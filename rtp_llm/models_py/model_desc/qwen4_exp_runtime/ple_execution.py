@@ -112,6 +112,7 @@ class PLEExecution:
         page_size,
         *,
         graph_mode,
+        state_write_mode=None,
     ):
         if not ids.is_cuda or torch.version.hip is not None:
             return None
@@ -140,6 +141,7 @@ class PLEExecution:
             ctx_pool,
             page_size,
             graph_mode=graph_mode,
+            state_write_mode=state_write_mode,
         )
 
     def _validate_ple_mode(
@@ -740,6 +742,11 @@ class PLEExecution:
                 raise RuntimeError(
                     "qwen4_exp PLE decode sequence_lengths must be a 1-D integer tensor"
                 )
+            state_write_mode = (
+                torch.empty(batch, dtype=torch.int32, device=ids.device)
+                if ids.is_cuda and 16 <= batch <= 128 and state_pool.is_contiguous()
+                else None
+            )
             decode_plan = self._try_decode_plan(
                 state_inputs,
                 ctx_inputs,
@@ -749,17 +756,23 @@ class PLEExecution:
                 ctx_pool,
                 page_size,
                 graph_mode=graph_capture,
+                state_write_mode=state_write_mode,
             )
             conv_read_blocks = None
+            direct_write = {}
             if decode_plan is not None:
                 state_read_blocks, state_write_blocks, ctx_write_blocks, history = (
                     decode_plan
                 )
-                if batch < 16:
-                    # The fused small-batch kernel reads the old pages into
-                    # its own tiles and returns a private rolled history.
+                if batch < 16 or state_write_mode is not None:
                     conv_buffer = state_pool
                     conv_read_blocks = state_read_blocks
+                    if state_write_mode is not None:
+                        direct_write = dict(
+                            conv_write_blocks=state_write_blocks,
+                            conv_write_mode=state_write_mode,
+                            context_write=(ctx_pool, ctx_write_blocks),
+                        )
                 else:
                     conv_buffer = state_pool.index_select(0, state_read_blocks)
             else:
@@ -787,15 +800,17 @@ class PLEExecution:
                     if local_rows is not None and local_rows[0] is not None
                     else None
                 ).embeddings,
+                **direct_write,
             )
-            state_pool.index_copy_(
-                0, state_write_blocks, new_state.to(state_pool.dtype)
-            )
-            ctx_pool.index_copy_(
-                0,
-                ctx_write_blocks,
-                history[:, -context_len:].to(ctx_pool.dtype),
-            )
+            if new_state is not None:
+                state_pool.index_copy_(
+                    0, state_write_blocks, new_state.to(state_pool.dtype)
+                )
+                ctx_pool.index_copy_(
+                    0,
+                    ctx_write_blocks,
+                    history[:, -context_len:].to(ctx_pool.dtype),
+                )
             return output.squeeze(1)
 
     def _read_decode_cache(

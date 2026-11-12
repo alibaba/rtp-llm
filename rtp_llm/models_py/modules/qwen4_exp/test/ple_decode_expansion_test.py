@@ -285,7 +285,10 @@ class PLEDecodeExpansionTest(unittest.TestCase):
                     _record_dispatch(ple_conv_triton, "try_ple_conv") as conv,
                 ):
                     actual = fixture.forward()
-                self.assertEqual(plan, [({"graph_mode": False}, True)])
+                self.assertEqual(
+                    [(kw["graph_mode"], dispatched) for kw, dispatched in plan],
+                    [(False, True)],
+                )
                 self._assert_s1_conv_dispatch(conv, fixture.hidden, fused=True)
                 self.assert_exact(actual, expected)
                 self.assert_exact((fixture.state, fixture.context), expected_pools)
@@ -318,7 +321,8 @@ class PLEDecodeExpansionTest(unittest.TestCase):
                     with torch.cuda.graph(graph):
                         output = fixture.forward()
                 self.assertEqual(
-                    plan, [({"graph_mode": True}, True)] if enabled else []
+                    [(kw["graph_mode"], dispatched) for kw, dispatched in plan],
+                    [(True, True)] if enabled else [],
                 )
                 self._assert_s1_conv_dispatch(conv, fixture.hidden, fused=enabled)
             return graph, output

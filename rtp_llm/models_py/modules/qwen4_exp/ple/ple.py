@@ -1,6 +1,6 @@
 import math
 from contextlib import contextmanager
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -1050,6 +1050,9 @@ class Qwen4ExpPLELayer(nn.Module):
         add_residual: bool = False,
         reuse_conv_buffer: bool = False,
         conv_read_blocks: Optional[torch.Tensor] = None,
+        conv_write_blocks: Optional[torch.Tensor] = None,
+        conv_write_mode: Optional[torch.Tensor] = None,
+        context_write: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> tuple:
         """One decode token: PLE output plus the rolled conv buffer.
 
@@ -1062,7 +1065,9 @@ class Qwen4ExpPLELayer(nn.Module):
         Set ``reuse_conv_buffer`` only for a disposable history buffer. The
         qualified fused path may write the rolled history into that buffer.
         With validated ``conv_read_blocks`` from the decode plan,
-        ``conv_buffer`` is the read-only history pool and the result is private.
+        ``conv_buffer`` is the history pool. A plan with ``conv_write_blocks``
+        and ``conv_write_mode`` can commit directly to it and return no buffer.
+        ``context_write`` supplies the matching context pool and destination IDs.
         """
         key, value = self._project_key_value(
             hyper_state, token_history_step, embeddings, decode=True
@@ -1084,6 +1089,11 @@ class Qwen4ExpPLELayer(nn.Module):
                 add_residual=add_residual,
                 reuse_history=reuse_conv_buffer and conv_read_blocks is None,
                 history_read_blocks=conv_read_blocks,
+                history_write_blocks=conv_write_blocks,
+                history_write_mode=conv_write_mode,
+                context_write=(
+                    (*context_write, token_history_step) if context_write is not None else None
+                ),
             )
             if fused is not None:
                 return fused

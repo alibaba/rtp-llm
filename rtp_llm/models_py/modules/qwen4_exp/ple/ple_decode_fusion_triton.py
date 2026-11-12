@@ -97,14 +97,29 @@ def _ple_decode_conv_roll(
     History,
     Weight,
     Output,
+    ReadBlocks,
+    WriteBlocks,
+    WriteMode,
+    Scratch,
     WIDTH: tl.constexpr,
     BLOCK: tl.constexpr,
     ADD_RESIDUAL: tl.constexpr,
+    PAGED: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     valid = col < WIDTH
-    history = History + row * 9 * WIDTH + col
+    if PAGED:
+        source = tl.load(ReadBlocks + row)
+        target = tl.load(WriteBlocks + row)
+        direct = tl.load(WriteMode + row) == 1
+        next_history = tl.where(
+            direct, History + target * 9 * WIDTH, Scratch + row * 9 * WIDTH
+        ) + col
+    else:
+        source = row
+        next_history = History + row * 9 * WIDTH + col
+    history = History + source * 9 * WIDTH + col
     weight = Weight + col * 4
     offset = row * WIDTH + col
     normed = tl.load(Normed + offset, valid, other=0)
@@ -120,12 +135,39 @@ def _ple_decode_conv_roll(
         if pos % 3 == 0:
             filt = tl.load(weight + pos // 3, valid, other=0).to(tl.float32)
             acc = tl.fma(prev.to(tl.float32), filt, acc)
-        tl.store(history + (pos - 1) * WIDTH, prev, valid)
+        tl.store(next_history + (pos - 1) * WIDTH, prev, valid)
     filt = tl.load(weight + 3, valid, other=0).to(tl.float32)
     acc = tl.fma(normed.to(tl.float32), filt, acc)
     out = _decode_output(gated, acc, Hidden + offset, valid, ADD_RESIDUAL)
     tl.store(Output + offset, out, valid)
-    tl.store(history + 8 * WIDTH, normed, valid)
+    tl.store(next_history + 8 * WIDTH, normed, valid)
+
+
+@triton.jit
+def _commit_decode_pages(
+    History, Scratch, WriteBlocks, WriteMode,
+    ContextPool, ContextBlocks, TokenHistory,
+    BATCH: tl.constexpr, PAGE_ELEMENTS: tl.constexpr, BLOCK: tl.constexpr,
+    WRITE_CONTEXT: tl.constexpr, REQUESTS: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    if WRITE_CONTEXT:
+        ctx_page = tl.load(ContextBlocks + row)
+        slots = tl.arange(0, REQUESTS)
+        live = (slots > row) & (slots < BATCH)
+        later = tl.load(ContextBlocks + slots, live, other=-1)
+        # A duplicate context destination must write a complete token pair.
+        if tl.max((live & (later == ctx_page)).to(tl.int32), 0) == 0:
+            tl.store(ContextPool + ctx_page * 2, tl.load(TokenHistory + row * 3 + 1))
+            tl.store(ContextPool + ctx_page * 2 + 1, tl.load(TokenHistory + row * 3 + 2))
+    if tl.load(WriteMode + row) == 2:
+        target = tl.load(WriteBlocks + row)
+        for start in range(0, PAGE_ELEMENTS, BLOCK):
+            col = start + tl.arange(0, BLOCK)
+            values = tl.load(
+                Scratch + row * PAGE_ELEMENTS + col, col < PAGE_ELEMENTS, other=0
+            )
+            tl.store(History + target * PAGE_ELEMENTS + col, values, col < PAGE_ELEMENTS)
 
 
 def try_ple_decode_fusion(
@@ -134,6 +176,9 @@ def try_ple_decode_fusion(
     add_residual=False,
     reuse_history=False,
     history_read_blocks=None,
+    history_write_blocks=None,
+    history_write_mode=None,
+    context_write=None,
 ):
     """Return the output and rolled history, optionally reusing a private input."""
     width, hidden_size, state_len = 10240, 2560, 9
@@ -152,10 +197,43 @@ def try_ple_decode_fusion(
     batch = hidden.shape[0]
     if batch > 1 and not hidden.is_contiguous():
         return None
+    paged_write = history_write_blocks is not None
+    if paged_write and not (
+        history_read_blocks is not None
+        and history_write_mode is not None
+        and history.is_contiguous()
+        and all(
+            tensor.shape == (batch,)
+            and tensor.device == hidden.device
+            and tensor.dtype == dtype
+            and tensor.is_contiguous()
+            for tensor, dtype in (
+                (history_write_blocks, torch.int64),
+                (history_write_mode, torch.int32),
+            )
+        )
+    ):
+        return None
+    if context_write is not None:
+        context_pool, context_blocks, token_history = context_write
+        if not (
+            paged_write
+            and context_pool.ndim == 2
+            and context_pool.shape[1] == 2
+            and context_blocks.shape == (batch,)
+            and token_history.shape == (batch, 3)
+            and all(
+                tensor.device == hidden.device
+                and tensor.dtype == torch.int64
+                and tensor.is_contiguous()
+                for tensor in context_write
+            )
+        ):
+            return None
     pool_rows = 0
     if history_read_blocks is not None:
         if not (
-            batch < 16
+            (batch < 16 or paged_write)
             and not reuse_history
             and history.ndim == 3
             and history.shape[0] > 0
@@ -188,16 +266,29 @@ def try_ple_decode_fusion(
 
     output = torch.empty_like(hidden, memory_format=torch.contiguous_format)
     # Use separate tiling for the gate reduction and the history copy.
-    if reuse_history and batch >= 16 and history.is_contiguous():
+    if paged_write or (reuse_history and batch >= 16 and history.is_contiguous()):
         gates = try_ple_gate(key, value, hidden, norm_key, norm_query, norm_conv, eps)
         if gates is not None:
             block = 512
+            scratch = history.new_empty((batch, state_len, width)) if paged_write else None
             _ple_decode_conv_roll[(batch, triton.cdiv(width, block))](
-                *gates, hidden, history, weight, output,
-                WIDTH=width, BLOCK=block, ADD_RESIDUAL=add_residual,
+                *gates, hidden, history, weight, output, history_read_blocks,
+                history_write_blocks, history_write_mode, scratch,
+                WIDTH=width, BLOCK=block, ADD_RESIDUAL=add_residual, PAGED=paged_write,
                 num_warps=8 if batch < 32 else 4,
             )
+            if paged_write:
+                context = context_write if context_write is not None else (None,) * 3
+                _commit_decode_pages[(batch,)](
+                    history, scratch, history_write_blocks, history_write_mode,
+                    *context, BATCH=batch, PAGE_ELEMENTS=state_len * width, BLOCK=1024,
+                    WRITE_CONTEXT=context_write is not None,
+                    REQUESTS=triton.next_power_of_2(batch), num_warps=4,
+                )
+                return output, None
             return output, history
+        if paged_write:
+            return None
 
     next_history = history.new_empty((batch, state_len, width))
     _ple_decode_gate_conv[(batch, width // hidden_size)](

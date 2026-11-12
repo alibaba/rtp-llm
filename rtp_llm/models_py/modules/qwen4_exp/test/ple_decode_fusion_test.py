@@ -240,6 +240,84 @@ class PLEDecodeFusionTest(unittest.TestCase):
             graph.replay()
             self.assert_exact((output, pool), (expected_output, expected_pool))
 
+    def test_paged_conv_graph_switches_between_direct_and_staged_writes(self):
+        batch = 16
+        kw = {"device": "cuda", "dtype": torch.bfloat16}
+        hidden = torch.randn(batch, 1, 10240, **kw)
+        key = torch.randn_like(hidden)
+        value = torch.randn(batch, 1, 2560, **kw)
+        norms = tuple(torch.randn(10240, **kw) * 0.1 for _ in range(3))
+        weight = torch.randn(10240, 1, 4, **kw) * 0.1
+        pool = torch.randn(2 * batch + 1, 9, 10240, **kw)
+        initial_context = torch.arange(pool.shape[0] * 2, device="cuda").view(-1, 2)
+        context = initial_context.clone()
+        lengths = torch.full((batch,), 65, device="cuda", dtype=torch.int32)
+        ids = torch.arange(batch, device="cuda", dtype=torch.int64)
+        reads = list(range(1, batch + 1))
+        writes = list(range(batch + 1, 2 * batch + 1))
+        table = torch.tensor(list(zip(reads, writes)), device="cuda", dtype=torch.int32)
+        ctx_table = table.clone()
+        mode = torch.empty(batch, device="cuda", dtype=torch.int32)
+        fuse = ple_decode_fusion_triton.try_ple_decode_fusion
+
+        def forward():
+            read, write, ctx_write, history = try_plan_decode_cache(
+                lengths, ids, table, ctx_table, pool, context, 64,
+                graph_mode=True, state_write_mode=mode,
+            )
+            output, state = fuse(
+                key, value, hidden, *norms, pool, weight, 1e-6, 3, add_residual=True,
+                history_read_blocks=read, history_write_blocks=write,
+                history_write_mode=mode, context_write=(context, ctx_write, history),
+            )
+            self.assertIsNone(state)
+            return output
+
+        forward()
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = forward()
+
+        scenarios = (
+            (reads, writes, 65, False),
+            ([reads[0], *reads[:-1]], writes, 65, False),  # shared read pages
+            (reads, writes, 64, False),  # same-page updates, one owner per page
+            (reads, [reads[1], reads[0], *writes[2:]], 65, True),  # page swap
+            ([0, *reads[1:]], [0, 0, *writes[2:]], 65, True),  # dummy alias
+            (reads, writes, 65, False),
+        )
+        for src, dst, length, staged in scenarios:
+            with self.subTest(src=src[:2], dst=dst[:2], length=length):
+                lengths.fill_(length)
+                table.copy_(torch.tensor(
+                    list(zip(src, dst)), device="cuda", dtype=torch.int32,
+                ))
+                ctx_table.copy_(table)
+                if length == 64:
+                    dst = src
+                pool.normal_()
+                context.copy_(initial_context)
+                read_ids = torch.tensor(src, device="cuda")
+                gathered = pool[read_ids]
+                expected, rolled = fuse(
+                    key, value, hidden, *norms, gathered, weight, 1e-6, 3,
+                    add_residual=True, reuse_history=True,
+                )
+                expected_pool = pool.clone()
+                expected_context = initial_context.clone()
+                next_context = torch.stack((initial_context[read_ids, 1], ids), dim=1)
+                # For colliding destinations only the final request commits.
+                for row, page in enumerate(dst):
+                    expected_pool[page].copy_(rolled[row])
+                    expected_context[page].copy_(next_context[row])
+
+                graph.replay()
+                self.assert_exact(
+                    (output, pool, context), (expected, expected_pool, expected_context)
+                )
+                self.assertEqual(bool((mode != 1).any().item()), staged)
+
     def test_cache_plan_cross_page_independent_tables(self):
         lengths = torch.tensor([63, 64, 65, 128], device="cuda", dtype=torch.int32)
         ids = torch.tensor([19, 23, 29, 31], device="cuda", dtype=torch.int32)
