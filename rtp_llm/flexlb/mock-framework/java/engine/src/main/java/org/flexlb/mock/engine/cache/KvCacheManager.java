@@ -1,6 +1,7 @@
 package org.flexlb.mock.engine.cache;
 
 import java.util.*;
+import java.util.function.BiConsumer;
 import org.flexlb.mock.engine.config.RtpConfig;
 import static org.flexlb.mock.engine.cache.BlockPool.Kind.*;
 
@@ -22,7 +23,7 @@ public final class KvCacheManager implements AutoCloseable {
 
     private volatile KvcmReporter reporter;
     private java.util.function.Consumer<CacheMetadata.Change> metadataObserver;
-    private java.util.function.LongConsumer evictionLifetime = nanos -> {};
+    private BiConsumer<Long, Long> evictionObserver = (lifetime, idle) -> {};
     private Runnable changed = () -> {};
 
     public KvCacheManager(int blockSize, int blocks, int reserve) {
@@ -47,8 +48,8 @@ public final class KvCacheManager implements AutoCloseable {
     /** The observer must only signal; it must never acquire an Engine scheduling lock. */
     public synchronized void onChange(Runnable observer) { changed = Objects.requireNonNull(observer); }
 
-    public synchronized void onEvictionLifetime(java.util.function.LongConsumer observer) {
-        evictionLifetime = Objects.requireNonNull(observer);
+    public synchronized void onEviction(BiConsumer<Long, Long> observer) {
+        evictionObserver = Objects.requireNonNull(observer);
     }
 
     public synchronized int itemCount() { return tree.size(); }
@@ -174,7 +175,7 @@ public final class KvCacheManager implements AutoCloseable {
         int missing = count - pool.snapshot().free();
         if (missing > 0)
             for (var evicted : tree.evict(missing))
-                evictionLifetime.accept(System.nanoTime() - evicted.insertedNanos);
+                evictionObserver.accept(evicted.lifetimeNanos(), evicted.idleNanos());
         return pool.snapshot().free() >= count;
     }
 

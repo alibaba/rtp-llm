@@ -162,6 +162,20 @@ class RtpMetricsTest {
         assertThrows(IllegalArgumentException.class, () -> new RtpMetrics.State(0, 0, 0, 0, 100, 71, 50, 0, 5));
     }
 
+    @Test void evictionLifetimeAndIdleTimeShareCapacityTags() {
+        var metrics = new RtpMetrics("prefill", () -> IDLE);
+        metrics.blockEvicted(10_000_000, 3_000_000);
+        var text = metrics.scrape();
+        for (var name : List.of("lifetime", "idletime")) {
+            var metric = "rtp_llm_kv_cache_evicted_block_" + name + "_ms";
+            var sample = text.lines().filter(line -> line.startsWith(metric + "_count{")).findFirst().orElseThrow();
+            assertTrue(sample.contains("tier=\"DEVICE\"") && sample.contains("group_type=\"full\"")
+                && sample.contains("trigger_type=\"capacity\""));
+            assertEquals(1, sample(text, metric + "_count", ""));
+            assertEquals(name.equals("lifetime") ? 10 : 3, sample(text, metric + "_sum", ""));
+        }
+    }
+
     @Test void nativeThroughputSeparatesActiveTimeWallTimeAndTerminalQpsAndClearsIdleWindows() {
         var clock = new java.util.concurrent.atomic.AtomicLong();
         var metrics = new RtpMetrics("prefill", () -> IDLE, clock::get);

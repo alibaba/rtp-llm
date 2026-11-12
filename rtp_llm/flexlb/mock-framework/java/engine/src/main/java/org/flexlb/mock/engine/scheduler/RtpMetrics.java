@@ -184,9 +184,10 @@ final class RtpMetrics {
 
     void cacheMatched(long nanos) { events.observe("rtp_llm_match_cost_time_us", nanos / 1000.0); }
 
-    void blockEvicted(long lifetimeNanos) {
-        events.observe("rtp_llm_kv_cache_evicted_block_lifetime_ms", lifetimeNanos / 1_000_000.0,
-            Map.of("tier", "DEVICE", "trigger_type", "capacity"));
+    void blockEvicted(long lifetimeNanos, long idleNanos) {
+        var tags = Map.of("tier", "DEVICE", "trigger_type", "capacity", "group_type", "full");
+        events.observe("rtp_llm_kv_cache_evicted_block_lifetime_ms", lifetimeNanos / 1_000_000.0, tags);
+        events.observe("rtp_llm_kv_cache_evicted_block_idletime_ms", idleNanos / 1_000_000.0, tags);
     }
 
     void batchPrepared(long nanos) { positiveMicros("rtp_llm_gather_model_input_us", nanos); }

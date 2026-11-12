@@ -36,7 +36,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         this.config = Objects.requireNonNull(config);
         this.cache = Objects.requireNonNull(cache);
         this.metrics = new RtpMetrics(config.role().name(), this::metricState, System::nanoTime, cache::itemCount);
-        cache.onEvictionLifetime(metrics::blockEvicted);
+        cache.onEviction(metrics::blockEvicted);
     }
 
     public static Supplier<List<Collector.MetricFamilySamples>> metricsFor(EngineScheduler scheduler) {

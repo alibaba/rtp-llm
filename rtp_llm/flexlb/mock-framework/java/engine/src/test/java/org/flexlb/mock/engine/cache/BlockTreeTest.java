@@ -1,6 +1,7 @@
 package org.flexlb.mock.engine.cache;
 
 import java.util.*;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 import org.flexlb.mock.engine.cache.KvCacheManager.Failed;
 import org.flexlb.mock.engine.cache.KvCacheManager.Ready;
@@ -96,12 +97,30 @@ class BlockTreeTest {
         tree.insert(5, four, refs.get(4)); tree.insert(6, null, refs.get(5));
         var pin = pool.retain(refs.get(2), BlockPool.Kind.REQUEST);
         tree.match(List.of(4L, 5L));
-        assertEquals(List.of(6L, 5L, 4L), tree.evict(3).stream().map(node -> node.key).toList());
+        assertEquals(List.of(6L, 5L, 4L), tree.evict(3).stream().map(BlockTree.Eviction::key).toList());
         assertTrue(tree.evict(3).isEmpty()); // All remaining ancestors are protected by the pinned leaf.
         assertEquals(3, tree.size());
         pin.close();
-        assertEquals(List.of(3L, 2L, 1L), tree.evict(3).stream().map(node -> node.key).toList());
+        assertEquals(List.of(3L, 2L, 1L), tree.evict(3).stream().map(BlockTree.Eviction::key).toList());
         assertEquals(0, tree.size()); assertEquals(6, pool.snapshot().free());
+    }
+
+    @Test void timesEachVictimBeforeRemovalAndRefreshesIdleTimeOnHit() {
+        var clock = new AtomicLong(10);
+        var tree = new BlockTree(clock::get);
+        var pool = new BlockPool(2);
+        var refs = pool.allocate(2, BlockPool.Kind.CACHE);
+        var parent = tree.insert(1, null, refs.get(0));
+        tree.insert(2, parent, refs.get(1));
+        clock.set(20);
+        tree.match(List.of(1L, 2L));
+        clock.set(30);
+        tree.observe(change -> clock.addAndGet(5));
+        var pin = pool.retain(refs.get(1), BlockPool.Kind.REQUEST);
+        assertTrue(tree.evict(2).isEmpty());
+        pin.close();
+        assertEquals(List.of(new BlockTree.Eviction(2, 20, 10), new BlockTree.Eviction(1, 25, 15)),
+            tree.evict(2));
     }
 
     private static Set<Long> keySet(KvCacheManager cache) {

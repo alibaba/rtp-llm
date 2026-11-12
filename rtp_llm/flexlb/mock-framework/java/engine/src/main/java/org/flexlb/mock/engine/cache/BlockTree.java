@@ -1,11 +1,13 @@
 package org.flexlb.mock.engine.cache;
 
 import java.util.*;
+import java.util.function.LongSupplier;
 
 /**
  * RTP Full-KV prefix index. Every mutation runs under KvCacheManager's monitor.
  */
 final class BlockTree {
+    private final LongSupplier clock;
     private final Map<Long, Node> nodes = new HashMap<>(), roots = new HashMap<>();
     private final NavigableSet<Node> leaves = new TreeSet<>(Comparator
         .comparingLong((Node node) -> node.access).thenComparingLong(node -> node.admission));
@@ -14,17 +16,23 @@ final class BlockTree {
 
     private java.util.function.Consumer<CacheMetadata.Change> observer = change -> {};
 
+    BlockTree() { this(System::nanoTime); }
+
+    BlockTree(LongSupplier clock) { this.clock = clock; }
+
     void observe(java.util.function.Consumer<CacheMetadata.Change> observer) { this.observer = observer; }
 
     List<Node> match(List<Long> keys) {
         var result = new ArrayList<Node>();
         var children = roots;
         long access = ++sequence;
+        long now = clock.getAsLong();
         for (long key : keys) {
             var node = children.get(key);
             if (node == null) break;
             if (leaves.remove(node)) { node.access = access; leaves.add(node); }
             else node.access = access;
+            node.lastAccessNanos = now;
             result.add(node); children = node.children;
         }
         return result;
@@ -44,7 +52,7 @@ final class BlockTree {
 
     Node insert(long key, Node parent, BlockPool.Reference cache) {
         if (parent != null) leaves.remove(parent);
-        var node = new Node(key, parent, cache, ++sequence);
+        var node = new Node(key, parent, cache, ++sequence, clock.getAsLong());
         nodes.put(key, node);
         (parent == null ? roots : parent.children).put(key, node);
         leaves.add(node);
@@ -52,25 +60,21 @@ final class BlockTree {
         return node;
     }
 
-    Node evict() {
-        var evicted = evict(1);
-        return evicted.isEmpty() ? null : evicted.getFirst();
-    }
-
-    List<Node> evict(int count) {
-        var evicted = new ArrayList<Node>();
+    List<Eviction> evict(int count) {
+        var evicted = new ArrayList<Eviction>();
         var pinned = new ArrayList<Node>();
         try {
             while (evicted.size() < count && !leaves.isEmpty()) {
                 var node = leaves.pollFirst();
                 // Pins cannot change under KvCacheManager's monitor. Skip each pinned leaf once per reclamation.
                 if (node.cache.inUse()) { pinned.add(node); continue; }
+                long selected = clock.getAsLong();
                 nodes.remove(node.key);
                 (node.parent == null ? roots : node.parent.children).remove(node.key);
                 node.cache.close();
                 if (node.parent != null && node.parent.children.isEmpty()) leaves.add(node.parent);
                 changed(node.key, false);
-                evicted.add(node);
+                evicted.add(new Eviction(node.key, selected - node.insertedNanos, selected - node.lastAccessNanos));
             }
         } finally { leaves.addAll(pinned); }
         return evicted;
@@ -102,21 +106,24 @@ final class BlockTree {
         observer.accept(new CacheMetadata.Change(++version, key, added));
     }
 
+    record Eviction(long key, long lifetimeNanos, long idleNanos) {}
+
     /**
      * Stores one cached prefix block and links to its child blocks.
      */
     static final class Node {
-        final long key, admission, insertedNanos = System.nanoTime();
+        final long key, admission, insertedNanos;
         final Node parent;
         final BlockPool.Reference cache;
         final Map<Long, Node> children = new HashMap<>();
-        long access;
+        long access, lastAccessNanos;
 
-        Node(long key, Node parent, BlockPool.Reference cache, long sequence) {
+        Node(long key, Node parent, BlockPool.Reference cache, long sequence, long now) {
             this.key = key;
             this.parent = parent;
             this.cache = cache;
             admission = access = sequence;
+            insertedNanos = lastAccessNanos = now;
         }
     }
 }
