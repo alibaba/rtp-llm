@@ -362,6 +362,12 @@ void AwiService::generate(const std::unique_ptr<http_server::HttpResponseWriter>
             // million tokens at once.  Every prefix token is still prefetched
             // and the final request below reuses that exact KV; this is not a
             // truncated or sliding-window execution.
+            // Keep only the newest fill stream alive.  Its predecessor is
+            // destroyed on the next assignment, which releases the older
+            // prefix's KV reference so the reuse cache can evict it.  Without
+            // this, all 31 growing prefixes stay strongly referenced and the
+            // cache fills before the final request can be admitted.
+            std::shared_ptr<GenerateStream> last_fill;
             for (int64_t end = fill_chunk; end < static_cast<int64_t>(input_ids.size()); end += fill_chunk) {
                 auto fill_input          = std::make_shared<GenerateInput>();
                 fill_input->request_id   = request_counter_->incAndReturn();
@@ -413,6 +419,7 @@ void AwiService::generate(const std::unique_ptr<http_server::HttpResponseWriter>
                                "kv_capacity_exceeded");
                     return;
                 }
+                last_fill = fill_stream;
             }
         }
 
