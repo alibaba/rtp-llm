@@ -90,6 +90,7 @@ public:
     // No-op for graph backends that initialize eagerly; CudaGraphRunner defers
     // the decode graph until the first decode to keep prefill memory free.
     virtual void           finishDeferredDecodeInit() {}
+    virtual void           releaseCapturedDecodeGraph() {}
     virtual PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state)   = 0;
     virtual void           setPositionEncoding(torch::Tensor position_encoding)          = 0;
     virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding)     = 0;

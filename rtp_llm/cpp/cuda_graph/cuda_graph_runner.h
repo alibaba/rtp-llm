@@ -194,7 +194,7 @@ public:
     // Drop the captured decode graph and its private pool while the engine is
     // between requests. Large prefill temporaries then reuse that HBM instead
     // of competing with a graph that is re-captured at the next first decode.
-    void releaseCapturedDecodeGraph();
+    void releaseCapturedDecodeGraph() override;
     bool hasCapturedDecodeGraph() const {
         return decode_capture_done_ && !graph_instances_.empty();
     }
