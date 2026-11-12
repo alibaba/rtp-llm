@@ -398,7 +398,7 @@ Mock 只统计统一池的容量回收，标签为 `tier=DEVICE`、`group_type=f
 
 - `rtp_llm_kv_cache_eviction_trigger_qps` 在一次回收至少淘汰一块时加一。本地 Prometheus 用 `rtp_llm_kv_cache_eviction_trigger_qps_total` 计算触发频率。
 - `rtp_llm_kv_cache_eviction_blocks_count` 每次尝试回收记录缺少的块数（`block_type=required`）和实际淘汰的块数（`block_type=scheduled`）。回收不到块时，后者为 0，仍有一次块数样本。
-- 默认大盘已有存活时间面板。空闲时间 `rtp_llm_kv_cache_evicted_block_idletime_ms`、触发频率和块数可直接查询 Prometheus，当前未配置面板。
+- 默认大盘的 Prefill 和 Decode KV Cache 分区分别展示淘汰存活时间、淘汰空闲时间（`rtp_llm_kv_cache_evicted_block_idletime_ms`）、每秒触发次数，以及每次回收尝试的平均 `required` / `scheduled` 块数。时长按淘汰块加权，块数按回收尝试加权。没有回收尝试时，块数面板无数据。
 
 ### ViT 指标口径
 

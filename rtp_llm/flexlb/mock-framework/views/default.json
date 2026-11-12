@@ -7339,6 +7339,198 @@
               "targetBlank": true
             }
           ]
+        },
+        {
+          "id": 111051,
+          "type": "timeseries",
+          "title": "evicted block idle time",
+          "gridPos": {
+            "x": 0,
+            "y": 490,
+            "w": 8,
+            "h": 9
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by(${prefill_group},trigger_type)(rate(rtp_llm_kv_cache_evicted_block_idletime_ms_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) / (sum by(${prefill_group},trigger_type)(rate(rtp_llm_kv_cache_evicted_block_idletime_ms_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
+              "legendFormat": "Prefill · trigger_type={{trigger_type}} · {{${prefill_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": ["mean", "max", "lastNotNull"]
+            }
+          },
+          "description": "从前缀块最近一次命中（未命中时从加入缓存起）到被选中淘汰的平均时间。按淘汰块加权，窗口内没有淘汰时无样本。"
+        },
+        {
+          "id": 111052,
+          "type": "timeseries",
+          "title": "eviction trigger rate",
+          "gridPos": {
+            "x": 8,
+            "y": 490,
+            "w": 8,
+            "h": 9
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by(${prefill_group},trigger_type)(rate(rtp_llm_kv_cache_eviction_trigger_qps_total{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))",
+              "legendFormat": "Prefill · trigger_type={{trigger_type}} · {{${prefill_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": ["mean", "max", "lastNotNull"]
+            }
+          },
+          "description": "每秒有多少次容量回收至少淘汰了一块。一次回收淘汰多块也只计一次。"
+        },
+        {
+          "id": 111053,
+          "type": "timeseries",
+          "title": "eviction blocks per attempt",
+          "gridPos": {
+            "x": 16,
+            "y": 490,
+            "w": 8,
+            "h": 9
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by(${prefill_group},trigger_type,block_type)(rate(rtp_llm_kv_cache_eviction_blocks_count_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) / (sum by(${prefill_group},trigger_type,block_type)(rate(rtp_llm_kv_cache_eviction_blocks_count_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
+              "legendFormat": "Prefill · trigger_type={{trigger_type}} · {{${prefill_group}}} · block_type={{block_type}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": ["mean", "max", "lastNotNull"]
+            }
+          },
+          "description": "每次容量回收尝试的平均块数。required 是缺块数，scheduled 是实际淘汰数。没有淘汰到块的尝试仍计入，scheduled 为 0。"
         }
       ],
       "gridPos": {
@@ -13737,6 +13929,198 @@
               "targetBlank": true
             }
           ]
+        },
+        {
+          "id": 211051,
+          "type": "timeseries",
+          "title": "evicted block idle time",
+          "gridPos": {
+            "x": 0,
+            "y": 1081,
+            "w": 8,
+            "h": 9
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by(${decode_group},trigger_type)(rate(rtp_llm_kv_cache_evicted_block_idletime_ms_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) / (sum by(${decode_group},trigger_type)(rate(rtp_llm_kv_cache_evicted_block_idletime_ms_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
+              "legendFormat": "Decode · trigger_type={{trigger_type}} · {{${decode_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": ["mean", "max", "lastNotNull"]
+            }
+          },
+          "description": "从前缀块最近一次命中（未命中时从加入缓存起）到被选中淘汰的平均时间。按淘汰块加权，窗口内没有淘汰时无样本。"
+        },
+        {
+          "id": 211052,
+          "type": "timeseries",
+          "title": "eviction trigger rate",
+          "gridPos": {
+            "x": 8,
+            "y": 1081,
+            "w": 8,
+            "h": 9
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by(${decode_group},trigger_type)(rate(rtp_llm_kv_cache_eviction_trigger_qps_total{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))",
+              "legendFormat": "Decode · trigger_type={{trigger_type}} · {{${decode_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": ["mean", "max", "lastNotNull"]
+            }
+          },
+          "description": "每秒有多少次容量回收至少淘汰了一块。一次回收淘汰多块也只计一次。"
+        },
+        {
+          "id": 211053,
+          "type": "timeseries",
+          "title": "eviction blocks per attempt",
+          "gridPos": {
+            "x": 16,
+            "y": 1081,
+            "w": 8,
+            "h": 9
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by(${decode_group},trigger_type,block_type)(rate(rtp_llm_kv_cache_eviction_blocks_count_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) / (sum by(${decode_group},trigger_type,block_type)(rate(rtp_llm_kv_cache_eviction_blocks_count_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
+              "legendFormat": "Decode · trigger_type={{trigger_type}} · {{${decode_group}}} · block_type={{block_type}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": ["mean", "max", "lastNotNull"]
+            }
+          },
+          "description": "每次容量回收尝试的平均块数。required 是缺块数，scheduled 是实际淘汰数。没有淘汰到块的尝试仍计入，scheduled 为 0。"
         }
       ],
       "gridPos": {
