@@ -399,6 +399,12 @@ py_library(
 )
 
 py_library(
+    name = "oss_download_config",
+    srcs = ["config/oss_download.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "config_exceptions",
     srcs = ["config/exceptions.py"],
 )

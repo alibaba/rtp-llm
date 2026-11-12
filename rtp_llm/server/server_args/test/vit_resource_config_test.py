@@ -2,10 +2,15 @@
 
 import io
 import os
+import subprocess
 import sys
 import unittest
 from unittest.mock import Mock, patch
 
+from rtp_llm.config.oss_download import (
+    OSS_INTERNAL_REGION_ALLOWLIST_ENV,
+    export_oss_internal_region_allowlist,
+)
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.server.server_args.server_args import EnvArgumentParser
 from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
@@ -35,6 +40,39 @@ class VitResourceConfigTest(unittest.TestCase):
                 self.assertFalse(hasattr(config, name))
                 self.assertNotIn("--" + name, option_names)
                 self.assertNotIn(name + ":", config.to_string())
+
+    def test_oss_regions_from_env_and_cli(self):
+        env = {OSS_INTERNAL_REGION_ALLOWLIST_ENV: '["cn-beijing","ap-southeast-1"]'}
+        self.assertIsNone(self.parse()[0].oss_internal_region_allowlist)
+        self.assertEqual(
+            self.parse(env=env)[0].oss_internal_region_allowlist,
+            ["cn-beijing", "ap-southeast-1"],
+        )
+        config, _ = self.parse(["--oss_internal_region_allowlist", "[]"], env)
+        self.assertEqual(config.oss_internal_region_allowlist, [])
+        with patch.dict(os.environ, env):
+            export_oss_internal_region_allowlist(config.oss_internal_region_allowlist)
+            inherited = subprocess.check_output(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os; print(os.environ['OSS_INTERNAL_REGION_ALLOWLIST'])",
+                ],
+                text=True,
+            )
+        self.assertEqual(inherited.strip(), "[]")
+
+    def test_invalid_oss_region_list_fails_at_startup(self):
+        for raw in ('"cn-shanghai"', "[42]", '[""]', "not-json"):
+            for args, env in (
+                (["--oss_internal_region_allowlist", raw], {}),
+                ([], {OSS_INTERNAL_REGION_ALLOWLIST_ENV: raw}),
+            ):
+                with self.subTest(raw=raw, args=args), patch(
+                    "sys.stderr", new_callable=io.StringIO
+                ):
+                    with self.assertRaises(SystemExit):
+                        self.parse(args, env)
 
     def test_removed_cli_flags_are_rejected(self):
         for name in self.REMOVED:
