@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadJoinRegistry.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
@@ -26,7 +26,7 @@ struct BlockTreeMatchResult {
     size_t                                              matched_device_host_blocks{0};
     std::vector<MultiNodeResource>                      matched_device_resources;
     std::shared_ptr<LoadAsyncContext>                   async_context;
-    std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> reuse_time_metrics_snapshots;
+    std::vector<BlockTreeCacheReuseTimeMetrics>         reuse_time_metrics;
 };
 
 // Owns matching and the complete lower-tier-to-device load workflow.
@@ -62,11 +62,11 @@ private:
     bool                 validMatch(std::vector<TreeNode*>&            path,
                                     std::vector<bool>&                 candidate_valid,
                                     const std::function<bool(size_t)>& valid_prefix) const;
-    void                 collectReuseTimeSnapshots(TreeNode*                                            node,
-                                                   size_t                                               group_set_id,
-                                                   uint64_t                                             access_seq,
-                                                   int64_t                                              access_time_us,
-                                                   std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>& snapshots);
+    void                 collectReuseTimeMetrics(TreeNode*                                    node,
+                                                 size_t                                       group_set_id,
+                                                 uint64_t                                     access_seq,
+                                                 int64_t                                      access_time_us,
+                                                 std::vector<BlockTreeCacheReuseTimeMetrics>& metrics_list);
     BlockTreeMatchResult createMatchResult(std::vector<TreeNode*>&            path,
                                            const CacheKeysType&               cache_keys,
                                            const std::function<bool(size_t)>& valid_prefix,

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <utility>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheLockGuard.h"
+
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/FullPrefixInvariantScanner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
@@ -56,6 +58,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
     storer_(tree_.get(), evictor_, *metrics_reporter_, storage_backend_, [this](bool check_watermark) {
         onWorkflowSettledLocked(check_watermark);
     }) {
+    metrics_reporter_->initEvictionMetricGroupTypes(tree_->groupSets());
     if (storage_backend_)
         storage_backend_->setStageMetricsReporter(metrics_reporter_);
 }
@@ -88,8 +91,8 @@ bool BlockTreeCache::init() {
                          group_set->diskPool() ? "enabled" : "null");
     }
     if (config_.full_prefix_scan_interval_ms > 0) {
-        auto scanner =
-            std::make_unique<FullPrefixInvariantScanner>(*tree_, mutex_, config_.full_prefix_scan_interval_ms);
+        auto scanner = std::make_unique<FullPrefixInvariantScanner>(
+            *tree_, mutex_, config_.full_prefix_scan_interval_ms, metrics_reporter_.get());
         if (scanner->start()) {
             full_prefix_scanner_ = std::move(scanner);
             RTP_LLM_LOG_INFO("FULL prefix invariant scanner enabled, interval_ms=%ld",
@@ -159,10 +162,10 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               ca
                                            std::optional<int64_t>             request_id) {
     BlockTreeMatchResult result;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        CacheLockGuard lock(mutex_, *metrics_reporter_, "match");
         result = loader_.matchLocked(cache_keys, valid_prefix, enable_storage_backend, request_id);
     }
-    metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics_snapshots);
+    metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics);
     return result;
 }
 
@@ -182,7 +185,7 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
     size_t           resident_prefix_length = 0;
     StorageWriteTask storage_write;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        CacheLockGuard lock(mutex_, *metrics_reporter_, "insert");
         storage_write = storer_.storeLocked(cache_keys,
                                             resources,
                                             target_tier,
@@ -199,7 +202,7 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
 }
 
 int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    CacheLockGuard lock(mutex_, *metrics_reporter_, "force_drop");
     if (!config_.isTierEnabled(Tier::DEVICE)) {
         return 0;
     }
@@ -224,7 +227,7 @@ BlockIndicesType BlockTreeCache::matchedBlocksForGroup(std::string_view         
 }
 
 CacheStats BlockTreeCache::getStats() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    CacheLockGuard              lock(mutex_, *metrics_reporter_, "other");
     CacheStats                  stats;
     stats.tree_node_count           = tree_->size();
     const CandidateStats candidates = evictor_.candidateStats();
@@ -234,21 +237,18 @@ CacheStats BlockTreeCache::getStats() const {
     return stats;
 }
 
-std::vector<BlockTreePoolMetricsSnapshot> BlockTreeCache::poolMetricsSnapshots() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return metrics_reporter_->collectPoolMetricsSnapshots(tree_->groupSets());
+std::vector<CachePoolMetrics> BlockTreeCache::poolMetrics() const {
+    CacheLockGuard lock(mutex_, *metrics_reporter_, "other");
+    return metrics_reporter_->collectPoolMetrics(tree_->groupSets());
 }
 
 void BlockTreeCache::reportMetrics() const {
-    std::vector<BlockTreeEvictableMetricsSnapshot> snapshots;
-    VictimSelectionMetrics                         victim_selection;
+    EvictionVictimMetrics metrics_data;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        snapshots        = metrics_reporter_->collectEvictableMetricsSnapshots(tree_->groupSets(), evictor_);
-        victim_selection = evictor_.takeVictimSelectionMetrics();
+        CacheLockGuard lock(mutex_, *metrics_reporter_, "other");
+        metrics_data = evictor_.getAndResetEvictionVictimMetrics();
     }
-    metrics_reporter_->reportEvictableCandidateCount(snapshots);
-    metrics_reporter_->reportVictimSelectionMetrics(victim_selection);
+    metrics_reporter_->reportEvictionMetrics(metrics_data);
     metrics_reporter_->reportQueueBacklog(task_pool_->queueSizes(), "business");
     metrics_reporter_->reportQueueBacklog(transfer_dispatcher_->queueSizes(), "transfer");
     if (storage_backend_)
@@ -257,17 +257,17 @@ void BlockTreeCache::reportMetrics() const {
 
 void BlockTreeCache::setEventPublisher(KVCacheEventPublisherPtr        publisher,
                                        const std::vector<std::string>& required_group_tags) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    CacheLockGuard lock(mutex_, *metrics_reporter_, "other");
     tree_->setEventPublisher(std::move(publisher), required_group_tags);
 }
 
 KVCacheSnapshot BlockTreeCache::logicalCacheSnapshot() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    CacheLockGuard lock(mutex_, *metrics_reporter_, "snapshot");
     return tree_->logicalCacheSnapshot();
 }
 
 BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(int64_t latest_version) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    CacheLockGuard              lock(mutex_, *metrics_reporter_, "snapshot");
     BlockTreeKeySnapshot        snapshot;
     snapshot.version = tree_->keyVersion();
     if (latest_version != snapshot.version) {

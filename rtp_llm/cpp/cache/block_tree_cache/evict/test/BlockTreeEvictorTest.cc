@@ -22,7 +22,7 @@
 #include "kmonitor/client/metric/GaugeMetric.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
@@ -76,22 +76,22 @@ void expectCountSamples(kmonitor::MutableMetric* metric, const kmonitor::Metrics
     EXPECT_TRUE(metric->UndeclareMetric(series));
 }
 
-void expectVictimSelectionCounters(const VictimSelectionCounters&                               counters,
-                                   uint64_t                                                     calls,
-                                   uint64_t                                                     selected,
-                                   uint64_t                                                     scanned,
-                                   std::initializer_list<std::pair<VictimSkipReason, uint64_t>> skipped = {}) {
+void expectEvictionVictimCounters(const EvictionVictimCounters&                                        counters,
+                                  uint64_t                                                             calls,
+                                  uint64_t                                                             selected,
+                                  uint64_t                                                             scanned,
+                                  std::initializer_list<std::pair<EvictionVictimSkipReason, uint64_t>> skipped = {}) {
     EXPECT_TRUE(counters.observed);
     EXPECT_EQ(counters.calls, calls);
     EXPECT_EQ(counters.selected, selected);
     EXPECT_EQ(counters.scanned_candidates, scanned);
-    std::array<uint64_t, static_cast<size_t>(VictimSkipReason::COUNT)> expected{};
+    std::array<uint64_t, static_cast<size_t>(EvictionVictimSkipReason::COUNT)> expected{};
     for (const auto& [reason, count] : skipped) {
         expected[static_cast<size_t>(reason)] = count;
     }
     uint64_t total_skipped = 0;
     for (size_t i = 0; i < expected.size(); ++i) {
-        EXPECT_EQ(counters.skipped[i], expected[i]) << kVictimSkipReasonNames[i];
+        EXPECT_EQ(counters.skipped[i], expected[i]) << kEvictionVictimSkipReasonNames[i];
         total_skipped += counters.skipped[i];
     }
     // Every visit either returns the selected victim or has exactly one rejection reason.
@@ -2274,10 +2274,10 @@ TEST_F(BlockTreeEvictorTest, DeviceHostWatermarkCapsBatchByRemainingRequiredCoun
     EXPECT_EQ(device_pool_->usedBlocksNum(), 7u);
     EXPECT_EQ(host_pool->usedBlocksNum(), 1u);
 
-    const auto selection = evictor_->takeVictimSelectionMetrics();
-    expectVictimSelectionCounters(
-        selection.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false), 1, 1, 1);
-    EXPECT_FALSE(selection.at(VictimSelectionTrigger::ON_DEMAND, Tier::DEVICE, CacheGroupType::FULL, false).observed);
+    const auto selection = evictor_->getAndResetEvictionVictimMetrics();
+    expectEvictionVictimCounters(
+        selection.at(EvictionVictimTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false), 1, 1, 1);
+    EXPECT_FALSE(selection.at(EvictionVictimTrigger::FORCE_DROP, Tier::DEVICE, CacheGroupType::FULL, false).observed);
 
     evictor_->settled_ = [](bool) {};
     while (evictor_->dropLocked(/*group_set_id=*/0, Tier::DEVICE, /*notify_settled=*/false)) {}
@@ -3140,7 +3140,7 @@ TEST(BlockTreeEvictorCascadeTest, InteriorSwaDropInvalidatesAncestorMatches) {
         const auto                             drop_leaf = [&] {
             if (same_pass) {
                 return evictor->dropLocked(
-                    0, Tier::HOST, false, VictimSelectionTrigger::WATERMARK, &eviction_batch_context);
+                    0, Tier::HOST, false, EvictionVictimTrigger::WATERMARK, &eviction_batch_context);
             }
             size_t reclaimed = 0;
             return evictor->batchDropLocked(0, Tier::HOST, 1, reclaimed) && reclaimed == 1;
@@ -3401,18 +3401,18 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimRejectsUnsupportedTier) {
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimMetricsCountEmptyCallsAndDrainIntervalDeltas) {
     EXPECT_FALSE(evictor_->chooseVictim(0, Tier::DEVICE).has_value());
-    const auto first = evictor_->takeVictimSelectionMetrics();
-    expectVictimSelectionCounters(
-        first.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false), 1, 0, 0);
-    EXPECT_FALSE(first.at(VictimSelectionTrigger::ON_DEMAND, Tier::DEVICE, CacheGroupType::FULL, false).observed);
-    const auto idle = evictor_->takeVictimSelectionMetrics();
-    expectVictimSelectionCounters(
-        idle.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false), 0, 0, 0);
-    EXPECT_EQ(idle.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false).latency_sum_ns, 0u);
+    const auto first = evictor_->getAndResetEvictionVictimMetrics();
+    expectEvictionVictimCounters(
+        first.at(EvictionVictimTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false), 1, 0, 0);
+    EXPECT_FALSE(first.at(EvictionVictimTrigger::FORCE_DROP, Tier::DEVICE, CacheGroupType::FULL, false).observed);
+    const auto idle = evictor_->getAndResetEvictionVictimMetrics();
+    expectEvictionVictimCounters(
+        idle.at(EvictionVictimTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false), 0, 0, 0);
+    EXPECT_EQ(idle.at(EvictionVictimTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false).latency_sum_ns, 0u);
     EXPECT_FALSE(evictor_->chooseVictim(0, Tier::DEVICE).has_value());
-    const auto next = evictor_->takeVictimSelectionMetrics();
-    expectVictimSelectionCounters(
-        next.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false), 1, 0, 0);
+    const auto next = evictor_->getAndResetEvictionVictimMetrics();
+    expectEvictionVictimCounters(
+        next.at(EvictionVictimTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false), 1, 0, 0);
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimMetricsDisabledReporterPreservesSelection) {
@@ -3444,7 +3444,7 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimMetricsDisabledReporterPreservesSelecti
     EXPECT_EQ(actual->node, expected->node);
     EXPECT_EQ(actual->source_blocks, expected->source_blocks);
     EXPECT_EQ(actual->target_tier, expected->target_tier);
-    for (const auto& counters : disabled.takeVictimSelectionMetrics().buckets) {
+    for (const auto& counters : disabled.getAndResetEvictionVictimMetrics().buckets) {
         EXPECT_FALSE(counters.observed);
         EXPECT_EQ(counters.calls, 0u);
         EXPECT_EQ(counters.latency_sum_ns, 0u);
@@ -3462,9 +3462,9 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimMetricsSeparateWatermarkDropFromOnDeman
     EXPECT_TRUE(evictor_->batchEvictLocked(0, Tier::DEVICE, 1).direct_progress);
     EXPECT_EQ(evictor_->reclaimDeviceBlocksLocked(0, 0, 1), 1u);
     EXPECT_EQ(tree_->size(), 1u);
-    const auto selection = evictor_->takeVictimSelectionMetrics();
-    for (const auto trigger : {VictimSelectionTrigger::WATERMARK, VictimSelectionTrigger::ON_DEMAND}) {
-        expectVictimSelectionCounters(selection.at(trigger, Tier::DEVICE, CacheGroupType::FULL, true), 1, 1, 1);
+    const auto selection = evictor_->getAndResetEvictionVictimMetrics();
+    for (const auto trigger : {EvictionVictimTrigger::WATERMARK, EvictionVictimTrigger::FORCE_DROP}) {
+        expectEvictionVictimCounters(selection.at(trigger, Tier::DEVICE, CacheGroupType::FULL, true), 1, 1, 1);
         EXPECT_FALSE(selection.at(trigger, Tier::DEVICE, CacheGroupType::FULL, false).observed);
     }
 }
@@ -3490,21 +3490,21 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimMetricsFrozenSourcesAndFirstRejectionRe
         if (tier == Tier::DEVICE) {
             device_pool_->incRef(source);
             EXPECT_FALSE(evictor_->chooseVictim(0, tier).has_value());
-            const auto held = evictor_->takeVictimSelectionMetrics();
-            expectVictimSelectionCounters(held.at(VictimSelectionTrigger::WATERMARK, tier, CacheGroupType::FULL, false),
-                                          1,
-                                          0,
-                                          1,
-                                          {{VictimSkipReason::REQUEST_REF, 1}});
+            const auto held = evictor_->getAndResetEvictionVictimMetrics();
+            expectEvictionVictimCounters(held.at(EvictionVictimTrigger::WATERMARK, tier, CacheGroupType::FULL, false),
+                                         1,
+                                         0,
+                                         1,
+                                         {{EvictionVictimSkipReason::REQUEST_REF, 1}});
             device_pool_->decRef(source);
         }
         EXPECT_FALSE(evictor_->chooseVictim(0, tier).has_value());
-        const auto frozen = evictor_->takeVictimSelectionMetrics();
-        expectVictimSelectionCounters(frozen.at(VictimSelectionTrigger::WATERMARK, tier, CacheGroupType::FULL, false),
-                                      1,
-                                      0,
-                                      1,
-                                      {{VictimSkipReason::FROZEN, 1}});
+        const auto frozen = evictor_->getAndResetEvictionVictimMetrics();
+        expectEvictionVictimCounters(frozen.at(EvictionVictimTrigger::WATERMARK, tier, CacheGroupType::FULL, false),
+                                     1,
+                                     0,
+                                     1,
+                                     {{EvictionVictimSkipReason::FROZEN, 1}});
         // FROZEN holds remain until pool teardown on main.
         EXPECT_TRUE(pool->isFrozen(source));
         EXPECT_TRUE(pool->isAllocated(source));
@@ -3530,13 +3530,13 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimSkipsInvalidHeapEntry) {
     EXPECT_EQ(victim->node, second_node);
     EXPECT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::DEVICE), 1u);
 
-    const auto selection = evictor_->takeVictimSelectionMetrics();
-    expectVictimSelectionCounters(
-        selection.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false),
+    const auto selection = evictor_->getAndResetEvictionVictimMetrics();
+    expectEvictionVictimCounters(
+        selection.at(EvictionVictimTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false),
         1,
         1,
         2,
-        {{VictimSkipReason::INVALID_CANDIDATE, 1}});
+        {{EvictionVictimSkipReason::INVALID_CANDIDATE, 1}});
 
     first_node->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
     first_node->group_set_resources[0].evictFromTier(Tier::DEVICE);
@@ -3681,21 +3681,21 @@ TEST_F(BlockTreeEvictorTest, SelectionCacheDefersReleasedCandidateUntilNextPass)
         evictor_->reserveSource({*second});
         EXPECT_FALSE(evictor_->chooseVictim(0, Tier::DEVICE, force_drop, &eviction_batch_context).has_value());
 
-        const auto selection = evictor_->takeVictimSelectionMetrics();
-        expectVictimSelectionCounters(
-            selection.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, force_drop),
+        const auto selection = evictor_->getAndResetEvictionVictimMetrics();
+        expectEvictionVictimCounters(
+            selection.at(EvictionVictimTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, force_drop),
             3,
             2,
             5,
-            {{force_drop ? VictimSkipReason::NOT_RECLAIMABLE : VictimSkipReason::REQUEST_REF, 1},
-             {VictimSkipReason::CACHED_REJECTION, 2}});
+            {{force_drop ? EvictionVictimSkipReason::NOT_RECLAIMABLE : EvictionVictimSkipReason::REQUEST_REF, 1},
+             {EvictionVictimSkipReason::CACHED_REJECTION, 2}});
 
         const auto next_pass = evictor_->chooseVictim(0, Tier::DEVICE, force_drop);
         ASSERT_TRUE(next_pass.has_value());
         EXPECT_EQ(next_pass->node, nodes[0]);
-        const auto retried = evictor_->takeVictimSelectionMetrics();
-        expectVictimSelectionCounters(
-            retried.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, force_drop), 1, 1, 1);
+        const auto retried = evictor_->getAndResetEvictionVictimMetrics();
+        expectEvictionVictimCounters(
+            retried.at(EvictionVictimTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, force_drop), 1, 1, 1);
         EXPECT_TRUE(evictor_->restoreSource({*first, *second}).empty());
         for (size_t i = 0; i < blocks.size(); ++i) {
             EXPECT_TRUE(evictor_->dropLocked(0, Tier::DEVICE, false));
@@ -3891,15 +3891,15 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimSkipsDeviceParentOfLoadingChildUnlessFo
     const auto victim = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE, /*force_drop=*/false);
     ASSERT_TRUE(victim.has_value());
     EXPECT_EQ(victim->node, parent);
-    const auto selection = evictor_->takeVictimSelectionMetrics();
-    expectVictimSelectionCounters(
-        selection.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false),
+    const auto selection = evictor_->getAndResetEvictionVictimMetrics();
+    expectEvictionVictimCounters(
+        selection.at(EvictionVictimTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false),
         3,
         3,
         5,
-        {{VictimSkipReason::CHILD_LOADING, 2}});
-    expectVictimSelectionCounters(
-        selection.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, true), 2, 2, 2);
+        {{EvictionVictimSkipReason::CHILD_LOADING, 2}});
+    expectEvictionVictimCounters(
+        selection.at(EvictionVictimTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, true), 2, 2, 2);
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimReturnsEmptyWhenAllDeviceCandidatesAreSkipped) {
@@ -4556,7 +4556,7 @@ TEST_F(BlockTreeEvictorTest, InvalidationDetachesBusyDescendantAndReclaimsAfterD
     // Model both source reservation and timing ownership of an in-flight eviction.
     evictor_->reserveSource({child_transfer});
     evictor_->heaps_[0].pending_timings.emplace(
-        busy_child, EvictionTimingSnapshot(busy_child->group_set_resources[0].candidate_meta));
+        busy_child, EvictionTimingMetrics(busy_child->group_set_resources[0].candidate_meta));
     const int64_t key_version = tree_->keyVersion();
 
     // Only settled CRC sources are invalidated; the descendant belongs to another transfer.

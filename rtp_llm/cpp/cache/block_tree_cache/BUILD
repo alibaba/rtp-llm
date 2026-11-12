@@ -96,8 +96,9 @@ cc_library(
 cc_library(
     name = "transfer_common",
     srcs = [
-        "BlockTreeCacheMetricsReporter.cc",
-        "CacheStageMetrics.cc",
+        "metrics/BlockTreeCacheMetricsReporter.cc",
+        "metrics/CacheStageMetrics.cc",
+        "metrics/EvictionMetrics.cc",
         "group_set/GroupSetResource.cc",
         "group_set/GroupSet.cc",
         "group_set/FullGroupSet.cc",
@@ -117,11 +118,14 @@ cc_library(
     }),
     hdrs = [
         "BlockTree.h",
-        "BlockTreeCacheMetricsReporter.h",
-        "CacheStageMetrics.h",
+        "metrics/BlockTreeCacheMetricsReporter.h",
+        "metrics/CacheLockGuard.h",
+        "metrics/CacheStageMetrics.h",
         "group_set/GroupSetResource.h",
         "evict/BlockTreeEvictor.h",
-        "evict/VictimSelectionMetrics.h",
+        "metrics/EvictionMetrics.h",
+        "metrics/ReuseMetrics.h",
+        "metrics/TransferMetrics.h",
         "group_set/GroupSet.h",
         "evict/EvictionHeap.h",
         "evict/EvictionTask.h",
@@ -149,6 +153,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        "//rtp_llm/cpp/cache:pool_metrics",
         ":block_tree_cache_layout",
         "@havenask//aios/autil:common_macros",
         "//rtp_llm/cpp/cache/events:kv_cache_event",

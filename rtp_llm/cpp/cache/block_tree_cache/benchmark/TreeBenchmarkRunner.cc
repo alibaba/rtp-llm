@@ -548,23 +548,23 @@ void TreeBenchmarkRunner::addDistributionMetrics(const std::string& prefix, cons
     writer_.addMetric(prefix + "_samples", static_cast<double>(sorted.size()));
 }
 
-void TreeBenchmarkRunner::writePressureMetrics(bool                                             pressure_ready,
-                                               const std::vector<BlockTreePoolMetricsSnapshot>& snapshots) {
+void TreeBenchmarkRunner::writePressureMetrics(bool pressure_ready, const std::vector<CachePoolMetrics>& metrics_list) {
     writer_.addMetric("pressure_ready", pressure_ready ? 1.0 : 0.0);
     double min_device_ratio = std::numeric_limits<double>::max();
     size_t host_pools_used  = 0;
     size_t host_pools_total = 0;
-    for (const auto& snapshot : snapshots) {
-        const std::string pool_key = "pool." + snapshot.pool_name + ".";
-        writer_.addMetric(pool_key + "used_blocks", static_cast<double>(snapshot.used_blocks));
-        writer_.addMetric(pool_key + "total_blocks", static_cast<double>(snapshot.total_blocks));
-        if (snapshot.tier == Tier::DEVICE && snapshot.total_blocks > 0) {
-            const double ratio = static_cast<double>(snapshot.used_blocks) / static_cast<double>(snapshot.total_blocks);
+    for (const auto& metrics_data : metrics_list) {
+        const std::string pool_key = "pool." + metrics_data.pool_name + ".";
+        writer_.addMetric(pool_key + "used_blocks", static_cast<double>(metrics_data.used_blocks));
+        writer_.addMetric(pool_key + "total_blocks", static_cast<double>(metrics_data.total_blocks));
+        if (metrics_data.tier == Tier::DEVICE && metrics_data.total_blocks > 0) {
+            const double ratio =
+                static_cast<double>(metrics_data.used_blocks) / static_cast<double>(metrics_data.total_blocks);
             writer_.addMetric(pool_key + "used_ratio", ratio);
             min_device_ratio = std::min(min_device_ratio, ratio);
-        } else if (snapshot.tier == Tier::HOST) {
+        } else if (metrics_data.tier == Tier::HOST) {
             ++host_pools_total;
-            if (snapshot.used_blocks > 0) {
+            if (metrics_data.used_blocks > 0) {
                 ++host_pools_used;
             }
         }
@@ -576,16 +576,16 @@ void TreeBenchmarkRunner::writePressureMetrics(bool                             
     writer_.addMetric("warmup.host_pools_total", static_cast<double>(host_pools_total));
 }
 
-void TreeBenchmarkRunner::writeFinalZeroMetrics(const std::vector<BlockTreePoolMetricsSnapshot>& snapshots) {
+void TreeBenchmarkRunner::writeFinalZeroMetrics(const std::vector<CachePoolMetrics>& metrics_list) {
     size_t request_ref_blocks = 0;
-    for (const auto& snapshot : snapshots) {
-        request_ref_blocks += snapshot.request_ref_blocks;
+    for (const auto& metrics_data : metrics_list) {
+        request_ref_blocks += metrics_data.request_ref_blocks;
     }
     writer_.addMetric("final.request_ref_blocks", static_cast<double>(request_ref_blocks));
-    for (const auto& snapshot : snapshots) {
-        const std::string pool_key = "final.pool." + snapshot.pool_name + ".";
-        writer_.addMetric(pool_key + "used_blocks", static_cast<double>(snapshot.used_blocks));
-        writer_.addMetric(pool_key + "request_ref_blocks", static_cast<double>(snapshot.request_ref_blocks));
+    for (const auto& metrics_data : metrics_list) {
+        const std::string pool_key = "final.pool." + metrics_data.pool_name + ".";
+        writer_.addMetric(pool_key + "used_blocks", static_cast<double>(metrics_data.used_blocks));
+        writer_.addMetric(pool_key + "request_ref_blocks", static_cast<double>(metrics_data.request_ref_blocks));
     }
 }
 
@@ -724,26 +724,27 @@ bool TreeBenchmarkRunner::runOnlineBenchmark(const OnlineTreeWorkloadConfig& con
     writer_.addPhaseNs("warmup", warmup_ns);
     drain("warmup");
     const OnlineSchedulerMetrics warmup_metrics   = scheduler.takeMetrics();
-    const auto                   warmup_snapshots = cache->poolMetricsSnapshots();
+    const auto                   warmup_metrics_list = cache->poolMetrics();
     const auto                   warmup_stats     = cache->getStats();
-    const bool                   pressure_ready   = warmup_ok
-                                && std::all_of(warmup_snapshots.begin(),
-                                               warmup_snapshots.end(),
-                                               [](const auto& snapshot) {
-                                                   if (snapshot.tier == Tier::DEVICE && snapshot.total_blocks > 0) {
-                                                       return static_cast<double>(snapshot.used_blocks)
-                                                                  / static_cast<double>(snapshot.total_blocks)
-                                                              >= 0.75;
-                                                   }
-                                                   if (snapshot.tier == Tier::HOST) {
-                                                       return snapshot.used_blocks > 0;
-                                                   }
-                                                   return true;
-                                               })
-                                && warmup_stats.device_heap_total_size > 0
-                                && warmup_metrics.completed_transactions >= config.warmup_completed_requests_min
-                                && scheduler.activeContexts() == 0;
-    writePressureMetrics(pressure_ready, warmup_snapshots);
+    const bool                   pressure_ready =
+        warmup_ok
+        && std::all_of(warmup_metrics_list.begin(),
+                       warmup_metrics_list.end(),
+                       [](const auto& metrics_data) {
+                           if (metrics_data.tier == Tier::DEVICE && metrics_data.total_blocks > 0) {
+                               return static_cast<double>(metrics_data.used_blocks)
+                                          / static_cast<double>(metrics_data.total_blocks)
+                                      >= 0.75;
+                           }
+                           if (metrics_data.tier == Tier::HOST) {
+                               return metrics_data.used_blocks > 0;
+                           }
+                           return true;
+                       })
+        && warmup_stats.device_heap_total_size > 0
+        && warmup_metrics.completed_transactions >= config.warmup_completed_requests_min
+        && scheduler.activeContexts() == 0;
+    writePressureMetrics(pressure_ready, warmup_metrics_list);
     writer_.addMetric("warmup.completed_request_transactions",
                       static_cast<double>(warmup_metrics.completed_transactions));
     writer_.addMetric("warmup.device_heap_total_size", static_cast<double>(warmup_stats.device_heap_total_size));
@@ -769,7 +770,7 @@ bool TreeBenchmarkRunner::runOnlineBenchmark(const OnlineTreeWorkloadConfig& con
     // Finalize: verify contexts, tickets, task pool and REQUEST refs are zero.
     const auto finalize_start = Clock::now();
     drain("finalize");
-    const auto final_snapshots = cache->poolMetricsSnapshots();
+    const auto final_metrics_list = cache->poolMetrics();
     const auto final_stats     = cache->getStats();
     const auto finalize_ns     = elapsedNs(finalize_start, Clock::now());
     writer_.addPhaseNs("finalize", finalize_ns);
@@ -777,10 +778,10 @@ bool TreeBenchmarkRunner::runOnlineBenchmark(const OnlineTreeWorkloadConfig& con
     const size_t final_pending_load_tickets = scheduler.pendingLoadTickets();
     const size_t final_pending_tasks        = adapter.pendingTaskCount();
     const size_t final_request_ref_blocks   = std::accumulate(
-        final_snapshots.begin(), final_snapshots.end(), size_t{0}, [](size_t sum, const auto& snapshot) {
-            return sum + snapshot.request_ref_blocks;
+        final_metrics_list.begin(), final_metrics_list.end(), size_t{0}, [](size_t sum, const auto& metrics_data) {
+            return sum + metrics_data.request_ref_blocks;
         });
-    writeFinalZeroMetrics(final_snapshots);
+    writeFinalZeroMetrics(final_metrics_list);
     writer_.addMetric("final.active_requests", static_cast<double>(final_active_requests));
     writer_.addMetric("final.pending_load_tickets", static_cast<double>(final_pending_load_tickets));
     writer_.addMetric("final.pending_tasks", static_cast<double>(final_pending_tasks));
