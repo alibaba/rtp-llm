@@ -244,8 +244,6 @@ def get_frontend_world_info(
     """
     current = get_world_info(server_config, distribute_config, parallelism_config)
     pc = parallelism_config
-    if pc.ffn_disaggregate_config.enable_ffn_disaggregate:
-        return current
     present = {member.world_rank for member in current.members}
     leaders = dict.fromkeys(
         member.world_rank // pc.tp_size * pc.tp_size for member in current.members

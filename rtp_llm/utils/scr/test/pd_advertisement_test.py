@@ -12,7 +12,6 @@ from rtp_llm.distribute.distributed_server import (
     get_dp_addrs_from_world_info,
 )
 from rtp_llm.distribute.worker_info import WorkerInfo
-from rtp_llm.ops import FfnDisAggregateConfig
 from rtp_llm.utils.scr import runtime_fixup as fixup
 from rtp_llm.utils.scr import template_utils as scr
 from rtp_llm.utils.scr.endpoint import resolve_world_info
@@ -27,6 +26,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
             world_size=2,
             local_world_size=2,
             tp_size=2,
+            pp_size=1,
             dp_size=1,
             dp_rank=0,
             local_rank=0,
@@ -64,7 +64,6 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         self.addCleanup(self.env.stop)
 
     def test_checkpoint_uses_loopback_control_and_routable_kv_advertisement(self):
-        self.pc.ffn_disaggregate_config = FfnDisAggregateConfig()
         members = [
             WorkerInfo("192.0.2.10", i, i, f"rank-{i}", 18630, 10) for i in range(2)
         ]
@@ -136,7 +135,6 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         visitor.update_addresses.assert_called_once_with(["127.0.0.1:18631"])
 
     def test_repeated_restore_repairs_all_consumers_before_release(self):
-        self.pc.ffn_disaggregate_config = FfnDisAggregateConfig()
         members = [
             WorkerInfo(
                 ip="127.0.0.1",

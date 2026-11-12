@@ -4,12 +4,6 @@ py_test(
     deps = ["//rtp_llm:testlib"],
 )
 
-py_test(
-    name = "frontend_routing_test",
-    srcs = ["frontend_routing_test.py"],
-    deps = ["//rtp_llm:testlib"],
-)
-
 filegroup(
     name = "testdata",
     srcs = glob([
@@ -56,6 +50,7 @@ py_test(
     srcs = ["frontend_routing_test.py"],
     data = ["//:th_transformer_config"],
     deps = [
+        "//rtp_llm:testlib",
         "//rtp_llm:sdk",
         "//rtp_llm:config_ops",
         "//rtp_llm:utils",
