@@ -18,6 +18,12 @@ public:
     virtual bool           success() const               = 0;
     virtual TransferResult result() const                = 0;
 
+    // An immutable observation for exceptional coordinator completion. A
+    // pending RPC implementation must not read responses still owned by gRPC.
+    virtual std::shared_ptr<const TransferExecutionDiagnostics> executionDiagnostics() const {
+        return nullptr;
+    }
+
     ErrorInfo errorInfo() const {
         return result().status;
     }
@@ -25,7 +31,13 @@ public:
 
 class CompletedTransferAsyncContext final: public TransferAsyncContext {
 public:
-    explicit CompletedTransferAsyncContext(TransferResult result, size_t block_count = 0): result_(std::move(result)) {
+    explicit CompletedTransferAsyncContext(TransferResult                        result,
+                                           size_t                                block_count = 0,
+                                           std::shared_ptr<TransferBufferSafety> proof       = nullptr):
+        result_(std::move(result)) {
+        if (proof) {
+            proof->report(result_.buffer_safe);
+        }
         result_.expandBlockErrors(block_count);
     }
 

@@ -125,6 +125,27 @@ void BlockTreeCache::shutdownLoads() {
     loader_.shutdown();
 }
 
+std::vector<std::shared_ptr<FrozenTask>> BlockTreeCache::frozenTasks() const {
+    return transfer_dispatcher_ ? transfer_dispatcher_->frozenTasks() : std::vector<std::shared_ptr<FrozenTask>>{};
+}
+
+TransferTaskRegistry::ForgetResult BlockTreeCache::forgetLocalTransferCompletion(uint64_t trace_id) const {
+    return transfer_dispatcher_ ? transfer_dispatcher_->forgetLocalCompletion(trace_id) :
+                                  TransferTaskRegistry::ForgetResult::FAILED;
+}
+
+void BlockTreeCache::setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup) {
+    if (transfer_dispatcher_)
+        transfer_dispatcher_->setCompletionCleanup(std::move(cleanup));
+}
+
+TransferTaskRegistry::State BlockTreeCache::localTransferCompletion(uint64_t trace_id) const {
+    if (!transfer_dispatcher_) {
+        return TransferTaskRegistry::State::UNKNOWN;
+    }
+    return transfer_dispatcher_->queryLocalCompletion(trace_id);
+}
+
 TransferResult BlockTreeCache::executeTransfer(TransferTask task) {
     auto context = transfer_dispatcher_->executePerRank(std::move(task));
     context->waitDone();
@@ -219,6 +240,11 @@ CacheStats BlockTreeCache::getStats() const {
 std::vector<BlockTreePoolMetricsSnapshot> BlockTreeCache::poolMetricsSnapshots() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return metrics_reporter_->collectPoolMetricsSnapshots(tree_->groupSets());
+}
+
+void BlockTreeCache::cleanupExpiredMissing() const {
+    if (transfer_dispatcher_)
+        transfer_dispatcher_->cleanupExpiredMissing();
 }
 
 void BlockTreeCache::reportMetrics() const {

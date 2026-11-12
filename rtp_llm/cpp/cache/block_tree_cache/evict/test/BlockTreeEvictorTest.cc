@@ -436,6 +436,12 @@ public:
     }
 
     bool completeBatch(size_t batch_index, bool success) {
+        return completeBatchResult(batch_index,
+                                   success ? ErrorInfo::OkStatus() :
+                                             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected failure"));
+    }
+
+    bool completeBatchResult(size_t batch_index, TransferResult result) {
         std::shared_ptr<TransferBatchAsyncContext> context;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -444,8 +450,7 @@ public:
             }
             context = contexts_[batch_index];
         }
-        context->complete(success ? ErrorInfo::OkStatus() :
-                                    ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected failure"));
+        context->complete(std::move(result));
         return true;
     }
 
@@ -1419,6 +1424,57 @@ TEST(BlockTreeEvictorAsyncTest, SameNodeGroupSetsSettleSuccessAndFailureIndepend
     EXPECT_EQ(environment.evictor_->candidateStats().host_candidates, 1u);
     EXPECT_EQ(environment.pendingReleaseCount(), 0u);
     EXPECT_EQ(environment.settledEvents(), (std::vector<bool>{false, true}));
+}
+
+TEST(BlockTreeEvictorAsyncTest, UnknownCompletionPreservesOnlyTargetAndReadmitsSource) {
+    MultiGroupAsyncEvictionEnvironment environment;
+    ASSERT_TRUE(environment.init());
+    TreeNode* node = environment.insertDeviceNode();
+    ASSERT_NE(node, nullptr);
+
+    ASSERT_TRUE(environment.evictor_->batchEvictLocked(0, Tier::DEVICE, /*max_victim_count=*/1).madeProgress());
+    ASSERT_TRUE(environment.transfer_engine_->waitForBatchCount(1, std::chrono::seconds(2)));
+    const auto first_batch = environment.transfer_engine_->batchDescriptors(0);
+    ASSERT_EQ(first_batch.size(), 1u);
+    ASSERT_EQ(first_batch.front().target_blocks.size(), 1u);
+    const auto source = environment.device_sources_[0];
+    const auto target = first_batch.front().target_blocks.front();
+    ASSERT_TRUE(environment.transfer_engine_->completeBatchResult(
+        0, ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "eviction completion unknown")));
+    environment.task_pool_->waitForIdle();
+
+    const auto frozen_tasks = environment.transfer_dispatcher_->frozenTasks();
+    ASSERT_EQ(frozen_tasks.size(), 1u);
+    const auto& resource = node->group_set_resources[0];
+    EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_EQ(resource.device_blocks, (std::vector<BlockIdxType>{source}));
+    EXPECT_FALSE(resource.hasTier(Tier::HOST));
+    EXPECT_FALSE(environment.device_pools_[0]->isFrozen(source));
+    EXPECT_TRUE(environment.host_pools_[0]->isFrozen(target));
+    EXPECT_EQ(environment.host_pools_[0]->treeRefCount(target), 1u);
+    EXPECT_EQ(environment.device_pools_[0]->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
+    EXPECT_EQ(environment.host_pools_[0]->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
+    EXPECT_EQ(environment.pendingReleaseCount(), 0u);
+
+    ASSERT_TRUE(environment.evictor_->batchEvictLocked(0, Tier::DEVICE, /*max_victim_count=*/1).madeProgress());
+    ASSERT_TRUE(environment.transfer_engine_->waitForBatchCount(2, std::chrono::seconds(2)));
+    const auto retry_batch = environment.transfer_engine_->batchDescriptors(1);
+    ASSERT_EQ(retry_batch.size(), 1u);
+    EXPECT_EQ(retry_batch.front().source_blocks, (std::vector<BlockIdxType>{source}));
+    ASSERT_EQ(retry_batch.front().target_blocks.size(), 1u);
+    const auto retry_target = retry_batch.front().target_blocks.front();
+    EXPECT_NE(retry_target, target);
+    ASSERT_TRUE(environment.transfer_engine_->completeBatch(1, false));
+    environment.task_pool_->waitForIdle();
+
+    EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_EQ(resource.device_blocks, (std::vector<BlockIdxType>{source}));
+    EXPECT_FALSE(environment.device_pools_[0]->isFrozen(source));
+    EXPECT_FALSE(environment.host_pools_[0]->isAllocated(retry_target));
+    EXPECT_EQ(environment.host_pools_[0]->treeRefCount(target), 1u);
+    EXPECT_EQ(environment.transfer_dispatcher_->frozenTasks().size(), 1u);
+    frozen_tasks.front()->unfreeze();
+    EXPECT_FALSE(environment.host_pools_[0]->isAllocated(target));
 }
 
 TEST(BlockTreeEvictorAsyncTest, ForceDropDetachesTwoGroupSetsBeforeLateCompletions) {

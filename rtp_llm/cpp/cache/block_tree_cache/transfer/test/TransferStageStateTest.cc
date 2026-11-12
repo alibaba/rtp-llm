@@ -30,12 +30,94 @@ TEST(TransferStageStateTest, EmptyStageCompletesExactlyOnce) {
     size_t             callback_count = 0;
     TransferStageState state([&](TransferResult error) {
         EXPECT_TRUE(error.ok());
+        EXPECT_TRUE(error.buffer_safe);
         ++callback_count;
     });
 
     state.finishSubmitting();
     state.finishSubmitting();
     EXPECT_EQ(callback_count, 1u);
+}
+
+TEST(TransferStageStateTest, BufferSafeBatchesPreserveFailureAcrossSubmissionClosure) {
+    for (bool finish_first : {false, true}) {
+        SCOPED_TRACE(finish_first);
+        size_t             callback_count = 0;
+        TransferResult     result;
+        TransferStageState state([&](TransferResult completed) {
+            result = std::move(completed);
+            ++callback_count;
+        });
+        state.addBatch();
+        state.addBatch();
+        if (finish_first) {
+            state.finishSubmitting();
+        }
+        TransferResult success(TransferStatus::OK);
+        success.buffer_safe = true;
+        state.completeBatch(std::move(success));
+        EXPECT_EQ(callback_count, 0u);
+        TransferResult failure(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "completed copy failed"));
+        failure.buffer_safe = true;
+        state.completeBatch(std::move(failure));
+        EXPECT_EQ(callback_count, finish_first ? 1u : 0u);
+        if (!finish_first) {
+            state.finishSubmitting();
+        }
+
+        EXPECT_EQ(callback_count, 1u);
+        EXPECT_TRUE(result.buffer_safe);
+        EXPECT_FALSE(result.ok());
+        EXPECT_EQ(result.status.code(), ErrorCode::EXECUTION_EXCEPTION);
+        EXPECT_EQ(result.status.ToString(), "completed copy failed");
+    }
+}
+
+TEST(TransferStageStateTest, UnprovenSuccessfulBatchPreventsSafetyProofAndStillDrains) {
+    for (bool unproven_first : {false, true}) {
+        SCOPED_TRACE(unproven_first);
+        size_t             callback_count = 0;
+        TransferResult     result;
+        TransferStageState state([&](TransferResult completed) {
+            result = std::move(completed);
+            ++callback_count;
+        });
+        state.addBatch();
+        state.addBatch();
+        state.finishSubmitting();
+        TransferResult safe(TransferStatus::OK);
+        safe.buffer_safe = true;
+        const TransferResult unproven(TransferStatus::OK);
+
+        state.completeBatch(unproven_first ? unproven : safe);
+        EXPECT_EQ(callback_count, 0u);
+        state.completeBatch(unproven_first ? safe : unproven);
+
+        EXPECT_EQ(callback_count, 1u);
+        EXPECT_TRUE(result.ok());
+        EXPECT_FALSE(result.buffer_safe);
+    }
+}
+
+TEST(TransferStageStateTest, ExplicitSubmissionFailureDoesNotGrantBufferSafety) {
+    size_t             callback_count = 0;
+    TransferResult     result;
+    TransferStageState state([&](TransferResult completed) {
+        result = std::move(completed);
+        ++callback_count;
+    });
+    state.addBatch();
+    TransferResult safe(TransferStatus::OK);
+    safe.buffer_safe = true;
+    state.completeBatch(std::move(safe));
+    EXPECT_EQ(callback_count, 0u);
+
+    state.finishSubmitting(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "submission failed"));
+
+    EXPECT_EQ(callback_count, 1u);
+    EXPECT_FALSE(result.buffer_safe);
+    EXPECT_EQ(result.status.code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_EQ(result.status.ToString(), "submission failed");
 }
 
 TEST(TransferStageStateTest, SubmissionFailureWaitsForBatchesAndPreservesUnsubmittedBlocks) {

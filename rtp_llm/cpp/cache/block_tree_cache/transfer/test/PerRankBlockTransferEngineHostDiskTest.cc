@@ -332,6 +332,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, LegacyMaxBatchSizeSplitsOneLogica
     context->waitDone();
 
     ASSERT_TRUE(context->success()) << context->errorInfo().ToString();
+    EXPECT_TRUE(context->result().buffer_safe);
     // Worker execution order is independent of the logical descriptor order.
     std::sort(io->batch_sizes.begin(), io->batch_sizes.end());
     EXPECT_EQ(io->batch_sizes, (std::vector<size_t>{1, 2, 2}));
@@ -532,6 +533,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskStatusMapping) {
         auto group      = makeHostDiskGroup(0, host_pool_, disk_pool, host_block_size_);
         auto engine     = makeEngine({group});
         expectStatus(engine, makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block), expected);
+        // The admitted HOST -> DISK route completes synchronous disk access.
         releasePoolBlock(*host_pool_, host_block);
     }
 }

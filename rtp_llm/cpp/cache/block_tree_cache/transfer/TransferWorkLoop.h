@@ -160,13 +160,14 @@ private:
         }
     }
 
-    // Ordinary preparation/submission errors finish this Entry after RAII cleanup.
+    // CRC and disk submission throw only before accepting I/O. Accepted work
+    // completes through their callbacks, including partial submission failures.
     template<typename Action>
     void withEntry(Entry& entry, Action&& action) noexcept {
         try {
             abortOnOom(std::forward<Action>(action));
         } catch (const std::exception& error) {
-            abortOnOom([&] { fail(entry, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what())); });
+            abortOnOom([&] { fail(entry, TransferResult::executionException(true, error.what())); });
         }
     }
 

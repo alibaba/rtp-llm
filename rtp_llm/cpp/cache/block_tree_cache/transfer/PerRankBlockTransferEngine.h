@@ -44,6 +44,9 @@ public:
         return async_ && source == Tier::DISK && target == Tier::DEVICE ? staging_batch_limit_ :
                                                                           max_descriptors_per_batch_;
     }
+    const std::vector<GroupSetPtr>& groupSets() const noexcept {
+        return group_sets_;
+    }
     void                cancelPendingStagingTransfers();
     // Monitoring compatibility: async reports outstanding batches, including
     // callbacks; evict maps to background. Legacy reports task-pool queues.

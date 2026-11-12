@@ -4,6 +4,28 @@ import math
 from rtp_llm.server.server_args.util import str2bool
 
 
+def _frozen_recovery_ms(value, minimum, name):
+    try:
+        duration = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            f"{name} must be an integer in [{minimum}, 2147483647]"
+        ) from error
+    if not minimum <= duration <= 2147483647:
+        raise argparse.ArgumentTypeError(
+            f"{name} must be in [{minimum}, 2147483647]"
+        )
+    return duration
+
+
+def _frozen_recovery_interval_ms(value):
+    return _frozen_recovery_ms(value, 0, "block_tree_frozen_recovery_interval_ms")
+
+
+def _frozen_recovery_query_timeout_ms(value):
+    return _frozen_recovery_ms(value, 1, "block_tree_frozen_recovery_query_timeout_ms")
+
+
 def _frozen_abort_ratio(value):
     try:
         ratio = float(value)
@@ -418,6 +440,24 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=_frozen_abort_ratio,
         default=0.3,
         help="单个 DEVICE/HOST/DISK pool 的冻结 block abort 阈值下限，默认 0.3。实际阈值在 [下限, 上限) 均匀采样，进程内固定；上下限相等时使用固定值。下限为 0 关闭保护，否则冻结占比严格超过实际阈值时 core。要求 0 <= 下限 <= 上限 <= 1；启动时配置。",
+    )
+    kv_cache_group.add_argument(
+        "--block_tree_frozen_recovery_interval_ms",
+        env_name="BLOCK_TREE_FROZEN_RECOVERY_INTERVAL_MS",
+        bind_to=(kv_cache_config, "block_tree_frozen_recovery_interval_ms"),
+        type=_frozen_recovery_interval_ms,
+        default=1000,
+        help="冻结任务恢复与完成记录清理的轮询间隔，单位毫秒，默认 1000；0 暂停两者，范围 [0, 2147483647]。"
+        "原参与者均确认 buffer safe 后才释放冻结引用。",
+    )
+    kv_cache_group.add_argument(
+        "--block_tree_frozen_recovery_query_timeout_ms",
+        env_name="BLOCK_TREE_FROZEN_RECOVERY_QUERY_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "block_tree_frozen_recovery_query_timeout_ms"),
+        type=_frozen_recovery_query_timeout_ms,
+        default=1000,
+        help="单个冻结任务查询或一批完成记录清理的超时预算，单位毫秒，默认 1000；范围 [1, 2147483647]。"
+        "查询失败或缺少安全证明时保留冻结引用。",
     )
     kv_cache_group.add_argument(
         "--block_pool_frozen_abort_upper_ratio",
