@@ -10,6 +10,8 @@ from pathlib import Path
 
 import requests
 
+from rtp_llm.test.perf_test.config_schema import DEFAULT_PREFILL_TRANSPORT
+
 
 def capture_scope(backend):
     """Describe the backend's actual capture boundary, independently of replay."""
@@ -208,6 +210,10 @@ class ProfiledRunner:
                 commit_tail_tokens=self.config["workload"]["commit_tail_tokens"],
                 max_batch_tokens=self.config["engine"]["max_batch_tokens"],
                 workspace_tokens=self.config["workload"].get("workspace_tokens"),
+                input_ids_only=self.config["workload"].get(
+                    "transport", DEFAULT_PREFILL_TRANSPORT
+                )
+                == "dashsc_input_ids",
                 cache_block_size=resolve_probe_block_size(self.config),
             ).run_case(diagnostic)
             if result["status"] == "ok":

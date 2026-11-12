@@ -1,6 +1,10 @@
 """Core performance behavior contracts."""
 
+import array
+import copy
+import hashlib
 import json
+import sys
 import tempfile
 import threading
 import unittest
@@ -15,7 +19,11 @@ from rtp_llm.test.perf_test.multi_node.prefill_runtime import (
     ExternalPrefillSession,
     build_external_prefill_plan,
 )
-from rtp_llm.test.perf_test.prefill.prompts import PrefixPromptFactory
+from rtp_llm.test.perf_test.prefill import runner as prefill_runner_module
+from rtp_llm.test.perf_test.prefill.prompts import (
+    PrefixPromptFactory,
+    build_grouped_prompts,
+)
 from rtp_llm.test.perf_test.prefill.runner import PrefillRunner
 from rtp_llm.test.perf_test.run_directory import initialize_run_directory
 from rtp_llm.test.perf_test.state import RunState
@@ -186,6 +194,229 @@ class SeedBatchClient:
                 batch["completed"] += 1
                 if request["phase"] == "seed":
                     self.completed_seeds.add(request["request_index"])
+
+
+class PreflightReuseTest(unittest.TestCase):
+    class Tokenizer(prefill_runner_Tokenizer):
+        def __init__(self, *, collide=False):
+            self.long_encodes = 0
+            self.reject_long = False
+            self.collide = collide
+            self.vocab = {}
+
+        def encode(self, text):
+            ids = super().encode(text)
+            if len(ids) >= 64:
+                self.long_encodes += 1
+                if self.reject_long:
+                    raise ValueError("unexpected repeated full encoding")
+            if self.collide and ids and ids[0].startswith("cache_grid_shared_prefix_"):
+                ids[0] = "shared"
+            return [self.vocab.setdefault(word, len(self.vocab)) for word in ids]
+
+    def case(self, *, cache_len=64, case_id="sampled", batch_size=2):
+        return dict(
+            prefill_runner_case(cache_len=cache_len, batch_size=batch_size),
+            case_id=case_id,
+            sample_index=1,
+            input_len=128,
+            compute_len=128 - cache_len,
+            prefix_policy="independent",
+            request_groups=[
+                {"count": batch_size, "input_len": 128, "cache_len": cache_len}
+            ],
+        )
+
+    def runner(self, tokenizer, case, **kwargs):
+        client = SeedBatchClient([case["cache_len"]] * case["batch_size"])
+        return (
+            PrefillRunner(
+                client,
+                tokenizer,
+                commit_tail_tokens=4,
+                max_batch_tokens=4096,
+                cache_block_size=4,
+                **kwargs,
+            ),
+            client,
+        )
+
+    def test_successful_global_preflight_is_reused_without_long_reencoding(self):
+        case = self.case()
+        tokenizer = self.Tokenizer()
+        runner, client = self.runner(tokenizer, case)
+        runner.preflight([case])
+        tokenizer.reject_long = True
+        result = runner.run_case(copy.deepcopy(case))
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(2, len(client.batches))
+        self.assertEqual(4, len(result["metrics"]["measurements"]))
+
+    def test_changed_case_with_same_id_is_validated_again(self):
+        case = self.case()
+        tokenizer = self.Tokenizer()
+        runner, client = self.runner(tokenizer, case)
+        runner.preflight([case])
+        tokenizer.reject_long = True
+        result = runner.run_case(dict(case, measure_runs=3))
+        self.assertEqual("request_failed", result["status"])
+        self.assertEqual([], client.batches)
+
+    def test_standalone_run_validates_before_dispatch(self):
+        case = self.case(cache_len=0)
+        tokenizer = self.Tokenizer()
+        runner, client = self.runner(tokenizer, case)
+        tokenizer.reject_long = True
+        result = runner.run_case(case)
+        self.assertEqual("request_failed", result["status"])
+        self.assertEqual([], client.batches)
+
+    def test_failed_global_preflight_does_not_mark_partial_cases_valid(self):
+        case = self.case(batch_size=1)
+        other = self.case(case_id="other", batch_size=1)
+        tokenizer = self.Tokenizer(collide=True)
+        runner, client = self.runner(tokenizer, case)
+        with self.assertRaisesRegex(ValueError, "not independent"):
+            runner.preflight([case, other])
+        tokenizer.reject_long = True
+        result = runner.run_case(case)
+        self.assertEqual("request_failed", result["status"])
+        self.assertEqual([], client.batches)
+
+    def test_id_transport_only_full_encodes_initial_verified_shapes(self):
+        case = self.case(batch_size=16)
+        tokenizer = self.Tokenizer()
+        runner, _ = self.runner(tokenizer, case, input_ids_only=True)
+        runner.preflight([case])
+        self.assertEqual(4, tokenizer.long_encodes)
+
+    def test_text_transport_retains_full_text_id_consistency_check(self):
+        for input_ids_only in (False, True):
+            with self.subTest(input_ids_only=input_ids_only):
+                case = self.case()
+                runner, _ = self.runner(
+                    self.Tokenizer(), case, input_ids_only=input_ids_only
+                )
+
+                def corrupt_text(*args):
+                    members = build_grouped_prompts(*args)
+                    members[0]["prompts"].run_texts[0] += " extra"
+                    return members
+
+                with patch(
+                    "rtp_llm.test.perf_test.prefill.runner.build_grouped_prompts",
+                    side_effect=corrupt_text,
+                ):
+                    if input_ids_only:
+                        runner.preflight([case])
+                    else:
+                        with self.assertRaisesRegex(
+                            ValueError, "text and input IDs differ"
+                        ):
+                            runner.preflight([case])
+
+    def test_id_transport_rejects_wrong_prefix_and_duplicate_round_ids(self):
+        for corruption in ("prefix", "duplicate", "short_texts"):
+            with self.subTest(corruption=corruption):
+                case = self.case()
+                runner, client = self.runner(
+                    self.Tokenizer(), case, input_ids_only=True
+                )
+
+                def corrupt_ids(*args):
+                    members = build_grouped_prompts(*args)
+                    prompts = members[0]["prompts"]
+                    if corruption == "prefix":
+                        prompts.run_ids[0][0] = "wrong-prefix"
+                    elif corruption == "duplicate":
+                        prompts.run_ids[1] = prompts.run_ids[0]
+                    else:
+                        prompts.run_texts.pop()
+                    return members
+
+                with patch(
+                    "rtp_llm.test.perf_test.prefill.runner.build_grouped_prompts",
+                    side_effect=corrupt_ids,
+                ):
+                    result = runner.run_case(case)
+                self.assertEqual("request_failed", result["status"])
+                self.assertEqual([], client.batches)
+
+
+class TokenDigestTest(unittest.TestCase):
+    def test_digest_matches_little_endian_int32_boundary_bytes(self):
+        ids = [0, 1, -1, -(2**31), 2**31 - 1]
+        payload = bytes.fromhex("00000000 01000000 ffffffff 00000080 ffffff7f")
+        self.assertEqual(
+            hashlib.sha256(payload).digest(), prefill_runner_module._token_digest(ids)
+        )
+
+    def test_digest_preserves_equality_order_and_length(self):
+        digest = prefill_runner_module._token_digest
+        self.assertEqual(digest([1, 2]), digest([1, 2]))
+        for left, right in (
+            ([], [0]),
+            ([1, 2], [2, 1]),
+            ([1, 2], [1, 2, 0]),
+            ([1, 23], [12, 3]),
+        ):
+            with self.subTest(left=left, right=right):
+                self.assertNotEqual(digest(left), digest(right))
+
+    def test_digest_rejects_out_of_range_and_non_integer_tokens(self):
+        for token in (-(2**31) - 1, 2**31, 1.5, "1"):
+            with self.subTest(token=token):
+                with self.assertRaises(ValueError):
+                    prefill_runner_module._token_digest([token])
+
+    def test_big_endian_native_array_is_normalized(self):
+        def big_endian_array(typecode, values):
+            packed = array.array(typecode, values)
+            if sys.byteorder == "little":
+                packed.byteswap()
+            return packed
+
+        with patch.object(
+            prefill_runner_module, "array", SimpleNamespace(array=big_endian_array)
+        ), patch.object(prefill_runner_module, "sys", SimpleNamespace(byteorder="big")):
+            actual = prefill_runner_module._token_digest([1, -1])
+        expected = hashlib.sha256(bytes.fromhex("01000000 ffffffff")).digest()
+        self.assertEqual(expected, actual)
+
+    def test_preflight_rejects_shared_block_with_distinct_complete_sequences(self):
+        setup = PreflightReuseTest()
+        first = setup.case(batch_size=1)
+        second = dict(
+            setup.case(case_id="other", batch_size=1),
+            input_len=132,
+            compute_len=68,
+            request_groups=[{"count": 1, "input_len": 132, "cache_len": 64}],
+        )
+        runner, client = setup.runner(
+            setup.Tokenizer(collide=True), first, input_ids_only=True
+        )
+        with self.assertRaisesRegex(ValueError, "cache blocks are not independent"):
+            runner.preflight([first, second])
+        self.assertEqual([], client.batches)
+
+    def test_preflight_rejects_extra_reuse_with_distinct_complete_sequences(self):
+        setup = PreflightReuseTest()
+        case = setup.case()
+        runner, client = setup.runner(setup.Tokenizer(), case, input_ids_only=True)
+
+        def corrupt_round(*args):
+            members = build_grouped_prompts(*args)
+            ids = members[0]["prompts"].run_ids
+            ids[1][:68] = ids[0][:68]
+            ids[1][-1] = -1
+            return members
+
+        with patch.object(
+            prefill_runner_module, "build_grouped_prompts", side_effect=corrupt_round
+        ):
+            with self.assertRaisesRegex(ValueError, "rounds are not independent"):
+                runner.preflight([case])
+        self.assertEqual([], client.batches)
 
 
 class SeedBatchTest(unittest.TestCase):

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 from rtp_llm.test.perf_test.config_resolver import canonical_json
+from rtp_llm.test.perf_test.config_schema import DEFAULT_PREFILL_TRANSPORT
 from rtp_llm.test.perf_test.errors import ConfigurationError
 from rtp_llm.test.perf_test.execution.engine_session import (
     EngineDiagnostics,
@@ -185,6 +186,10 @@ def _default_executor(inputs: RemoteInputs):
             commit_tail_tokens=commit_tail,
             max_batch_tokens=inputs.config["engine"]["max_batch_tokens"],
             workspace_tokens=inputs.config["workload"].get("workspace_tokens"),
+            input_ids_only=inputs.config["workload"].get(
+                "transport", DEFAULT_PREFILL_TRANSPORT
+            )
+            == "dashsc_input_ids",
             cache_block_size=resolve_probe_block_size(inputs.config),
         ),
         probe=lambda context: probe_cache_block(

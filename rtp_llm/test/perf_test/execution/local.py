@@ -10,7 +10,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
-from rtp_llm.test.perf_test.config_schema import EngineConfig
+from rtp_llm.test.perf_test.config_schema import DEFAULT_PREFILL_TRANSPORT, EngineConfig
 from rtp_llm.test.perf_test.decode.executor import (
     DecodeBatchExecutor,
     DecodeCaseExecutor,
@@ -214,6 +214,10 @@ class UnifiedLocalExecutor:
                 commit_tail_tokens=commit_tail,
                 max_batch_tokens=config["engine"]["max_batch_tokens"],
                 workspace_tokens=config["workload"].get("workspace_tokens"),
+                input_ids_only=config["workload"].get(
+                    "transport", DEFAULT_PREFILL_TRANSPORT
+                )
+                == "dashsc_input_ids",
                 cache_block_size=resolve_probe_block_size(config),
             ),
             probe=lambda context: probe_cache_block(

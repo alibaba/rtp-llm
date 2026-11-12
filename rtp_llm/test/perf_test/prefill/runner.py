@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import array
 import copy
 import hashlib
 import json
 import math
 import statistics
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +21,19 @@ from rtp_llm.test.perf_test.prefill.prompts import (
 )
 
 
+def _token_digest(ids) -> bytes:
+    """Hash complete token sequences as canonical little-endian signed int32."""
+    try:
+        packed = array.array("i", ids)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("token IDs must be signed 32-bit integers") from error
+    if packed.itemsize != 4:
+        raise ValueError("native int array must use 4-byte items")
+    if sys.byteorder != "little":
+        packed.byteswap()
+    return hashlib.sha256(packed).digest()
+
+
 class PrefillRunner:
     def __init__(
         self,
@@ -29,6 +44,7 @@ class PrefillRunner:
         max_batch_tokens: int,
         workspace_tokens: int | None = None,
         cache_block_size: int | None = None,
+        input_ids_only: bool = False,
         monotonic: Callable[[], float] = time.monotonic,
     ):
         self.monotonic = monotonic
@@ -38,6 +54,8 @@ class PrefillRunner:
         self.max_batch_tokens = max_batch_tokens
         self.workspace_tokens = workspace_tokens
         self.cache_block_size = cache_block_size or commit_tail_tokens
+        self.input_ids_only = input_ids_only
+        self._validated_cases: set[str] = set()
 
     @staticmethod
     def _identity(case: Dict[str, Any]) -> Dict[str, Any]:
@@ -87,48 +105,77 @@ class PrefillRunner:
             return "invalid_timing", "wait_time_ms must be finite and non-negative"
         return None
 
+    def _validation_key(self, case: Dict[str, Any]) -> str:
+        data = json.dumps(
+            (case, self.commit_tail_tokens, self.cache_block_size, self.input_ids_only),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return hashlib.sha256(data).hexdigest()
+
     def preflight(self, cases):
         """Reject sampled prompts that cannot remain independent in token space."""
-
-        def digest(ids):
-            data = json.dumps(ids, separators=(",", ":")).encode()
-            return hashlib.sha256(data).digest()
 
         seen = set()
         blocks = {}
         round_blocks = set()
+        validated = set()
         for case in cases:
             if "sample_index" not in case:
                 continue
             try:
-                members = build_grouped_prompts(
-                    self.factory, case, int(case["measure_runs"])
-                )
+                run_count = int(case["measure_runs"])
+                members = build_grouped_prompts(self.factory, case, run_count)
                 for index, member in enumerate(members):
                     owner = (case["case_id"], index)
                     prompts = member["prompts"]
+                    cache_len = member["cache_len"]
+                    if (
+                        len(prompts.prefix_ids) != cache_len
+                        or len(prompts.run_ids) != run_count
+                        or len(prompts.run_texts) != run_count
+                    ):
+                        raise ValueError("prompt shape does not match plan")
                     if member["cache_len"]:
-                        seed_text, seed_ids = self.factory.make_seed_and_ids(
+                        seed_text, seed_ids = self.factory.build_seed_and_ids(
                             member["prefix_id"],
-                            prompts.seed_text,
+                            prompts,
                             member["cache_len"],
                             self.commit_tail_tokens,
                         )
-                        if list(self.factory.tokenizer.encode(seed_text)) != seed_ids:
+                        if (
+                            len(seed_ids) != cache_len + self.commit_tail_tokens
+                            or seed_ids[:cache_len] != prompts.prefix_ids
+                        ):
+                            raise ValueError("seed IDs do not preserve planned prefix")
+                        if (
+                            not self.input_ids_only
+                            and list(self.factory.tokenizer.encode(seed_text))
+                            != seed_ids
+                        ):
                             raise ValueError("seed text and input IDs differ")
                         boundary = member["cache_len"] + self.cache_block_size
                         if len(seed_ids) >= boundary:
-                            round_blocks.add((owner, digest(seed_ids[:boundary])))
+                            round_blocks.add(
+                                (owner, _token_digest(seed_ids[:boundary]))
+                            )
                     for text, ids in zip(prompts.run_texts, prompts.run_ids):
-                        if list(self.factory.tokenizer.encode(text)) != ids:
+                        if (
+                            not self.input_ids_only
+                            and list(self.factory.tokenizer.encode(text)) != ids
+                        ):
                             raise ValueError("text and input IDs differ")
-                        key = digest(ids)
+                        if ids[:cache_len] != prompts.prefix_ids:
+                            raise ValueError(
+                                "request IDs do not preserve planned prefix"
+                            )
+                        key = _token_digest(ids)
                         if len(ids) != member["input_len"] or key in seen:
                             raise ValueError("sampled prompts are not independent")
                         seen.add(key)
                         block = self.cache_block_size
                         if len(ids) >= block:
-                            first = digest(ids[:block])
+                            first = _token_digest(ids[:block])
                             if first in blocks and blocks[first] != owner:
                                 raise ValueError(
                                     "sampled cache blocks are not independent"
@@ -136,15 +183,18 @@ class PrefillRunner:
                             blocks[first] = owner
                         boundary = member["cache_len"] + block
                         if len(ids) >= boundary:
-                            round_key = (owner, digest(ids[:boundary]))
+                            round_key = (owner, _token_digest(ids[:boundary]))
                             if round_key in round_blocks:
                                 raise ValueError("sampled rounds are not independent")
                             round_blocks.add(round_key)
+                validated.add(self._validation_key(case))
             except ValueError as error:
                 raise ValueError(
                     f"traffic prompt preflight failed for {case['case_id']}: {error}; "
                     "increase min_input_tokens or choose a compatible tokenizer"
                 ) from error
+        # A failed global check must not authorize partially validated cases.
+        self._validated_cases.update(validated)
 
     def _seed_batches(self, members: List[Dict[str, Any]]) -> List[List[int]]:
         batches = []
@@ -185,9 +235,9 @@ class PrefillRunner:
             requests = []
             for member in batch:
                 item = members[member]
-                seed_text, seed_ids = self.factory.make_seed_and_ids(
+                seed_text, seed_ids = self.factory.build_seed_and_ids(
                     item["prefix_id"],
-                    item["prompts"].seed_text,
+                    item["prompts"],
                     item["cache_len"],
                     self.commit_tail_tokens,
                 )
@@ -245,7 +295,10 @@ class PrefillRunner:
         return None
 
     def run_case(self, case: Dict[str, Any]) -> Dict[str, Any]:
-        if "sample_index" in case:
+        if (
+            "sample_index" in case
+            and self._validation_key(case) not in self._validated_cases
+        ):
             try:
                 self.preflight([case])
             except ValueError as error:

@@ -32,6 +32,127 @@ from rtp_llm.test.perf_test.test_support import (
 )
 
 
+class SeedPreparationTest(unittest.TestCase):
+    def test_grouped_prompts_preserve_fast_construction_metadata(self):
+        factory = PrefixPromptFactory(prefill_prompt_WhitespaceTokenizer())
+        for policy in ("independent", "shared_by_group"):
+            with self.subTest(policy=policy):
+                case = {
+                    "case_id": "metadata",
+                    "input_len": 128,
+                    "cache_len": 64,
+                    "batch_size": 2,
+                    "prefix_policy": policy,
+                    "request_groups": [{"count": 2, "input_len": 128, "cache_len": 64}],
+                }
+                members = build_grouped_prompts(factory, case, 2)
+                for member in members:
+                    self.assertIsNotNone(member["prompts"].run_specs)
+                    self.assertEqual(2, len(member["prompts"].run_specs))
+                if policy == "shared_by_group":
+                    self.assertEqual(
+                        [" __run_1_", " __run_3_"],
+                        [s["tail"] for s in members[1]["prompts"].run_specs],
+                    )
+
+    def test_seed_fragments_match_exact_builder_without_repeated_long_encodes(self):
+        class Tokenizer(prefill_prompt_WhitespaceTokenizer):
+            def __init__(self):
+                self.long_encodes = 0
+
+            def encode(self, text):
+                ids = super().encode(text)
+                self.long_encodes += len(ids) >= 64
+                return ids
+
+        tokenizer = Tokenizer()
+        factory = PrefixPromptFactory(tokenizer)
+        prompts = [
+            factory.build_case_prompts(f"member{i}", 128, 64, 2) for i in range(3)
+        ]
+        tokenizer.long_encodes = 0
+        for i, prompt in enumerate(prompts):
+            actual = factory.build_seed_and_ids(f"member{i}", prompt, 64, 4)
+            expected = PrefixPromptFactory(
+                prefill_prompt_WhitespaceTokenizer()
+            ).make_seed_and_ids(f"member{i}", prompt.seed_text, 64, 4)
+            self.assertEqual(expected, actual)
+            self.assertEqual(68, len(actual[1]))
+        self.assertEqual(1, tokenizer.long_encodes)
+
+    def test_seed_falls_back_when_commit_marker_changes_prefix_tokenization(self):
+        class Tokenizer(prefill_prompt_WhitespaceTokenizer):
+            def encode(self, text):
+                ids = super().encode(text)
+                for i, token in enumerate(ids):
+                    if token.startswith("__seed_commit_") and i:
+                        return ids[: i - 1] + ["merged"] + ids[i + 1 :]
+                return ids
+
+        tokenizer = Tokenizer()
+        factory = PrefixPromptFactory(tokenizer)
+        prompt = factory.build_case_prompts("fallback", 128, 64, 2)
+        actual = factory.build_seed_and_ids("fallback", prompt, 64, 4)
+        self.assertEqual(prompt.seed_text + " hello" * 4, actual[0])
+        self.assertEqual(tokenizer.encode(actual[0]), actual[1])
+        self.assertEqual(prompt.prefix_ids, actual[1][:64])
+
+    def test_seed_falls_back_when_commit_tail_cannot_fit_marker(self):
+        class Tokenizer(prefill_prompt_WhitespaceTokenizer):
+            def encode(self, text):
+                return text.replace("_", " ").split()
+
+        tokenizer = Tokenizer()
+        factory = PrefixPromptFactory(tokenizer)
+        prompt = factory.build_case_prompts("short", 128, 64, 2)
+        actual = factory.build_seed_and_ids("short", prompt, 64, 1)
+        expected = PrefixPromptFactory(tokenizer).make_seed_and_ids(
+            "short", prompt.seed_text, 64, 1
+        )
+        self.assertEqual(expected, actual)
+        self.assertEqual(65, len(actual[1]))
+        self.assertEqual(prompt.prefix_ids, actual[1][:64])
+
+    def test_verified_long_seed_does_not_bypass_marker_only_prefix_fallback(self):
+        class Tokenizer(prefill_prompt_WhitespaceTokenizer):
+            def encode(self, text):
+                ids = super().encode(text)
+                for i, token in enumerate(ids):
+                    if (
+                        token.startswith("__seed_commit_")
+                        and i
+                        and ids[i - 1].startswith("cache_grid_shared_prefix_")
+                    ):
+                        return ids[: i - 1] + ["merged"] + ids[i + 1 :]
+                return ids
+
+        tokenizer = Tokenizer()
+        factory = PrefixPromptFactory(tokenizer)
+        long = factory.build_case_prompts("long", 128, 64, 2)
+        factory.build_seed_and_ids("long", long, 64, 4)
+        short = factory.build_case_prompts("short", 128, 1, 2)
+        actual = factory.build_seed_and_ids("short", short, 1, 4)
+        self.assertEqual(short.seed_text + " hello" * 4, actual[0])
+        self.assertEqual(tokenizer.encode(actual[0]), actual[1])
+        self.assertEqual(short.prefix_ids, actual[1][:1])
+
+    def test_verified_seed_with_fillers_does_not_bypass_eof_verification(self):
+        class Tokenizer(prefill_prompt_WhitespaceTokenizer):
+            def encode(self, text):
+                ids = super().encode(text)
+                if len(ids) >= 64 and ids[-1].startswith("__seed_commit_"):
+                    ids[-1] += "at_eof"
+                return ids
+
+        tokenizer = Tokenizer()
+        factory = PrefixPromptFactory(tokenizer)
+        prompt = factory.build_case_prompts("ending", 128, 64, 2)
+        factory.build_seed_and_ids("ending", prompt, 64, 4)
+        actual = factory.build_seed_and_ids("ending", prompt, 64, 1)
+        self.assertEqual(tokenizer.encode(actual[0]), actual[1])
+        self.assertEqual(65, len(actual[1]))
+
+
 class prefill_prompt_WhitespaceTokenizer:
 
     def encode(self, text):

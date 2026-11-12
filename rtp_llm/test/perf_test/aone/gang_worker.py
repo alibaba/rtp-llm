@@ -1198,6 +1198,10 @@ def _default_prefill_master_executor(
                 commit_tail_tokens=commit_tail,
                 max_batch_tokens=merged["engine"]["max_batch_tokens"],
                 workspace_tokens=merged["workload"].get("workspace_tokens"),
+                input_ids_only=merged["workload"].get(
+                    "transport", DEFAULT_PREFILL_TRANSPORT
+                )
+                == "dashsc_input_ids",
                 cache_block_size=resolve_probe_block_size(merged),
             ),
             probe=lambda executor_context: probe_cache_block(

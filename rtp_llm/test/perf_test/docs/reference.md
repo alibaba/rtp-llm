@@ -87,6 +87,18 @@ uses its actual request count as the scheduler target, including the final
 batch. All seeds must complete and pass validation before measurement starts;
 a failed batch is fully drained and stops the case.
 
+Sampled cases are checked together before execution for independent request and
+cache-block IDs. Successful checks are reused for unchanged cases within the
+same runner; a changed case or a standalone `run_case` still requires validation.
+DashSC validates the actual token IDs without re-encoding every long prompt as
+text. HTTP text transport keeps text/ID consistency checks. Prompt and seed
+construction reuse verified tokenizer fragments, with initial full-sequence
+verification and exact text-based fallback for incompatible tokenizers. Only
+case fingerprints are retained across cases, not all prepared long sequences.
+Internal token-sequence checks hash canonical little-endian signed int32 data
+directly, avoiding long JSON strings. Out-of-range or non-integer token IDs are
+rejected; persisted case fingerprints remain unchanged.
+
 Decode examples cover fixed input/output/global-batch grids
 (`decode_grid_local.json`), a materialized input-length distribution
 (`decode_distribution_local.json`), and bounded target-TPOT search

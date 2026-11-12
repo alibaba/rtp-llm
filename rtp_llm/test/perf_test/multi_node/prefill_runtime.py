@@ -218,6 +218,8 @@ def execute_master_prefill(
                 commit_tail_tokens=commit_tail,
                 max_batch_tokens=plan.resolved_config["engine"]["max_batch_tokens"],
                 workspace_tokens=workload.get("workspace_tokens"),
+                input_ids_only=workload.get("transport", DEFAULT_PREFILL_TRANSPORT)
+                == "dashsc_input_ids",
                 cache_block_size=block_size,
             ),
             probe=lambda context: probe_cache_block(

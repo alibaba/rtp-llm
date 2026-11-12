@@ -146,6 +146,41 @@ class PrefixPromptFactory:
     ) -> str:
         return self.make_seed_and_ids(case_id, prefix, cache_len, commit_tail_tokens)[0]
 
+    def build_seed_and_ids(
+        self,
+        case_id: Any,
+        prompts: CasePrompts,
+        cache_len: int,
+        commit_tail_tokens: int,
+    ) -> Tuple[str, List[int]]:
+        """Reuse verified prompt fragments, with exact construction as fallback."""
+        if cache_len <= 0:
+            return "", []
+        if prompts.run_specs is not None and prompts.seed_text.endswith(self._word * 4):
+            tail = f" __seed_commit_{case_id}_"
+            tail_ids = self._safe_tail_ids(tail)
+            if (
+                tail_ids is not None
+                and len(tail_ids) <= commit_tail_tokens
+                and len(prompts.prefix_ids) == cache_len
+            ):
+                fillers = commit_tail_tokens - len(tail_ids)
+                text = prompts.seed_text + tail + self._word * fillers
+                ids = prompts.prefix_ids + tail_ids + self._filler_ids * fillers
+                # The tail probe uses four fillers on each side. Short suffixes
+                # have distinct end-of-text boundaries and need their own check.
+                shape = f"seed_tail_{min(fillers, 4)}"
+                if shape not in self._unsafe_shapes:
+                    try:
+                        if shape not in self._verified_shapes:
+                            self._verify(shape, CasePrompts(text, ids))
+                        return text, ids
+                    except _FastConstructionUnavailable:
+                        pass
+        return self.make_seed_and_ids(
+            case_id, prompts.seed_text, cache_len, commit_tail_tokens
+        )
+
     def _safe_marker_ids(self, marker: str) -> Optional[List[int]]:
         if not self._fast_path:
             return None
@@ -329,6 +364,11 @@ def build_grouped_prompts(
                         [prompts.run_texts[index] for index in indices],
                         [prompts.run_ids[index] for index in indices],
                         prompts.built_len,
+                        (
+                            [prompts.run_specs[index] for index in indices]
+                            if prompts.run_specs is not None
+                            else None
+                        ),
                     ),
                 }
             )
