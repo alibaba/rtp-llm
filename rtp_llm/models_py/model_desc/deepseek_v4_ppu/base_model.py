@@ -229,17 +229,27 @@ class DeepSeekV4Model(_BaseDeepSeekV4Model):
         self, init_resource: PyModelInitResources, device_str: str
     ) -> bool:
         """Initialize an attention-only DSpARK PREFILL commit model."""
+        # The PREFILL weight descriptor keeps only wkv/kv_norm per layer, so the
+        # transformer must pick CommitOnlyAttentionFP8. Pin the flag here instead
+        # of relying on the draft wrapper having set it before initialize().
+        self._v4_args.commit_only = True
         logging.info(
             "[DeepSeekV4Model] building DSpARK commit-only transformer "
-            "(layers=%d, globals=%d)",
+            "(layers=%d, globals=%d, commit_only=%s)",
             len(self.weight.weights),
             len(self.weight.global_weights),
+            self._v4_args.commit_only,
         )
         prev_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.bfloat16)
         try:
             with torch.device("meta"):
-                self.v4 = V4Transformer(self._v4_args, mw=self.weight)
+                self.v4 = self._platform_provider.build_transformer(
+                    V4Transformer,
+                    self._v4_args,
+                    self.weight,
+                    platform_provider=self._platform_provider,
+                )
         finally:
             torch.set_default_dtype(prev_dtype)
 

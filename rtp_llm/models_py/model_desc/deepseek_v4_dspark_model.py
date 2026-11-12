@@ -665,6 +665,12 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         tokens_per_block: int,
         graph_metadata: Any,
     ) -> torch.Tensor:
+        """Non-causal fixed-block attention for one draft layer.
+
+        The geometry (query rows, paged slots, index width) is platform
+        independent; only the four operator calls below differ per platform
+        and are delegated to the ``_dspark_*`` hooks.
+        """
         batch_size, gamma, _ = x.shape
         if batch_size == 0:
             return torch.empty_like(x)
@@ -678,7 +684,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         ):
             # Project and insert all query KVs before attention so each query
             # can read every other query position, including future noise.
-            qkv = decode_compute_qkv(attn, x, query_positions.reshape(-1))
+            qkv = self._dspark_compute_qkv(attn, x, query_positions.reshape(-1))
             query_req_ids = torch.arange(
                 batch_size, device=x.device, dtype=torch.long
             ).repeat_interleave(gamma)
@@ -708,23 +714,69 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             topk = int(global_indices.shape[-1])
             global_indices = global_indices.view(batch_size, gamma, topk).contiguous()
 
-            sched_meta = get_or_build_sched_meta(
+            sched_meta = self._dspark_sched_meta(
                 graph_metadata,
                 batch_size=batch_size,
                 q_len=gamma,
                 num_heads=int(attn.n_heads),
                 topk=topk,
-                extra_attn_type=None,
+                attn=attn,
             )
-            output = attn._get_fp8_decode_op().forward(
-                q=qkv.q,
-                kv_cache=pool,
-                attn_sink=attn.attn_sink,
-                topk_idxs=global_indices,
-                sched_meta=sched_meta,
-                topk_length=topk_length,
+            output = self._dspark_attend(
+                attn,
+                qkv.q,
+                pool,
+                global_indices,
+                sched_meta,
+                topk_length,
+                block_table,
+                batch_size,
             )
-            return decode_output_proj(attn, output, qkv.freqs_cis, batch_size, gamma)
+            return self._dspark_output_proj(
+                attn, output, qkv.freqs_cis, batch_size, gamma
+            )
+
+    # ------------------------------------------------------------------
+    # Per-platform operator hooks for the query-block attention above
+    # ------------------------------------------------------------------
+
+    def _dspark_compute_qkv(self, attn: Any, x: torch.Tensor, positions: torch.Tensor):
+        return decode_compute_qkv(attn, x, positions)
+
+    def _dspark_sched_meta(self, graph_metadata: Any, *, attn: Any, **geometry: Any):
+        return get_or_build_sched_meta(
+            graph_metadata, extra_attn_type=None, **geometry
+        )
+
+    def _dspark_attend(
+        self,
+        attn: Any,
+        q: torch.Tensor,
+        pool: torch.Tensor,
+        indices: torch.Tensor,
+        sched_meta: Any,
+        topk_length: torch.Tensor,
+        block_table: torch.Tensor,
+        batch_size: int,
+    ) -> torch.Tensor:
+        return attn._get_fp8_decode_op().forward(
+            q=q,
+            kv_cache=pool,
+            attn_sink=attn.attn_sink,
+            topk_idxs=indices,
+            sched_meta=sched_meta,
+            topk_length=topk_length,
+        )
+
+    def _dspark_output_proj(
+        self,
+        attn: Any,
+        output: torch.Tensor,
+        freqs_cis: torch.Tensor,
+        batch_size: int,
+        gamma: int,
+    ) -> torch.Tensor:
+        return decode_output_proj(attn, output, freqs_cis, batch_size, gamma)
 
     def _forward_layers(
         self,

@@ -1974,7 +1974,9 @@ class CommitOnlyAttentionFP8(_BaseCommitOnlyAttentionFP8):
         from rtp_llm.utils.model_weight import W
 
         self.wkv = _v4_fp8_linear(
-            layer_weights[W.v4_attn_wkv_w], layer_weights[W.v4_attn_wkv_s]
+            layer_weights[W.v4_attn_wkv_w],
+            layer_weights[W.v4_attn_wkv_s],
+            platform_provider=platform_provider,
         )
         self.kv_norm = layer_weights[W.v4_attn_kv_norm]
 

@@ -1278,9 +1278,14 @@ class DeepSeekV4DSpark(DeepSeekV4):
         return config
 
     def _create_python_model(self):
-        from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import (
-            DeepSeekV4DSparkModel,
-        )
+        if _is_ppu_flash(self.model_config):
+            from rtp_llm.models_py.model_desc.deepseek_v4_ppu.dspark_model import (
+                PpuDeepSeekV4DSparkModel as DeepSeekV4DSparkModel,
+            )
+        else:
+            from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import (
+                DeepSeekV4DSparkModel,
+            )
 
         self.py_model = DeepSeekV4DSparkModel(
             self.model_config,
