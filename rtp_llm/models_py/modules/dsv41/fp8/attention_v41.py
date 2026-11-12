@@ -2037,6 +2037,16 @@ class AttentionV41FP8(AttentionFP8):
                     chunk_rows = prefill_indexer.logits_chunk_rows(key_count)
                 else:
                     chunk_rows = 64
+                    if key_count > 262144:
+                        # The non-fused logits tensor is
+                        # [chunk_rows, heads, key_count] fp32: at 1M keys
+                        # (ratio-0 layers) 64 rows allocate 8.00 GiB, which
+                        # OOMed n25 (einsum output) and n26 (the preallocated
+                        # buffer, attention_v41.py:2146, allocated 163.02 GiB,
+                        # 1.91 GiB free). 8 rows keep it at ~1 GiB; combined
+                        # with the key-axis slicing the whole selection is
+                        # bounded. More q-chunk iterations, identical math.
+                        chunk_rows = 8
                 request_bounds = None
                 if contiguous and fused_indexer:
                     cache = shared.setdefault("prefill_score_bounds", {})
