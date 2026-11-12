@@ -516,9 +516,9 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
         from datetime import datetime
 
         from mock_framework.execution.roles.prometheus import _get
-        from mock_framework.execution.step.master_engine_get import (
-            MasterEngineGetArgs,
-            master_engine_get,
+        from mock_framework.execution.step.master_list_engines import (
+            MasterListEnginesArgs,
+            master_list_engines,
         )
         from mock_framework.execution.step_trace import write_json
 
@@ -582,7 +582,7 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
                 observations = []
 
                 async def converged():
-                    value = await master_engine_get(ctx, MasterEngineGetArgs())
+                    value = await master_list_engines(ctx, MasterListEnginesArgs())
                     observations.append({"at": timestamp(), "observed": value})
                     return value == {master: expected}
 

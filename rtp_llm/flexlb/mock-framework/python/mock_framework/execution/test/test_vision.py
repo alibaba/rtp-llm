@@ -96,7 +96,7 @@ def test_vision_playback_through_real_master(tmp_path):
                     {
                         "id": "start",
                         "describe": "Play image input",
-                        "interface": "client/start",
+                        "interface": "client/start/playback",
                         "args": {
                             "requests_file": "requests.mckidx",
                             "replay_speed": 2,
@@ -111,7 +111,7 @@ def test_vision_playback_through_real_master(tmp_path):
                     {
                         "id": "stop",
                         "describe": "Collect playback result",
-                        "interface": "client/stop",
+                        "interface": "client/stop/playback",
                     },
                 ],
             }

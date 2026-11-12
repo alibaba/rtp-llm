@@ -59,7 +59,7 @@ Python 的 `*Role` 管理 Case 中对应角色的子进程、就绪检查和收�
 
 ### 一份计划，各自发送
 
-Python 把 `client/start` 交给 Java client0。`ClientNode` 固定参与者、分配并发槽和索引范围，在所有 Client 准备后下发同一开始时刻。client0 也发送自己的请求。每个 JVM 独立读取和计算发送时刻，再由 `BackendRpcClient` 调用真实 Master 和原生 Engine RPC。
+Case 的 `client/start/playback` 通过 Python 调用 Java client0 的 `client/start` 控制端点。`ClientNode` 固定参与者、分配并发槽和索引范围，在所有 Client 准备后下发同一开始时刻。client0 也发送自己的请求。每个 JVM 独立读取和计算发送时刻，再由 `BackendRpcClient` 调用真实 Master 和原生 Engine RPC。
 
 | 回放方式       | 全局序号为 `k` 的请求计划发送时刻                |
 | -------------- | ------------------------------------------------ |
@@ -68,11 +68,11 @@ Python 把 `client/start` 交给 Java client0。`ClientNode` 固定参与者、�
 
 第 `i` 个 Client 负责 `i, i+N, i+2N, …`，其中 `N` 为 Client 数。各 Client 共享同一份数据文件。可选的 `warmup` 在开始阶段降低速率，之后恢复正式速率，每条请求发送一次。性能门禁使用预热后的时间范围。
 
-本地播放器将到点的请求放入有界队列，调用占用并发槽直至终态。队列满会结束整轮并记录错误。自然结束会发完队列中的请求，主动停止则把未发请求记入 `unsent`，已发请求在收尾预算内排空。`client/stop` 汇总本轮结果，单请求业务失败由 Case 门禁判断。TTFT 和请求耗时从实际发起 RPC 时计量。
+本地播放器将到点的请求放入有界队列，调用占用并发槽直至终态。队列满会结束整轮并记录错误。自然结束会发完队列中的请求，主动停止则把未发请求记入 `unsent`，已发请求在收尾预算内排空。`client/stop/playback` 汇总本轮结果，单请求业务失败由 Case 门禁判断。TTFT 和请求耗时从实际发起 RPC 时计量。
 
 ### 共享索引回放输入
 
-`client/start.args.requests_file` 指向二进制 `.mckidx`。文件头以 `MCKINDEX` 开头，记录请求数、各表偏移、最后到达时间、缺少两种输出长度的请求数和数据摘要。每 1,024 条请求独立做成一个 Zstd 页，Client 按索引只解压所需的页。文本前缀链每页最多 256 条，独立压缩并有界缓存。链记录起始节点、父节点和长度，请求引用叶节点。媒体表和输出上限表由请求共享。Client 读取时校验访问到的页和记录，损坏会终止回放。
+`client/start/playback.args.requests_file` 指向二进制 `.mckidx`。文件头以 `MCKINDEX` 开头，记录请求数、各表偏移、最后到达时间、缺少两种输出长度的请求数和数据摘要。每 1,024 条请求独立做成一个 Zstd 页，Client 按索引只解压所需的页。文本前缀链每页最多 256 条，独立压缩并有界缓存。链记录起始节点、父节点和长度，请求引用叶节点。媒体表和输出上限表由请求共享。Client 读取时校验访问到的页和记录，损坏会终止回放。
 
 [Basic 数据集](../data/traffic/basic.mckidx) 有 20 条请求。下面摘录前两条及其引用的表。节点 4 接在节点 2 后，所以两条请求共享前两个文本 token。
 
@@ -175,10 +175,10 @@ WorkerStatus 从接入会话与 Scheduler 采集任务快照，`TaskHistory` 提
 
 ### Client 逐请求记录与查询
 
-每个 Client 将已完成请求写入 `components/<client>/playback/<轮次>/requests.jsonl`。`client/stop` 使用 Java 封口的汇总。`client/requests` 从已封口的逐请求记录读取，可按 Client、轮次、请求 ID、结果及发出时间筛选。返回条数限制只影响明细，匹配计数和记录完整性校验仍覆盖查询输入。
+每个 Client 将已完成请求写入 `components/<client>/playback/<轮次>/requests.jsonl`。`client/stop/playback` 使用 Java 封口的汇总。`client/query/requests` 从已封口的逐请求记录读取，可按 Client、轮次、请求 ID、结果及发出时间筛选。返回条数限制只影响明细，匹配计数和记录完整性校验仍覆盖查询输入。
 
 ```yaml
-interface: client/requests
+interface: client/query/requests
 args:
   outcome: error
   limit: 10

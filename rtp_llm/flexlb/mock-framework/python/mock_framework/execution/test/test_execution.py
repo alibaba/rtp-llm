@@ -115,7 +115,7 @@ def cleaned(out):
 
 def test_cli_sigterm_cancels_and_cleans_owned_process(setup, tmp_path):
     case, launch = setup(
-        [{"id": "leader", "describe": "leader", "interface": "master/get"}],
+        [{"id": "leader", "describe": "leader", "interface": "master/list/addresses"}],
         child="hung",
     )
     launch["components"]["master"]["startup_timeout"] = "30s"
@@ -287,7 +287,7 @@ def test_cli_compiles_without_java_catalog(setup, tmp_path):
             {
                 "id": "leader",
                 "describe": "leader",
-                "interface": "master/get",
+                "interface": "master/list/addresses",
                 "args": {"is_leader": True},
                 "wait_after": "1ms",
             }

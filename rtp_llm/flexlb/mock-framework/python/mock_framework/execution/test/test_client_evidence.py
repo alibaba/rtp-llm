@@ -175,7 +175,7 @@ def test_query_defaults_to_all_clients_and_limits_details_not_counts(
         records=SimpleNamespace(directory=tmp_path),
         runtime=SimpleNamespace(topology=SimpleNamespace(active=lambda: topology)),
     )
-    query = StepRegistry.standard().get("client/requests")
+    query = StepRegistry.standard().get("client/query/requests")
     result = asyncio.run(query.invoke(ctx, {"limit": 1}))
     assert (
         result["matched"] == 2 and result["truncated"] and len(result["records"]) == 1
@@ -218,11 +218,15 @@ def test_stop_uses_rpc_summary_while_request_query_requires_files(
         return {"clients": {"http://c:1": state(), "http://c:2": state()}, "errors": []}
 
     monkeypatch.setattr(client_runtime, "post", post)
-    result = asyncio.run(StepRegistry.standard().get("client/stop").invoke(ctx, {}))
+    result = asyncio.run(
+        StepRegistry.standard().get("client/stop/playback").invoke(ctx, {})
+    )
     assert set(result) == {"c:1", "c:2"} and not ctx.runtime.clients.pending
     assert list(tmp_path.iterdir()) == []
     with pytest.raises(ExecutionError, match="No Client playback"):
-        asyncio.run(StepRegistry.standard().get("client/requests").invoke(ctx, {}))
+        asyncio.run(
+            StepRegistry.standard().get("client/query/requests").invoke(ctx, {})
+        )
 
 
 def test_killed_java_writer_leaves_readable_lines_but_no_complete_evidence(tmp_path):
@@ -379,7 +383,7 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
                     {
                         "id": "start",
                         "describe": "Start global request plan",
-                        "interface": "client/start",
+                        "interface": "client/start/playback",
                         "args": {
                             "masters": {"ref": "globals.masters"},
                             "requests_file": "requests.mckidx",
@@ -394,7 +398,7 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
                     {
                         "id": "stop",
                         "describe": "Collect every Client",
-                        "interface": "client/stop",
+                        "interface": "client/stop/playback",
                     },
                 ],
             }
@@ -426,7 +430,7 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
         {
             "id": "records",
             "describe": "Read sealed Client evidence",
-            "interface": "client/requests",
+            "interface": "client/query/requests",
             "args": {"limit": 2},
         }
     )
@@ -478,7 +482,7 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
             {
                 "id": "qps",
                 "describe": "Check aggregate issued rate",
-                "interface": "client/qps",
+                "interface": "client/query/qps",
                 "args": {"range": ["-10s" if large_input else "-6s", "0s"]},
                 "expect": (
                     {"gte": 21.6, "lte": 26.4}
@@ -493,7 +497,7 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
             {
                 "id": "success",
                 "describe": "Check aggregate terminal success rate",
-                "interface": "client/success_rate",
+                "interface": "client/query/success_rate",
                 "args": {"range": ["-20s", "0s"]},
                 "expect": {"eq": 1.0},
             },
@@ -514,7 +518,7 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
             for line in (output / "gates.jsonl").read_text().splitlines()
         ]
         (success,) = [
-            gate for gate in gates if gate["interface"] == "client/success_rate"
+            gate for gate in gates if gate["interface"] == "client/query/success_rate"
         ]
         assert success["actual"] == 1.0
     summary = json.loads(

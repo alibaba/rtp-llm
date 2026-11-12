@@ -23,7 +23,7 @@ def test_shipped_cases_compile_and_reference_existing_inputs(path, registry):
     case = compile_case(path, registry)
     for phase in case.phases:
         for step in phase.steps:
-            if step.definition.name == "client/start":
+            if step.definition.name == "client/start/playback":
                 assert (case.shared_root / step.args["requests_file"]).is_file()
 
 

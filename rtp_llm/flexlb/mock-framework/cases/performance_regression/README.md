@@ -8,7 +8,7 @@
 
 此前的冷启动原速验证跑在开发机 133，源码 `a49398941f`，FlexLB run `20261110_035731_cde01974`。启动配方将 Prometheus 采样设为 5 秒。Master 设置 `-XX:ActiveProcessorCount=32 -Xmx96g -XX:MaxDirectMemorySize=16g -XX:MaxGCPauseMillis=150`，P/D/V 各设 2 个可见处理器和 2 GiB 最大堆，Client 各设 16 个可见处理器和 16 GiB 最大堆。各角色共享开发机 CPU。
 
-切速过渡期的 TTFT 和命中率在 View 中观察。Case 在回放约第 395 秒回查约第 360–390 秒的稳态窗口，在同一窗口检查吞吐、延迟和 Prefill 命中率，命中率门槛为 90%。该窗口与 300 秒预热基线对应同一段原始流量。随后停止 Client 并排空，按本轮 `client/stop` 的终态汇总检查完整性和成功率，预热和切速过渡期的失败、超时及取消都计入。
+切速过渡期的 TTFT 和命中率在 View 中观察。Case 在回放约第 395 秒回查约第 360–390 秒的稳态窗口，在同一窗口检查吞吐、延迟和 Prefill 命中率，命中率门槛为 90%。该窗口与 300 秒预热基线对应同一段原始流量。随后停止 Client 并排空，按本轮 `client/stop/playback` 的终态汇总检查完整性和成功率，预热和切速过渡期的失败、超时及取消都计入。
 
 原始流量每 30 秒约为 1,025–1,085 QPS，门禁范围设为 960–1,150 QPS，全程成功率门槛为 99.9%。300 秒预热原速基线的稳态 TTFT 均值为 416 ms、P95 为 1.23 s，稳态门槛设为 600 ms 和 1.5 s。Prefill Forward、Master 调度响应和 Prefill 等待在 View 中用于诊断。
 

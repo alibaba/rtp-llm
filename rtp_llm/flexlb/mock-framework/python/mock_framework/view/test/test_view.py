@@ -93,7 +93,7 @@ def completed(tmp_path):
     gates = [
         {
             "step": "qps",
-            "interface": "client/qps",
+            "interface": "client/query/qps",
             "query_time": "2026-10-29T00:00:10Z",
             "args": {"range": ["-4s", "0s"]},
             "expect": {"gte": 2},
@@ -642,7 +642,7 @@ def test_gate_annotations_include_saved_conditions_values_and_errors(completed):
         event["text"] for event in body["events"] if event["text"].startswith("门禁 ")
     ]
     assert (
-        "门禁 qps · client/qps · FAIL\n预期：≥ 2 requests/s\n实际：1 requests/s"
+        "门禁 qps · client/query/qps · FAIL\n预期：≥ 2 requests/s\n实际：1 requests/s"
         in texts
     )
     assert (
@@ -654,7 +654,7 @@ def test_gate_annotations_include_saved_conditions_values_and_errors(completed):
 def test_gate_annotation_formats_range_count_ratio_and_structured_results():
     gate = {
         "step": "qps",
-        "interface": "client/qps",
+        "interface": "client/query/qps",
         "status": "PASS",
         "unit": "requests/s",
         "expect": {"gte": 1.5, "lte": 2.5},

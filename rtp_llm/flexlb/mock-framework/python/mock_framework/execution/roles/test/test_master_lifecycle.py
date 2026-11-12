@@ -163,7 +163,7 @@ def test_master_cleanup_waits_for_peer_exit_and_slow_graceful_shutdown(tmp_path)
     from mock_framework.execution.roles.master import MasterRole
     from mock_framework.execution.step_trace import StepTrace
 
-    case, launch = generic(tmp_path, [step("masters", "master/get")])
+    case, launch = generic(tmp_path, [step("masters", "master/list/addresses")])
     output = tmp_path / "run"
     peer = tmp_path / "shutdown.py"
     peer.write_text(
@@ -304,10 +304,15 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
         chains=[(1, 0, 3)],
     )
     steps = [
-        step("leader", "master/get", args={"is_leader": True}, expect={"count": 1}),
+        step(
+            "leader",
+            "master/list/addresses",
+            args={"is_leader": True},
+            expect={"count": 1},
+        ),
         step(
             "traffic",
-            "client/start",
+            "client/start/playback",
             args={
                 "requests_file": source.name,
                 "qps": 8,
@@ -325,7 +330,12 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
             args={"targets": {"ref": "steps.leader"}},
             wait_after="10s",
         ),
-        step("survivor", "master/get", args={"is_leader": True}, expect={"count": 1}),
+        step(
+            "survivor",
+            "master/list/addresses",
+            args={"is_leader": True},
+            expect={"count": 1},
+        ),
         step(
             "after_first",
             "test/client_progress",
@@ -341,7 +351,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
         ),
         step(
             "new_leader",
-            "master/get",
+            "master/list/addresses",
             args={"is_leader": True},
             expect={"eq": {"ref": "steps.replacement"}},
         ),
@@ -356,8 +366,8 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
             "test/client_progress",
             expect={"gte": {"ref": "steps.after_second"}},
         ),
-        step("engines", "master/engine/get"),
-        step("collected", "client/stop"),
+        step("engines", "master/list/engines"),
+        step("collected", "client/stop/playback"),
     ]
     document = dict(
         id="master_ha",
@@ -569,7 +579,10 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(
                 timeout="120s",
                 steps=[
                     step(
-                        "a", "master/get", args={"is_leader": True}, expect={"count": 1}
+                        "a",
+                        "master/list/addresses",
+                        args={"is_leader": True},
+                        expect={"count": 1},
                     ),
                     step(
                         "killed",
@@ -585,7 +598,7 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(
                     ),
                     step(
                         "leader",
-                        "master/get",
+                        "master/list/addresses",
                         args={"is_leader": True},
                         expect={"eq": {"ref": "steps.a"}},
                     ),

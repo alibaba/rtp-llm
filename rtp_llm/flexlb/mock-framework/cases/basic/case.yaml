@@ -19,7 +19,7 @@ phases:
     steps:
       - id: check_master_leader
         describe: 只有一个主 Master。
-        interface: master/get
+        interface: master/list/addresses
         args: { is_leader: true }
         expect: { count: 1 }
         wait_after: 2s
@@ -29,7 +29,7 @@ phases:
     steps:
       - id: start_client
         describe: Client 自行发现主 Master，开始单轮播放。
-        interface: client/start
+        interface: client/start/playback
         args:
           requests_file: data/traffic/basic.mckidx
           qps: 2
@@ -40,16 +40,16 @@ phases:
         wait_after: 6s
       - id: check_client_qps
         describe: 在持续播放中检查已发请求速率，容许采样误差。
-        interface: client/qps
+        interface: client/query/qps
         args: { range: [-4s, 0s] }
         expect: { gte: 1.5, lte: 2.5 }
         wait_after: 6s
       - id: stop_client
         describe: 收集 Client 结果并验证请求证据完整。
-        interface: client/stop
+        interface: client/stop/playback
       - id: check_client_requests
         describe: 所有 20 条请求成功，没有错误、超时或取消。
-        interface: client/requests
+        interface: client/query/requests
         args: { limit: 0 }
         expect:
           eq:

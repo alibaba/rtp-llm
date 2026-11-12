@@ -10,7 +10,7 @@ from .step_registry import Targets, register_step
 
 
 @dataclass(frozen=True, kw_only=True)
-class SuccessRateArgs(Targets):
+class ClientQuerySuccessRateArgs(Targets):
     range: Annotated[list[str], "range"] | None = None
     mode: Literal["interval", "series"] = "interval"
     playback_result: dict[str, ClientResult] | None = None
@@ -27,11 +27,11 @@ class SuccessRateArgs(Targets):
             )
 
 
-@register_step("client/success_rate", effect="read", unit="ratio")
-async def client_success_rate(
-    ctx: StepContext, args: SuccessRateArgs
+@register_step("client/query/success_rate", effect="read", unit="ratio")
+async def client_query_success_rate(
+    ctx: StepContext, args: ClientQuerySuccessRateArgs
 ) -> float | list[float]:
-    """Success share from a Prometheus window or one completed client/stop result."""
+    """Success share from a Prometheus window or one completed client/stop/playback result."""
     if args.playback_result is not None:
         clients = args.playback_result.values()
         if any(client.unsent for client in clients):

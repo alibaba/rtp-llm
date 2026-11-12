@@ -4,11 +4,14 @@ from pathlib import Path
 import pytest
 from mock_framework.execution import ExecutionError
 from mock_framework.execution.roles.master import bind_discovery
-from mock_framework.execution.step.master_engine_get import (
-    MasterEngineGetArgs,
-    master_engine_get,
+from mock_framework.execution.step.master_list_addresses import (
+    MasterListAddressesArgs,
+    master_list_addresses,
 )
-from mock_framework.execution.step.master_get import MasterGetArgs, master_get
+from mock_framework.execution.step.master_list_engines import (
+    MasterListEnginesArgs,
+    master_list_engines,
+)
 from mock_framework.execution.test.helpers import FRAMEWORK
 from mock_framework.execution.test.helpers.zookeeper import command as zookeeper_command
 
@@ -214,19 +217,19 @@ def test_real_master_routes_to_isolated_rtp_processes(
                     {
                         "id": "prefills",
                         "describe": "实际登记P集合",
-                        "interface": "master/engine/get",
+                        "interface": "master/list/engines",
                         "args": {"role": "prefill"},
                     },
                     {
                         "id": "decodes",
                         "describe": "实际登记D集合",
-                        "interface": "master/engine/get",
+                        "interface": "master/list/engines",
                         "args": {"role": "decode"},
                     },
                     {
                         "id": "leader",
                         "describe": "ZK选举产生唯一Leader",
-                        "interface": "master/get",
+                        "interface": "master/list/addresses",
                         "args": {"is_leader": True},
                         "expect": {"count": 1},
                         "wait_after": "20s" if replicas == 2 else "12s",
@@ -252,7 +255,7 @@ def test_real_master_routes_to_isolated_rtp_processes(
             {
                 "id": "still_healthy",
                 "describe": "多轮同步后Engine仍可发现",
-                "interface": "master/engine/get",
+                "interface": "master/list/engines",
                 "args": {"role": "prefill"},
             }
         )
@@ -271,7 +274,7 @@ def test_real_master_routes_to_isolated_rtp_processes(
                 {
                     "id": "after_add",
                     "describe": "Master实际看到新P",
-                    "interface": "master/engine/get",
+                    "interface": "master/list/engines",
                 },
                 {
                     "id": "removed",
@@ -283,7 +286,7 @@ def test_real_master_routes_to_isolated_rtp_processes(
                 {
                     "id": "after_remove",
                     "describe": "Master清除旧P",
-                    "interface": "master/engine/get",
+                    "interface": "master/list/engines",
                 },
             ]
         )
@@ -569,11 +572,13 @@ def test_adapter_keeps_per_master_observations(
 
     monkeypatch.setattr(master, "post", post)
     args = (
-        MasterGetArgs(is_leader=True) if operation == "get" else MasterEngineGetArgs()
+        MasterListAddressesArgs(is_leader=True)
+        if operation == "get"
+        else MasterListEnginesArgs()
     )
     assert (
         asyncio.run(
-            ({"get": master_get, "engines": master_engine_get}[operation])(
+            ({"get": master_list_addresses, "engines": master_list_engines}[operation])(
                 adapter_context(), args
             )
         )
@@ -603,13 +608,13 @@ def test_adapter_rejects_wrong_identity_and_invalid_or_duplicate_engine(
 
     monkeypatch.setattr(master, "post", post)
     args = (
-        MasterGetArgs(["m0:1"], is_leader=True)
+        MasterListAddressesArgs(["m0:1"], is_leader=True)
         if operation == "get"
-        else MasterEngineGetArgs(["m0:1"])
+        else MasterListEnginesArgs(["m0:1"])
     )
     with pytest.raises(ExecutionError):
         asyncio.run(
-            ({"get": master_get, "engines": master_engine_get}[operation])(
+            ({"get": master_list_addresses, "engines": master_list_engines}[operation])(
                 adapter_context(), args
             )
         )
@@ -629,16 +634,21 @@ def test_explicit_master_selection_and_empty_selection_do_not_broadcast(monkeypa
     monkeypatch.setattr(master, "post", post)
     assert (
         asyncio.run(
-            master_get(adapter_context(), MasterGetArgs(["m1:1"], is_leader=True))
+            master_list_addresses(
+                adapter_context(), MasterListAddressesArgs(["m1:1"], is_leader=True)
+            )
         )
         == []
     )
     assert calls == ["http://m1"]
     with pytest.raises(ValueError):
-        MasterGetArgs([])
+        MasterListAddressesArgs([])
     with pytest.raises(ExecutionError):
         asyncio.run(
-            master_get(adapter_context(), MasterGetArgs(["missing:1"], is_leader=True))
+            master_list_addresses(
+                adapter_context(),
+                MasterListAddressesArgs(["missing:1"], is_leader=True),
+            )
         )
     assert calls == ["http://m1"]
 
@@ -687,7 +697,11 @@ def test_standby_query_preserves_actual_master_claims(monkeypatch, leaders, expe
 
     monkeypatch.setattr(master, "post", post)
     assert (
-        asyncio.run(master_get(adapter_context(), MasterGetArgs(is_leader=False)))
+        asyncio.run(
+            master_list_addresses(
+                adapter_context(), MasterListAddressesArgs(is_leader=False)
+            )
+        )
         == expected
     )
 
@@ -707,5 +721,8 @@ def test_master_get_without_leadership_filter_lists_selected_active_masters(
 
     monkeypatch.setattr(master, "post", unexpected_read)
     assert (
-        asyncio.run(master_get(adapter_context(), MasterGetArgs(targets))) == expected
+        asyncio.run(
+            master_list_addresses(adapter_context(), MasterListAddressesArgs(targets))
+        )
+        == expected
     )

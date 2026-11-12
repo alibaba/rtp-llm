@@ -35,19 +35,19 @@ phases:
     steps:
       - id: get_master_a
         describe: 记录当前唯一主 Master 的实际地址列表作为 A。
-        interface: master/get
+        interface: master/list/addresses
         args: { is_leader: true }
         expect:
           count: 1
       - id: get_master_b
         describe: 记录声明自己非主的唯一 Master 作为 B。
-        interface: master/get
+        interface: master/list/addresses
         args: { is_leader: false }
         expect:
           count: 1
       - id: check_initial_master_leader
         describe: 检查所有存活 Master 中唯一的主节点。
-        interface: master/get
+        interface: master/list/addresses
         args: { is_leader: true }
         expect:
           eq:
@@ -58,7 +58,7 @@ phases:
     steps:
       - id: start_client
         describe: 按 0.01 倍速启动 DeepSeek V4.1 回放（约 11 QPS），先等待 30 秒建立基线。
-        interface: client/start
+        interface: client/start/playback
         args:
           requests_file: data/traffic/deepseek-v4.1.mckidx
           reuse_cache: true
@@ -71,7 +71,7 @@ phases:
         within: 300s
       - id: check_baseline_client_success_rate
         describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
-        interface: client/success_rate
+        interface: client/query/success_rate
         args:
           range:
             - -20s
@@ -92,14 +92,14 @@ phases:
         wait_after: 30s
       - id: check_master_leader_after_kill_a
         describe: 检查所有存活 Master 中唯一的主节点。
-        interface: master/get
+        interface: master/list/addresses
         args: { is_leader: true }
         expect:
           eq:
             ref: steps.get_master_b
       - id: check_client_success_rate_after_kill_a
         describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
-        interface: client/success_rate
+        interface: client/query/success_rate
         args:
           range:
             - -20s
@@ -119,7 +119,7 @@ phases:
         wait_after: 30s
       - id: check_master_leader_after_restart_a
         describe: 检查所有存活 Master 中唯一的主节点。
-        interface: master/get
+        interface: master/list/addresses
         args: { is_leader: true }
         expect:
           eq:
@@ -138,14 +138,14 @@ phases:
         wait_after: 30s
       - id: check_master_leader_after_kill_b
         describe: 检查所有存活 Master 中唯一的主节点。
-        interface: master/get
+        interface: master/list/addresses
         args: { is_leader: true }
         expect:
           eq:
             ref: steps.get_master_a
       - id: check_client_success_rate_after_kill_b
         describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
-        interface: client/success_rate
+        interface: client/query/success_rate
         args:
           range:
             - -20s
@@ -165,14 +165,14 @@ phases:
         wait_after: 30s
       - id: check_master_leader_after_restart_b
         describe: 检查所有存活 Master 中唯一的主节点。
-        interface: master/get
+        interface: master/list/addresses
         args: { is_leader: true }
         expect:
           eq:
             ref: steps.get_master_a
       - id: check_client_success_rate_after_restart_b
         describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
-        interface: client/success_rate
+        interface: client/query/success_rate
         args:
           range:
             - -20s
@@ -181,5 +181,5 @@ phases:
           gte: 0.95
       - id: stop_client
         describe: 提前停止 trace 回放并收齐所有 Client 已发请求的终态。
-        interface: client/stop
+        interface: client/stop/playback
         within: 180s

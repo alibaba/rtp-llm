@@ -14,7 +14,7 @@ from .step_registry import Bounds, register_step
 
 
 @dataclass(frozen=True)
-class ClientRequestsArgs:
+class ClientQueryRequestsArgs:
     targets: list[str] | None = None
     playback: Annotated[int, Bounds(minimum=1)] | None = None
     request_ids: list[Annotated[int, Bounds(minimum=1)]] | None = None
@@ -51,8 +51,10 @@ class RequestsResult:
     truncated: bool
 
 
-@register_step("client/requests", effect="read")
-async def client_requests(ctx: StepContext, args: ClientRequestsArgs) -> RequestsResult:
+@register_step("client/query/requests", effect="read")
+async def client_query_requests(
+    ctx: StepContext, args: ClientQueryRequestsArgs
+) -> RequestsResult:
     """Read a sealed playback; filters limit returned details, never completeness validation."""
     directories = playback_directories(
         ctx.records.directory,

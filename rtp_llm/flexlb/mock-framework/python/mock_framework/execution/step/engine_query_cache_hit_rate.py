@@ -4,8 +4,8 @@ from .step import StepContext
 from .step_registry import register_step
 
 
-@register_step("engine/cache/hit_rate", effect="read", unit="ratio")
-async def engine_cache_hit_rate(
+@register_step("engine/query/cache_hit_rate", effect="read", unit="ratio")
+async def engine_query_cache_hit_rate(
     ctx: StepContext, args: MetricArgs
 ) -> float | list[float]:
     return await metrics.metric(

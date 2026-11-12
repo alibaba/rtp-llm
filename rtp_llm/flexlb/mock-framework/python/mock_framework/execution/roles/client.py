@@ -96,7 +96,7 @@ class ClientRole:
             raise ExecutionError("Unknown Master address")
         if self.pending:
             raise ExecutionError(
-                "Collect previous playback with client/stop before starting again"
+                "Collect previous playback with client/stop/playback before starting again"
             )
         # A lost acknowledgement may still leave Java sending; teardown must attempt collection.
         self.pending = True

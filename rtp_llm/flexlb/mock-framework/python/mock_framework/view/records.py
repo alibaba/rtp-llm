@@ -204,7 +204,13 @@ def load_experiment_view(directory):
                 elif kind == "step_finished" and name in annotations:
                     interface = steps.get(name, {}).get("interface")
                     if (
-                        interface in ("master/get", "master/engine/get")
+                        interface
+                        in (
+                            "master/list/addresses",
+                            "master/list/engines",
+                            "master/get",
+                            "master/engine/get",
+                        )
                         and "result" in event
                     ):
                         master_queries.append(

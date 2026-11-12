@@ -71,7 +71,7 @@ P/D/V、Master 和 Client 各实例直接启动独立 JVM。ZooKeeper 由单独�
 
 检查 Client 的 issued、finished、success/error/timeout/cancelled，以及 queued、inflight、unsent。Case 主动提前停止播放时，未发送的输入不算失败；已发送请求是否收齐终态、请求证据是否完整，要分别确认。清理错误和采集错误也应单独报告，不能解释成请求失败或忽略后宣称 PASS。
 
-新运行的逐请求证据位于 `components/<client>/playback/<轮次>/requests.jsonl`，可直接查看。逐请求查询使用 Case 的 `client/requests` 接口，支持 Client、请求 ID、播放轮次、时间和结果筛选。显式查询会读取并校验 JSONL；`client/stop` 使用 Java 返回的最终汇总，不重复扫描文件。协议和示例见 [Client 逐请求记录](docs/architecture.md#client-逐请求记录与查询)。
+新运行的逐请求证据位于 `components/<client>/playback/<轮次>/requests.jsonl`，可直接查看。逐请求查询使用 Case 的 `client/query/requests` 接口，支持 Client、请求 ID、播放轮次、时间和结果筛选。显式查询会读取并校验 JSONL；`client/stop/playback` 使用 Java 返回的最终汇总，不重复扫描文件。协议和示例见 [Client 逐请求记录](docs/architecture.md#client-逐请求记录与查询)。
 
 ## 查看报告
 
