@@ -96,6 +96,25 @@ def _get_think_config(generate_env_config):
     return think_mode, think_start_tag, think_end_tag
 
 
+def _fixed_output_token_budget(
+    request: ChatCompletionRequest, config: Optional[GenerateConfig] = None
+) -> int:
+    """A minimum equal to the maximum suppresses frontend stop truncation too."""
+    resolved = config or request.extra_configs
+    if resolved is None:
+        return 0
+    maximum = config.max_new_tokens if config is not None else request.max_tokens
+    minimum = resolved.min_new_tokens
+    if (
+        isinstance(maximum, int)
+        and maximum > 0
+        and isinstance(minimum, int)
+        and minimum >= maximum
+    ):
+        return maximum
+    return 0
+
+
 class StreamStatus:
     index: int = 0
     request: ChatCompletionRequest
@@ -112,6 +131,7 @@ class StreamStatus:
 
     def __init__(self, request: ChatCompletionRequest):
         self.request = request
+        self.fixed_output_token_budget = _fixed_output_token_budget(request)
         self.has_real_aux_info = True
         self._fallback_aux_info: Optional[AuxInfo] = None
 
@@ -140,9 +160,16 @@ class StreamStatus:
         self.finish_reason = check_finish_func(
             self.output_ids_list, self.input_token_length
         )
-        self.output_ids = remove_stop_word_ids_func(
-            self.output_ids_list, delta_output_ids
-        )
+        if self.fixed_output_token_budget:
+            # Backend min/max constraints own termination. An internal EOS/stop
+            # in an MTP chunk must not cancel the owned backend stream early.
+            if self.finish_reason == FinisheReason.stop:
+                self.finish_reason = None
+            self.output_ids = list(self.output_ids_list)
+        else:
+            self.output_ids = remove_stop_word_ids_func(
+                self.output_ids_list, delta_output_ids
+            )
 
     def update_result(self):
         self.last_token_length = len(self.output_ids) - len(self.last_output_ids)
@@ -748,7 +775,7 @@ class CustomChatRenderer:
             3. No stop word: "hello world"
                -> Returns ("hello world", False)
         """
-        if not delta_string:
+        if not delta_string or getattr(status, "fixed_output_token_budget", 0):
             return delta_string, False
 
         # Truncate at complete stop words
@@ -1050,8 +1077,12 @@ class CustomChatRenderer:
                 think_status.in_think_mode = False
                 think_status.think_buffer = ""
                 think_status.decision_token_ids = []
-            trunc_string = truncate_response_with_stop_words(
-                pending_output, stop_words_str, is_streaming
+            trunc_string = (
+                pending_output
+                if buffer.fixed_output_token_budget
+                else truncate_response_with_stop_words(
+                    pending_output, stop_words_str, is_streaming
+                )
             )
             output_items.append(
                 OutputDelta(
@@ -1170,6 +1201,10 @@ class CustomChatRenderer:
         )
         nums_output = last_num_beams if last_num_beams != 1 else nums_output
         status_list = await self._create_status_list(nums_output, request)
+        for status in status_list:
+            status.fixed_output_token_budget = _fixed_output_token_budget(
+                request, generate_config
+            )
         index = 0
         resolved_thinking_mode = generate_config.thinking_mode
         if resolved_thinking_mode == ThinkingMode.ADAPTIVE:
