@@ -146,6 +146,31 @@ def _json_batches(stream, cancelled):
         yield header, (line,), None
 
 
+def playback_directories(root, topology, targets=None, playback=None):
+    clients = {node["rpc"]: node for node in topology if node["role"] == "client"}
+    chosen = list(clients) if targets is None else targets
+    if not chosen or len(set(chosen)) != len(chosen) or set(chosen) - clients.keys():
+        raise ExecutionError("Expected nonempty, unique Client addresses")
+    if playback is None:
+        rounds = root / "components" / "client-0" / "coordinator"
+        available = (
+            [
+                int(path.name)
+                for path in rounds.iterdir()
+                if path.is_dir() and path.name.isdecimal()
+            ]
+            if rounds.exists()
+            else []
+        )
+        if not available:
+            raise ExecutionError("No Client playback exists")
+        playback = max(available)
+    return [
+        root / "components" / clients[target]["id"] / "playback" / str(playback)
+        for target in chosen
+    ]
+
+
 def read_requests(directory: Path, cancelled=None):
     """Yield completed requests with bounded memory; consume through EOF to validate the seal."""
     path = directory / "requests.jsonl"

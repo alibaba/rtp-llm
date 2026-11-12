@@ -7,7 +7,6 @@ from typing import Any
 
 from ...config.validation import duration, validate
 from .. import ExecutionError
-from .assertions import matches_expectation
 from .step_registry import StepDefinition, to_record_value
 
 
@@ -29,6 +28,23 @@ def resolve_refs(value, results, case_globals):
     if isinstance(value, list):
         return [resolve_refs(v, results, case_globals) for v in value]
     return value
+
+
+def matches_expectation(actual, expected):
+    for operator, target in expected.items():
+        if operator == "eq":
+            good = actual == target
+        elif operator == "count":
+            good = len(actual) == target
+        elif operator == "gte":
+            values = actual if isinstance(actual, list) else [actual]
+            good = bool(values) and all(value >= target for value in values)
+        else:
+            values = actual if isinstance(actual, list) else [actual]
+            good = bool(values) and all(value <= target for value in values)
+        if not good:
+            return False
+    return True
 
 
 @dataclass(frozen=True)

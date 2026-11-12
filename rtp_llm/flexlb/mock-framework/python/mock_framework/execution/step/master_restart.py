@@ -1,6 +1,5 @@
-from ._targets import Targets
 from .step import StepContext
-from .step_registry import register_step
+from .step_registry import Targets, register_step
 
 
 @register_step("master/restart", effect="write")

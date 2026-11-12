@@ -392,7 +392,7 @@ def test_series_rejects_missing_points_and_nonfinite_samples(prometheus):
 
 
 def test_series_checks_every_point_and_each_instances_history(monkeypatch):
-    from mock_framework.execution.step.assertions import matches_expectation
+    from mock_framework.execution.step.step import matches_expectation
 
     ctx = context()
     ctx.runtime.monitoring = SimpleNamespace(interval=1)

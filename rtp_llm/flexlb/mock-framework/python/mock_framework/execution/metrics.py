@@ -10,7 +10,7 @@ from typing import Annotated, Literal
 
 from ..config.validation import duration
 from . import ExecutionError
-from .step._targets import Targets
+from .step.step_registry import Targets
 
 
 @dataclass(frozen=True)

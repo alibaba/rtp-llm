@@ -5,9 +5,8 @@ from typing import Annotated, Literal
 
 from .. import ExecutionError, metrics
 from ..roles.client import ClientResult
-from ._targets import Targets
 from .step import StepContext
-from .step_registry import register_step
+from .step_registry import Targets, register_step
 
 
 @dataclass(frozen=True, kw_only=True)
