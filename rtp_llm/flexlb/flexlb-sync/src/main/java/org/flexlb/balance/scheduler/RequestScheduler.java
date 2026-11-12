@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import io.opentelemetry.api.common.Attributes;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -103,6 +104,8 @@ public final class RequestScheduler {
     private void submitDirect(BalanceContext context) {
         Response failure = Response.error(StrategyErrorType.DISPATCH_FAILED);
         long decisionStartedNanos = System.nanoTime();
+        FlexlbTrace.recordScheduleEvent(context.getTraceContext(), "flexlb.decision.started",
+                Attributes.empty());
         try {
             PlacementResult<RouteAdmission, PlacementKey> selection = router.select(context);
             FlexlbTrace.recordPlacement(context.getTraceContext(), decisionStartedNanos,

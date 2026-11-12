@@ -1,11 +1,15 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Context;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointRegistry.PrefillRoutingEntry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
@@ -15,6 +19,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -38,14 +43,37 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks queue-to-decision ordering and progress across asynchronous planners.
+ */
 class GlobalQueueProgressTest {
+    @Test
+    void queueAdmissionEventPrecedesDecisionOnPlannerThread() throws Exception {
+        FlexlbTrace.configure(OpenTelemetry.noop(), "test");
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            var span = mock(Span.class);
+            when(span.storeInContext(any(Context.class))).thenCallRealMethod();
+            BalanceContext context = RequestLifecycleTestSupport.context(f.config, 90L);
+            context.setTraceContext(Context.root().with(span));
+            f.groups.put(90L, "g1");
+            f.scheduler.submit(context);
+            verify(span, timeout(1000)).addEvent(eq("flexlb.decision.started"), any(Attributes.class));
+            var order = org.mockito.Mockito.inOrder(span);
+            order.verify(span).addEvent(eq("flexlb.queue.enqueued"), any(Attributes.class));
+            order.verify(span).addEvent(eq("flexlb.decision.started"), any(Attributes.class));
+        } finally {
+            FlexlbTrace.configure(null, "");
+        }
+    }
+
     @Test
     void completedBacklogDoesNotDelayRefillingAReleasedSlot() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
