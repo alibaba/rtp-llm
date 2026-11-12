@@ -2,7 +2,11 @@
 
 from torch import nn
 
-from rtp_llm.models_py.triton_kernels.moe.qwen4_topk import _moe_topk, is_supported
+from rtp_llm.models_py.triton_kernels.moe.qwen4_topk import (
+    _moe_topk,
+    is_supported,
+    use_native_math,
+)
 
 
 class Qwen4ExpMoeTopk(nn.Module):
@@ -21,6 +25,7 @@ class Qwen4ExpMoeTopk(nn.Module):
             router_logits, topk_ids, topk_weights
         ):
             return self.native(router_logits, topk_ids, topk_weights)
+        native_math = use_native_math(router_logits)
         _moe_topk[(router_logits.shape[0],)](
             router_logits,
             topk_ids,
