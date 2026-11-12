@@ -169,7 +169,13 @@ def resolve_thinking(request: dict, default: bool) -> tuple[bool, int]:
     elif effort is not None:
         thinking = True
     else:
-        thinking = default
+        # ``think_mode`` is the string "enabled"/"disabled" from server
+        # config; bool("disabled") is True and silently forced reasoning on
+        # for every request that did not set an explicit mode.
+        if isinstance(default, str):
+            thinking = default.strip().lower() in ("enabled", "thinking", "true", "1")
+        else:
+            thinking = bool(default)
     # The existing explicit zero budget remains a hard request-level limit.
     if request.get("thinking_budget") == 0 or extra.get("max_thinking_tokens") == 0:
         thinking = False
