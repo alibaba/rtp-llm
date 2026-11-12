@@ -1,7 +1,38 @@
+import argparse
+import logging
+import os
+
 from rtp_llm.server.server_args.util import str2bool
+
+_LEGACY_GANG_ANNOTATION_ENV = "GANG_ANNOCATION_PATH"
+
+
+def _migrate_legacy_gang_env() -> None:
+    """Carry the pre-rename env spelling over to the corrected name.
+
+    ``GANG_ANNOCATION_PATH`` was a typo in a released interface; launch scripts
+    and manifests outside this repository may still set it.  Migrating it here
+    keeps a custom annotation path working instead of silently falling back to
+    the default.
+    """
+    legacy = os.environ.get(_LEGACY_GANG_ANNOTATION_ENV)
+    if not legacy:
+        return
+    if os.environ.get("GANG_ANNOTATION_PATH"):
+        logging.warning(
+            "%s is deprecated and ignored because GANG_ANNOTATION_PATH is set",
+            _LEGACY_GANG_ANNOTATION_ENV,
+        )
+        return
+    os.environ["GANG_ANNOTATION_PATH"] = legacy
+    logging.warning(
+        "%s is deprecated (typo); use GANG_ANNOTATION_PATH instead",
+        _LEGACY_GANG_ANNOTATION_ENV,
+    )
 
 
 def init_gang_group_args(parser, distribute_config):
+    _migrate_legacy_gang_env()
     ##############################################################################################################
     # Gang Configuration
     ##############################################################################################################
@@ -21,6 +52,15 @@ def init_gang_group_args(parser, distribute_config):
         type=str,
         default="/etc/podinfo/annotations",
         help="GANG信息的路径",
+    )
+    # Deprecated spelling kept so existing launch commands keep working.
+    gang_group.add_argument(
+        "--gang_annocation_path",
+        dest="gang_annotation_path",
+        env_name="GANG_ANNOTATION_PATH",
+        type=str,
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     gang_group.add_argument(
         "--gang_config_string",

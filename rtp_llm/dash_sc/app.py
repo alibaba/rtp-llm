@@ -781,7 +781,7 @@ class DashScApp:
                     ),
                 )
                 get_template_lifecycle().register_fixup(
-                    f"dash-inference:{id(servicer)}", servicer
+                    "dash-inference", servicer
                 )
 
             loop = self._start_enqueue_loop()
