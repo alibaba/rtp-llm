@@ -59,11 +59,11 @@ class ControlServerTest {
         }
     }
 
-    @Test void nativeOnlyNodeHealthAdvertisesNoImplementedBusinessInterfaces() throws Exception {
+    @Test void nativeOnlyNodeIsHealthyWithoutInvokeRoute() throws Exception {
         try (var nativeHost = new ControlServer(new InetSocketAddress("127.0.0.1", 0)).start()) {
             var response = CLIENT.send(HttpRequest.newBuilder(URI.create(nativeHost.url() + "/health")).GET().build(), HttpResponse.BodyHandlers.ofString());
             assertEquals(200, response.statusCode());
-            assertEquals(0, JsonWire.JSON.readTree(response.body()).get("interfaces").size());
+            assertEquals(JsonWire.JSON.readTree("{\"status\":\"ok\"}"), JsonWire.JSON.readTree(response.body()));
             var invoke = HttpRequest.newBuilder(URI.create(nativeHost.url() + "/invoke"))
                 .POST(HttpRequest.BodyPublishers.noBody()).build();
             assertEquals(404, CLIENT.send(invoke, HttpResponse.BodyHandlers.ofString()).statusCode());

@@ -36,7 +36,7 @@ public final class ControlServer implements AutoCloseable {
                 }
                 try { health.run(); }
                 catch (RuntimeException error) { send(exchange, 503, Map.of("status", "unavailable")); return; }
-                send(exchange, 200, Map.of("status", "ok", "interfaces", bindings.keySet()));
+                send(exchange, 200, Map.of("status", "ok"));
             }
         });
     }

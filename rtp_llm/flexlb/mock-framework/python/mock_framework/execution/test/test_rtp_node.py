@@ -2,10 +2,12 @@ import asyncio
 import json
 import os
 import subprocess
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
 from mock_framework.config import compile_case
 from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
@@ -127,7 +129,14 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                 with urllib.request.urlopen(
                     endpoints["control"] + "/health", timeout=2
                 ) as response:
-                    assert json.load(response)["interfaces"] == []
+                    assert json.load(response) == {"status": "ok"}
+                invoke = urllib.request.Request(
+                    endpoints["control"] + "/invoke", method="POST"
+                )
+                with pytest.raises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(invoke, timeout=2)
+                with error.value as response:
+                    assert response.code == 404
                 probe_result = tmp_path / f"{role}.json"
                 command = [
                     str(java),
