@@ -283,6 +283,7 @@ KVCacheManager::~KVCacheManager() {
     // Queries, cleanup and capacity notifications must finish while the cache, RPC
     // manager and allocation wait state are still alive. Never join under a lock.
     stopFrozenTaskRecovery();
+    stopMissingCleanup();
     {
         std::lock_guard<std::mutex> lock(allocation_wait_state_->mutex);
         allocation_wait_state_->stopped.store(true, std::memory_order_release);
@@ -389,10 +390,10 @@ bool KVCacheManager::init() {
     coordinator_manager_->attachBlockTreeCache(block_tree_cache_);
     initCacheEventPublisher();
 
-    if (metrics_reporter_) {
-        stop_.store(false, std::memory_order_relaxed);
-        metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
-    }
+    missing_cleanup_thread_ = std::thread(&KVCacheManager::missingCleanupLoop, this);
+
+    stop_.store(false, std::memory_order_relaxed);
+    metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
 
     return startFrozenTaskRecovery();
 }
@@ -1257,6 +1258,33 @@ void KVCacheManager::stopCacheEventPublisher() {
         block_tree_cache_->setEventPublisher(nullptr, {});
     }
     cache_event_publisher_.reset();
+}
+
+void KVCacheManager::stopMissingCleanup() {
+    {
+        std::lock_guard<std::mutex> lock(missing_cleanup_mutex_);
+        missing_cleanup_stopped_ = true;
+    }
+    missing_cleanup_cv_.notify_all();
+    if (missing_cleanup_thread_.joinable()) {
+        missing_cleanup_thread_.join();
+    }
+}
+
+void KVCacheManager::missingCleanupLoop() {
+    pthread_setname_np(pthread_self(), "kv_missing_gc");
+    std::unique_lock<std::mutex> lock(missing_cleanup_mutex_);
+    while (!missing_cleanup_cv_.wait_for(lock, std::chrono::minutes(1),
+                                         [this] { return missing_cleanup_stopped_; })) {
+        lock.unlock();
+        block_tree_cache_->cleanupExpiredMissing();
+#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
+        if (auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend())) {
+            backend->cleanupExpiredMissing();
+        }
+#endif
+        lock.lock();
+    }
 }
 
 void KVCacheManager::reportMetricsLoop() {

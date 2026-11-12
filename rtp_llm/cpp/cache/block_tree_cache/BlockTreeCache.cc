@@ -242,6 +242,11 @@ std::vector<BlockTreePoolMetricsSnapshot> BlockTreeCache::poolMetricsSnapshots()
     return metrics_reporter_->collectPoolMetricsSnapshots(tree_->groupSets());
 }
 
+void BlockTreeCache::cleanupExpiredMissing() const {
+    if (transfer_dispatcher_)
+        transfer_dispatcher_->cleanupExpiredMissing();
+}
+
 void BlockTreeCache::reportMetrics() const {
     std::vector<BlockTreeEvictableMetricsSnapshot> snapshots;
     VictimSelectionMetrics                         victim_selection;

@@ -104,7 +104,9 @@ private:
 struct SmokeWorker {
     SmokeWorker(size_t rank, bool async, const std::string& directory): rank(rank) {
         host = makeHostPool(kBytes, kBlocks, true);
-        device = makeTestDevicePool({{kBytes, 0}}, kBlocks, "timeout_device_rank_" + std::to_string(rank));
+        // This recovery fixture deliberately freezes the entire small pool.
+        device = makeTestDevicePool({{kBytes, 0}}, kBlocks, "timeout_device_rank_" + std::to_string(rank),
+                                    /*disable_frozen_abort=*/true);
         auto storage = std::make_unique<ObservedPosixIO>();
         io = storage.get();
         disk = makeDiskPool(kBytes, kBlocks, directory, std::move(storage),
@@ -115,7 +117,9 @@ struct SmokeWorker {
         config.read_thread_count = 1;
         config.write_thread_count = 1;
         engine = std::make_shared<PerRankBlockTransferEngine>(
-            groups, true, DeviceHostCopyOptions{}, 4, kBlocksPerRequest, 1, kRequests * 4,
+            // Admission counts transfer batches, not RPC requests. Keep room
+            // for every block so this workload exercises deadlines, not rejection.
+            groups, true, DeviceHostCopyOptions{}, 4, kBlocksPerRequest, 1, kBlocks,
             nullptr, rank, 1, async, config);
         dispatcher = std::make_shared<BlockTransferDispatcher>(engine);
         for (size_t i = 0; i < kBlocks; ++i) {
@@ -525,9 +529,14 @@ protected:
                 for (const auto& done : worker_results) {
                     if (done.request < first_request || done.request >= first_request + static_cast<int64_t>(kRequests)) continue;
                     const auto& message = done.result.status.ToString();
+                    // The async owner drains its incoming queue quickly, then
+                    // queues DISK -> DEVICE batches behind staging/I/O resources.
+                    // Expiry in that FIFO is also a real queued, unsubmitted timeout.
+                    const bool resource_queue_timeout =
+                        GetParam() && !write && message.find("transfer resource wait timed out") != std::string::npos;
                     if (done.result.status.code() == ErrorCode::DEADLINE_EXCEEDED
                         && (message.find("WorkLoop queue") != std::string::npos
-                            || message.find("TE worker queue") != std::string::npos)) {
+                            || message.find("TE worker queue") != std::string::npos || resource_queue_timeout)) {
                         ++queue_timeouts;
                         EXPECT_TRUE(done.result.buffer_safe);
                     }
