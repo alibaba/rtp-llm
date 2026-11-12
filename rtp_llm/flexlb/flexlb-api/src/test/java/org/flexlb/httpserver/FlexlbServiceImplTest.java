@@ -1257,12 +1257,19 @@ class FlexlbServiceImplTest {
             assertFalse(resp.getSuccess());
             assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), resp.getCode());
 
-            // The interceptor owns the span lifecycle; nothing is exported yet.
-            assertEquals(0, exporter.spans.size());
+            // The interceptor owns the server span lifecycle: it exports only after
+            // finish, while lifecycle events export their instantaneous child spans.
+            assertEquals(0, exporter.spans.stream()
+                    .filter(exported -> "rtp_llm.flexlb.schedule".equals(exported.getName())).count(),
+                    () -> "exported before server span finish: " + exporter.spans);
             org.flexlb.telemetry.FlexlbTrace.finish(serverSpan, null);
 
-            assertEquals(1, exporter.spans.size());
-            io.opentelemetry.sdk.trace.data.SpanData span = exporter.spans.get(0);
+            assertEquals(1, exporter.spans.stream()
+                    .filter(exported -> "rtp_llm.flexlb.schedule".equals(exported.getName())).count(),
+                    () -> "server span must be exported exactly once: " + exporter.spans);
+            io.opentelemetry.sdk.trace.data.SpanData span = exporter.spans.stream()
+                    .filter(exported -> "rtp_llm.flexlb.schedule".equals(exported.getName()))
+                    .findFirst().orElseThrow();
             assertEquals(io.opentelemetry.api.trace.StatusCode.ERROR,
                     span.getStatus().getStatusCode());
             assertEquals("FLEXLB_INTERNAL_ERROR",
