@@ -25,8 +25,7 @@ public:
               py::object propose_model,
               py::object token_processor,
               py::object mm_process_engine,
-              py::object trace_config         = py::none(),
-              bool       defer_service_start  = false);
+              py::object trace_config = py::none());
     std::vector<torch::Tensor> gpuCacheTensors() const;
     void startRPCServer();
     void updateRuntimeEndpoints(py::object runtime_config);
@@ -46,16 +45,10 @@ private:
     EngineInitParams initModel(py::object model, py::object engine_config, py::object vit_config);
     std::unique_ptr<ProposeModelEngineInitParams> initProposeModel(py::object              propose_model,
                                                                    const EngineInitParams& base_params);
-    void                                          initRPCServer(const EngineInitParams&                       maga_init_params,
-                                                                std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                                                                py::object                                    token_processor,
-                                                                py::object                                    mm_process_engine,
-                                                                telemetry::TelemetryConfig                    trace_config);
     void                                          prepareRPCService(const EngineInitParams&                       maga_init_params,
                                                                      py::object                                    mm_process_engine,
                                                                      std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                                                                      py::object                                    token_processor,
-                                                                     bool                                          defer_network_services,
                                                                      telemetry::TelemetryConfig                    trace_config);
     void                                          startRPCServerInternal(const EngineInitParams& maga_init_params);
     void                                          setServerStartError(const std::string& error);

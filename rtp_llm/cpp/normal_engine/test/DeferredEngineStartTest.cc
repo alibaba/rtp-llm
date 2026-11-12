@@ -37,7 +37,7 @@ TEST_F(DeferredEngineStartTest, RpcReleaseStartsLeaderAndFollowerWithoutBroadcas
         auto engine = prepareEngine();
         LocalRpcServer server;
         server.engine_ = engine;
-        server.setDeferServiceStart(true);
+        server.deferServiceStart();
         // Only RPC role selection varies here; the mock engine uses one GPU.
         server.maga_init_params_.parallelism_config.tp_rank = tp_rank;
         if (tp_rank != 0) {

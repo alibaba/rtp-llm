@@ -32,7 +32,7 @@ class RtpLLMOp:
         self.token_processor = token_processor
         self.mm_process_engine = mm_process_engine
 
-    def start(self, defer_service_start: bool = False):
+    def start(self):
         self.weight = self.model.weight
         logging.info("engine_config: %s", self.engine_config.to_string())
         from rtp_llm.telemetry.config import load_trace_config
@@ -48,7 +48,6 @@ class RtpLLMOp:
             self.token_processor,
             self.mm_process_engine,
             trace_config,
-            defer_service_start,
         )
 
     def gpu_cache_tensors(self):

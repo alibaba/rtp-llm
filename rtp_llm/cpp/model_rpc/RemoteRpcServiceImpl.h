@@ -11,7 +11,7 @@ class RemoteRpcServiceImpl: public LocalRpcServiceImpl {
 public:
     RemoteRpcServiceImpl() {}
     ~RemoteRpcServiceImpl() {}
-    void setDeferServiceStart(bool defer) override;
+    void deferServiceStart() override;
     void startDeferredServices() override;
     grpc::Status init(const EngineInitParams&                                maga_init_params,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
