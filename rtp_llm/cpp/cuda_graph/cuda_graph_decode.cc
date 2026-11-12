@@ -11,6 +11,10 @@ void CudaGraphRunner::finishDeferredDecodeInit() {
     // workspace and calls captureDecode(); clear the defer flag first so this
     // second entry proceeds instead of deferring again.
     decode_capture_deferred_ = false;
+    // Prefill's large temporary allocations are dead by the first decode.
+    // Return their cached segments to the driver before allocating the graph
+    // private pool; without this the graph capture fails on a reserved block.
+    cuda_graph::graphEmptyCache();
     RTP_LLM_LOG_INFO("Initializing deferred decode CUDA graphs on first decode");
     initCapture();
 }

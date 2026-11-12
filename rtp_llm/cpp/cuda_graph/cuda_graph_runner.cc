@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
-#include <cstdio>
 #include <chrono>
 #include <fstream>
 #include <limits>
@@ -1383,8 +1382,6 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs&                inpu
                 state.current_real_graph_bs,
                 state.current_real_graph_bs * num_tokens_per_bs_,
                 state.seq_len_sum);
-            std::fprintf(stderr, "[AWI_GRAPH] replay_decode key=%d seq_len_sum=%d\n",
-                         state.current_real_graph_bs, state.seq_len_sum);
             replayDecode(state.current_real_graph_bs);
             outputs.decode_graph_replay = true;
         }
@@ -1569,8 +1566,6 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
     const auto graph_it  = graph_instances_.find(graph_key);
     if (graph_it == graph_instances_.end()) {
         if (observe_fallback) {
-            std::fprintf(stderr, "[AWI_GRAPH] fallback=key_not_captured key=%d instances=%zu\n",
-                         graph_key, graph_instances_.size());
             RTP_LLM_LOG_WARNING("CUDA graph key %d was not captured, fallback to normal run", graph_key);
         }
         return false;
@@ -1609,10 +1604,6 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
     const auto& captured_position_ids = graph_it->second.mem_hold_.py_model_inputs_.combo_position_ids;
     if (!validateComboPositionIds(inputs, state, captured_position_ids, copy_numel)) {
         if (observe_fallback) {
-            std::fprintf(stderr, "[AWI_GRAPH] fallback=combo_position_ids key=%d src=%lld dst=%lld\n",
-                         graph_key,
-                         inputs.combo_position_ids.defined() ? static_cast<long long>(inputs.combo_position_ids.numel()) : -1LL,
-                         captured_position_ids.defined() ? static_cast<long long>(captured_position_ids.numel()) : -1LL);
             const FallbackTick tick = tickFallback(combo_position_fallback_count_);
             // Log the first fallback and then at powers of two. This keeps the
             // decode hot path quiet while retaining a monotonic, observable count.
