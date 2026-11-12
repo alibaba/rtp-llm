@@ -373,7 +373,9 @@ def test_series_rejects_missing_points_and_nonfinite_samples(prometheus):
         "result": [{"metric": {}, "values": [[100, "0.8"], [101, "0.9"], [102, "1"]]}],
     }
     samples = asyncio.run(metrics.series_query(ctx, "ratio", 100, 102, 1))
-    assert [s.value for s in samples[0]] == [0.8, 0.9, 1]
+    assert samples == [
+        [QuerySample({}, 0.8, 100), QuerySample({}, 0.9, 101), QuerySample({}, 1, 102)]
+    ]
     assert prometheus["requests"][0]["step"] == ["1"]
     prometheus["body"]["data"]["result"][0]["values"].pop(1)
     with pytest.raises(ExecutionError, match="coverage"):
@@ -385,6 +387,9 @@ def test_series_rejects_missing_points_and_nonfinite_samples(prometheus):
     ]
     with pytest.raises(ExecutionError, match="Nonfinite"):
         asyncio.run(metrics.series_query(ctx, "ratio", 100, 102, 1))
+    prometheus["body"]["data"]["result"] = [{"metric": {"bad": 1}, "values": []}]
+    with pytest.raises(ExecutionError, match="Invalid Prometheus labels"):
+        asyncio.run(ctx.runtime.monitoring.query_range("ratio", 100, 102, 1, 2))
 
 
 def test_series_checks_every_point_and_each_instances_history(monkeypatch):

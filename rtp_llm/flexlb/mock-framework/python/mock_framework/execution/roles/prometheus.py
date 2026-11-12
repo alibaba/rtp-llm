@@ -58,6 +58,35 @@ def _query(url, path, parameters, timeout):
     return data["data"]
 
 
+def _validate_labels(labels, message):
+    if not isinstance(labels, dict) or any(
+        type(key) is not str or type(value) is not str for key, value in labels.items()
+    ):
+        raise ExecutionError(message)
+
+
+def _parse_sample(labels, pair, *, range_query=False):
+    if (
+        not isinstance(pair, list)
+        or len(pair) != 2
+        or type(pair[0]) not in (int, float)
+        or type(pair[1]) is not str
+    ):
+        kind = "range sample" if range_query else "sample"
+        raise ExecutionError(f"Invalid Prometheus {kind}")
+    if range_query:
+        sample_time, value = map(float, pair)
+    else:
+        value, sample_time = map(float, reversed(pair))
+    if not math.isfinite(value) or not math.isfinite(sample_time):
+        if range_query:
+            raise ExecutionError("Nonfinite Prometheus range sample")
+        raise ExecutionError(
+            "Nonfinite Prometheus sample; missing observations or zero denominator"
+        )
+    return QuerySample(labels, value, sample_time)
+
+
 def _fetch(url, expression, at, timeout):
     data = _query(
         url,
@@ -80,21 +109,8 @@ def _fetch(url, expression, at, timeout):
     result = []
     for item in rows:
         labels, pair = item["metric"], item["value"]
-        if (
-            not isinstance(labels, dict)
-            or any(type(k) is not str or type(v) is not str for k, v in labels.items())
-            or not isinstance(pair, list)
-            or len(pair) != 2
-            or type(pair[0]) not in (int, float)
-            or type(pair[1]) is not str
-        ):
-            raise ExecutionError("Invalid Prometheus sample")
-        value, sample_time = float(pair[1]), float(pair[0])
-        if not math.isfinite(value) or not math.isfinite(sample_time):
-            raise ExecutionError(
-                "Nonfinite Prometheus sample; missing observations or zero denominator"
-            )
-        result.append(QuerySample(labels, value, sample_time))
+        _validate_labels(labels, "Invalid Prometheus sample")
+        result.append(_parse_sample(labels, pair))
     return result
 
 
@@ -116,24 +132,10 @@ def _fetch_series(url, expression, start, end, step, timeout):
     series = []
     for item in data["result"]:
         labels = item["metric"]
-        if not isinstance(labels, dict) or any(
-            type(k) is not str or type(v) is not str for k, v in labels.items()
-        ):
-            raise ExecutionError("Invalid Prometheus labels")
-        samples = []
-        for pair in item["values"]:
-            if (
-                not isinstance(pair, list)
-                or len(pair) != 2
-                or type(pair[0]) not in (int, float)
-                or type(pair[1]) is not str
-            ):
-                raise ExecutionError("Invalid Prometheus range sample")
-            point, value = float(pair[0]), float(pair[1])
-            if not math.isfinite(point) or not math.isfinite(value):
-                raise ExecutionError("Nonfinite Prometheus range sample")
-            samples.append(QuerySample(labels, value, point))
-        series.append(samples)
+        _validate_labels(labels, "Invalid Prometheus labels")
+        series.append(
+            [_parse_sample(labels, pair, range_query=True) for pair in item["values"]]
+        )
     return series
 
 
