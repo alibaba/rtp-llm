@@ -6,6 +6,7 @@
 #include <shared_mutex>
 #include <string>
 #include <map>
+#include <vector>
 
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheReceiver.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
@@ -18,8 +19,11 @@ namespace transfer {
 /// @brief 单次 recv 任务（一层一个 partition），实现 IKVCacheRecvTask
 class TransferTask: public IKVCacheRecvTask {
 public:
-    TransferTask(KeyBlockInfoMap block_infos, int64_t deadline_ms):
-        block_infos_(std::move(block_infos)), deadline_ms_(deadline_ms), start_time_us_(currentTimeUs()) {}
+    TransferTask(KeyBlockInfoMap block_infos, int64_t deadline_ms, BatchCopiedCallback on_batch_copied = {}):
+        block_infos_(std::move(block_infos)),
+        on_batch_copied_(std::move(on_batch_copied)),
+        deadline_ms_(deadline_ms),
+        start_time_us_(currentTimeUs()) {}
     ~TransferTask() override = default;
 
 public:
@@ -38,6 +42,9 @@ public:
     }
     void
     notifyDone(bool success, TransferErrorCode error_code = TransferErrorCode::OK, const std::string& error_msg = "");
+    void notifyBatchDone(const std::vector<int64_t>& keys);
+    bool acceptsBatches() const { return static_cast<bool>(on_batch_copied_); }
+    int64_t deadlineMs() const { return deadline_ms_; }
 
     /// Record the first logical failure while outstanding DMA still owns the buffers.
     void recordError(TransferErrorCode error_code, const std::string& error_message);
@@ -56,6 +63,7 @@ public:
 
 private:
     KeyBlockInfoMap block_infos_;
+    BatchCopiedCallback on_batch_copied_;
     int64_t         deadline_ms_;
     int64_t         start_time_us_      = 0;
     int64_t         total_cost_time_us_ = 0;
@@ -77,7 +85,10 @@ public:
 
     /// @brief 创建并注册一个新的 recv task
     std::shared_ptr<TransferTask>
-    addTask(const std::string& unique_key, KeyBlockInfoMap block_infos, int64_t deadline_ms);
+    addTask(const std::string& unique_key,
+            KeyBlockInfoMap block_infos,
+            int64_t deadline_ms,
+            BatchCopiedCallback on_batch_copied = {});
 
     /// @brief 按 unique_key 查询 task（不转移所有权）
     std::shared_ptr<TransferTask> getTask(const std::string& unique_key) const;
@@ -89,6 +100,8 @@ public:
 private:
     mutable std::shared_mutex                            mutex_;
     std::map<std::string, std::shared_ptr<TransferTask>> task_map_;
+    std::map<std::string, int64_t> completed_batches_;
+    std::multimap<int64_t, std::string> completed_expiry_;
 };
 
 }  // namespace transfer

@@ -50,27 +50,6 @@ public:
     }
 };
 
-class MockLayerContext: public KVCacheConnectorLayerContext {
-public:
-    explicit MockLayerContext(KVCacheResourcePtr resource): resource_(std::move(resource)) {}
-
-    const KVCacheResource& kvCacheResource() const override {
-        return *resource_;
-    }
-    int64_t requestId() const override {
-        return 100;
-    }
-    std::shared_ptr<torch::Event> attentionEvent() const override {
-        return nullptr;
-    }
-    int64_t deadlineMs() const override {
-        return currentTimeMs() + 5000;
-    }
-
-private:
-    KVCacheResourcePtr resource_;
-};
-
 class P2PConnectorTest: public ::testing::Test {
 protected:
     void SetUp() override {
@@ -324,27 +303,12 @@ TEST_F(P2PConnectorTest, EnabledWriteCommandsDispatchOnlyToMatchingRole) {
     }
 }
 
-TEST_F(P2PConnectorTest, AsyncWriteByLayer_ReturnsNullWhenWorkerRejectsDispatch) {
+TEST_F(P2PConnectorTest, WriteByLayerTagReturnsFalseWhenWorkerRejectsDispatch) {
     auto resource = createValidKVCacheResource();
-    resource->mutableBlockIds(resource->groupTags().at(0)).assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
-    auto layer_context = std::make_shared<MockLayerContext>(std::move(resource));
+    const auto tag = resource->groupTags().at(0);
+    resource->mutableBlockIds(tag).assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
 
-    EXPECT_EQ(connector_->asyncWriteByLayer(0, layer_context), nullptr);
-}
-
-TEST_F(P2PConnectorTest, AsyncWriteByLayer_AcceptedContextDoesNotHoldRequestResource) {
-    auto resource = createValidKVCacheResource();
-    std::weak_ptr<KVCacheResource> weak_resource = resource;
-    auto layer_context = std::make_shared<MockLayerContext>(resource);
-
-    auto accepted_context = connector_->asyncWriteByLayer(0, layer_context);
-    ASSERT_NE(accepted_context, nullptr);
-
-    layer_context.reset();
-    resource.reset();
-    EXPECT_TRUE(weak_resource.expired());
-    EXPECT_TRUE(accepted_context->done());
-    EXPECT_TRUE(accepted_context->success());
+    EXPECT_FALSE(connector_->writeByLayerTag(0, tag, resource, 100, nullptr, currentTimeMs() + 5000, 0));
 }
 
 // 测试: stream_store_ 为 nullptr，返回 INTERNAL 错误
@@ -1344,8 +1308,9 @@ TEST_F(P2PConnectorTest, LayerBeforeStartLoadReanchorsHorizonWithoutChangingSour
         EXPECT_FALSE(store->requestHorizon(request_id, source_identity + 1));
         const auto transfer_horizon = currentTimeMs() + 5000;
         ASSERT_EQ(store->activateRequestHorizon(request_id, transfer_horizon, source_identity), transfer_horizon);
-        ASSERT_TRUE(
-            connector_->writeByLayerTag(1, "group1", resource, request_id, nullptr, source_identity, -skew_ms + 10000));
+        // A later chunk may publish this layer again without extending the transfer horizon.
+        ASSERT_TRUE(connector_->writeByLayerTag(
+            1, "group1", resource, request_id, nullptr, source_identity, -skew_ms + 10000, /*chunk_id=*/1));
         EXPECT_EQ(store->requestHorizon(request_id, source_identity), transfer_horizon);
         store->removeBuffer(request_id, source_identity);
         ASSERT_TRUE(connector_->writeByLayerTag(0, "group0", resource, request_id, nullptr, source_identity, -skew_ms));

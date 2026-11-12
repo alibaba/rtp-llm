@@ -217,47 +217,13 @@ bool P2PWorkerPrefillRead::rejectLayer(int64_t request_id, int64_t request_deadl
     return false;
 }
 
-bool P2PWorkerPrefillRead::writeByLayer(int                           layer_id,
-                                             const KVCacheResourcePtr&     resource,
-                                             int64_t                       request_id,
-                                             std::shared_ptr<torch::Event> event,
-                                             int64_t                       request_deadline_ms) {
-    if (!resource || !config_.topology || config_.cp_size <= 0) {
-        return rejectLayer(request_id,
-                           request_deadline_ms,
-                           ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
-                                     "writeByLayer: invalid resource, topology or CP size"));
-    }
-    // 本地投影：prefill worker 按自身 cp_rank 取出它持有的那一份。在 planner 允许的
-    // 所有 CP 形态下，(src_rank, dst_rank, tag) 唯一确定一条 route，且该 route 的键集
-    // 恰好等于这份本地投影 —— 因此 prefill 侧不需要下发键规则，也不必再筛。
-    auto layer_cache_buffers = LayerCacheBufferUtil::convertLayer(*resource,
-                                                                  *config_.topology,
-                                                                  layer_id,
-                                                                  0,
-                                                                  -1,
-                                                                  config_.tp_rank % config_.cp_size,
-                                                                  config_.cp_size,
-                                                                  config_.cache_key_tokens_per_block);
-    if (!layer_cache_buffers.ok()) {
-        return rejectLayer(request_id, request_deadline_ms, layer_cache_buffers.status());
-    }
-    if (layer_cache_buffers.value().empty()) {
-        return rejectLayer(request_id,
-                           request_deadline_ms,
-                           ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
-                                     "layer=" + std::to_string(layer_id)
-                                         + ": no layer buffers; an empty worker plan must be decided by the planner"));
-    }
-    return scheduleLayerCacheBuffers(layer_id, request_id, event, request_deadline_ms, layer_cache_buffers.value());
-}
-
 bool P2PWorkerPrefillRead::writeByLayerTag(int                                  layer_id,
                                                 const std::string&                   tag,
                                                 const KVCacheResourcePtr&            resource,
                                                 int64_t                              request_id,
                                                 const std::shared_ptr<torch::Event>& event,
-                                                int64_t                              request_deadline_ms) {
+                                                int64_t                              request_deadline_ms,
+                                                int                                  chunk_id) {
     if (!resource || resource->cacheKeys().size() != resource->blocksForLayer(layer_id, tag).size()) {
         return rejectLayer(request_id,
                            request_deadline_ms,
@@ -266,7 +232,7 @@ bool P2PWorkerPrefillRead::writeByLayerTag(int                                  
                                          + ": missing resource or mismatched key/block counts"));
     }
 
-    auto        layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, tag);
+    auto        layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, tag, chunk_id);
     if (config_.tp_rank == 0) {
         layer_cache_buffer->setKVCacheResource(resource);
     }
@@ -284,21 +250,10 @@ bool P2PWorkerPrefillRead::writeByLayerTag(int                                  
         }
         layer_cache_buffer->addBlockId(cache_keys[i], block_ids[i]);
     }
-    return scheduleLayerCacheBuffers(layer_id, request_id, event, request_deadline_ms, {std::move(layer_cache_buffer)});
-}
-
-bool P2PWorkerPrefillRead::scheduleLayerCacheBuffers(
-    int                                                   layer_id,
-    int64_t                                               request_id,
-    const std::shared_ptr<torch::Event>&                  event,
-    int64_t                                               request_deadline_ms,
-    const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers) {
     auto collector = std::make_shared<P2PConnectorMetricsCollector>();
     // prefill_worker_store_start_time_us 是该场景的触发字段，创建时即写入。
     collector->prefill_worker_store_start_time_us = currentTimeUs();
-    for (const auto& layer_cache_buffer : layer_cache_buffers) {
-        collector->prefill_worker_store_total_block_count += layer_cache_buffer->blockIdMap().size();
-    }
+    collector->prefill_worker_store_total_block_count = layer_cache_buffer->blockIdMap().size();
 
     const int64_t now_ms = currentTimeMs();
     // StartLoad may already have installed a receiver-local transfer horizon.
@@ -307,7 +262,7 @@ bool P2PWorkerPrefillRead::scheduleLayerCacheBuffers(
         computed_buffers_->requestHorizon(request_id, request_deadline_ms).value_or(request_deadline_ms);
     if (request_deadline_ms <= 0 || request_deadline_ms == std::numeric_limits<int64_t>::max()
         || local_horizon_ms <= now_ms) {
-        RTP_LLM_LOG_WARNING("writeByLayer [P2P Prefill]: drop layer after request deadline, "
+        RTP_LLM_LOG_WARNING("writeByLayerTag [P2P Prefill]: drop layer after request deadline, "
                             "request_id=%ld, layer_id=%d, request_deadline_ms=%ld",
                             request_id,
                             layer_id,
@@ -319,19 +274,29 @@ bool P2PWorkerPrefillRead::scheduleLayerCacheBuffers(
     const auto request_horizon =
         computed_buffers_->registerRequestHorizon(request_id, local_horizon_ms, request_deadline_ms);
     if (!request_horizon.has_value()) {
-        RTP_LLM_LOG_DEBUG("writeByLayer [P2P Prefill]: ignore layer after transfer completed, "
+        RTP_LLM_LOG_DEBUG("writeByLayerTag [P2P Prefill]: ignore layer after transfer completed, "
                           "request_id=%ld, layer_id=%d",
                           request_id,
                           layer_id);
         return true;
     }
     const int64_t deadline_ms = *request_horizon;
-    for (const auto& layer_cache_buffer : layer_cache_buffers) {
-        store_wait_context_checker_->addContext(
-            StoreWaitContext(request_id, event, layer_cache_buffer, deadline_ms, collector, request_deadline_ms));
+    using PublicationStatus = ComputedLayerCacheBufferStore::PublicationStatus;
+    const auto status = computed_buffers_->registerLayerPublication(request_id, request_deadline_ms, *layer_cache_buffer);
+    if (status == PublicationStatus::Inactive) {
+        return true;
     }
+    if (status == PublicationStatus::Duplicate) {
+        return rejectLayer(request_id,
+                           request_deadline_ms,
+                           ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                                     "duplicate layer publication: layer=" + std::to_string(layer_id)
+                                         + " tag=" + tag + " chunk_id=" + std::to_string(chunk_id)));
+    }
+    store_wait_context_checker_->addContext(
+        StoreWaitContext(request_id, event, layer_cache_buffer, deadline_ms, collector, request_deadline_ms));
     if (layer_id == 0) {
-        RTP_LLM_LOG_DEBUG("writeByLayer [P2P Prefill]: queued request_id=%ld, layer_id=%d, blocks=%zu, deadline_ms=%ld "
+        RTP_LLM_LOG_DEBUG("writeByLayerTag [P2P Prefill]: queued request_id=%ld, layer_id=%d, blocks=%zu, deadline_ms=%ld "
                           "(request=%ld)",
                           request_id,
                           layer_id,
@@ -363,100 +328,55 @@ int P2PWorkerPrefillRead::dispatchPendingLayerTransfers(
     int64_t                                          return_deadline_ms,
     const std::shared_ptr<std::atomic<bool>>&        cancel_flag,
     const std::shared_ptr<SendTransferResult>&       transfer_result,
-                                      const std::set<std::string>&                     expected_buffer_keys,
-                                      std::set<std::string>&                           sent_buffer_keys,
-                                      int                                              total_transfers) {
+    const std::set<std::string>&                     expected_buffer_keys) {
     int sent_count = 0;
-    auto mark_dispatch_failure = [transfer_result](ErrorCode error_code, const std::string& error_msg) {
-        std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
-        if (!transfer_result->dispatch_failed.load()) {
+    while (transfer_result->all_success.load() && !cancel_flag->load() && currentTimeMs() < return_deadline_ms) {
+        const auto sequence = computed_buffer->changeSequence();
+        if (computed_buffer->sealedAndEmpty()) {
+            break;
+        }
+        const auto error = computed_buffer->error();
+        if (error.hasError()) {
+            std::lock_guard<std::mutex> lock(transfer_result->result_mutex);
             if (transfer_result->all_success.exchange(false)) {
-                transfer_result->error_code = error_code;
-                transfer_result->error_msg  = error_msg;
+                transfer_result->error_code = error.code();
+                transfer_result->error_msg = error.ToString();
             }
-            transfer_result->dispatch_failed.store(true);
-            transfer_result->result_cv.notify_all();
-        }
-    };
-    while (sent_count < total_transfers && transfer_result->all_success.load() && !cancel_flag->load()
-           && currentTimeMs() < return_deadline_ms) {
-        std::set<std::string> need_buffer_keys;
-        for (const auto& key : expected_buffer_keys) {
-            if (!sent_buffer_keys.count(key)) {
-                need_buffer_keys.insert(key);
-            }
-        }
-        if (need_buffer_keys.empty()) {
             break;
         }
 
-        const auto error = computed_buffer->error();
-        if (error.hasError()) {
-            mark_dispatch_failure(error.code(), error.ToString());
-            break;
-        }
-        auto [total_layer_num, ready_layer_buffers] = computed_buffer->getBuffers(need_buffer_keys);
-        for (const auto& layer_cache_buffer : ready_layer_buffers) {
-            if (!layer_cache_buffer) {
-                mark_dispatch_failure(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
-                                      "sendKVCache: computed buffer is null, unique_key: " + unique_key);
+        bool dispatched = false;
+        for (const auto& buffer_key : expected_buffer_keys) {
+            if (!transfer_result->all_success.load() || cancel_flag->load()) {
                 break;
             }
-            const std::string buffer_key = layer_cache_buffer->bufferKey();
-            if (sent_buffer_keys.count(buffer_key)) {
+            {
+                std::lock_guard<std::mutex> lock(transfer_result->result_mutex);
+                if (transfer_result->in_flight_by_layer[buffer_key] > 0) {
+                    continue;
+                }
+            }
+            auto buffer = computed_buffer->takeBuffer(buffer_key);
+            if (!buffer) {
                 continue;
             }
-            if (!expected_buffer_keys.count(buffer_key)) {
-                mark_dispatch_failure(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
-                                      "sendKVCache: unexpected computed buffer layer="
-                                          + std::to_string(layer_cache_buffer->getLayerId()) + " tag="
-                                          + layer_cache_buffer->cacheTag() + " unique_key: " + unique_key);
-                break;
+            if (buffer->blockIdMap().empty()) {
+                continue;
             }
-            if (worker_plan.routeCountForTag(layer_cache_buffer->cacheTag()) > 0) {
+            const auto count = sendLayerToPartitions(
+                buffer, worker_plan, unique_key, return_deadline_ms, cancel_flag, transfer_result);
+            if (count > 0) {
                 const auto ready_us = currentTimeUs();
                 if (transfer_result->first_buffer_ready_us < 0) {
                     transfer_result->first_buffer_ready_us = ready_us;
                 }
                 transfer_result->last_buffer_ready_us = ready_us;
+                sent_count += count;
             }
-            sent_buffer_keys.insert(buffer_key);
-            if (layer_cache_buffer->blockIdMap().empty()) {
-                const int completed_partition_count = worker_plan.routeCountForTag(layer_cache_buffer->cacheTag());
-                if (completed_partition_count != 0) {
-                    mark_dispatch_failure(
-                        ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
-                        "sendKVCache: route requires an empty layer buffer, layer="
-                            + std::to_string(layer_cache_buffer->getLayerId()) + " tag="
-                            + layer_cache_buffer->cacheTag() + " route_count="
-                            + std::to_string(completed_partition_count) + " unique_key: " + unique_key);
-                    break;
-                }
-                sent_count += completed_partition_count;
-                transfer_result->done_count.fetch_add(completed_partition_count, std::memory_order_relaxed);
-                {
-                    std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
-                    transfer_result->result_cv.notify_all();
-                }
-                continue;
-            }
-            sent_count += sendLayerToPartitions(
-                layer_cache_buffer,
-                worker_plan,
-                unique_key,
-                return_deadline_ms,
-                cancel_flag,
-                transfer_result);
-            if (!transfer_result->all_success.load()) {
-                break;
-            }
+            dispatched = true;
         }
-
-        if (!transfer_result->all_success.load()) {
-            break;
-        }
-        if (ready_layer_buffers.empty()) {
-            computed_buffer->waitChange(total_layer_num, 50);
+        if (!dispatched) {
+            computed_buffer->waitChange(sequence, 50);
         }
     }
     return sent_count;
@@ -470,32 +390,43 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
                                                      const std::shared_ptr<SendTransferResult>& transfer_result) {
     int       count    = 0;
     const int layer_id = layer_cache_buffer->getLayerId();
+    const auto buffer_key = layer_cache_buffer->bufferKey();
+    const int  chunk_id   = layer_cache_buffer->chunkId();
 
     // Account for both transport completion and a task rejected before enqueue.
-    auto make_send_done_cb = [transfer_result, unique_key](const std::string& partition_layer_key) {
-        return [transfer_result, partition_layer_key, unique_key](transfer::TransferErrorCode transfer_ec,
-                                                      const std::string&          cb_error_msg) {
-            RTP_LLM_LOG_DEBUG("send done, partition_layer_key: %s, success: %d",
-                              partition_layer_key.c_str(),
+    auto make_send_done_cb = [transfer_result, unique_key, buffer_key, chunk_id](
+                                 const std::string& route_layer_key, const std::string& peer) {
+        return [transfer_result, route_layer_key, unique_key, buffer_key, chunk_id, peer](
+                   transfer::TransferErrorCode transfer_ec, const std::string& cb_error_msg) {
+            RTP_LLM_LOG_DEBUG("send done, route_layer_key=%s chunk_id=%d success=%d",
+                              route_layer_key.c_str(),
+                              chunk_id,
                               transfer_ec == transfer::TransferErrorCode::OK);
             if (transfer_ec != transfer::TransferErrorCode::OK) {
                 std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
                 if (transfer_result->all_success.exchange(false)) {
                     transfer_result->error_code = transfer::toErrorCode(transfer_ec);
-                    transfer_result->error_msg  = "Prefill send key=" + partition_layer_key + " transfer_code="
+                    transfer_result->error_msg  = "Prefill send key=" + route_layer_key + " chunk_id="
+                                                 + std::to_string(chunk_id) + " transfer_code="
                                                  + std::to_string(static_cast<int>(transfer_ec)) + ": " + cb_error_msg;
                 }
             }
-            transfer_result->done_count.fetch_add(1);
             {
-                std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
-                transfer_result->result_cv.notify_one();
+                std::lock_guard<std::mutex> lock(transfer_result->result_mutex);
+                --transfer_result->in_flight_by_layer[buffer_key];
+                transfer_result->done_count.fetch_add(1);
+                transfer_result->result_cv.notify_all();
+            }
+            if (auto computed_buffer = transfer_result->computed_buffer.lock()) {
+                computed_buffer->notifyChange();
             }
             if (transfer_ec != transfer::TransferErrorCode::OK) {
-                RTP_LLM_LOG_WARNING("P2P Prefill send callback failed, unique_key=%s partition_layer_key=%s "
-                                    "transfer_code=%d transfer_name=%s error=%s",
+                RTP_LLM_LOG_WARNING("P2P Prefill send callback failed, unique_key=%s route_layer_key=%s chunk_id=%d "
+                                    "peer=%s transfer_code=%d transfer_name=%s error=%s",
                                     unique_key.c_str(),
-                                    partition_layer_key.c_str(),
+                                    route_layer_key.c_str(),
+                                    chunk_id,
+                                    peer.c_str(),
                                     static_cast<int>(transfer_ec),
                                     transfer::transferErrorCodeToString(transfer_ec),
                                     cb_error_msg.c_str());
@@ -542,6 +473,7 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
                                       ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
                                   "sendKVCache: route=" + std::to_string(route.route_id) + " layer="
                                       + std::to_string(layer_id) + " tag=" + layer_cache_buffer->cacheTag()
+                                      + " chunk_id=" + std::to_string(chunk_id)
                                       + " task registration failed, unique_key=" + unique_key + ": "
                                       + conversion_message);
             return count;
@@ -552,19 +484,23 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
             return count;
         }
 
-        std::string partition_layer_key = P2PKeyUtil::makeRouteLayerKey(
+        std::string route_layer_key = P2PKeyUtil::makeRouteLayerKey(
             unique_key, layer_id, layer_cache_buffer->cacheTag(), route.route_id, worker_plan.plan_digest);
 
         transfer::SendRequest send_req;
         send_req.ip          = route.dst_ip;
         send_req.port        = route.dst_port;
-        send_req.unique_key  = partition_layer_key;
+        send_req.unique_key  = route_layer_key;
         send_req.block_info  = std::move(key_block_infos.value());
         send_req.deadline_ms = transfer_deadline_ms;
         // The Decode transfer budget owns this window, not Prefill's local configuration.
         send_req.timeout_ms = std::min<int64_t>(std::numeric_limits<int32_t>::max(),
                                                 std::max<int64_t>(1, transfer_deadline_ms - currentTimeMs()));
 
+        {
+            std::lock_guard<std::mutex> lock(transfer_result->result_mutex);
+            ++transfer_result->in_flight_by_layer[buffer_key];
+        }
         ++count;
 
         // OPT-A2: push sender_->send onto the dedicated pool. The dispatcher
@@ -574,8 +510,7 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
         // invoked by arpc IO threads when the response arrives).
         //
         // Task state owns the request until execution or cancellation releases it.
-        auto done_cb =
-            make_send_done_cb(partition_layer_key + " peer=" + route.dst_ip + ":" + std::to_string(route.dst_port));
+        auto done_cb = make_send_done_cb(route_layer_key, route.dst_ip + ":" + std::to_string(route.dst_port));
         auto                              send_req_shared = std::make_shared<transfer::SendRequest>(std::move(send_req));
         auto task_state                   = std::make_shared<AsyncSendTaskState>();
         task_state->send_request          = send_req_shared;
@@ -587,7 +522,8 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
                      task_state,
                      done_cb,
                      cancel_flag,
-                     partition_layer_key,
+                     route_layer_key,
+                     chunk_id,
                      reporter = metrics_reporter_,
                      enqueue_time_us]() mutable {
             P2PConnectorMetricsCollector submit_collector;
@@ -609,8 +545,8 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
             // Measure inside-pool cost; the sync prefix of sender->send()
             // (cuda copy + sync) can take seconds under contention.
             const int64_t pool_task_start_us = currentTimeUs();
-            auto          measured_done_cb = [done_cb, reporter, pool_task_start_us](transfer::TransferErrorCode ec,
-                                                                            const std::string&          message) {
+            auto measured_done_cb = [done_cb, reporter, pool_task_start_us, buffer_keepalive_local](
+                                        transfer::TransferErrorCode ec, const std::string& message) {
                 // Sender callbacks, including synchronous completion, are the transport completion boundary.
                 P2PConnectorMetricsCollector completed_collector;
                 completed_collector.prefill_worker_write_success = ec == transfer::TransferErrorCode::OK;
@@ -618,6 +554,7 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
                 if (reporter) {
                     reporter->report<P2PConnectorMetrics, P2PConnectorMetricsCollector>(nullptr, &completed_collector);
                 }
+                (void)buffer_keepalive_local;
                 done_cb(ec, message);
             };
             auto report_submit = [&] {
@@ -629,16 +566,18 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
             try {
                 sender->send(*send_req_local, measured_done_cb);
             } catch (const std::exception& e) {
-                RTP_LLM_LOG_WARNING("P2PWorkerPrefillRead async send threw, partition_layer_key=%s, error=%s",
-                                    partition_layer_key.c_str(),
+                RTP_LLM_LOG_WARNING("P2PWorkerPrefillRead async send threw, route_layer_key=%s chunk_id=%d error=%s",
+                                    route_layer_key.c_str(),
+                                    chunk_id,
                                     e.what());
                 report_submit();
                 done_cb(transfer::TransferErrorCode::UNKNOWN, e.what());
                 return;
             } catch (...) {
                 RTP_LLM_LOG_WARNING("P2PWorkerPrefillRead async send threw unknown exception, "
-                                    "partition_layer_key=%s",
-                                    partition_layer_key.c_str());
+                                    "route_layer_key=%s chunk_id=%d",
+                                    route_layer_key.c_str(),
+                                    chunk_id);
                 report_submit();
                 done_cb(transfer::TransferErrorCode::UNKNOWN, "unknown async send exception");
                 return;
@@ -647,14 +586,12 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
             const int64_t pool_task_cost_us = currentTimeUs() - pool_task_start_us;
             if (pool_task_cost_us >= 100000) {
                 RTP_LLM_LOG_WARNING("async_sender_pool task slow, "
-                                    "partition_layer_key=%s, pool_task_cost_us=%ld",
-                                    partition_layer_key.c_str(),
+                                    "route_layer_key=%s chunk_id=%d pool_task_cost_us=%ld",
+                                    route_layer_key.c_str(),
+                                    chunk_id,
                                     pool_task_cost_us);
             }
-            // buffer_keepalive_local keeps layer_cache_buffer alive only until
-            // sender->send() has built the transport request. Late-cancelled
-            // tasks that never start release this ref via AsyncSendTaskState.
-            (void)buffer_keepalive_local;
+
         };
         // Blocking enqueue cannot observe this request's cancellation/deadline.
         // Never fall back to inline send: its synchronous GPU copy can also block
@@ -668,7 +605,7 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
                                            "sender queue full" : "sender pool unavailable";
             const std::string message = "sendKVCache: " + reason + " enqueue_error="
                                         + std::to_string(static_cast<int>(enqueue_error))
-                                        + " key=" + partition_layer_key;
+                                        + " key=" + route_layer_key + " chunk_id=" + std::to_string(chunk_id);
             RTP_LLM_LOG_WARNING("%s", message.c_str());
             task_state->releaseIfNotStarted();
             mark_dispatch_failure(ErrorCode::P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED, message);
@@ -862,28 +799,25 @@ P2PWorkerPrefillRead::sendKVCache(int64_t                   request_id,
         });
 
     const int64_t dispatch_start_us = currentTimeUs();
-    std::set<std::string> sent_buffer_keys;
+    transfer_result->computed_buffer = computed_layer_cache_buffer;
     const int sent_transfer_count = dispatchPendingLayerTransfers(computed_layer_cache_buffer,
                                                                   worker_plan,
                                                                   unique_key,
                                                                   deadline_ms,
                                                                   cancel_flag,
                                                                   transfer_result,
-                                                                  expected_buffer_keys,
-                                                                  sent_buffer_keys,
-                                                                  total_transfers);
-    if (sent_transfer_count != total_transfers) {
+                                                                  expected_buffer_keys);
+    const bool publication_drained = computed_layer_cache_buffer->sealedAndEmpty();
+    {
         std::lock_guard<std::mutex> lock(transfer_result->result_mutex);
-        if (transfer_result->all_success.exchange(false)) {
+        if (!publication_drained && transfer_result->all_success.exchange(false)) {
             transfer_result->error_code =
-                cancel_flag->load() ?
-                    ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED :
-                    (currentTimeMs() >= deadline_ms ? ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT :
-                                                      ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED);
-            transfer_result->error_msg = "sendKVCache: dispatched transfer count mismatch, sent="
-                                         + std::to_string(sent_transfer_count)
-                                         + " planned=" + std::to_string(total_transfers)
-                                         + " routes=" + describeRoutes(worker_plan) + ", unique_key: " + unique_key;
+                cancel_flag->load() ? ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED :
+                (currentTimeMs() >= deadline_ms ? ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT :
+                                                 ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED);
+            transfer_result->error_msg = "sendKVCache: Prefill publication did not drain, sent="
+                                         + std::to_string(sent_transfer_count) + " routes=" + describeRoutes(worker_plan)
+                                         + ", unique_key: " + unique_key;
         }
     }
     const int64_t dispatch_cost_us                   = currentTimeUs() - dispatch_start_us;
@@ -892,7 +826,7 @@ P2PWorkerPrefillRead::sendKVCache(int64_t                   request_id,
         collector->prefill_worker_write_first_layer_wait_time_us =
             transfer_result->first_buffer_ready_us - start_time_us;
     }
-    if (sent_transfer_count == total_transfers && transfer_result->last_buffer_ready_us >= 0) {
+    if (publication_drained && transfer_result->last_buffer_ready_us >= 0) {
         collector->prefill_worker_write_last_layer_wait_time_us = transfer_result->last_buffer_ready_us - start_time_us;
     }
 
@@ -965,10 +899,7 @@ P2PWorkerPrefillRead::sendKVCache(int64_t                   request_id,
         handle_cancel_flags_.erase(unique_key);
     }
 
-    // Remove the computed buffer entry even on cancellation. Already-started send tasks
-    // retain their layer buffers, including rank-0 source references from writeByLayerTag,
-    // until sender->send() returns. Other ranks still carry only block descriptions.
-    // This also marks the request key as removed, preventing late-arriving layers from
+    // Mark the request key as removed, preventing late-arriving layers from
     // StoreWaitContextChecker from creating orphan description entries.
     computed_buffers_->removeBuffer(request_id, request_deadline_ms);
 
@@ -977,7 +908,6 @@ P2PWorkerPrefillRead::sendKVCache(int64_t                   request_id,
                                            timeout_cancelled_pending_tasks,
                                            all_callbacks_received,
                                            sent_transfer_count,
-                                           total_transfers,
                                            worker_plan,
                                            unique_key);
 
@@ -999,13 +929,16 @@ P2PWorkerPrefillRead::sendKVCache(int64_t                   request_id,
         return ErrorInfo(send_result.error_code, send_result.error_msg);
     }
 
-    RTP_LLM_LOG_DEBUG("sendKVCache [P2P]: done request_id=%ld, unique_key=%s, sent=%d/%d, cost_us=%ld",
+    RTP_LLM_LOG_DEBUG("sendKVCache [P2P]: done request_id=%ld, unique_key=%s, sent_batches=%d, cost_us=%ld",
                       request_id,
                       unique_key.c_str(),
                       sent_transfer_count,
-                      total_transfers,
                       currentTimeUs() - start_time_us);
     return ErrorInfo::OkStatus();
+}
+
+void P2PWorkerPrefillRead::finishPublication(int64_t request_id, int64_t request_deadline_ms) {
+    store_wait_context_checker_->finishPublication(request_id, request_deadline_ms);
 }
 
 void P2PWorkerPrefillRead::completeNoTransfer(int64_t request_id,
@@ -1066,7 +999,6 @@ P2PWorkerPrefillRead::determineSendResult(const std::shared_ptr<SendTransferResu
                                                bool                                       timeout_cancelled_pending_tasks,
                                                bool                                       all_callbacks_received,
                                                int                                        sent_transfer_count,
-                                               int                                        total_transfers,
                                                const P2PWorkerRoutePlan&                  worker_plan,
                                                const std::string&                         unique_key) const {
 
@@ -1080,14 +1012,7 @@ P2PWorkerPrefillRead::determineSendResult(const std::shared_ptr<SendTransferResu
                 "sendKVCache cancelled, unique_key: " + unique_key};
     }
     const std::string transfer_summary = "sent=" + std::to_string(sent_transfer_count)
-                                         + " planned=" + std::to_string(total_transfers)
                                          + " routes=" + describeRoutes(worker_plan);
-    if (sent_transfer_count != total_transfers) {
-        return {false,
-                ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT,
-                "sendKVCache: dispatched transfer count mismatch, " + transfer_summary
-                    + ", unique_key: " + unique_key};
-    }
     if (timeout_cancelled_pending_tasks) {
         return {false,
                 ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT,

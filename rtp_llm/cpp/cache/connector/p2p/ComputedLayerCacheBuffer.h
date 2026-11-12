@@ -6,6 +6,7 @@
 #include <atomic>
 #include <functional>
 #include <condition_variable>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -27,12 +28,17 @@ public:
     /// @brief 追加一层 cache buffer，deadline 只允许收紧
     void addBuffer(const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer, int64_t deadline_ms);
 
-    /// @brief 返回当前已存 buffer 数及指定 layer/tag 集合对应的缓冲区列表
+    /// @brief 返回变更序号和指定 layer/tag 的待发送批次
     std::pair<int, std::vector<std::shared_ptr<LayerCacheBuffer>>>
     getBuffers(const std::set<std::string>& buffer_keys);
 
-    /// @brief 阻塞等待层数变化，直到超过 last_layer_num 或 timeout_ms 超时
-    void waitChange(int last_layer_num, int timeout_ms);
+    /// @brief 等待发布或派发状态变化
+    void waitChange(int last_change, int timeout_ms);
+    int changeSequence() const;
+    void notifyChange();
+    void seal();
+    bool sealedAndEmpty() const;
+    std::shared_ptr<LayerCacheBuffer> takeBuffer(const std::string& buffer_key);
 
     void      setError(const ErrorInfo& error);
     ErrorInfo error() const;
@@ -43,9 +49,11 @@ public:
     }
 
 private:
-    int64_t                                                  request_id_;
-    std::map<std::string, std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers_;
-    std::atomic<int64_t>                             deadline_ms_;
+    int64_t                                                           request_id_;
+    std::map<std::string, std::deque<std::shared_ptr<LayerCacheBuffer>>> layer_cache_buffers_;
+    int                                                               change_sequence_ = 0;
+    bool                                                              sealed_ = false;
+    std::atomic<int64_t>                                               deadline_ms_;
 
     std::function<void(const ErrorInfo&)> error_handler_;
     ErrorInfo                             error_;
@@ -66,6 +74,12 @@ public:
                                                         int64_t                                  request_deadline_ms);
 
     std::shared_ptr<ComputedLayerCacheBuffer> getBuffer(int64_t request_id, int64_t request_deadline_ms) const;
+    // Keep publication identities until the request is retired, even after dequeue.
+    enum class PublicationStatus { Accepted, Duplicate, Inactive };
+    PublicationStatus registerLayerPublication(int64_t                 request_id,
+                                               int64_t                 request_deadline_ms,
+                                               const LayerCacheBuffer& buffer);
+
     // Register the fixed late-layer acceptance horizon for a request. The
     // first value wins so callbacks from later layers cannot roll the horizon.
     // horizon_ms is receiver-local time; request_deadline_ms is an opaque source
@@ -112,8 +126,9 @@ private:
     const std::shared_ptr<P2PNotification> notification_{std::make_shared<P2PNotification>()};
 
     struct RequestHorizon {
-        int64_t horizon_ms;
-        int64_t request_deadline_ms;
+        int64_t                             horizon_ms;
+        int64_t                             request_deadline_ms;
+        std::map<std::string, std::set<int>> published_chunks;
     };
 
     // stores layer cache buffer already computed

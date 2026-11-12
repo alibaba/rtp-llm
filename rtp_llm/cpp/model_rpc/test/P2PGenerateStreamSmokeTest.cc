@@ -368,7 +368,16 @@ private:
                 }
             }
         }
-        if (!prefill) {
+        if (prefill) {
+            // Match NormalExecutor's publication-end signal after the last model layer.
+            const auto final = torch::tensor({true}, torch::kBool);
+            getCacheManager()->finishP2PPublication(
+                final,
+                final,
+                torch::tensor({stream->streamId()}, torch::kInt64),
+                torch::tensor({stream->generateInput()->request_deadline_ms}, torch::kInt64),
+                0);
+        } else {
             ++checked_requests;
         }
         return true;

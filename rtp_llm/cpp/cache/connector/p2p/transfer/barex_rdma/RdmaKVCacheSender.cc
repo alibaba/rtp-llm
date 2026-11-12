@@ -41,13 +41,14 @@ public:
         request_(request),
         response_(response),
         controller_(controller),
-        callback_(callback) {}
+        callback_(std::move(callback)) {}
 
     ~RdmaTransferClosure() {
         delete controller_;
     }
 
     void Run() override {
+        std::unique_ptr<RdmaTransferClosure> self_guard(this);
         TransferErrorCode error_code = TransferErrorCode::OK;
         std::string       error_msg;
 
@@ -190,7 +191,8 @@ void RdmaKVCacheSender::loadToRemote(
     auto timeout_ms        = deadline_ms - currentTimeMs();
     controller->SetExpireTime(timeout_ms > 0 ? timeout_ms : 1);
 
-    auto closure = new RdmaTransferClosure(ip, port, transfer_request, transfer_response, controller, callback);
+    auto closure = new RdmaTransferClosure(
+        ip, port, transfer_request, transfer_response, controller, callback);
     ::rdma_transfer::RdmaTransferService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
                                                    ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
     stub.transfer(controller, transfer_request.get(), transfer_response.get(), closure);

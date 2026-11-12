@@ -314,6 +314,7 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
         inputs.kv_cache_group_types     = types.clone();
         inputs.kv_cache_update_mapping  = copies.clone();
         inputs.cache_store_publish_start_tokens = torch::tensor({0, 8}, torch::kInt32);
+        inputs.p2p_final_prefill = torch::tensor({false, true}, torch::kBool);
     }
     const auto        original_physical = inputs.kv_cache_block_id;
     const auto        original_kernel   = inputs.kv_cache_kernel_block_id;
@@ -350,6 +351,8 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
     }
     expectIntTensor(inputs.combo_tokens, torch::tensor({7, 8}, torch::kInt32));
     expectIntTensor(inputs.cache_store_publish_start_tokens, torch::tensor({0, 8}, torch::kInt32));
+    ASSERT_TRUE(inputs.p2p_final_prefill.defined());
+    EXPECT_TRUE(torch::equal(inputs.p2p_final_prefill, torch::tensor({false, true}, torch::kBool)));
     expectIntTensor(inputs.request_deadline_ms, torch::tensor({int64_t{123456}, int64_t{123457}}, torch::kInt64));
     if (rank == 0) {
         EXPECT_EQ(inputs.p2p_deadline_clock_offset_ms, 0);

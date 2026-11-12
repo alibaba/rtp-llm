@@ -12,7 +12,7 @@ namespace rtp_llm {
 
 class LayerCacheBuffer {
 public:
-    LayerCacheBuffer(int layer_id, std::string cache_tag);
+    LayerCacheBuffer(int layer_id, std::string cache_tag, int chunk_id = 0);
     ~LayerCacheBuffer() = default;
 
 public:
@@ -26,6 +26,9 @@ public:
     const std::string& cacheTag() const {
         return cache_tag_;
     }
+    int chunkId() const {
+        return chunk_id_;
+    }
     std::string bufferKey() const {
         return std::to_string(layer_id_) + ":" + cache_tag_;
     }
@@ -38,6 +41,7 @@ public:
 private:
     int                    layer_id_;
     std::string            cache_tag_;
+    int                    chunk_id_;
     std::map<int64_t, int> block_id_map_;  // [cache_key, block_id]
     KVCacheResourcePtr     resource_;  // Rank-0 source hold for the sender's synchronous copy.
 };

@@ -789,6 +789,26 @@ void KVCacheManager::publishPrefillPayload(const std::string&                   
     }
 }
 
+void KVCacheManager::finishP2PPublication(const torch::Tensor& final_prefill,
+                                          const torch::Tensor& pd_separation,
+                                          const torch::Tensor& request_ids,
+                                          const torch::Tensor& deadlines,
+                                          int64_t              clock_offset_ms) {
+    if (!p2p_connector_ || !final_prefill.defined() || final_prefill.numel() == 0) {
+        return;
+    }
+    const auto pd = pd_separation.cpu();
+    const auto ids = request_ids.cpu();
+    const auto host_deadlines = deadlines.cpu();
+    const auto* final_rows = final_prefill.data_ptr<bool>();
+    for (int64_t row = 0; row < final_prefill.numel(); ++row) {
+        if (final_rows[row] && pd.data_ptr<bool>()[row]) {
+            p2p_connector_->finishP2PPublication(
+                ids.data_ptr<int64_t>()[row], host_deadlines.data_ptr<int64_t>()[row], clock_offset_ms);
+        }
+    }
+}
+
 bool KVCacheManager::writeP2PLayer(size_t                               model_id,
                                    int                                  local_layer_id,
                                    const std::string&                   tag,
@@ -797,7 +817,8 @@ bool KVCacheManager::writeP2PLayer(size_t                               model_id
                                    int64_t                              request_id,
                                    const std::shared_ptr<torch::Event>& event,
                                    int64_t                              deadline_ms,
-                                   int64_t                              deadline_clock_offset_ms) {
+                                   int64_t                              deadline_clock_offset_ms,
+                                   int                                  chunk_id) {
     if (!p2p_connector_) {
         return false;
     }
@@ -859,7 +880,8 @@ bool KVCacheManager::writeP2PLayer(size_t                               model_id
                                                        request_id,
                                                        event,
                                                        deadline_ms,
-                                                       deadline_clock_offset_ms);
+                                                       deadline_clock_offset_ms,
+                                                       chunk_id);
             }
         }
         layer_resource = coordinator_manager_->incrKVCacheRef(*layer_resource, cache_keys, true);
@@ -879,7 +901,8 @@ bool KVCacheManager::writeP2PLayer(size_t                               model_id
                                            request_id,
                                            event,
                                            deadline_ms,
-                                           deadline_clock_offset_ms);
+                                           deadline_clock_offset_ms,
+                                           chunk_id);
 }
 
 // 异步连接器操作

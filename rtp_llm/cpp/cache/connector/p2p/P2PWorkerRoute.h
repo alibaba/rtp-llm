@@ -24,7 +24,7 @@ struct P2PWorkerRoute {
 
     /// 本 route 的本侧每层 buffer（cache_key -> block_id 已由 rank0 解析好）。
     /// Read 的 Decode 接收侧、Write 的 Decode 发送侧和 Prefill 接收侧均显式提供。
-    /// Read 的 Prefill 发送侧为空，使用 writeByLayer 产出的本地投影，与该 route 键集对应。
+    /// Read 的 Prefill 发送侧为空，使用 writeByLayerTag 按 chunk 发布的本地块。
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_buffers;
 
     /// 发送侧目的端点（由 peer_index 在 peer_workers 里解析）：Read 的 Prefill / Write 的 Decode。

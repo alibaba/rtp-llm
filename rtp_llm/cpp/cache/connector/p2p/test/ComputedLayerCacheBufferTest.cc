@@ -37,6 +37,20 @@ protected:
 
 // ==================== ComputedLayerCacheBuffer 类测试 ====================
 
+TEST_F(ComputedLayerCacheBufferTest, QueuesMultipleBatchesForTheSameLayerAndTag) {
+    const auto deadline_ms = currentTimeMs() + 5000;
+    auto first = std::make_shared<LayerCacheBuffer>(0, "full");
+    first->addBlockId(100, 2);
+    auto second = std::make_shared<LayerCacheBuffer>(0, "full");
+    second->addBlockId(101, 3);
+
+    ComputedLayerCacheBuffer buffer(10, first, deadline_ms);
+    buffer.addBuffer(second, deadline_ms);
+    EXPECT_EQ(buffer.takeBuffer("0:full"), first);
+    EXPECT_EQ(buffer.takeBuffer("0:full"), second);
+    EXPECT_EQ(buffer.takeBuffer("0:full"), nullptr);
+}
+
 TEST_F(ComputedLayerCacheBufferTest, nullBufferFirst) {
     int64_t request_id   = 1001;
     int64_t deadline_ms0 = getDeadlineMs();

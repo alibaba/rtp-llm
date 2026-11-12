@@ -592,6 +592,9 @@ TEST_F(P2PMultiRankPeer, DISABLED_Serve) {
                                                                    0),
                               "batch publication failed");
                     }
+                    if (command.op == 'p') {
+                        ranks[r]->connector->finishP2PPublication(command.id, source.deadline, 0);
+                    }
                 }
             } else if (command.op == 'd') {
                 auto store = ranks[0]->connector->streamStore();
@@ -632,6 +635,7 @@ TEST_F(P2PMultiRankPeer, DISABLED_Serve) {
                                                                0),
                               "Prefill publication failed");
                     }
+                    rank->connector->finishP2PPublication(id, deadline, 0);
                 }
             } else {
                 check(command.op == 'S', "invalid control command");

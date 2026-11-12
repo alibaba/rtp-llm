@@ -84,6 +84,7 @@ enum GptModelInputIndex : size_t {
     sequenceLengths,
     prefixLengths,
     cacheStorePublishStartTokens,
+    p2pFinalPrefill,
     maxKernelBlocksPerBatch,
     maxBlocksPerBatch,
     cacheKeysWidth,

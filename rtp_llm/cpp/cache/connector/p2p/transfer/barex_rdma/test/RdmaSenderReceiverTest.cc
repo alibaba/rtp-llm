@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <atomic>
+#include <set>
 #include <chrono>
 #include <cstring>
 #include <future>
@@ -358,6 +360,84 @@ TEST_F(RdmaSenderReceiverTest, G2_MultipleSenders_ConcurrentKeys) {
         EXPECT_TRUE(verifyDevice(dst_tensors[i].data_ptr(), contents[i])) << "key index " << i;
     }
 }
+
+// Keep legacy single-batch writeback compatible with incremental Prefill reception.
+class RdmaReceiveWindowTest: public RdmaSenderReceiverTest, public ::testing::WithParamInterface<bool> {};
+
+TEST_P(RdmaReceiveWindowTest, CompletesOnlyAfterAllTargetBlocksAreCopied) {
+    constexpr size_t size = kMinMrRegBytes;
+    auto first_source = allocDevice(size).fill_('A');
+    auto final_source = allocDevice(size).fill_('B');
+    auto first_target = allocDevice(size).zero_();
+    auto final_target = allocDevice(size).zero_();
+    at::cuda::getCurrentCUDAStream().synchronize();
+
+    auto targets = makeBlocks(101, first_target.data_ptr(), size, true);
+    targets.merge(makeBlocks(102, final_target.data_ptr(), size, true));
+    auto sources = makeBlocks(100, first_source.data_ptr(), size, true);
+    sources.merge(makeBlocks(101, first_source.data_ptr(), size, true));
+    sources.merge(makeBlocks(102, final_source.data_ptr(), size, true));
+    ASSERT_TRUE(regAllMem(*receiver_, targets));
+    ASSERT_TRUE(regAllMem(*sender_, sources));
+
+    std::atomic<int> copied_batches{0};
+    std::atomic<int> completions{0};
+    RecvRequest receive;
+    receive.unique_key = "rdma_receive_window";
+    receive.block_info = targets;
+    receive.deadline_ms = currentTimeMs() + 10000;
+    if (GetParam()) {
+        receive.on_batch_copied = [&, pending = std::set<int64_t>{101, 102}](const auto& keys) mutable {
+            ++copied_batches;
+            for (const auto key : keys) {
+                pending.erase(key);
+            }
+            return pending.empty();
+        };
+    }
+    auto task = receiver_->recv(receive);
+    ASSERT_NE(task, nullptr);
+    task->setDoneCallback([&]() { ++completions; });
+
+    SendRequest send;
+    send.ip = "127.0.0.1";
+    send.port = test_port_;
+    send.unique_key = receive.unique_key;
+    send.deadline_ms = receive.deadline_ms;
+    send.timeout_ms = 10000;
+    if (GetParam()) {
+        send.block_info = makeBlocks(100, first_source.data_ptr(), size, true);
+        ASSERT_EQ(syncSend(*sender_, send), TransferErrorCode::OK);
+        EXPECT_FALSE(task->done());
+        EXPECT_EQ(completions.load(), 0);
+
+        send.block_info.merge(makeBlocks(101, first_source.data_ptr(), size, true));
+        ASSERT_EQ(syncSend(*sender_, send), TransferErrorCode::OK);
+        EXPECT_FALSE(task->done());
+        EXPECT_EQ(completions.load(), 0);
+        EXPECT_TRUE(verifyDevice(first_target.data_ptr(), std::string(size, 'A')));
+        EXPECT_TRUE(verifyDevice(final_target.data_ptr(), std::string(size, '\0')));
+        send.block_info = makeBlocks(102, final_source.data_ptr(), size, true);
+    } else {
+        send.block_info = makeBlocks(101, first_source.data_ptr(), size, true);
+        send.block_info.merge(makeBlocks(102, final_source.data_ptr(), size, true));
+    }
+    ASSERT_EQ(syncSend(*sender_, send), TransferErrorCode::OK);
+    EXPECT_TRUE(task->success());
+    EXPECT_EQ(completions.load(), 1);
+    EXPECT_EQ(copied_batches.load(), GetParam() ? 3 : 0);
+    EXPECT_TRUE(verifyDevice(first_target.data_ptr(), std::string(size, 'A')));
+    EXPECT_TRUE(verifyDevice(final_target.data_ptr(), std::string(size, 'B')));
+
+    receiver_->stealTask(receive.unique_key);
+    if (GetParam()) {
+        send.block_info = makeBlocks(100, first_source.data_ptr(), size, true);
+        EXPECT_EQ(syncSend(*sender_, send), TransferErrorCode::OK);
+        EXPECT_EQ(completions.load(), 1);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(WritebackAndChunkedPrefill, RdmaReceiveWindowTest, ::testing::Bool());
 
 }  // namespace barex_rdma
 }  // namespace transfer

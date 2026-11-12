@@ -11,9 +11,35 @@
 #include <chrono>
 #include <functional>
 #include <limits>
+#include <set>
 #include <thread>
 
 namespace rtp_llm {
+
+namespace {
+
+class ReceiveWindow {
+public:
+    explicit ReceiveWindow(const transfer::KeyBlockInfoMap& targets) {
+        for (const auto& target : targets) {
+            pending_.insert(target.first);
+        }
+    }
+
+    bool onBatchCopied(const std::vector<int64_t>& keys) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto key : keys) {
+            pending_.erase(key);
+        }
+        return pending_.empty();
+    }
+
+private:
+    std::mutex mutex_;
+    std::set<int64_t> pending_;
+};
+
+}  // namespace
 
 P2PWorkerDecodeRead::P2PWorkerDecodeRead(P2PConnectorWorkerConfig                    config,
                                                    const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
@@ -110,15 +136,19 @@ ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&         
             }
 
             // key 由编排层签发的 route_id + plan digest 命名 —— 两侧不做任何独立推导。
-            const std::string partition_layer_key = P2PKeyUtil::makeRouteLayerKey(
+            const std::string route_layer_key = P2PKeyUtil::makeRouteLayerKey(
                 unique_key, layer_id, layer_cache_buffer->cacheTag(), route.route_id, worker_plan.plan_digest);
 
             transfer::RecvRequest recv_req;
-            recv_req.unique_key  = partition_layer_key;
+            recv_req.unique_key  = route_layer_key;
             recv_req.block_info  = std::move(key_block_infos.value());
             recv_req.deadline_ms = deadline_ms;
+            auto window = std::make_shared<ReceiveWindow>(recv_req.block_info);
+            recv_req.on_batch_copied = [window](const std::vector<int64_t>& keys) {
+                return window->onBatchCopied(keys);
+            };
 
-            task_group->task_buffer_keys.emplace(partition_layer_key, layer_cache_buffer->bufferKey());
+            task_group->task_buffer_keys.emplace(route_layer_key, layer_cache_buffer->bufferKey());
             task_group->pending_buffer_tasks.emplace(layer_cache_buffer->bufferKey(), 0);
             prepared.push_back({std::move(recv_req),
                                 "read: layer=" + std::to_string(layer_id) + " tag=" + route.cache_tag

@@ -627,20 +627,6 @@ void P2PConnectorAsyncReadContext::runControl(const std::shared_ptr<P2PBroadcast
     notify();
 }
 
-/*----------------------------------------------- P2PConnectorAcceptedWriteContext
- * -------------------------------------------------*/
-void P2PConnectorAcceptedWriteContext::waitDone() {
-    // done() is always true, no blocking
-}
-
-bool P2PConnectorAcceptedWriteContext::done() const {
-    return true;
-}
-
-bool P2PConnectorAcceptedWriteContext::success() const {
-    return true;
-}
-
 /*----------------------------------------------- P2PConnectorAsyncReadContextChecker
  * -------------------------------------------------*/
 P2PConnectorAsyncReadContextChecker::~P2PConnectorAsyncReadContextChecker() {

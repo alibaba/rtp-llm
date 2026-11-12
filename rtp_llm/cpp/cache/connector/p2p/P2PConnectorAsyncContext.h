@@ -232,22 +232,6 @@ private:
     std::atomic<int64_t>             control_retry_ms_{0};
 };
 
-/// @brief P2P 按层写入已被 worker 接收的上下文。
-/// Write-by-layer is fire-and-forget; this context only reports that scheduling was accepted.
-/// It does not represent the final transfer result.
-class P2PConnectorAcceptedWriteContext: public AsyncContext {
-public:
-    P2PConnectorAcceptedWriteContext() = default;
-    ~P2PConnectorAcceptedWriteContext() override = default;
-
-public:
-    void onDone(DoneCallback callback) override { if (callback) callback(ErrorInfo::OkStatus()); }
-    void waitDone() override;  // done() always true, no blocking
-    bool done() const override;
-    bool success() const override;
-
-};
-
 /// @brief 完成事件唤醒状态检查；定时器只处理 deadline 和控制 RPC 重试
 class P2PConnectorAsyncReadContextChecker {
 public:
