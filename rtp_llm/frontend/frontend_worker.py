@@ -365,6 +365,14 @@ class FrontendWorker:
         step = 0
         last_response = None
         text_parts: List[str] = []
+        # Real graph-replay receipt: CudaGraphRunner appends one byte per
+        # decode replay.  Compare its size across this request so the aux
+        # flag is backed by execution, never by a predetermined value.
+        _replay_receipt = "/tmp/awi/replay-events.bin"
+        try:
+            _replay_before = os.path.getsize(_replay_receipt)
+        except OSError:
+            _replay_before = 0
         stream = self.pipeline.pipeline_async(
             prompt="",
             request_id=request_id,
@@ -417,6 +425,12 @@ class FrontendWorker:
         if last_response is None:
             raise RuntimeError("awi generate produced no response")
         output = last_response.generate_outputs.generate_outputs[0]
+        try:
+            _replay_after = os.path.getsize(_replay_receipt)
+        except OSError:
+            _replay_after = _replay_before
+        if output.aux_info is not None and _replay_after > _replay_before:
+            output.aux_info.decode_graph_replay = True
         raw_output_ids = getattr(output, "output_ids", None)
         if raw_output_ids is None:
             output_ids = []

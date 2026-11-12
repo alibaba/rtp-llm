@@ -1384,12 +1384,14 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs&                inpu
                 state.current_real_graph_bs,
                 state.current_real_graph_bs * num_tokens_per_bs_,
                 state.seq_len_sum);
-            static std::atomic<int> replay_trace{0};
-            if (replay_trace.fetch_add(1) < 4) {
-                std::fprintf(stderr, "[AWI_GRAPH] replay_decode key=%d seq_len_sum=%d\n",
-                             state.current_real_graph_bs, state.seq_len_sum);
-            }
             replayDecode(state.current_real_graph_bs);
+            // Durable receipt for the API layer: one byte per real graph
+            // replay, never synthesized by a flag.  The request handler
+            // snapshots this file and promotes its aux flag only when it grew.
+            if (FILE* receipt = std::fopen("/tmp/awi/replay-events.bin", "ab")) {
+                std::fputc('.', receipt);
+                std::fclose(receipt);
+            }
             outputs.decode_graph_replay = true;
         }
         outputs.hidden_states =
@@ -1654,17 +1656,7 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
 bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state, CudaGraphCheckMode mode) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.canRun");
     const bool observe_fallback = mode == CudaGraphCheckMode::FORWARD;
-    static std::atomic<int> canrun_trace{0};
-    const bool trace_canrun = observe_fallback && canrun_trace.fetch_add(1) < 8;
-    if (trace_canrun) {
-        std::fprintf(stderr, "[AWI_GRAPH] canRun begin this=%p enable=%d prefill=%d range=%zu instances=%zu bs=%lld\n",
-                     (void*)this, (int)enable_cuda_graph_, (int)is_prefill_cuda_graph_mode_,
-                     capture_range_.size(), graph_instances_.size(),
-                     inputs.attention_inputs.input_lengths.defined()
-                         ? (long long)inputs.attention_inputs.input_lengths.size(0) : -1LL);
-    }
     if (!enable_cuda_graph_) {
-        if (trace_canrun) std::fprintf(stderr, "[AWI_GRAPH] fallback=disabled\n");
         return false;
     }
     if (isGenerationPrefillCudaGraph()) {
