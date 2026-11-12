@@ -260,7 +260,11 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     if (update_info.generation_prefill_cuda_graph_status != GenerationPrefillCudaGraphStatus::NOT_REQUESTED) {
         generation_prefill_cuda_graph_status_ = update_info.generation_prefill_cuda_graph_status;
     }
-    decode_graph_replay_ = update_info.decode_graph_replay;
+    // Sticky: a trailing non-graph update (stop-token postprocess) must not
+    // erase the fact that this request's decode actually replayed a graph.
+    if (update_info.decode_graph_replay) {
+        decode_graph_replay_ = true;
+    }
 
     if (update_info.loss.defined()) {
         setLoss(update_info.loss);
