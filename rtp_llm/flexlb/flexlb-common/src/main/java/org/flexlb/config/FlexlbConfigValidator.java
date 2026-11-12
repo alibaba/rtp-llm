@@ -130,6 +130,16 @@ final class FlexlbConfigValidator {
         require(config.getObservability() != null, "observability", "is required");
 
         if (!config.isDirect()) {
+            PrefillQueueSheddingConfig shedding = config.queueScheduler().getPrefillQueueShedding();
+            if (shedding != null) {
+                require(config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH,
+                        "scheduler.prefillQueueShedding",
+                        "is supported only with the NON_BATCH dispatcher");
+                require(config.getRouter().getRoles().getPrefill().getTokenBalance() != null
+                                || shedding.getDeadlineBudget() == null,
+                        "scheduler.prefillQueueShedding.deadlineBudget",
+                        "requires router.roles.prefill.tokenBalance for token accounting");
+            }
             validateQueue(config.queueScheduler());
         }
         config.getDispatcher().validateFor(config.getScheduler());
@@ -211,6 +221,73 @@ final class FlexlbConfigValidator {
                     "scheduler.ordering.preemption",
                     "is supported only with PRIORITY");
         }
+        PrefillQueueSheddingConfig shedding = queue.getPrefillQueueShedding();
+        if (shedding != null) {
+            positive(shedding.getExpectedWaitThresholdMs(),
+                    "scheduler.prefillQueueShedding.expectedWaitThresholdMs");
+            positive(shedding.getMaxWaitMs(),
+                    "scheduler.prefillQueueShedding.maxWaitMs");
+            require(shedding.getMaxWaitMs() >= shedding.getExpectedWaitThresholdMs(),
+                    "scheduler.prefillQueueShedding.maxWaitMs",
+                    "must not be below expectedWaitThresholdMs");
+            require(shedding.getMinAcceptingWorkerPercent() > 0
+                            && shedding.getMinAcceptingWorkerPercent()
+                                    <= RoutingConfig.PERCENTAGE_SCALE,
+                    "scheduler.prefillQueueShedding.minAcceptingWorkerPercent",
+                    "must be in (0, 100]");
+            PrefillQueueSheddingConfig.RecoveryConfig recovery = shedding.getRecovery();
+            if (recovery != null) {
+                positive(recovery.getWindowMs(),
+                        "scheduler.prefillQueueShedding.recovery.windowMs");
+                require(recovery.getMaxGraceMs() > 0
+                                && recovery.getMaxGraceMs() <= shedding.getMaxWaitMs(),
+                        "scheduler.prefillQueueShedding.recovery.maxGraceMs",
+                        "must be in (0, maxWaitMs]");
+                positive(recovery.getBurstProbeMs(),
+                        "scheduler.prefillQueueShedding.recovery.burstProbeMs");
+                require(recovery.getWaitMultiplier() > 1.0,
+                        "scheduler.prefillQueueShedding.recovery.waitMultiplier",
+                        "must be above 1 so relief never tightens eviction");
+                require(recovery.getMaxEvictionFraction() > 0
+                                && recovery.getMaxEvictionFraction() <= 1.0,
+                        "scheduler.prefillQueueShedding.recovery.maxEvictionFraction",
+                        "must be in (0, 1]");
+                require(recovery.getMinArrivalDropFraction() > 0
+                                && recovery.getMinArrivalDropFraction() < 1.0,
+                        "scheduler.prefillQueueShedding.recovery.minArrivalDropFraction",
+                        "must be in (0, 1)");
+                require(recovery.getMinQueueDrainFraction() > 0
+                                && recovery.getMinQueueDrainFraction() < 1.0,
+                        "scheduler.prefillQueueShedding.recovery.minQueueDrainFraction",
+                        "must be in (0, 1)");
+            }
+            PrefillQueueSheddingConfig.DeadlineBudgetConfig deadlineBudget =
+                    shedding.getDeadlineBudget();
+            if (deadlineBudget != null) {
+                require(Double.isFinite(deadlineBudget.getTokensPerSecond())
+                                && deadlineBudget.getTokensPerSecond() > 0,
+                        "scheduler.prefillQueueShedding.deadlineBudget.tokensPerSecond",
+                        "must be calibrated to a positive tokens/second rate");
+                require(Double.isFinite(deadlineBudget.getCapacityFactor())
+                                && deadlineBudget.getCapacityFactor() > 0
+                                && deadlineBudget.getCapacityFactor()
+                                        <= RoutingConfig.PERCENTAGE_SCALE / 100,
+                        "scheduler.prefillQueueShedding.deadlineBudget.capacityFactor",
+                        "must be in (0, 1]");
+                require(deadlineBudget.getSaturatedWorkerPercent() > 0
+                                && deadlineBudget.getSaturatedWorkerPercent()
+                                        <= RoutingConfig.PERCENTAGE_SCALE,
+                        "scheduler.prefillQueueShedding.deadlineBudget.saturatedWorkerPercent",
+                        "must be in (0, 100]");
+                positive(deadlineBudget.getSaturationHoldMs(),
+                        "scheduler.prefillQueueShedding.deadlineBudget.saturationHoldMs");
+                require(deadlineBudget.getDispatchSlackMs() >= 0
+                                && deadlineBudget.getDispatchSlackMs()
+                                        < shedding.getExpectedWaitThresholdMs(),
+                        "scheduler.prefillQueueShedding.deadlineBudget.dispatchSlackMs",
+                        "must be in [0, expectedWaitThresholdMs)");
+            }
+        }
     }
 
     private static void validateRouting(RoutingConfig routing) {
@@ -243,6 +320,16 @@ final class FlexlbConfigValidator {
             range(affinity.getMinPrefixHitPercent(), 0,
                     RoutingConfig.PERCENTAGE_SCALE,
                     "router.roles.prefill.cacheAffinity.minPrefixHitPercent");
+        }
+        RoutingConfig.TokenBalanceConfig tokenBalance = prefill.getTokenBalance();
+        if (tokenBalance != null) {
+            range(tokenBalance.getMinPrefixHitPercent(), 0,
+                    RoutingConfig.PERCENTAGE_SCALE,
+                    "router.roles.prefill.tokenBalance.minPrefixHitPercent");
+            positive(tokenBalance.getMaxPendingComputeTokens(),
+                    "router.roles.prefill.tokenBalance.maxPendingComputeTokens");
+            positive(tokenBalance.getWindowMs(),
+                    "router.roles.prefill.tokenBalance.windowMs");
         }
 
         require(routing.getRoles().getDecode() != null,

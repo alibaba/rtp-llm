@@ -5,9 +5,11 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.PlacementKey;
+import org.flexlb.balance.scheduler.PrefillQueueShedding;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
@@ -33,6 +35,10 @@ import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Prefill 池的候选排序与端点选择：默认按建模 TTFT，可选按未缓存 token 工作量均衡。
+ * 同时向队列丢弃策略提供池占用快照、过载证据与单请求工作量估计。
+ */
 @Component
 public class CostBasedPrefillStrategy {
 
@@ -43,6 +49,8 @@ public class CostBasedPrefillStrategy {
     private final CacheAwareService cacheAwareService;
     private final EngineHealthReporter engineHealthReporter;
     private final EndpointRoundRobin tieRotation = new EndpointRoundRobin();
+    /** Pool-wide sustained-pressure evidence for global shedding admission. */
+    private final PrefillQueuePressure queuePressure = new PrefillQueuePressure();
 
     public CostBasedPrefillStrategy(WorkerDirectory workerDirectory,
                                     CacheAwareService cacheAwareService,
@@ -77,9 +85,14 @@ public class CostBasedPrefillStrategy {
         }
 
         // Rank known work and cache hits without excluding admission-blocked candidates.
-        int selectedIndex = selectBestCandidate(
-                survivors, survivors.minimumProjectedTtftMs,
-                roleType, group, seqLen, config);
+        RoutingConfig.TokenBalanceConfig tokenBalance = config.getRouter()
+                .getRoles().getPrefill().getTokenBalance();
+        int selectedIndex = tokenBalance != null
+                ? selectTokenBalancedCandidate(
+                        survivors, roleType, group, seqLen, tokenBalance)
+                : selectBestCandidate(
+                        survivors, survivors.minimumProjectedTtftMs,
+                        roleType, group, seqLen, config);
 
         if (selectedIndex < 0) {
             Logger.debug(
@@ -126,6 +139,11 @@ public class CostBasedPrefillStrategy {
             }
         }
         long selectedTtft = survivors.projectedTtftMs(selectedIndex);
+        // Reserve outstanding uncached work before handing the pin to the route
+        // owner; blocked and stale-generation paths return before this point.
+        PrefillTokenWorkload.Reservation tokenReservation =
+                tokenBalance == null ? null : best.planTokenWork(
+                        Math.max(0L, seqLen - bestCacheHit));
         SelectedRole selectedRole = buildSelectedRole(
                 best,
                 roleType,
@@ -134,7 +152,8 @@ public class CostBasedPrefillStrategy {
                 selectedPrefillMs,
                 bestCacheHit,
                 survivors.ownershipVersion(selectedIndex),
-                selectedPin);
+                selectedPin,
+                tokenReservation);
         try {
             reportSelectedEstimates(
                     roleType,
@@ -159,6 +178,45 @@ public class CostBasedPrefillStrategy {
         }
     }
 
+    /**
+     * Rank outstanding uncached token work instead of modeled TTFT. Cold
+     * requests go to the least-loaded worker; hot requests only rotate among
+     * cache leaders so their prefix reuse is not discarded.
+     */
+    private int selectTokenBalancedCandidate(PrefillCandidateSet survivors,
+            RoleType roleType, String group, long seqLen,
+            RoutingConfig.TokenBalanceConfig tokenBalance) {
+        boolean cacheFirst = PrefillTokenBalance.cacheFirst(
+                survivors.maximumCacheHit, seqLen, tokenBalance.getMinPrefixHitPercent());
+        long maxPendingComputeTokens = tokenBalance.getMaxPendingComputeTokens();
+        double[] scores = new double[survivors.size()];
+        double minimumScore = Double.MAX_VALUE;
+        int eligibleCount = 0;
+        for (int index = 0; index < survivors.size(); index++) {
+            long cacheHit = survivors.cacheHit(index);
+            PrefillEndpoint endpoint = survivors.endpoint(index);
+            if (!PrefillTokenBalance.eligible(cacheHit, survivors.maximumCacheHit, cacheFirst)
+                    || !cacheFirst && !PrefillTokenBalance.hasCapacity(
+                            endpoint.pendingTokenWork(), maxPendingComputeTokens)) {
+                scores[index] = Double.MAX_VALUE;
+                continue;
+            }
+            double score = cacheFirst
+                    ? 0.0
+                    : endpoint.tokenWorkloadScore() + Math.max(0L, seqLen);
+            scores[index] = score;
+            minimumScore = Math.min(minimumScore, score);
+            eligibleCount++;
+        }
+        if (eligibleCount == 0) {
+            return -1;
+        }
+        double selectedScore = minimumScore;
+        return tieRotation.next(roleType, group, survivors.size(),
+                index -> scores[index] == selectedScore,
+                survivors::endpointAddress);
+    }
+
     private static Response admissionFailure(PrefillEndpoint endpoint, int priority) {
         AdmissionRejectReason reason = endpoint.admissionRejectReason(priority);
         return switch (reason) {
@@ -167,6 +225,86 @@ public class CostBasedPrefillStrategy {
             case RESOURCE_EXHAUSTED -> Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
             case UNSPECIFIED -> Response.error(StrategyErrorType.ADMISSION_UNAVAILABLE);
         };
+    }
+
+    /** Occupancy snapshot of one Prefill pool, used by queue shedding decisions. */
+    public record PrefillPoolSnapshot(int workers, int accepting, long pendingTokens) { }
+
+    /** Worker count, accepting share and outstanding uncached tokens of one pool. */
+    public PrefillPoolSnapshot prefillPoolSnapshot(RoleType roleType, String group) {
+        List<EndpointRegistry.PrefillRoutingEntry> candidates =
+                discoverEndpoints(roleType, group).candidates();
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        int accepting = 0;
+        long pendingTokens = 0L;
+        for (EndpointRegistry.PrefillRoutingEntry routingEntry : candidates) {
+            PrefillEndpoint endpoint = routingEntry.endpoint();
+            if (endpoint.canAcceptRequest()) {
+                accepting++;
+            }
+            pendingTokens += Math.max(0L, endpoint.pendingTokenWork());
+        }
+        return new PrefillPoolSnapshot(candidates.size(), accepting, pendingTokens);
+    }
+
+    /** True when more than half of the pool reports deep Engine waiting queues for a sustained period. */
+    public boolean isPrefillClusterOverloaded(RoleType roleType, String group, long nowMs) {
+        List<EndpointRegistry.PrefillRoutingEntry> candidates =
+                discoverEndpoints(roleType, group).candidates();
+        int waiting = 0;
+        for (EndpointRegistry.PrefillRoutingEntry routingEntry : candidates) {
+            if (routingEntry.endpoint().getStatus()
+                    .committedEngineObservation().waitingQueryLen() > 10) {
+                waiting++;
+            }
+        }
+        return queuePressure.observe(roleType, group, candidates.size(), waiting, nowMs);
+    }
+
+    /**
+     * Advisory fleet estimate for one queued request: the best reachable cache
+     * hit, the best modeled service time across the pool, and the pool size.
+     * Returns null when the pool is empty or no estimator produced a value.
+     */
+    public PrefillQueueShedding.Estimate estimateQueuedWork(
+            BalanceContext balanceContext, RoleType roleType, String group) {
+        EndpointDiscovery discovery = discoverEndpoints(roleType, group);
+        int workers = discovery.candidates().size();
+        if (workers <= 0) {
+            return null;
+        }
+        Request request = balanceContext.getRequest();
+        long seqLen = Math.max(0L, request.getSeqLen());
+        Map<String, Integer> cacheMatchResults = discovery.directory().isEmpty() ? Map.of()
+                : getCacheMatchResults(balanceContext, roleType, discovery);
+        long bestHit = 0L;
+        long bestWorkMs = -1L;
+        for (EndpointRegistry.PrefillRoutingEntry routingEntry : discovery.candidates()) {
+            PrefillEndpoint endpoint = routingEntry.endpoint();
+            CacheTokenMatch cacheMatch = calculateCacheMatch(
+                    endpoint, routingEntry.address(), cacheMatchResults, request);
+            long hit = Math.max(0L, cacheMatch.effectiveHitTokens());
+            bestHit = Math.max(bestHit, hit);
+            PrefillTimePredictor predictor = endpoint.getPredictor();
+            if (predictor == null) {
+                continue;
+            }
+            try {
+                long workMs = PrefillPredictionBoundary.predictSingleRequestMs(
+                        predictor.evaluator(), seqLen, hit);
+                if (bestWorkMs < 0L || workMs < bestWorkMs) {
+                    bestWorkMs = workMs;
+                }
+            } catch (RuntimeException predictionFailure) {
+                // A broken estimator only removes its own candidate from the estimate.
+            }
+        }
+        if (bestWorkMs < 0L) {
+            return null;
+        }
+        return new PrefillQueueShedding.Estimate(seqLen, bestHit, bestWorkMs, workers);
     }
 
     private static PlacementResult<SelectedRole, PlacementKey> blockedWithDiagnostics(
@@ -556,6 +694,21 @@ public class CostBasedPrefillStrategy {
             long bestCacheHit,
             long placementVersion,
             WorkerEndpoint.GenerationPin selectedPin) {
+        return buildSelectedRole(
+                ep, roleType, requestId, projectedTtftMs, selectedPrefillMs,
+                bestCacheHit, placementVersion, selectedPin, null);
+    }
+
+    private SelectedRole buildSelectedRole(
+            PrefillEndpoint ep,
+            RoleType roleType,
+            long requestId,
+            long projectedTtftMs,
+            long selectedPrefillMs,
+            long bestCacheHit,
+            long placementVersion,
+            WorkerEndpoint.GenerationPin selectedPin,
+            PrefillTokenWorkload.Reservation tokenReservation) {
         try {
             // Populate DebugInfo so ScheduledRequest.hitCache() can read
             // hitCacheLen for batch metrics.
@@ -582,11 +735,16 @@ public class CostBasedPrefillStrategy {
             result.setSuccess(true);
             WorkerEndpoint.GenerationPin ownedPin = selectedPin;
             selectedPin = null;
+            PrefillTokenWorkload.Reservation ownedReservation = tokenReservation;
+            tokenReservation = null;
             return SelectedRole.prefill(
-                    ownedPin, result, selectedPrefillMs, placementVersion);
+                    ownedPin, result, selectedPrefillMs, placementVersion, ownedReservation);
         } finally {
             if (selectedPin != null) {
                 selectedPin.close();
+            }
+            if (tokenReservation != null) {
+                tokenReservation.close();
             }
         }
     }

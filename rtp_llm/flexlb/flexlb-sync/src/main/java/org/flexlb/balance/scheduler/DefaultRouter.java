@@ -4,6 +4,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
+import org.flexlb.balance.strategy.CostBasedPrefillStrategy.PrefillPoolSnapshot;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
@@ -15,8 +16,8 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.util.Logger;
 import org.flexlb.service.VitCacheSelector;
+import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -25,6 +26,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
+/**
+ * 角色路由门面：按模型必需角色分派到各选择器，并组合成一条可提交的路由。
+ * 另向 QUEUE 调度器暴露 Prefill 池证据接口，供丢弃策略使用。
+ */
 @Component
 public class DefaultRouter {
 
@@ -58,6 +63,35 @@ public class DefaultRouter {
 
     public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context) {
         return select(context, resolvePolicyGroup(context));
+    }
+
+    /** The Prefill-capable role this model actually routes through, or null. */
+    public RoleType prefillRole() {
+        for (RoleType role : requiredRoles) {
+            if (role.supportsPrefill()) {
+                return role;
+            }
+        }
+        return null;
+    }
+
+    /** Fleet-side work estimate for one queued request; null without a Prefill pool. */
+    public PrefillQueueShedding.Estimate estimateQueuedWork(BalanceContext context, String policyGroup) {
+        RoleType role = prefillRole();
+        return role == null ? null
+                : prefillSelector.estimateQueuedWork(context, role, policyGroup);
+    }
+
+    /** Sustained pool-wide Engine queue pressure evidence for global shedding. */
+    public boolean isPrefillClusterOverloaded(String policyGroup, long nowMs) {
+        RoleType role = prefillRole();
+        return role != null && prefillSelector.isPrefillClusterOverloaded(role, policyGroup, nowMs);
+    }
+
+    /** Pool occupancy snapshot; null without a Prefill pool. */
+    public PrefillPoolSnapshot prefillPoolSnapshot(String policyGroup) {
+        RoleType role = prefillRole();
+        return role == null ? null : prefillSelector.prefillPoolSnapshot(role, policyGroup);
     }
 
     public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context, String policyGroup) {

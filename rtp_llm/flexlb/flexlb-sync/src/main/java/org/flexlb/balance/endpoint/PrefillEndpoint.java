@@ -13,6 +13,7 @@ import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.scheduler.WorkerBatcher;
+import org.flexlb.balance.strategy.PrefillTokenWorkload;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
@@ -117,6 +118,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 status.getIpPort(), this, config,
                 deliveryStrategy, endpointEvents);
         this.prefillState = runtime.ownedState();
+        RoutingConfig.PrefillConfig prefillRouting = config.getRouter()
+                .getRoles().getPrefill();
+        RoutingConfig.TokenBalanceConfig tokenBalance =
+                prefillRouting == null ? null : prefillRouting.getTokenBalance();
+        if (tokenBalance != null) {
+            this.prefillState.enableTokenWorkload(
+                    tokenBalance.isEnableWindow() ? tokenBalance.getWindowMs() : 0L);
+        }
     }
 
     /** Start the attached generation exactly once before routing publication. */
@@ -309,6 +318,21 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /** Advisory endpoint ownership revision captured by queue placement. */
     public long placementVersion() {
         return prefillState.mutationVersion();
+    }
+
+    /** Soft scoring reservation of outstanding uncached work; closes exactly once on commit or abandoned planning. */
+    public PrefillTokenWorkload.Reservation planTokenWork(long tokens) {
+        return prefillState.planTokenWork(tokens);
+    }
+
+    /** Advisory outstanding uncached work for token-balanced ranking; 0 when accounting is disabled. */
+    public double tokenWorkloadScore() {
+        return prefillState.tokenWorkloadScore();
+    }
+
+    /** Advisory outstanding pending uncached work for cold capacity checks. */
+    public long pendingTokenWork() {
+        return prefillState.pendingTokenWork();
     }
 
     /**

@@ -115,6 +115,27 @@ final class OrderedRequestQueue {
                 : fifo.hasPendingRequests();
     }
 
+    /** Enumerate every linked entry without mutating order; used by eviction scans. */
+    List<GlobalQueueEntry> entries() {
+        List<GlobalQueueEntry> entries = new ArrayList<>(size);
+        if (priorityOrdering) {
+            for (Bucket bucket : priorityBuckets) {
+                if (bucket != null) {
+                    appendBucket(bucket, entries);
+                }
+            }
+        } else {
+            appendBucket(fifo, entries);
+        }
+        return entries;
+    }
+
+    private static void appendBucket(Bucket bucket, List<GlobalQueueEntry> entries) {
+        for (GlobalQueueEntry entry = bucket.head; entry != null; entry = entry.next) {
+            entries.add(entry);
+        }
+    }
+
     /** Start scanning at this request, or keep an existing earlier scan position. */
     private void rewindScanTo(GlobalQueueEntry entry) {
         if (!entry.linked || entry.removed) {

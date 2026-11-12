@@ -5,7 +5,9 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
+import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.PrefillQueueSheddingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -15,6 +17,7 @@ import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
@@ -23,6 +26,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -53,6 +57,8 @@ import java.util.concurrent.locks.ReentrantLock;
 final class GlobalQueueCoordinator implements AutoCloseable {
 
     private static final int MIN_PLANNER_THREADS = 1;
+    /** Decision-loop wake period while shedding is enabled; otherwise unbounded. */
+    private static final long SHED_WAKEUP_MS = 100L;
 
     private final DefaultRouter router;
     private final BatchSchedulerReporter reporter;
@@ -63,6 +69,17 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private final int plannerCount;
     private final double scanBudgetMultiplier;
     private final ConfigService configService;
+    /** Optional age-based shedding; null keeps the queue purely deadline-driven. */
+    private final PrefillQueueSheddingConfig sheddingConfig;
+    // Decision-thread confined feedback state, keyed by routing group.
+    private final Map<String, PrefillQueueShedding.Controller> sheddingControllers =
+            new LinkedHashMap<>();
+    private final Map<String, PrefillTrafficTrend> trafficTrends = new LinkedHashMap<>();
+    private final Map<String, PrefillDeadlineBudget> deadlineBudgets = new LinkedHashMap<>();
+    /** Arrival classification funnel from ingress threads to the decision thread. */
+    private final ConcurrentLinkedQueue<GlobalQueueEntry> arrivals = new ConcurrentLinkedQueue<>();
+    /** Hard-timeout evidence funnel from planner threads to the decision thread. */
+    private final ConcurrentLinkedQueue<HardTimeout> hardTimeouts = new ConcurrentLinkedQueue<>();
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition changed = lock.newCondition();
     private final OrderedRequestQueue orderedQueue;
@@ -99,6 +116,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
         this.availability = Objects.requireNonNull(availability, "availability");
         this.priorityOrdering = resolvePriorityOrdering(checkedConfig);
+        this.sheddingConfig = checkedConfig.loadBalanceConfig()
+                .queueScheduler().getPrefillQueueShedding();
         this.orderedQueue = new OrderedRequestQueue(priorityOrdering);
         this.waitingRequests = new PlacementWaitQueue(priorityOrdering, availability);
         this.scanBudgetMultiplier = checkedConfig.loadBalanceConfig().queueScheduler().getScanBudgetMultiplier();
@@ -150,6 +169,11 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                     Attributes.builder()
                             .put("flexlb.queue.depth", orderedQueue.size())
                             .put("flexlb.request.priority", priority).build());
+            if (sheddingConfig != null) {
+                // The decision thread classifies arrivals; retries and
+                // migrations never re-enter this funnel.
+                arrivals.add(entry);
+            }
             // Completion removes this exact request from the ordering and wait
             // indexes without scanning the backlog.
             future.whenComplete((ignored, failure) -> completeRequest(entry));
@@ -208,6 +232,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 if (completed != null) {
                     processCompletedPlan(completed);
                 }
+                shedOverloadedQueue();
                 // Reuse released slots even when other completed plans are buffered.
                 claimPlanningSlots().forEach(this::submitPlan);
                 awaitIfNoWork();
@@ -352,6 +377,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         // must not allow an already expired request to scan the fleet or be
         // published to an endpoint queue.
         if (entry.context.requestExpired(System.currentTimeMillis())) {
+            recordQueueHardTimeout(entry);
             lifecycle.cancelRequest(
                     entry.context.getRequestId(),
                     0L,
@@ -374,6 +400,13 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             handle.recordDiagnostics(result.diagnostics());
             FlexlbTrace.recordPlacement(entry.context.getTraceContext(), decisionStartedNanos,
                     result.status().name(), result.diagnostics(), null);
+            if (sheddingConfig != null
+                    && result.status() == PlacementResult.Status.BLOCKED) {
+                // Advisory fleet estimate captured while the request keeps
+                // waiting; eviction decisions read it later.
+                entry.sheddingEstimate = router.estimateQueuedWork(
+                        entry.context, entry.routingGroup);
+            }
             if (result.status() == PlacementResult.Status.SUCCESS) {
                 return Plan.success(
                         entry, handle, result, availabilitySequence);
@@ -470,6 +503,11 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         try {
             if (!isQueued(plan.entry)) { return true; }
             parked = waitingRequests.park(plan.entry, plan.waitKey(), plan.availabilitySequence);
+            PrefillQueueShedding.Estimate estimate = plan.entry.sheddingEstimate;
+            if (estimate != null && estimate.hitTokens() == 0L) {
+                plan.entry.knownColdRequest = true;
+            }
+            plan.entry.lastBlocker = plan.waitKey();
             depth = orderedQueue.size();
             counts = orderedQueue.priorityCounts();
         } finally {
@@ -518,6 +556,228 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
     }
 
+    // ==================== Prefill queue shedding ====================
+
+    /** Hard-deadline evidence enqueued by planner threads; atMs is wall clock. */
+    private record HardTimeout(String pool, long atMs) { }
+
+    /** Planner threads only enqueue the evidence; controllers stay decision-thread confined. */
+    private void recordQueueHardTimeout(GlobalQueueEntry entry) {
+        if (sheddingConfig == null || router.prefillRole() == null) {
+            return;
+        }
+        hardTimeouts.add(new HardTimeout(entry.routingGroup, System.currentTimeMillis()));
+    }
+
+    private void drainArrivals() {
+        GlobalQueueEntry entry;
+        while ((entry = arrivals.poll()) != null) {
+            if (!entry.classifyArrival || entry.removed || entry.future.isDone()) {
+                continue;
+            }
+            entry.classifyArrival = false;
+            PrefillQueueShedding.Controller controller = controllerFor(entry.routingGroup);
+            PrefillTrafficTrend trend = trendFor(entry.routingGroup);
+            if (trend != null) {
+                trend.arrive(Math.max(0L, entry.context.getRequest().getSeqLen()));
+            }
+            PrefillQueueShedding.Estimate estimate = entry.sheddingEstimate;
+            if (estimate != null && estimate.hitTokens() == 0L) {
+                controller.coldArrival();
+            } else {
+                controller.arrive();
+            }
+        }
+    }
+
+    private void drainHardTimeouts() {
+        HardTimeout timeout;
+        while ((timeout = hardTimeouts.poll()) != null) {
+            controllerFor(timeout.pool()).hardTimeout(timeout.atMs());
+        }
+    }
+
+    /**
+     * Decision-thread eviction round: expired queued requests get their hard
+     * deadline enforced, then each routing-group pool applies bounded soft
+     * eviction. Controllers throttle themselves to one active round per second.
+     */
+    private void shedOverloadedQueue() {
+        if (sheddingConfig == null) {
+            return;
+        }
+        long nowMs = System.currentTimeMillis();
+        long nowNanos = System.nanoTime();
+        drainArrivals();
+        drainHardTimeouts();
+        List<GlobalQueueEntry> expired = new ArrayList<>();
+        Map<String, List<PrefillQueueShedding.Candidate<GlobalQueueEntry>>> pools =
+                new LinkedHashMap<>();
+        lock.lock();
+        try {
+            if (closed.get()) {
+                return;
+            }
+            for (GlobalQueueEntry entry : orderedQueue.entries()) {
+                if (entry.removed || entry.future.isDone()
+                        || inFlight.contains(entry)) {
+                    continue;
+                }
+                if (entry.context.requestExpired(nowMs)) {
+                    expired.add(entry);
+                    continue;
+                }
+                PrefillQueueShedding.Estimate estimate = entry.sheddingEstimate;
+                if (estimate == null) {
+                    // Never blocked yet: only the hard deadline applies.
+                    continue;
+                }
+                long waitedMs = Math.max(0L, (nowNanos - entry.queuedAtNanos) / 1_000_000L);
+                pools.computeIfAbsent(entry.routingGroup, ignored -> new ArrayList<>())
+                        .add(new PrefillQueueShedding.Candidate<>(
+                                entry, entry.priority, entry.sequence, estimate, waitedMs));
+            }
+        } finally {
+            lock.unlock();
+        }
+        for (GlobalQueueEntry entry : expired) {
+            expireQueuedRequest(entry, nowMs);
+        }
+        for (Map.Entry<String, List<PrefillQueueShedding.Candidate<GlobalQueueEntry>>> pool
+                : pools.entrySet()) {
+            shedPool(pool.getKey(), pool.getValue(), nowMs);
+        }
+    }
+
+    private void expireQueuedRequest(GlobalQueueEntry entry, long nowMs) {
+        controllerFor(entry.routingGroup).hardTimeout(nowMs);
+        lifecycle.cancelRequest(
+                entry.context.getRequestId(),
+                0L,
+                CancelReason.DEADLINE_EXCEEDED);
+        removeRequest(entry);
+    }
+
+    private void shedPool(
+            String pool,
+            List<PrefillQueueShedding.Candidate<GlobalQueueEntry>> candidates,
+            long nowMs) {
+        CostBasedPrefillStrategy.PrefillPoolSnapshot snapshot = router.prefillPoolSnapshot(pool);
+        if (snapshot == null || snapshot.workers() <= 0) {
+            return;
+        }
+        PrefillQueueShedding.Controller controller = controllerFor(pool);
+        PrefillTrafficTrend trend = trendFor(pool);
+        double queuedWorkMs = 0.0;
+        for (PrefillQueueShedding.Candidate<GlobalQueueEntry> candidate : candidates) {
+            queuedWorkMs += candidate.estimate().fleetWorkMs();
+        }
+        PrefillTrafficTrend.Snapshot observed = trend == null ? null
+                : trend.observe(nowMs, queuedWorkMs,
+                        sheddingConfig.getExpectedWaitThresholdMs(),
+                        sheddingConfig.getMaxWaitMs());
+        List<GlobalQueueEntry> victims;
+        if (sheddingConfig.getDeadlineBudget() != null) {
+            victims = deadlineBudgetVictims(pool, candidates, snapshot, nowMs);
+        } else {
+            // Soft eviction requires sustained pool-wide Engine queue pressure;
+            // recovery headroom only reduces, never triggers, eviction.
+            victims = PrefillQueueShedding.adaptiveVictims(
+                    candidates, sheddingConfig, observed, controller, nowMs,
+                    router.isPrefillClusterOverloaded(pool, nowMs));
+        }
+        double acceptingPercent = snapshot.accepting() * 100.0 / snapshot.workers();
+        int selected = victims.size();
+        int accepted = 0;
+        for (GlobalQueueEntry victim : victims) {
+            if (evictPoolVictim(victim, acceptingPercent, trend)) {
+                accepted++;
+            }
+        }
+        controller.recordEvictions(nowMs, selected, accepted);
+    }
+
+    private List<GlobalQueueEntry> deadlineBudgetVictims(
+            String pool,
+            List<PrefillQueueShedding.Candidate<GlobalQueueEntry>> candidates,
+            CostBasedPrefillStrategy.PrefillPoolSnapshot snapshot,
+            long nowMs) {
+        PrefillDeadlineBudget budget = deadlineBudgets.computeIfAbsent(
+                pool, ignored -> new PrefillDeadlineBudget());
+        PrefillDeadlineBudget.Fleet fleet = new PrefillDeadlineBudget.Fleet(
+                snapshot.workers(),
+                snapshot.workers() - snapshot.accepting(),
+                snapshot.pendingTokens(),
+                true);
+        List<PrefillDeadlineBudget.Candidate<GlobalQueueEntry>> budgeted =
+                new ArrayList<>(candidates.size());
+        for (PrefillQueueShedding.Candidate<GlobalQueueEntry> candidate : candidates) {
+            GlobalQueueEntry entry = candidate.value();
+            PrefillQueueShedding.Estimate estimate = candidate.estimate();
+            long computeTokens = Math.max(
+                    0L, estimate.inputTokens() - estimate.hitTokens());
+            boolean cold = entry.knownColdRequest || estimate.hitTokens() == 0L;
+            long remainingMs = Math.max(
+                    0L, entry.context.getRequestExpiresAtMs() - nowMs);
+            budgeted.add(new PrefillDeadlineBudget.Candidate<>(
+                    entry, candidate.priority(), candidate.sequence(),
+                    computeTokens, cold, remainingMs));
+        }
+        return budget.victims(budgeted, fleet,
+                sheddingConfig.getDeadlineBudget(), priorityOrdering, nowMs);
+    }
+
+    /** Evict one victim, or veto a cold request while placement capacity exists. */
+    private boolean evictPoolVictim(
+            GlobalQueueEntry victim,
+            double acceptingPercent,
+            PrefillTrafficTrend trend) {
+        PrefillQueueShedding.Estimate estimate = victim.sheddingEstimate;
+        boolean cold = victim.knownColdRequest
+                || (estimate != null && estimate.hitTokens() == 0L);
+        lock.lock();
+        try {
+            if (closed.get() || victim.removed || victim.future.isDone()
+                    || inFlight.contains(victim)) {
+                return false;
+            }
+            if (cold && acceptingPercent >= sheddingConfig.getMinAcceptingWorkerPercent()) {
+                // Cold-request veto: workers still admit, so retry placement
+                // instead of dropping work that has not started anywhere.
+                orderedQueue.markRequestReadyForRetry(victim);
+                return false;
+            }
+            removeRequestUnderLock(victim);
+        } finally {
+            lock.unlock();
+        }
+        completeDecisionResponse(victim, error(
+                StrategyErrorType.RESOURCE_EXHAUSTED,
+                "prefill queue overloaded: request evicted while waiting for placement"));
+        if (trend != null && estimate != null) {
+            // Own evictions must not masquerade as natural queue drainage.
+            trend.discard(estimate.fleetWorkMs());
+        }
+        Logger.info(
+                "Prefill queue shedding evicted request: request_id={}, pool={}",
+                victim.context.getRequestId(), victim.routingGroup);
+        return true;
+    }
+
+    private PrefillQueueShedding.Controller controllerFor(String pool) {
+        return sheddingControllers.computeIfAbsent(
+                pool, ignored -> new PrefillQueueShedding.Controller());
+    }
+
+    private PrefillTrafficTrend trendFor(String pool) {
+        PrefillQueueSheddingConfig.RecoveryConfig recovery = sheddingConfig.getRecovery();
+        if (recovery == null) {
+            return null;
+        }
+        return trafficTrends.computeIfAbsent(
+                pool, ignored -> new PrefillTrafficTrend(recovery));
+    }
+
     private int calculateScanBudget(int candidates) {
         return (int) Math.min(Integer.MAX_VALUE, Math.ceil(candidates * scanBudgetMultiplier));
     }
@@ -528,7 +788,13 @@ final class GlobalQueueCoordinator implements AutoCloseable {
 
     private void awaitChanged() {
         try {
-            changed.await();
+            if (sheddingConfig == null) {
+                changed.await();
+                return;
+            }
+            // Shedding cadence needs periodic control rounds even without
+            // arrivals, capacity events or completed plans.
+            changed.await(SHED_WAKEUP_MS, TimeUnit.MILLISECONDS);
         } catch (InterruptedException interruption) {
             if (closed.get()) {
                 Thread.currentThread().interrupt();
@@ -589,6 +855,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             abandoned = orderedQueue.drain();
             waitingRequests.clear();
             registered.clear();
+            arrivals.clear();
+            hardTimeouts.clear();
             completed = List.copyOf(completedPlans);
             completedPlans.clear();
             inFlight.clear();
