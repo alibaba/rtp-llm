@@ -152,12 +152,12 @@ def load_experiment_view(directory):
                 node = event["node"]
                 role, instance_id = event["role"], event["instance_id"]
                 if role in role_names:
+                    generation = event["generation"]
                     process = processes.setdefault(
                         instance_id, {"role": role, "id": instance_id, "attempts": {}}
                     )
                     attempt = process["attempts"].setdefault(node, {})
-                    if "generation" in event:
-                        attempt["generation"] = event["generation"]
+                    attempt["generation"] = generation
                     attempt[kind] = {
                         k: event[k]
                         for k in ("recorded_at", "pid", "code", "url", "connect")

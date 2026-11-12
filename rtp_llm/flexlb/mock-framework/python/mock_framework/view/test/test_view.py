@@ -1072,6 +1072,7 @@ def test_view_distinguishes_role_process_evidence_from_missing_roles(completed):
             "node": "master-0",
             "role": "master",
             "instance_id": "master-0",
+            "generation": 0,
             "pid": 42,
         },
         {
@@ -1079,6 +1080,7 @@ def test_view_distinguishes_role_process_evidence_from_missing_roles(completed):
             "node": "master-0",
             "role": "master",
             "instance_id": "master-0",
+            "generation": 0,
             "code": 137,
         },
         {
@@ -1086,7 +1088,15 @@ def test_view_distinguishes_role_process_evidence_from_missing_roles(completed):
             "node": "master-0-restart-1",
             "role": "master",
             "instance_id": "master-0",
+            "generation": 1,
             "url": "http://127.0.0.1:1234",
+        },
+        {
+            "event": "process_started",
+            "node": "master-1",
+            "role": "master",
+            "instance_id": "master-1",
+            "pid": 43,
         },
         {"event": "client_result", "result": {"clients": {}, "errors": []}},
     ]
@@ -1095,10 +1105,17 @@ def test_view_distinguishes_role_process_evidence_from_missing_roles(completed):
             stream.write(
                 json.dumps({"recorded_at": "2026-10-29T00:00:05Z", **event}) + "\n"
             )
-    roles = load_experiment_view(completed)["roles"]
+    body = load_experiment_view(completed)
+    roles = body["roles"]
     (instance,) = roles["master"]["instances"]
+    assert instance["attempts"]["master-0"]["generation"] == 0
     assert instance["attempts"]["master-0"]["process_stopped"]["code"] == 137
+    assert instance["attempts"]["master-0-restart-1"]["generation"] == 1
     assert "process_ready" in instance["attempts"]["master-0-restart-1"]
+    assert any(
+        warning.startswith("events.jsonl:") and warning.endswith(": 'generation'")
+        for warning in body["warnings"]
+    )
     assert roles["prefill"]["state"] == "no_observation"
     assert roles["vit"]["state"] == "not_deployed"
     assert roles["client"]["playback"][0]["result"]["errors"] == []
