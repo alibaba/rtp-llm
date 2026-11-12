@@ -19,8 +19,22 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.utils.model_weight import W
 
+from .util import eplb_weight_tensors
+
 
 class TrtllmFp4Executor(FusedMoeExpertExecutor):
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return eplb_weight_tensors(
+            self.w1,
+            self.w2,
+            self.w1_scale,
+            self.w2_scale,
+            self.expert_x_scale,
+            self.g1_alphas,
+            self.g2_alphas,
+            self.g1_scale_c,
+        )
+
     @classmethod
     def executor_type(cls):
         return ExecutorType.TRTLLM_FP4
@@ -72,7 +86,7 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
         self.g2_alphas = w2_input_scale * w2_weight_scale_2
         self.g1_scale_c = self.g1_alphas / w2_input_scale
 
-        self.global_num_experts = config.expert_num
+        self.global_num_experts = config.physical_expert_num
         self._enable_pdl = device_support_pdl(self.w1.device)
 
     @property
@@ -101,6 +115,9 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
     ) -> CombineForwardPayload:
         topk_ids = payload.expert_topk_ids
         topk_weights = payload.expert_topk_weights
+        expert_load = payload.expert_load
+        if expert_load is not None:
+            expert_load.record_ids(topk_ids)
 
         topk = topk_ids.size(-1)
 
@@ -162,7 +179,7 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
             output1_scale_scalar=self.g1_scale_c,  # output1_scale_scalar
             output1_scale_gate_scalar=self.g1_alphas,  # output1_scale_gate_scalar
             output2_scale_scalar=self.g2_alphas,  # output2_scale_scalar
-            num_experts=self.global_num_experts,  # num_experts
+            num_experts=self.local_num_experts,
             top_k=topk,  # top_k
             n_group=None,  # n_group
             topk_group=None,  # topk_group

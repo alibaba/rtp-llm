@@ -9,6 +9,24 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
 )
 
 
+def eplb_weight_tensors(
+    *tensors: Optional[torch.Tensor],
+) -> tuple[torch.Tensor, ...]:
+    """Register live expert tensors; scalar scales are shared across experts."""
+    first = tensors[0]
+    assert first is not None and first.ndim > 0
+    num_experts = first.size(0)
+    result = []
+    for tensor in tensors:
+        if tensor is None:
+            continue
+        if tensor.ndim > 0 and tensor.size(0) == num_experts:
+            result.append(tensor)
+        elif tensor.numel() != 1:
+            raise ValueError("EPLB scale must be scalar or indexed by local expert")
+    return tuple(result)
+
+
 def resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
     """
     Shrink the given tensor and apply the given view to it.  This is

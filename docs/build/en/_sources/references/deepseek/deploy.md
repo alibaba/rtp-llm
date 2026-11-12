@@ -54,7 +54,6 @@ ENABLE_MERGE_W13=1 \
 --reuse_cache 0 \
 --cache_store_rdma_mode 1 \
 --cache_store_rdma_connect_timeout_ms 800 \
---balance_method mix \
 --use_deepep_internode 1 \
 --use_deepep_low_latency 0 \
 --use_deepep_moe 1 \
@@ -113,7 +112,6 @@ REDUNDANT_EXPERT=32 \
 --reuse_cache 0 \
 --cache_store_rdma_mode 1 \ # delete
 --cache_store_rdma_connect_timeout_ms 800 \
---balance_method mix \
 --use_deepep_internode 0 \
 --use_deepep_low_latency 1 \
 --use_deepep_moe 1 \
@@ -121,7 +119,6 @@ REDUNDANT_EXPERT=32 \
 --eplb_stats_window_size 10 \
 --eplb_update_time 20 \
 --eplb_mode EPLB \
---eplb_force_repack 1 \
 --redundant_expert 32 \
 --enable_layer_micro_batch 2 \
 --seq_size_per_block 64 \

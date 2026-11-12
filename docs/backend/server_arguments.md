@@ -83,16 +83,27 @@ This page lists server arguments used to configure the behavior and performance 
 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
-| `--eplb_mode` | EPLB mode | "NONE" |
-| `--balance_method` | EPLB load balancing method. | "mix" |
+| `--eplb_mode` | `NONE`, `STATS`, `EPLB`, or `ALL`. Set the mode at startup; online changes are disabled. `STATS` collects counts without migration. Both `EPLB` and `ALL` collect counts and rearrange experts. With EP > 1, enabled runtimes prepare shuffle resources and warm up planning at startup, including `STATS` and a paused update interval. This preserves the initial weights, routing maps and statistics. Monitoring is configured independently. | "NONE" |
 | `--redundant_expert` | Number of redundant experts. | 0 |
-| `--eplb_update_time` | EPLB execution cycle. | 5000 |
-| `--eplb_balance_layer_per_step` | Number of layers updated per EPLB update. | 1 |
-| `--eplb_force_repack` | Globally repack EPLB experts. | False |
-| `--eplb_stats_window_size` | EPLB statistics window size. | 10 |
-| `--eplb_control_step` | (DEBUG) EPLB synchronization control parameter cycle. | 100 |
-| `--eplb_test_mode` | (DEBUG) Enables ExpertBalancer test mode | False |
+| `--eplb_update_time` | Rearrangement interval in eligible model steps. `0` disables rearrangement; the first update runs after `max(1, interval // 4)` eligible steps. | 0 |
+| `--eplb_stats_window_size` | Rearrangement count window. Must be non-negative; a positive update interval requires `1 <= window <= interval`. | 100 |
+| `--eplb_rearrange_after_prefill` | On PDFUSION workers, collect prefill counts and rearrange on the next decode step. Otherwise PDFUSION prefill is excluded from rearrangement scheduling. Dedicated P/D workers retain their own eligible step schedule. | False |
+| `--eplb_metrics_report_interval` | Report `moe_lb` every N target-model prefill/decode forwards (target verify during speculative decoding); draft models are excluded. `0` disables collection; `-1` selects 100 for PREFILL and 1000 for DECODE or PDFUSION. Other values must be positive. Unsupported devices or topologies (including PP, FFN disaggregation and MoE context parallelism without EP) log a warning and skip monitoring. Dense models retain empty-window `moe_lb=1` without a collective or device-to-host copy. This does not relax dynamic EPLB requirements. | -1 |
+| `--eplb_metrics_snapshot_max_files` | Snapshots retained per model instance in circular slots under `LOG_PATH/eplb_snapshot` (`LOG_PATH` defaults to `logs`). `0` disables snapshots. | 0 |
 | `--fake_balance_expert` | (DEBUG) Enables expert pseudo-balancing mechanism. | False |
+
+Each rearrangement handles every layer in a homogeneous weight-layout group.
+
+On GLM5 with SM100-class GPUs and compatible BF16 gate inputs, runtime EPLB uses DeepGEMM `bf16_mega_gate` in ordinary prefill and CMP decode. `RTP_LLM_GLM5_MEGA_GATE=auto` is the default and enables this route when an EPLB mapping exists; `0` selects the legacy gate, and `1` also enables the native gate without EPLB for controlled comparisons. Compare EPLB on/off with the same gate setting: native FP32 score accumulation can change near-tie TopK choices compared with a BF16 logits intermediate. Unsupported gate shapes use the legacy routing path. CMP scheduling remains enabled.
+
+Set `EPLB_MODE` and `EPLB_UPDATE_TIME` at startup; automatic rearrangement follows that fixed configuration.
+
+`moe_lb` follows DeepInfer: sum the maximum EP-rank load for each step and layer,
+then divide by the sum of their mean EP-rank loads. `1.0` means balanced; larger
+values indicate more imbalance. A window with no routed tokens reports `1.0`.
+The model-level `rtp_llm_moe_lb` gauge and `[EPLB]` log use this same ratio.
+Completed windows use a blocking GPU-to-CPU copy and synchronous gathering;
+snapshot schema 4 stores per-step layer sums for independent recomputation.
 
 ## Sampling Configuration
 

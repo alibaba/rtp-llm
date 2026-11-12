@@ -150,7 +150,7 @@ void preallocateTorchCudaPoolForPrefill(RoleType role_type, int device_id) {
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
                            std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                           bool defer_loop_start):
+                           bool                                          defer_loop_start):
     EngineBase(params),
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
@@ -551,8 +551,7 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     return stream;
 }
 
-void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result,
-                                    bool defer_connector_start) {
+void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result, bool defer_connector_start) {
     const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
     if (propose_params_ && propose_params_->draftModel()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,
@@ -1020,13 +1019,6 @@ absl::Status NormalEngine::step() {
     }
 
     return status;
-}
-
-bool NormalEngine::updateEplbConfig(const EPLBConfig& config) {
-    if (executor_) {
-        return executor_->updateEplbConfig(config);
-    }
-    return true;
 }
 
 void NormalEngine::startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {

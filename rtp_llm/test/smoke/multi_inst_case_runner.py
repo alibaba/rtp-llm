@@ -4,6 +4,7 @@ from smoke.case_runner import CaseRunner
 from smoke.task_info import TaskInfo, TaskStates
 
 from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
+from rtp_llm.test.smoke.eplb_smoke_checks import check_eplb_and_probe
 from rtp_llm.test.utils.device_resource import get_gpu_ids
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
@@ -160,6 +161,15 @@ class PdSeperationCaseRunner(CaseRunner):
         task_states = self.curl_server(
             curl_server_mgr,
             profile_server_managers=[decode_server_manager],
+        )
+        check_eplb_and_probe(
+            self,
+            curl_server_mgr,
+            [
+                ("prefill", prefill_server_manager, int(prefill_envs["WORLD_SIZE"])),
+                ("decode", decode_server_manager, int(decode_envs["WORLD_SIZE"])),
+            ],
+            task_states,
         )
         prefill_server_manager.stop_server()
         decode_server_manager.stop_server()
@@ -325,6 +335,15 @@ class DpSeperationCaseRunner(CaseRunner):
         task_states = self.curl_server(
             curl_server_mgr,
             profile_server_managers=[decode_server_manager],
+        )
+        check_eplb_and_probe(
+            self,
+            curl_server_mgr,
+            [
+                ("prefill", prefill_server_manager, int(prefill_envs["WORLD_SIZE"])),
+                ("decode", decode_server_manager, int(decode_envs["WORLD_SIZE"])),
+            ],
+            task_states,
         )
         prefill_server_manager.stop_server()
         decode_server_manager.stop_server()

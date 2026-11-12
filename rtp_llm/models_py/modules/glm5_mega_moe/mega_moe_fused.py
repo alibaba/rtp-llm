@@ -123,6 +123,9 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
             device,
         )
         self._input_packer = get_mega_moe_input_packer()
+        self._eplb_global_counts = torch.zeros(
+            cfg.n_routed_experts, dtype=torch.int32, device=device
+        )
 
     def clone_for_cuda_graph(
         self, *, share_mega_buf: bool = False
@@ -137,6 +140,7 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
                 self._mega_buf, self._mega_group, self.cfg
             )
         clone._shared_l1_w = self._shared_l1_w
+        clone._eplb_global_counts = torch.empty_like(self._eplb_global_counts)
         clone._shared_l1_sf = self._shared_l1_sf
         clone._shared_l2_w = self._shared_l2_w
         clone._shared_l2_sf = self._shared_l2_sf
@@ -294,9 +298,19 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
         x: torch.Tensor,  # [T, D] BF16 local-rank tokens
         weights: torch.Tensor,  # [T, topk] FP32 router weights
         indices: torch.Tensor,  # [T, topk] int64 GLOBAL expert IDs
+        *,
+        eplb=None,
+        token_offset: int = 0,
     ) -> torch.Tensor:
         """Run fused routed MegaMoE plus the FP8 shared expert in one kernel."""
-        return self._forward_impl(x, weights, indices, inputs_prepacked=False)
+        return self._forward_impl(
+            x,
+            weights,
+            indices,
+            inputs_prepacked=False,
+            eplb=eplb,
+            token_offset=token_offset,
+        )
 
     def _forward_impl(
         self,
@@ -306,6 +320,11 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
         *,
         inputs_prepacked: bool,
         activation_clamp: Optional[float] = None,
+        eplb=None,
+        token_offset: int = 0,
+        gate_logits: torch.Tensor | None = None,
+        gate_bias: torch.Tensor | None = None,
+        route_scale: float = 1.0,
     ) -> torch.Tensor:
         import deep_gemm
 
@@ -331,10 +350,33 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
                 f"is smaller than input tokens={T}."
             )
 
-        if not inputs_prepacked:
+        if gate_logits is not None:
+            from .input_packer import pack_gate_inputs
+
+            pack_gate_inputs(
+                x,
+                gate_logits,
+                gate_bias,
+                buf,
+                route_scale,
+                eplb=eplb,
+                token_offset=token_offset,
+            )
+        elif not inputs_prepacked:
             if weights is None or indices is None:
                 raise ValueError("weights and indices are required before packing")
-            self._input_packer.pack(x, weights, indices, buf, T)
+            self._input_packer.pack(
+                x,
+                weights,
+                indices,
+                buf,
+                T,
+                **(
+                    {"eplb": eplb, "token_offset": token_offset}
+                    if eplb is not None
+                    else {}
+                ),
+            )
         self._maybe_pre_kernel_barrier(T)
         _sync_cuda_graph_warmup_ranks(
             f"glm5.mega_moe_fused.layer{self.cfg.layer_id}.before_deepgemm",
@@ -358,4 +400,27 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
             activation_clamp=None,  # (self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None),
             fast_math=False,
         )
+        self._record_expert_load(T)
         return y
+
+    def _record_expert_load(self, token_count: int) -> None:
+        counts = getattr(self, "expert_token_counts", None)
+        if counts is None:
+            return
+        import torch.distributed as dist
+
+        from rtp_llm.models_py.utils.expert_load_monitor import record_expert_load
+
+        # The legacy fused ABI has no receive counters. Reduce source routing
+        # histograms so each destination counts assignments from every EP rank.
+        self._eplb_global_counts.zero_()
+        record_expert_load(
+            self._mega_buf.topk_idx[:token_count], self._eplb_global_counts
+        )
+        if self.cfg.ep_size > 1:
+            dist.all_reduce(self._eplb_global_counts, group=self._mega_group)
+        counts.add_(
+            self._eplb_global_counts[
+                self.cfg.local_expert_start : self.cfg.local_expert_end
+            ]
+        )

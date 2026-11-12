@@ -1,4 +1,5 @@
 load("//:def.bzl", "copts")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 # Sample infos - model sampling data structures
 cc_library(
@@ -133,10 +134,23 @@ cc_library(
 )
 
 cc_library(
+    name = "model_types",
+    hdrs = ["ModelTypes.h"],
+    deps = [
+        "//:rtp_compute_ops",
+        "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/models/models_weight:weights_define",
+        "//rtp_llm/models_py/bindings/core:tensor_holder",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "models",
     hdrs = glob([
         "*.h",
-    ]),
+    ], exclude = ["ModelTypes.h"]),
     srcs = glob([
         "*.cc",
     ]),
@@ -145,6 +159,9 @@ cc_library(
         ":logits_processor",
         ":dfa_utils",
         ":context_parallel",
+        ":expert_load_monitor",
+        ":eplb",
+        ":model_types",
         "//:rtp_compute_ops",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core:tensor_holder",
@@ -170,12 +187,32 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# Expert statistics - monitoring component
 cc_library(
-    name = "stats",
-    hdrs = [
-        "eplb/stats/ExpertStats.h",
-    ],
+    name = "expert_metric_utils",
+    hdrs = ["eplb/ExpertMetricUtils.h"],
+    srcs = ["eplb/ExpertMetricUtils.cc"],
+    deps = [
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:eplb_config",
+        "//rtp_llm/cpp/utils:core_utils",
+        "@havenask//aios/autil:env_util",
+    ] + torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "expert_load_monitor",
+    hdrs = ["eplb/ExpertLoadMonitor.h"],
+    srcs = ["eplb/ExpertLoadMonitor.cc"],
+    deps = [
+        ":expert_metric_utils",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:eplb_config",
+        "//rtp_llm/cpp/metrics:metrics",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+    ] + torch_deps(),
     visibility = ["//visibility:public"],
 )
 
@@ -200,7 +237,10 @@ cc_library(
         "eplb/ExpertBalancerPythonWrapper.cc",
     ],
     deps = [
-        ":models",
+        ":model_types",
+        ":expert_load_monitor",
+        "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         ":dfa_utils",
         "//rtp_llm/cpp/config:eplb_config",
         "//rtp_llm/cpp/metrics",

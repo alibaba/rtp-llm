@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from rtp_llm.model_loader.loader import ModelLoader
 
@@ -25,35 +25,30 @@ class ModelLoaderEplbTest(unittest.TestCase):
         return loader
 
     @patch("rtp_llm.model_loader.loader.LoadConfig.create_redundant_expert")
-    @patch("rtp_llm.model_loader.loader.CkptDatabase")
+    @patch("rtp_llm.utils.database.CkptDatabase")
     def test_disabled_eplb_does_not_construct_checkpoint_database(
         self, database_cls, create_redundant_expert
     ):
         create_redundant_expert.return_value = [[0, 1, 2, 3], [0, 1, 2, 3]]
         loader = self._make_loader(False)
 
-        py_eplb, phy2log = loader.create_eplb()
+        phy2log = loader._create_expert_placement()
 
-        self.assertIsNone(py_eplb)
         self.assertEqual(phy2log, create_redundant_expert.return_value)
         database_cls.assert_not_called()
 
-    @patch("rtp_llm.eplb.ep_balancer.ExpertBalancer")
     @patch("rtp_llm.model_loader.loader.LoadConfig.create_redundant_expert")
-    @patch("rtp_llm.model_loader.loader.CkptDatabase")
-    def test_enabled_eplb_keeps_independent_checkpoint_database(
-        self, database_cls, create_redundant_expert, balancer_cls
+    @patch("rtp_llm.utils.database.CkptDatabase")
+    def test_enabled_eplb_uses_executor_weights_without_checkpoint_database(
+        self, database_cls, create_redundant_expert
     ):
         create_redundant_expert.return_value = [[0, 1, 2, 3], [0, 1, 2, 3]]
-        database = MagicMock()
-        database_cls.return_value = database
         loader = self._make_loader(True)
 
-        py_eplb, _ = loader.create_eplb()
+        phy2log = loader._create_expert_placement()
 
-        database_cls.assert_called_once_with("/unused/checkpoint")
-        self.assertIs(py_eplb, balancer_cls.return_value)
-        self.assertIs(balancer_cls.call_args.kwargs["database"], database)
+        database_cls.assert_not_called()
+        self.assertEqual(phy2log, create_redundant_expert.return_value)
 
 
 if __name__ == "__main__":

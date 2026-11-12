@@ -183,8 +183,15 @@ py_library(
         "eplb/*.py",
     ]),
     deps = [
+        ":device",
+        ":torch",
         ":utils",
-    ],
+    ] + select({
+        "@//:using_cuda13_x86": [":deep_ep"],
+        "@//:using_cuda13_arm": [":deep_ep"],
+        "@//:using_cuda": [":deep_ep"],
+        "//conditions:default": [],
+    }) + triton_deps(["triton"]),
 )
 
 py_library(

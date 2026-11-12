@@ -8,6 +8,7 @@ into one kernel, so there's no separate router/executor.
 """
 
 import logging
+import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -73,7 +74,14 @@ class MegaMoeWrapper(nn.Module):
         ep_rank = parallelism_config.ep_rank
 
         dim = config.hidden_size
-        n_routed_experts = config.expert_num
+        eplb_config = getattr(config, "eplb_config", None)
+        n_routed_experts = (
+            config.expert_num
+            if eplb_config is None
+            else eplb_config.phy_exp_num(config.expert_num)
+        )
+        if n_routed_experts % ep_size != 0:
+            raise ValueError("MegaMoE physical expert count must be divisible by EP")
         n_activated_experts = config.moe_k
         swiglu_limit = float(getattr(config, "swiglu_limit", 10.0) or 10.0)
         self._activation_clamp = (
@@ -211,6 +219,7 @@ class MegaMoeWrapper(nn.Module):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         forward_fn,
+        eplb=None,
     ) -> torch.Tensor:
         capacity = int(
             getattr(
@@ -220,7 +229,12 @@ class MegaMoeWrapper(nn.Module):
         )
         tokens = int(hidden_states.size(0))
         if capacity <= 0 or tokens <= capacity:
-            return forward_fn(hidden_states, topk_weights, topk_ids)
+            return forward_fn(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                **({"eplb": eplb, "token_offset": 0} if eplb is not None else {}),
+            )
 
         global _CHUNKED_GLM5_MOE_LOGGED
         if not _CHUNKED_GLM5_MOE_LOGGED:
@@ -243,11 +257,81 @@ class MegaMoeWrapper(nn.Module):
                     hidden_states[token_start:token_end],
                     topk_weights[token_start:token_end],
                     topk_ids[token_start:token_end],
+                    **(
+                        {"eplb": eplb, "token_offset": token_start}
+                        if eplb is not None
+                        else {}
+                    ),
                 )
             )
         return output
 
     supports_shared_mega_buf = True
+
+    def supports_gate_pack(self, x, bias, config, eplb) -> bool:
+        from .eplb_routing import maps_supported
+
+        mode = os.environ.get("RTP_LLM_GLM5_GATE_PACK", "auto")
+        return (
+            (mode == "1" or (mode == "auto" and eplb is not None))
+            and getattr(config, "model_type", "") == "glm_5"
+            and getattr(self.mega_moe._input_packer, "name", None) == "fused"
+            and x.is_cuda
+            and x.ndim == 2
+            and x.dtype == torch.bfloat16
+            and x.stride(1) == 1
+            and x.shape[1] % 128 == 0
+            and bias is not None
+            and bias.ndim == 1
+            and bias.device == x.device
+            and bias.dtype == torch.float32
+            and bias.is_contiguous()
+            and 2 <= int(config.moe_k) <= min(32, bias.numel())
+            and bias.numel() <= 512
+            and int(config.moe_n_group) == int(config.moe_topk_group) == 1
+            and bool(config.has_moe_norm)
+            and (eplb is None or maps_supported(eplb, x.device))
+        )
+
+    def forward_gate_pack(self, x, logits, bias, route_scale, eplb=None):
+        capacity = int(self.mega_moe._mega_buf.num_max_tokens_per_rank)
+
+        def run(start, end):
+            return self.mega_moe._forward_impl(
+                x[start:end],
+                None,
+                None,
+                inputs_prepacked=False,
+                activation_clamp=self._activation_clamp,
+                gate_logits=logits[start:end],
+                gate_bias=bias,
+                route_scale=route_scale,
+                eplb=eplb,
+                token_offset=start,
+            )
+
+        if x.shape[0] <= capacity:
+            return run(0, x.shape[0])
+        output = torch.empty_like(x)
+        for start in range(0, x.shape[0], capacity):
+            end = min(start + capacity, x.shape[0])
+            output[start:end].copy_(run(start, end))
+        return output
+
+    def supports_eplb_input_pack(self, layer, hidden_states) -> bool:
+        from .eplb_routing import maps_supported
+
+        return (
+            maps_supported(layer, hidden_states.device)
+            and getattr(self.mega_moe._input_packer, "name", None) == "fused"
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.shape[1] % 128 == 0
+        )
+
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        """Return converted routed weights and scales, excluding shared experts."""
+        moe = self.mega_moe
+        return (moe._mega_l1_w, moe._mega_l1_sf, moe._mega_l2_w, moe._mega_l2_sf)
 
     def clone_for_cuda_graph(self, *, share_mega_buf: bool = False) -> "MegaMoeWrapper":
         clone = object.__new__(type(self))
@@ -290,6 +374,7 @@ class MegaMoeWrapper(nn.Module):
         apply_router_weight_on_input: bool = False,
         extra_expert_args: Optional[Dict[str, Any]] = None,
         extra_finalize_args: Optional[Dict[str, Any]] = None,
+        eplb=None,
     ) -> torch.Tensor:
         swiglu_limit = float(
             (extra_expert_args or {}).get("swiglu_limit", self._activation_clamp or 0.0)
@@ -299,10 +384,12 @@ class MegaMoeWrapper(nn.Module):
             hidden_states,
             topk_weights,
             topk_ids,
-            lambda x, weights, indices: self.mega_moe(
+            lambda x, weights, indices, **kwargs: self.mega_moe(
                 x,
                 weights,
                 indices,
                 activation_clamp=activation_clamp,
+                **kwargs,
             ),
+            eplb=eplb,
         )

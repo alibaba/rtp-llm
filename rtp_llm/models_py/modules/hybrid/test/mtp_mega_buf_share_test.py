@@ -188,6 +188,8 @@ class MtpMegaBufShareTest(unittest.TestCase):
             "num_experts",
             "top_k",
             "gate_chunk_rows",
+            "expert_load_layer_id",
+            "_bound_expert_load",
             "gate",
             "select_topk",
             "fake_balance_expert",
@@ -204,6 +206,7 @@ class MtpMegaBufShareTest(unittest.TestCase):
             "_use_mega_moe_fused_shared",
         ):
             setattr(moe, name, None)
+        moe.eplb = None
         moe.gate_weight = None
         moe._hy4_fp32_router = False
         moe._hy4_bf16_router_weight = None

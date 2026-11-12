@@ -14,7 +14,6 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
-#include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
@@ -54,7 +53,6 @@ public:
                          std::function<void()>                          profile_step_finish = {});
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
-    bool         updateEplbConfig(const EPLBConfig& config) override;
     void         notifyStop() override;
 
     void setTargetModel(std::unique_ptr<ModelBase> model) {
@@ -243,7 +241,6 @@ private:
     // wall-clock TPS reporter. Keep it because constructor initialization and
     // process metrics in the new base depend on it.
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
-    std::shared_ptr<ExpertBalancer>                                                            expert_balancer_;
     size_t                                                                                     vocab_size_;
 
     // for mtp

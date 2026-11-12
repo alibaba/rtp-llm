@@ -338,6 +338,7 @@ cc_library(
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":bf16_gemm_op",
+        "//rtp_llm/models_py/bindings/cuda/kernels:expert_load",
         ":cuda_bindings_base",
     ] + select({
         "@//:using_cuda13_arm": [],

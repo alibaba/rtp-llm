@@ -400,29 +400,22 @@ class DeviceResourceConfig:
 
 
 class EPLBConfig:
-    balance_method: str
-    eplb_balance_layer_per_step: int
-    eplb_control_step: int
-    eplb_force_repack: int
+    eplb_rearrange_after_prefill: bool
+    eplb_metrics_report_interval: int
+    eplb_metrics_snapshot_max_files: int
     eplb_stats_window_size: int
-    eplb_test_mode: bool
     eplb_update_time: int
     redundant_expert: int
-
     def __getstate__(self) -> tuple:
         ...
-
     def __init__(self) -> None:
         ...
-
     def __setstate__(self, arg0: tuple) -> None:
         ...
-
     def enable_eplb(self) -> bool:
         """
         Get enable_eplb status
         """
-
     def phy_exp_num(self, expert_num: int) -> int:
         """
         Get physical expert number
@@ -430,12 +423,9 @@ class EPLBConfig:
     @property
     def eplb_mode(self) -> EplbMode:
         ...
-
     @eplb_mode.setter
     def eplb_mode(self, arg1: typing.Any) -> None:
         ...
-
-
 class EplbMode:
     """
     Members:

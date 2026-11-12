@@ -36,9 +36,9 @@ public:
 
     virtual void startDeferredServices();
     virtual void updateRuntimeEndpoints(const RuntimeConfig& runtime_config);
-    void setDeferServiceStart(bool defer) {
+    void         setDeferServiceStart(bool defer) {
         defer_tp_broadcaster_ = defer;
-        defer_engine_loop_ = defer;
+        defer_engine_loop_    = defer;
     }
 
     grpc::Status
@@ -54,9 +54,6 @@ public:
     grpc::Status CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response);
 
     grpc::Status UpdateWeights(grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response);
-
-    grpc::Status
-    UpdateEplbConfig(grpc::ServerContext* context, const UpdateEplbConfigRequestPB* request, EmptyPB* response);
 
     grpc::Status SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response);
 

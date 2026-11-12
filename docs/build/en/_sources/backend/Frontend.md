@@ -403,22 +403,6 @@ class VersionInfo(BaseModel):
 # request format: {"log_level": "DEBUG/INFO/TRACE/WARNING"}
 ```
 
-``` python
-@app.post("/update_eplb_config")
-# request format: {"mode": "NONE", "update_time": 5000}
-
-# input:
-class EplbMode(Enum):
-    NONE
-    STATS  # stats, only
-    EPLB   # load balance, only
-    ALL    # stats + load balance
-
-class EplbConfig:
-  mode: EplbMode
-  update_time: int
-```
-
 #### *Embedding APIs*
 Proxied to same endpoints in Backend.
 

@@ -171,22 +171,6 @@ class GrpcClientWrapper:
             logging.error(f"Start profile failed: {e}")
             return {"error": f"Failed to start profile: {str(e)}"}
 
-    async def update_eplb_config(self, req: Any) -> Dict[str, Any]:
-        """Update EPLB config - this would need to be implemented based on your requirements"""
-        try:
-            await self._ensure_connection()
-            if isinstance(req, str):
-                req = json.loads(req)
-            epld_req = pb2.UpdateEplbConfigRequestPB(
-                mode=req.get("mode", "NONE"),
-                update_time=int(time.time()),
-            )
-            await self.stub.UpdateEplbConfig(epld_req)
-            return {"status": "ok"}
-        except Exception as e:
-            logging.error(f"Update EPLB config failed: {e}")
-            return {"error": f"Failed to update EPLB config: {str(e)}"}
-
     async def update_scheduler_info(self, req: Any) -> Dict[str, Any]:
         """Update scheduler info on all DP addresses"""
         try:
@@ -234,8 +218,6 @@ class GrpcClientWrapper:
                 return await self.set_log_level(req)
             elif uri == "start_profile":
                 return await self.start_profile(req)
-            elif uri == "update_eplb_config":
-                return await self.update_eplb_config(req)
             elif uri == "update_scheduler_info":
                 return await self.update_scheduler_info(req)
             else:

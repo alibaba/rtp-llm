@@ -60,6 +60,9 @@ class BatchedTritonExperts(FusedMoeExpertExecutor):
         self.w1 = weights[W.moe_w1]
         self.w2 = weights[W.moe_w2]
 
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return self.w1, self.w2
+
     @property
     def local_num_experts(self) -> int:
         return self.w1.size(0)

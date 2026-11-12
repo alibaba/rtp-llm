@@ -716,6 +716,12 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         prepareInputData(inputs, state);
     }
 
+    {
+        const size_t graph_idx =
+            is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
+        checkGraphInputStable(inputs, graph_instances_[graph_idx].mem_hold_.py_model_inputs_);
+    }
+
     if (is_prefill_cuda_graph_mode_) {
         static std::atomic<int> prefill_replay_log_budget{64};
         if (prefill_replay_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
@@ -1096,6 +1102,7 @@ void CudaGraphRunner::initCapture() {
         }
 
         PyModelInputs inputs;
+        inputs.expert_token_counts = capture_mem_hold_.py_model_inputs_.expert_token_counts;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
         inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
         // DSv4 MTP draft consumes the target's pre-hc residual ([T, hc*dim])
@@ -1219,6 +1226,10 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type, boo
 
     size_t pre_capture_reserved = cuda_graph::graphReservedBytes();
 
+    // MegaGate initializes its barriers per stream, before graph capture.
+    cuda_graph::graphDeviceSynchronize();
+    CudaGraphStreamLife stream_life(capture_stream_);
+
     // WarmUp twice (params already prepared in attn impl __init__/create_params when instance was created)
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
@@ -1251,7 +1262,6 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type, boo
         // large reserved-but-unallocated default pool.
         cuda_graph::graphEmptyCache();
 
-        CudaGraphStreamLife stream_life(capture_stream_);
         auto&               graph               = graph_instances_[key].graph_;
         std::string         output_dot_filename = "";
         if (enable_cuda_graph_debug_mode_) {
@@ -1309,7 +1319,28 @@ void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("replay end check for %s %d", key_type, key);
 }
 
+void CudaGraphRunner::checkGraphInputStable(const PyModelInputs& inputs, const PyModelInputs& captured_inputs) const {
+    // prepareInputData() does not copy this externally owned buffer. Replay
+    // writes directly into the allocation captured for the selected graph.
+    const auto& captured = captured_inputs.expert_token_counts;
+    const auto& replay   = inputs.expert_token_counts;
+    if (!captured.defined() && !replay.defined()) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(captured.defined() == replay.defined(),
+                            "expert token counts presence changed after CUDA graph capture");
+    RTP_LLM_CHECK_WITH_INFO(captured.data_ptr() == replay.data_ptr(),
+                            "expert token counts buffer changed after CUDA graph capture: capture=%p replay=%p",
+                            static_cast<const void*>(captured.data_ptr()),
+                            static_cast<const void*>(replay.data_ptr()));
+    RTP_LLM_CHECK_WITH_INFO(captured.sizes() == replay.sizes() && captured.scalar_type() == replay.scalar_type()
+                                && captured.device() == replay.device()
+                                && captured.is_contiguous() == replay.is_contiguous(),
+                            "expert token counts metadata changed after CUDA graph capture");
+}
+
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
+    inputs.expert_token_counts = capture_mem_hold_.py_model_inputs_.expert_token_counts;
     c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;

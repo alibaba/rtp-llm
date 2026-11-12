@@ -58,6 +58,16 @@ class GptModelBase(nn.Module):
         ## (batch_size -> fmha_params)
         self.params_dict: dict[int, Any] = {}
 
+    def get_eplb_layers(self):
+        from rtp_llm.models_py.utils.expert_load_monitor import collect_eplb_layers
+
+        return collect_eplb_layers(self)
+
+    def set_expert_token_counts(self, counts: Tensor) -> None:
+        from rtp_llm.models_py.utils.expert_load_monitor import bind_model_expert_load
+
+        bind_model_expert_load(self, counts)
+
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
         if self.kv_cache is not None and getattr(

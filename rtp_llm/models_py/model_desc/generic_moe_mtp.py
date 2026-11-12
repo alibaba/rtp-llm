@@ -17,6 +17,7 @@ from rtp_llm.models_py.model_desc.generic_moe import GenericMoeDecoderLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import Embedding, LinearFactory, RMSNorm, RMSResNorm
 from rtp_llm.models_py.modules.hybrid.glm5_cmp import should_enable_glm5_cmp
+from rtp_llm.models_py.utils.expert_load_monitor import expert_load_for_layer
 from rtp_llm.ops import MoeConfig, ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -153,6 +154,7 @@ class GenericMoeMTPModel(GptModelBase):
         clone.py_hw_kernel_config = self.py_hw_kernel_config
         clone.micro_batch_size = self.micro_batch_size
         clone.layer_num = self.layer_num
+
         clone.vocab_size = self.vocab_size
         clone.kv_cache = None
         # Clones using the same KV arena must share its token-to-slot mapping.
@@ -357,6 +359,7 @@ class GenericMoeMTPModel(GptModelBase):
                 prev_topk_indices=prev_topk_indices,
                 enable_cmp=enable_cmp,
                 force_reuse_topk_indices=reuse_topk_indices,
+                expert_load=expert_load_for_layer(inputs.expert_token_counts, i),
             )
             hidden_states = output.hidden_states
             residual = output.residual

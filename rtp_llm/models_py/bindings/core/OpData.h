@@ -5,7 +5,6 @@
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/cpp/model_utils/activation_types.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
-#include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <cstddef>
@@ -202,18 +201,18 @@ struct CacheStoreInputs {
     size_t context_batch_size = 0;
     size_t decoder_batch_size = 0;
 
-    torch::Tensor            request_id;             // [context_batch_size]
-    torch::Tensor            request_pd_separation;  // [context_batch_size]
+    torch::Tensor                                   request_id;             // [context_batch_size]
+    torch::Tensor                                   request_pd_separation;  // [context_batch_size]
     std::shared_ptr<const std::vector<std::string>> cache_keys =
         std::make_shared<const std::vector<std::string>>();  // [context_batch_size, global_max_blocks]
-    size_t                   tokens_per_block;
-    size_t                   kv_block_stride_bytes = 0;
-    size_t                   kv_scale_stride_bytes = 0;
-    bool                     pd_separation         = false;
-    size_t                   model_id              = 0;
-    bool                     decode_entrance       = false;
-    bool                     warmup;
-    bool                     use_opaque_kv_cache_store = false;
+    size_t tokens_per_block;
+    size_t kv_block_stride_bytes = 0;
+    size_t kv_scale_stride_bytes = 0;
+    bool   pd_separation         = false;
+    size_t model_id              = 0;
+    bool   decode_entrance       = false;
+    bool   warmup;
+    bool   use_opaque_kv_cache_store = false;
 
     int               layer_id    = 0;
     KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;
@@ -307,8 +306,6 @@ struct MoeConfigs {
     double routed_scaling_factor = 1.0;  // used in deepseek v2 and glm4 moe
 
     bool enable_eplb = false;
-    // NOTE(yinzhi): not used yet
-    EplbBalanceMethod balance_method = EplbBalanceMethod::EQUAL;
 };
 
 struct FfnConfigs {

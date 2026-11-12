@@ -1,4 +1,16 @@
 py_test(
+    name = "test_eplb_integration",
+    srcs = ["test_eplb_integration.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "test_expert_load_contract",
+    srcs = ["test_expert_load_contract.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "test_config_resolver",
     srcs = ["test_config_resolver.py"],
     deps = [

@@ -49,7 +49,18 @@ class TorchMegaMoeSeInputPacker(MegaMoeSeInputPacker):
 class FusedMegaMoeSeInputPacker(MegaMoeSeInputPacker):
     name = "fused"
 
-    def pack(self, x, weights, indices, buf, tokens: int, block_m: int) -> None:
+    def pack(
+        self,
+        x,
+        weights,
+        indices,
+        buf,
+        tokens: int,
+        block_m: int,
+        *,
+        eplb=None,
+        token_offset: int = 0,
+    ) -> None:
         if not (x.is_cuda and x.dtype == torch.bfloat16 and x.shape[1] % 128 == 0):
             raise RuntimeError(
                 "GLM5 fused MegaMoE SE input packer requires CUDA bf16 input "
@@ -68,6 +79,8 @@ class FusedMegaMoeSeInputPacker(MegaMoeSeInputPacker):
             buf.topk_idx[:tokens],
             buf.topk_weights[:tokens],
             block_m,
+            eplb=eplb,
+            token_offset=token_offset,
         )
 
 

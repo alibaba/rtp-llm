@@ -295,8 +295,18 @@ class GLM5MegaMoESE(GLM5MegaMoE):
         x: torch.Tensor,
         weights: torch.Tensor,
         indices: torch.Tensor,
+        *,
+        eplb=None,
+        token_offset: int = 0,
     ) -> torch.Tensor:
-        return self._forward_impl(x, weights, indices, inputs_prepacked=False)
+        return self._forward_impl(
+            x,
+            weights,
+            indices,
+            inputs_prepacked=False,
+            eplb=eplb,
+            token_offset=token_offset,
+        )
 
     def _forward_impl(
         self,
@@ -306,6 +316,11 @@ class GLM5MegaMoESE(GLM5MegaMoE):
         *,
         inputs_prepacked: bool,
         activation_clamp: Optional[float] = None,
+        eplb=None,
+        token_offset: int = 0,
+        gate_logits: torch.Tensor | None = None,
+        gate_bias: torch.Tensor | None = None,
+        route_scale: float = 1.0,
     ) -> torch.Tensor:
         # Fused shared experts keep their existing unclamped behavior. Accept
         # the base-class argument so inherited prepacked dispatch stays valid.
@@ -335,7 +350,20 @@ class GLM5MegaMoESE(GLM5MegaMoE):
             "fp8xfp4",
         )
         block_m = int(block_m)
-        if inputs_prepacked:
+        if gate_logits is not None:
+            from .input_packer import pack_gate_inputs
+
+            pack_gate_inputs(
+                x,
+                gate_logits,
+                gate_bias,
+                buf,
+                route_scale,
+                eplb=eplb,
+                token_offset=token_offset,
+                block_m=block_m,
+            )
+        elif inputs_prepacked:
             stage_shared_fp8_input_scales(
                 buf.x_sf,
                 buf.shared_l1_acts_sf,
@@ -352,6 +380,11 @@ class GLM5MegaMoESE(GLM5MegaMoE):
                 buf,
                 tokens,
                 block_m,
+                **(
+                    {"eplb": eplb, "token_offset": token_offset}
+                    if eplb is not None
+                    else {}
+                ),
             )
         self._maybe_pre_kernel_barrier(tokens)
         _sync_cuda_graph_warmup_ranks(
@@ -372,6 +405,9 @@ class GLM5MegaMoESE(GLM5MegaMoE):
             activation="swiglu",
             activation_clamp=None,
             fast_math=False,
+            cumulative_local_expert_recv_stats=getattr(
+                self, "expert_token_counts", None
+            ),
         )
         return y
 

@@ -90,7 +90,7 @@ void LocalRpcServer::updateRuntimeEndpoints(const RuntimeConfig& runtime_config)
     if (!defer_tp_broadcaster_) {
         RTP_LLM_FAIL("runtime endpoints can only be updated before deferred services start");
     }
-    maga_init_params_.runtime_config.worker_addrs = runtime_config.worker_addrs;
+    maga_init_params_.runtime_config.worker_addrs      = runtime_config.worker_addrs;
     maga_init_params_.runtime_config.worker_grpc_addrs = runtime_config.worker_grpc_addrs;
 }
 
@@ -512,29 +512,6 @@ grpc::Status
 LocalRpcServer::CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
     response->set_health("OK");
-    return grpc::Status::OK;
-}
-
-grpc::Status LocalRpcServer::UpdateEplbConfig(grpc::ServerContext*             context,
-                                              const UpdateEplbConfigRequestPB* request,
-                                              EmptyPB*                         response) {
-    RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
-    const string mode_str = request->mode();
-    EPLBConfig   config;
-    if (mode_str == "EPLB" || mode_str == "eplb") {
-        config.eplb_mode = EplbMode::EPLB;
-    } else if (mode_str == "STATS" || mode_str == "stats") {
-        config.eplb_mode = EplbMode::STATS;
-    } else if (mode_str == "NONE" || mode_str == "none") {
-        config.eplb_mode = EplbMode::NONE;
-    } else if (mode_str == "ALL" || mode_str == "all") {
-        config.eplb_mode = EplbMode::ALL;
-    } else {
-        RTP_LLM_LOG_WARNING("set eplb mode failed, unknown mode : %s", mode_str.c_str());
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Invalid eplb mode");
-    }
-    config.eplb_update_time = request->update_time();
-    engine_->updateEplbConfig(config);
     return grpc::Status::OK;
 }
 

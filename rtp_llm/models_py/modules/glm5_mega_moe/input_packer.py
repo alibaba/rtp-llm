@@ -31,6 +31,30 @@ class MegaMoeInputPacker(ABC):
         raise NotImplementedError
 
 
+def pack_gate_inputs(
+    x, logits, bias, buf, route_scale, *, eplb=None, token_offset=0, block_m=0
+):
+    from .input_packer_triton import fused_pack_mega_moe_inputs
+
+    tokens = x.shape[0]
+    fused_pack_mega_moe_inputs(
+        x,
+        buf.topk_weights[:tokens],
+        buf.topk_idx[:tokens],
+        buf.x[:tokens],
+        buf.x_sf[:tokens],
+        buf.topk_idx[:tokens],
+        buf.topk_weights[:tokens],
+        out_shared_sf=buf.shared_l1_acts_sf if block_m else None,
+        shared_block_m=block_m,
+        eplb=eplb,
+        token_offset=token_offset,
+        router_logits=logits,
+        correction_bias=bias,
+        routed_scaling_factor=route_scale,
+    )
+
+
 class TorchMegaMoeInputPacker(MegaMoeInputPacker):
     """Reference implementation using PyTorch ops (for debugging)."""
 
@@ -63,6 +87,9 @@ class FusedMegaMoeInputPacker(MegaMoeInputPacker):
         indices: torch.Tensor,
         buf,
         tokens: int,
+        *,
+        eplb=None,
+        token_offset: int = 0,
     ) -> None:
         if not (x.is_cuda and x.dtype == torch.bfloat16 and x.shape[1] % 128 == 0):
             raise RuntimeError(
@@ -80,6 +107,8 @@ class FusedMegaMoeInputPacker(MegaMoeInputPacker):
             buf.x_sf[:tokens],
             buf.topk_idx[:tokens],
             buf.topk_weights[:tokens],
+            eplb=eplb,
+            token_offset=token_offset,
         )
 
 

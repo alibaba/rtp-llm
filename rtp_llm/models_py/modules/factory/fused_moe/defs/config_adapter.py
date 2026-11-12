@@ -23,6 +23,7 @@ class MoEConfigAdapter:
         moe_config: Optional[MoeConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         enable_cuda_graph: bool = False,
+        layer_id: int = -1,
     ):
         self.model_config = model_config
         self.parallelism_config = parallelism_config
@@ -41,6 +42,11 @@ class MoEConfigAdapter:
         self.local_rank = parallelism_config.local_rank
 
         self.expert_num = model_config.expert_num
+        self.physical_expert_num = int(
+            model_config.eplb_config.phy_exp_num(self.expert_num)
+        )
+        self.has_redundant_experts = self.physical_expert_num != self.expert_num
+        self.layer_id = layer_id
         self.moe_k = model_config.moe_k
         self.moe_topk_group = model_config.moe_topk_group
         self.hidden_size = model_config.hidden_size

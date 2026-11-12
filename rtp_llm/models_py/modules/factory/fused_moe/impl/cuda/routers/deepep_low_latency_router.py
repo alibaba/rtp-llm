@@ -1,3 +1,4 @@
+import inspect
 import os
 from typing import Any, Dict, Optional, Tuple
 
@@ -5,6 +6,7 @@ import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.distributed.deepep_wrapper import (
+    DeepEPBuffer,
     DeepEPMode,
     DeepEPWrapper,
     DeepepWrapperConfig,
@@ -81,8 +83,25 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             use_fp8_dispatch and use_nvfp4_dispatch
         ), "use_fp8_dispatch and use_nvfp4_dispatch cannot both be True"
 
+        required_parameter = (
+            "use_nvfp4"
+            if use_nvfp4_dispatch
+            else "pertoken_quant" if quant_config.is_per_act_token else None
+        )
+        if required_parameter is not None:
+            dispatch = getattr(DeepEPBuffer, "low_latency_dispatch", None)
+            if (
+                dispatch is None
+                or required_parameter not in inspect.signature(dispatch).parameters
+            ):
+                raise NotImplementedError(
+                    f"The installed DeepEP provider does not support low-latency "
+                    f"dispatch parameter {required_parameter}; this quantization "
+                    "requires an ACCL provider with that capability"
+                )
+
         # DeepEpLowLatency-specific initialization
-        self._num_experts = config.expert_num
+        self._num_experts = config.physical_expert_num
         self._ll_num_max_token_per_rank = (
             DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
                 config.ll_num_max_token, config.tp_size, config.quant_config

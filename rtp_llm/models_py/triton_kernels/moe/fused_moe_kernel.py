@@ -21,6 +21,8 @@ def fused_moe_kernel(
     sorted_token_ids_ptr,
     expert_ids_ptr,
     num_tokens_post_padded_ptr,
+    load_topk_ids_ptr,
+    expert_token_counts_ptr,
     # Matrix dimensions
     N,
     K,
@@ -43,6 +45,8 @@ def fused_moe_kernel(
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
     even_Ks: tl.constexpr,
+    load_expert_offset: tl.constexpr,
+    num_local_experts: tl.constexpr,
 ):
     """
     Fused MoE GEMM kernel.
@@ -77,6 +81,20 @@ def fused_moe_kernel(
     token_mask = offs_token < num_valid_tokens
 
     off_experts = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
+
+    if expert_token_counts_ptr is not None:
+        if pid_n == 0:
+            load_experts = (
+                tl.load(load_topk_ids_ptr + offs_token, mask=token_mask, other=-1)
+                - load_expert_offset
+            )
+            local_routes = (
+                token_mask & (load_experts >= 0) & (load_experts < num_local_experts)
+            )
+            tl.atomic_add(
+                expert_token_counts_ptr + off_experts,
+                tl.sum(local_routes.to(tl.int32)),
+            )
 
     # Pointers for A and B
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
@@ -140,6 +158,9 @@ def invoke_fused_moe_kernel(
     top_k: int,
     config: Dict[str, Any],
     compute_type: tl.dtype,
+    expert_token_counts: torch.Tensor | None = None,
+    load_topk_ids: torch.Tensor | None = None,
+    load_expert_offset: int = 0,
 ) -> None:
     assert sorted_token_ids.stride(0) == 1
 
@@ -159,6 +180,8 @@ def invoke_fused_moe_kernel(
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
+        load_topk_ids,
+        expert_token_counts,
         B.shape[1],  # N
         K,  # K
         sorted_token_ids.shape[0],  # EM
@@ -174,6 +197,8 @@ def invoke_fused_moe_kernel(
         top_k=top_k,
         compute_type=compute_type,
         even_Ks=even_Ks,
+        load_expert_offset=load_expert_offset,
+        num_local_experts=B.shape[0],
         **config,
     )
 

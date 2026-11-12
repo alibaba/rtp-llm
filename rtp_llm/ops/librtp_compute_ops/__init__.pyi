@@ -296,6 +296,7 @@ class PyModelInitResources:
     def max_context_batch_size(self) -> int: ...
 
 class PyModelInputs:
+    expert_token_counts: torch.Tensor | None
     @typing.overload
     def __init__(self) -> None: ...
     @typing.overload

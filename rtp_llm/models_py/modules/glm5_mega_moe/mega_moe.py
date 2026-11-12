@@ -706,6 +706,9 @@ class GLM5MegaMoE(nn.Module):
         weights: torch.Tensor,  # [T, topk] FP32 router weights
         indices: torch.Tensor,  # [T, topk] int64 GLOBAL expert IDs
         activation_clamp: Optional[float] = None,
+        *,
+        eplb=None,
+        token_offset: int = 0,
     ) -> torch.Tensor:
         """Run the fused DeepGEMM Mega MoE kernel.
 
@@ -720,6 +723,8 @@ class GLM5MegaMoE(nn.Module):
             indices,
             inputs_prepacked=False,
             activation_clamp=activation_clamp,
+            eplb=eplb,
+            token_offset=token_offset,
         )
 
     def prepacked_input_views(
@@ -758,6 +763,11 @@ class GLM5MegaMoE(nn.Module):
         *,
         inputs_prepacked: bool,
         activation_clamp: Optional[float] = None,
+        eplb=None,
+        token_offset: int = 0,
+        gate_logits: torch.Tensor | None = None,
+        gate_bias: torch.Tensor | None = None,
+        route_scale: float = 1.0,
     ) -> torch.Tensor:
         import deep_gemm
 
@@ -775,10 +785,33 @@ class GLM5MegaMoE(nn.Module):
                 "MegaMoE buffer sizing."
             )
 
-        if not inputs_prepacked:
+        if gate_logits is not None:
+            from .input_packer import pack_gate_inputs
+
+            pack_gate_inputs(
+                x,
+                gate_logits,
+                gate_bias,
+                buf,
+                route_scale,
+                eplb=eplb,
+                token_offset=token_offset,
+            )
+        elif not inputs_prepacked:
             if weights is None or indices is None:
                 raise ValueError("weights and indices are required before packing")
-            self._input_packer.pack(x, weights, indices, buf, T)
+            self._input_packer.pack(
+                x,
+                weights,
+                indices,
+                buf,
+                T,
+                **(
+                    {"eplb": eplb, "token_offset": token_offset}
+                    if eplb is not None
+                    else {}
+                ),
+            )
         self._maybe_pre_kernel_barrier(T)
         _sync_cuda_graph_warmup_ranks(
             f"glm5.mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
@@ -795,6 +828,9 @@ class GLM5MegaMoE(nn.Module):
             activation="swiglu",
             activation_clamp=activation_clamp,
             fast_math=False,
+            cumulative_local_expert_recv_stats=getattr(
+                self, "expert_token_counts", None
+            ),
         )
         return y
 

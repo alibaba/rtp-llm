@@ -18,6 +18,7 @@ py_library(
     srcs = glob([
         "utils/*.py",
     ]),
+    deps = ["//rtp_llm:ops", "//rtp_llm:torch"],
 )
 
 # flashinfer-python is only available for CUDA12
@@ -259,6 +260,7 @@ py_library(
         ":modules",
         ":kernels",
         ":configs",
+        "//rtp_llm:eplb",
         "//rtp_llm/model_loader:loader",
     ] + select({
         "@//:using_cuda12": [

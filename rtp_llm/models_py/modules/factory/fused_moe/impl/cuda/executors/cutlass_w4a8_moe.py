@@ -1,10 +1,8 @@
 from typing import Any, Dict, Optional
 
 import torch
-from rtp_kernel.fp8_group_gemm import (
-    get_cutlass_batched_moe_mm_data,
-)
-from rtp_kernel.w4a8_group_gemm import w4a8_group_gemm_ptpc, compute_reorder_stride
+from rtp_kernel.fp8_group_gemm import get_cutlass_batched_moe_mm_data
+from rtp_kernel.w4a8_group_gemm import compute_reorder_stride, w4a8_group_gemm_ptpc
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -24,15 +22,25 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
 )
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     cutlass_moe_pre_reorder,
-    post_reorder_triton_kernel,
     get_cutlass_moe_mm_without_permute_info,
+    post_reorder_triton_kernel,
 )
 from rtp_llm.utils.model_weight import W
 
-from .util import moe_kernel_quantize_input, resize_cache
+from .util import eplb_weight_tensors, moe_kernel_quantize_input, resize_cache
 
 
 class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return eplb_weight_tensors(
+            self.w1,
+            self.w2,
+            self.w1_scale,
+            self.w2_scale,
+            self.a1q_scale,
+            self.a2_scale,
+        )
+
     @classmethod
     def executor_type(cls):
         return ExecutorType.CUTLASS_W4A8_INT4_PER_CHANNEL
@@ -62,7 +70,7 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
         self.quant_config.per_out_ch_quant = False
         self.quant_config.block_shape = None
 
-        self.num_experts = config.expert_num
+        self.num_experts = config.physical_expert_num
 
         self.swap_ab_gemm1 = True
         self.swap_ab_gemm2 = True
@@ -234,6 +242,11 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
             self.K,
             self.swap_ab_gemm1,
             self.swap_ab_gemm2,
+            expert_token_counts=(
+                payload.expert_load.expert_token_counts
+                if payload.expert_load is not None
+                else None
+            ),
         )
         if not per_act_token and expert_map is not None:
             c1.fill_(0)
@@ -293,6 +306,16 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
 
 
 class CutlassBatchedExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return eplb_weight_tensors(
+            self.w1,
+            self.w2,
+            self.w1_scale,
+            self.w2_scale,
+            self.a1q_scale,
+            self.a2_scale,
+        )
+
     @classmethod
     def executor_type(cls):
         return ExecutorType.CUTLASS_BATCHED_W4A8_INT4_PER_CHANNEL
@@ -322,7 +345,7 @@ class CutlassBatchedExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
         self.quant_config.per_out_ch_quant = False
         self.quant_config.block_shape = None
 
-        self.num_experts = config.expert_num
+        self.num_experts = config.physical_expert_num
 
         self.swap_ab_gemm1 = True
         self.swap_ab_gemm2 = True

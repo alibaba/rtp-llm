@@ -102,7 +102,7 @@ class BatchedDataRouter(FusedMoeDataRouter):
         self.max_num_tokens = max_num_tokens
         self.ep_rank = config.ep_rank
         self.tp_size = config.tp_size
-        self.num_local_experts = config.expert_num // self.tp_size
+        self.num_local_experts = config.physical_expert_num // config.ep_size
 
     def prepare(
         self,

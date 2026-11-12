@@ -9,11 +9,13 @@
 #endif
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/expert_load.h"
 #include "rtp_llm/models_py/bindings/common/kernels/moe/ep_utils.h"
 
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("record_expert_load", &recordExpertLoad, py::arg("ids"), py::arg("expert_token_counts"));
     rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",
                   &torch_ext::cublas_gemm_bf16_bf16_fp32,
                   "cuBLAS BF16 x BF16 GEMM with FP32 accumulation and FP32 output",

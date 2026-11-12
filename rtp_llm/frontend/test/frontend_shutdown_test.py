@@ -62,6 +62,21 @@ class FakeGrpcClient:
 
 
 class FrontendShutdownManagerTest(unittest.TestCase):
+    def test_removed_eplb_update_endpoint_is_not_registered(self):
+        app_owner = FrontendApp.__new__(FrontendApp)
+        app_owner.frontend_server = FakeFrontendServer()
+        app_owner.shutdown_manager = FrontendShutdownManager()
+        app_owner.separated_frontend = True
+        app_owner.server_config = SimpleNamespace(http_port=0)
+        app_owner.grpc_client = FakeGrpcClient()
+
+        response = TestClient(app_owner.create_app()).post(
+            "/update_eplb_config", json={"mode": "ALL", "update_time": 1000}
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(app_owner.grpc_client.calls, [])
+
     def wait_until(self, predicate, timeout=1.0):
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -155,18 +170,19 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         server = Mock()
         prebind = lambda: events.append("prebind")
 
-        with patch("rtp_llm.frontend.frontend_app.socket.socket", socket_factory), \
-            patch("rtp_llm.frontend.frontend_app.Config"), \
-            patch(
-                "rtp_llm.frontend.frontend_app.GracefulShutdownServer",
-                return_value=server,
-            ), \
-            patch(
-                "rtp_llm.frontend.frontend_app.get_uvicorn_logging_config",
-                return_value={},
-            ), \
-            patch("rtp_llm.frontend.frontend_app.gc.collect"), \
-            patch("rtp_llm.frontend.frontend_app.gc.freeze"):
+        with patch(
+            "rtp_llm.frontend.frontend_app.socket.socket", socket_factory
+        ), patch("rtp_llm.frontend.frontend_app.Config"), patch(
+            "rtp_llm.frontend.frontend_app.GracefulShutdownServer",
+            return_value=server,
+        ), patch(
+            "rtp_llm.frontend.frontend_app.get_uvicorn_logging_config",
+            return_value={},
+        ), patch(
+            "rtp_llm.frontend.frontend_app.gc.collect"
+        ), patch(
+            "rtp_llm.frontend.frontend_app.gc.freeze"
+        ):
             app_owner.start(on_prebind=prebind)
 
         self.assertLess(events.index("prebind"), events.index("bind"))
@@ -213,7 +229,6 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             ("get", "/worker_status", None),
             ("post", "/set_log_level", {"log_level": "DEBUG"}),
             ("post", "/start_profile", {}),
-            ("post", "/update_eplb_config", {"mode": "NONE"}),
             ("post", "/update_scheduler_info", {}),
             ("post", "/tokenizer/encode", {"prompt": "hello"}),
             ("post", "/tokenize", {"prompt": "hello"}),
@@ -246,7 +261,6 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             ("get", "/worker_status", None),
             ("post", "/set_log_level", {"log_level": "DEBUG"}),
             ("post", "/start_profile", {}),
-            ("post", "/update_eplb_config", {"mode": "NONE"}),
             ("post", "/update_scheduler_info", {}),
             ("post", "/tokenizer/encode", {"prompt": "hello"}),
             ("post", "/tokenize", {"prompt": "hello"}),

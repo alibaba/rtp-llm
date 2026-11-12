@@ -14,7 +14,6 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
-#include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
 
 namespace rtp_llm {
 
@@ -53,8 +52,6 @@ public:
     using ModelFactory = std::function<std::unique_ptr<ModelBase>(const GptModelInitParams&)>;
     static ModelFactory test_model_factory;
 
-    bool updateEplbConfig(const EPLBConfig& config) override;
-
 protected:
     // Stream-async dispatch gate. Reuses the same env var as MtpExecutor so a
     // single launcher knob (`RTP_LLM_STREAM_ASYNC=1`) flips both paths.
@@ -69,11 +66,11 @@ protected:
     // Stream-async dispatch. Records sampler_event on the main stream after
     // sampler_->forward, then forks the bookkeeping worker to wait on the
     // event and run dispatch + per-stream update off the main thread.
-    absl::Status dispatchOutputAsync(const StreamGroups&           stream_groups,
-                                     GptModelOutputs               model_output,
-                                     SamplerOutput                 sampler_output,
-                                     std::shared_ptr<torch::Event> sampler_event,
-                                     std::function<void()>         profile_step_finish,
+    absl::Status dispatchOutputAsync(const StreamGroups&            stream_groups,
+                                     GptModelOutputs                model_output,
+                                     SamplerOutput                  sampler_output,
+                                     std::shared_ptr<torch::Event>  sampler_event,
+                                     std::function<void()>          profile_step_finish,
                                      std::shared_ptr<RecordedBatch> recorded_batch = nullptr);
 
     void publishNormalDeviceState(const StreamGroups& stream_groups, const SamplerOutput& sampler_output);
@@ -97,7 +94,6 @@ private:
     std::unique_ptr<Sampler>                                                 sampler_;
     std::unique_ptr<NormalBatchStreamProcessor>                              batch_stream_processor_;
     std::shared_ptr<KVCacheManager>                                          cache_manager_;
-    std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
     RoleType                                                                 role_type_ = RoleType::PDFUSION;
     bool                                                                     warm_up_;
     bool                                                                     use_all_gather_;

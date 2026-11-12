@@ -300,7 +300,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
                     if arg.startswith("--"):
                         # Find the action for this option
                         for action_item in self._actions:
-                            if arg in action_item.option_strings:
+                            if arg.split("=", 1)[0] in action_item.option_strings:
                                 provided_args.add(action_item.dest)
                                 # Check if this action requires a value
                                 if action_item.nargs in (None, "?", 1):
@@ -319,7 +319,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
                     if arg.startswith("--"):
                         # Find the action for this option
                         for action_item in self._actions:
-                            if arg in action_item.option_strings:
+                            if arg.split("=", 1)[0] in action_item.option_strings:
                                 provided_args.add(action_item.dest)
                                 # Check if this action requires a value
                                 if action_item.nargs in (None, "?", 1):

@@ -2,6 +2,7 @@
 #include <memory>
 #include <limits>
 #include <chrono>
+#include <pybind11/embed.h>
 #include "torch/all.h"
 #include "autil/EnvUtil.h"
 #include "gtest/gtest.h"
@@ -18,6 +19,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -573,6 +575,244 @@ TEST_F(MtpExecutorTest, testDraftRawLogitsOptimizationIsOptIn) {
     ASSERT_EQ(torch::softmax(logits, -1).argmax(-1).item<int64_t>(), 0);
     EXPECT_EQ(legacy.forward(logits).token_ids.item<int64_t>(), 0);
     EXPECT_EQ(optimized.forward(logits).token_ids.item<int64_t>(), 1);
+}
+
+TEST(MtpExecutorPolicyTest, DraftInitKeepsEplbDisabled) {
+    py::scoped_interpreter interpreter;
+    EngineInitParams       base_params;
+    py::dict               py_model;
+    base_params.eplb_config.eplb_mode                    = EplbMode::ALL;
+    base_params.eplb_config.redundant_expert             = 32;
+    base_params.eplb_config.eplb_metrics_report_interval = 4;
+    ModelConfig                  draft_model_config;
+    ProposeModelEngineInitParams params(1, SP_TYPE_VANILLA, 3, draft_model_config, base_params, Weights{}, py_model);
+
+    const auto& draft = params.getEngineInitParams();
+    EXPECT_TRUE(draft.py_model.is(py_model));
+    EXPECT_EQ(draft.eplb_config.eplb_mode, EplbMode::NONE);
+    EXPECT_EQ(draft.eplb_config.redundant_expert, 0);
+    EXPECT_EQ(draft.eplb_config.eplb_metrics_report_interval, 0);
+    EXPECT_EQ(base_params.eplb_config.eplb_mode, EplbMode::ALL);
+    EXPECT_EQ(base_params.eplb_config.redundant_expert, 32);
+    EXPECT_EQ(base_params.eplb_config.eplb_metrics_report_interval, 4);
+}
+
+TEST_F(MtpExecutorTest, testRealModelWrappersOnlyEnableTargetEplb) {
+    py::scoped_interpreter interpreter;
+    try {
+        py::module_::import("torch");
+        auto module = py::module_::import("__main__");
+        py::class_<torch_ext::PyModelInitResources>(module, "TestModelInitResources");
+        py::class_<PyModelInputs>(module, "TestModelInputs");
+        py::class_<PyModelOutputs>(module, "TestModelOutputs");
+        auto types                  = py::module_::import("types");
+        auto py_model               = types.attr("SimpleNamespace")();
+        py_model.attr("initialize") = py::cpp_function([](py::object) { return true; });
+        auto forward                = py::cpp_function(
+            [](const PyModelInputs& inputs, py::object) {
+                if (inputs.expert_token_counts.defined()) {
+                    inputs.expert_token_counts.add_(1);
+                }
+                return PyModelOutputs(inputs.input_hiddens.clone());
+            },
+            py::arg("inputs"),
+            py::arg("attention") = py::none());
+        py_model.attr("prepare_fmha_impl") = py::cpp_function([](py::args) { return py::none(); });
+        py_model.attr("forward")           = forward;
+        py_model.attr("forward_propose")   = forward;
+        py_model.attr("forward_commit")    = forward;
+        py_model.attr("get_eplb_layers")   = py::cpp_function([]() { return py::list(); });
+
+        int  runtime_initializations                 = 0;
+        auto runtime_module                          = types.attr("ModuleType")("rtp_llm.eplb.runtime");
+        runtime_module.attr("RuntimeExpertBalancer") = py::cpp_function([&](py::object,
+                                                                            py::object config,
+                                                                            size_t     ep_rank,
+                                                                            size_t     ep_size,
+                                                                            size_t     model_id,
+                                                                            bool,
+                                                                            bool sync_prompt_phase) {
+            ++runtime_initializations;
+            EXPECT_EQ(config.attr("eplb_mode").cast<int>(), static_cast<int>(EplbMode::ALL));
+            EXPECT_EQ(ep_rank, 0);
+            EXPECT_EQ(ep_size, 1);
+            EXPECT_EQ(model_id, 0);
+            EXPECT_FALSE(sync_prompt_phase);
+            return types.attr("SimpleNamespace")();
+        });
+        py::dict replacements;
+        replacements["rtp_llm.eplb.runtime"] = runtime_module;
+        auto runtime_patch =
+            py::module_::import("unittest.mock").attr("patch").attr("dict")("sys.modules", replacements);
+        runtime_patch.attr("__enter__")();
+
+        ModelConfig   model_config;
+        RuntimeConfig runtime_config;
+        KVCacheConfig kv_cache_config;
+        auto          params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+        params.model_config_.moe_style                         = 1;
+        params.model_config_.expert_num                        = 2;
+        params.model_config_.moe_k                             = 1;
+        params.eplb_config.eplb_metrics_report_interval        = 2;
+        params.eplb_config.eplb_stats_window_size              = 1;
+        params.device_resource_config.enable_layer_micro_batch = 0;
+        params.sp_config.gen_num_per_cycle                     = 1;
+        params.py_model                                        = py_model;
+        params.py_sp_model                                     = py_model;
+        params.concurrency_config.concurrency_limit            = 1;
+        params.hw_kernel_config.decode_capture_batch_sizes     = {1};
+        params.hw_kernel_config.prefill_capture_seq_lens       = {2};
+
+        auto cache_config =
+            test::makeSimpleMhaCacheConfig(params.model_config_.num_layers, 10, 2, rtp_llm::TYPE_FP16, 1, 64);
+        cache_config.mtp_sub_configs.push_back(std::make_shared<CacheConfig>(cache_config));
+        auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
+        cache_manager->init();
+
+        for (auto mode : {EplbMode::NONE, EplbMode::ALL}) {
+            params.eplb_config.eplb_mode = mode;
+            for (auto sp_type : {SP_TYPE_MTP}) {
+                for (auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+                    for (bool enable_graph : {false, true}) {
+                        SCOPED_TRACE(::testing::Message()
+                                     << "mode=" << static_cast<int>(mode) << " sp_type=" << static_cast<int>(sp_type)
+                                     << " role=" << static_cast<int>(role) << " enable_graph=" << enable_graph);
+                        runtime_initializations                   = 0;
+                        params.sp_config.type                     = sp_type;
+                        params.pd_sep_config.role_type            = role;
+                        params.parallelism_config.role_type       = role;
+                        params.hw_kernel_config.enable_cuda_graph = enable_graph;
+                        auto draft_params                         = std::make_unique<EngineInitParams>(params);
+                        draft_params->model_id                    = 1;
+                        draft_params->eplb_config                 = EPLBConfig{};
+                        auto draft_models = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+                        draft_models->push_back(std::move(draft_params));
+                        auto propose_params = std::make_unique<ProposeModelEngineInitParams>(
+                            sp_type, params.sp_config.gen_num_per_cycle, std::move(draft_models));
+
+                        MtpExecutor executor(params, propose_params, cache_manager);
+                        auto*       target = dynamic_cast<PyWrappedModel*>(executor.model_.get());
+                        ASSERT_NE(target, nullptr);
+                        const auto& target_counts = target->expert_balancer_.stable_expert_token_counts();
+                        ASSERT_TRUE(target_counts.defined());
+                        EXPECT_FALSE(target_counts.is_inference());
+                        EXPECT_EQ(target_counts.sizes(),
+                                  (torch::IntArrayRef{static_cast<int64_t>(params.model_config_.num_layers), 2}));
+                        EXPECT_EQ(target_counts.sum().item<int64_t>(), 0);
+                        EXPECT_EQ(runtime_initializations, mode == EplbMode::ALL ? 1 : 0);
+                        EXPECT_EQ(target->expert_balancer_.runtime_requested_, mode == EplbMode::ALL);
+
+                        const bool expect_propose = true;
+                        const bool expect_commit  = enable_graph;
+                        EXPECT_EQ(executor.draft_model_ != nullptr, expect_propose);
+                        EXPECT_EQ(executor.sp_prefill_draft_model_ != nullptr, expect_commit);
+                        for (auto* model : {executor.draft_model_.get(), executor.sp_prefill_draft_model_.get()}) {
+                            if (model) {
+                                auto* draft = dynamic_cast<PyWrappedModel*>(model);
+                                ASSERT_NE(draft, nullptr);
+                                EXPECT_FALSE(draft->expert_balancer_.stable_expert_token_counts().defined());
+                                EXPECT_FALSE(draft->expert_balancer_.runtime_requested_);
+                                EXPECT_EQ(draft->expert_balancer_.load_monitor_, nullptr);
+                                draft->expert_balancer_.step(true);
+                                draft->expert_balancer_.step();
+                            }
+                        }
+                        EXPECT_EQ(runtime_initializations, mode == EplbMode::ALL ? 1 : 0);
+                    }
+                }
+            }
+        }
+        params.hw_kernel_config.enable_cuda_graph       = false;
+        params.parallelism_config.role_type             = RoleType::PDFUSION;
+        params.pd_sep_config.role_type                  = RoleType::PDFUSION;
+        params.eplb_config.eplb_mode                    = EplbMode::ALL;
+        params.eplb_config.eplb_metrics_report_interval = 0;
+        std::vector<bool>          phases;
+        std::vector<torch::Tensor> samples;
+        runtime_module.attr("RuntimeExpertBalancer") = py::cpp_function([&](py::args) {
+            auto runtime         = types.attr("SimpleNamespace")();
+            runtime.attr("step") = py::cpp_function([&](torch::Tensor counts, bool is_prompt) {
+                phases.push_back(is_prompt);
+                samples.push_back(counts.clone());
+                return false;
+            });
+            return runtime;
+        });
+        int forward_calls                            = 0;
+        py_model.attr("forward")                     = py::cpp_function([&](const PyModelInputs& inputs, py::object) {
+            inputs.expert_token_counts.fill_(++forward_calls);
+            return PyModelOutputs(inputs.input_hiddens.clone());
+        });
+        {
+            auto draft         = std::make_unique<EngineInitParams>(params);
+            draft->model_id    = 1;
+            draft->eplb_config = EPLBConfig{};
+            auto drafts        = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+            drafts->push_back(std::move(draft));
+            auto        propose = std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_MTP, 1, std::move(drafts));
+            MtpExecutor executor(params, propose, cache_manager);
+            auto*       target = dynamic_cast<PyWrappedModel*>(executor.model_.get());
+            ASSERT_NE(target, nullptr);
+            target->weights_.lm_head.reset();
+            GptModelInputs inputs;
+            inputs.combo_tokens     = torch::tensor({0, 1, 2, 3}, torch::kInt32).to(torch::kCUDA);
+            inputs.input_lengths    = torch::tensor({4}, torch::kInt32);
+            inputs.sequence_lengths = torch::empty({0}, torch::kInt32);
+            inputs.last_hidden_states =
+                torch::ones({4, 64}, torch::TensorOptions(torch::kFloat16).device(torch::kCUDA));
+            inputs.pd_separation = false;
+            for (bool verify : {false, true}) {
+                inputs.is_target_verify = verify;
+                // Keep context-shaped tensors fixed while testing the semantic verify phase.
+                target->attention_inputs_.is_prefill = true;
+                target->prepared_attention_inputs_.store(true);
+                target->forward(inputs);
+            }
+            EXPECT_EQ(phases, (std::vector<bool>{true, false}));
+            ASSERT_EQ(samples.size(), 2);
+            EXPECT_TRUE(samples[0].eq(1).all().item<bool>());
+            EXPECT_TRUE(samples[1].eq(2).all().item<bool>());
+            EXPECT_EQ(target->expert_balancer_.stable_expert_token_counts().sum().item<int64_t>(), 0);
+        }
+        int runtime_failures = 0;
+        for (int failure_stage : {0, 1, 2, 3}) {
+            params.eplb_config.eplb_mode                 = failure_stage >= 2 ? EplbMode::ALL : EplbMode::NONE;
+            py_model.attr("initialize")                  = py::cpp_function([failure_stage](py::object) {
+                if (failure_stage == 1) {
+                    throw std::runtime_error("injected EPLB initialization failure");
+                }
+                return failure_stage >= 2;
+            });
+            py_model.attr("get_eplb_layers")             = py::cpp_function([failure_stage]() -> py::list {
+                if (failure_stage == 2) {
+                    throw std::runtime_error("injected get_eplb_layers failure");
+                }
+                return py::list();
+            });
+            runtime_module.attr("RuntimeExpertBalancer") = py::cpp_function([&](py::args) -> py::object {
+                ++runtime_failures;
+                throw std::runtime_error("injected EPLB runtime construction failure");
+            });
+            auto draft                                   = std::make_unique<EngineInitParams>(params);
+            draft->model_id                              = 1;
+            draft->eplb_config                           = EPLBConfig{};
+            auto drafts = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+            drafts->push_back(std::move(draft));
+            auto       propose = std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_MTP, 1, std::move(drafts));
+            const auto refs    = py_model.ref_count();
+            {
+                py::gil_scoped_release release;
+                EXPECT_ANY_THROW(MtpExecutor(params, propose, cache_manager));
+            }
+            EXPECT_EQ(py_model.ref_count(), refs);
+            EXPECT_EQ(runtime_failures, failure_stage == 3 ? 1 : 0);
+        }
+        runtime_patch.attr("__exit__")(py::none(), py::none(), py::none());
+    } catch (const py::error_already_set& error) {
+        FAIL() << error.what();
+    } catch (const std::exception& error) {
+        FAIL() << error.what();
+    }
 }
 
 TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsPointMassProposal) {

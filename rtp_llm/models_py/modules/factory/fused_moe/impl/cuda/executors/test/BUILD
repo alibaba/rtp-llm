@@ -1,3 +1,28 @@
+py_test(
+    name = "eplb_native_counts_test",
+    srcs = ["eplb_native_counts_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "eplb_triton_moe_test",
+    srcs = ["eplb_triton_moe_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+    env = {"GPU_COUNT": "2"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "2"},
+    timeout = "long",
+)
+
 py_library(
     name = "fused_moe_executor_test_util",
     srcs = ["fused_moe_executor_test_util.py"],

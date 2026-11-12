@@ -544,8 +544,11 @@ class Glm5Cmp:
             )
             if working_entry is not None:
                 working.write(
-                    group_layer, params.slot_mapping,
-                    mla_cache.view(-1, 656)[:rows].view(working.backing[group_layer].dtype),
+                    group_layer,
+                    params.slot_mapping,
+                    mla_cache.view(-1, 656)[:rows].view(
+                        working.backing[group_layer].dtype
+                    ),
                 )
             return residual_out, q_for_sparse_mla, prev_topk_indices
 
@@ -746,7 +749,8 @@ class Glm5Cmp:
         events.side_streams_complete.wait()
         if working_entry is not None:
             working.write(
-                group_layer, params.slot_mapping,
+                group_layer,
+                params.slot_mapping,
                 mla_cache.view(-1, 656)[:rows].view(working.backing[group_layer].dtype),
             )
         return residual_out, q_for_sparse_mla, topk_indices
@@ -822,6 +826,13 @@ class Glm5Cmp:
                 out=(moe_residual, moe_norm, moe_activation, moe_scale),
                 epsilon=float(self.post_attention_layernorm.variance_epsilon),
             )
+            self.eplb_routing_fused = False
+            native_supported = getattr(self.mlp, "native_gate_supported", None)
+            if callable(native_supported) and native_supported(moe_norm):
+                self.mlp.native_gate(moe_norm, out=(routed_indices, routed_weights))
+                self.eplb_routing_fused = True
+                return moe_norm, moe_residual, routed_indices, routed_weights
+
             # Project normalized hidden states to FP32 logits for 256 experts.
             router_logits = ops.router_proj(
                 moe_norm,
@@ -829,12 +840,37 @@ class Glm5Cmp:
             )
             # Apply sigmoid and correction bias, select corrected Top-8 experts,
             # normalize/scale their weights, and pack MegaMoE routing buffers.
-            ops.router_topk(
-                router_logits,
-                self.mlp.correction_bias,
-                topk_indices=routed_indices,
-                topk_weights=routed_weights,
-            )
+            self.eplb_routing_fused = False
+            eplb = getattr(self.mlp, "eplb", None)
+            if (
+                eplb is not None
+                and getattr(self.mlp, "fake_balance_expert", None) is None
+            ):
+                from rtp_llm.models_py.modules.glm5_mega_moe import cmp_router_triton
+
+                if cmp_router_triton.is_supported(
+                    router_logits,
+                    self.mlp.correction_bias,
+                    routed_indices,
+                    routed_weights,
+                    eplb,
+                ):
+                    cmp_router_triton.router_topk(
+                        router_logits,
+                        self.mlp.correction_bias,
+                        routed_indices,
+                        routed_weights,
+                        eplb,
+                        pdl=ops.get_pdl(),
+                    )
+                    self.eplb_routing_fused = True
+            if not self.eplb_routing_fused:
+                ops.router_topk(
+                    router_logits,
+                    self.mlp.correction_bias,
+                    topk_indices=routed_indices,
+                    topk_weights=routed_weights,
+                )
             return moe_norm, moe_residual, routed_indices, routed_weights
         return attention_output, residual
 

@@ -689,6 +689,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
         input_list.emplace_back(PyModelInputs{token_ids, input_hiddens, py_attn_inputs, bert_embedding_inputs});
+        input_list.back().expert_token_counts = expert_balancer_.stable_expert_token_counts();
     }
 
     if (!inputs.warmup && inputs.pd_separation) {
@@ -806,9 +807,10 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
         fusedCopy(d2d_copies_);
     }
 
-    graph_state_         = CudaGraphState();
-    auto empty_tensor    = torch::Tensor();
-    auto py_model_inputs = PyModelInputs({empty_tensor, empty_tensor, attention_inputs_, empty_tensor});
+    graph_state_                        = CudaGraphState();
+    auto empty_tensor                   = torch::Tensor();
+    auto py_model_inputs                = PyModelInputs({empty_tensor, empty_tensor, attention_inputs_, empty_tensor});
+    py_model_inputs.expert_token_counts = expert_balancer_.stable_expert_token_counts();
 
     if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
@@ -884,6 +886,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     if (enable_cuda_graph_) {
         auto empty_tensor    = torch::Tensor();
         auto py_model_inputs = PyModelInputs({empty_tensor, empty_tensor, attention_inputs_, empty_tensor});
+        py_model_inputs.expert_token_counts = expert_balancer_.stable_expert_token_counts();
         if (graph_runner_->canRun(py_model_inputs, graph_state_)) {
             graph_runner_->updateKVCacheKernelBlockId(py_model_inputs, graph_state_);
         }
@@ -910,11 +913,18 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
     } flag_guard{prepared_attention_inputs_};
 
+    const auto finalize_outputs = [&](GptModelOutputs outputs) {
+        const bool is_prompt =
+            inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0) && !inputs.is_target_verify;
+        expert_balancer_.step(inputs.warmup, is_prompt);
+        return outputs;
+    };
+
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
         if (int(device_props_.enable_layer_micro_batch)) {
-            return forwardMicroBatched(inputs);
+            return finalize_outputs(forwardMicroBatched(inputs));
         }
         PyContextParallelParams cp_params;
         if (device_props_.enable_prefill_cp) {
@@ -953,6 +963,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         auto submit_forward_and_post = [&]() -> GptModelOutputs {
             auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs});
+            py_model_inputs.expert_token_counts = expert_balancer_.stable_expert_token_counts();
             PyModelOutputs py_model_outputs;
             torch::Tensor  hidden_states;
 
@@ -1057,9 +1068,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             return callForwardPostLayers(hidden_states, inputs, true);
         };
         if (prefillOptimizationsEnabled() && !inputs.warmup && inputs.pd_separation) {
-            return cache_store_async_writer_->completeAfter(submit_forward_and_post);
+            return finalize_outputs(cache_store_async_writer_->completeAfter(submit_forward_and_post));
         }
-        return submit_forward_and_post();
+        return finalize_outputs(submit_forward_and_post());
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());

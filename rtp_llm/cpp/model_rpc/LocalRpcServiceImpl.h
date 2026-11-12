@@ -154,15 +154,6 @@ public:
         return local_server_->CheckHealth(context, request, response);
     }
 
-    ::grpc::Status UpdateEplbConfig(::grpc::ServerContext*           context,
-                                    const UpdateEplbConfigRequestPB* request,
-                                    EmptyPB*                         response) override {
-        if (!readyForRegularRpc()) {
-            return notReadyStatus("UpdateEplbConfig");
-        }
-        return local_server_->UpdateEplbConfig(context, request, response);
-    }
-
     ::grpc::Status SetPause(::grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) override {
         if (!readyForRegularRpc()) {
             return notReadyStatus("SetPause");
@@ -260,7 +251,7 @@ protected:
     }
 
     std::shared_ptr<LocalRpcServer> local_server_;
-    bool defer_service_start_{false};
+    bool                            defer_service_start_{false};
 };
 
 typedef LocalRpcServiceImpl RpcServiceImpl;

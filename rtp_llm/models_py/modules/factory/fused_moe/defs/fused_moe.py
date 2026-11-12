@@ -1,6 +1,16 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, final
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Union,
+    final,
+)
 
 import torch
 
@@ -14,6 +24,10 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
     ExecutorType,
     RouterType,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
+
+if TYPE_CHECKING:
+    from rtp_llm.eplb.runtime import EplbLayer
 
 
 @dataclass
@@ -25,6 +39,7 @@ class ExpertTokensMetadata:
     expected_m: Optional[int] = None
     expert_num_tokens: Optional[torch.Tensor] = None
     expert_num_tokens_cpu: Optional[Union[List[int], torch.Tensor]] = None
+    counts_are_padded: bool = False
 
 
 @dataclass
@@ -39,6 +54,8 @@ class ExpertForwardPayload:
     expert_tokens_meta: Optional[ExpertTokensMetadata] = None
     expert_topk_ids: Optional[torch.Tensor] = None
     expert_topk_weights: Optional[torch.Tensor] = None
+    expert_ids_are_local: bool = False
+    expert_load: Optional[ExpertLoadContext] = None
 
 
 @dataclass
@@ -105,6 +122,8 @@ class FusedMoeDataRouter(ABC):
 
 
 class FusedMoeExpertExecutor(ABC):
+    execute_empty_inputs = False
+
     def __init__(
         self,
         config: MoEConfigAdapter,
@@ -138,6 +157,11 @@ class FusedMoeExpertExecutor(ABC):
         """
         pass
 
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support EPLB weight migration"
+        )
+
     @property
     def topk_ids_dtype(self) -> torch.dtype:
         return torch.int64
@@ -162,11 +186,15 @@ class FusedMoe(torch.nn.Module):
         router: FusedMoeDataRouter,
         fused_experts: FusedMoeExpertExecutor,
         expert_num: int,
+        strategy_name: str = "",
+        eplb_layer: Optional["EplbLayer"] = None,
     ):
         super().__init__()
         self.router = router
         self.fused_experts = fused_experts
         self.expert_num = expert_num
+        self.strategy_name = strategy_name
+        self.eplb_layer = eplb_layer
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
@@ -185,9 +213,13 @@ class FusedMoe(torch.nn.Module):
         apply_router_weight_on_input: bool = False,
         extra_expert_args: Optional[Dict[str, Any]] = None,
         extra_finalize_args: Optional[Dict[str, Any]] = None,
+        expert_load: Optional[ExpertLoadContext] = None,
+        ids_are_physical: bool = False,
     ) -> torch.Tensor:
 
         a1 = hidden_states
+        if self.eplb_layer is not None and not ids_are_physical:
+            topk_ids = self.eplb_layer.map_ids(topk_ids)
 
         expert_payload = self.router.prepare(
             a1,
@@ -202,7 +234,21 @@ class FusedMoe(torch.nn.Module):
         if expert_payload.expert_topk_weights is None:
             expert_payload.expert_topk_weights = topk_weights
 
-        if expert_payload.expert_x.numel() == 0:
+        metadata = expert_payload.expert_tokens_meta
+        has_dispatch_counts = (
+            metadata is not None
+            and metadata.expert_num_tokens is not None
+            and not metadata.counts_are_padded
+        )
+        if expert_load is not None and has_dispatch_counts:
+            expert_load.expert_token_counts.add_(metadata.expert_num_tokens)
+            expert_load = None
+        expert_payload.expert_load = expert_load
+
+        if (
+            expert_payload.expert_x.numel() == 0
+            and self.fused_experts.execute_empty_inputs is not True
+        ):
             # This happens when none of the tokens from the all2all reach this
             # EP rank. Also, note that this is only relevant for CUDAGraph
             # incompatible all2all kernels like the DeepEP high-throughput

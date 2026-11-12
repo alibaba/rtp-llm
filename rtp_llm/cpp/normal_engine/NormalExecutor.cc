@@ -232,29 +232,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                    timeout_ms);
     }
 
-    if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0) {
-        // use first moe layer weight as moe weight type
-        int         first_moe_layer = params.model_config_.moe_layer_index.front();
-        const auto& moe_kernel      = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
-        auto        moe_weight_type = torchDTypeToDataType(moe_kernel.dtype());
-        bool        is_gated_activation = params.model_config_.isGatedActivation();
-        auto        moe_inter_size      = is_gated_activation ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
-
-        expert_balancer_ = make_shared<ExpertBalancer>(params.model_config_.expert_num,
-                                                       params.eplb_config.phy_exp_num(params.model_config_.expert_num),
-                                                       params.model_config_.num_layers,
-                                                       moe_inter_size,
-                                                       params.model_config_.hidden_size,
-                                                       params.parallelism_config.ep_rank,
-                                                       params.parallelism_config.ep_size,
-                                                       params.parallelism_config.world_size,
-                                                       params.py_eplb,
-                                                       moe_weight_type,
-                                                       params.model_config_.quant_algo,
-                                                       metrics_reporter_,
-                                                       params.eplb_config);
-    }
-
     sampler_.reset(new Sampler(SamplerInitParams{params.model_config_.model_type, params.model_config_.vocab_size}));
 
     // CacheConfig is the single source of truth for tokens_per_block /
@@ -297,6 +274,14 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          kv_cache_layer_to_group,
          cache_manager,
          params.model_config_.hc_mult});
+
+    model_init_params.eplb_config      = params.eplb_config;
+    model_init_params.metrics_reporter = metrics_reporter_;
+    if (is_propose_) {
+        model_init_params.eplb_config = EPLBConfig{};
+    } else if (warm_up_) {
+        model_init_params.eplb_config.eplb_metrics_report_interval = 0;
+    }
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
@@ -461,11 +446,6 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
                              executor_collector.model_forward_us);
         }
     }
-    if (expert_balancer_) {
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
-        executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
 
     if (tp_rank_ > 0 || warm_up_ || !has_real_stream) {
         cudaSyncAndCheck();
@@ -606,13 +586,6 @@ void NormalExecutor::reportMetrics(const StreamGroups&                        st
         tps_reporter_.report(&tps_collector);
         wall_tps_reporter_.report(&tps_collector);
     }
-}
-
-bool NormalExecutor::updateEplbConfig(const EPLBConfig& config) {
-    if (expert_balancer_) {
-        return expert_balancer_->updateEplbConfig(config);
-    }
-    return true;
 }
 
 bool NormalExecutor::useStreamAsync() const {

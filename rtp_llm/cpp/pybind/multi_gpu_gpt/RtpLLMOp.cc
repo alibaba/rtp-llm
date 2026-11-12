@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 using namespace std;
@@ -60,12 +61,6 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         model_num = 1;
     }
 
-    // Get py_eplb if available (from model)
-    py::object py_eplb = py::none();
-    if (py::hasattr(sp_model, "py_eplb")) {
-        py_eplb = sp_model.attr("py_eplb");
-    }
-
     // Create a temporary ModelConfig with num_layers = 1 for MTP
     ModelConfig temp_model_config = model_config;
     temp_model_config.num_layers  = 1;
@@ -96,8 +91,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                            base_params.ffn_disaggregate_config,
                                                                            base_params.vit_config,
                                                                            std::move(*gpt_weight),
-                                                                           py::none(),
-                                                                           py_eplb)));
+                                                                           py::none())));
         model_id++;
     }
 
@@ -112,7 +106,7 @@ void RtpLLMOp::init(py::object model,
                     py::object mm_process_engine,
                     py::object propose_model,
                     py::object token_processor,
-                    bool      defer_service_start) {
+                    bool       defer_service_start) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     EngineInitParams params = initModel(model, engine_config, vit_config);
@@ -140,8 +134,7 @@ void RtpLLMOp::init(py::object model,
                           std::move(deferred_token_processor_),
                           true);
         rpc_server_deferred_ = true;
-        RTP_LLM_LOG_INFO(
-            "backend service/cache initialization deferred until SCR checkpoint release");
+        RTP_LLM_LOG_INFO("backend service/cache initialization deferred until SCR checkpoint release");
         return;
     }
     pybind11::gil_scoped_release release;
@@ -150,8 +143,8 @@ void RtpLLMOp::init(py::object model,
     deferred_init_params_ = std::make_unique<EngineInitParams>(std::move(params));
     grpc_server_thread_   = std::thread([this,
                                        mm_process_engine = std::move(mm_process_engine),
-                                       propose_params = std::move(propose_params),
-                                       token_processor = std::move(token_processor)]() mutable {
+                                       propose_params    = std::move(propose_params),
+                                       token_processor   = std::move(token_processor)]() mutable {
         try {
             initRPCServer(*deferred_init_params_,
                           std::move(mm_process_engine),
@@ -189,7 +182,7 @@ void RtpLLMOp::startRPCServer() {
         pybind11::gil_scoped_release release;
         server_start_failed_ = false;
         stop_requested_      = false;
-        grpc_server_thread_ = std::thread([this]() {
+        grpc_server_thread_  = std::thread([this]() {
             try {
                 startRPCServerInternal(*deferred_init_params_);
             } catch (const std::exception& e) {
@@ -211,8 +204,8 @@ void RtpLLMOp::startRPCServer() {
 void RtpLLMOp::updateRuntimeEndpoints(py::object runtime_config) {
     RTP_LLM_CHECK_WITH_INFO(rpc_server_deferred_ && deferred_init_params_ != nullptr,
                             "runtime endpoints can only be updated before deferred RPC start");
-    auto config = runtime_config.cast<RuntimeConfig>();
-    deferred_init_params_->runtime_config.worker_addrs = config.worker_addrs;
+    auto config                                             = runtime_config.cast<RuntimeConfig>();
+    deferred_init_params_->runtime_config.worker_addrs      = config.worker_addrs;
     deferred_init_params_->runtime_config.worker_grpc_addrs = config.worker_grpc_addrs;
     if (model_rpc_service_) {
         model_rpc_service_->updateRuntimeEndpoints(config);
@@ -260,12 +253,6 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         auto weight_manager = model.attr("weight_manager");
         // TODO(wangyin.yx): Only one of `py_model` and `gpt_weight` is actually needed.
 
-        // Get py_eplb if available (from model)
-        py::object py_eplb = py::none();
-        if (py::hasattr(model, "py_eplb")) {
-            py_eplb = model.attr("py_eplb");
-        }
-
         EngineInitParams params(model_id_,
                                 model_config,
                                 parallelism_config,
@@ -288,8 +275,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
                                 vit_config_cpp,
                                 std::move(*gpt_weight),
                                 py_model,
-                                weight_manager,
-                                py_eplb);
+                                weight_manager);
         params.grammar_config   = grammar_config;
         params.nccl_comm_config = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
         params.server_config    = engine_config.attr("server_config");
@@ -328,21 +314,9 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
             auto convert    = WeightsConverter(false, model_config.quant_algo);
             auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
 
-            // Get py_eplb if available (from model)
-            py::object py_eplb = py::none();
-            if (py::hasattr(sp_model, "py_eplb")) {
-                py_eplb = sp_model.attr("py_eplb");
-            }
-
             size_t gen_num_per_cycle = base_params.sp_config.gen_num_per_cycle;
-            params                   = std::make_unique<ProposeModelEngineInitParams>(model_id_,
-                                                                    sp_type,
-                                                                    gen_num_per_cycle,
-                                                                    model_config,
-                                                                    base_params,
-                                                                    std::move(*gpt_weight),
-                                                                    py::none(),
-                                                                    py_eplb);
+            params                   = std::make_unique<ProposeModelEngineInitParams>(
+                model_id_, sp_type, gen_num_per_cycle, model_config, base_params, std::move(*gpt_weight), py::none());
             model_id_++;
         } else if (sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3) {
             params = prepareMTPEngineInitParams(model_id_, propose_model, base_params);
@@ -389,7 +363,7 @@ void RtpLLMOp::prepareRPCService(const EngineInitParams&                       m
                                  py::object                                    mm_process_engine,
                                  std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                                  py::object                                    token_processor,
-                                 bool                                           defer_network_services) {
+                                 bool                                          defer_network_services) {
     std::string server_address;
     int64_t     http_port              = 0;
     int64_t     model_rpc_port         = 0;
@@ -403,7 +377,7 @@ void RtpLLMOp::prepareRPCService(const EngineInitParams&                       m
             model_rpc_port >= 0 && autil::EnvUtil::getEnv("RTP_LLM_CROSS_NODE_CPU_TP_BROADCAST", false)
             && maga_init_params.parallelism_config.tp_size > maga_init_params.parallelism_config.local_world_size;
         // NOTE: ip/ip段可自定义为所需范围。
-        server_address = "0.0.0.0:" + std::to_string(model_rpc_port);
+        server_address           = "0.0.0.0:" + std::to_string(model_rpc_port);
         deferred_server_address_ = server_address;
         if (role_type == RoleType::PREFILL || role_type == RoleType::DECODE) {
             model_rpc_service_.reset(new RemoteRpcServiceImpl());
@@ -520,7 +494,7 @@ void RtpLLMOp::startRPCServerInternal(const EngineInitParams& maga_init_params) 
     grpc::ServerBuilder builder;
     builder.AddChannelArgument(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, 1024 * 1024 * 1024);
     builder.AddChannelArgument(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH, 1024 * 1024 * 1024);
-    const GrpcConfig& grpc_config  = maga_init_params.grpc_config;
+    const GrpcConfig& grpc_config   = maga_init_params.grpc_config;
     auto              server_config = grpc_config.get_server_config();
     for (auto it = server_config.begin(); it != server_config.end(); ++it) {
         RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
@@ -537,8 +511,7 @@ void RtpLLMOp::startRPCServerInternal(const EngineInitParams& maga_init_params) 
         grpc_server_ = builder.BuildAndStart();
         grpc_server  = grpc_server_.get();
     }
-    RTP_LLM_CHECK_WITH_INFO(grpc_server != nullptr,
-                            "grpc server start failed at address " + deferred_server_address_);
+    RTP_LLM_CHECK_WITH_INFO(grpc_server != nullptr, "grpc server start failed at address " + deferred_server_address_);
     RTP_LLM_LOG_INFO("Server listening on %s", deferred_server_address_.c_str());
     is_server_ready_ = true;
     setKmonServiceServing(true);
@@ -743,7 +716,7 @@ void RtpLLMOp::pause() {
 
 void RtpLLMOp::releaseMlaHostCacheForCheckpoint() {
     RTP_LLM_CHECK_WITH_INFO(rpc_server_deferred_ && model_rpc_service_ != nullptr,
-                           "host KV release is only allowed before deferred service startup");
+                            "host KV release is only allowed before deferred service startup");
     auto manager = model_rpc_service_->getEngine()->getCacheManager();
     RTP_LLM_CHECK_WITH_INFO(manager != nullptr, "engine has no KV cache manager");
     if (auto pool = manager->mlaHostCachePool()) {
@@ -753,7 +726,7 @@ void RtpLLMOp::releaseMlaHostCacheForCheckpoint() {
 
 void RtpLLMOp::restoreMlaHostCacheAfterCheckpoint() {
     RTP_LLM_CHECK_WITH_INFO(rpc_server_deferred_ && model_rpc_service_ != nullptr,
-                           "host KV restore is only allowed before deferred service startup");
+                            "host KV restore is only allowed before deferred service startup");
     auto manager = model_rpc_service_->getEngine()->getCacheManager();
     RTP_LLM_CHECK_WITH_INFO(manager != nullptr, "engine has no KV cache manager");
     if (auto pool = manager->mlaHostCachePool()) {

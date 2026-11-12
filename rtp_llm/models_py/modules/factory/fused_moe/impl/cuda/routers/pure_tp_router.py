@@ -60,7 +60,7 @@ class PureTpRouterBase(FusedMoeDataRouter):
         self.tp_size = config.tp_size
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
-        self.expert_num = config.expert_num
+        self.expert_num = config.physical_expert_num
         self.expert_num_per_rank = self.expert_num // self.ep_size
         self.expert_start_id = self.ep_rank * self.expert_num_per_rank
         self.do_recompute_topk = do_recompute_topk
@@ -225,9 +225,7 @@ class PureTpRouterW4a8Int4PerChannel(PureTpRouterBase):
         super().check_conditions(checker, config)
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
-        checker.check(
-            quant_method in ["W4A8_INT4_PER_CHANNEL"]
-        )
+        checker.check(quant_method in ["W4A8_INT4_PER_CHANNEL"])
 
     def _do_quant(
         self, a1: torch.Tensor

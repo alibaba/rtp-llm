@@ -64,7 +64,6 @@ cc_library(
         "//rtp_llm/models_py/bindings/common/kernels:kernels_cu",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/pybind:th_utils",
-        "//rtp_llm/cpp/models:stats",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/cache:cache_group_type",
         "@havenask//aios/autil:stack_tracer",

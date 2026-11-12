@@ -288,6 +288,7 @@ def test_fused_shared_expert_is_not_added_twice() -> None:
     shared_expert = Mock(side_effect=AssertionError("shared expert ran twice"))
     layer = SimpleNamespace(
         fake_balance_expert=None,
+        eplb=None,
         fused_moe=SimpleNamespace(forward_prepacked=Mock(return_value=expected)),
         _use_mega_moe_fused_shared=True,
         shared_expert=shared_expert,
@@ -342,8 +343,9 @@ def test_side_streams_are_shared_once_per_device(monkeypatch) -> None:
 
 @pytest.mark.parametrize("drain_prefetch", [False, True])
 @pytest.mark.parametrize("nested_fmha", [False, True])
+@pytest.mark.parametrize("physical_routes", [False, True])
 def test_decoder_forward_consumes_cmp_topk_before_flashmla(
-    drain_prefetch, nested_fmha
+    drain_prefetch, nested_fmha, physical_routes
 ) -> None:
     calls: list[str] = []
     topk_indices = torch.empty((16, 2048), dtype=torch.int32)
@@ -354,6 +356,7 @@ def test_decoder_forward_consumes_cmp_topk_before_flashmla(
     routed_indices = torch.empty((16, 8), dtype=torch.int64)
     routed_weights = torch.empty((16, 8))
     cmp = SimpleNamespace(
+        eplb_routing_fused=physical_routes,
         has_indexer=True,
         moe_prepacked_input_views=Mock(
             return_value=(
@@ -377,7 +380,8 @@ def test_decoder_forward_consumes_cmp_topk_before_flashmla(
     )
     mlp = SimpleNamespace(
         forward_prepacked=Mock(
-            side_effect=lambda *args: calls.append("ffn") or torch.empty((16, 6144))
+            side_effect=lambda *args, **kwargs: calls.append("ffn")
+            or torch.empty((16, 6144))
         )
     )
     layer = object.__new__(GenericMoeDecoderLayer)
@@ -407,6 +411,9 @@ def test_decoder_forward_consumes_cmp_topk_before_flashmla(
         ["prefetch_ready"] if drain_prefetch else []
     ) + ["ffn"]
     assert cmp.sparse_mla.call_args.args[1] is topk_indices
+    assert mlp.forward_prepacked.call_args.kwargs == (
+        {"ids_are_physical": True} if physical_routes else {}
+    )
     assert result.topk_indices is topk_indices
 
 
@@ -417,6 +424,7 @@ def test_regular_decoder_waits_for_prefetch_before_moe(drain_prefetch) -> None:
     residual = torch.empty_like(hidden)
     layer = object.__new__(GenericMoeDecoderLayer)
     torch.nn.Module.__init__(layer)
+    layer.mlp = torch.nn.Identity()
     layer.layer_idx = 3
     layer._drain_pinned_mla_before_moe = drain_prefetch
     layer._fuse_input_norm_quant = False

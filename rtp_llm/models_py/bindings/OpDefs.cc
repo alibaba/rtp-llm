@@ -208,6 +208,7 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("input_hiddens")         = torch::empty(0),
              pybind11::arg("attention_inputs")      = PyAttentionInputs(),
              pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs())
+        .def_readwrite("expert_token_counts", &PyModelInputs::expert_token_counts)
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")

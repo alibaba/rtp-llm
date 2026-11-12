@@ -17,6 +17,9 @@ def fused_pack_mega_moe_se_inputs(
     out_indices: torch.Tensor,
     out_weights: torch.Tensor,
     block_m: int,
+    *,
+    eplb=None,
+    token_offset: int = 0,
 ) -> None:
     """Pack routed inputs and shared-L1 UTCCP scales in one launch."""
     fused_pack_mega_moe_inputs(
@@ -29,6 +32,8 @@ def fused_pack_mega_moe_se_inputs(
         out_weights,
         out_shared_sf=out_shared_l1_sf,
         shared_block_m=block_m,
+        eplb=eplb,
+        token_offset=token_offset,
     )
 
 

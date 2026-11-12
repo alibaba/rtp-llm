@@ -48,12 +48,13 @@ public:
         if (kernel_seq_size_per_block_ <= 0) {
             throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
         }
-        max_bs_                 = graph_params.max_context_batch_size;
-        py_attn_pyobj_method_   = py_instance_.attr("prepare_fmha_impl");
-        py_forward_method_      = py_instance_.attr("forward");
-        const auto graph_device = cuda_graph::graphDevice(device_index_);
-        options_cuda_int32_     = torch::TensorOptions().dtype(torch::kInt32).device(graph_device).requires_grad(false);
-        options_cpu_int32_      = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
+        max_bs_                                                = graph_params.max_context_batch_size;
+        py_attn_pyobj_method_                                  = py_instance_.attr("prepare_fmha_impl");
+        py_forward_method_                                     = py_instance_.attr("forward");
+        capture_mem_hold_.py_model_inputs_.expert_token_counts = graph_params.expert_token_counts;
+        const auto graph_device                                = cuda_graph::graphDevice(device_index_);
+        options_cuda_int32_ = torch::TensorOptions().dtype(torch::kInt32).device(graph_device).requires_grad(false);
+        options_cpu_int32_  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(graph_device).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \
@@ -106,6 +107,7 @@ private:
     void replayAndSyncCheck(int key, const char* key_type);
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
+    void checkGraphInputStable(const PyModelInputs& inputs, const PyModelInputs& captured_inputs) const;
     // Common memory hold creation logic
     CaptureMemoryHold createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count);
     void              initKernelInternalMemory();

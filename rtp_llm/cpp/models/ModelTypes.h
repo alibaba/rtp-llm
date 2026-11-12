@@ -2,11 +2,12 @@
 
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
-#include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/config/EplbConfig.h"
+#include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <string>
@@ -65,7 +66,9 @@ struct GptModelInitParams {
     // When >1, the model's pre-output residual ([T, hc_mult*hidden_size])
     // is the contract between target and draft for MTP — see
     // MtpExecutor::makeFakeSPOutputBuffer and CudaGraphRunner input_hiddens.
-    int64_t hc_mult = 1;
+    int64_t                      hc_mult = 1;
+    EPLBConfig                   eplb_config{};
+    kmonitor::MetricsReporterPtr metrics_reporter{};
 };
 
 enum GptModelInputIndex : size_t {
@@ -171,9 +174,8 @@ public:
         return torch::Tensor();
     }
 
-    rtp_llm::Weights            weights_;
-    rtp_llm::OverallExpertStats overall_expert_stats_;
-    size_t                      model_id_ = 0;
+    rtp_llm::Weights weights_;
+    size_t           model_id_ = 0;
 };
 
 }  // namespace rtp_llm

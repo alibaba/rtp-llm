@@ -177,8 +177,18 @@ class GLM5MegaMoEFP8SE(GLM5MegaMoEFP8):
         x: torch.Tensor,
         weights: torch.Tensor,
         indices: torch.Tensor,
+        *,
+        eplb=None,
+        token_offset: int = 0,
     ) -> torch.Tensor:
-        return self._forward_impl(x, weights, indices, inputs_prepacked=False)
+        return self._forward_impl(
+            x,
+            weights,
+            indices,
+            inputs_prepacked=False,
+            eplb=eplb,
+            token_offset=token_offset,
+        )
 
     def _forward_impl(
         self,
@@ -188,6 +198,11 @@ class GLM5MegaMoEFP8SE(GLM5MegaMoEFP8):
         *,
         inputs_prepacked: bool,
         activation_clamp: Optional[float] = None,
+        eplb=None,
+        token_offset: int = 0,
+        gate_logits: torch.Tensor | None = None,
+        gate_bias: torch.Tensor | None = None,
+        route_scale: float = 1.0,
     ) -> torch.Tensor:
         # The fused-shared strategy retains its existing unclamped GLM5
         # behavior. The argument keeps the override compatible with the base
@@ -209,10 +224,6 @@ class GLM5MegaMoEFP8SE(GLM5MegaMoEFP8):
                 f"is smaller than input tokens={tokens}"
             )
 
-        if not inputs_prepacked:
-            if weights is None or indices is None:
-                raise ValueError("weights and indices are required before packing")
-            self._input_packer.pack(x, weights, indices, buf, tokens)
         block_m = deep_gemm.get_block_m_for_mega_moe_fp8(
             self.cfg.ep_size,
             self.cfg.n_routed_experts,
@@ -220,12 +231,41 @@ class GLM5MegaMoEFP8SE(GLM5MegaMoEFP8):
             tokens,
             self.cfg.n_activated_experts,
         )
-        stage_shared_fp8_input_scales(
-            buf.x_sf,
-            buf.shared_l1_acts_sf,
-            tokens,
-            block_m,
-        )
+        if gate_logits is not None:
+            from .input_packer import pack_gate_inputs
+
+            pack_gate_inputs(
+                x,
+                gate_logits,
+                gate_bias,
+                buf,
+                route_scale,
+                eplb=eplb,
+                token_offset=token_offset,
+                block_m=int(block_m),
+            )
+        elif not inputs_prepacked:
+            if weights is None or indices is None:
+                raise ValueError("weights and indices are required before packing")
+            self._input_packer.pack(
+                x,
+                weights,
+                indices,
+                buf,
+                tokens,
+                **(
+                    {"eplb": eplb, "token_offset": token_offset}
+                    if eplb is not None
+                    else {}
+                ),
+            )
+        if gate_logits is None:
+            stage_shared_fp8_input_scales(
+                buf.x_sf,
+                buf.shared_l1_acts_sf,
+                tokens,
+                block_m,
+            )
         self._maybe_pre_kernel_barrier(tokens)
         _sync_cuda_graph_warmup_ranks(
             f"glm5.mega_moe_fp8_se.layer{self.cfg.layer_id}.before_deepgemm",
@@ -244,6 +284,9 @@ class GLM5MegaMoEFP8SE(GLM5MegaMoEFP8):
             activation="swiglu",
             activation_clamp=None,
             fast_math=False,
+            cumulative_local_expert_recv_stats=getattr(
+                self, "expert_token_counts", None
+            ),
             assume_all_topk_valid=True,
         )
         return y

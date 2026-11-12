@@ -41,7 +41,8 @@ struct GraphParams {
     // CudaGraphRunner allocates input_hiddens with hidden_size * hc_mult so
     // the DSv4 MTP draft graph captures with the [T, hc*dim] residual shape
     // produced by the target's getMtpTargetHiddenStates accessor.
-    int64_t hc_mult = 1;
+    int64_t       hc_mult = 1;
+    torch::Tensor expert_token_counts;
 };
 
 class GraphBase {

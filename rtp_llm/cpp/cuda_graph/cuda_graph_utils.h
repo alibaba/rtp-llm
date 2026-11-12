@@ -40,6 +40,7 @@ public:
         py_model_inputs_.attention_inputs.kv_cache_layer_to_group = inputs.attention_inputs.kv_cache_layer_to_group;
         py_model_inputs_.attention_inputs.prefix_lengths          = inputs.attention_inputs.prefix_lengths;
         py_model_inputs_.input_ids                                = inputs.input_ids;
+        py_model_inputs_.expert_token_counts                      = inputs.expert_token_counts;
 
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;

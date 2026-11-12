@@ -1,7 +1,8 @@
 """Triton MegaMoE input packer for GLM-5.
 
-Fuses: BF16 activation -> FP8 E4M3, packed UE8M0 group-32 scales, and
-router tensor copies into DeepGEMM's symmetric-memory dispatch buffer.
+Fuses BF16 activation quantization, packed UE8M0 group-32 scales and
+router writes into DeepGEMM's symmetric-memory dispatch buffer. With logits,
+also computes GLM sigmoid TopK and EPLB mapping in the same launch.
 Ported from dsv4/moe/_mega_input_pack_triton.py.
 """
 
@@ -12,9 +13,12 @@ import os
 import torch
 from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
+from .eplb_routing import map_experts, maps_supported
+
 try:
     import triton
     import triton.language as tl
+    from triton.language.extra.cuda import libdevice
 except Exception:
     triton = None
     tl = None
@@ -22,7 +26,9 @@ except Exception:
 
 if triton is not None:
 
-    @triton.jit(do_not_specialize=["M", "SHARED_ACTIVE_ROWS"])
+    @triton.jit(
+        do_not_specialize=["M", "SHARED_ACTIVE_ROWS", "ep_rank", "token_offset"]
+    )
     def _pack_mega_moe_inputs_optimized_kernel(
         x_ptr,
         weights_ptr,
@@ -32,6 +38,12 @@ if triton is not None:
         out_weights_ptr,
         out_indices_ptr,
         out_shared_sf_ptr,
+        mapping_ptr,
+        counts_ptr,
+        map_stride: tl.constexpr,
+        HAS_EPLB: tl.constexpr,
+        ep_rank,
+        token_offset,
         M,
         N: tl.constexpr,
         K: tl.constexpr,
@@ -53,6 +65,13 @@ if triton is not None:
         SHARED_ALIGNED_BLOCK_M: tl.constexpr,
         SHARED_ACTIVE_ROWS,
         SHARED_ZERO_ROWS: tl.constexpr,
+        logits_ptr,
+        bias_ptr,
+        logits_stride_m: tl.constexpr,
+        E: tl.constexpr,
+        BLOCK_E: tl.constexpr,
+        ROUTE_SCALE: tl.constexpr,
+        FUSE_GATE: tl.constexpr,
     ):
         # Large prefill rows can make row * hidden_stride approach int32 range.
         # Use int64 row offsets for all pointer arithmetic.
@@ -141,31 +160,112 @@ if triton is not None:
 
         if pid_blk == 0:
             router_offs = tl.arange(0, BLOCK_K)
-            router_mask = row_mask[:, None] & (router_offs[None, :] < K)
-            w = tl.load(
-                weights_ptr + offs_m[:, None] * weights_stride_m + router_offs[None, :],
-                mask=router_mask,
-                other=0.0,
-            ).to(tl.float32)
-            idx = tl.load(
-                indices_ptr + offs_m[:, None] * indices_stride_m + router_offs[None, :],
-                mask=router_mask,
-                other=0,
-            ).to(tl.int64)
-            tl.store(
-                out_weights_ptr
-                + offs_m[:, None] * out_weights_stride_m
-                + router_offs[None, :],
-                w,
-                mask=router_mask,
-            )
-            tl.store(
-                out_indices_ptr
-                + offs_m[:, None] * out_indices_stride_m
-                + router_offs[None, :],
-                idx,
-                mask=router_mask,
-            )
+            if FUSE_GATE:
+                experts = tl.arange(0, BLOCK_E)
+                bias = tl.load(bias_ptr + experts, mask=experts < E, other=0.0)
+                for row_i in range(BLOCK_M):
+                    row = pid_m_blk * BLOCK_M + row_i
+                    valid_row = row < M
+                    logits = tl.load(
+                        logits_ptr + row * logits_stride_m + experts,
+                        mask=valid_row & (experts < E),
+                        other=0.0,
+                    ).to(tl.float32)
+                    score = tl.div_rn(1.0, 1.0 + libdevice.exp(-logits))
+                    corrected = score + bias
+                    lowest = -3.4028234663852886e38
+                    corrected = tl.where(
+                        (experts < E) & (tl.abs(corrected) < float("inf")),
+                        corrected,
+                        lowest,
+                    )
+                    available = experts < E
+                    idx = tl.full((BLOCK_K,), 0, tl.int64)
+                    w = tl.full((BLOCK_K,), 0.0, tl.float32)
+                    group_score = 0.0
+                    for k in tl.static_range(K):
+                        best = tl.max(tl.where(available, corrected, -float("inf")), 0)
+                        winner = tl.min(
+                            tl.where(
+                                available & (corrected == best), experts, 2147483647
+                            ),
+                            0,
+                        )
+                        value = tl.sum(tl.where(experts == winner, score, 0.0), 0)
+                        idx = tl.where(router_offs == k, winner.to(tl.int64), idx)
+                        w = tl.where(router_offs == k, value, w)
+                        available = available & (experts != winner)
+                        if k < 2:
+                            group_score += best
+                    valid_group = (tl.abs(group_score) < float("inf")) & (
+                        group_score != lowest
+                    )
+                    w = tl.div_rn(w, tl.sum(w, 0) + 1.0e-20) * ROUTE_SCALE
+                    w = tl.where(valid_group, w, 1.0 / K)
+                    idx = tl.where(valid_group, idx, router_offs)
+                    router_mask = valid_row & (router_offs < K)
+                    if HAS_EPLB:
+                        idx = map_experts(
+                            idx,
+                            row,
+                            router_mask,
+                            mapping_ptr,
+                            counts_ptr,
+                            map_stride,
+                            ep_rank,
+                            token_offset,
+                        )
+                    tl.store(
+                        out_weights_ptr + row * out_weights_stride_m + router_offs,
+                        w,
+                        mask=router_mask,
+                    )
+                    tl.store(
+                        out_indices_ptr + row * out_indices_stride_m + router_offs,
+                        idx,
+                        mask=router_mask,
+                    )
+            else:
+                router_mask = row_mask[:, None] & (router_offs[None, :] < K)
+                w = tl.load(
+                    weights_ptr
+                    + offs_m[:, None] * weights_stride_m
+                    + router_offs[None, :],
+                    mask=router_mask,
+                    other=0.0,
+                ).to(tl.float32)
+                idx = tl.load(
+                    indices_ptr
+                    + offs_m[:, None] * indices_stride_m
+                    + router_offs[None, :],
+                    mask=router_mask,
+                    other=0,
+                ).to(tl.int64)
+                if HAS_EPLB:
+                    idx = map_experts(
+                        idx,
+                        offs_m[:, None],
+                        router_mask,
+                        mapping_ptr,
+                        counts_ptr,
+                        map_stride,
+                        ep_rank,
+                        token_offset,
+                    )
+                tl.store(
+                    out_weights_ptr
+                    + offs_m[:, None] * out_weights_stride_m
+                    + router_offs[None, :],
+                    w,
+                    mask=router_mask,
+                )
+                tl.store(
+                    out_indices_ptr
+                    + offs_m[:, None] * out_indices_stride_m
+                    + router_offs[None, :],
+                    idx,
+                    mask=router_mask,
+                )
 
 
 def fused_pack_mega_moe_inputs(
@@ -178,11 +278,16 @@ def fused_pack_mega_moe_inputs(
     out_weights: torch.Tensor,
     out_shared_sf: torch.Tensor | None = None,
     shared_block_m: int = 0,
+    eplb=None,
+    token_offset: int = 0,
+    router_logits: torch.Tensor | None = None,
+    correction_bias: torch.Tensor | None = None,
+    routed_scaling_factor: float = 1.0,
 ) -> None:
     """Fused packing of MegaMoE inputs into the symm-mem buffer.
 
-    Performs BF16 → FP8 E4M3 quantization with packed UE8M0 (group=32) scales,
-    and copies router weights/indices, all in a single Triton launch.
+    Quantizes BF16 to FP8 with packed UE8M0 group-32 scales and writes routing
+    in one launch. Supplied logits replace router copies with sigmoid TopK.
     """
     if triton is None:
         raise RuntimeError("triton is unavailable")
@@ -192,7 +297,25 @@ def fused_pack_mega_moe_inputs(
         raise ValueError(f"x must be [T,D], got {tuple(x.shape)}")
 
     T, D = x.shape
+    if eplb is not None and not maps_supported(eplb, x.device):
+        raise ValueError("unsupported GLM MegaMoE EPLB routing maps")
     topk = weights.shape[1]
+    if router_logits is not None:
+        if not (
+            router_logits.ndim == 2
+            and router_logits.shape[0] == T
+            and router_logits.dtype in (torch.bfloat16, torch.float32)
+            and router_logits.device == x.device
+            and router_logits.stride(1) == 1
+            and 2 <= topk <= min(32, router_logits.shape[1])
+            and router_logits.shape[1] <= 512
+            and correction_bias is not None
+            and correction_bias.shape == (router_logits.shape[1],)
+            and correction_bias.dtype == torch.float32
+            and correction_bias.device == x.device
+            and correction_bias.is_contiguous()
+        ):
+            raise ValueError("unsupported GLM sigmoid gate/pack routing tensors")
 
     if D % 128 != 0:
         raise ValueError(f"fused MegaMoE packer requires D % 128 == 0, got D={D}")
@@ -247,6 +370,12 @@ def fused_pack_mega_moe_inputs(
             out_weights,
             out_indices,
             out_shared_sf if out_shared_sf is not None else out_sf,
+            eplb.logical_to_physical if eplb is not None else indices,
+            eplb.logical_count if eplb is not None else indices,
+            eplb.logical_to_physical.stride(0) if eplb is not None else 0,
+            eplb is not None,
+            eplb.replica_offset if eplb is not None else 0,
+            token_offset,
             T,
             D,
             topk,
@@ -268,6 +397,13 @@ def fused_pack_mega_moe_inputs(
             aligned_shared_block_m,
             active_shared_rows,
             shared_zero_rows,
+            router_logits,
+            correction_bias,
+            router_logits.stride(0) if router_logits is not None else 0,
+            router_logits.shape[1] if router_logits is not None else 0,
+            triton.next_power_of_2(router_logits.shape[1]) if router_logits is not None else 1,
+            routed_scaling_factor,
+            router_logits is not None,
         ),
-        num_warps=4,
+        num_warps=1 if router_logits is not None else 4,
     )

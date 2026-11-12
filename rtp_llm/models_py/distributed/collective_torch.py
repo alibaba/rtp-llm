@@ -465,6 +465,9 @@ def _register_process_groups_to_cpp():
         """
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
+            if not inplace:
+                for i, recv_buf in enumerate(recv_buffers):
+                    recv_buf.copy_(send_buffers[i].reshape(recv_buf.shape))
             return
         world_size = pg.size()
         device_id: Optional[int] = None
@@ -752,6 +755,22 @@ def all_reduce(
         tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
     )
     return tensor
+
+
+def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
+    process_group = _get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    if input_tensor.shape[0] % world_size:
+        raise ValueError("reduce_scatter requires equal row counts across ranks")
+    output = torch.empty(
+        (input_tensor.shape[0] // world_size, *input_tensor.shape[1:]),
+        device=input_tensor.device,
+        dtype=input_tensor.dtype,
+    )
+    torch.distributed.reduce_scatter_tensor(
+        output, input_tensor.contiguous(), group=process_group
+    )
+    return output
 
 
 def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:

@@ -13,6 +13,20 @@ py_test (
 )
 
 py_test(
+    name = "expert_load_collective_test",
+    srcs = ["expert_load_collective_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    data = ["//rtp_llm/cpp/models/eplb/test:th_eplb_py_wrapper_test"],
+    env = {"GPU_COUNT": "2"},
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "2"},
+    tags = ["SM103_CU13"],
+    timeout = "moderate",
+)
+
+py_test(
     name = "collective_torch_test",
     srcs = ["collective_torch_test.py"],
     deps = [

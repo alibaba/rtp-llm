@@ -5,6 +5,7 @@ import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.eplb.runtime import EplbLayer
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
@@ -42,6 +43,10 @@ from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
     Glm5Cmp,
     resolve_glm5_cmp_enabled,
     should_enable_glm5_cmp,
+)
+from rtp_llm.models_py.utils.expert_load_monitor import (
+    ExpertLoadContext,
+    expert_load_for_layer,
 )
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
@@ -153,6 +158,9 @@ class GenericMoeLayer(nn.Module):
         self.ffn_dim = config.inter_size
         self.num_experts = config.eplb_config.phy_exp_num(config.expert_num)
         self.top_k = config.moe_k
+        self.eplb = None
+        self.expert_load_layer_id = layer_idx
+        self._bound_expert_load = None
 
         # GLM5 CP prefill changes the rank-local token count when a reused long
         # request is mixed with short requests (666 -> 697 rows in the
@@ -330,8 +338,27 @@ class GenericMoeLayer(nn.Module):
                 moe_config=moe_config,
                 quant_config=quant_config,
                 enable_cuda_graph=enable_cuda_graph,
+                layer_id=layer_idx,
             )
             self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
+
+        if W.log2phy in weights and not hasattr(self.fused_moe, "eplb_layer"):
+            from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_wrapper import (
+                MegaMoeWrapper,
+            )
+
+            if not isinstance(self.fused_moe, MegaMoeWrapper):
+                raise ValueError(
+                    "Runtime EPLB requires an executor exposing expert weights"
+                )
+            self.eplb = EplbLayer(
+                layer_idx,
+                weights[W.log2phy],
+                weights[W.logic_expert_cnt],
+                self.fused_moe.get_eplb_weights(),
+                ep_rank=parallelism_config.ep_rank,
+                replica_offset=parallelism_config.ep_rank,
+            )
 
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
@@ -395,6 +422,69 @@ class GenericMoeLayer(nn.Module):
                     "HY V4 correction bias must contain one value per expert, got "
                     f"{self.correction_bias.numel()} for {config.expert_num} experts"
                 )
+        self._mega_gate_weight = None
+        from rtp_llm.models_py.modules.glm5_mega_moe.mega_gate import enabled
+
+        weight = getattr(self.gate, "weight", None)
+        if (
+            enabled(self._native_gate_eplb())
+            and getattr(config, "model_type", "") == "glm_5"
+            and isinstance(weight, torch.Tensor)
+            and weight.dtype == torch.bfloat16
+            and getattr(self.fused_moe, "topk_ids_dtype", None) == torch.int64
+        ):
+            self._mega_gate_weight = weight.contiguous()
+
+    def get_eplb_layer(self):
+        return self._native_gate_eplb()
+
+    def bind_expert_load(self, expert_load: ExpertLoadContext) -> None:
+        self._bound_expert_load = expert_load
+        if hasattr(self.fused_moe, "mega_moe"):
+            self.fused_moe.mega_moe.expert_token_counts = (
+                expert_load.expert_token_counts
+            )
+
+    def _native_gate_eplb(self):
+        return self.eplb or getattr(self.fused_moe, "eplb_layer", None)
+
+    def native_gate_supported(self, hidden_states: torch.Tensor) -> bool:
+        if getattr(self, "_mega_gate_weight", None) is None:
+            return False
+        from rtp_llm.models_py.modules.glm5_mega_moe.mega_gate import is_supported
+
+        return self.fake_balance_expert is None and is_supported(
+            hidden_states,
+            getattr(self, "_mega_gate_weight", None),
+            self.correction_bias,
+            self.config,
+            self._native_gate_eplb(),
+        )
+
+    def native_gate(self, hidden_states: torch.Tensor, *, out=None):
+        from rtp_llm.models_py.modules.glm5_mega_moe.mega_gate import mega_gate
+
+        return mega_gate(
+            hidden_states,
+            self._mega_gate_weight,
+            self.correction_bias,
+            self.config,
+            self._native_gate_eplb(),
+            out=out,
+        )
+
+    def gate_pack_supported(self, hidden_states: torch.Tensor) -> bool:
+        supported = getattr(self.fused_moe, "supports_gate_pack", None)
+        return (
+            callable(supported)
+            and self.fake_balance_expert is None
+            and supported(hidden_states, self.correction_bias, self.config, self.eplb)
+        )
+
+    def gate_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.gate_chunk_rows > 0 and hidden_states.shape[0] > 0:
+            return fixed_m_linear(self.gate, hidden_states, self.gate_chunk_rows)
+        return self.gate(hidden_states)
 
     def clone_for_cuda_graph(
         self, *, share_mega_buf: bool = False
@@ -408,11 +498,15 @@ class GenericMoeLayer(nn.Module):
         clone.ffn_dim = self.ffn_dim
         clone.num_experts = self.num_experts
         clone.top_k = self.top_k
+        clone.eplb = self.eplb
+        clone.expert_load_layer_id = self.expert_load_layer_id
+        clone._bound_expert_load = self._bound_expert_load
         clone.gate_chunk_rows = self.gate_chunk_rows
         clone.gate = self.gate
         clone.gate_weight = self.gate_weight
         clone._hy4_fp32_router = self._hy4_fp32_router
         clone._hy4_bf16_router_weight = self._hy4_bf16_router_weight
+        clone._mega_gate_weight = getattr(self, "_mega_gate_weight", None)
         clone.select_topk = self.select_topk
         clone.fake_balance_expert = self.fake_balance_expert
         if share_mega_buf:
@@ -425,6 +519,8 @@ class GenericMoeLayer(nn.Module):
             clone.fused_moe = self.fused_moe.clone_for_cuda_graph()
         else:
             clone.fused_moe = self.fused_moe
+        if clone._bound_expert_load is not None:
+            clone.bind_expert_load(clone._bound_expert_load)
         clone.w1 = self.w1
         clone.w2 = self.w2
         clone.num_local_experts = self.num_local_experts
@@ -446,10 +542,16 @@ class GenericMoeLayer(nn.Module):
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
+        *,
+        ids_are_physical: bool = False,
     ) -> torch.Tensor:
         """Consume router/quant resources already prepared by GLM5 CMP."""
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
+        if self.eplb is not None and (
+            not ids_are_physical or self.fake_balance_expert is not None
+        ):
+            topk_ids.copy_(self.eplb.map_ids(topk_ids))
         branches = self._cmp_moe_streams
         if (
             branches is not None
@@ -480,103 +582,137 @@ class GenericMoeLayer(nn.Module):
         hidden_states: torch.Tensor,
         x_fp8: "Optional[torch.Tensor]" = None,
         x_scale: "Optional[torch.Tensor]" = None,
+        expert_load: Optional[ExpertLoadContext] = None,
     ) -> torch.Tensor:
+        if expert_load is None:
+            expert_load = getattr(self, "_bound_expert_load", None)
         num_tokens, _ = hidden_states.shape
-        native_routing = None
-        if _cpu_ops.NATIVE_ROUTER and not self._hy4_fp32_router:
-            from rtp_llm.models_py.modules.base.cuda.native_router import try_route
-
-            native_routing = try_route(self, hidden_states)
-        if native_routing is not None:
-            topk_weights, topk_ids = native_routing
+        gate_pack = self.gate_pack_supported(hidden_states)
+        eplb_native_routing = self.native_gate_supported(hidden_states)
+        if (
+            gate_pack
+            and eplb_native_routing
+            and num_tokens < 8192
+            and os.environ.get("RTP_LLM_GLM5_GATE_PACK", "auto") == "auto"
+        ):
+            # Include the projection GEMM cost when choosing between fusions.
+            gate_pack = False
+        eplb_native_routing = eplb_native_routing and not gate_pack
+        if gate_pack:
+            router_logits = self.gate_logits(hidden_states)
+        elif eplb_native_routing:
+            topk_weights, topk_ids = self.native_gate(hidden_states)
         else:
-            if self._hy4_fp32_router:
-                router_logits = bf16_fp32_router_logits(
-                    hidden_states, self.gate_weight, self._hy4_bf16_router_weight
-                )
-            elif self.gate_chunk_rows > 0 and num_tokens > 0:
-                router_logits = fixed_m_linear(
-                    self.gate, hidden_states, self.gate_chunk_rows
-                )
+            native_routing = None
+            if _cpu_ops.NATIVE_ROUTER and not self._hy4_fp32_router:
+                from rtp_llm.models_py.modules.base.cuda.native_router import try_route
+
+                native_routing = try_route(self, hidden_states)
+            if native_routing is not None:
+                topk_weights, topk_ids = native_routing
             else:
-                router_logits = self.gate(
-                    hidden_states
-                )  # fuse kernel: nvjet_tst_64x8_64x16_2x4_h_bz_NNT (bf16 nn.Linear router, every layer)
-            # The fused router converts BF16 inside its first kernel. Unsupported
-            # cases still perform the original FP32 conversion in GroupTopK.
-            router_logits_fp32 = (
-                router_logits
-                if self.correction_bias is not None and _prefill_optimization.ENABLED
-                else router_logits.float()
-            )
-
-            # different executor may need different topk_ids dtype
-            topk_ids_dtype = self.fused_moe.topk_ids_dtype
-            allocator = (
-                _cpu_ops.native()
-                if _cpu_ops.NATIVE_ALLOC
-                and hidden_states.is_cuda
-                and topk_ids_dtype in (torch.int32, torch.int64)
-                else None
-            )
-            if allocator is not None:
-                topk_weights, topk_ids = allocator.router_outputs(
-                    num_tokens,
-                    self.top_k,
-                    hidden_states.device.index,
-                    topk_ids_dtype == torch.int64,
-                )
-            else:
-                topk_weights = torch.empty(
-                    (num_tokens, self.top_k),
-                    dtype=torch.float32,
-                    device=hidden_states.device,
-                )
-                topk_ids = torch.empty(
-                    (num_tokens, self.top_k),
-                    dtype=topk_ids_dtype,
-                    device=hidden_states.device,
+                if self._hy4_fp32_router:
+                    router_logits = bf16_fp32_router_logits(
+                        hidden_states, self.gate_weight, self._hy4_bf16_router_weight
+                    )
+                elif self.gate_chunk_rows > 0 and num_tokens > 0:
+                    router_logits = fixed_m_linear(
+                        self.gate, hidden_states, self.gate_chunk_rows
+                    )
+                else:
+                    router_logits = self.gate(
+                        hidden_states
+                    )  # fuse kernel: nvjet_tst_64x8_64x16_2x4_h_bz_NNT (bf16 nn.Linear router, every layer)
+                # The fused router converts BF16 inside its first kernel. Unsupported
+                # cases still perform the original FP32 conversion in GroupTopK.
+                router_logits_fp32 = (
+                    router_logits
+                    if self.correction_bias is not None and _prefill_optimization.ENABLED
+                    else router_logits.float()
                 )
 
-            routed = False
-            if (
-                _cpu_ops.DIRECT_ROUTER
-                and self.correction_bias is not None
-                and _cpu_ops.no_module_hooks(self.group_topk)
-            ):
-                from rtp_llm.models_py.triton_kernels.moe import router_single_group
-
-                routed = router_single_group.try_single_group_router(
-                    router_logits_fp32,
-                    self.correction_bias,
-                    topk_weights,
-                    topk_ids,
-                    self.config.moe_n_group,
-                    self.config.moe_topk_group,
-                    self.top_k,
-                    self.config.has_moe_norm,
-                    self.config.routed_scaling_factor,
+                # different executor may need different topk_ids dtype
+                topk_ids_dtype = self.fused_moe.topk_ids_dtype
+                allocator = (
+                    _cpu_ops.native()
+                    if _cpu_ops.NATIVE_ALLOC
+                    and hidden_states.is_cuda
+                    and topk_ids_dtype in (torch.int32, torch.int64)
+                    else None
                 )
+                if allocator is not None:
+                    topk_weights, topk_ids = allocator.router_outputs(
+                        num_tokens,
+                        self.top_k,
+                        hidden_states.device.index,
+                        topk_ids_dtype == torch.int64,
+                    )
+                else:
+                    topk_weights = torch.empty(
+                        (num_tokens, self.top_k),
+                        dtype=torch.float32,
+                        device=hidden_states.device,
+                    )
+                    topk_ids = torch.empty(
+                        (num_tokens, self.top_k),
+                        dtype=topk_ids_dtype,
+                        device=hidden_states.device,
+                    )
 
-            if self.correction_bias is not None and not routed:
-                assert self.group_topk is not None
-                self.group_topk(
-                    topk_weights=topk_weights,
-                    topk_ids=topk_ids,
-                    scores=router_logits_fp32,
-                    correction_bias=self.correction_bias,
-                    n_group=self.config.moe_n_group,
-                    topk_group=self.config.moe_topk_group,
-                    topk=self.top_k,
-                    renormalize=self.config.has_moe_norm,
-                    routed_scaling_factor=self.config.routed_scaling_factor,
-                )
-            elif self.correction_bias is None:
-                # Top-K selection using C++ SelectTopkOp
-                self.select_topk(router_logits_fp32, topk_ids, topk_weights)
+                routed = False
+                if (
+                    _cpu_ops.DIRECT_ROUTER
+                    and self.correction_bias is not None
+                    and _cpu_ops.no_module_hooks(self.group_topk)
+                ):
+                    from rtp_llm.models_py.triton_kernels.moe import router_single_group
 
-        if self.fake_balance_expert is not None:
+                    routed = router_single_group.try_single_group_router(
+                        router_logits_fp32,
+                        self.correction_bias,
+                        topk_weights,
+                        topk_ids,
+                        self.config.moe_n_group,
+                        self.config.moe_topk_group,
+                        self.top_k,
+                        self.config.has_moe_norm,
+                        self.config.routed_scaling_factor,
+                    )
+
+                if self.correction_bias is not None and not routed:
+                    assert self.group_topk is not None
+                    self.group_topk(
+                        topk_weights=topk_weights,
+                        topk_ids=topk_ids,
+                        scores=router_logits_fp32,
+                        correction_bias=self.correction_bias,
+                        n_group=self.config.moe_n_group,
+                        topk_group=self.config.moe_topk_group,
+                        topk=self.top_k,
+                        renormalize=self.config.has_moe_norm,
+                        routed_scaling_factor=self.config.routed_scaling_factor,
+                    )
+                elif self.correction_bias is None:
+                    # Top-K selection using C++ SelectTopkOp
+                    self.select_topk(router_logits_fp32, topk_ids, topk_weights)
+
+        if not gate_pack and self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
+
+        pack_eplb = (
+            self.eplb is not None
+            and not gate_pack
+            and not eplb_native_routing
+            and callable(getattr(self.fused_moe, "supports_eplb_input_pack", None))
+            and self.fused_moe.supports_eplb_input_pack(self.eplb, hidden_states)
+        )
+        if (
+            self.eplb is not None
+            and not pack_eplb
+            and not eplb_native_routing
+            and not gate_pack
+        ):
+            topk_ids = self.eplb.map_ids(topk_ids)
 
         is_ep_mode = self.ep_size > 1
         use_ep_shared_allreduce = (
@@ -589,21 +725,28 @@ class GenericMoeLayer(nn.Module):
             and self._use_mega_moe_fused_shared
         )
 
-        experts_output = self.fused_moe(
-            hidden_states=hidden_states,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation="SiGLU",
-            **(
-                {
-                    "extra_expert_args": {
-                        "swiglu_limit": float(getattr(self.config, "swiglu_limit", 0.0))
-                    }
-                }
-                if self._hy4_fp32_router
-                else {}
-            ),
-        )
+        if gate_pack:
+            experts_output = self.fused_moe.forward_gate_pack(
+                hidden_states,
+                router_logits,
+                self.correction_bias,
+                float(self.config.routed_scaling_factor),
+                self.eplb,
+            )
+        else:
+            experts_output = self.fused_moe(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation="SiGLU",
+                **({"extra_expert_args": {"swiglu_limit": float(getattr(self.config, "swiglu_limit", 0.0))}} if self._hy4_fp32_router else {}),
+                **({"eplb": self.eplb} if pack_eplb else {}),
+                **(
+                    {"expert_load": expert_load, "ids_are_physical": eplb_native_routing}
+                    if hasattr(self.fused_moe, "eplb_layer")
+                    else {}
+                ),
+            )
         if use_mega_moe_fused_shared:
             return experts_output
         if self.shared_expert is not None:
@@ -853,6 +996,7 @@ class GenericMoeDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run residual add, RMSNorm, then the dense MLP or MoE."""
         # Dense MLP: fuse add + RMSNorm + FP8 quant; up_proj consumes FP8 directly.
@@ -876,13 +1020,18 @@ class GenericMoeDecoderLayer(nn.Module):
                 group_size=128,
                 scale_ue8m0=self.mlp.shared_expert.up_proj.scale_ue8m0,
             )
-            hidden_states = self.mlp(bf16_hs, x_fp8=fp8_hs, x_scale=scale)
+            hidden_states = self.mlp(
+                bf16_hs, x_fp8=fp8_hs, x_scale=scale, expert_load=expert_load
+            )
         # Fallback: use the standard norm path and let MLP/MoE prepare its inputs.
         else:
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual
             )
-            hidden_states = self.mlp(hidden_states)
+            if isinstance(self.mlp, GenericMoeLayer):
+                hidden_states = self.mlp(hidden_states, expert_load=expert_load)
+            else:
+                hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
     def _forward_cmp(
@@ -893,6 +1042,7 @@ class GenericMoeDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache],
         prev_topk_indices: Optional[torch.Tensor],
         force_reuse_topk_indices: bool = False,
+        expert_load: Optional[ExpertLoadContext] = None,
     ) -> DecodeLayerOutput:
         """Run the GLM5 CMP attention and MoE preparation path."""
         cmp = self.cmp
@@ -942,12 +1092,17 @@ class GenericMoeDecoderLayer(nn.Module):
                 moe_hidden_states,
                 routed_indices,
                 routed_weights,
+                **(
+                    {"ids_are_physical": True}
+                    if getattr(cmp, "eplb_routing_fused", False)
+                    else {}
+                ),
             )
         else:
             # Dense layers and unsupported MoE strategies use RTP's MLP path.
             hidden_states, output_residual = mla_post
             hidden_states, output_residual = self._fwd_mlp_or_moe(
-                hidden_states, output_residual
+                hidden_states, output_residual, expert_load
             )
 
         return DecodeLayerOutput(hidden_states, output_residual, topk_indices)
@@ -961,7 +1116,14 @@ class GenericMoeDecoderLayer(nn.Module):
         prev_topk_indices: Optional[torch.Tensor] = None,
         enable_cmp: bool = False,
         force_reuse_topk_indices: bool = False,
+        expert_load: Optional[ExpertLoadContext] = None,
     ) -> DecodeLayerOutput:
+        if isinstance(self.mlp, GenericMoeLayer) and hasattr(
+            self.mlp.fused_moe, "mega_moe"
+        ):
+            self.mlp.fused_moe.mega_moe.expert_token_counts = (
+                expert_load.expert_token_counts if expert_load is not None else None
+            )
         if enable_cmp:
             return self._forward_cmp(
                 hidden_states,
@@ -970,6 +1132,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 kv_cache,
                 prev_topk_indices,
                 force_reuse_topk_indices=force_reuse_topk_indices,
+                expert_load=expert_load,
             )
 
         topk_indices = None
@@ -1018,7 +1181,9 @@ class GenericMoeDecoderLayer(nn.Module):
                 )
 
         self._wait_pinned_mla_before_moe(fmha_impl)
-        hidden_states, residual = self._fwd_mlp_or_moe(hidden_states, residual)
+        hidden_states, residual = self._fwd_mlp_or_moe(
+            hidden_states, residual, expert_load
+        )
 
         return DecodeLayerOutput(hidden_states, residual, topk_indices)
 
@@ -1159,6 +1324,7 @@ class GenericMoeModel(GptModelBase):
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 prev_topk_indices=prev_topk_indices,
                 enable_cmp=enable_cmp,
+                expert_load=expert_load_for_layer(inputs.expert_token_counts, i),
             )
             hidden_states = output.hidden_states
             residual = output.residual

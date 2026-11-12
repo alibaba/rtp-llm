@@ -415,8 +415,6 @@ bool RtpLLMExecutorMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(sample_input_us_metric, "rtp_llm_sample_input_us");
     REGISTER_GAUGE_MUTABLE_METRIC(dispatch_output_us_metric, "rtp_llm_dispatch_output_us_metric");
 
-    REGISTER_GAUGE_MUTABLE_METRIC(eplb_step_latency_us_metric, "rtp_llm_eplb_step_latency_us");
-
     return true;
 }
 
@@ -437,7 +435,6 @@ void RtpLLMExecutorMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMExec
     REPORT_GAUGE(model_forward_us);
     REPORT_GAUGE(sample_input_us);
     REPORT_GAUGE(dispatch_output_us);
-    REPORT_GAUGE(eplb_step_latency_us);
 }
 
 bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -702,38 +699,17 @@ void RtpLLMKernelMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMKernel
 }
 
 bool RtpLLmEplbMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_QPS_MUTABLE_METRIC(update_weights_qps_metric, "rtp_llm_update_weights_qps");
-    REGISTER_QPS_MUTABLE_METRIC(update_layer_weights_qps_metric, "rtp_llm_update_layer_weights_qps");
-    REGISTER_GAUGE_MUTABLE_METRIC(update_weights_latency_ms_metric, "rtp_llm_update_weights_latency_ms");
-    REGISTER_GAUGE_MUTABLE_METRIC(gpu_loads_metric, "rtp_llm_gpu_loads");
+    REGISTER_GAUGE_MUTABLE_METRIC(step_latency_us_metric, "rtp_llm_eplb_step_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(moe_lb_metric, "rtp_llm_moe_lb");
     return true;
 }
 
 void RtpLLmEplbMetrics::report(const kmonitor::MetricsTags* tags, RtpLLmEplbMetricsCollector* collector) {
-    // ep stats metrics
-    int  num_layer = collector->gpu_loads.size();
-    auto ep_tag    = kmonitor::MetricsTags("ep_rank", std::to_string(collector->ep_rank));
-    tags->MergeTags(&ep_tag);
-    for (int i = 0; i < num_layer; ++i) {
-        auto layer_tag = kmonitor::MetricsTags("layer", std::to_string(i));
-        ep_tag.MergeTags(&layer_tag);
-        if (gpu_loads_metric) {
-            reportKmonMetric(gpu_loads_metric, &layer_tag, collector->gpu_loads[i]);
-        }
+    if (collector->step_latency_us >= 0) {
+        REPORT_MUTABLE_METRIC(step_latency_us_metric, collector->step_latency_us);
     }
-
-    // update weights metrics
-    if (collector->update_weights_qps) {
-        RTP_REPORT_MUTABLE_QPS(update_weights_qps_metric);
-        RTP_REPORT_MUTABLE_METRIC(update_weights_latency_ms_metric, collector->update_weights_latency_ms);
-
-        // report layer qps
-        auto layer_tag = kmonitor::MetricsTags("layer", std::to_string(collector->update_layer_id));
-        tags->MergeTags(&layer_tag);
-        if (update_layer_weights_qps_metric) {
-            reportKmonMetric(update_layer_weights_qps_metric, &layer_tag, 1);
-        }
-        collector->update_weights_qps = false;
+    if (collector->moe_lb >= 0) {
+        REPORT_MUTABLE_METRIC(moe_lb_metric, collector->moe_lb);
     }
 }
 
@@ -1164,7 +1140,7 @@ namespace {
 bool kmonitorTransportDeferred = false;
 
 bool deferKmonitorTransportForScr() {
-    const auto phase = autil::EnvUtil::getEnv("SCR_PHASE", "");
+    const auto phase   = autil::EnvUtil::getEnv("SCR_PHASE", "");
     const bool enabled = autil::EnvUtil::getEnv("RTPLLM_ENABLE_SCR", false);
     return enabled && (phase == "checkpoint" || phase == "restore");
 }
@@ -1208,7 +1184,7 @@ bool initKmonitorFactory() {
     }
 
     kmonitor::MetricsConfig metricsConfig;
-    const bool deferTransport = deferKmonitorTransportForScr();
+    const bool              deferTransport = deferKmonitorTransportForScr();
     fillKmonitorConfig(metricsConfig, param);
     if (!kmonitor::KMonitorFactory::Init(metricsConfig)) {
         RTP_LLM_LOG_ERROR("init kmonitor factory failed with");
@@ -1238,7 +1214,7 @@ bool resumeKmonitorAfterScr() {
     if (!kmonitorTransportDeferred) {
         return true;
     }
-    auto* worker = kmonitor::KMonitorFactory::GetWorker();
+    auto* worker        = kmonitor::KMonitorFactory::GetWorker();
     auto* factoryConfig = kmonitor::KMonitorFactory::GetConfig();
     if (worker == nullptr || worker->getMetricsSystem() == nullptr || factoryConfig == nullptr) {
         return false;
@@ -1248,11 +1224,17 @@ bool resumeKmonitorAfterScr() {
     kmonitor::MetricsConfig resumedConfig;
     fillKmonitorConfig(resumedConfig, param);
     *factoryConfig = resumedConfig;
-    auto* system = worker->getMetricsSystem();
+    auto* system   = worker->getMetricsSystem();
     // Start refreshes common tags before MetricsSystem::Init creates transport.
     // Only SCR needs to replace identity captured by registered metric handles.
-    system->SetOutputTagKeys({"hippo_slave_ip", "host_ip", "container_ip", "hippo_role", "hippo_app", "hippo_group",
-                             "host", "hippo_cluster"});
+    system->SetOutputTagKeys({"hippo_slave_ip",
+                              "host_ip",
+                              "container_ip",
+                              "hippo_role",
+                              "hippo_app",
+                              "hippo_group",
+                              "host",
+                              "hippo_cluster"});
     kmonitor::KMonitorFactory::Start();
     if (!system->Started()) {
         return false;

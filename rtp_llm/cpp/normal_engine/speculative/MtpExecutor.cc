@@ -1502,6 +1502,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     // indexer sharing (including GLM-5.1 models without an indexer). Preserve
     // the supported execution layout and model-specific hidden-state contract.
     forward_overlap_supported_ = has_python_draft_model && params.hw_kernel_config.enable_cuda_graph
+                                 && !params.eplb_config.enable_eplb()
                                  && !params.device_resource_config.enable_layer_micro_batch && !context_parallel_enabled
                                  && draft_model_config.num_layers == 1 && propose_step_ >= 1
                                  && supportsForwardOverlapHiddenState(params.model_config_, draft_model_config);
@@ -1538,30 +1539,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         "[adaptive-verify] enabled=%d; fixed verification when disabled; indexer sharing disabled when enabled",
         adaptive_verification_);
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, tp_rank_);
-
-    if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0) {
-        // use first moe layer weight as moe weight type
-        int         first_moe_layer = params.model_config_.moe_layer_index.front();
-        const auto& moe_kernel      = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
-        auto        moe_weight_type = torchDTypeToDataType(moe_kernel.dtype());
-        bool        is_gated_activation = params.model_config_.isGatedActivation();
-        auto        moe_inter_size      = is_gated_activation ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
-
-        expert_balancer_ =
-            std::make_shared<ExpertBalancer>(params.model_config_.expert_num,
-                                             params.eplb_config.phy_exp_num(params.model_config_.expert_num),
-                                             params.model_config_.num_layers,
-                                             moe_inter_size,
-                                             params.model_config_.hidden_size,
-                                             params.parallelism_config.ep_rank,
-                                             params.parallelism_config.ep_size,
-                                             params.parallelism_config.world_size,
-                                             params.py_eplb,
-                                             moe_weight_type,
-                                             params.model_config_.quant_algo,
-                                             metrics_reporter_,
-                                             params.eplb_config);
-    }
 
     sampler_.reset(new Sampler(SamplerInitParams{params.model_config_.model_type, params.model_config_.vocab_size}));
     RTP_LLM_CHECK_WITH_INFO(
@@ -1618,6 +1595,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          kv_cache_layer_to_group,
          cache_manager,
          params.model_config_.hc_mult});
+
+    model_init_params.eplb_config      = params.eplb_config;
+    model_init_params.metrics_reporter = metrics_reporter_;
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
@@ -1941,14 +1921,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         cache_status_snapshot_refresh_callback_(streams);
     }
     model_input.need_all_hidden_states = saved_need_all_hidden_states;
-
-    // eplb
-    if (expert_balancer_) {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(eplb_step_forward)");
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
-        executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
 
     // target model sample
     if (isTpRank0()) {
@@ -2611,14 +2583,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         && spec_logits_result->skipped_ineligible_processors == 0) {
         return absl::InternalError("MTP async spec logits processor is present but no verify artifact was produced; "
                                    "disable MTP/async or implement spec verify for this processor");
-    }
-
-    // eplb
-    if (expert_balancer_) {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(eplb_step_forward)");
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
-        executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
     SamplerOutput sampler_output;
@@ -3753,13 +3717,6 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
     return absl::OkStatus();
 }
 
-bool MtpExecutor::updateEplbConfig(const EPLBConfig& config) {
-    if (expert_balancer_) {
-        return expert_balancer_->updateEplbConfig(config);
-    }
-    return true;
-}
-
 void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    const StreamGroups&         stream_groups,
                                    std::vector<torch::Tensor>& draft_probs_list,
@@ -4098,7 +4055,7 @@ bool MtpExecutor::useForwardOverlap() const {
     }();
     (void)logged;
     return kForwardOverlapFlag.on && forward_overlap_supported_ && useStreamAsync() && useDeviceInput()
-           && !useAsyncPrepare() && parallelism_config_.tp_size == 1 && !is_linear_attention_model_ && !expert_balancer_
+           && !useAsyncPrepare() && parallelism_config_.tp_size == 1 && !is_linear_attention_model_
            && role_type_ == RoleType::DECODE && !warm_up_;
 }
 

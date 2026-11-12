@@ -89,12 +89,14 @@ class MegaMoeSEWrapper(MegaMoeWrapper):
         apply_router_weight_on_input: bool = False,
         extra_expert_args: Optional[Dict[str, Any]] = None,
         extra_finalize_args: Optional[Dict[str, Any]] = None,
+        eplb=None,
     ) -> torch.Tensor:
         return self._forward_chunked(
             hidden_states,
             topk_weights,
             topk_ids,
             self.mega_moe.forward,
+            eplb=eplb,
         )
 
 

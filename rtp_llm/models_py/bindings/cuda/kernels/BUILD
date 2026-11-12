@@ -3,6 +3,17 @@ load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch
 load("//bazel:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//rtp_llm:__subpackages__"])
 
+cc_library(
+    name = "expert_load",
+    srcs = ["expert_load.cu"],
+    hdrs = ["expert_load.h"],
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = cuda_copts(),
+)
+
 sm100_cuda_copts = copts() + cuda_default_copts_without_arch() + [
     '--cuda-include-ptx=sm_100', '--cuda-gpu-arch=sm_100',
     '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',

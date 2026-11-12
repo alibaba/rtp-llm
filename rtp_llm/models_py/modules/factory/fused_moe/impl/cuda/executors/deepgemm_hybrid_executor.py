@@ -86,7 +86,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
 
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
-        self.num_experts = config.expert_num
+        self.num_experts = config.physical_expert_num
 
         assert self.num_experts % self.ep_size == 0
         self.num_experts_per_partition = self.num_experts // self.ep_size
@@ -125,6 +125,14 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         )
 
         self.num_gemm_sms = get_num_device_sms()
+
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return (
+            self.w13_weight,
+            self.w13_weight_scale_inv,
+            self.w2_weight,
+            self.w2_weight_scale_inv,
+        )
 
     def execute(
         self,
@@ -226,6 +234,10 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             ]
             output_index = torch.empty_like(topk_idx)
             expert_start_loc = torch.empty_like(num_recv_tokens_per_expert)
+            expert_load = payload.expert_load
+            counts = (
+                expert_load.expert_token_counts if expert_load is not None else None
+            )
             ep_scatter_v2(
                 hidden_states_fp8,
                 hidden_states_scale,
@@ -238,6 +250,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 input_tensor[1],
                 output_index,
                 scale_ue8m0=is_deep_gemm_e8m0_used(),
+                expert_token_counts=counts,
             )
             dispose_tensor(hidden_states_fp8)
 
@@ -449,6 +462,8 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             device="cpu",
         ).cuda(non_blocking=True)
         expert_start_loc = torch.empty_like(num_recv_tokens_per_expert_gpu)
+        expert_load = payload.expert_load
+        counts = expert_load.expert_token_counts if expert_load is not None else None
         ep_scatter(
             hidden_states_fp8,
             hidden_states_scale,
@@ -460,6 +475,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             m_indices,
             output_index,
             scale_ue8m0=is_deep_gemm_e8m0_used(),
+            expert_token_counts=counts,
         )
         m_indices.clamp_(min=0, max=self.num_experts_per_partition - 1)
         dispose_tensor(hidden_states_fp8)

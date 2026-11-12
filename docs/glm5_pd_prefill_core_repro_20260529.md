@@ -38,7 +38,7 @@ Relevant online prefill env variables from `/home/zw193905/RTP-LLM/github-openso
 - cache-store / PD: `USE_CACHE_STORE=1`, `CACHE_STORE_RDMA_MODE=1`, `CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS=800`, `LOAD_CACHE_TIMEOUT_MS=900000`, `PREFILL_RETRY_TIMEOUT_MS=20`, `PREFILL_RETRY_TIMES=1`, `MAX_RPC_TIMEOUT_MS=1800000`, `RDMA_CONNECT_RETRY_TIMES=2`.
 - cache reuse: `REUSE_CACHE=1`, `ENABLE_DEVICE_CACHE=1`, `ENABLE_MEMORY_CACHE=0`, `MEMORY_CACHE_SYNC_TIMEOUT_MS=180000`, `MEMORY_CACHE_SIZE_MB=122880`.
 - MTP: `SP_MODEL_TYPE=glm_5_mtp`, `SP_TYPE=eagle`, `GEN_NUM_PER_CIRCLE=3`, `SP_ACT_TYPE=bf16`, `SP_MIN_TOKEN_MATCH=2`, `SP_MAX_TOKEN_MATCH=2`.
-- MoE / kernels: `MOE_STRATEGY=mega_moe`, `QUANTIZATION=FP8_PER_BLOCK_NO_MOE`, `USE_ALL_GATHER=0`, `USE_GATHER_PATH=1`, `EPLB_MODE=NONE`, `EPLB_FORCE_REPACK=1`, `DSV4_MOE_CHUNK_PREFILL=0`, `ENABLE_COMM_OVERLAP=0`.
+- MoE / kernels: `MOE_STRATEGY=mega_moe`, `QUANTIZATION=FP8_PER_BLOCK_NO_MOE`, `USE_ALL_GATHER=0`, `USE_GATHER_PATH=1`, `EPLB_MODE=NONE`, `DSV4_MOE_CHUNK_PREFILL=0`, `ENABLE_COMM_OVERLAP=0`.
 - Online-only topology values intentionally not copied: `TP_SIZE=8`, `DP_SIZE=1`, `WORLD_SIZE=8`, `LOCAL_WORLD_SIZE=8`.
 
 ## Code Inspection Notes
@@ -75,7 +75,6 @@ bazelisk test //internal_source/rtp_llm/test/smoke:mla_mtp_mega_moe_cudagraph_pd
   --test_env=SP_MIN_TOKEN_MATCH=2 \
   --test_env=SP_MAX_TOKEN_MATCH=2 \
   --test_env=EPLB_MODE=NONE \
-  --test_env=EPLB_FORCE_REPACK=1 \
   --test_env=DSV4_MOE_CHUNK_PREFILL=0 \
   --test_env=ENABLE_MEMORY_CACHE=0 \
   --test_env=ENABLE_COMM_OVERLAP=0
@@ -150,7 +149,6 @@ bazelisk test //internal_source/rtp_llm/test/smoke:mla_mtp_mega_moe_cudagraph_pd
   --test_env=SP_MIN_TOKEN_MATCH=2 \
   --test_env=SP_MAX_TOKEN_MATCH=2 \
   --test_env=EPLB_MODE=NONE \
-  --test_env=EPLB_FORCE_REPACK=1 \
   --test_env=DSV4_MOE_CHUNK_PREFILL=0 \
   --test_env=ENABLE_MEMORY_CACHE=0 \
   --test_env=ENABLE_COMM_OVERLAP=0 \
