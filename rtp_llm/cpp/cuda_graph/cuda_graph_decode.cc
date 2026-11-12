@@ -2,16 +2,21 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
 namespace rtp_llm {
-void CudaGraphRunner::replayDecode(int bs) {
-    if (decode_capture_deferred_ && !decode_capture_done_) {
-        decode_capture_done_ = true;
-        RTP_LLM_LOG_INFO("Initializing deferred decode CUDA graphs on first decode");
-        // initCapture() runs the eager datatype probe, allocates the graph
-        // workspace and calls captureDecode(); clear the defer flag first so
-        // this second entry proceeds instead of deferring again.
-        decode_capture_deferred_ = false;
-        initCapture();
+void CudaGraphRunner::finishDeferredDecodeInit() {
+    if (!hasDeferredDecodeInit()) {
+        return;
     }
+    decode_capture_done_     = true;
+    // initCapture() runs the eager datatype probe, allocates the graph
+    // workspace and calls captureDecode(); clear the defer flag first so this
+    // second entry proceeds instead of deferring again.
+    decode_capture_deferred_ = false;
+    RTP_LLM_LOG_INFO("Initializing deferred decode CUDA graphs on first decode");
+    initCapture();
+}
+
+void CudaGraphRunner::replayDecode(int bs) {
+    finishDeferredDecodeInit();
     replayGraph(bs);
 }
 

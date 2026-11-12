@@ -183,6 +183,14 @@ public:
                 CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) override;
     void replayGraph(int key);
     void replayDecode(int bs);
+
+    // True while the decode graph was deferred at startup and has not yet been
+    // initialized.  PyWrappedModel calls finishDeferredDecodeInit() on the
+    // first decode forward, before canRun(), so the graph exists for replay.
+    bool hasDeferredDecodeInit() const {
+        return decode_capture_deferred_ && !decode_capture_done_;
+    }
+    void finishDeferredDecodeInit();
     void replayPrefill(int seq_len);
     int  getCurrentRealGraphSize(const CudaGraphState& state) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
