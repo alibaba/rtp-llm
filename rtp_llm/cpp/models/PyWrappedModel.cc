@@ -1374,15 +1374,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             }
             py::gil_scoped_acquire gil;
             if (py_model_inputs.attention_inputs.is_prefill && graph_runner_ != nullptr
-                && py_model_inputs.attention_inputs.input_lengths.defined()
-                && py_model_inputs.attention_inputs.input_lengths.numel() > 0) {
+                && py_model_inputs.attention_inputs.context_total_kv_length > 262144) {
                 // Only a full-context prefill needs the graph-private pool's HBM.
                 // Short requests keep their captured graph for later replay.
-                const int max_prefill_len =
-                    py_model_inputs.attention_inputs.input_lengths.max().item<int>();
-                if (max_prefill_len > 262144) {
-                    graph_runner_->releaseCapturedDecodeGraph();
-                }
+                graph_runner_->releaseCapturedDecodeGraph();
             }
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");
