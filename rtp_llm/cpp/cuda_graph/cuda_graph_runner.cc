@@ -1572,7 +1572,6 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
     const int  graph_key = is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
     const auto graph_it  = graph_instances_.find(graph_key);
     if (graph_it == graph_instances_.end()) {
-        if (trace_canrun) std::fprintf(stderr, "[AWI_GRAPH] fallback=key_not_captured key=%d\n", graph_key);
         if (observe_fallback) {
             RTP_LLM_LOG_WARNING("CUDA graph key %d was not captured, fallback to normal run", graph_key);
         }
@@ -1611,7 +1610,6 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
     size_t      copy_numel            = 0;
     const auto& captured_position_ids = graph_it->second.mem_hold_.py_model_inputs_.combo_position_ids;
     if (!validateComboPositionIds(inputs, state, captured_position_ids, copy_numel)) {
-        if (trace_canrun) std::fprintf(stderr, "[AWI_GRAPH] fallback=combo_position_ids key=%d\n", graph_key);
         if (observe_fallback) {
             const FallbackTick tick = tickFallback(combo_position_fallback_count_);
             // Log the first fallback and then at powers of two. This keeps the
