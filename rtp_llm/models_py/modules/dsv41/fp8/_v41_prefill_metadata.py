@@ -130,7 +130,14 @@ def debug_dump_rows(tag, **payload):
         for name, value in payload.items():
             saved[name] = value.detach().cpu() if isinstance(value, torch.Tensor) else value
         os.makedirs(_DEBUG_DUMP_ROWS_DIR, exist_ok=True)
-        rank = os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0"))
+        # Backend processes do not export LOCAL_RANK/RANK; the current CUDA
+        # device IS the local rank here (load76: env-based naming collided
+        # across all 8 ranks into r0 files, making cross-run byte diffs
+        # rank-ambiguous).
+        try:
+            rank = torch.cuda.current_device()
+        except Exception:  # pragma: no cover - CPU-only callers
+            rank = os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0"))
         path = os.path.join(
             _DEBUG_DUMP_ROWS_DIR, f"rows_{tag}_r{rank}_{_debug_dump_rows_files}.pt"
         )

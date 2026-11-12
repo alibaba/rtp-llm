@@ -1344,7 +1344,17 @@ class AttentionV41FP8(AttentionFP8):
             publish_paged_globals,
         )
 
-        if (
+        # Paged-value eligibility is decided up front, but the markers are
+        # published only AFTER the tile loop below has written this forward's
+        # compressed rows into the pools. Publishing first and returning early
+        # (the previous shape) skipped the only prefill writer of the
+        # csa/hca/indexer pool rows, so every global/indexer row read back
+        # through the paged markers was unwritten pool memory (measured:
+        # nonzero_frac == 0.0 at every publish point, frozen smoke case2
+        # hallucinates, and only the 128-token SWA window carried real
+        # context). The dense g/k materialization after the loop is what the
+        # paged path must skip — not the writes.
+        paged_publish = (
             prefill
             and paged_sparse_values_enabled()
             and len(ends) == 1
@@ -1353,15 +1363,12 @@ class AttentionV41FP8(AttentionFP8):
             and (cp is None or cp.cp_size <= 1 or not cp.kv_cache_sharded)
             and not torch.cuda.is_current_stream_capturing()
             and paged_sparse_device_eligible(x_full.device)
-            and publish_paged_globals(
-                self, main_pool, index_pool, INDEXER_KV, ends, ratio, x_full.device
-            )
-        ):
-            return
+        )
         prefill_metadata.debug_trace(
-            f"producer_dense L{self.layer_id} prefill={prefill} rows={rows} "
+            f"producer_loop L{self.layer_id} prefill={prefill} rows={rows} "
             f"main_pool={main_pool is not None} index_pool={index_pool is not None} "
-            f"ratio={ratio} ends0={int(ends[0]) if len(ends) else -1}"
+            f"ratio={ratio} paged_publish={paged_publish} "
+            f"ends0={int(ends[0]) if len(ends) else -1}"
         )
         pair_ranges = None
         producer_meta = None
@@ -1789,6 +1796,14 @@ class AttentionV41FP8(AttentionFP8):
             boundary_req = torch.cat([tile[1] for tile in warm_keys])
             global_keys = torch.cat([tile[2] for tile in warm_keys])
             index_keys = torch.cat([tile[3] for tile in warm_keys])
+        if paged_publish and publish_paged_globals(
+            self, main_pool, index_pool, INDEXER_KV, ends, ratio, x_full.device
+        ):
+            # The tile loop has written this forward's compressed rows; the
+            # lazy markers now reference real bytes and the dense gather /
+            # materialization below is skipped (its 604MB+268MB span-scaled
+            # buffers are what this path exists to avoid).
+            return
         result = []
         fused_indexer = prefill and prefill_indexer.is_supported(
             x_full.device, getattr(self, "index_n_heads", 0), owner.index_wk.shape[0]
