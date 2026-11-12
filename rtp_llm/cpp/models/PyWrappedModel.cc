@@ -1284,15 +1284,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // Cast the Python object to PyModelOutputs and extract hidden states
         auto*      graph_runner = selectGraphRunner(py_model_inputs.attention_inputs);
         auto&      graph_state  = selectGraphState(py_model_inputs.attention_inputs);
-        if (!py_model_inputs.attention_inputs.is_prefill && graph_runner_ != nullptr) {
-            // Deferred startup capture: initialize on the first decode, after
-            // full-context prefill scratch has been released.  initCapture()
-            // calls into the Python model, so hold the GIL as startup capture
-            // does; calling it during the prefill forward would re-enter an
-            // active Python call.
-            py::gil_scoped_acquire capture_gil;
-            graph_runner_->finishDeferredDecodeInit();
-        }
         const bool is_generation_prefill_runner =
             graph_runner != nullptr && graph_runner == generation_prefill_graph_runner_.get();
         if (!capture_hidden_states && owns_generation_prefill_cuda_graph_ && has_context_request
@@ -1390,6 +1381,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
             py_model_outputs = outputs.cast<PyModelOutputs>();
+        }
+
+        if (py_model_inputs.attention_inputs.is_prefill && graph_runner_ != nullptr) {
+            // Capture after the prefill Python call has returned but before the
+            // full-context hidden state is cloned, so one 1M-row copy is not
+            // alive during graph allocation.  Hold the GIL because capture
+            // calls back into the Python model.
+            py::gil_scoped_acquire capture_gil;
+            graph_runner_->finishDeferredDecodeInit();
         }
 
         if (capture_hidden_states || dspark_model_role_ == DSparkModelRole::PROPOSE) {
