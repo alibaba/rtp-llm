@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheLockGuard.h"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -67,9 +69,14 @@ std::string formatViolationDetail(const FullViolationDetail& detail);
 // most 1024 nodes across the interval. Cache lock acquisition retries with sleeps
 // for up to 10 ms; a timeout skips the window/batch without advancing the cursor.
 // Observation only: it never mutates the tree, resources, block pools or refcounts.
+class BlockTreeCacheMetricsReporter;
+
 class FullPrefixInvariantScanner {
 public:
-    FullPrefixInvariantScanner(const BlockTree& tree, std::mutex& cache_mutex, int64_t interval_ms);
+    FullPrefixInvariantScanner(const BlockTree&                     tree,
+                               std::mutex&                          cache_mutex,
+                               int64_t                              interval_ms,
+                               const BlockTreeCacheMetricsReporter* metrics_reporter = nullptr);
     ~FullPrefixInvariantScanner();
 
     FullPrefixInvariantScanner(const FullPrefixInvariantScanner&)            = delete;
@@ -84,12 +91,13 @@ private:
     void                         runScanGuarded();
     void                         runScan();
     void                         runBatch();
-    std::unique_lock<std::mutex> tryLockCacheUntil(std::chrono::steady_clock::time_point deadline);
+    CacheLockGuard               tryLockCacheUntil(std::chrono::steady_clock::time_point deadline);
     void                         publishBatch(const std::vector<FullViolationDetail>& details,
                                               size_t                                  nodes_scanned,
                                               size_t                                  tree_size,
                                               bool                                    cycle_complete);
 
+    const BlockTreeCacheMetricsReporter* metrics_reporter_;
     const BlockTree& tree_;
     std::mutex&      cache_mutex_;
     const int64_t    interval_ms_;
