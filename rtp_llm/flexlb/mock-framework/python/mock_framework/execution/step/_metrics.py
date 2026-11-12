@@ -117,13 +117,13 @@ async def instant(ctx, expression, at):
     return result
 
 
-def window(ctx, args):
+def query_window(ctx, args):
     end = epoch(ctx.query_time)
     start, stop = (duration(v, negative=True) for v in args.range)
     millis = (stop - start) * 1000
     if millis < 1 or millis != int(millis):
         raise ExecutionError("Metric window must contain integral milliseconds")
-    return end + float(stop), int(millis), "increase"
+    return end + float(stop), int(millis)
 
 
 def scope(ctx, args, role):
@@ -168,19 +168,19 @@ def _check_history(name, targets, series):
 
 
 async def metric(ctx, args, role, numerator, denominator=None, *, kind=None):
-    _, millis, operation = evaluation_window(ctx, args)
+    millis = counter_window_ms(ctx, args)
     labels, targets = scope(ctx, args, role)
     numerator_labels = labels + (f",kind={json.dumps(kind)}" if kind else "")
     histories = [(numerator, numerator_labels, targets)]
 
     def aggregate(name, selector):
-        return f"sum({operation}({name}{{{selector}}}[{millis}ms]))"
+        return f"sum(increase({name}{{{selector}}}[{millis}ms]))"
 
     expression = aggregate(numerator, numerator_labels)
     if denominator:
         histories.append((denominator, labels, targets))
         expression += " / " + aggregate(denominator, labels)
-    elif operation == "increase":
+    else:
         expression += " / " + str(Decimal(millis) / 1000)
     return await evaluate(ctx, args, expression, histories)
 
@@ -238,12 +238,11 @@ def sample_period(ctx):
     return max(0.001, monitor.interval) * 4
 
 
-def evaluation_window(ctx, args):
-    at, millis, operation = window(ctx, args)
+def counter_window_ms(ctx, args):
+    _, millis = query_window(ctx, args)
     if args.mode == "series":
-        millis = max(1, round(sample_period(ctx) * 1000))
-        operation = "increase"
-    return at, millis, operation
+        return max(1, round(sample_period(ctx) * 1000))
+    return millis
 
 
 async def series_query(ctx, expression, start, end, step):
@@ -268,7 +267,7 @@ async def series_query(ctx, expression, start, end, step):
 
 
 async def evaluate(ctx, args, expression, histories):
-    at, millis, _ = window(ctx, args)
+    at, millis = query_window(ctx, args)
     start = at - millis / 1000
     if args.mode == "series":
         period = sample_period(ctx)
@@ -313,7 +312,7 @@ async def evaluate(ctx, args, expression, histories):
 
 
 async def gauge(ctx, args, role, name):
-    _, millis, _ = window(ctx, args)
+    _, millis = query_window(ctx, args)
     labels, targets = scope(ctx, args, role)
     worker = f"sum by(instance)({name}{{{labels}}})"
     expression = (
@@ -325,13 +324,13 @@ async def gauge(ctx, args, role, name):
 
 
 async def latency(ctx, args, name):
-    _, millis, operation = evaluation_window(ctx, args)
+    millis = counter_window_ms(ctx, args)
     labels, targets = scope(ctx, args, "client")
     if args.statistic == "mean":
         histories = [(name + suffix, labels, targets) for suffix in ("_sum", "_count")]
-        expression = f"sum({operation}({name}_sum{{{labels}}}[{millis}ms])) / sum({operation}({name}_count{{{labels}}}[{millis}ms]))"
+        expression = f"sum(increase({name}_sum{{{labels}}}[{millis}ms])) / sum(increase({name}_count{{{labels}}}[{millis}ms]))"
     else:
         histories = [(name + "_bucket", labels, targets)]
         quantile = {"p95": 0.95, "p99": 0.99}[args.statistic]
-        expression = f"histogram_quantile({quantile}, sum by(le)({operation}({name}_bucket{{{labels}}}[{millis}ms])))"
+        expression = f"histogram_quantile({quantile}, sum by(le)(increase({name}_bucket{{{labels}}}[{millis}ms])))"
     return await evaluate(ctx, args, expression, histories)

@@ -41,7 +41,7 @@ class PrefillAdmissionTest {
             assertTrue(engine.snapshot(0).tasks().isEmpty());
             assertTrue(engine.snapshot(0).finished().isEmpty());
 
-            var session = engine.new Session(raw, false, System.nanoTime(), Long.MAX_VALUE);
+            var session = engine.new PrefillSession(raw, false, System.nanoTime(), Long.MAX_VALUE);
             var error = assertThrows(io.grpc.StatusRuntimeException.class,
                 () -> engine.submit(session, MultimodalProtocol.text(raw)));
             assertEquals(Status.Code.INVALID_ARGUMENT, error.getStatus().getCode());
@@ -219,7 +219,7 @@ class PrefillAdmissionTest {
              var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             for (int i = 0; i < 30; i++) {
                 var raw = input(i, 0, true);
-                var session = engine.new Session(raw, false, System.nanoTime(), Long.MAX_VALUE);
+                var session = engine.new PrefillSession(raw, false, System.nanoTime(), Long.MAX_VALUE);
                 assertEquals(org.flexlb.mock.engine.scheduler.EngineScheduler.ReportedPhase.PENDING,
                     engine.snapshot(0).tasks().getFirst().phase());
                 var gate = new CountDownLatch(1);
@@ -235,9 +235,9 @@ class PrefillAdmissionTest {
                 assertEquals(i + 1, engine.snapshot(0).finished().size());
                 assertTrue(engine.snapshot(0).tasks().isEmpty());
             }
-            var old = engine.new Session(input(99, 0, true), false, System.nanoTime(), Long.MAX_VALUE);
+            var old = engine.new PrefillSession(input(99, 0, true), false, System.nanoTime(), Long.MAX_VALUE);
             old.cancel();
-            var fresh = engine.new Session(input(99, 0, true), false, System.nanoTime(), Long.MAX_VALUE);
+            var fresh = engine.new PrefillSession(input(99, 0, true), false, System.nanoTime(), Long.MAX_VALUE);
             old.cancel();
             assertEquals(99, engine.snapshot(0).tasks().getFirst().requestId());
             engine.submit(fresh, MultimodalProtocol.text(input(99, 0, true)));
@@ -252,8 +252,8 @@ class PrefillAdmissionTest {
         var metrics = new RtpTestMetrics(config);
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0);
              var admission = server(config, cache, metrics)) {
-            var cancelled = admission.new Session(input(1, 0, true), true, System.nanoTime(), Long.MAX_VALUE);
-            var ready = admission.new Session(input(2, 0, true), true, System.nanoTime(), Long.MAX_VALUE);
+            var cancelled = admission.new PrefillSession(input(1, 0, true), true, System.nanoTime(), Long.MAX_VALUE);
+            var ready = admission.new PrefillSession(input(2, 0, true), true, System.nanoTime(), Long.MAX_VALUE);
             cancelled.cancel();
             var batch = admission.submit(List.of(
                 new PrefillRpcServer.Submission(MultimodalProtocol.text(input(1, 0, true)), Long.MAX_VALUE, cancelled),
@@ -273,7 +273,7 @@ class PrefillAdmissionTest {
         var config = config("0");
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0);
              var admission = server(config, cache, AbstractRtpScheduler.factory(config))) {
-            var pending = admission.new Session(input(1, 0, true), false, System.nanoTime(), Long.MAX_VALUE);
+            var pending = admission.new PrefillSession(input(1, 0, true), false, System.nanoTime(), Long.MAX_VALUE);
             admission.close();
             assertEquals(Status.Code.UNAVAILABLE, pending.termination.get(2, TimeUnit.SECONDS).status().getCode());
             assertTrue(admission.snapshot(0).tasks().isEmpty());
@@ -294,14 +294,14 @@ class PrefillAdmissionTest {
         var path = directory.resolve("config.json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
     }
 
-    private static PrefillRpcServer.Session submit(PrefillRpcServer server, GenerateInputPB input) {
+    private static PrefillRpcServer.PrefillSession submit(PrefillRpcServer server, GenerateInputPB input) {
         return submit(server, input, Long.MAX_VALUE);
     }
 
-    private static PrefillRpcServer.Session submit(PrefillRpcServer server, GenerateInputPB input, long rpcDeadline) {
+    private static PrefillRpcServer.PrefillSession submit(PrefillRpcServer server, GenerateInputPB input, long rpcDeadline) {
         long started = System.nanoTime();
         server.validate(input, false);
-        var session = server.new Session(input, false, started, RpcMessages.deadline(input, started, rpcDeadline));
+        var session = server.new PrefillSession(input, false, started, RpcMessages.deadline(input, started, rpcDeadline));
         return server.submit(session, MultimodalProtocol.text(input));
     }
 

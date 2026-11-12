@@ -43,7 +43,7 @@ async def client_success_rate(
             raise ExecutionError("Playback has no terminal observations")
         return sum(client.outcomes["success"] for client in clients) / finished
 
-    _, millis, _ = _metrics.evaluation_window(ctx, args)
+    millis = _metrics.counter_window_ms(ctx, args)
     labels, targets = _metrics.scope(ctx, args, "client")
     name = "mock_client_requests_finished_total"
     success = f'{name}{{{labels},outcome="success"}}'

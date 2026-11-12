@@ -164,10 +164,9 @@ def test_explicit_target_scope_and_default_sixty_second_interval():
         ctx, metrics.MetricArgs(targets=["127.0.0.1:1002"]), "prefill"
     )
     assert targets == ["127.0.0.1:1002"] and "1001" not in selector
-    assert metrics.window(ctx, metrics.MetricArgs()) == (
+    assert metrics.query_window(ctx, metrics.MetricArgs()) == (
         metrics.epoch(ctx.query_time),
         60000,
-        "increase",
     )
     with pytest.raises(ExecutionError):
         metrics.scope(ctx, metrics.MetricArgs(targets=["old:1"]), "prefill")
