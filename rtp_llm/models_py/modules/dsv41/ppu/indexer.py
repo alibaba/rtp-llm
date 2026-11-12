@@ -116,7 +116,7 @@ def _visible_counts(
     return visible
 
 
-def dense_fp4_index_score(q, k, head_weights, positions, ratio):
+def dense_fp4_index_score(q, k, head_weights, positions, ratio, *, sg_align=False):
     """Score one request-local tile using the CUDA Prefill FP4 ABI."""
     from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_indexer import (
         score_indexer_chunk,
@@ -133,6 +133,23 @@ def dense_fp4_index_score(q, k, head_weights, positions, ratio):
         starts = torch.zeros_like(ends)
     else:
         starts, ends = bounds
+    if sg_align:
+        # The compatibility scorer normalizes BF16 output to FP32 and masks
+        # its full tail. SG consumes the provider's raw FP32 output instead.
+        from rtp_llm.models_py.modules.dsv41.fp8._indexer_score import (
+            _deep_gemm,
+            _mqa_accepts_logits_dtype,
+        )
+
+        operation = _deep_gemm.fp8_fp4_mqa_logits
+        if not _mqa_accepts_logits_dtype(operation):
+            raise RuntimeError("SG Prefill requires the qualified FP32 MQA provider ABI")
+        return operation(
+            (q.values.contiguous(), q.scales.contiguous()),
+            (k.values.contiguous(), k.scales.contiguous()),
+            head_weights.contiguous(), starts, ends,
+            clean_logits=False, max_seqlen_k=count, logits_dtype=torch.float32,
+        )
     logits = score_indexer_chunk(
         q.values,
         q.scales,
@@ -141,8 +158,12 @@ def dense_fp4_index_score(q, k, head_weights, positions, ratio):
         head_weights,
         ends,
         bounds=(starts, ends),
-        return_bf16=True,
+        return_bf16=not sg_align,
     )
+    if sg_align:
+        # The SG selector consumes explicit row lengths. Unwritten score tails
+        # are never candidates, so no full score-matrix mask or sanitizer runs.
+        return logits
     # The request-local DeepGEMM ABI can leave the tail unwritten. Both token
     # TopK and candidate block pooling below this boundary need a masked tile.
     if bounds is not None and logits.stride(1) == 1:

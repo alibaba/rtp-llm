@@ -17,13 +17,38 @@ _REFERENCE_PREFILLS = []
 
 def record_reference_prefill(state):
     if len(_REFERENCE_PREFILLS) < 4096:
+        engine = getattr(getattr(state.runtime.model, "_shared_ops", None), "moe_engine", None)
         _REFERENCE_PREFILLS.append({
             "stamp_ns": time.monotonic_ns(),
             "lengths": list(state.lengths), "prefixes": list(state.query_prefixes),
             "plan": state.plan_reason, "compacted": state.compacted,
             "dense_fp4_layers": sorted(state.shared.get("reference_dense_fp4", ())),
             "sparse_fp4_layers": sorted(state.shared.get("reference_sparse_fp4", ())),
+            "sg_align": bool(getattr(state, "local_prefill_sg_align", False)),
+            "sg_topk_calls": list(state.shared.get("sg_topk_calls", ())),
+            "sg_paged_layers": list(state.shared.get("sg_paged_layers", ())),
+            "sg_rope_calls": list(state.shared.get("sg_rope_calls", ())),
+            "sg_source_read": getattr(getattr(state, "cache", None), "_local_sg_source_stats", None) or {},
             "mega_mhc_transitions": state.normalization["mega_transitions"],
+            "mhc_normalization": dict(state.normalization),
+            # Host integer only: do not add a device-statistics reduction to
+            # the measured forward while recording persistent buffer size.
+            "mega_workspace_capacity": getattr(engine, "_mega_capacity", 0),
+            "dp_prefill_capacity": dict(getattr(engine, "_dp_capacity_evidence", None) or {}),
+            # Runtime replaces this host-only dict at every dispatch. Keep
+            # this forward's owner so its finally block can add lease/peak
+            # evidence before the records are flushed after teardown.
+            "engram_rounds": getattr(state.runtime, "_engram_evidence", None) or {},
+            # As above, keep the per-dispatch owner through final cleanup.
+            "cross_layer_mhc": getattr(state.runtime, "_cross_mhc_evidence", None) or {},
+            # Host-only per-forward counters; never synchronize a device
+            # merely to observe the local old-window reader.
+            "swa_native_read": getattr(getattr(state, "cache", None), "_local_swa_native_read_stats", None) or {},
+            "source_native_read": getattr(getattr(state, "cache", None), "_local_source_native_read_stats", None) or {},
+            "source_native_write": getattr(getattr(state, "cache", None), "_local_source_native_write_stats", None) or {},
+            "csa_native_write": getattr(getattr(state, "cache", None), "_local_csa_native_write_stats", None) or {},
+            "producer_slots": getattr(getattr(state, "cache", None), "_local_producer_slot_stats", None) or {},
+            "attention_provider": getattr(getattr(state, "local_attention_provider", None), "stats", None) or {},
         })
 
 

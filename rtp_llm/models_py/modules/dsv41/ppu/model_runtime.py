@@ -19,10 +19,25 @@ from rtp_llm.models_py.modules.dsv41.ppu.native_protocol import native_cache_pro
 from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import SharedPrefillPolicy
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import SharedNativeCache
 from rtp_llm.models_py.modules.dsv41.ppu.dspark_modes import target_loop_geometry
-from rtp_llm.models_py.modules.dsv41.ppu.prefill_runtime import SharedForwardState, _Overlay, encoder_replay_inputs
+from rtp_llm.models_py.modules.dsv41.ppu.prefill_runtime import (
+    SharedForwardState, _Overlay, bind_cross_mhc_layers, encoder_replay_inputs,
+)
 from rtp_llm.models_py.modules.dsv41.ppu.weight import _build_freqs_cis
 from rtp_llm.models_py.modules.dsv41.prefill.forward import forward_prefill
 from rtp_llm.ops.compute_ops import PyModelOutputs
+
+
+DP_PREFILL_FORWARD_MEGA_CAPACITY_ENV = "RTP_V41_PPU_DP_PREFILL_FORWARD_MEGA_CAPACITY"
+
+
+def _dp_prefill_row_bound(lengths, actual_rows, *, idle=False):
+    if type(actual_rows) is not int or actual_rows < 0:
+        raise ValueError("invalid DP Prefill flat row count")
+    if idle:
+        return max(actual_rows, 1)
+    if any(type(n) is not int or n < 0 for n in lengths) or sum(lengths) != actual_rows:
+        raise ValueError("DP Prefill lengths must cover the actual flat rows")
+    return max(actual_rows, sum((n + 1) // 2 * 2 for n in lengths), 1)
 
 
 @dataclass(frozen=True)
@@ -98,6 +113,20 @@ class SharedNativeRuntime:
         self.graph_replays = 0
         self.core = SimpleNamespace(geometry=self.geometry)
         self.calls = 0
+        self._cross_mhc_bindings = bind_cross_mhc_layers(model.v4.layers, self.geometry)
+        self._cross_mhc_evidence = {
+            "enabled": False, "decision": "not_dispatched", "published": 0,
+            "consumed": 0, "edges": [], "fallbacks": {}, "complete": False,
+        }
+        self.dp_prefill_capacity_enabled = os.environ.get(DP_PREFILL_FORWARD_MEGA_CAPACITY_ENV, "0") == "1"
+        from rtp_llm.models_py.modules.dsv41.ppu.engram import LOCAL_PREFILL_ENGRAM_ROUNDS_ENV
+
+        engram_flag = os.environ.get(LOCAL_PREFILL_ENGRAM_ROUNDS_ENV, "0")
+        self._engram_requested = engram_flag == "1"
+        self._engram_flag_valid = engram_flag in ("0", "1")
+        self._engram_epoch = 0
+        self._engram_incomplete = False
+        self._engram_evidence = {}
         self.pending_verify = None
         self.pending_idle_verify = None
         self._idle_verify_calls = 0
@@ -210,10 +239,112 @@ class SharedNativeRuntime:
             layer.engram_hashes = hashes[:, index].contiguous()
             layer.engram_token_mask = mask
 
+    def _prepare_engram_rounds(self, state):
+        from rtp_llm.models_py.modules.dsv41.ppu import engram
+        from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
+
+        model = self.model
+        # This is the shared scheduling domain, not a local optimization
+        # predicate. Every P WORLD8 owner joins even with flag0, idle or an
+        # unsupported TP/CP/DP/EP configuration.
+        if (getattr(model, "_is_decode_role", True) or not dist.is_initialized()
+                or dist.get_world_size(dist.group.WORLD) != 8):
+            return None
+        graph = (any(getattr(state, key, False) for key in ("is_graph", "is_graph_commit"))
+                 or getattr(state.attn, "is_cuda_graph", False))
+        # Graph belongs to the existing public/Graph dispatch domain. Never
+        # insert this host agreement into capture or a Graph metadata path.
+        if graph or (self.device.type == "cuda" and torch.cuda.is_current_stream_capturing()):
+            return None
+        self._engram_epoch += 1
+        args, parallel = model._v4_args, model.parallelism_config
+        ops = model._shared_ops
+        bindings = getattr(ops, "_engram", {})
+        topology = (getattr(parallel, "tp_size", None) == 1
+                    and tuple(getattr(args, key, None) for key in ("tp_size", "dp_size", "ep_size")) == (1, 8, 8)
+                    and getattr(model, "_prefill_cp_size", None) == 1
+                    and getattr(args, "dp_rank", None) == getattr(args, "ep_rank", None) == dist.get_rank(dist.group.WORLD))
+        bound = tuple(getattr(self.geometry, "engram_layer_ids", ())) == (1, 14)
+        bound = bound and all(
+            layer in bindings and isinstance(bindings[layer][2], engram.DistributedEnpmGroup)
+            and bindings[layer][2].pg is dist.group.WORLD
+            and bindings[layer][0].rank == dist.get_rank(dist.group.WORLD)
+            and bindings[layer][1].enp_size == 8 and bindings[layer][0].dim == 256
+            for layer in (1, 14)
+        )
+        pinned = bound and all(bindings[layer][0].pinned
+                               and bindings[layer][0].payload.is_pinned()
+                               and bindings[layer][0].scale.is_pinned() for layer in (1, 14))
+        supported = bool(
+            topology and bound and pinned and not graph and not torch.is_grad_enabled()
+            and not getattr(model, "_is_speculative", False)
+            and not any(getattr(state, key, False) for key in ("verify", "proposal"))
+            and (state.idle or (state.prefill and state.cache is not None and not state.cache.sharded))
+            and self.device.type == "cuda" and is_ppu()
+            and torch.cuda.get_device_capability(self.device) == (8, 9)
+        )
+        native_bad = False
+        if supported:
+            try:
+                supported = engram._triton_kernels() is not None
+            except Exception:
+                supported, native_bad = False, True
+        return engram.prepare_local_prefill_engram_schedule(
+            self.device, requested=self._engram_requested, supported=bool(supported),
+            epoch=self._engram_epoch, process_group=getattr(getattr(ops, "_enpm_group", None), "pg", None),
+            fatal=(not self._engram_flag_valid or self._engram_incomplete
+                   or (self._engram_requested and (native_bad or not topology or not bound))),
+            evidence=self._engram_evidence,
+            bindings=bindings,
+        )
+
+    def _prepare_dp_prefill_mega_capacity(self, state):
+        if not getattr(self, "dp_prefill_capacity_enabled", False):
+            return
+        from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
+        from rtp_llm.models_py.modules.dsv41.ppu.quant_mode import MXFP4_FP8_PTPC
+
+        model, policy = self.model, self.policy
+        args, parallel = model._v4_args, model.parallelism_config
+        static_bad = (
+            getattr(parallel, "tp_size", None) != 1
+            or tuple(getattr(args, name, None) for name in ("tp_size", "dp_size", "ep_size")) != (1, 8, 8)
+            or getattr(model, "_prefill_cp_size", None) != 1
+            or getattr(args, "dp_rank", None) != getattr(args, "ep_rank", None)
+            or model._is_decode_role or model._is_speculative
+            or model.shared_weight_views.quant_mode != MXFP4_FP8_PTPC
+            or not is_ppu() or torch.cuda.get_device_capability(self.device) != (8, 9)
+        )
+        supported = (
+            not any(getattr(state, name, False) for name in (
+                "is_graph", "is_graph_commit", "verify", "proposal",
+            ))
+            and not getattr(state.attn, "is_cuda_graph", False)
+            and not torch.is_grad_enabled()
+            and (policy.mode, policy.keep_tokens, policy.window, policy.max_rollback_tokens,
+                 policy.encoder_replay) == ("compact", 140, 128, 0, False)
+            and (state.idle or (
+                state.prefill and state.cache is not None and not state.cache.sharded
+            ))
+        )
+        try:
+            bound = _dp_prefill_row_bound(
+                state.lengths, int(state.inputs.input_ids.numel()), idle=state.idle,
+            )
+            if len(state.query_prefixes) != len(state.lengths):
+                raise ValueError("DP Prefill request metadata disagrees")
+        except (TypeError, ValueError):
+            bound, static_bad = 1, True
+        state.dp_prefill_mega_buffer = model._shared_ops.moe_engine.prepare_dp_prefill_forward(
+            self.device, bound, supported=supported, fatal=static_bad,
+        )
+
     def dispatch(self, inputs, fmha_impl=None):
         """Metadata/dispatch only; both complete layer loops remain public."""
         if self.current is not None:
             raise RuntimeError("shared PPU forward is not reentrant")
+        self._engram_evidence = dict(decision="outside_domain", epoch=getattr(self, "_engram_epoch", 0),
+                                     round_cap=98304, packet=[], consumed_layers=[])
         if self.pending_verify is not None or self.pending_idle_verify is not None:
             raise RuntimeError("previous shared verify must be accepted or aborted before another forward")
         model = self.model
@@ -287,13 +418,17 @@ class SharedNativeRuntime:
         if restore_replay is not None:
             state.append_starts = dict(enumerate(original_prefixes))
         self.current = state
+        self._cross_mhc_evidence = state._cross_mhc_evidence
         state.verify = verify
         validate_state = os.environ.get("RTP_V41_SHARED_VALIDATE_STATE", "0") == "1"
         immutable_before = cache.fingerprint(original_prefixes, global_only=True) if cache is not None and prefill and validate_state and any(original_prefixes) else None
         state.native_state_before = cache.fingerprint(original_prefixes) if cache is not None and not prefill and validate_state else {}
         counts_before = [(layer.attn_norm.calls, layer.ffn_norm.calls, layer.ffn.calls) for layer in model.v4.layers]
         mega_before = sum(model._shared_ops.mhc_execution_stats()["calls"].values())
+        cross_success = False
         try:
+            state.engram_round_schedule = self._prepare_engram_rounds(state)
+            self._prepare_dp_prefill_mega_capacity(state)
             model.v4._propagate_cp_ctx(None)
             self.prepare_hashes(inputs, idle)
             for layer in model.v4.layers:
@@ -360,12 +495,39 @@ class SharedNativeRuntime:
             if verify:
                 self.pending_verify = transaction
                 self.pending_idle_verify = idle_token
+            cross_success = True
             return result
         except Exception:
             if transaction is not None:
                 transaction.abort()
             raise
         finally:
+            cross_pending = state._cross_mhc_ticket is not None
+            state.discard_next_attn_mhc("forward_exit")
+            close_swa_reads = getattr(cache, "close_local_swa_native_reads", None)
+            if close_swa_reads is not None:
+                close_swa_reads()
+            close_source_reads = getattr(cache, "close_local_source_native_reads", None)
+            if close_source_reads is not None:
+                close_source_reads()
+            attention_provider = getattr(state, "local_attention_provider", None)
+            if attention_provider is not None:
+                attention_provider.close()
+            engram_schedule = getattr(state, "engram_round_schedule", None)
+            if engram_schedule is not None:
+                self._engram_incomplete = not engram_schedule.close()
+                self._engram_evidence["complete"] = not self._engram_incomplete
+            state.engram_round_schedule = None
+            if self.device.type == "cuda" and self._engram_evidence.get("packet"):
+                self._engram_evidence.update(
+                    torch_allocator_peak_allocated_bytes=torch.cuda.max_memory_allocated(self.device),
+                    torch_allocator_peak_reserved_bytes=torch.cuda.max_memory_reserved(self.device),
+                    memory_scope="process-lifetime torch allocator peak; excludes C++/PCCL/host pinned",
+                )
+            dp_receipt = getattr(state, "dp_prefill_mega_buffer", None)
+            if dp_receipt is not None:
+                model._shared_ops.moe_engine.finish_dp_prefill_forward(dp_receipt)
+            state.dp_prefill_mega_buffer = None
             for layer in model.v4.layers:
                 layer.attn._shared_attention = None
                 layer.attn._set_prefill_meta_shared(None)
@@ -376,6 +538,7 @@ class SharedNativeRuntime:
                 layer.attn_hc.pre_mix_out = layer.ffn_hc.pre_mix_out = None
             model.v4._propagate_cp_ctx(None)
             self.current = None
+            state._cross_mhc_evidence["complete"] = cross_success and not cross_pending
 
     def stage_idle_graph_verify(self, inputs, reason):
         attn = as_tagged_attention_inputs(inputs.attention_inputs)

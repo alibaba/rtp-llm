@@ -14,9 +14,14 @@ from threading import Lock
 _build_lock = Lock()
 
 
-@lru_cache(maxsize=1)
-def _source_bundle():
-    root = Path(__file__).with_name("dsv4_ppu") / "fp4_indexer"
+@lru_cache(maxsize=None)
+def _source_bundle(bundle="fp4_indexer"):
+    if not isinstance(bundle, str) or not bundle or not all(
+        character.isascii() and (character.isalnum() or character == "_")
+        for character in bundle
+    ):
+        raise ValueError("SGLang source bundle must be a local bundle name")
+    root = Path(__file__).with_name("dsv4_ppu") / bundle
     manifest = json.loads((root / "source-manifest.json").read_text())
     digest = hashlib.sha256()
     for name, expected in sorted(manifest["sources"].items()):
@@ -29,11 +34,11 @@ def _source_bundle():
 
 
 @lru_cache(maxsize=None)
-def load_sglang_kernel(name, header, symbol, arch, extra_cuda_cflags=()):
+def load_sglang_kernel(name, header, symbol, arch, extra_cuda_cflags=(), *, bundle="fp4_indexer"):
     """Build one explicit entry point. Warm it up before graph capture."""
     from tvm_ffi.cpp import load_inline
 
-    root, source_digest = _source_bundle()
+    root, source_digest = _source_bundle() if bundle == "fp4_indexer" else _source_bundle(bundle)
     source = root / header
     flags = [
         f"-DSGL_CUDA_ARCH={arch[0] * 100 + arch[1] * 10}",

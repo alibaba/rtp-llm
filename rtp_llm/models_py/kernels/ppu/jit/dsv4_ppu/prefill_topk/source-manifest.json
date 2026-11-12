@@ -1,0 +1,31 @@
+{
+  "upstream_repository": "https://github.com/sgl-project/sglang",
+  "upstream_checkout": "sglang-for-sail",
+  "upstream_commit": "3bc4f87d5f9bb6f04b724540fb12a3acdc62d2fa",
+  "license": "Apache-2.0",
+  "adaptations": [
+    "compat/prefill_topk_entry.cuh: host-only Optional blocks export; native device kernels unchanged",
+    "compat/sgl_kernel/tensor.h: host pointer alignment uses reinterpret_cast instead of unavailable std::bit_cast; native device kernels unchanged",
+    "compat/sgl_kernel/warp.cuh: replace unavailable using enum with same-valued constexpr int64 aliases for all original LoadStoreBytes enum entries; copy/selection algorithms unchanged"
+  ],
+  "sources": {
+    "LICENSE": "1495e1e757ef4d0925a2350563cf5754bb23c51701a8ec4fb3c5cdcbedae6747",
+    "compat/prefill_topk_entry.cuh": "9a2a17a496df6a9f7b2a77dda4c321328fee01d08ae727fff8c9c7865fcdcf9b",
+    "compat/sgl_kernel/tensor.h": "bebe1d9b3e08ab5c180a4173f5911dfe1bf0ac05dee206bd72a7113c254011a7",
+    "compat/sgl_kernel/warp.cuh": "854d122da39f620666f2a4308a1062086046b90425c2d9549c54520872e869a7",
+    "csrc/deepseek_v4/block_amax.cuh": "57edc969d1ad4edaece2a1c4e1b7182c8c134ae94d059404ba8a6d0e6edba794",
+    "csrc/deepseek_v4/topk_bf16_small.cuh": "7c53f8c13e6cbf0ae1ba96cab0566def897b681abfddb2b951bb9df1503b7408",
+    "csrc/deepseek_v4/topk_v2.cuh": "158292a6c3cd43002b6bf4254df9abf691347e7ad49e55a4662a3a11336e0f80",
+    "include/sgl_kernel/bits.h": "5bab56d2578d151d3224994eeeae0abb939c26a1ac1e84205a1c942dab9cd605",
+    "include/sgl_kernel/deepseek_v4/topk_impl.cuh": "79969d906ffe6743e5357f0095addd886fcc33e6401f438664b278d40a726795",
+    "include/sgl_kernel/math.cuh": "73e182466976d821f8ad89017fd2492c50ea456d5e7007d4e869cb6730568477",
+    "include/sgl_kernel/source_location.h": "300026cbeeabe03b10b0c46b70e2e85b19a743cbe9ff462faa1dff4268cf806e",
+    "include/sgl_kernel/tensor.h": "c66eba28e0f7661711947309c12014d2e880025c7d91ff8a7ac544d4ece60ce2",
+    "include/sgl_kernel/tile.cuh": "692446727a0353f1eb0d7249f6564d2c79ee6c9066e2c61e2ab450014fb217b7",
+    "include/sgl_kernel/type.cuh": "4c72b0892e8d003490bdab2633056172a674bc6a9689be552861564c7aaf8edc",
+    "include/sgl_kernel/utils.cuh": "d7e858444067635f6d52f3958be4341e35e5bd0bc6437a21b085ce1a1b2218b9",
+    "include/sgl_kernel/utils.h": "68cd3ec640f9ceaf66f46be99b1e025c2a70dde32ea95ce462a1558af78d3515",
+    "include/sgl_kernel/vec.cuh": "11224cc483b7fbc93e2bcb1c2092715d80f1fa645920f4c82ee0e1d45a4eb551",
+    "include/sgl_kernel/warp.cuh": "264e64c3f386a70de938ed831f05f7a5f3c4b3ed9cfea58e1fbad433a8f860db"
+  }
+}

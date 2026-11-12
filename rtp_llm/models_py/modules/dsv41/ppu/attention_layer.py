@@ -37,14 +37,22 @@ from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import (
     select_candidate_blocks,
 )
 from rtp_llm.models_py.modules.dsv41.ppu._quant import _bytes_to_sf, is_ppu
+from rtp_llm.models_py.modules.dsv41.ppu import prefill_token_topk as _token_topk
 from rtp_llm.models_py.modules.dsv41.ppu.attention import flash_mla_sparse_fwd_ppu
 from rtp_llm.models_py.modules.dsv41.ppu.graph_swa_write import try_rope_
-from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import SharedNativeCache
+from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import (
+    LOCAL_PREFILL_SWA_SEGMENTS_ENV,
+    SharedNativeCache,
+    _LocalSwaStageRanges,
+    _source_tensor_key,
+)
 from rtp_llm.models_py.modules.dsv41.ppu.prefill import (
     _build_reference_workspace,
+    _make_local_producer_rotary_proof,
     _produce_global,
     _quantized_indexer_query,
     _rope_tail,
+    _valid_local_producer_rotary_proof,
     build_cp_prefill_workspace,
     build_step_context,
 )
@@ -71,8 +79,172 @@ CP8_WO_A_BMM_ENV = "RTP_V41_PPU_CP8_WO_A_BMM"
 CP8_GROUPED_QO_ROPE_ENV = "RTP_V41_PPU_CP8_GROUPED_QO_ROPE"
 CP8_INDEXER_REQUEST_SLICES_ENV = "RTP_V41_PPU_CP8_INDEXER_REQUEST_SLICES"
 CP8_INDEXER_TILE_PREP_ENV = "RTP_V41_PPU_CP8_INDEXER_TILE_PREP"
+LOCAL_PREFILL_WORKSPACE_ENV = "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE"
+LOCAL_PREFILL_GROUPED_QO_ROPE_ENV = "RTP_V41_PPU_LOCAL_PREFILL_GROUPED_QO_ROPE"
 _CP8_DENSE_TOPK_BYTES = 1 << 30
 _OPTIMIZED_LATE_FOCUS_LAYERS = (16, 20, 20, 20, 21, 20, 22, 20)
+
+
+def _local_prefill_token_topk_enabled(state, cp, *, diagnostic=None, packed_plan=None):
+    if (
+        not enabled(_token_topk.ENV, default=False)
+        or not getattr(state, "prefill", False) or getattr(state, "idle", True)
+        or diagnostic is not None or packed_plan is not None or torch.is_grad_enabled()
+        or any(getattr(state, flag, False) for flag in (
+            "is_graph", "is_graph_commit", "verify", "proposal",
+        ))
+        or getattr(getattr(state, "attn", None), "is_cuda_graph", False)
+    ):
+        return False
+    cache = getattr(state, "cache", None)
+    model = getattr(getattr(state, "runtime", None), "model", None)
+    return (
+        cache is not None and not getattr(cache, "sharded", True)
+        and (cp is None or (
+            getattr(cp, "cp_size", 0) == 1 and not getattr(cp, "kv_cache_sharded", True)
+        ))
+        and model is not None and not getattr(model, "_is_speculative", False)
+        and not getattr(model, "_is_decode_role", False)
+        and getattr(model, "_prefill_cp_size", None) == 1
+        and getattr(getattr(model, "parallelism_config", None), "tp_size", None) == 1
+        and is_ppu() and not torch.cuda.is_current_stream_capturing()
+    )
+
+
+def _local_prefill_grouped_qo_rope_enabled(state, cp, *, diagnostic=None):
+    if (
+        not enabled(LOCAL_PREFILL_GROUPED_QO_ROPE_ENV, default=False)
+        or not getattr(state, "prefill", False) or getattr(state, "idle", True)
+        or diagnostic is not None or torch.is_grad_enabled()
+        or any(getattr(state, flag, False) for flag in (
+            "is_graph", "is_graph_commit", "verify", "proposal",
+        ))
+        or getattr(getattr(state, "attn", None), "is_cuda_graph", False)
+    ):
+        return False
+    cache = getattr(state, "cache", None)
+    model = getattr(getattr(state, "runtime", None), "model", None)
+    return (
+        cache is not None and not getattr(cache, "sharded", True)
+        and (cp is None or (
+            getattr(cp, "cp_size", 0) == 1 and not getattr(cp, "kv_cache_sharded", True)
+        ))
+        and model is not None and not getattr(model, "_is_speculative", False)
+        and is_ppu() and not torch.cuda.is_current_stream_capturing()
+    )
+
+
+def _local_qo_rope_owned(value, *live_inputs):
+    """Allow a fresh projection/native-output view, never a copied alias."""
+    return (
+        value.is_cuda and value.dtype == torch.bfloat16 and value.ndim == 3
+        and value.shape[1] == 64 and value.shape[2] in (128, 512)
+        and value.is_contiguous() and not value.requires_grad
+        and value.untyped_storage().data_ptr() not in {
+            tensor.untyped_storage().data_ptr() for tensor in live_inputs if tensor is not None
+        }
+    )
+
+
+def _local_sg_indexer_counts_supported(counts):
+    # The SG dense score/amax ABI reads aligned groups of eight columns.
+    # Startup requests can have an odd bank width even in this deployment.
+    return bool(counts) and all(8 <= count <= 131072 and count % 8 == 0 for count in counts)
+
+
+def _local_sg_rope_positions(state, context, rows, frequencies):
+    """Use only creation-stamped positions within their original host spans."""
+    if not getattr(state, "local_prefill_sg_align", False):
+        return None
+    if not (
+        isinstance(frequencies, torch.Tensor) and frequencies.layout == torch.strided
+        and frequencies.dtype == torch.complex64 and frequencies.ndim == 2
+        and frequencies.shape[1] == 32 and frequencies.is_contiguous()
+        and not frequencies.is_neg() and not frequencies.is_conj()
+        and not frequencies.requires_grad and frequencies.device == rows[0].device
+    ):
+        return None
+    if state.local_indexer_request_slices(context, rows, rows[0].numel()) is None:
+        return None
+    prefixes, lengths = state.query_prefixes, state.lengths
+    if (len(prefixes) != len(lengths) or not lengths
+            or any(type(value) is not int or value < 0 for value in (*prefixes, *lengths))
+            or max(prefix + length for prefix, length in zip(prefixes, lengths)) > frequencies.shape[0]):
+        return None
+    return rows[0]
+
+
+def _local_swa_stage_ranges(state, cp, layer, full_pos, full_req, real, positions, requests,
+                            packed, *, packed_plan, retain_rows, retain_prefix_tail,
+                            bounded_starts, diagnostic=None):
+    """Bind real request ranges only to unchanged creation-stamped outputs."""
+    def eligible():
+        cache = getattr(state, "cache", None)
+        model = getattr(getattr(state, "runtime", None), "model", None)
+        return (
+            os.environ.get(LOCAL_PREFILL_SWA_SEGMENTS_ENV, "0") == "1"
+            and packed_plan is None and retain_rows
+            and getattr(state, "prefill", False) and not getattr(state, "idle", True)
+            and diagnostic is None and not torch.is_grad_enabled()
+            and not any(getattr(state, flag, False) for flag in (
+                "is_graph", "is_graph_commit", "verify", "proposal",
+            ))
+            and not getattr(getattr(state, "attn", None), "is_cuda_graph", False)
+            and model is not None and not getattr(model, "_is_speculative", False)
+            and type(cache) is SharedNativeCache and cache._is_prefill and not cache.sharded
+            and (cp is None or (cp.cp_size == 1 and not cp.kv_cache_sharded))
+        )
+
+    if not eligible() or not isinstance(real, slice) or real != slice(None):
+        return None
+    prove = getattr(state, "_local_swa_stage_rows", None)
+    ranges = prove(cp, full_pos, full_req) if prove is not None else None
+    if ranges is None or (cp is None and not retain_prefix_tail):
+        return None
+    if cp is not None and (retain_prefix_tail or bounded_starts != tuple(row[1] for row in ranges)):
+        return None
+    for source, view in ((full_pos, positions), (full_req, requests)):
+        if (not torch._C._is_alias_of(source, view) or source.data_ptr() != view.data_ptr()
+                or source.storage_offset() != view.storage_offset() or source.shape != view.shape
+                or source.stride() != view.stride() or source.dtype != view.dtype or source.device != view.device):
+            return None
+    cache = state.cache
+    pool_key, owners = cache._local_swa_pool_key(layer)
+    inputs = positions, requests, packed
+    return _LocalSwaStageRanges(
+        cache, ranges, inputs, tuple(_source_tensor_key(value) for value in inputs),
+        tuple(state.query_prefixes), cache.lengths, retain_prefix_tail, bounded_starts,
+        cache.pools[layer, "swa_kv"], pool_key, owners,
+        lambda: eligible() and prove(cp, full_pos, full_req) == ranges,
+    )
+
+
+def _local_prefill_workspace_layout(state, cp, geometry, layer_id, *, diagnostic=None):
+    """Describe local query chunks without changing the executor's CP context."""
+    if (
+        not enabled(LOCAL_PREFILL_WORKSPACE_ENV, default=False)
+        or not state.prefill
+        or state.idle
+        or state.cache.sharded
+        or diagnostic is not None
+        or (cp is not None and cp.cp_size != 1)
+    ):
+        return None
+    if geometry.ratio(layer_id) and geometry.kv_source_for(layer_id) is None:
+        return None
+    if cp is not None:
+        return cp
+    chunks, prefixes = tuple(state.lengths), tuple(state.query_prefixes)
+    key = "local_prefill_workspace_layout"
+    layout = state.shared.get(key)
+    if (
+        layout is None
+        or layout.chunk_lengths_per_req != chunks
+        or layout.prefix_lengths_host != prefixes
+    ):
+        layout = SimpleNamespace(chunk_lengths_per_req=chunks, prefix_lengths_host=prefixes)
+        state.shared[key] = layout
+    return layout
 
 
 def _project_wo_a(output, weight, groups, rank, *, batched, pack_groups=False):
@@ -100,9 +272,14 @@ def _project_wo_a(output, weight, groups, rank, *, batched, pack_groups=False):
     ], dim=1)
 
 
-def _store_dense_topk(logits, output, candidates, visible, block, candidate_k):
+def _store_dense_topk(logits, output, candidates, visible, block, candidate_k, *, local_token_topk=False):
     if candidates is not None:
         select_candidate_blocks(logits, visible, block, candidate_k, out=candidates)
+    if local_token_topk and output.shape[1] == _token_topk.K:
+        selected = _token_topk.try_select_tokens(logits, visible, disposable=True)
+        if selected is not None:
+            output.copy_(selected)
+            return
     scores, ids = logits.topk(output.shape[1], dim=-1)
     if not write_torch_topk_results(scores, ids, output):
         output.copy_(torch.where(torch.isfinite(scores), ids, -1).int())
@@ -490,15 +667,24 @@ class SharedPPUAttention(PPUAttentionProjections):
     def _select(
         self, x, qr, context, cache, shared, *, prefill=False,
         request_slices=None, allow_tile_prep=True, yoco_small_ops=False, indexer_inputs=None,
-        quantized_input=None,
+        quantized_input=None, local_token_topk=False, local_sg_align=False,
     ):
         g, source = self.geometry, self.kv_source_layer_id
+        sg_align = bool(
+            local_sg_align and prefill and request_slices is not None
+            and g.index_topk == 512 and g.index_n_heads == 32 and g.index_head_dim == 128
+        )
+        if sg_align:
+            from rtp_llm.models_py.modules.dsv41.ppu import local_prefill_sg_topk as sg_topk
+            from rtp_llm.models_py.modules.dsv41.ppu import local_prefill_sg_paged_indexer as sg_paged
+        local_token_topk = bool(local_token_topk and prefill and g.index_topk == _token_topk.K)
         direct_indexer_output = yoco_small_ops and request_slices is not None
         if not self.is_index_source:
             return shared["topk"][self.index_source_layer_id]
         reference_perf = prefill and os.environ.get("RTP_V41_REFERENCE_PERF_DIR")
         ratio = g.ratio(source)
         counts = [n // ratio for n in cache.lengths]
+        sg_align = sg_align and _local_sg_indexer_counts_supported(counts)
         dense_fp4 = (
             prefill
             and self.layer_id in (2, 8, 14, 20)
@@ -528,6 +714,8 @@ class SharedPPUAttention(PPUAttentionProjections):
         if rows_per_request:
             batch_row_limit -= batch_row_limit % rows_per_request
         batch_dense_topk = (
+            not sg_align
+            and
             direct_indexer_output
             and dense_fp4
             and (publish or candidates is None)
@@ -581,7 +769,16 @@ class SharedPPUAttention(PPUAttentionProjections):
                     continue
                 sparse_fp4 = sparse_enabled and block * candidate_k < count <= 1 << 20
                 native_fp4 = dense_fp4 or sparse_fp4
-                if native_fp4:
+                paged_plan = None
+                if sg_align and sparse_fp4 and rid == 0 and row_count == x.shape[0]:
+                    publication = shared.get("sg_candidate_publication")
+                    if publication is not None:
+                        paged_plan = sg_paged.prepare(
+                            cache, candidates, publication.visible, publication=publication,
+                        )
+                if paged_plan is not None:
+                    keys, chunk_rows = None, row_count
+                elif native_fp4:
                     if isinstance(cache, SharedNativeCache):
                         payload, scales = cache.read_indexer_fp4(source, rid, global_entries=count)
                     else:
@@ -593,6 +790,10 @@ class SharedPPUAttention(PPUAttentionProjections):
                     chunk_rows = logits_chunk_rows(
                         block * candidate_k if sparse_fp4 else count
                     )
+                    if sg_align and dense_fp4:
+                        # Match SG's full 4096-row FP32 tile at this width;
+                        # retain a one-GiB score budget for other admitted rows.
+                        chunk_rows = max(1, min(4096, row_count, (1 << 30) // (4 * count)))
                 else:
                     packed = cache.read_source(source, rid, global_entries=count)[1]
                     decoded = x.new_empty((count, g.index_head_dim))
@@ -613,6 +814,21 @@ class SharedPPUAttention(PPUAttentionProjections):
                         weights_bf16 if native_fp4 and weights_bf16 is not None else weights
                     )
                     if sparse_fp4:
+                        if paged_plan is not None:
+                            logits = sg_paged.score(
+                                q.values, q.scales, score_weights[chunk], paged_plan,
+                            )
+                            selected = sg_topk.select_sparse(
+                                logits, paged_plan.valid_lens, paged_plan.blocks, out=out[chunk],
+                            )
+                            if selected is None:
+                                raise RuntimeError("SG paged sparse TopK rejected an admitted tile")
+                            if reference_perf:
+                                shared.setdefault("reference_sparse_fp4", set()).add(self.layer_id)
+                            shared.setdefault("sg_topk_calls", []).append((self.layer_id, "sparse", stop - start))
+                            shared.setdefault("sg_paged_layers", []).append(self.layer_id)
+                            del logits
+                            continue
                         visible = (positions + 1) // ratio
                         plan = _prefill_sparse_plan(
                             shared,
@@ -634,11 +850,25 @@ class SharedPPUAttention(PPUAttentionProjections):
                             raise RuntimeError("PPU sparse Prefill scorer rejected a supported tile")
                         if reference_perf:
                             shared.setdefault("reference_sparse_fp4", set()).add(self.layer_id)
+                        if sg_align:
+                            selected = sg_topk.select_sparse(
+                                logits, plan.end, plan.sparse_indices, out=out[chunk],
+                            )
+                            if selected is None:
+                                raise RuntimeError("SG sparse TopK rejected an admitted Prefill tile")
+                            shared.setdefault("sg_topk_calls", []).append((self.layer_id, "sparse", stop - start))
+                            del logits
+                            continue
                         columns = torch.arange(plan.sparse_columns, device=x.device)
                         logits.masked_fill_(
                             columns[None, :] >= plan.end[:, None], -torch.inf
                         )
-                        selected = logits.topk(g.index_topk, dim=-1).indices
+                        selected = (
+                            _token_topk.try_select_tokens(logits, plan.end, disposable=True)
+                            if local_token_topk else None
+                        )
+                        if selected is None:
+                            selected = logits.topk(g.index_topk, dim=-1).indices
                         if not (tile_prep or direct_indexer_output) or sparse_prefill_indexer.remap(
                             selected, plan, logits=logits, out=out[chunk]
                         ) is None:
@@ -649,7 +879,7 @@ class SharedPPUAttention(PPUAttentionProjections):
                         del logits
                         continue
                     dense_tile_prep = tile_prep and dense_fp4
-                    direct_positions = dense_tile_prep or (dense_fp4 and yoco_small_ops)
+                    direct_positions = dense_tile_prep or (dense_fp4 and (yoco_small_ops or sg_align))
                     sub = None if direct_positions else build_step_context(
                         positions, context.request_ids[chunk], context.request_offsets
                     )
@@ -664,9 +894,29 @@ class SharedPPUAttention(PPUAttentionProjections):
                         ratio=ratio,
                         dense_fp4=dense_fp4,
                         positions=positions if direct_positions else None,
+                        **({"sg_align": True} if sg_align and dense_fp4 else {}),
                     )
                     if reference_perf and dense_fp4:
                         shared.setdefault("reference_dense_fp4", set()).add(self.layer_id)
+                    if sg_align and dense_fp4:
+                        visible = ((positions + 1) // ratio).clamp_max(count).to(torch.int32)
+                        result = sg_topk.select_dense(
+                            logits, visible, out=out[chunk],
+                            block_topk=candidate_k if publish and candidates is not None else g.index_topk,
+                            blocks_out=candidates[chunk] if publish and candidates is not None else None,
+                        )
+                        if result is None:
+                            raise RuntimeError(
+                                f"SG dense TopK rejected an admitted Prefill tile: layer={self.layer_id}, "
+                                f"shape={tuple(logits.shape)}, stride={logits.stride()}, dtype={logits.dtype}"
+                            )
+                        if publish and candidates is not None and start == 0 and stop == x.shape[0]:
+                            publication = sg_paged.make_publication(cache, candidates, visible, source=source)
+                            if publication is not None:
+                                shared["sg_candidate_publication"] = publication
+                        shared.setdefault("sg_topk_calls", []).append((self.layer_id, "dense", stop - start))
+                        del logits
+                        continue
                     if batch_dense_topk:
                         dense_tiles.append(logits)
                         del logits
@@ -684,8 +934,9 @@ class SharedPPUAttention(PPUAttentionProjections):
                             _store_dense_topk(
                                 batch_logits, out[batch_rows],
                                 candidates[batch_rows] if publish else None,
-                                (context.positions[batch_rows] + 1) // ratio if publish else None,
+                                (context.positions[batch_rows] + 1) // ratio if publish or local_token_topk else None,
                                 block, candidate_k,
+                                **({"local_token_topk": True} if local_token_topk else {}),
                             )
                             del batch_logits
                             dense_start = chunk.stop
@@ -702,12 +953,20 @@ class SharedPPUAttention(PPUAttentionProjections):
                                 candidates[chunk, :chosen.shape[-1]] = chosen
                         elif self.layer_id > candidate_source:
                             mask_candidate_logits(logits, candidates[chunk], block)
-                    scores, chosen = logits.topk(min(g.index_topk, count), dim=-1)
-                    if not (
-                        direct_positions and request_slices is not None
-                        and write_torch_topk_results(scores, chosen, out[chunk, :chosen.shape[-1]])
-                    ):
-                        out[chunk, :chosen.shape[-1]] = torch.where(torch.isfinite(scores), chosen, -1).int()
+                    selected = (
+                        _token_topk.try_select_tokens(logits, (positions + 1) // ratio, disposable=True)
+                        if local_token_topk else None
+                    )
+                    if selected is not None:
+                        # Advanced row indexing is a copy; assign into the parent.
+                        out[chunk] = selected
+                    else:
+                        scores, chosen = logits.topk(min(g.index_topk, count), dim=-1)
+                        if not (
+                            direct_positions and request_slices is not None
+                            and write_torch_topk_results(scores, chosen, out[chunk, :chosen.shape[-1]])
+                        ):
+                            out[chunk, :chosen.shape[-1]] = torch.where(torch.isfinite(scores), chosen, -1).int()
                     del logits
         shared.setdefault("topk", {})[self.layer_id] = out
         return out
@@ -746,6 +1005,9 @@ class SharedPPUAttention(PPUAttentionProjections):
             plan, packed_reason = None, "cp_sharded_logical_workspace"
         else:
             plan, packed_reason = prepare_packed_attention(self, state, context, x)
+        local_grouped_qo_rope = plan is None and _local_prefill_grouped_qo_rope_enabled(
+            state, cp, diagnostic=diagnostic,
+        )
         if (
             not state.prefill
             and plan is None
@@ -762,7 +1024,12 @@ class SharedPPUAttention(PPUAttentionProjections):
         parallel = enabled(STREAMS_ENV) and streams_supported(state, x)
         if parallel and self.runtime.qkv_streams is None:
             self.runtime.qkv_streams = QKVStreams(x.device)
-        freqs = self.runtime.freqs_for(self.layer_id)[positions]
+        frequency_table = self.runtime.freqs_for(self.layer_id)
+        sg_rope_positions = (
+            _local_sg_rope_positions(state, cp, (positions, requests, cu, valid), frequency_table)
+            if diagnostic is None and plan is None else None
+        )
+        freqs = frequency_table[positions] if sg_rope_positions is None else None
 
         def query_branch(value):
             latent = self.query_latent(value)
@@ -786,7 +1053,7 @@ class SharedPPUAttention(PPUAttentionProjections):
         from rtp_llm.models_py.modules.dsv41.ppu.fused_ops import (
             is_supported as fusion_supported, qk_rope,
         )
-        fused = (enabled(FUSION_ENV) and bool(x.shape[0]) and ordinary_eager_reason(state) is None
+        fused = (sg_rope_positions is None and enabled(FUSION_ENV) and bool(x.shape[0]) and ordinary_eager_reason(state) is None
                  and not torch.cuda.is_current_stream_capturing()
                  and fusion_supported(q, kv, freqs))
         if diagnostic is not None:
@@ -795,10 +1062,30 @@ class SharedPPUAttention(PPUAttentionProjections):
         if fused:
             q, kv = qk_rope(q, kv, freqs)
             rope_backend = "triton_fused_qk_rope"
-        else:
-            # The Q projection owns its result in the CP workspace path.
+        elif sg_rope_positions is not None:
+            from rtp_llm.models_py.modules.dsv41.ppu.fused_ops import try_rope_tail
+
             rotated_q = (
-                try_rope_(q, freqs, preserve_signed_zero=True) if grouped_qo_rope else None
+                try_rope_(q, frequency_table, preserve_signed_zero=True, positions=sg_rope_positions)
+                if _local_qo_rope_owned(q, x, qr, kv, frequency_table, sg_rope_positions) else None
+            )
+            rotated_kv = try_rope_tail(kv, frequency_table, False, positions=sg_rope_positions)
+            if rotated_q is not None and rotated_kv is not None:
+                q, kv = rotated_q, rotated_kv
+                rope_backend = "local_sg_position_lookup"
+                shared.setdefault("sg_rope_calls", []).extend(((self.layer_id, "q"), (self.layer_id, "kv")))
+            else:
+                if freqs is None:
+                    freqs = frequency_table[positions]
+                q = rotated_q if rotated_q is not None else _rope_tail(q, freqs)
+                kv = rotated_kv if rotated_kv is not None else _rope_tail(kv, freqs)
+        else:
+            # Local Q must own storage disjoint from every live projection input.
+            rotated_q = (
+                try_rope_(q, freqs, preserve_signed_zero=True)
+                if grouped_qo_rope or (
+                    local_grouped_qo_rope and _local_qo_rope_owned(q, x, qr, kv, freqs)
+                ) else None
             )
             if rotated_q is not None:
                 q = rotated_q
@@ -841,7 +1128,17 @@ class SharedPPUAttention(PPUAttentionProjections):
             and os.environ.get("RTP_V41_PPU_CP8_YOCO_PACK_LOCAL_SWA", "0") == "1"
         )
         swa_rows = self.ops.encode_kv(kv, pool_tag="swa_kv") if pack_local_swa else kv
-        if compact_cp8 and starts is not None and not self.is_kv_source:
+        local_compact_rows = (
+            diagnostic is None and not self.is_kv_source
+            and getattr(state, "use_local_compact_rows", lambda context: False)(cp)
+        )
+        if local_compact_rows:
+            # CP1 is local. The varlen helper's TP group may resolve to the
+            # DP world, so reuse only its replay-only restore operation.
+            full_kv = swa_rows.index_select(0, cp.unpad_restore)
+            full_pos, full_req, real = state.full_rows(cp, selected_only=True)
+            route["swa_rows_backend"] = "local_compact_selected"
+        elif compact_cp8 and starts is not None and not self.is_kv_source:
             # The CUDA bounded path gathers in retained request order.
             full_kv = cp_all_gather_full_varlen(
                 swa_rows, cp, replay_only=True, profile_name="dsv41.ppu.prefill.swa_replay",
@@ -853,29 +1150,48 @@ class SharedPPUAttention(PPUAttentionProjections):
         packed = full_kv[real]
         if not pack_local_swa:
             packed = self.ops.encode_kv(packed, pool_tag="swa_kv")
-        cache.stage_swa(
-            self.layer_id, full_pos[real], full_req[real], packed, state.query_prefixes,
+        stage_positions, stage_requests = full_pos[real], full_req[real]
+        stage_options = dict(
             retain_rows=plan is None, retain_prefix_tail=swa_starts is None,
-            bounded_starts=(
-                tuple(swa_starts.values())
-                if state.compacted and cp is state.context
-                and starts is not None and swa_starts is not None
-                else None
-            ),
+            bounded_starts=(tuple(swa_starts.values()) if state.compacted and cp is state.context
+                            and starts is not None and swa_starts is not None else None),
         )
+        local_ranges = _local_swa_stage_ranges(
+            state, cp, self.layer_id, full_pos, full_req, real, stage_positions, stage_requests, packed,
+            packed_plan=plan, diagnostic=diagnostic, **stage_options,
+        )
+        if local_ranges is not None:
+            stage_options["local_ranges"] = local_ranges
+        local_rotary_proof = (
+            _make_local_producer_rotary_proof(
+                local_ranges, cache=cache, layer_id=self.layer_id,
+                prefixes=state.query_prefixes, lengths=state.lengths,
+            ) if self.is_kv_source and local_ranges is not None else None
+        )
+        cache.stage_swa(self.layer_id, stage_positions, stage_requests, packed, state.query_prefixes, **stage_options)
         if self.is_kv_source:
             values = gather(self.global_wkv(x))
             scores = gather(self.global_wgate(x)) if self.global_wgate is not None else None
             prefill_layout = None
             if state.prefill and (cp is None or cp.gather_restore_positions is None):
                 prefill_layout = (state.query_prefixes, state.lengths)
+            source_options = {}
+            if local_rotary_proof is not None and _valid_local_producer_rotary_proof(
+                local_rotary_proof, cache=cache, layer_id=self.layer_id,
+                prefill_layout=prefill_layout, positions=stage_positions,
+                request_ids=stage_requests,
+            ):
+                producer_positions, producer_requests = stage_positions, stage_requests
+                source_options["local_rotary_proof"] = local_rotary_proof
+            else:
+                producer_positions, producer_requests = full_pos[real], full_req[real]
             _produce_global(
                 ops=self.ops, layer=self._layer_weights(), geometry=g,
                 freqs=self.runtime.freqs_for(self.layer_id),
                 values=values[real], scores=scores[real] if scores is not None else None,
-                positions=full_pos[real], request_ids=full_req[real], cache=cache,
+                positions=producer_positions, request_ids=producer_requests, cache=cache,
                 layer_id=self.layer_id, append_starts=state.append_starts,
-                prefill_layout=prefill_layout,
+                prefill_layout=prefill_layout, **source_options,
             )
             shared.setdefault("global", {})[self.layer_id] = source_identity(cache, self.layer_id)
         indexer_inputs = None
@@ -898,14 +1214,30 @@ class SharedPPUAttention(PPUAttentionProjections):
             # start from the compact context is for the subsequent layers.
             positions, requests, cu, valid = state.rows(cp)
             context = build_step_context(positions, requests, cu, valid_mask=valid)
-            freqs = self.runtime.freqs_for(self.layer_id)[positions]
+            frequency_table = self.runtime.freqs_for(self.layer_id)
+            sg_rope_positions = (
+                _local_sg_rope_positions(state, cp, (positions, requests, cu, valid), frequency_table)
+                if diagnostic is None and plan is None else None
+            )
+            freqs = frequency_table[positions] if sg_rope_positions is None else None
             compact_cp8 = True
             shape = x.shape
             route.update(rows=x.shape[0], producer_rows=route["rows"])
         if self.compress_ratio and (not use_cp_workspace or self.is_index_source):
             cache.prepare_source(self.kv_source_layer_id)
         request_slices = None
+        local_sg_align = bool(
+            getattr(state, "local_prefill_sg_align", False)
+            and diagnostic is None and plan is None and self.is_index_source
+        )
+        if local_sg_align:
+            request_slices = state.local_indexer_request_slices(
+                cp, (positions, requests, cu, valid), x.shape[0],
+            )
+            local_sg_align = request_slices is not None
         if (
+            request_slices is None
+            and
             (full_cp8 or compact_cp8)
             and self.is_index_source
             and enabled(CP8_INDEXER_REQUEST_SLICES_ENV)
@@ -915,9 +1247,15 @@ class SharedPPUAttention(PPUAttentionProjections):
             )
         selected = self._select(
             x, qr, context, cache, shared, prefill=state.prefill,
-            request_slices=request_slices, allow_tile_prep=not compact_cp8,
+            request_slices=request_slices, allow_tile_prep=not (compact_cp8 or local_sg_align),
             yoco_small_ops=yoco_small_ops, indexer_inputs=indexer_inputs,
             quantized_input=indexer_quantized_input,
+            **({"local_sg_align": True} if local_sg_align else {}),
+            **({"local_token_topk": True} if (
+                self.is_index_source
+                and _local_prefill_token_topk_enabled(state, cp, diagnostic=diagnostic, packed_plan=plan)
+                and g.index_topk == _token_topk.K
+            ) else {}),
         ) if self.compress_ratio else None
         indexer_quantized_input = None
         if diagnostic is not None:
@@ -969,6 +1307,16 @@ class SharedPPUAttention(PPUAttentionProjections):
                     selected_blocks=selected, window=g.window, swa_starts=swa_starts, cp=cp, shared=shared,
                     q8=q8_attention,
                 )
+            elif (local_layout := _local_prefill_workspace_layout(
+                state, cp, g, self.layer_id, diagnostic=diagnostic,
+            )) is not None:
+                q8_attention = False
+                kv_rows, indices, lengths = build_cp_prefill_workspace(
+                    ops=self.ops, cache=cache, layer_id=self.layer_id, geometry=g, context=context,
+                    selected_blocks=selected, window=g.window, swa_starts=swa_starts,
+                    cp=local_layout, shared=shared, q8=False,
+                )
+                route["workspace_backend"] = "local_bf16_reuse"
             else:
                 q8_attention = False
                 kv_rows, indices, lengths = _build_reference_workspace(
@@ -985,10 +1333,22 @@ class SharedPPUAttention(PPUAttentionProjections):
                 )
                 route["attention_backend"] = "flash_mla_sparse_quantized_fwd"
             else:
-                output, _, _ = flash_mla_sparse_fwd_ppu(
-                    q.contiguous(), kv_rows, indices, g.sm_scale(),
-                    attn_sink=self.attn_sink, topk_length=lengths,
+                native_q = q.contiguous()
+                provider = getattr(state, "local_attention_provider", None)
+                provider_result = (
+                    provider.try_run(state, self.layer_id, g, native_q, kv_rows, indices, lengths, self.attn_sink)
+                    if provider is not None and diagnostic is None and self.layer_id < 20
+                    and route.get("workspace_backend") == "local_bf16_reuse"
+                    else None
                 )
+                if provider_result is None:
+                    output, _, _ = flash_mla_sparse_fwd_ppu(
+                        native_q, kv_rows, indices, g.sm_scale(),
+                        attn_sink=self.attn_sink, topk_length=lengths,
+                    )
+                else:
+                    output, _, _ = provider_result
+                    route["attention_backend"] = "local_bf16_sparse_prefill_provider"
             route["bf16_kv_workspace"] = kv_rows.dtype == torch.bfloat16
         partition_probe = None
         if diagnostic is not None:
@@ -997,11 +1357,25 @@ class SharedPPUAttention(PPUAttentionProjections):
                     self, state, context, selected, swa_starts, plan, q, output, diagnostic["arm"],
                 )
             diagnostic_output = output
-        rotated_output = (
-            try_rope_(output, freqs, inverse=True, preserve_signed_zero=True)
-            if grouped_qo_rope
-            else None
-        )
+        if sg_rope_positions is not None:
+            rotated_output = (
+                try_rope_(output, frequency_table, inverse=True, preserve_signed_zero=True,
+                          positions=sg_rope_positions)
+                if _local_qo_rope_owned(output, x, qr, q, kv, kv_rows, frequency_table, sg_rope_positions)
+                else None
+            )
+            if rotated_output is not None:
+                shared.setdefault("sg_rope_calls", []).append((self.layer_id, "o"))
+            elif freqs is None:
+                freqs = frequency_table[positions]
+        else:
+            rotated_output = (
+                try_rope_(output, freqs, inverse=True, preserve_signed_zero=True)
+                if grouped_qo_rope or (
+                    local_grouped_qo_rope and _local_qo_rope_owned(output, x, qr, q, kv, kv_rows, freqs)
+                )
+                else None
+            )
         output = _rope_tail(output, freqs, inverse=True) if rotated_output is None else rotated_output
         output = output.reshape(-1, g.o_groups, g.n_heads * g.head_dim // g.o_groups)
         if hasattr(self.wo_a, "forward_grouped"):

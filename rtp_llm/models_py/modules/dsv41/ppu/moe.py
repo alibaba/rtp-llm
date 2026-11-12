@@ -48,6 +48,7 @@ import importlib.util
 import os
 import threading
 import weakref
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -1463,6 +1464,16 @@ def routed_swiglu_fp8(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, eq=False)
+class _DPForwardMegaBuffer:
+    engine: object
+    buffer: object
+    capacity: int
+    bound: int
+    generation: int
+    epoch: int
+
+
 class PPUMoE:
     """Expert-parallel MoE for the PPU V4.1 strategy.
 
@@ -1535,6 +1546,10 @@ class PPUMoE:
         self._mega_capacity = 0
         self._mega_device = None
         self._mega_recv_stats = None
+        self._mega_generation = 0
+        self._dp_prepare_epoch = 0
+        self._dp_active_preparation = None
+        self._dp_capacity_evidence = None
         self._fake_balance_config = None
         self._fake_balance_op = None
         self.group = group
@@ -1816,6 +1831,10 @@ class PPUMoE:
         plus ``-1`` padding); ``expert_weights`` is the matching fp32
         ``[T, 8]`` slot weights (zero on padding slots).
         """
+        dp_prepared = isinstance(prepared_buffer, _DPForwardMegaBuffer)
+        if dp_prepared:
+            self._validate_dp_preparation(prepared_buffer, x.shape[0])
+            prepared_buffer = prepared_buffer.buffer
         expert_ids, expert_weights = self._apply_fake_balance(
             expert_ids, expert_weights
         )
@@ -1823,6 +1842,7 @@ class PPUMoE:
             expert_ids, expert_weights, layer_id,
             single_replica=(
                 prepared_buffer is not None
+                and not dp_prepared
                 and os.environ.get("RTP_V41_PPU_CP8_YOCO_FAST_PREFILL", "0") == "1"
             ),
         )
@@ -1928,6 +1948,98 @@ class PPUMoE:
     def _ensure_mega_buffer(self, x):
         return self._ensure_mega_capacity(x.device, x.shape[0])
 
+    def _validate_dp_preparation(self, receipt, rows):
+        if (
+            receipt is not self._dp_active_preparation or receipt.engine is not self
+            or receipt.buffer is not self._mega_buffer
+            or receipt.generation != self._mega_generation
+            or receipt.epoch != self._dp_prepare_epoch
+            or receipt.capacity != self._mega_capacity
+            or not 0 <= rows <= receipt.bound <= receipt.capacity
+        ):
+            raise ValueError("stale or insufficient DP Prefill MegaMoE preparation")
+
+    def finish_dp_prefill_forward(self, receipt):
+        if receipt is self._dp_active_preparation:
+            self._dp_active_preparation = None
+
+    def prepare_dp_prefill_forward(self, device, local_bound, *, supported, fatal=False):
+        """Agree once in WORLD8, including idle owners, before any layer loop.
+
+        The caller's feature flag must be uniform across this eager role world.
+        No local eligibility decision may skip this control collective.
+        """
+        import torch.distributed as dist
+
+        self._dp_active_preparation = None
+        self._dp_prepare_epoch += 1
+        if (
+            not dist.is_initialized() or dist.get_world_size(dist.group.WORLD) != 8
+            or device.type != "cuda" or torch.cuda.is_current_stream_capturing()
+        ):
+            raise RuntimeError("DP Prefill capacity requires an eager CUDA/PPU WORLD8")
+        present, capacity = int(self._mega_buffer is not None), self._mega_capacity
+        lifecycle_bad = (
+            (not present and capacity != 0)
+            or (present and (capacity < 128 or capacity & (capacity - 1)))
+            or self._mega_generation < 0
+            or (present and self._mega_device != device)
+        )
+        configuration_bad = (
+            self.backend != "megamoe" or self.precision != "w4a4"
+            or self.ep_size != 8 or self.ep_rank != dist.get_rank(dist.group.WORLD)
+            or self.group is not dist.group.WORLD
+            or self.hidden_size != 5120 or self.inter_dim != 2304
+            or self.num_routed_experts != 384
+        )
+        invalid_bound = type(local_bound) is not int or not 1 <= local_bound < (1 << 62)
+        packet = torch.tensor(
+            [1 if invalid_bound else local_bound, int(not supported),
+             int(bool(fatal or lifecycle_bad or configuration_bad or invalid_bound)),
+             present, -present, capacity, -capacity,
+             self._mega_generation, -self._mega_generation],
+            dtype=torch.int64, device=device,
+        )
+        dist.all_reduce(packet, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
+        values = packet.tolist()
+        bound, unsupported, rejected, pmax, negpmin, cmax, negcmin, gmax, neggmin = values
+        self._dp_capacity_evidence = dict(
+            packet=values, epoch=self._dp_prepare_epoch, local_bound=local_bound,
+            decision="rejected", capacity=capacity, generation=self._mega_generation,
+        )
+        if rejected or pmax != -negpmin or cmax != -negcmin or gmax != -neggmin:
+            local = dict(
+                backend=self.backend, precision=self.precision,
+                ep_size=self.ep_size, ep_rank=self.ep_rank,
+                world_rank=dist.get_rank(dist.group.WORLD), group_is_world=self.group is dist.group.WORLD,
+                hidden_size=self.hidden_size, inter_dim=self.inter_dim,
+                routed_experts=self.num_routed_experts, physical_experts=self.num_physical_experts,
+                local_experts=self.num_local_experts, buffer_present=present,
+                capacity=capacity, generation=self._mega_generation,
+                device=str(device), buffer_device=str(self._mega_device),
+                runtime_fatal=bool(fatal), lifecycle_bad=bool(lifecycle_bad),
+                configuration_bad=bool(configuration_bad), invalid_bound=invalid_bound,
+                local_bound=local_bound,
+            )
+            raise RuntimeError(
+                f"DP Prefill MegaMoE configuration/lifecycle disagreement: "
+                f"local={local!r}, reduced_packet={values!r}"
+            )
+        if unsupported:
+            self._dp_capacity_evidence["decision"] = "fallback"
+            return None
+        buffer = self._ensure_mega_capacity(device, bound, uniform_rows=True)
+        receipt = _DPForwardMegaBuffer(
+            self, buffer, self._mega_capacity, bound,
+            self._mega_generation, self._dp_prepare_epoch,
+        )
+        self._dp_active_preparation = receipt
+        self._dp_capacity_evidence.update(
+            decision="reuse" if self._mega_capacity == capacity else "grow" if present else "create",
+            capacity=self._mega_capacity, generation=self._mega_generation, bound=bound,
+        )
+        return receipt
+
     def prepare_full_cp8(self, device, rows):
         """Prepare once for the uniform host-padded CP8 role world."""
         import torch.distributed as dist
@@ -1984,6 +2096,7 @@ class PPUMoE:
                 activation="swiglu",
             )
             self._mega_capacity = required
+            self._mega_generation += 1
             if self._mega_recv_stats is None:
                 self._mega_recv_stats = torch.zeros(
                     self.num_local_experts, dtype=torch.int32, device=device
@@ -2590,6 +2703,8 @@ def shared_expert_forward(
     *,
     fused_activation: bool = False,
     prefill_exact: bool = False,
+    local_prefill_exact: bool = False,
+    local_prefill_sg: bool = False,
 ) -> torch.Tensor:
     """Shared-expert SwiGLU forward on BF16-resident weights.
 
@@ -2597,8 +2712,51 @@ def shared_expert_forward(
     / rtp ``silu_mul_split``): clamp ``up`` to ``[-limit, limit]`` and ``gate``
     to ``[-inf, limit]`` BEFORE the SiLU, then ``silu(gate) * up`` and the w2
     projection. Returns BF16.
+
+    The independent local option reuses only clamp/widen fusion after W13's
+    actual output is qualified; SiLU, multiplication and BF16 landing stay ATen.
     """
     gate_up = w13(x)
+    if local_prefill_sg:
+        from rtp_llm.models_py.modules.dsv41.ppu.linear import PPUPTPCLinear
+        from rtp_llm.models_py.modules.dsv41.ppu.local_prefill_sg_ops import (
+            supports_swiglu,
+            swiglu_quant,
+        )
+
+        if isinstance(w2, PPUPTPCLinear) and supports_swiglu(gate_up, swiglu_limit):
+            payload, scale = swiglu_quant(gate_up, swiglu_limit)
+            return w2.forward_quantized(payload, scale)
+    if (
+        local_prefill_exact is True
+        and isinstance(gate_up, torch.Tensor)
+        and gate_up.layout == torch.strided
+        and gate_up.dtype == torch.bfloat16
+        and gate_up.ndim == 2
+        and 0 < gate_up.shape[0] <= 16384
+        and gate_up.shape[1] == 4608
+        and gate_up.is_contiguous()
+        and not gate_up.is_neg()
+        and not gate_up.is_conj()
+        and not gate_up.requires_grad
+        and not torch.is_grad_enabled()
+        and isinstance(swiglu_limit, (int, float))
+        and swiglu_limit == 10.0
+        and gate_up.is_cuda
+    ):
+        from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
+
+        if (
+            is_ppu()
+            and torch.cuda.get_device_capability(gate_up.device) == (8, 9)
+            and not torch.cuda.is_current_stream_capturing()
+            and importlib.util.find_spec("triton") is not None
+        ):
+            from rtp_llm.models_py.modules.dsv41.moe._silu_mul_bf16_triton import (
+                silu_mul_split_bf16_torch_exact,
+            )
+
+            return w2(silu_mul_split_bf16_torch_exact(gate_up, clamp_limit=swiglu_limit))
     if (
         prefill_exact
         and gate_up.is_cuda

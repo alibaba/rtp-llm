@@ -17,6 +17,7 @@ from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.base.common.norm import BaseNorm
 from rtp_llm.models_py.modules.dsv41.hc.base import HCUnitBase
+from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
 from rtp_llm.models_py.modules.dsv41.ppu.engram import engram_gate_inject, wkv_project
 from rtp_llm.models_py.modules.dsv41.ppu.linear import (
     PPUPTPCLinear,
@@ -103,6 +104,142 @@ def cp8_yoco_fast_prefill_enabled(state):
         os.environ.get("RTP_V41_PPU_CP8_YOCO_FAST_PREFILL", "0") == "1"
         and cp8_yoco_small_ops_enabled(state)
     )
+
+
+LOCAL_PREFILL_AIU_PRENORM_ENV = "RTP_V41_PPU_LOCAL_PREFILL_AIU_PRENORM"
+LOCAL_PREFILL_EXACT_SHARED_SWIGLU_ENV = "RTP_V41_PPU_LOCAL_PREFILL_EXACT_SHARED_SWIGLU"
+
+
+def _local_prefill_business_phase(state):
+    """Metadata-only scope shared by the two independent local options."""
+    if (not getattr(state, "prefill", False) or getattr(state, "idle", True)
+            or torch.is_grad_enabled()
+            or any(getattr(state, flag, False) for flag in (
+                "is_graph", "is_graph_commit", "verify", "proposal",
+            ))
+            or getattr(getattr(state, "attn", None), "is_cuda_graph", False)
+            or len(getattr(state, "lengths", ())) != 1):
+        return False
+    from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import SharedNativeCache
+    from rtp_llm.models_py.modules.dsv41.ppu.attention_layer import optimized_diagnostics_enabled
+    from rtp_llm.models_py.modules.dsv4 import _record_tensor, _forward_tensor_debug
+
+    cache, cp = getattr(state, "cache", None), getattr(state, "context", None)
+    model = getattr(getattr(state, "runtime", None), "model", None)
+    return (
+        type(cache) is SharedNativeCache and cache._is_prefill and not cache.sharded
+        and (cp is None or (getattr(cp, "cp_size", 0) == 1
+                           and not getattr(cp, "kv_cache_sharded", True)))
+        and model is not None and not getattr(model, "_is_decode_role", True)
+        and not getattr(model, "_is_speculative", False)
+        and getattr(model, "_prefill_cp_size", None) == 1
+        and getattr(getattr(model, "parallelism_config", None), "tp_size", None) == 1
+        and not _record_tensor.ENABLED and not _forward_tensor_debug.enabled()
+        and not optimized_diagnostics_enabled() and is_ppu()
+        and not torch.cuda.is_current_stream_capturing()
+    )
+
+
+def _local_prefill_exact_shared_swiglu_enabled(state):
+    return (os.environ.get(LOCAL_PREFILL_EXACT_SHARED_SWIGLU_ENV, "0") == "1"
+            and _local_prefill_business_phase(state))
+
+
+def _local_prefill_aiu_prenorm_enabled(state, residual):
+    """Admit the existing rowwise AIU projection without a CP8 context."""
+    if (
+        os.environ.get(LOCAL_PREFILL_AIU_PRENORM_ENV, "0") != "1"
+        or not getattr(state, "prefill", False)
+        or getattr(state, "idle", True)
+        or any(getattr(state, flag, False) for flag in (
+            "is_graph", "is_graph_commit", "verify", "proposal",
+        ))
+        or torch.is_grad_enabled()
+    ):
+        return False
+    cache = getattr(state, "cache", None)
+    context = getattr(state, "context", None)
+    model = getattr(getattr(state, "runtime", None), "model", None)
+    if (
+        cache is None or getattr(cache, "sharded", True)
+        or (context is not None and (
+            getattr(context, "cp_size", 0) != 1
+            or getattr(context, "kv_cache_sharded", True)
+        ))
+        or model is None or getattr(model, "_is_speculative", False)
+        or residual.ndim != 3 or residual.shape[1:] != (4, 5120)
+        or not 1024 <= residual.shape[0] <= 16384
+        or residual.dtype != torch.bfloat16 or residual.device.type != "cuda"
+        or not residual.is_contiguous()
+    ):
+        return False
+    from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
+
+    return (
+        is_ppu()
+        and torch.cuda.get_device_capability(residual.device) == (8, 9)
+        and not torch.cuda.is_current_stream_capturing()
+    )
+
+
+LOCAL_PREFILL_DIRECT_MOE_ROUTES_ENV = "RTP_V41_PPU_LOCAL_PREFILL_DIRECT_MOE_ROUTES"
+
+
+def _local_prefill_direct_moe_real(state, flat):
+    """Return the current local layout's mask for the existing direct gate."""
+    if (
+        os.environ.get(LOCAL_PREFILL_DIRECT_MOE_ROUTES_ENV, "0") != "1"
+        or not getattr(state, "prefill", False)
+        or getattr(state, "idle", True)
+        or any(getattr(state, flag, False) for flag in (
+            "is_graph", "is_graph_commit", "verify", "proposal",
+        ))
+        or getattr(getattr(state, "attn", None), "is_cuda_graph", False)
+        or torch.is_grad_enabled()
+    ):
+        return None
+    cache = getattr(state, "cache", None)
+    context = getattr(state, "context", None)
+    model = getattr(getattr(state, "runtime", None), "model", None)
+    if (
+        cache is None or getattr(cache, "sharded", True)
+        or (context is not None and (
+            getattr(context, "cp_size", 0) != 1
+            or getattr(context, "kv_cache_sharded", True)
+        ))
+        or model is None or getattr(model, "_is_speculative", False)
+        or getattr(model, "_is_decode_role", False)
+        or flat.ndim != 2 or flat.shape[1] != 5120
+        or flat.dtype != torch.bfloat16 or flat.device.type != "cuda"
+        or not flat.is_contiguous()
+    ):
+        return None
+    from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
+
+    if (
+        not is_ppu()
+        or torch.cuda.get_device_capability(flat.device) != (8, 9)
+        or torch.cuda.is_current_stream_capturing()
+    ):
+        return None
+    # Match the legacy mask precedence, including compact CP1 padding. An
+    # unpadded local layout without an active mask consists entirely of real
+    # rows. Keep this call-local so layout transitions cannot reuse old masks.
+    real = (
+        getattr(context, "local_is_real", None) if context is not None
+        else getattr(state, "active_token_mask", None)
+    )
+    if real is None:
+        if context is not None:
+            return None
+        return torch.ones(flat.shape[0], dtype=torch.bool, device=flat.device)
+    if (
+        not isinstance(real, torch.Tensor) or real.shape != (flat.shape[0],)
+        or real.dtype != torch.bool or real.device != flat.device
+        or not real.is_contiguous()
+    ):
+        return None
+    return real
 
 
 def try_graph_rms_norm(hidden_states, weight, eps) -> torch.Tensor | None:
@@ -329,6 +466,9 @@ class PPUSharedHCUnit(HCUnitBase):
             and not torch.is_grad_enabled()
             and not torch.cuda.is_current_stream_capturing()
         )
+        aiu_prenorm = aiu_prenorm or (
+            self.name == "attn" and _local_prefill_aiu_prenorm_enabled(state, x)
+        )
         if reduce_block_m is None and not aiu_prenorm:
             state = self.ops.mhc(
                 x, None, phase="pre", parameters=self.parameters_map, state=previous_state,
@@ -352,6 +492,12 @@ class PPUSharedHCUnit(HCUnitBase):
         return self.state.hidden, self.state.post_mix, self.state.residual_mix
 
     def _post_impl(self, x, residual, post, comb):
+        current = getattr(getattr(self, "runtime", None), "current", None)
+        if self.name == "ffn" and current is not None:
+            produce = getattr(current, "try_ffn_to_next_attn", None)
+            updated = produce(self, x, residual, post, comb) if produce is not None else None
+            if updated is not None:
+                return updated
         graph_post = getattr(self, "_graph_mhc_post", None)
         if graph_post is not None:
             from rtp_llm.models_py.modules.dsv41.ppu._mhc_triton import try_verify_mhc_post
@@ -572,11 +718,13 @@ class PPUSharedExpert(nn.Module):
         self.w2 = views.linear(layer_id, W.v4_shared_w2_w)
         self.swiglu_limit = views.geometry.swiglu_limit
 
-    def forward(self, hidden, *, fused_activation=False, prefill_exact=False):
+    def forward(self, hidden, *, fused_activation=False, prefill_exact=False, local_prefill_exact=False, local_prefill_sg=False):
         return shared_expert_forward(
             hidden, self.w13, self.w2, self.swiglu_limit,
             fused_activation=fused_activation,
             prefill_exact=prefill_exact,
+            **({"local_prefill_exact": True} if local_prefill_exact is True else {}),
+            **({"local_prefill_sg": True} if local_prefill_sg is True else {}),
         )
 
 
@@ -692,9 +840,14 @@ class PPUSharedMoE(nn.Module):
             and flat.is_cuda
             and os.environ.get("RTP_V41_PPU_CP8_DIRECT_MOE_ROUTES", "0") == "1"
         )
+        direct_real = (
+            routing_cp.local_is_real if direct_routes
+            else _local_prefill_direct_moe_real(state, flat)
+        )
+        direct_routes = direct_routes or direct_real is not None
         if direct_routes:
             routed_rows = torch.empty((), dtype=torch.int64, device=flat.device)
-            ids, weights = self.gate(flat, graph_routes=(routing_cp.local_is_real, routed_rows))
+            ids, weights = self.gate(flat, graph_routes=(direct_real, routed_rows))
             if os.environ.get("RTP_V41_SHARED_EVIDENCE_DIR"):
                 state.routed_rows[self.layer_id] = int(routed_rows)
         else:
@@ -713,11 +866,13 @@ class PPUSharedMoE(nn.Module):
             state.routed_rows[self.layer_id] = int((ids >= 0).any(-1).sum())
         # The compact query layout fits the full CP8 workspace reserved at
         # entry. Reusing it also avoids a capacity all-reduce on each layer.
-        prefill_buffer = (
-            getattr(state, "prefill_mega_buffer", None)
-            if cp is not None or (routing_cp is not None and cp8_yoco_fast_prefill_enabled(state))
-            else None
-        )
+        prefill_buffer = getattr(state, "dp_prefill_mega_buffer", None)
+        if prefill_buffer is None:
+            prefill_buffer = (
+                getattr(state, "prefill_mega_buffer", None)
+                if cp is not None or (routing_cp is not None and cp8_yoco_fast_prefill_enabled(state))
+                else None
+            )
 
         def run_routed(value):
             return self.ops.moe(
@@ -743,6 +898,10 @@ class PPUSharedMoE(nn.Module):
             return self.shared_expert(
                 value, fused_activation=fused_swiglu,
                 prefill_exact=prefill_exact and not fused_swiglu,
+                **({"local_prefill_exact": True}
+                   if _local_prefill_exact_shared_swiglu_enabled(state) else {}),
+                **({"local_prefill_sg": True}
+                   if getattr(state, "local_prefill_sg_align", False) else {}),
             )
 
         if (
@@ -785,19 +944,25 @@ class PPUSharedEngram(nn.Module):
         self.k_weight = source.get(prefix + ".k_weight").to(device, torch.bfloat16)
         self._prefetched = None
 
-    def prefetch(self, hashes, *, uniform_rank_rows=False):
+    def prefetch(self, hashes, *, uniform_rank_rows=False, round_schedule=None, local_fused_mask=False):
         if hashes is None:
             raise ValueError("shared Engram requires scheduler token-window hashes")
         if self._prefetched is not None:
             raise RuntimeError("unconsumed Engram prefetch from an earlier call")
         options = {"uniform_rank_rows": True} if uniform_rank_rows else {}
-        self._prefetched = (hashes, self.ops.engram_lookup(hashes, layer_id=self.layer_id, **options))
+        if round_schedule is not None:
+            options["round_schedule"] = round_schedule
+        embedded = self.ops.engram_lookup(hashes, layer_id=self.layer_id, **options)
+        self._prefetched = (hashes, embedded, True) if local_fused_mask is True else (hashes, embedded)
 
     def clear(self):
         self._prefetched = None
 
     def forward(self, hidden, hashes, token_mask=None):
         if hashes is None:
+            pending = self._prefetched
+            if pending is not None and len(pending) == 3 and pending[2] is True:
+                self._prefetched = None
             raise RuntimeError("N2 must supply original-row Engram hashes")
         state = getattr(self, "_graph_state", None)
         if state is not None:
@@ -817,6 +982,18 @@ class PPUSharedEngram(nn.Module):
             raise RuntimeError("Engram prefetch belongs to different token rows")
         embedded = pending[1] if pending is not None else self.ops.engram_lookup(hashes, layer_id=self.layer_id)
         value = wkv_project(embedded.flatten(1), self.wkv.weight)
+        local_mask = pending is not None and len(pending) == 3 and pending[2] is True
+        if local_mask:
+            # The existing raw-pointer gate cannot interpret deferred view
+            # transforms. Decline before launch and keep the masked legacy
+            # expression; read-only aliases remain valid inputs.
+            local_mask = all(
+                isinstance(tensor, torch.Tensor) and tensor.layout == torch.strided
+                and not tensor.is_neg() and not tensor.is_conj()
+                for tensor in (hidden, value, self.q_weight, self.k_weight, token_mask)
+                if tensor is not None
+            )
         return engram_gate_inject(
-            hidden, self.q_weight, self.k_weight, value, token_mask=token_mask
+            hidden, self.q_weight, self.k_weight, value, token_mask=token_mask,
+            **({"fused_mask": True} if local_mask else {}),
         )

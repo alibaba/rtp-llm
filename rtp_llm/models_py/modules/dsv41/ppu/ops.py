@@ -189,7 +189,10 @@ class PPUOps(V41BackendOps):
                 positions = context.positions
             if positions is None or ratio is None:
                 raise ValueError("dense FP4 Prefill requires request positions and a compression ratio")
-            return dense_fp4_index_score(q, k, head_weights, positions, ratio)
+            return dense_fp4_index_score(
+                q, k, head_weights, positions, ratio,
+                **({"sg_align": True} if kwargs.get("sg_align", False) else {}),
+            )
         return _index_score(
             q,
             k,
@@ -260,6 +263,7 @@ class PPUOps(V41BackendOps):
         layer_id: int,
         context: Optional[V41StepContext] = None,
         uniform_rank_rows: bool = False,
+        round_schedule=None,
     ) -> torch.Tensor:
         binding = self._engram.get(int(layer_id))
         if binding is None:
@@ -273,6 +277,8 @@ class PPUOps(V41BackendOps):
             and hasattr(group, "lookup")
             and not hasattr(group, "all_gather_ids")
         ):
+            if round_schedule is not None:
+                raise RuntimeError("local Prefill Engram schedule requires its admitted WORLD8 adapter")
             # Multi-rank simulator (LocalEnpmGroup): this rank's request sits
             # at its own rank slot; the other slots stay empty.
             per_rank = [None] * group.size
@@ -281,6 +287,7 @@ class PPUOps(V41BackendOps):
         return _engram_lookup(
             rows, layer_id=int(layer_id), shard=shard, layout=layout, group=group,
             uniform_rank_rows=uniform_rank_rows,
+            **({"round_schedule": round_schedule} if round_schedule is not None else {}),
         )
 
     def mhc(

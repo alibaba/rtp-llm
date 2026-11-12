@@ -17,7 +17,109 @@ from rtp_llm.models_py.modules.dsv41.ppu.layers import (
     cp8_yoco_fast_prefill_enabled,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.mhc import _prefer_triton
+from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
 from rtp_llm.utils.model_weight import W
+
+
+LOCAL_PREFILL_MEGA_MHC_ENV = "RTP_V41_PPU_LOCAL_PREFILL_MEGA_MHC"
+LOCAL_PREFILL_SPLIT_L20_ENV = "RTP_V41_PPU_LOCAL_PREFILL_SPLIT_L20"
+LOCAL_PREFILL_ENGRAM_GATE_ENV = "RTP_V41_PPU_LOCAL_PREFILL_ENGRAM_GATE"
+
+
+def _local_prefill_engram_gate_enabled(state):
+    if (
+        os.environ.get(LOCAL_PREFILL_ENGRAM_GATE_ENV, "0") != "1"
+        or not getattr(state, "prefill", False) or getattr(state, "idle", True)
+        or any(getattr(state, name, False) for name in (
+            "is_graph", "is_graph_commit", "verify", "proposal",
+        ))
+        or getattr(getattr(state, "attn", None), "is_cuda_graph", False)
+        or torch.is_grad_enabled()
+    ):
+        return False
+    from rtp_llm.models_py.modules.dsv41.ppu.attention_layer import optimized_diagnostics_enabled
+    from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import SharedNativeCache
+
+    runtime = getattr(state, "runtime", None)
+    model, cache = getattr(runtime, "model", None), getattr(state, "cache", None)
+    context = getattr(state, "context", None)
+    return (
+        type(cache) is SharedNativeCache and cache._is_prefill and not cache.sharded
+        and (context is None or (getattr(context, "cp_size", 0) == 1
+                                 and not getattr(context, "kv_cache_sharded", True)))
+        and model is not None and not getattr(model, "_is_decode_role", True)
+        and not getattr(model, "_is_speculative", False)
+        and getattr(model, "_prefill_cp_size", None) == 1
+        and getattr(getattr(model, "parallelism_config", None), "tp_size", None) == 1
+        and not optimized_diagnostics_enabled() and is_ppu()
+        and not torch.cuda.is_current_stream_capturing()
+    )
+
+
+def _local_prefill_mega_mhc_enabled(state):
+    """Admit rowwise transitions without changing local CED/cache transport."""
+    if (
+        os.environ.get(LOCAL_PREFILL_MEGA_MHC_ENV, "0") != "1"
+        or state is None
+        or not state.prefill
+        or state.idle
+        or getattr(state, "is_graph", False)
+        or getattr(state, "verify", False)
+        or torch.is_grad_enabled()
+    ):
+        return False
+    cache = getattr(state, "cache", None)
+    context = getattr(state, "context", None)
+    runtime = getattr(state, "runtime", None)
+    policy = getattr(runtime, "policy", None)
+    model = getattr(runtime, "model", None)
+    return (
+        cache is not None
+        and not getattr(cache, "sharded", True)
+        and (context is None or getattr(context, "cp_size", 0) == 1)
+        and getattr(policy, "mode", None) == "compact"
+        and getattr(policy, "keep_tokens", None) == 140
+        and getattr(policy, "window", None) == 128
+        and getattr(policy, "max_rollback_tokens", None) == 0
+        and getattr(policy, "encoder_replay", True) is False
+        and model is not None
+        and not getattr(model, "_is_speculative", False)
+    )
+
+
+def _local_prefill_split_l20_enabled(state):
+    """Reuse the full-producer/compact-query seam for a local bounded plan."""
+    if (
+        os.environ.get(LOCAL_PREFILL_SPLIT_L20_ENV, "0") != "1"
+        or not getattr(state, "prefill", False)
+        or getattr(state, "idle", True)
+        or getattr(state, "compacted", True)
+        or any(getattr(state, flag, False) for flag in (
+            "is_graph", "is_graph_commit", "verify", "proposal",
+        ))
+        or torch.is_grad_enabled()
+    ):
+        return False
+    runtime = getattr(state, "runtime", None)
+    policy, model = getattr(runtime, "policy", None), getattr(runtime, "model", None)
+    context, cache = getattr(state, "context", None), getattr(state, "cache", None)
+    query = getattr(getattr(state, "plan", None), "context", None)
+    return (
+        cache is not None and not getattr(cache, "sharded", True)
+        and (context is None or (
+            getattr(context, "cp_size", 0) == 1
+            and not getattr(context, "kv_cache_sharded", True)
+            and getattr(context, "gather_restore_positions", None) is None
+        ))
+        and getattr(query, "cp_size", 0) == 1
+        and not getattr(query, "kv_cache_sharded", True)
+        and getattr(policy, "mode", None) == "compact"
+        and getattr(policy, "keep_tokens", None) == 140
+        and getattr(policy, "window", None) == 128
+        and getattr(policy, "max_rollback_tokens", None) == 0
+        and getattr(policy, "encoder_replay", True) is False
+        and model is not None and not getattr(model, "_is_speculative", False)
+    )
 
 
 class SharedPPUBlock(Block):
@@ -67,9 +169,18 @@ class SharedPPUBlock(Block):
         x, input_ids, positions, cu_seqlens = state.before_block(
             self, x, input_ids, positions, cu_seqlens
         )
+        begin = getattr(state, "begin_cross_mhc_block", None)
+        if begin is not None:
+            begin(self, allowed=(kwargs.get("routing_metadata") is None and not (
+                set(kwargs) - {"routing_metadata", "kv_cache", "block_tables_by_type"}
+            )))
         fast_yoco = cp8_yoco_fast_prefill_enabled(state)
         self.bind_execution_context(
-            "prefill", ced=state.runtime.policy.mode != "full" and not fast_yoco
+            "prefill", ced=(
+                state.runtime.policy.mode != "full"
+                and not fast_yoco
+                and not _local_prefill_mega_mhc_enabled(state)
+            ),
         )
         if self.engram is not None:
             context = state.context
@@ -78,10 +189,18 @@ class SharedPPUBlock(Block):
                 and context.gather_restore_positions is None
                 and os.environ.get("RTP_V41_PPU_CP8_YOCO_ENGRAM_RS", "0") == "1"
             )
-            self.engram.prefetch(self.engram_hashes, uniform_rank_rows=uniform_rows)
+            schedule = getattr(state, "engram_round_schedule", None)
+            gate = _local_prefill_engram_gate_enabled(state)
+            self.engram.prefetch(self.engram_hashes, uniform_rank_rows=uniform_rows,
+                                 **({"round_schedule": schedule} if schedule is not None else {}),
+                                 **({"local_fused_mask": True} if gate else {}))
         if (
-            self.layer_id == 20 and fast_yoco and state.plan is not None and state.cache.sharded
-            and os.environ.get("RTP_V41_PPU_CP8_YOCO_SPLIT_L20", "1") == "1"
+            self.layer_id == 20 and state.plan is not None
+            and (
+                (fast_yoco and state.cache.sharded
+                 and os.environ.get("RTP_V41_PPU_CP8_YOCO_SPLIT_L20", "1") == "1")
+                or _local_prefill_split_l20_enabled(state)
+            )
             and self.attn.is_kv_source and self.attn.is_index_source
             and input_ids is not None and kwargs.get("routing_metadata") is None
             and not torch.is_grad_enabled()
@@ -97,7 +216,12 @@ class SharedPPUBlock(Block):
 
     def _forward_compact_l20(self, x, input_ids, state, expert_load):
         residual = self._inject_engram(x)
-        hidden, _, _ = self.attn_hc.pre(residual)
+        cached = self._try_cached_attn_pre(residual)
+        if cached is None:
+            hidden, _, _ = self.attn_hc.pre(residual)
+            normalized = self.attn_norm(hidden)
+        else:
+            normalized, _, _ = cached
         exchange = state.plan.exchange
 
         def compact_after_producer():
@@ -114,9 +238,7 @@ class SharedPPUBlock(Block):
             self.attn_hc.state = compact_mix
             state.compact_l20_queries(residual, exchange.compact(input_ids))
 
-        attn_out = self.attn(
-            self.attn_norm(hidden), compact_after_producer=compact_after_producer
-        )
+        attn_out = self.attn(normalized, compact_after_producer=compact_after_producer)
         mix = self.attn_hc.state
         transition = self._try_mega_mhc(attn_out, residual, mix.post_mix, mix.residual_mix)
         if transition is None:
@@ -127,6 +249,14 @@ class SharedPPUBlock(Block):
             residual, hidden, post, comb = transition
         ffn_out = self.ffn(hidden, state.compact_ids, expert_load=expert_load)
         return self.ffn_hc.post(ffn_out, residual, post, comb)
+
+    def _try_cached_attn_pre(self, residual):
+        state = self.attn.runtime.current
+        take = getattr(state, "take_next_attn_mhc", None)
+        transition = take(self, residual) if take is not None else None
+        if transition is None:
+            return None
+        return transition.normalized, transition.post_mix, transition.residual_mix
 
     def forward_decode(self, x, attn_metadata, input_ids, expert_load=None, **kwargs):
         state = self.attn.runtime.current
@@ -145,7 +275,9 @@ class SharedPPUBlock(Block):
         if self.layer_id in state.v4.capture_aux_hidden_layer_ids:
             state.v4.capture_aux_hidden(self.layer_id, x)
         if self.engram is not None:
-            self.engram.prefetch(self.engram_hashes)
+            schedule = getattr(state, "engram_round_schedule", None)
+            self.engram.prefetch(self.engram_hashes,
+                                 **({"round_schedule": schedule} if schedule is not None else {}))
         return super().forward_decode(
             x, attn_metadata, input_ids, expert_load=expert_load, **kwargs
         )

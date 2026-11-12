@@ -135,12 +135,16 @@ def _kernels():
     def rope_inplace(
         q, frequencies, valid, HEADS: tl.constexpr, DIM: tl.constexpr, INVERSE: tl.constexpr,
         SIGNED_ZERO: tl.constexpr,
+        positions=None,
     ):
         token = tl.program_id(0).to(tl.int64)
         tile = tl.program_id(1)
         pair = tl.arange(0, 32)
-        cosine = tl.load(frequencies + token * 64 + 2 * pair)
-        sine = tl.load(frequencies + token * 64 + 2 * pair + 1)
+        frequency_row = token
+        if positions is not None:
+            frequency_row = tl.load(positions + token).to(tl.int64)
+        cosine = tl.load(frequencies + frequency_row * 64 + 2 * pair)
+        sine = tl.load(frequencies + frequency_row * 64 + 2 * pair + 1)
         if INVERSE and SIGNED_ZERO:
             sine = (sine.to(tl.int32, bitcast=True) ^ -2147483648).to(tl.float32, bitcast=True)
         elif INVERSE:
@@ -861,9 +865,21 @@ def try_rotate_q_and_write_swa(q, kv, freqs, cache, layer_id, slots, *, journal=
     return q
 
 
-def try_rope_(output, freqs, *, inverse=False, valid_mask=None, preserve_signed_zero=False):
-    """Rotate an owned tensor, optionally zeroing padded rows before RoPE."""
-    if not _can_rotate(output, freqs) or (
+def try_rope_(output, freqs, *, inverse=False, valid_mask=None, preserve_signed_zero=False, positions=None):
+    """Rotate an owned tensor, optionally zeroing padded rows before RoPE.
+
+    With positions, freqs is the full complex64 [F,32] table. The caller proves
+    original row provenance and 0 <= positions[i] < F; admission is metadata
+    only and launch errors propagate. Without positions the old ABI is kept.
+    """
+    if positions is not None:
+        from rtp_llm.models_py.modules.dsv41.ppu.fused_ops import _rope_positions_supported
+
+        supported = (_rope_positions_supported(output, freqs, positions)
+                     and output.shape[0] > 0 and output.shape[-2] > 0)
+    else:
+        supported = _can_rotate(output, freqs)
+    if not supported or (
         valid_mask is not None
         and (
             valid_mask.shape != (output.shape[0],)
@@ -875,6 +891,7 @@ def try_rope_(output, freqs, *, inverse=False, valid_mask=None, preserve_signed_
         return None
     _, rope_inplace, _, _, _ = _kernels()
     heads = output.shape[1] if output.ndim == 3 else 1
+    options = {} if positions is None else {"positions": positions}
     rope_inplace[(output.shape[0], (heads + 7) // 8)](
         output,
         torch.view_as_real(freqs),
@@ -885,6 +902,7 @@ def try_rope_(output, freqs, *, inverse=False, valid_mask=None, preserve_signed_
         preserve_signed_zero,
         num_warps=4,
         enable_fp_fusion=False,
+        **options,
     )
     return output
 

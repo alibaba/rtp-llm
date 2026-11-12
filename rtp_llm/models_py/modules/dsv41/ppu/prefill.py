@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, Optional, Tuple
+from typing import Callable, Dict, NamedTuple, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -17,6 +17,8 @@ from rtp_llm.models_py.modules.dsv41.ppu.linear import PPUPTPCLinear
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import (
     CP8_WORKSPACE_DEQUANT_ENV,
     SharedNativeCache,
+    _LocalSwaStageRanges,
+    _source_tensor_key,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import compact_prefix
 from rtp_llm.models_py.modules.dsv41.ppu.weight import V41Geometry
@@ -218,15 +220,103 @@ def _build_reference_workspace(
     return kv, indices, lengths
 
 
+LOCAL_PREFILL_WORKSPACE_FUSED_ENV = "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE_FUSED"
+
+
+def _local_prefill_workspace_fusion_supported(cache, geometry, context, cp):
+    """Admit existing row kernels without enabling CP placement or writers."""
+    positions, requests = context.positions, context.request_ids
+    chunks = getattr(cp, "chunk_lengths_per_req", None)
+    return (
+        os.environ.get(LOCAL_PREFILL_WORKSPACE_FUSED_ENV, "0") == "1"
+        and os.environ.get("RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE", "0") == "1"
+        and isinstance(cache, SharedNativeCache)
+        and cache._is_prefill
+        and not cache.sharded
+        and getattr(cp, "cp_size", 1) == 1
+        and not getattr(cp, "kv_cache_sharded", False)
+        and geometry.head_dim == _quant.KV_DIM
+        and positions.is_cuda
+        and positions.ndim == 1
+        and positions.dtype == torch.int64
+        and requests.shape == positions.shape
+        and requests.device == positions.device
+        and chunks is not None
+        and len(chunks) == len(cache.lengths)
+        and sum(chunks) == positions.numel()
+        and _quant.is_ppu()
+    )
+
+
+def _local_prefill_workspace_bounds(cache, context, cp, *, full_layout=False):
+    """Use only the adapter's full token or the bound CP1 replay layout.
+
+    Replay starts are fresh-relative; CP1 pads an odd retained count with
+    the request's last real position, so padding does not extend its bounds.
+    Exact selected layouts carry no replay starts and retain the GPU oracle.
+    """
+    chunks = getattr(cp, "chunk_lengths_per_req", None)
+    prefixes = getattr(cp, "prefix_lengths_host", None)
+    positions = context.positions
+    if (
+        chunks is None or prefixes is None
+        or len(chunks) != len(prefixes) or len(chunks) != len(cache.lengths)
+        or any(type(n) is not int or n < 0 for n in (*chunks, *prefixes))
+        or positions.ndim != 1 or positions.dtype != torch.int64
+        or not positions.is_contiguous() or positions.numel() != sum(chunks)
+        or context.request_ids.shape != positions.shape
+    ):
+        return None
+    if not hasattr(cp, "cp_size"):
+        # Only shared["local_prefill_workspace_layout"] proves these chunks
+        # came from state.rows(None), which emits prefix + arange(fresh).
+        if not full_layout or tuple(cache.lengths) != tuple(p + n for p, n in zip(prefixes, chunks)):
+            return None
+        return [(rid, p, p + n - 1) for rid, (p, n) in enumerate(zip(prefixes, chunks)) if n]
+
+    lengths = getattr(cp, "input_lengths_global_host", None)
+    starts = getattr(cp, "swa_replay_starts_host", None)
+    if starts is None and len(chunks) == 1 and getattr(cp, "swa_replay_start", None) is not None:
+        starts = (cp.swa_replay_start,)
+    source = getattr(cp, "global_positions", None)
+    selected = getattr(cp, "gather_restore_positions", None)
+    if (
+        cp.cp_size != 1 or getattr(cp, "cp_rank", None) != 0 or getattr(cp, "kv_cache_sharded", False)
+        or lengths is None or starts is None
+        or len(lengths) != len(chunks) or len(starts) != len(chunks)
+        or any(type(n) is not int or n < 0 for n in lengths)
+        or any(type(s) is not int or not 0 <= s <= n for n, s in zip(lengths, starts))
+        or tuple(cache.lengths) != tuple(p + n for p, n in zip(prefixes, lengths))
+        or tuple(chunks) != tuple((n - s + 1) // 2 * 2 for n, s in zip(lengths, starts))
+        or getattr(cp, "seq_len_full", None) != sum(lengths)
+        or getattr(cp, "chunk_length", None) != positions.numel()
+        or getattr(cp, "padded_seq_len", None) != positions.numel()
+        or not isinstance(source, torch.Tensor) or source.shape != positions.shape
+        or source.device != positions.device or source.dtype != positions.dtype
+        or not source.is_contiguous() or source.data_ptr() != positions.data_ptr()
+        or context.valid_mask is not getattr(cp, "local_is_real", None)
+        or not isinstance(selected, torch.Tensor) or selected.ndim != 1
+        or selected.dtype != torch.int64 or selected.device != positions.device
+        or not selected.is_contiguous()
+        or selected.numel() != sum(n - s for n, s in zip(lengths, starts))
+    ):
+        return None
+    return [(rid, p + s, p + n - 1)
+            for rid, (p, n, s) in enumerate(zip(prefixes, lengths, starts)) if n > s]
+
+
 class _CPPrefillWorkspace:
     """One CP query layout and immutable global bank within a forward."""
 
-    def __init__(self, ops, cache, geometry, context, cp, source, ratio, window, starts):
+    def __init__(self, ops, cache, geometry, context, cp, source, ratio, window, starts, *, full_local_layout=False):
         positions = context.positions
         cp8 = isinstance(cache, SharedNativeCache) and cache.cp8_row_prep_enabled()
-        self.fused_dequant = cp8 and os.environ.get(CP8_WORKSPACE_DEQUANT_ENV, "1") == "1"
-        self.fused_indices = cp8 and os.environ.get("RTP_V41_PPU_CP8_FUSED_WORKSPACE_INDICES", "0") == "1"
-        bounds = _full_cp_workspace_bounds(cp, positions) if self.fused_indices else None
+        local = _local_prefill_workspace_fusion_supported(cache, geometry, context, cp)
+        self.fused_dequant = local or (cp8 and os.environ.get(CP8_WORKSPACE_DEQUANT_ENV, "1") == "1")
+        self.fused_indices = local or (cp8 and os.environ.get("RTP_V41_PPU_CP8_FUSED_WORKSPACE_INDICES", "0") == "1")
+        bounds = _full_cp_workspace_bounds(cp, positions) if cp8 and self.fused_indices else None
+        if bounds is None and local:
+            bounds = _local_prefill_workspace_bounds(cache, context, cp, full_layout=full_local_layout)
         if bounds is None:
             chunks = positions.split(cp.chunk_lengths_per_req)
             active = [rid for rid, chunk in enumerate(chunks) if chunk.numel()]
@@ -380,7 +470,10 @@ def build_cp_prefill_workspace(
     layout = (source, ratio, window, starts)
     cached = shared.get("prefill_kv_workspace")
     if cached is None or cached[0] is not cp or cached[1] != layout:
-        workspace = _CPPrefillWorkspace(ops, cache, geometry, context, cp, source, ratio, window, starts)
+        workspace = _CPPrefillWorkspace(
+            ops, cache, geometry, context, cp, source, ratio, window, starts,
+            full_local_layout=shared.get("local_prefill_workspace_layout") is cp,
+        )
         shared["prefill_kv_workspace"] = (cp, layout, workspace)
     else:
         workspace = cached[2]
@@ -430,6 +523,83 @@ def _global_write_ranges(positions, request_ids, append_starts, prefill_layout):
 
 _PRODUCER_TILE_ENTRIES = 8192
 _DIRECT_PRODUCER_WRITE_ENV = "RTP_V41_PPU_CP8_DIRECT_PRODUCER_WRITE"
+LOCAL_PREFILL_ROTARY_PACK_ENV = "RTP_V41_PPU_LOCAL_PREFILL_ROTARY_PACK"
+
+
+class _LocalProducerRotaryProof(NamedTuple):
+    """Read-only row provenance, independent of the preceding SWA payload."""
+    cache: object
+    layer_id: int
+    positions: torch.Tensor
+    request_ids: torch.Tensor
+    input_keys: tuple
+    prefixes: tuple
+    lengths: tuple
+    ranges: tuple
+    guard: Callable[[], bool]
+
+
+def _valid_local_producer_rotary_proof(
+    proof, *, cache, layer_id, prefill_layout, positions=None, request_ids=None,
+):
+    if (
+        os.environ.get(LOCAL_PREFILL_ROTARY_PACK_ENV, "0") != "1"
+        or not isinstance(proof, _LocalProducerRotaryProof)
+        or type(cache) is not SharedNativeCache or proof.cache is not cache
+        or not cache._is_prefill or cache.sharded or proof.layer_id != layer_id
+        or prefill_layout is None or len(prefill_layout) != 2 or not callable(proof.guard)
+    ):
+        return False
+    prefixes, lengths = tuple(prefill_layout[0]), tuple(prefill_layout[1])
+    if (prefixes != proof.prefixes or lengths != proof.lengths
+            or len(prefixes) != len(lengths) or len(prefixes) != len(cache.lengths)
+            or (positions is not None and positions is not proof.positions)
+            or (request_ids is not None and request_ids is not proof.request_ids)):
+        return False
+    offset, ranges, totals = 0, [], []
+    for prefix, length in zip(prefixes, lengths):
+        if (type(prefix) is not int or type(length) is not int
+                or prefix < 0 or length < 0 or prefix + length > 2**63 - 1):
+            return False
+        ranges.append((offset, prefix, length))
+        totals.append(prefix + length)
+        offset += length
+    if tuple(totals) != cache.lengths or tuple(ranges) != proof.ranges:
+        return False
+    owners = proof.positions, proof.request_ids
+    if not all(
+        isinstance(value, torch.Tensor) and value.layout == torch.strided
+        and not value.is_neg() and not value.is_conj()
+        and value.dtype == torch.int64 and value.shape == (offset,) and value.is_contiguous()
+        and value.device == torch.device(cache.device)
+        for value in owners
+    ):
+        return False
+    # Keep the original creation keys, including normal Tensor versions.
+    # Inference metadata follows A08's read-only-within-forward contract.
+    return (tuple(_source_tensor_key(value) for value in owners) == proof.input_keys
+            and proof.guard())
+
+
+def _make_local_producer_rotary_proof(ticket, *, cache, layer_id, prefixes, lengths):
+    if (
+        os.environ.get(LOCAL_PREFILL_ROTARY_PACK_ENV, "0") != "1"
+        or type(cache) is not SharedNativeCache
+        or not isinstance(ticket, _LocalSwaStageRanges) or ticket.cache is not cache
+        or not ticket.retain_prefix_tail or ticket.bounded_starts is not None
+        or len(ticket.inputs) != 3 or len(ticket.input_keys) != 3
+        or tuple(prefixes) != ticket.prefixes or ticket.totals != cache.lengths
+    ):
+        return None
+    proof = _LocalProducerRotaryProof(
+        cache, layer_id, ticket.inputs[0], ticket.inputs[1], ticket.input_keys[:2],
+        tuple(prefixes), tuple(lengths), ticket.ranges, ticket.guard,
+    )
+    # No payload/pool key is read or rebaselined: stage_swa may legitimately
+    # change its own pool before this metadata capability is consumed.
+    return proof if _valid_local_producer_rotary_proof(
+        proof, cache=cache, layer_id=layer_id, prefill_layout=(prefixes, lengths),
+    ) else None
 
 
 def _producer_tiles(requests, ratio):
@@ -539,6 +709,7 @@ def _produce_global(
     layer_id: int,
     append_starts: Optional[dict] = None,
     prefill_layout=None,
+    local_rotary_proof=None,
 ) -> None:
     """Produce + write global KV, indexer K and CSA states for one layer.
 
@@ -554,10 +725,25 @@ def _produce_global(
     """
     ratio = geometry.ratio(layer_id)
     tag = "global_kv_2" if ratio == 2 else "global_kv_1"
+    pack_rotary = (
+        getattr(ops, "try_encode_rotary_kv", None)
+        if ratio in (1, 2) and _valid_local_producer_rotary_proof(
+            local_rotary_proof, cache=cache, layer_id=layer_id, prefill_layout=prefill_layout,
+            positions=positions, request_ids=request_ids,
+        ) else None
+    )
     request_local = (
         prefill_layout is not None
         and isinstance(cache, SharedNativeCache)
         and cache.cp8_row_prep_enabled()
+    )
+    local_store = (
+        os.environ.get("RTP_V41_PPU_LOCAL_PREFILL_SOURCE_NATIVE_WRITE", "0") == "1"
+        and getattr(cache, "_local_source_native_write_enabled", False)
+        and _valid_local_producer_rotary_proof(
+            local_rotary_proof, cache=cache, layer_id=layer_id, prefill_layout=prefill_layout,
+            positions=positions, request_ids=request_ids,
+        )
     )
     ranges = _global_write_ranges(positions, request_ids, append_starts or {}, prefill_layout)
     prepared = (
@@ -568,7 +754,7 @@ def _produce_global(
         else ((request, None) for request in ranges)
     )
     for (rid, start, end, append, rows, state_rows), packed in prepared:
-        handle = None if request_local else cache.slots[rid]
+        handle = None if request_local or local_store else cache.slots[rid]
         begin, stop = start // ratio, end // ratio
         if packed is not None:
             entry_positions, packed_global, packed_index = packed
@@ -616,18 +802,34 @@ def _produce_global(
                     f"layer {layer_id} produced {latent.shape[0]} entries for "
                     f"request {rid}, expected {entry_count} (start={start}, end={end})"
                 )
-            safe_positions = entry_positions.clamp_max(freqs.shape[0] - 1)
-            global_keys = _rope_tail(latent, freqs[safe_positions])
-            packed_global = ops.encode_kv(global_keys, pool_tag=tag)
+            # Ratio1 is a private slice of the proof's creation-stamped rows;
+            # ratio2 above creates its own arange from the same host bounds.
+            # Both are nonnegative without a new device-value reduction.
+            safe_positions = None
+            packed_global = (
+                pack_rotary(latent, freqs, entry_positions, global_pool=True)
+                if pack_rotary is not None else None
+            )
+            if packed_global is None:
+                safe_positions = entry_positions.clamp_max(freqs.shape[0] - 1)
+                global_keys = _rope_tail(latent, freqs[safe_positions])
+                packed_global = ops.encode_kv(global_keys, pool_tag=tag)
         first_write = max(begin, append // ratio)
         write_offset = first_write - begin
         write_positions = entry_positions[write_offset:]
-        if handle is None:
+        if local_store and cache.try_insert_local_source_rows(
+            layer_id, tag, rid, first_write * ratio, packed_global[write_offset:],
+            proof=local_rotary_proof, prefill_layout=prefill_layout,
+        ):
+            pass
+        elif request_local:
             cache.insert_request_rows(
                 layer_id, tag, rid, write_positions, packed_global[write_offset:],
                 start=first_write * ratio,
             )
         else:
+            if handle is None:
+                handle = cache.slots[rid]
             cache.insert_rows(
                 layer_id,
                 tag,
@@ -641,14 +843,28 @@ def _produce_global(
                 else F.linear(latent, layer.index_wk.weight)
             )
             projected = _rms_norm(projected, layer.index_k_norm, geometry.norm_eps)
-            index_keys = _rope_tail(projected, freqs[safe_positions])
-            packed_index = ops.encode_kv(index_keys, pool_tag="indexer_kv")
-        if handle is None:
+            packed_index = (
+                pack_rotary(projected, freqs, entry_positions, global_pool=False)
+                if pack_rotary is not None else None
+            )
+            if packed_index is None:
+                if safe_positions is None:
+                    safe_positions = entry_positions.clamp_max(freqs.shape[0] - 1)
+                index_keys = _rope_tail(projected, freqs[safe_positions])
+                packed_index = ops.encode_kv(index_keys, pool_tag="indexer_kv")
+        if local_store and cache.try_insert_local_source_rows(
+            layer_id, "indexer_kv", rid, first_write * ratio, packed_index[write_offset:],
+            proof=local_rotary_proof, prefill_layout=prefill_layout,
+        ):
+            pass
+        elif request_local:
             cache.insert_request_rows(
                 layer_id, "indexer_kv", rid, write_positions, packed_index[write_offset:],
                 start=first_write * ratio,
             )
         else:
+            if handle is None:
+                handle = cache.slots[rid]
             cache.insert_rows(
                 layer_id,
                 "indexer_kv",
@@ -663,7 +879,21 @@ def _produce_global(
             state_values, state_scores = values[state_rows], scores[state_rows]
             state_start = max(start, append)
             if (
-                handle is None
+                os.environ.get("RTP_V41_PPU_LOCAL_PREFILL_CSA_NATIVE_WRITE", "0") == "1"
+                and isinstance(state_rows, slice)
+                and isinstance(cache, SharedNativeCache)
+                and _valid_local_producer_rotary_proof(
+                    local_rotary_proof, cache=cache, layer_id=layer_id, prefill_layout=prefill_layout,
+                    positions=positions, request_ids=request_ids,
+                )
+                and cache.try_insert_local_csa_fields(
+                    layer_id, rid, state_start, state_values, state_scores,
+                    proof=local_rotary_proof, prefill_layout=prefill_layout,
+                )
+            ):
+                continue
+            if (
+                request_local
                 and isinstance(state_rows, slice)
                 and isinstance(cache, SharedNativeCache)
                 and os.environ.get(_DIRECT_PRODUCER_WRITE_ENV, "0") == "1"
@@ -671,7 +901,7 @@ def _produce_global(
             ):
                 continue
             state = torch.cat((state_values, state_scores), dim=-1).float()
-            if handle is None:
+            if request_local:
                 cache.insert_request_rows(
                     layer_id, "csa_state", rid, state_positions, state, start=state_start
                 )

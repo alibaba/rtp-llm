@@ -290,6 +290,10 @@ class Block(nn.Module):
             self.engram_token_mask,
         ).reshape(shape)
 
+    def _try_cached_attn_pre(self, residual):
+        """Optional normalized input and HC coefficients for this entry."""
+        return None
+
     def _try_mega_mhc(
         self, attn_out, residual, post, comb, *, original_tokens=None, moe_inputs=None
     ):
@@ -772,24 +776,28 @@ class Block(nn.Module):
         x = self._inject_engram(x)
         # Attention path
         residual = x
-        x_pre, post, comb = self.attn_hc.pre(
-            x,
-            dbg_tag=f"L{self.layer_id:02d}_attn_hc_pre" if _dbg_layer else None,
-        )  # [T, dim], [T, hc, 1], [T, hc, hc]
         shared_input_quant = None
-        if (
-            not _dbg_layer
-            and isinstance(self.attn, AttentionFP8)
-            and getattr(self.attn, "v41_config", None) is not None
-            and self.attn.can_fuse_prefill_attn_norm_input_quant(
-                x_pre, self.attn_norm.weight.data
-            )
-        ):
-            x_pre, shared_input_quant = self.attn.prefill_fused_attn_norm_input_quant(
-                x_pre, self.attn_norm.weight.data, self.attn_norm.variance_epsilon
-            )
+        cached_pre = None if _dbg_layer else self._try_cached_attn_pre(residual)
+        if cached_pre is not None:
+            x_pre, post, comb = cached_pre
         else:
-            x_pre = self.attn_norm(x_pre)  # [T, dim]
+            x_pre, post, comb = self.attn_hc.pre(
+                x,
+                dbg_tag=f"L{self.layer_id:02d}_attn_hc_pre" if _dbg_layer else None,
+            )
+            if (
+                not _dbg_layer
+                and isinstance(self.attn, AttentionFP8)
+                and getattr(self.attn, "v41_config", None) is not None
+                and self.attn.can_fuse_prefill_attn_norm_input_quant(
+                    x_pre, self.attn_norm.weight.data
+                )
+            ):
+                x_pre, shared_input_quant = self.attn.prefill_fused_attn_norm_input_quant(
+                    x_pre, self.attn_norm.weight.data, self.attn_norm.variance_epsilon
+                )
+            else:
+                x_pre = self.attn_norm(x_pre)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_in", x_pre)
             if dbg_pos_mask is not None:

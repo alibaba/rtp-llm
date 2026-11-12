@@ -765,7 +765,7 @@ def _triton_kernels():
             imag *= inverse[:, None]
             tl.store(fp8 + base + DIM // 2 + groups, encoded)
         else:
-            scaled = tl.maximum(maximum, 6.0 * (2.0**-126)) * (1.0 / 6.0)
+            scaled = tl.where(poison, maximum, tl.maximum(maximum, 6.0 * (2.0**-126))) * (1.0 / 6.0)
             bits = scaled.to(tl.int32, bitcast=True)
             exponent = ((bits >> 23) & 255) + ((bits & 0x7FFFFF) != 0)
             scale = tl.exp2((exponent - 127).to(tl.float32))
@@ -1082,7 +1082,9 @@ def try_dequantize_swa_segments(tail, fresh, start, out):
 def try_pack_swa_rows(kv):
     """Pack BF16 SWA rows without materializing scale and payload tensors."""
     if not (
-        kv.ndim == 2 and kv.shape[1] == KV_DIM and kv.dtype == torch.bfloat16
+        isinstance(kv, torch.Tensor) and kv.layout == torch.strided
+        and not kv.is_neg() and not kv.is_conj()
+        and kv.ndim == 2 and kv.shape[1] == KV_DIM and kv.dtype == torch.bfloat16
         and kv.is_contiguous() and _ppu_fast_path(kv)
     ):
         return None
@@ -1095,12 +1097,15 @@ def try_pack_swa_rows(kv):
 
 
 def try_pack_rotary_fp4_rows(kv, freqs, positions, *, global_pool):
-    """Fuse the producer's indexed RoPE and native interleaved FP4 codec."""
+    """Fuse indexed RoPE/FP4; the caller proves nonnegative positions."""
     dim = KV_DIM if global_pool else INDEXER_HEAD_DIM
     group = FP4_GROUP if global_pool else MX_GROUP
     if not (
-        kv.ndim == 2 and kv.shape[1] == dim and kv.dtype == torch.bfloat16 and kv.is_contiguous()
+        all(isinstance(value, torch.Tensor) and value.layout == torch.strided
+            and not value.is_neg() and not value.is_conj() for value in (kv, freqs, positions))
+        and kv.ndim == 2 and kv.shape[1] == dim and kv.dtype == torch.bfloat16 and kv.is_contiguous()
         and positions.shape == (kv.shape[0],) and positions.dtype == torch.int64
+        and positions.stride(0) > 0
         and freqs.ndim == 2 and freqs.shape[0] > 0 and 0 < freqs.shape[1] <= dim // 2
         and freqs.dtype == torch.complex64 and freqs.is_contiguous() and not freqs.is_conj()
         and kv.device == freqs.device == positions.device and _ppu_fast_path(kv)

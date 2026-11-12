@@ -77,6 +77,8 @@ FP8_BLOCK_SIZE = 32
 PAD_SCALE_BYTE = 0x7F
 # Upper bound on rows moved host->device in one copy batch.
 COPY_BATCH_ROWS = 4096
+LOCAL_PREFILL_ENGRAM_ROUNDS_ENV = "RTP_V41_PPU_LOCAL_PREFILL_ENGRAM_ROUNDS"
+LOCAL_PREFILL_ENGRAM_ROUND_CAP = 98304
 _ROW_ALIGNMENT = 256
 
 
@@ -862,6 +864,155 @@ class DistributedEnpmGroup:
         return local
 
 
+@dataclass
+class _LocalEngramLease:
+    active: bool = True
+    records: list = field(default_factory=list)
+    schedule: object = field(default=None, repr=False)
+
+
+def _engram_host_tensor_key(tensor):
+    version = None if tensor.is_inference() else tensor._version
+    return (tensor._cdata, tensor.data_ptr(), tensor.shape, tensor.stride(),
+            tensor.storage_offset(), tensor.dtype, tensor.device, version)
+
+
+def _capture_local_engram_bindings(bindings, rank):
+    """Keep the exact native host tensor identities alive with their keys."""
+    import torch.distributed as dist
+
+    captured, geometry = [], []
+    try:
+        for layer in (1, 14):
+            shard, layout, adapter = bindings[layer]
+            tensors = shard.payload, shard.scale
+            if not (
+                isinstance(shard, HostShard) and isinstance(layout, EngramShardLayout)
+                and type(adapter) is DistributedEnpmGroup and adapter.pg is dist.group.WORLD
+                and shard.layout is layout and shard.rank == rank and layout.enp_size == 8
+                and shard.dim == 256
+                and tensors[0].dtype == torch.float8_e4m3fn and tensors[1].dtype == torch.uint8
+                and tensors[0].shape == (layout.valid_rows(rank), 256)
+                and tensors[1].shape == (layout.valid_rows(rank), 8)
+                and all(t.device.type == "cpu" and t.layout == torch.strided and t.is_contiguous()
+                        and not t.is_neg() and not t.is_conj() for t in tensors)
+            ):
+                raise ValueError("invalid native Engram binding")
+            fields = (layout.num_embeddings, layout.padded_rows, layout.num_per_part, layout.enp_size, shard.dim)
+            if any(type(value) is not int or not 0 <= value < 2**62 for value in fields):
+                raise ValueError("invalid native Engram geometry")
+            geometry.extend(fields)
+            captured.append((layer, shard, layout, adapter, fields,
+                             tuple(_engram_host_tensor_key(t) for t in tensors), tensors))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return (), (0,) * 10, True
+    return tuple(captured), tuple(geometry), False
+
+
+@dataclass(frozen=True)
+class LocalPrefillEngramSchedule:
+    """One jointly admitted eager WORLD8 forward, including idle owners."""
+
+    group: object
+    rank: int
+    epoch: int
+    device: torch.device
+    round_cap: int
+    layers: tuple
+    _bindings: tuple = field(repr=False, compare=False)
+    _lease: _LocalEngramLease = field(repr=False, compare=False)
+
+    def claim(self, adapter, shard, layout, rows, layer_id):
+        import torch.distributed as dist
+
+        if not (
+            self._lease.active and self._lease.schedule is self
+            and type(adapter) is DistributedEnpmGroup
+            and adapter.pg is self.group is dist.group.WORLD
+            and dist.is_initialized() and adapter.size == 8
+            and adapter.rank == self.rank == shard.rank
+            and layout.enp_size == 8 and shard.dim == 256 and shard.pinned
+            and rows.device == self.device and rows.is_cuda
+            and rows.layout == torch.strided and not rows.is_neg() and not rows.is_conj()
+            and rows.ndim == 2 and rows.shape[1] == 24
+            and len(self._lease.records) < len(self.layers)
+            and layer_id == self.layers[len(self._lease.records)]
+        ):
+            raise RuntimeError("local Prefill Engram schedule binding/lifecycle changed after admission")
+        bound = self._bindings[len(self._lease.records)]
+        fields = (layout.num_embeddings, layout.padded_rows, layout.num_per_part, layout.enp_size, shard.dim)
+        if (bound[0] != layer_id or bound[1] is not shard or bound[2] is not layout
+                or bound[3] is not adapter or bound[4] != fields
+                or bound[5] != tuple(_engram_host_tensor_key(t) for t in (shard.payload, shard.scale))):
+            raise RuntimeError("local Prefill Engram host binding changed after admission")
+        record = dict(layer=int(layer_id), local_rows=rows.numel(), group_max_rows=None,
+                      rounds=[], reduce_scatter=True, complete=False, contribution_bytes=0)
+        self._lease.records.append(record)
+        return record
+
+    def close(self):
+        if self._lease.active and self._lease.schedule is not self:
+            raise RuntimeError("local Prefill Engram lease belongs to another schedule")
+        complete = (self._lease.active and len(self._lease.records) == len(self.layers)
+                    and all(record["complete"] for record in self._lease.records))
+        self._lease.active = False
+        self._lease.schedule = None
+        return complete
+
+
+def prepare_local_prefill_engram_schedule(
+    device, *, requested, supported, epoch, process_group, fatal=False,
+    round_cap=LOCAL_PREFILL_ENGRAM_ROUND_CAP, layers=(1, 14), evidence=None, bindings=None,
+):
+    """All P-role WORLD8 owners enter, even with the rollout flag disabled.
+
+    Unsupported owners agree on the old schedule. Flag/cap/epoch, group or
+    lifecycle disagreement is a coherent error before any layer collective.
+    No caller may turn a rejected, expired or partially used lease into a
+    local fallback after this agreement.
+    """
+    import torch.distributed as dist
+
+    if (not dist.is_initialized() or dist.get_world_size(dist.group.WORLD) != 8
+            or device.type != "cuda" or torch.cuda.is_current_stream_capturing()):
+        raise RuntimeError("local Prefill Engram agreement requires eager CUDA/PPU WORLD8")
+    invalid = (type(requested) is not bool or type(supported) is not bool
+               or type(epoch) is not int or not 1 <= epoch < 2**62
+               or type(round_cap) is not int or round_cap != LOCAL_PREFILL_ENGRAM_ROUND_CAP
+               or not isinstance(layers, (tuple, list)) or tuple(layers) != (1, 14)
+               or process_group is not dist.group.WORLD)
+    cap = round_cap if type(round_cap) is int and 0 <= round_cap < 2**62 else 0
+    generation = epoch if type(epoch) is int and 0 <= epoch < 2**62 else 0
+    enabled = int(requested) if type(requested) is bool else 0
+    captured, geometry, binding_bad = _capture_local_engram_bindings(bindings, dist.get_rank(dist.group.WORLD))
+    dimensions = [item for value in geometry for item in (value, -value)]
+    packet = torch.tensor([enabled, -enabled, cap, -cap, generation, -generation,
+                           int(supported is not True), int(bool(fatal or invalid or (enabled and binding_bad))),
+                           *dimensions],
+                          dtype=torch.int64, device=device)
+    # The control group is WORLD even if a local binding is invalid. Peers
+    # must reach the same reject decision, not enter different groups.
+    dist.all_reduce(packet, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
+    values = packet.tolist()
+    on, neg_on, maximum, neg_minimum, current, neg_previous, unsupported, rejected = values[:8]
+    result = evidence if evidence is not None else {}
+    result.clear()
+    result.update(decision="rejected", epoch=generation, round_cap=cap, packet=values,
+                  rank=dist.get_rank(dist.group.WORLD), consumed_layers=[])
+    mismatch = any(values[i] != -values[i + 1] for i in range(8, len(values), 2))
+    if rejected or on != -neg_on or maximum != -neg_minimum or current != -neg_previous or mismatch:
+        raise RuntimeError(f"local Prefill Engram configuration/lifecycle disagreement: {values!r}")
+    if not on or unsupported:
+        result["decision"] = "disabled" if not on else "fallback"
+        return None
+    lease = _LocalEngramLease()
+    result.update(decision="adopted", round_cap=maximum, consumed_layers=lease.records)
+    schedule = LocalPrefillEngramSchedule(dist.group.WORLD, dist.get_rank(dist.group.WORLD),
+                                         current, device, maximum, tuple(layers), captured, lease)
+    lease.schedule = schedule
+    return schedule
+
+
 class LocalEnpmGroup:
     """Single-process simulation of the ENP group for CPU tests.
 
@@ -977,6 +1128,7 @@ def engram_lookup(
     group=None,
     max_rows_per_round: int = COPY_BATCH_ROWS,
     uniform_rank_rows: bool = False,
+    round_schedule: Optional[LocalPrefillEngramSchedule] = None,
 ) -> torch.Tensor:
     """Collective host-sharded Engram lookup -> bf16 ``[*rows.shape, dim]``.
 
@@ -995,6 +1147,12 @@ def engram_lookup(
     flat = rows.detach().reshape(-1).to(torch.int64)
     device = rows.device
     adapter = _resolve_group(group, layout)
+    record = None
+    if round_schedule is not None:
+        if not isinstance(round_schedule, LocalPrefillEngramSchedule) or uniform_rank_rows:
+            raise RuntimeError("local Prefill Engram requires its independent padded schedule")
+        record = round_schedule.claim(adapter, shard, layout, rows, layer_id)
+        max_rows_per_round = round_schedule.round_cap
     if adapter is None:
         # Single-process direct lookup: the lone shard owns every valid row.
         out = _lookup_round(flat, shard.rank, shard, layout, device)
@@ -1008,6 +1166,8 @@ def engram_lookup(
         fixed_rows = adapter.size == dist.get_world_size() == 8
     group_max = flat.numel() if fixed_rows else adapter.all_max_count(flat.numel(), device)
     lengths = _round_lengths(group_max, int(max_rows_per_round))
+    if record is not None:
+        record.update(group_max_rows=group_max, rounds=list(lengths))
     rank = adapter.rank
     pieces: list[torch.Tensor] = []
     offset = 0
@@ -1015,18 +1175,24 @@ def engram_lookup(
         chunk = flat.narrow(0, offset, length) if fixed_rows else _round_chunk(flat, offset, length)
         gathered = adapter.all_gather_ids(chunk)
         contribution = _lookup_round(gathered, rank, shard, layout, gathered.device)
-        if fixed_rows:
+        if fixed_rows or round_schedule is not None:
             pieces.append(adapter.reduce_scatter_sum(contribution, length))
         else:
             reduced = adapter.all_reduce_sum(contribution)
             pieces.append(reduced[rank * length : (rank + 1) * length])
         offset += length
+        if record is not None:
+            record["contribution_bytes"] = max(record["contribution_bytes"], contribution.numel() * contribution.element_size())
     if fixed_rows and len(pieces) == 1:
         out = pieces[0]
+    elif round_schedule is not None and len(pieces) == 1:
+        out = pieces[0][: flat.numel()]
     elif pieces:
         out = torch.cat(pieces, dim=0)[: flat.numel()]
     else:
         out = torch.zeros((0, shard.dim), dtype=torch.bfloat16, device=device)
+    if record is not None:
+        record["complete"] = True
     return out.reshape(*rows.shape, shard.dim)
 
 
@@ -1925,6 +2091,7 @@ def _triton_kernels() -> Optional[types.SimpleNamespace]:
             dot = dot * (rstd_key * (D**-0.5))
             root = tl.sqrt(tl.maximum(tl.abs(dot), CLAMP))
             gate = tl.sigmoid(tl.where(dot < 0, -root, root))
+            gate = tl.where(dot != dot, dot, gate)
             gate = tl.where(tl.load(TOKEN_MASK + token * MASK_STRIDE), gate, 0.0)
         else:
             dot = tl.sum((x * (q_weight * k_weight)) * key, 0) * (rstd_x * rstd_key) * (D**-0.5)

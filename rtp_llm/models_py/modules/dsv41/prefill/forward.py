@@ -470,7 +470,21 @@ def forward_layers(
             h = v4.embed(input_ids)  # [T_total, dim]
             if _rt_on:
                 _rt.record("prefill_embed_out", h)
+            sg_state = getattr(getattr(v4, "_ppu_runtime", None), "current", None)
+            sg_hc = None
+            if not _rt_on and getattr(sg_state, "local_prefill_sg_align", False):
+                from rtp_llm.models_py.modules.dsv41.ppu.local_prefill_sg_ops import (
+                    hc_broadcast,
+                    supports_hc,
+                )
+
+                if v4.hc_mult == 4 and supports_hc(h):
+                    sg_hc = hc_broadcast
             if (
+                sg_hc is not None
+            ):
+                h = sg_hc(h)
+            elif (
                 not _rt_on
                 and not torch.is_grad_enabled()
                 and h.is_cuda

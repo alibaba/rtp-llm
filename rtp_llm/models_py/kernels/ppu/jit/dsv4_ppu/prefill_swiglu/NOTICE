@@ -1,0 +1,18 @@
+SGLang PPU dense SwiGLU + per-token E4M3 quantization source bundle.
+
+Upstream: https://github.com/sgl-project/sglang (PPU fork sglang-for-sail)
+Pinned revision: 3bc4f87d5f9bb6f04b724540fb12a3acdc62d2fa
+Original kernel: python/sglang/kernels/jit/csrc/elementwise/
+silu_and_mul_post_per_token_quant_fp8.cuh
+Copyright SGLang contributors. Licensed under the Apache License, Version 2.0
+(https://www.apache.org/licenses/LICENSE-2.0).
+
+csrc/ retains the exact pinned upstream header. compat/elementwise/ changes
+only the host cudaFuncSetAttribute function-pointer std::bit_cast to
+reinterpret_cast for the RTP PPU clang/GCC10 toolchain, following the existing
+RTP SGLang TopK adaptation. Device arithmetic and launch geometry are unchanged.
+compat/sgl_kernel/tensor.h and include/sgl_kernel/* are unchanged copies of
+the already vendored RTP fp4_indexer bundle's host/toolchain support headers.
+That bundle's tensor.h host device-name lookup and utils compatibility fixes
+are retained. source-manifest.json records every runtime source hash and its
+provenance. No production code imports the SGLang Python package.

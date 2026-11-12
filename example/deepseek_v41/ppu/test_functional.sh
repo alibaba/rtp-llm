@@ -19,6 +19,77 @@ if [[ "$v41_role" == s5-kernel-surface ]]; then
     exec "$v41_python" -B rtp_llm/models_py/modules/dsv41/ppu/test/test_mhc_mega_probe.py --mode surface
 fi
 "$v41_python" -B -c 'from rtp_llm.models_py.modules.dsv41.ppu.pd_handoff import runtime_identity; print(runtime_identity())'
+if [[ "$v41_role" == dp-prefill-mega-capacity-distributed ]]; then
+    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.test_dp_prefill_mega_capacity \
+        --distributed --output-dir "$v41_output"
+fi
+if [[ "$v41_role" == local-prefill-engram-rounds-distributed ]]; then
+    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_engram_rounds \
+        --distributed --output-dir "$v41_output"
+fi
+if [[ "$v41_role" == local-prefill-sg-align-contracts || "$v41_role" == local-prefill-sg-align-device ]]; then
+    if [[ "$v41_role" == local-prefill-sg-align-device ]]; then export RTP_V41_TEST_LOCAL_WORKSPACE_DEVICE=1; fi
+    exec "$v41_python" -B -m unittest -v \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_sg_ops \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_sg_topk \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_sg_cache_rows \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_sg_integration \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_sg_paged_indexer \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_sg_rope_lookup \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_sg_rope_callers
+fi
+if [[ "$v41_role" == local-prefill-workspace-contracts || "$v41_role" == local-prefill-workspace-device ]]; then
+    if [[ "$v41_role" == local-prefill-workspace-device ]]; then export RTP_V41_TEST_LOCAL_WORKSPACE_DEVICE=1; fi
+    exec "$v41_python" -B -m unittest -v \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_workspace \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_rows \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_fused \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_mhc \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_aiu_mhc \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_operator_flags \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_moe_routes \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_compact_rows \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_split_l20 \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_source_cache \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_qo_rope \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_dp_prefill_mega_capacity \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_swa_segments \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_token_topk \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_token_topk_routes \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_swa_native_write \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_swa_pack \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_engram_rounds \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_rotary_pack \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_engram_gate \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_cross_layer_mhc \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_shared_swiglu \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_swa_native_read \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_source_native_read \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_attention_provider \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_source_native_write \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_csa_native_write \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_lazy_slots
+fi
+if [[ "$v41_role" == local-prefill-attention-provider-contracts || "$v41_role" == local-prefill-attention-provider-device ]]; then
+    if [[ "$v41_role" == local-prefill-attention-provider-device ]]; then export RTP_V41_TEST_LOCAL_WORKSPACE_DEVICE=1; fi
+    exec "$v41_python" -B -m unittest -v \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_attention_provider
+fi
+if [[ "$v41_role" == local-prefill-token-topk-variants-contracts || "$v41_role" == local-prefill-token-topk-variants-device ]]; then
+    if [[ "$v41_role" == local-prefill-token-topk-variants-device ]]; then export RTP_V41_TEST_LOCAL_WORKSPACE_DEVICE=1; fi
+    exec "$v41_python" -B -m unittest -v \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_token_topk_variants
+fi
+if [[ "$v41_role" == local-prefill-hierarchical-topk-variants-contracts || "$v41_role" == local-prefill-hierarchical-topk-variants-device ]]; then
+    if [[ "$v41_role" == local-prefill-hierarchical-topk-variants-device ]]; then export RTP_V41_TEST_LOCAL_WORKSPACE_DEVICE=1; fi
+    exec "$v41_python" -B -m unittest -v \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_hierarchical_topk_variants
+fi
+if [[ "$v41_role" == local-prefill-fused-hierarchical-topk-contracts || "$v41_role" == local-prefill-fused-hierarchical-topk-device ]]; then
+    if [[ "$v41_role" == local-prefill-fused-hierarchical-topk-device ]]; then export RTP_V41_TEST_LOCAL_WORKSPACE_DEVICE=1; fi
+    exec "$v41_python" -B -m unittest -v \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_fused_hierarchical_topk
+fi
 if [[ "$v41_role" == ptpc-qnorm-contracts || "$v41_role" == ptpc-qnorm-device ]]; then
     export RTP_V41_PPU_PTPC_FUSION=1
     if [[ "$v41_role" == ptpc-qnorm-device ]]; then export RTP_V41_TEST_PTPC_DEVICE=1; fi
@@ -54,6 +125,11 @@ fi
 if [[ "$v41_role" == ptpc-fusion-micro ]]; then
     export RTP_V41_PPU_PTPC_FUSION=1
     exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.ptpc_microbench
+fi
+if [[ "$v41_role" == local-prefill-native-fp32-topk-variants-contracts || "$v41_role" == local-prefill-native-fp32-topk-variants-device ]]; then
+    if [[ "$v41_role" == local-prefill-native-fp32-topk-variants-device ]]; then export RTP_V41_TEST_LOCAL_WORKSPACE_DEVICE=1; fi
+    exec "$v41_python" -B -m unittest -v \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_native_fp32_topk_variants
 fi
 if [[ "$v41_role" == ptpc-contracts || "$v41_role" == ptpc-device ]]; then
     if [[ "$v41_role" == ptpc-device ]]; then export RTP_V41_TEST_PTPC_DEVICE=1; fi

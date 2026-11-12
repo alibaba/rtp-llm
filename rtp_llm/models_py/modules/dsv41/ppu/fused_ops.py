@@ -122,9 +122,13 @@ def _kernel():
     def fused_rope_tail(
         source, frequencies, out,
         HEADS: tl.constexpr, DIM: tl.constexpr, HALF_ROPE: tl.constexpr, INVERSE: tl.constexpr,
+        positions=None,
     ):
         row = tl.program_id(0).to(tl.int64)
-        rotate_row(source + row * DIM, out + row * DIM, frequencies, row // HEADS, DIM, HALF_ROPE, INVERSE)
+        frequency_row = row // HEADS
+        if positions is not None:
+            frequency_row = tl.load(positions + frequency_row).to(tl.int64)
+        rotate_row(source + row * DIM, out + row * DIM, frequencies, frequency_row, DIM, HALF_ROPE, INVERSE)
 
     return fused_qk_rope, fused_rope_tail
 
@@ -159,24 +163,59 @@ def qk_rope(q, kv, freqs):
     return q_out, kv_out
 
 
-def try_rope_tail(x, freqs, inverse):
-    """Return the fused nonaliasing BF16 result for supported row layouts."""
-    if not (
+def _rope_positions_supported(x, freqs, positions):
+    """Metadata only: caller proves 0 <= positions[i] < freqs.shape[0]."""
+    values = (x, freqs, positions)
+    if not (not torch.is_grad_enabled()
+            and all(isinstance(value, torch.Tensor) and value.layout == torch.strided
+                    and not value.is_neg() and not value.is_conj()
+                    and not value.requires_grad for value in values)
+            and x.is_cuda and x.dtype == torch.bfloat16 and x.ndim in (2, 3)
+            and x.shape[-1] in (128, 512) and x.is_contiguous()
+            and freqs.device == x.device and freqs.dtype == torch.complex64
+            and freqs.ndim == 2 and freqs.shape[0] > 0 and freqs.shape[1] == 32
+            and freqs.is_contiguous() and positions.device == x.device
+            and positions.dtype in (torch.int32, torch.int64)
+            and positions.shape == (x.shape[0],) and positions.is_contiguous()
+            and len({value.untyped_storage().data_ptr() for value in values}) == 3):
+        return False
+    try:
+        return (not torch.cuda.is_current_stream_capturing()
+                and torch.cuda.current_device() == x.device.index
+                and torch.cuda.current_stream(x.device) == torch.cuda.default_stream(x.device))
+    except (AssertionError, RuntimeError):
+        return False
+
+
+def try_rope_tail(x, freqs, inverse, *, positions=None):
+    """Return the fused nonaliasing BF16 result for supported row layouts.
+
+    With positions, freqs is a full complex64 [F,32] table. The caller owns
+    the original row provenance and numeric position-range proof. This helper
+    does not scan GPU values or retry a failed launch.
+    """
+    if positions is not None:
+        supported = _rope_positions_supported(x, freqs, positions)
+    else:
+        supported = (
         x.is_cuda and x.dtype == torch.bfloat16 and x.ndim in (2, 3)
         and x.shape[-1] in (128, 512) and x.is_contiguous()
         and freqs.dtype == torch.complex64 and freqs.ndim == 2
         and freqs.shape[0] == x.shape[0] and 0 < freqs.shape[1] <= x.shape[-1] // 2
         and freqs.is_contiguous() and not freqs.is_conj() and freqs.device == x.device
         and not x.requires_grad and not freqs.requires_grad
-    ):
+        )
+    if not supported:
         return None
     out = torch.empty_like(x)
     if x.numel():
         heads = x.shape[1] if x.ndim == 3 else 1
         _, rope_kernel = _kernel()
+        options = {} if positions is None else {"positions": positions}
         rope_kernel[(x.shape[0] * heads,)](
             x, torch.view_as_real(freqs), out,
             heads, x.shape[-1], freqs.shape[1], inverse,
             num_warps=4, enable_fp_fusion=False,
+            **options,
         )
     return out

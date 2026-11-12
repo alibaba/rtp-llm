@@ -56,6 +56,13 @@ _DSV41_PPU_SHARED_MODULES = [
     "modules/dsv41/ppu/ptpc_norm_quant.py",
     "modules/dsv41/ppu/attention_layer.py",
     "modules/dsv41/ppu/prefill_runtime.py",
+    "modules/dsv41/ppu/local_prefill_attention_provider.py",
+    "modules/dsv41/ppu/local_prefill_hierarchical_topk.py",
+    "modules/dsv41/ppu/local_prefill_sg_ops.py",
+    "modules/dsv41/ppu/local_prefill_sg_topk.py",
+    "modules/dsv41/ppu/local_prefill_sg_paged_indexer.py",
+    "modules/dsv41/prefill/_hc_expand_triton.py",
+    "kernels/ppu/jit/sglang_jit.py",
     "modules/dsv41/ppu/ced.py",
     "modules/dsv41/ppu/native_cache_adapter.py",
     "modules/dsv41/ppu/cp_sharding.py",
@@ -97,7 +104,11 @@ _DSV41_PPU_SHARED_MODULES = [
 filegroup(
     name = "v41_ppu_shared_sources",
     srcs = select({
-        "@//:using_ppu": _DSV41_PPU_SHARED_MODULES,
+        "@//:using_ppu": _DSV41_PPU_SHARED_MODULES + glob([
+            "kernels/ppu/jit/dsv4_ppu/prefill_swiglu/**",
+            "kernels/ppu/jit/dsv4_ppu/prefill_topk/**",
+            "kernels/ppu/jit/dsv4_ppu/prefill_candidate_table/**",
+        ]),
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

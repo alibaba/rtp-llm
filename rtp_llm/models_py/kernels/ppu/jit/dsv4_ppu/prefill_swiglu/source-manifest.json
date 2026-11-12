@@ -1,0 +1,29 @@
+{
+  "schema_version": 2,
+  "upstream": {
+    "repository": "https://github.com/sgl-project/sglang",
+    "fork": "sglang-for-sail",
+    "commit": "3bc4f87d5f9bb6f04b724540fb12a3acdc62d2fa"
+  },
+  "originals": {
+    "csrc/elementwise/silu_and_mul_post_per_token_quant_fp8.cuh": {
+      "sha256": "c2fe1a44a1309d05efc06c516d81839a0517254596ac2262bc9effdbe905c528",
+      "runtime_path": "compat/elementwise/silu_and_mul_post_per_token_quant_fp8.cuh",
+      "adaptation": "Host-only std::bit_cast<const void*> to reinterpret_cast<const void*>; device source unchanged."
+    }
+  },
+  "support_headers": {
+    "source_bundle": "../fp4_indexer",
+    "policy": "Exact copies of the existing RTP toolchain-compatible headers; see NOTICE."
+  },
+  "sources": {
+    "compat/elementwise/silu_and_mul_post_per_token_quant_fp8.cuh": "3e202decd789c6e14a9e881fbeda9250bb9580298376e1be2255bf5fe9335be3",
+    "compat/sgl_kernel/tensor.h": "f971fbc9e6740f4d066764e8c88a4d8bacada5a4c607dc1170bc847517f1fcb0",
+    "csrc/elementwise/silu_and_mul_post_per_token_quant_fp8.cuh": "c2fe1a44a1309d05efc06c516d81839a0517254596ac2262bc9effdbe905c528",
+    "include/sgl_kernel/runtime.cuh": "7ed0f8ae9cac6a125d1e435e3ab628115a7f3179c64f308536c38db37a418542",
+    "include/sgl_kernel/source_location.h": "cd43da52aa20deafdffb0973bed1b101f634c728362aeef06959f0f5700f4973",
+    "include/sgl_kernel/type.cuh": "f70277be81e61c2737875067a0d91f7ca2c7e2f806be1353319273c55a93e6a5",
+    "include/sgl_kernel/utils.cuh": "5c7614629188d9033df55210a8ffa1e1530ece797e5db5f79a3f528423cd4945",
+    "include/sgl_kernel/utils.h": "d0e4bf235e004b2cc61924b377f57e876ae6988bfadc61c6f0422306f4f17aac"
+  }
+}
