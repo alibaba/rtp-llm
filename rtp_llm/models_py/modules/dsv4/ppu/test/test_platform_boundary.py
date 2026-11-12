@@ -21,12 +21,17 @@ class PlatformBoundaryTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[6]
         # Execute the real small helpers without importing the native model runtime.
         tree = ast.parse((root / "rtp_llm/models/deepseek_v4.py").read_text())
-        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef)
-                 and n.name in ("_is_ppu_flash", "configure_ppu_scheduler")]
+        nodes = [
+            n for n in tree.body
+            if (isinstance(n, ast.FunctionDef)
+                and n.name in ("_is_ppu_flash", "configure_ppu_scheduler"))
+            or (isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
+                and n.targets[0].id == "_PPU_FLASH_LAYERS")
+        ]
         namespace = {}
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(root / "rtp_llm/models/deepseek_v4.py"), "exec"), namespace)
         for ppu in (False, True):
-            for name, layers in (("deepseek_v4", 43), ("deepseek_v4_mtp", 1), ("deepseek_v4_dspark", 1), ("qwen_3", 43), ("deepseek_v4", 61)):
+            for name, layers in (("deepseek_v4", 43), ("deepseek_v4_mtp", 1), ("deepseek_v4_dspark", 3), ("deepseek_v4_dspark", 1), ("qwen_3", 43), ("deepseek_v4", 61)):
                 for width in (4096, 7168):
                     for chunk, expected in ((-1, 1024), (0, 1024), (128, 256), (512, 512)):
                         config = SimpleNamespace(model_type=name, hidden_size=width, num_layers=layers,
@@ -37,7 +42,11 @@ class PlatformBoundaryTest(unittest.TestCase):
                             "rtp_llm.device.device_type": SimpleNamespace(is_ppu=lambda: ppu),
                         }):
                             namespace["configure_ppu_scheduler"](config, scheduler)
-                        selected = ppu and width == 4096 and ((name == "deepseek_v4" and layers == 43) or (name == "deepseek_v4_mtp" and layers == 1))
+                        selected = ppu and width == 4096 and (
+                            (name == "deepseek_v4" and layers == 43)
+                            or (name == "deepseek_v4_mtp" and layers == 1)
+                            or (name == "deepseek_v4_dspark" and layers == 3)
+                        )
                         self.assertEqual(config.moe_prefill_max_tokens_per_rank, expected if selected else 256)
                         self.assertEqual(getattr(config, "_ppu_prefill_chunk_size", None), chunk if selected else None)
 

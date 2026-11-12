@@ -64,6 +64,40 @@ class Dsv4ConfigTest(unittest.TestCase):
         self.config.attn_config.layer_compress_ratios = [0]
         self.build()
 
+    def test_decode_dspark_draft_is_admitted_at_block_five(self):
+        self.parallel.role_type.name = "DECODE"
+        self.parallel.ep_size = 4
+        self.moe.use_deepep_low_latency = True
+        self.config.model_type = "deepseek_v4_dspark"
+        self.config.num_layers = 3
+        self.config.attn_config.layer_compress_ratios = [0, 0, 0]
+        self.config.dspark_target_layer_ids = [40, 41, 42]
+        self.config.gen_num_per_cycle = 5
+        self.assertEqual(self.build().execution_options["DSV4_PPU_DECODE_METADATA"],
+                         "reference")
+        with patch.object(self.config, "gen_num_per_cycle", 9):
+            with self.assertRaisesRegex(ValueError, "speculative depth"):
+                self.build()
+
+    def test_dspark_draft_rejects_deep_compressed_ratio(self):
+        self.config.model_type = "deepseek_v4_dspark"
+        self.config.num_layers = 3
+        self.config.attn_config.layer_compress_ratios = [0, 0, 4]
+        self.config.dspark_target_layer_ids = [40, 41, 42]
+        with self.assertRaisesRegex(ValueError, "DSpARK draft layers"):
+            self.build()
+
+    def test_dspark_target_carries_the_same_proposal_width(self):
+        # The target verifies gamma+1 rows, so it holds gamma=5 as well and
+        # must pass the same gate even though it is a 43-layer V4.
+        self.config.dspark_target_layer_ids = [40, 41, 42]
+        self.config.gen_num_per_cycle = 5
+        self.assertEqual(self.build().execution_options,
+                         self.module.PREFILL_EXECUTION_OPTIONS)
+        self.config.gen_num_per_cycle = 9
+        with self.assertRaisesRegex(ValueError, "speculative depth"):
+            self.build()
+
     def test_decode_ep1_rejected_for_single_and_multiple_tp_ranks(self):
         self.parallel.role_type.name = "DECODE"
         self.moe.use_deepep_low_latency = True
