@@ -1,14 +1,14 @@
 -r requirements_base.txt
 transformers==5.16.1
 tokenizers==0.23.3
-fast-safetensors==0.7.3+torch2.1.2.rocm ; platform_machine == "x86_64"
-fastsafetensors==0.1.19rc5+ali ; platform_machine == "x86_64"
+fast-safetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/rocm/fast_safetensors-0.7.3%2Btorch2.1.2.rocm-cp310-cp310-linux_x86_64.whl ; platform_machine == "x86_64"
+fastsafetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fastsafetensors-0.1.19rc5%2Bali-cp310-cp310-linux_x86_64.whl ; platform_machine == "x86_64"
 torch==2.9.1+git7e1940d
 torchvision==0.24.0+rocm7.2.0.gitb919bd0c
 triton==3.8.0+amd.rocm7.2.0.git111ff227
 triton-kernels==1.0.0+amd.rocm7.2.0.git111ff227
 amd-aiter @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/amd_aiter-0.1.29%2Brocm7.2.0.git97d2389-cp310-cp310-linux_x86_64.whl
-atom @ https://search-ad.cn-hangzhou-k.oss-internal.aliyun-inc.com/xingjunna/qwen4/atom-0.1.1.dev1%2Bg0189b3506-py3-none-any.whl
+atom @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/atom/atom-0.1.1.dev1%2Bg0189b3506-py3-none-any.whl
 # FLA kernels directly import FlyDSL (including private flydsl._mlir APIs), so
 # pin it explicitly rather than relying on AITER's transitive dependency.
 # The pinned amd-aiter 0.1.29 wheel requires FlyDSL 0.4.2.

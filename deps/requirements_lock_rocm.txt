@@ -146,7 +146,7 @@ attrs==24.2.0 \
     --hash=sha256:5cfb1b9148b5b086569baec03f20d7b6bf3bcacc9a42bebf87ffaaca362f6346 \
     --hash=sha256:81921eb96de3191c8258c199618104dd27ac608d9366f5e35d011eae1867ede2
     # via aiohttp
-atom @ https://search-ad.cn-hangzhou-k.oss-internal.aliyun-inc.com/xingjunna/qwen4/atom-0.1.1.dev1%2Bg0189b3506-py3-none-any.whl \
+atom @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/atom/atom-0.1.1.dev1%2Bg0189b3506-py3-none-any.whl \
     --hash=sha256:021920395fa6e95e7d3fe75631d0f8c93083c90f5c1ae3f4a4d46a93d940cbcc
     # via -r internal_source/deps/requirements_rocm.txt
 audioread==3.0.1 \
@@ -512,14 +512,14 @@ exceptiongroup==1.2.2 \
     --hash=sha256:3111b9d131c238bec2f8f516e123e14ba243563fb135d3fe885990585aa7795b \
     --hash=sha256:47c2edf7c6738fafb49fd34290706d1a1a2f4d1c6df275526b62cbb4aa5393cc
     # via anyio
-fast-safetensors==0.7.3+torch2.1.2.rocm ; platform_machine == "x86_64"  \
+fast-safetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/rocm/fast_safetensors-0.7.3%2Btorch2.1.2.rocm-cp310-cp310-linux_x86_64.whl ; platform_machine == "x86_64"  \
     --hash=sha256:8c8b07ef55b6fc42151ef507e7993d44443fb66371919457b70987234dc47a34
     # via -r internal_source/deps/requirements_rocm.txt
 fastapi==0.115.6 \
     --hash=sha256:9ec46f7addc14ea472958a96aae5b5de65f39721a46aaf5705c480d9a8b76654 \
     --hash=sha256:e9240b29e36fa8f4bb7290316988e90c381e5092e0cbe84e7818cc3713bcf305
     # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
-fastsafetensors==0.1.19rc5+ali ; platform_machine == "x86_64"  \
+fastsafetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fastsafetensors-0.1.19rc5%2Bali-cp310-cp310-linux_x86_64.whl ; platform_machine == "x86_64"  \
     --hash=sha256:aafb2bc7492a5de970b03455e68b5c9e15034e5d31d86f4524523bee7d9ada29
     # via -r internal_source/deps/requirements_rocm.txt
 filelock==3.20.0 \
