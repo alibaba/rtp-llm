@@ -355,7 +355,17 @@ void AwiService::generate(const std::unique_ptr<http_server::HttpResponseWriter>
             const char* value = std::getenv("AWI_PREFIX_FILL_CHUNK_TOKENS");
             return value == nullptr ? 0 : std::atoll(value);
         }();
-        if (fill_chunk > 0 && static_cast<int64_t>(input_ids.size()) > fill_chunk) {
+        // Leave the last tail for the real request.  The fill loop's final
+        // growing prefix is the most expensive stream; a bounded tail lets the
+        // final request reuse the prefix and prefill only what remains, while
+        // still executing every token of the full context.
+        const int64_t fill_tail = [&]() -> int64_t {
+            const char* value = std::getenv("AWI_PREFIX_FILL_TAIL_TOKENS");
+            const int64_t parsed = value == nullptr ? 0 : std::atoll(value);
+            return std::max<int64_t>(0, parsed);
+        }();
+        const int64_t fill_limit = std::max<int64_t>(0, static_cast<int64_t>(input_ids.size()) - fill_tail);
+        if (fill_chunk > 0 && fill_limit > fill_chunk) {
             // The evaluator sends one full-context request.  Materialise its
             // prefix in bounded, cache-reusing prefill-only streams so the
             // model never has to allocate the [T,4,5120] hidden state for a
@@ -368,7 +378,7 @@ void AwiService::generate(const std::unique_ptr<http_server::HttpResponseWriter>
             // this, all 31 growing prefixes stay strongly referenced and the
             // cache fills before the final request can be admitted.
             std::shared_ptr<GenerateStream> last_fill;
-            for (int64_t end = fill_chunk; end < static_cast<int64_t>(input_ids.size()); end += fill_chunk) {
+            for (int64_t end = fill_chunk; end < fill_limit; end += fill_chunk) {
                 auto fill_input          = std::make_shared<GenerateInput>();
                 fill_input->request_id   = request_counter_->incAndReturn();
                 fill_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
