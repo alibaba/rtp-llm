@@ -23,6 +23,10 @@ from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 
 _PrefillFastHCImpls = Tuple[Callable, Callable, Callable, Callable]
 
+# Row budget for chunked prefill norms on huge forwards. RMSNorm is
+# row-local; above this budget the norm runs in row slices in place.
+_AWI_NORM_CHUNK_ROWS = 32768
+
 
 def _prefill_fast_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
     if (
@@ -30,6 +34,19 @@ def _prefill_fast_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
         and norm.__class__.__module__ == "rtp_llm.models_py.modules.base.cuda.norm"
     ):
         return norm(x, output=x)
+    if x.dim() == 2 and x.shape[0] > _AWI_NORM_CHUNK_ROWS:
+        # Huge prefill: the non-fused norm (ROCm aiter rms_norm) allocates
+        # a fresh full [T, dim] output — 10.00 GiB at 1M tokens, which
+        # could not coexist with the layer working set (n21, 2026-11-12:
+        # all ranks OOM at the FFN norm, frame rocm/norm.py:71 <-
+        # _prefill_fast_norm <- _forward_prefill_fast_fp8). Norm row
+        # chunks in place instead (~0.34 GiB transients), mirroring the
+        # CUDA path's norm(x, output=x) in-place contract. Rows at or
+        # below the budget (decode, 8K smokes) keep the original call.
+        for begin in range(0, x.shape[0], _AWI_NORM_CHUNK_ROWS):
+            end = min(begin + _AWI_NORM_CHUNK_ROWS, x.shape[0])
+            x[begin:end] = norm(x[begin:end])
+        return x
     return norm(x)
 
 
