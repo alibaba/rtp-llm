@@ -44,6 +44,7 @@ struct StorageTaskState {
     struct Pin {
         DeviceBlockPoolPtr pool;
         BlockIdxType       block;
+        std::function<void()> release;
     };
 
     StorageRequest   request;
@@ -54,7 +55,8 @@ struct StorageTaskState {
     void             finish() {
         std::call_once(finish_once, [this] {
             for (const Pin& pin : pins) {
-                pin.pool->decRef(pin.block, DeviceBlockRefType::REMOTE_CONNECTOR);
+                if (pin.release)
+                    pin.release();
             }
             pins.clear();
         });
@@ -381,11 +383,14 @@ StorageBackend::prepare(StorageRequest request, bool for_write, uint64_t trace_i
             const auto&    pool = devicePool(handle.tag);
             const BlockKey key{pool.get(), handle.block};
             if (pinned.insert(key).second) {
-                pool->incRef(handle.block, DeviceBlockRefType::REMOTE_CONNECTOR);
-                state->pins.push_back({pool, handle.block});
+                state->pins.push_back({pool, handle.block, {}});
             }
         }
     }
+    // Finish all metadata allocation before acquiring any pin. A partial pin
+    // acquisition then releases only the closures that were successfully prepared.
+    for (auto& pin : state->pins)
+        pin.release = pin.pool->pinForStorageIo(pin.block);
     timer.finish(true);
     return state;
 }
@@ -675,7 +680,26 @@ bool StorageBackend::write(StorageWriteTask task) {
                 submit.emplace(nullptr, "write_submit", state->request.request_id.value_or(-1), 0,
                                state->request.handles.size(), world_rank_, "storage_backend",
                                state->trace_id, CacheStageContext::storage("write"));
-            if (startWriteImpl(state->request, [complete](WriteResult result) { complete(std::move(result), true); }))
+            auto retain_pins = [this, state](const std::vector<size_t>& key_indices) {
+                if (key_indices.size() == state->request.handles.size())
+                    return;
+                std::unordered_set<BlockKey, BlockKeyHash> required;
+                for (const auto key_index : key_indices) {
+                    for (const auto& handle : state->request.handles.at(key_index)) {
+                        const auto& pool = devicePool(handle.tag);
+                        required.insert({pool.get(), handle.block});
+                    }
+                }
+                auto& pins = state->pins;
+                pins.erase(std::remove_if(pins.begin(), pins.end(), [&](const auto& pin) {
+                    if (required.count({pin.pool.get(), pin.block}))
+                        return false;
+                    pin.release();
+                    return true;
+                }), pins.end());
+            };
+            if (startWriteImpl(state->request, [complete](WriteResult result) { complete(std::move(result), true); },
+                               std::move(retain_pins)))
                 return;
         } catch (...) {
             complete([error = std::current_exception()](bool) { std::rethrow_exception(error); }, false);

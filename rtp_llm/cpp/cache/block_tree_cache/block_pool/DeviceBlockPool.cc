@@ -51,6 +51,59 @@ DeviceBlockPool::DeviceBlockPool(std::shared_ptr<const DeviceBlockPoolConfig> co
     }
 }
 
+std::function<void()> DeviceBlockPool::pinForStorageIo(BlockIdxType block) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    checkAllocatedNoLock(block);
+    // At most all usable block IDs can be returned to the free list.
+    // Reserve before pin acquisition so release never allocates.
+    reserveAllReleasedBlocksNoLock();
+    auto notify = capacityChangeCallbackNoLock();
+    std::function<void()> release = [this, block, notify = std::move(notify)] {
+        releaseStorageIoPin(block, notify);
+    };
+    const auto type = static_cast<size_t>(DeviceBlockRefType::REMOTE_CONNECTOR);
+    const bool was_active = isActiveNoLock(block);
+    const bool was_available = isAvailableNoLock(block);
+    ++refcounts_[block];
+    if (refcounts_by_type_[type][block]++ == 0) {
+        ++referenced_block_counts_[type];
+    }
+    updateActiveBlocksNumNoLock(block, was_active);
+    updateAvailableBlocksNumNoLock(block, was_available);
+    return release;
+}
+
+void DeviceBlockPool::releaseStorageIoPin(BlockIdxType block, const std::function<void()>& notify) noexcept {
+    bool capacity_grew = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        checkAllocatedNoLock(block);
+        const auto type = static_cast<size_t>(DeviceBlockRefType::REMOTE_CONNECTOR);
+        RTP_LLM_CHECK(refcounts_by_type_[type][block] > 0);
+        const auto free_before = availableFreeBlocksNoLock();
+        const bool was_active = isActiveNoLock(block);
+        const bool was_available = isAvailableNoLock(block);
+        --refcounts_[block];
+        if (--refcounts_by_type_[type][block] == 0) {
+            --referenced_block_counts_[type];
+        }
+        if (refcounts_[block] == 0) {
+            freeAllocatedBlockNoLock(block);
+        }
+        updateActiveBlocksNumNoLock(block, was_active);
+        updateAvailableBlocksNumNoLock(block, was_available);
+        capacity_grew = availableFreeBlocksNoLock() > free_before || (!was_available && isAvailableNoLock(block));
+    }
+    // The callback was snapshotted before pin acquisition. Notification cannot
+    // turn an already-completed decrement into an ambiguous retry.
+    if (capacity_grew && notify) {
+        try {
+            notify();
+        } catch (...) {}
+    }
+}
+
 void DeviceBlockPool::incRef(BlockIdxType block, DeviceBlockRefType ref_type) {
     incRef(BlockIdList{block}, ref_type);
 }
