@@ -69,7 +69,7 @@ Output directories must not exist. Set `JAVA_HOME` to JDK 21 and install `uv`.
 Build the packaged application and the current Mock artifacts first:
 
 ```bash
-mock-framework/scripts/build-java.sh
+mock-framework/scripts/build-mock-java-runtime.sh
 ./mvnw -B -P 'opensource,!internal' -pl flexlb-api -am package -DskipTests
 ```
 

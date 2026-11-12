@@ -154,7 +154,7 @@ def local_launch(
             if runtime_root is not None:
                 raise ExecutionError(f"Missing CI runtime artifact: {path}")
             raise ExecutionError(
-                f"Missing build artifact: {path}; run scripts/build-java.sh first"
+                f"Missing build artifact: {path}; run scripts/build-mock-java-runtime.sh first"
             )
         return path
 

@@ -22,10 +22,10 @@ export PROMETHEUS_BIN="<Prometheus 可执行文件>"
 export PATH="$JAVA_HOME/bin:$PATH"
 
 uv sync --locked
-./scripts/build-java.sh
+./scripts/build-mock-java-runtime.sh
 ```
 
-`build-java.sh` 编译 Java 并运行 Java 测试，复用生产模块的公式、协议和 Master；构建 Mock 时跳过 Boot 重打包及 Whale 分发归档，不改变生产模块独立构建的默认行为。
+`build-mock-java-runtime.sh` 编译 Java 并运行 Java 测试，复用生产模块的公式、协议和 Master；构建 Mock 时跳过 Boot 重打包及 Whale 分发归档，不改变生产模块独立构建的默认行为。
 
 ## 跑第一个 Case
 
@@ -107,10 +107,10 @@ View 只读已完成实验，复制 TSDB 后启动独立指标服务，不重跑
 执行 Java 和 Python 检查：
 
 ```sh
-PROMETHEUS_BIN="$PROMETHEUS_BIN" ./scripts/test-framework.sh
+PROMETHEUS_BIN="$PROMETHEUS_BIN" ./scripts/run-mock-tests.sh
 ```
 
-`test-framework.sh` 会先调用 `build-java.sh`，再运行 Python 测试。缺少 Prometheus 时会跳过真实采集集成测试；macOS 缺少回环别名时跳过双 Master 测试。报告检查结果时说明跳过项，测试通过不代替完整 Case 验收。
+`run-mock-tests.sh` 会先调用 `build-mock-java-runtime.sh`，再运行 Python 测试。缺少 Prometheus 时会跳过真实采集集成测试；macOS 缺少回环别名时跳过双 Master 测试。报告检查结果时说明跳过项，测试通过不代替完整 Case 验收。
 
 - [Case 指南](docs/case-guide.md)涵盖目录约定、YAML 字段、门禁和接口扩展。
 - [在 AoneCI 运行 Case](docs/ci-case.md)：构建环境镜像、指定源码和 Case、查看结果。

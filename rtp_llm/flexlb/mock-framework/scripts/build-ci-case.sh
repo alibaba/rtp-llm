@@ -11,7 +11,7 @@ archive="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 profiles='-P!internal,!internal-monitoring,!internal-discovery'
 ../mvnw -B -f pom.xml clean "$profiles"
-./scripts/build-java.sh -DskipTests "$profiles"
+./scripts/build-mock-java-runtime.sh -DskipTests "$profiles"
 
 # Store each classpath in Maven's original order, relative to the packaged target directory.
 python3 - "$archive" <<'PY'

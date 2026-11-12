@@ -122,7 +122,7 @@ def package():
     build_args = ["-P" + ",".join(profiles)] if profiles else []
     subprocess.run(
         [
-            str(FRAMEWORK / "scripts/build-java.sh"),
+            str(FRAMEWORK / "scripts/build-mock-java-runtime.sh"),
             "-pl",
             "java/engine",
             "-am",
