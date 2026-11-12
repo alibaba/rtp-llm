@@ -1,4 +1,6 @@
+import io
 import json
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -31,10 +33,10 @@ class DeepJitCacheTest(unittest.TestCase):
         source = self.root / "source"
         files = deepjit.deepjit_snapshot_files(source)
         self.assertEqual(len(files), 4)
-        archive = self.root / "snapshot.zst"
-        store.pack_zstd_tar(archive, files)
+        archive = self.root / f"snapshot{store.SNAPSHOT_SUFFIX}"
+        store.pack_snapshot(archive, files)
         target = self.root / "restored"
-        store.extract_zstd_tar(archive, target)
+        store.extract_snapshot(archive, target)
         self.assertEqual(
             deepjit.deepjit_checksums(target),
             {
@@ -54,6 +56,34 @@ class DeepJitCacheTest(unittest.TestCase):
         (self.entry / "kernel.cubin").unlink()
         with self.assertRaisesRegex(ValueError, "incomplete"):
             deepjit.validate_deepjit_snapshot(source)
+
+    def test_archive_restore_checks_deepjit_payload_for_each_compression(self):
+        files = deepjit.deepjit_snapshot_files(self.root / "source")
+        real_addfile = tarfile.TarFile.addfile
+
+        def corrupt_payload(tar, info, fileobj=None):
+            if info.name.endswith("/kernel.cubin"):
+                fileobj = io.BytesIO(b"broken")  # same length, valid archive checksum
+            return real_addfile(tar, info, fileobj)
+
+        compressors = [None] + ([store.zstd] if store.zstd is not None else [])
+        for index, compressor in enumerate(compressors):
+            with self.subTest(compressor=index), mock.patch.object(
+                store, "zstd", compressor
+            ):
+                archive = self.root / f"archive-{index}"
+                store.pack_snapshot(archive, files)
+                target = self.root / f"good-{index}"
+                store.extract_snapshot(archive, target)
+                self.assertEqual(
+                    deepjit.deepjit_checksums(target),
+                    deepjit.deepjit_checksums(self.root / "source"),
+                )
+                self.assertFalse((target / deepjit.SNAPSHOT_MANIFEST).exists())
+                with mock.patch.object(tarfile.TarFile, "addfile", corrupt_payload):
+                    store.pack_snapshot(archive, files)
+                with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                    store.extract_snapshot(archive, self.root / f"bad-{index}")
 
     def test_symlink_and_nonempty_commit_marker_are_not_publishable(self):
         (self.entry / ".committed").write_bytes(b"not committed")

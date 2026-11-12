@@ -286,3 +286,9 @@ py_test(
     # Exercise the same lightweight entrypoint used by the PPU model target.
     data = ["//rtp_llm/models_py:ppu_entrypoint"],
 )
+
+py_test(
+    name = "jit_cache_optional_deps_test",
+    srcs = ["jit_cache_optional_deps_test.py"],
+    deps = ["//rtp_llm:jit_cache_manager_lib"],
+)
