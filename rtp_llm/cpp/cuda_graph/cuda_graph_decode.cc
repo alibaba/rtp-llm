@@ -3,6 +3,9 @@
 
 namespace rtp_llm {
 void CudaGraphRunner::finishDeferredDecodeInit() {
+    RTP_LLM_LOG_WARNING("AWI deferred init entry deferred=%d done=%d deferred_init=%d graphs=%zu",
+                        (int)decode_capture_deferred_, (int)decode_capture_done_,
+                        (int)decode_init_deferred_, graph_instances_.size());
     if (!hasDeferredDecodeInit()) {
         return;
     }
@@ -20,6 +23,8 @@ void CudaGraphRunner::finishDeferredDecodeInit() {
 }
 
 void CudaGraphRunner::releaseCapturedDecodeGraph() {
+    RTP_LLM_LOG_WARNING("AWI release entry done=%d graphs=%zu", (int)decode_capture_done_,
+                        graph_instances_.size());
     if (!hasCapturedDecodeGraph()) {
         return;
     }
