@@ -2,6 +2,10 @@ import argparse
 import logging
 import os
 
+from rtp_llm.config.oss_download import (
+    OSS_INTERNAL_REGION_ALLOWLIST_ENV,
+    parse_oss_internal_region_allowlist,
+)
 from rtp_llm.config.py_config_modules import (
     MM_TRANSPORT_MODE_GRPC,
     MM_TRANSPORT_MODES,
@@ -143,6 +147,18 @@ def init_vit_group_args(parser, vit_config):
         type=str,
         default="",
         help="是否需要下载headers",
+    )
+    vit_group.add_argument(
+        "--oss_internal_region_allowlist",
+        env_name=OSS_INTERNAL_REGION_ALLOWLIST_ENV,
+        bind_to=(vit_config, "oss_internal_region_allowlist"),
+        type=parse_oss_internal_region_allowlist,
+        default=None,
+        help=(
+            '允许保留 OSS 内网地址的地域，格式为 JSON 数组，例如 ["ap-southeast-1"]。'
+            "按完整地域 ID 匹配，名单外移除域名中的 -internal。"
+            "空数组表示所有地域都移除该后缀，未配置时沿用原有改写规则。"
+        ),
     )
     vit_group.add_argument(
         "--mm_image_max_file_size_kb",
