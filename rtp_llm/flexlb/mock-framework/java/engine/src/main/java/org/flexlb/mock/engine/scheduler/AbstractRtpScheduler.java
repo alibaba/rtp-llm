@@ -401,6 +401,14 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         stream.waitNanos = Math.max(0, System.nanoTime() - stream.timingStarted);
         stream.lease = ready.lease();
         stream.reused = Math.toIntExact(stream.lease.reusedTokens());
+        if (prefill()) {
+            int blockSize = config.tokensPerCacheKey();
+            var remote = stream.input.remotePrefix();
+            if (remote.endBlock() <= (stream.input.tokens() - 1) / blockSize) {
+                stream.remoteReused = remote.additionalBlocks(stream.reused / blockSize) * blockSize;
+                stream.reused += stream.remoteReused;
+            }
+        }
         stream.state.attach(stream.lease, () -> {
             if (!config.reuseCache() || !config.deviceCache() || !stream.input.reuse()) return;
             stream.lease.publish(stream.input.keys(), stream.input.tokens());
@@ -409,7 +417,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         if (stream.cacheMatchRequested) metrics.cacheMatched(ready.matchNanos());
         if (config.reuseCache() && stream.input.reuse())
             metrics.prepared((long) (stream.input.tokens() / config.tokensPerCacheKey()) * config.tokensPerCacheKey(),
-                stream.reused, System.nanoTime() - stream.preparationStarted);
+                stream.reused, stream.remoteReused, System.nanoTime() - stream.preparationStarted);
         if (!prefill()) {
             stream.phase = WAITING_LOAD;
             enqueue(stream, () -> { if (liveForDelivery(stream)) stream.listener.allocated(stream); }, false);
@@ -563,7 +571,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
 
         long preparationStarted;
         boolean cacheMatchRequested;
-        int reused;
+        int reused, remoteReused;
         boolean prefillFinished;
 
         final long begun = System.nanoTime();
@@ -594,6 +602,8 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         @Override public Progress progress() { synchronized (lock) { return progress; } }
 
         @Override public int reused() { synchronized (lock) { return reused; } }
+
+        @Override public int remoteReused() { synchronized (lock) { return remoteReused; } }
 
         AbstractRtpScheduler owner() { return AbstractRtpScheduler.this; }
 

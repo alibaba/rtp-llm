@@ -65,8 +65,16 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
         if (config.has("device_eviction_policy") || config.has("DEVICE_EVICTION_POLICY"))
             throw new IllegalArgumentException("Removed device_eviction_policy: Mock uses LRU");
         config = normalize(config, role);
-        if (nativeBool(config, "enable_memory_cache", false) || nativeBool(config, "enable_remote_cache", false))
-            throw new IllegalArgumentException("Mock RTP supports only local KV; remove Host and remote KV settings");
+        if (nativeBool(config, "enable_memory_cache", false))
+            throw new IllegalArgumentException("Mock RTP does not simulate a separate Host cache");
+        if (nativeBool(config, "enable_remote_cache", false)) {
+            if (role != Role.prefill || !nativeBool(config, "reuse_cache", false)
+                    || !nativeBool(config, "enable_device_cache", true))
+                throw new IllegalArgumentException("Mock Remote requires Prefill with local reuse enabled");
+            if (config.path("mock.cache.remote.instance.id").asText().isBlank())
+                throw new IllegalArgumentException("Missing mock.cache.remote.instance.id");
+            nativeInt(config, "mock.cache.remote.read.timeout.ms", 20, 1, 1000);
+        }
         nativeInt(config, "kv_cache_event_snapshot_interval_ms", 600000, 1, Integer.MAX_VALUE);
         finalizeSettings((ObjectNode) config);
         int physicalBlockSize = config.path("seq_size_per_block").intValue();
@@ -149,6 +157,11 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
             result.putObject("kvcm_capabilities").put("payload_io",false).put("hbm_events",events.equals("kvcm"));
         }
         if (role == Role.prefill) result.put("mock.scheduler.mode", groupScheduling() ? "group" : "fifo");
+        if (remoteCache()) {
+            result.put("enable_remote_cache", true)
+                .put("mock.cache.remote.instance.id", business.path("mock.cache.remote.instance.id").asText())
+                .put("mock.cache.remote.read.timeout.ms", nativeInt(business, "mock.cache.remote.read.timeout.ms", 20, 1, 1000));
+        }
         result.setAll((ObjectNode) compute.effectiveSettings());
         return result;
     }
@@ -158,6 +171,8 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
     public boolean groupScheduling() {
         return role == Role.prefill && business.path("mock.scheduler.mode").asText("fifo").equals("group");
     }
+
+    public boolean remoteCache() { return nativeBool(business, "enable_remote_cache", false); }
 
     static ObjectNode environment(Map<String, String> env, Role role) {
         var result = ConfigInput.environment(env, environmentNames(role), mockNames());
@@ -185,7 +200,8 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
 
     static Set<String> mockNames() {
         var names = new HashSet<>(ComputeModel.settingNames());
-        names.addAll(Set.of("mock.scheduler.mode", "mock.cache.total.blocks"));
+        names.addAll(Set.of("mock.scheduler.mode", "mock.cache.total.blocks", "mock.cache.remote.instance.id",
+            "mock.cache.remote.endpoint", "mock.cache.remote.read.timeout.ms"));
         return Set.copyOf(names);
     }
 

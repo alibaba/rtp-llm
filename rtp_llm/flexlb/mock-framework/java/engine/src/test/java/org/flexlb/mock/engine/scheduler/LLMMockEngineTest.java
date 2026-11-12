@@ -98,12 +98,12 @@ public class LLMMockEngineTest {
         }
     }
 
-    @Test void removedRemoteCacheIsRejected() throws Exception {
+    @Test void remoteCacheRequiresAnExplicitInstance() throws Exception {
         var root = JSON.<com.fasterxml.jackson.databind.node.ObjectNode>valueToTree(configuration("prefill"));
         ((com.fasterxml.jackson.databind.node.ObjectNode) root.path("component").path("config"))
-            .put("enable_remote_cache", true);
+            .put("enable_remote_cache", true).put("reuse_cache", true);
         var error = assertThrows(IllegalArgumentException.class, () -> LLMMockEngine.start(RtpConfig.load(root)));
-        assertTrue(error.getMessage().contains("supports only local KV"));
+        assertTrue(error.getMessage().contains("mock.cache.remote.instance.id"));
     }
 
     @Test void exportsClasspathForNativeCrossProcessProbe() throws Exception {

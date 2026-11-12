@@ -76,11 +76,15 @@ final class RpcMessages {
         return last >= 0 ? last : 42;
     }
 
-    static GenerateOutputsPB token(GenerateInputPB input, int tokenId, int generated, int stepTokens, int reused, long elapsedNanos, boolean finished, boolean pd) {
+    static GenerateOutputsPB token(GenerateInputPB input, int tokenId, int generated, int stepTokens, int reused,
+                                   int remoteReused, long elapsedNanos, boolean finished, boolean pd) {
         var aux = AuxInfoPB.newBuilder().setInputLen(input.getTokenIdsCount()).setOutputLen(generated).setStepOutputLen(stepTokens)
-            .setIterCount(generated).setPrefixLen(reused).setTotalReuseLen(reused).setLocalReuseLen(reused).setPdSep(pd)
+            .setIterCount(generated).setPrefixLen(reused).setTotalReuseLen(reused).setLocalReuseLen(reused - remoteReused)
+            .setRemoteReuseLen(remoteReused).setPdSep(pd)
             .setCostTimeUs((int) Math.min(Integer.MAX_VALUE, elapsedNanos / 1000))
             .setFirstTokenCostTimeUs((int) Math.min(Integer.MAX_VALUE, elapsedNanos / 1000));
+        if (pd && remoteReused > 0) aux.setPrefillTotalReuseLen(reused).setPrefillLocalReuseLen(reused - remoteReused)
+            .setPrefillRemoteReuseLen(remoteReused);
         return token(input.getRequestId(), tokenId, generated, stepTokens, aux.build(), finished);
     }
 

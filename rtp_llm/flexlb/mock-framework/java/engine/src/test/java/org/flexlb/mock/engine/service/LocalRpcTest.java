@@ -65,6 +65,87 @@ class LocalRpcTest {
             .mapToDouble(line -> Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1))).findFirst().orElseThrow();
     }
 
+    @Test void remoteReuseCrossesWorkersAndPreservesLocalCapacityAndMetrics() throws Exception {
+        var json = new ObjectMapper();
+        var published = ConcurrentHashMap.<String>newKeySet();
+        var pending = new ConcurrentHashMap<String, List<String>>();
+        var failRead = new java.util.concurrent.atomic.AtomicBoolean();
+        var server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/api/", exchange -> {
+            try (exchange) {
+                var request = json.readTree(exchange.getRequestBody());
+                var result = json.createObjectNode();
+                result.putObject("header").putObject("status").put("code", "OK");
+                switch (exchange.getRequestURI().getPath()) {
+                    case "/api/getCacheLocationLen" -> {
+                        if (failRead.get()) {
+                            exchange.sendResponseHeaders(503, -1);
+                            return;
+                        }
+                        if (!request.path("query_type").asText().equals("QT_PREFIX_MATCH"))
+                            throw new IllegalArgumentException("Expected continuous prefix matching");
+                        int hits = 0;
+                        for (var key : request.path("block_keys")) {
+                            if (!published.contains(key.asText())) break;
+                            hits++;
+                        }
+                        result.put("cache_location_len", Integer.toString(hits));
+                    }
+                    case "/api/startWriteCache" -> {
+                        var keys = new ArrayList<String>();
+                        for (var key : request.path("block_keys")) keys.add(key.asText());
+                        String id = UUID.randomUUID().toString();
+                        pending.put(id, keys);
+                        result.put("write_session_id", id);
+                        var locations = result.putArray("locations");
+                        for (String key : keys) locations.addObject().put("type", "ST_DUMMY");
+                    }
+                    case "/api/finishWriteCache" -> {
+                        var keys = pending.remove(request.path("write_session_id").asText());
+                        int count = request.path("success_blocks").path("offset").asInt();
+                        published.addAll(keys.subList(0, count));
+                    }
+                    default -> throw new IllegalArgumentException("Unexpected KVCM API");
+                }
+                byte[] response = json.writeValueAsBytes(result);
+                exchange.sendResponseHeaders(200, response.length);
+                exchange.getResponseBody().write(response);
+            }
+        });
+        server.start();
+        var settings = Map.<String, Object>of("enable_remote_cache", true,
+            "mock.cache.remote.instance.id", "remote-test",
+            "mock.cache.remote.endpoint", "http://127.0.0.1:" + server.getAddress().getPort(),
+            "mock.cache.remote.read.timeout.ms", 1000);
+        try (var first = LLMMockEngine.start(config("1", settings));
+             var second = LLMMockEngine.start(config("1", settings))) {
+            assertEquals(0, generate(first, 1).getTotalReuseLen());
+            await(() -> published.size() == 2);
+            assertEquals(0, second.cacheManager().itemCount());
+
+            var coldCapacity = second.cacheManager().snapshot(0, false);
+            var restored = generate(second, 2);
+            assertEquals(4, restored.getRemoteReuseLen());
+            assertEquals(0, restored.getLocalReuseLen());
+            assertEquals(4, restored.getTotalReuseLen());
+            assertEquals(4, sample(metrics(second), "rtp_llm_stream_cache_remote_reuse_length_sum", ""));
+            assertEquals(0, sample(metrics(second), "rtp_llm_stream_cache_device_reuse_length_sum", ""));
+            assertEquals(1, sample(metrics(second), "rtp_llm_forward_tokens_total", "kind=\"compute\""));
+            assertEquals(2, second.cacheManager().itemCount());
+            var warmCapacity = second.cacheManager().snapshot(0, false);
+            assertEquals(coldCapacity.totalBlocks(), warmCapacity.totalBlocks());
+            assertEquals(coldCapacity.availableBlocks(), warmCapacity.availableBlocks());
+
+            failRead.set(true);
+            try (var third = LLMMockEngine.start(config("1", settings))) {
+                assertEquals(0, generate(third, 3).getTotalReuseLen());
+                assertEquals(5, sample(metrics(third), "rtp_llm_forward_tokens_total", "kind=\"compute\""));
+            }
+        } finally {
+            server.stop(0);
+        }
+    }
+
     @Test void shardedPrefillUsesBaseHashesButVirtualAllocationAndReuseBoundaries() throws Exception {
         try(var node=LLMMockEngine.start(config("1",Map.of("prefill_cp_size",4)))) {
             var channel=ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
@@ -242,6 +323,19 @@ class LocalRpcTest {
     @Test void nativePrefixKeysAgreeWithProductionCppReferenceIncludingNegativeToken() {
         var input = GenerateInputPB.newBuilder().addAllTokenIds(List.of(1, 2, 3, 4, 5, -1)).build();
         assertEquals(List.of(-8366447769517741626L, 455111481605203084L, 3534810267006820515L), org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(org.flexlb.mock.protocol.MultimodalProtocol.text(input), 2, 0, 1).keys());
+    }
+
+    private static AuxInfoPB generate(LLMMockEngine node, long requestId) throws Exception {
+        var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
+        try {
+            var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS);
+            var outputs = rpc.generateStreamCall(PrefillAdmissionTest.input(requestId, 0, true));
+            var result = outputs.next().getFlattenOutput().getAuxInfo(0);
+            assertFalse(outputs.hasNext());
+            return result;
+        } finally {
+            channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+        }
     }
 
     private RtpConfig config(String expression) throws Exception { return config(expression,Map.of()); }

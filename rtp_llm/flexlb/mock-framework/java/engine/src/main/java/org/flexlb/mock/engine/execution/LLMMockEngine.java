@@ -44,7 +44,7 @@ public final class LLMMockEngine implements AutoCloseable {
             if (samples != null) metricSource = samples;
             engine = new EngineLoop(lock, scheduler, finished, cacheManager, config.compute(), config.role(), config.id());
             try {
-                service = new RtpRpcService(RtpRpcService.Config.from(config), cacheManager, lock, finished, engine, config.groupScheduling());
+                service = new RtpRpcService(RtpRpcService.Config.from(config), cacheManager, lock, finished, engine, config.groupScheduling(), config);
             } catch (RuntimeException | Error failure) {
                 engine.close();
                 throw failure;

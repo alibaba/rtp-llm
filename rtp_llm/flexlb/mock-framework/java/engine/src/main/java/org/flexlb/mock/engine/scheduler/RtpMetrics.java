@@ -196,8 +196,13 @@ final class RtpMetrics {
     }
 
     void prepared(long deviceInputTokens, long reused, long elapsedNanos) {
+        prepared(deviceInputTokens, reused, 0, elapsedNanos);
+    }
+
+    void prepared(long deviceInputTokens, long reused, long remoteReused, long elapsedNanos) {
         events.observe("rtp_llm_device_input_length", deviceInputTokens);
-        events.observe("rtp_llm_stream_cache_device_reuse_length", reused);
+        events.observe("rtp_llm_stream_cache_device_reuse_length", reused - remoteReused);
+        if (remoteReused > 0) events.observe("rtp_llm_stream_cache_remote_reuse_length", remoteReused);
         events.observe("rtp_llm_kv_cache_match_to_ready_latency_us", elapsedNanos / 1000.0,
             Map.of("load_attempted", "false"));
     }

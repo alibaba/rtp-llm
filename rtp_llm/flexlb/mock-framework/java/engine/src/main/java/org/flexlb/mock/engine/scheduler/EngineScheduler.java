@@ -66,7 +66,13 @@ public interface EngineScheduler extends AutoCloseable {
      */
     record Input(String identity, long requestId, long groupId, int tokens, int maxNewTokens, int priority,
                  long started, long deadline, PromptCacheKeys promptCacheKeys, boolean reuse, boolean retained, int minNewTokens, boolean ignoreEos,
-                 boolean streaming) {
+                 boolean streaming, RemotePrefix remotePrefix) {
+        public Input(String identity, long requestId, long groupId, int tokens, int maxNewTokens, int priority,
+                     long started, long deadline, PromptCacheKeys promptCacheKeys, boolean reuse, boolean retained,
+                     int minNewTokens, boolean ignoreEos, boolean streaming) {
+            this(identity, requestId, groupId, tokens, maxNewTokens, priority, started, deadline, promptCacheKeys,
+                reuse, retained, minNewTokens, ignoreEos, streaming, RemotePrefix.NONE);
+        }
         public Input(String identity, long requestId, long groupId, int tokens, int maxNewTokens, int priority,
                      long started, long deadline, PromptCacheKeys promptCacheKeys, boolean reuse, boolean retained,
                      int minNewTokens, boolean ignoreEos) {
@@ -77,9 +83,30 @@ public interface EngineScheduler extends AutoCloseable {
             if (identity == null || identity.isBlank() || tokens < 1 || maxNewTokens < 1 || minNewTokens < 0 || minNewTokens > maxNewTokens)
                 throw new IllegalArgumentException("Invalid scheduling input");
             Objects.requireNonNull(promptCacheKeys);
+            Objects.requireNonNull(remotePrefix);
             if (promptCacheKeys.inputLength() != tokens) throw new IllegalArgumentException("Cache identity length differs from input");
         }
         public List<Long> keys() { return promptCacheKeys.keys(); }
+
+        public Input withRemotePrefix(RemotePrefix prefix) {
+            return new Input(identity, requestId, groupId, tokens, maxNewTokens, priority, started, deadline,
+                promptCacheKeys, reuse, retained, minNewTokens, ignoreEos, streaming, prefix);
+        }
+    }
+
+    /**
+     * Confirmed continuous Remote suffix, relative to the original prompt's logical blocks.
+     */
+    record RemotePrefix(int startBlock, int endBlock) {
+        public static final RemotePrefix NONE = new RemotePrefix(0, 0);
+
+        public RemotePrefix {
+            if (startBlock < 0 || endBlock < startBlock) throw new IllegalArgumentException("Invalid Remote prefix");
+        }
+
+        public int additionalBlocks(int localBlocks) {
+            return localBlocks < startBlock ? 0 : Math.max(0, endBlock - localBlocks);
+        }
     }
 
     /**
@@ -90,6 +117,7 @@ public interface EngineScheduler extends AutoCloseable {
         RequestState.Snapshot snapshot();
         Progress progress();
         int reused();
+        default int remoteReused() { return 0; }
     }
 
     record Progress(int generated, int iterations, boolean finished) {}

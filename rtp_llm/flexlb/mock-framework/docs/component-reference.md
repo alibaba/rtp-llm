@@ -16,7 +16,7 @@ Case 的 `component.config` 可内联 YAML，或引用相对 Case 目录的配�
 
 已实现且语义对齐的 real 参数沿用 real 命名。未实现的 real 参数直接忽略，值不参与校验，也不进入 effective-config。例如磁盘/远端缓存、独立加载/重试超时、异步传输队列、模型路径、设备与尚未模拟的并行通信参数；出现这些参数不代表 Mock 实现了对应能力。原生参数拼写错误也会被忽略，因此复用 real 配置后应核对 effective-config 中真正生效的字段。
 
-Mock 专用参数使用小写点号名称，例如 `mock.compute.forward.expression`，也可写成嵌套 YAML。未知 Mock 参数、大小写错误、空对象、null、路径冲突和重复输入均报错。缓存淘汰固定使用 LRU。`device_blocks`、`reserve_blocks` 只是 effective-config 的派生输出，不能用于配置覆盖。不要在 Mock Case 放入不生效的 `memory_cache_size_mb`、`enable_disk_cache`、`block_tree_*_queue_max_size` 或独立加载/重试超时。`enable_memory_cache=true` 和 `enable_remote_cache=true` 仍拒绝启动。扩大统一池请设置 `mock.cache.total.blocks`。
+Mock 专用参数使用小写点号名称，例如 `mock.compute.forward.expression`，也可写成嵌套 YAML。未知 Mock 参数、大小写错误、空对象、null、路径冲突和重复输入均报错。缓存淘汰固定使用 LRU。`device_blocks`、`reserve_blocks` 只是 effective-config 的派生输出，不能用于配置覆盖。不要在 Mock Case 放入不生效的 `memory_cache_size_mb`、`enable_disk_cache`、`block_tree_*_queue_max_size` 或独立加载/重试超时。`enable_memory_cache=true` 会拒绝启动。Prefill 的 `enable_remote_cache=true` 可接专用 KVCM dummy 组模拟 Remote；配置见 [Whale Engine](whale-engine.md#仅元数据的-prefill-remote-cache)。扩大统一池请设置 `mock.cache.total.blocks`。
 
 ### 已实现的 real 参数
 

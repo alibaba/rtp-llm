@@ -30,6 +30,18 @@ final class BlockTree {
         return result;
     }
 
+    int prefixLength(List<Long> keys) {
+        var children = roots;
+        int matched = 0;
+        for (long key : keys) {
+            var node = children.get(key);
+            if (node == null) break;
+            matched++;
+            children = node.children;
+        }
+        return matched;
+    }
+
     void validatePath(List<Long> keys) {
         Long parent = null;
         for (long key : keys) {

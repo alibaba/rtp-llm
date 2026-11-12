@@ -84,12 +84,20 @@ P/D 按每实例的**逻辑 block**配置。先用该角色的每块 token 数�
 | `RESERVE_BLOCK_RATIO`     | 首次分配预留的 Device 百分比，默认 5。按可用 Device block 数向下取整。                      |
 | `REUSE_CACHE`             | 默认 `false`。启用前缀复用时，角色和请求都要允许复用，且 Device 前缀索引已开启。            |
 | `ENABLE_DEVICE_CACHE`     | 默认 `true`。控制本地前缀查找和发布。设为 `false` 时，请求执行仍会分配 KV block。           |
-| `ENABLE_REMOTE_CACHE`     | 默认 `false`。Mock 启动时校验此值，设为 `true` 会拒绝启动。                                 |
+| `ENABLE_REMOTE_CACHE`     | 默认 `false`。Prefill 可启用仅元数据的 Remote Cache，见下文。                              |
 | `ENABLE_MEMORY_CACHE`     | 默认 `false`。Mock 启动时校验此值，设为 `true` 会拒绝启动。                                 |
 
 这三个 `ENABLE_*` 参数使用默认值时可省略。模拟本地前缀复用时，显式设置 `REUSE_CACHE=true`。需要扩大统一缓存容量时，调整 `MOCK_CACHE_TOTAL_BLOCKS`。
 
 例如 P 为 CP4、基础块为 128，配置 `TEST_BLOCK_NUM=1025`、`MOCK_CACHE_TOTAL_BLOCKS=4096`。Device 可用 1024 块，即 524,288 token，统一缓存最多保留 4096 块，即 2,097,152 token。缓存命中也要取得 Device 驻留额度才可进入计算。
+
+### 仅元数据的 Prefill Remote Cache
+
+先在专用 KVCM 中创建 `dummy` 存储（`root_path=memory://`）和独立 Remote 实例组。组内注册一个供所有 P 共用的实例，块大小使用逻辑键跨度，例如基础块 256、CP4 时为 1024。实例配置一个固定大小的 location spec。按「目标逻辑块数 × spec 字节数」配置实例组字节配额，并在组内设置 LRU、水位和回收周期。KVCM 进程资源和元数据存储容量需单独评估。
+
+只在 Prefill 设置 `ENABLE_REMOTE_CACHE=true`、`REUSE_CACHE=true` 和 `MOCK_CACHE_REMOTE_INSTANCE_ID`。Whale 使用 `RECO_ENABLE_VIPSERVER` / `RECO_VIPSERVER_DOMAIN` 发现该 KVCM。独立测试可显式设置 `MOCK_CACHE_REMOTE_ENDPOINT`（Meta HTTP）；也可用 `RECO_SERVER_ADDRESS` 作为 gRPC 发现入口。读取超时 `MOCK_CACHE_REMOTE_READ_TIMEOUT_MS` 默认 20 ms。首轮对照可用同一镜像关／开 Remote，保持 Master `LOCAL_SYNC` 和 P/D HBM 事件关闭。
+
+Prefill 在进入 Engine 队列前读缺失前缀的长度，成功后减少 Forward 计算 token。入队后的本地匹配必须仍能衔接这段 Remote 前缀。失败或并发满时按本地命中继续，Device 准入和 PD 生命周期保持原有语义。成功完成后有界后台任务提交 KVCM 写入，队列满时丢弃写入。模拟只计查询耗时。监控 Remote 复用使用 `rtp_llm_stream_cache_remote_reuse_length`，查询耗时和失败、写回失败及丢弃使用 `mock_remote_cache_*` 指标。
 
 ## 性能模拟
 

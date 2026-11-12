@@ -44,6 +44,11 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
 
     public RtpRpcService(Config config, KvCacheManager cache, Object executionLock, TaskHistory finished,
                          EngineLoop engine, boolean groups) {
+        this(config, cache, executionLock, finished, engine, groups, null);
+    }
+
+    public RtpRpcService(Config config, KvCacheManager cache, Object executionLock, TaskHistory finished,
+                         EngineLoop engine, boolean groups, RtpConfig settings) {
         this.config = config;
         this.groups = groups;
         this.cache = cache; this.finished = finished;
@@ -53,7 +58,8 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         rpcMetrics = new EventMetrics(config.role().name(), metricTags);
         rpcMetrics.register(rpcRegistry);
         prefill = config.role() == Role.prefill
-            ? new PrefillRpcServer(config, executionLock, finished, engine, this::recordCancellation, this::trackRequest) : null;
+            ? new PrefillRpcServer(config, executionLock, finished, engine, this::recordCancellation, this::trackRequest,
+                settings == null ? null : org.flexlb.mock.engine.cache.KvcmRemoteCache.start(settings, cache, rpcMetrics)) : null;
         decode = prefill == null ? new DecodeRpcServer(config, executionLock, engine, this::recordCancellation, this::trackRequest) : null;
     }
 
