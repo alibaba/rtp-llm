@@ -95,10 +95,10 @@ def _integer(value):
 
 
 def _identity(header):
-    if header.keys() - set(HEADER_FIELDS):
-        raise ValueError("Unknown evidence header field")
+    if header.keys() != set(HEADER_FIELDS):
+        raise ValueError("Missing or unknown evidence header fields")
     return tuple(
-        header.get(key, "") if key == "client" else _integer(header.get(key, 0))
+        header[key] if key == "client" else _integer(header[key])
         for key in HEADER_FIELDS
     )
 

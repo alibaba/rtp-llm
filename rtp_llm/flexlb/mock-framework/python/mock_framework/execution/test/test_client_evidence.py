@@ -136,6 +136,16 @@ def test_reads_three_schedule_attempts_in_sealed_journal(evidence):
     assert result.outcome == "success"
 
 
+def test_header_requires_explicit_first_index(evidence):
+    directory, rows = evidence()
+    del rows[0]["first_index"]
+    write_rows(directory, rows)
+    with pytest.raises(
+        ExecutionError, match="Missing or unknown evidence header fields"
+    ):
+        list(read_requests(directory))
+
+
 @pytest.mark.parametrize(
     "damage", ["missing_seal", "sequence", "duplicate_field", "trailing", "truncated"]
 )
