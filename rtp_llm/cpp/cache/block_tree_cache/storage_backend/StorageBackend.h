@@ -192,6 +192,7 @@ protected:
     // result can still check the rank responses and settle the source pins.
     using WriteResult = std::function<void(bool on_worker)>;
     using WriteCompletion = std::function<void(WriteResult)>;
+    using WritePinFilter = std::function<void(const std::vector<size_t>&)>;
     const CacheTopology&      topology() const;
     const DeviceBlockPoolPtr& devicePool(const std::string& tag) const;
     std::vector<BlockInfo>    convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const;
@@ -212,9 +213,9 @@ protected:
         return false;
     }
     virtual void               writeImpl(const StorageRequest& request)                             = 0;
-    // False means the write finished on this worker. True keeps the request and
-    // its source pins alive until the result passed to done has been settled.
-    virtual bool startWriteImpl(const StorageRequest& request, WriteCompletion) {
+    // Filter validated handle rows once on this worker before dispatch or done.
+    // True defers completion, retaining the request and remaining pins until done settles.
+    virtual bool startWriteImpl(const StorageRequest& request, WriteCompletion, WritePinFilter) {
         writeImpl(request);
         return false;
     }

@@ -54,6 +54,11 @@ public:
     void decRef(BlockIdxType block, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
     void decRef(const BlockIdList& blocks, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
 
+    // Allocate release bookkeeping before acquiring a storage I/O pin.
+    // The caller keeps the pool alive and invokes the returned closure exactly once.
+    // Release cannot allocate and isolates capacity-notification exceptions.
+    std::function<void()> pinForStorageIo(BlockIdxType block);
+
     struct RequestReferenceUpdate {
         BlockIdxType block;
         int          old_count;
@@ -126,6 +131,7 @@ protected:
 
 private:
     bool hasRequestRefNoLock(BlockIdxType block) const;
+    void releaseStorageIoPin(BlockIdxType block, const std::function<void()>& notify) noexcept;
     // global_layer_id -> {layout_index, local_layer_id}
     std::pair<int, int> mapGlobalLayerIdToLocal(int global_layer_id) const;
     void                checkLayoutValidity(int layout_id) const;
