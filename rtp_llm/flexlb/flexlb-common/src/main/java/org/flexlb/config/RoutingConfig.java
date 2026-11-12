@@ -6,6 +6,10 @@ import lombok.Getter;
 import lombok.Setter;
 import org.flexlb.balance.prediction.DecodeCostFormula;
 
+/**
+ * 角色路由配置：流量分组、各角色成本估计与 Prefill 候选排序策略开关。
+ * 所有百分比配置均以 {@link #PERCENTAGE_SCALE} 为满刻度。
+ */
 @Getter
 @Setter
 public final class RoutingConfig {
@@ -39,6 +43,21 @@ public final class RoutingConfig {
         private ExecutionTimeEstimatorConfig executionTimeEstimator =
                 new ExecutionTimeEstimatorConfig();
         private CacheAffinityConfig cacheAffinity;
+        /** Select Prefill workers by outstanding uncached token work. */
+        private TokenBalanceConfig tokenBalance;
+    }
+
+    /** Prefill selection by outstanding uncached tokens with hot/cold cache affinity. */
+    @Getter
+    @Setter
+    public static final class TokenBalanceConfig {
+        /** Above this percentage, the largest reusable prefix wins without a TTFT cap. */
+        private double minPrefixHitPercent = 50.0;
+        /** Token backpressure cap applied to cold Prefill candidates. */
+        private long maxPendingComputeTokens = 2_000_000L;
+        /** Include recently completed uncached tokens in ranking only; disabled by default. */
+        private boolean enableWindow = false;
+        private long windowMs = 10_000L;
     }
 
     @Getter

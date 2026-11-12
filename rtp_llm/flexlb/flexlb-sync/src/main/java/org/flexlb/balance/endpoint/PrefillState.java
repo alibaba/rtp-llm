@@ -6,6 +6,7 @@ import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.projection.WorkSnapshot.Phase;
 import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.strategy.PrefillTokenWorkload;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
@@ -427,6 +428,8 @@ public final class PrefillState {
         /** Canonical callback identity after admission commits. */
         private RequestExecution committedItem;
         private Reservation reservation;
+        /** Outstanding uncached tokens accepted for this entry; released once at removal. */
+        private long tokenWork;
         private RequestEntry(ScheduledRequest item) {
             this(item, QueueMembership.WAITING);
         }
@@ -609,6 +612,58 @@ public final class PrefillState {
     private int batchLeasesInUse;
     private long routeLeasesInUse;
     private volatile long occupiedRouteSlots;
+    /** Outstanding uncached token accounting for selection scoring; null when disabled. */
+    private volatile PrefillTokenWorkload tokenWorkload;
+
+    /** Enable outstanding-token accounting used by token-balanced Prefill selection. */
+    public void enableTokenWorkload(long windowMs) {
+        tokenWorkload = new PrefillTokenWorkload(windowMs);
+    }
+
+    /** Soft scoring reservation; never consumes admission capacity and closes exactly once. */
+    public PrefillTokenWorkload.Reservation planTokenWork(long tokens) {
+        PrefillTokenWorkload ledger = tokenWorkload;
+        if (ledger == null) {
+            throw new IllegalStateException("Prefill token workload accounting is disabled");
+        }
+        return ledger.plan(tokens);
+    }
+
+    /** Advisory outstanding uncached work for ranking, including soft reservations. */
+    public double tokenWorkloadScore() {
+        PrefillTokenWorkload ledger = tokenWorkload;
+        return ledger == null ? 0.0 : ledger.snapshot().score();
+    }
+
+    /** Advisory outstanding uncached pending work for cold capacity checks. */
+    public long pendingTokenWork() {
+        PrefillTokenWorkload ledger = tokenWorkload;
+        return ledger == null ? 0L : ledger.snapshot().pendingTokens();
+    }
+
+    /** Caller holds {@link #lock}. */
+    private void acceptTokenWorkUnderLock(RequestEntry entry, ScheduledRequest item) {
+        requireLock();
+        PrefillTokenWorkload ledger = tokenWorkload;
+        if (ledger == null) {
+            return;
+        }
+        long tokens = Math.max(0L, item.seqLen() - item.hitCache());
+        entry.tokenWork = tokens;
+        ledger.accept(tokens);
+    }
+
+    /** Caller holds {@link #lock}. */
+    private void releaseTokenWorkUnderLock(RequestEntry entry) {
+        requireLock();
+        PrefillTokenWorkload ledger = tokenWorkload;
+        long tokens = entry.tokenWork;
+        entry.tokenWork = 0L;
+        if (ledger == null || tokens == 0L) {
+            return;
+        }
+        ledger.release(tokens);
+    }
 
     /** Publish the capacity summary before readers observe a new ownership revision. */
     private void recordMutationUnderLock() {
@@ -649,6 +704,7 @@ public final class PrefillState {
         if (!requests.remove(requestId, entry)) {
             return false;
         }
+        releaseTokenWorkUnderLock(entry);
         if (entry.queueMembership == QueueMembership.UNINDEXED) {
             committedWorkCapture = null;
         }
@@ -680,6 +736,7 @@ public final class PrefillState {
             removeRequestUnderLock(item.requestId(), entry);
             throw failure;
         }
+        acceptTokenWorkUnderLock(entry, item);
         recordMutationUnderLock();
         return true;
     }
@@ -1103,6 +1160,7 @@ public final class PrefillState {
             ReservationResult<RouteReservation> result = new ReservationResult<>(CapacityStatus.ACQUIRED, reservation);
             entry.reservation = reservation;
             putRequestUnderLock(item.requestId(), entry);
+            acceptTokenWorkUnderLock(entry, item);
             routeLeasesInUse++;
             committedWorkCapture = null;
             recordMutationUnderLock();

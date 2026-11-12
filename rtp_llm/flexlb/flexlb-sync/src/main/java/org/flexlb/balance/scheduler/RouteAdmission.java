@@ -10,6 +10,7 @@ import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
+import org.flexlb.balance.strategy.PrefillTokenWorkload;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
@@ -61,6 +62,7 @@ public final class RouteAdmission implements AutoCloseable {
         WorkerEndpoint.GenerationPin decodePin = null;
         ServerStatus decodeStatus = null;
         long decodePlacementVersion = 0L;
+        PrefillTokenWorkload.Reservation prefillTokenReservation = null;
 
         try {
             for (SelectedRole selected : selectedRoles) {
@@ -73,20 +75,29 @@ public final class RouteAdmission implements AutoCloseable {
                 long placementVersion = selected.placementVersion();
                 WorkerEndpoint.GenerationPin pin =
                         selected.takeGenerationPin();
+                PrefillTokenWorkload.Reservation tokenReservation =
+                        selected.takeTokenReservation();
                 WorkerEndpoint endpoint = pin.endpoint();
                 if (role != null && role.supportsPrefill()) {
                     if (prefillPin != null
                             || !(endpoint instanceof PrefillEndpoint prefill)) {
                         pin.close();
+                        if (tokenReservation != null) {
+                            tokenReservation.close();
+                        }
                         throw new IllegalStateException(
                                 "route requires one exact Prefill selection");
                     }
                     prefillEndpoint = prefill;
                     prefillPin = pin;
+                    prefillTokenReservation = tokenReservation;
                     prefillStatus = status;
                     prefillPlacementVersion = placementVersion;
                     prefillWorkMs = selected.prefillWorkMs();
                     continue;
+                }
+                if (tokenReservation != null) {
+                    tokenReservation.close();
                 }
                 if (role == RoleType.DECODE) {
                     if (decodePin != null
@@ -120,12 +131,15 @@ public final class RouteAdmission implements AutoCloseable {
                             prefillPlacementVersion,
                             prefillWorkMs,
                             decodePin,
-                            decodePlacementVersion),
+                            decodePlacementVersion,
+                            prefillTokenReservation),
                     decodeRequest.bind(decodeStatus, decodeEndpoint, null));
         } catch (RuntimeException | Error failure) {
             WorkerEndpoint.GenerationPin ownedPrefillPin = prefillPin;
             WorkerEndpoint.GenerationPin ownedDecodePin = decodePin;
+            PrefillTokenWorkload.Reservation ownedTokenReservation = prefillTokenReservation;
             try (ownedPrefillPin; ownedDecodePin) {
+                if (ownedTokenReservation != null) { ownedTokenReservation.close(); }
                 throw failure;
             }
         }
@@ -376,9 +390,13 @@ public final class RouteAdmission implements AutoCloseable {
 
     private void closePins() {
         try (var prefill = prefillPin(); var decode = decodePin()) { }
+        PrefillTokenWorkload.Reservation tokenReservation =
+                selection.prefillTokenReservation();
+        if (tokenReservation != null) { tokenReservation.close(); }
     }
 
     private record Selection(PrefillEndpoint prefillEndpoint, WorkerEndpoint.GenerationPin prefillPin,
                              ServerStatus prefillStatus, long prefillPlacementVersion, long prefillWorkMs,
-                             WorkerEndpoint.GenerationPin decodePin, long decodePlacementVersion) { }
+                             WorkerEndpoint.GenerationPin decodePin, long decodePlacementVersion,
+                             PrefillTokenWorkload.Reservation prefillTokenReservation) { }
 }

@@ -14,7 +14,9 @@ import java.util.Objects;
  * <p>The selection owns its generation pin until the router moves it into a
  * DIRECT registration or a queue-route admission.  It carries only immutable
  * routing output besides that pin; {@link ServerStatus} remains response
- * metadata and is never an ownership token.</p>
+ * metadata and is never an ownership token.  A token-balanced Prefill
+ * selection may also hold a soft workload reservation that the route owner
+ * converts into pending token work at commit.</p>
  */
 public final class SelectedRole implements AutoCloseable {
 
@@ -22,12 +24,14 @@ public final class SelectedRole implements AutoCloseable {
     private final ServerStatus serverStatus;
     private final long prefillWorkMs;
     private final long placementVersion;
+    private PrefillTokenWorkload.Reservation tokenReservation;
 
     private SelectedRole(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
             long prefillWorkMs,
-            long placementVersion) {
+            long placementVersion,
+            PrefillTokenWorkload.Reservation tokenReservation) {
         this.generationPin = generationPin;
         this.serverStatus = serverStatus;
         if (!serverStatus.isSuccess()) {
@@ -68,27 +72,33 @@ public final class SelectedRole implements AutoCloseable {
     public static SelectedRole prefill(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
-            long prefillWorkMs) {
+            long prefillWorkMs,
+            long placementVersion) {
         return prefill(
                 generationPin, serverStatus, prefillWorkMs,
-                endpointPlacementVersion(generationPin));
+                placementVersion, null);
     }
 
+    /** Calling a factory consumes the pin, including every validation failure. */
     public static SelectedRole prefill(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
             long prefillWorkMs,
-            long placementVersion) {
+            long placementVersion,
+            PrefillTokenWorkload.Reservation tokenReservation) {
         if (prefillWorkMs < 0L) {
             if (generationPin != null) {
                 generationPin.close();
+            }
+            if (tokenReservation != null) {
+                tokenReservation.close();
             }
             throw new IllegalArgumentException(
                     "Prefill work must be non-negative");
         }
         return createOwned(
                 generationPin, serverStatus, prefillWorkMs,
-                placementVersion);
+                placementVersion, tokenReservation);
     }
 
     public static SelectedRole decode(
@@ -109,14 +119,14 @@ public final class SelectedRole implements AutoCloseable {
             }
             throw new IllegalArgumentException("Decode selection requires Decode metadata");
         }
-        return createOwned(generationPin, serverStatus, -1L, placementVersion);
+        return createOwned(generationPin, serverStatus, -1L, placementVersion, null);
     }
 
     public static SelectedRole stateless(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus) {
         return createOwned(
-                generationPin, serverStatus, -1L, 0L);
+                generationPin, serverStatus, -1L, 0L, null);
     }
 
     /** Calling a factory consumes the pin, including every validation failure. */
@@ -125,13 +135,26 @@ public final class SelectedRole implements AutoCloseable {
             ServerStatus serverStatus,
             long prefillWorkMs,
             long placementVersion) {
+        return createOwned(generationPin, serverStatus, prefillWorkMs,
+                placementVersion, null);
+    }
+
+    private static SelectedRole createOwned(
+            WorkerEndpoint.GenerationPin generationPin,
+            ServerStatus serverStatus,
+            long prefillWorkMs,
+            long placementVersion,
+            PrefillTokenWorkload.Reservation tokenReservation) {
         try {
             return new SelectedRole(
                     generationPin, serverStatus, prefillWorkMs,
-                    placementVersion);
+                    placementVersion, tokenReservation);
         } catch (RuntimeException | Error failure) {
             if (generationPin != null) {
                 generationPin.close();
+            }
+            if (tokenReservation != null) {
+                tokenReservation.close();
             }
             throw failure;
         }
@@ -175,6 +198,13 @@ public final class SelectedRole implements AutoCloseable {
         return owned;
     }
 
+    /** Move the soft token reservation to the route owner; never consumes admission capacity. */
+    public PrefillTokenWorkload.Reservation takeTokenReservation() {
+        PrefillTokenWorkload.Reservation owned = tokenReservation;
+        tokenReservation = null;
+        return owned;
+    }
+
     private WorkerEndpoint.GenerationPin requireOwnedPin() {
         if (generationPin == null) {
             throw new IllegalStateException(
@@ -189,6 +219,15 @@ public final class SelectedRole implements AutoCloseable {
         generationPin = null;
         if (owned != null) {
             owned.close();
+        }
+        closeTokenReservation();
+    }
+
+    private void closeTokenReservation() {
+        PrefillTokenWorkload.Reservation reservation = tokenReservation;
+        tokenReservation = null;
+        if (reservation != null) {
+            reservation.close();
         }
     }
 }
