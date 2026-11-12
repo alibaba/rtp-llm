@@ -674,6 +674,11 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
                 StaticPrefillSegment(layer_idx, "hc_attn", admission),
                 StaticPrefillSegment(layer_idx, "hc_moe", admission, mega),
             )
+            moe_graph = getattr(self.mlp, "_mega_prefill_graph", None)
+            if moe_graph is not None:
+                moe_graph.unified_segment = StaticPrefillSegment(
+                    layer_idx, "moe", admission, mega
+                )
 
     def _attention_quant_config(self, config, weights):
         if getattr(config, "_qwen4_nvfp4_source", False):
