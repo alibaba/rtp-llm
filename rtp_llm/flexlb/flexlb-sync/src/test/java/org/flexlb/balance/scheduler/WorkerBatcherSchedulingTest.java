@@ -374,6 +374,7 @@ class WorkerBatcherSchedulingTest {
                                                         .RouteReservation.class)));
         DeliveryStrategy delivery = mock(DeliveryStrategy.class);
         List<org.flexlb.dao.pv.DecisionGroup> published = new CopyOnWriteArrayList<>();
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
         when(delivery.prepare(
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any(),
@@ -383,6 +384,24 @@ class WorkerBatcherSchedulingTest {
                             List<ScheduledRequest> members = List.copyOf(invocation.getArgument(0));
                             var transaction = mock(DeliveryStrategy.Transaction.class);
                             when(transaction.items()).thenReturn(members);
+                            when(transaction.commitUnderLock())
+                                    .thenAnswer(
+                                            ignored -> {
+                                                var precedingWork =
+                                                        runtime.ownedState().committedSnapshot();
+                                                for (ScheduledRequest member : members) {
+                                                    assertTrue(
+                                                            runtime.ownedState()
+                                                                    .terminalizeActiveUnderLock(
+                                                                            member));
+                                                    var reservation =
+                                                            member.takePublishedRouteReservation();
+                                                    if (reservation != null) {
+                                                        reservation.close();
+                                                    }
+                                                }
+                                                return precedingWork;
+                                            });
                             org.mockito.Mockito.doAnswer(
                                             ignored -> {
                                                 for (ScheduledRequest member : members) {
@@ -398,7 +417,6 @@ class WorkerBatcherSchedulingTest {
                                             org.mockito.ArgumentMatchers.any());
                             return transaction;
                         });
-        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
         List<ScheduledRequest> requests = new ArrayList<>();
         for (int i = 0; i < count; i++) {
             ScheduledRequest request =
