@@ -471,6 +471,8 @@ TEST(CacheConfigCreatorTest, LinearReplayCanBeExplicitlyDisabled) {
     EXPECT_FALSE(runtime.enable_linear_replay);
     CacheConfigCreator::configureLinearReplay(config, model, parallelism, runtime, speculative, true);
 
+    EXPECT_FALSE(config.isLinearReplayGroup(0));
+    EXPECT_TRUE(config.isLegacyLinearGroup(0));
     EXPECT_TRUE(config.linear_replay.group_ids.empty());
     EXPECT_EQ(config.linear_replay.slotCount(), 0);
     EXPECT_EQ(config.linear_replay.maxSteps(), 0);
@@ -522,15 +524,14 @@ TEST(CacheConfigCreatorTest, LinearReplayReservesLogBytesIndependentlyOfLinearPo
 }
 
 TEST(CacheConfigCreatorTest, ReplayRequiresCudaAndSelectsTargetLinearGroups) {
-    auto target = makeTestGroup(std::make_shared<LinearKVCacheSpec>("target_linear", 16, 16, 1),
-                                CacheGroupType::LINEAR,
-                                {0});
-    auto draft = makeTestGroup(std::make_shared<LinearKVCacheSpec>("draft_linear", 16, 16, 1),
-                               CacheGroupType::LINEAR,
-                               {2});
-    auto full = makeTestGroup(test::makeResolvedMhaSpec(DataType::TYPE_BF16, 1, 4, 16, "full"),
-                              CacheGroupType::FULL,
-                              {1});
+    auto target =
+        makeTestGroup(std::make_shared<LinearKVCacheSpec>("target_linear_a", 16, 16, 1), CacheGroupType::LINEAR, {0});
+    auto second_target =
+        makeTestGroup(std::make_shared<LinearKVCacheSpec>("target_linear_b", 16, 16, 1), CacheGroupType::LINEAR, {1});
+    auto draft =
+        makeTestGroup(std::make_shared<LinearKVCacheSpec>("draft_linear", 16, 16, 1), CacheGroupType::LINEAR, {3});
+    auto full =
+        makeTestGroup(test::makeResolvedMhaSpec(DataType::TYPE_BF16, 1, 4, 16, "full"), CacheGroupType::FULL, {2});
     ModelConfig model;
     auto& linear = model.linear_attention_config;
     linear.linear_num_key_heads   = 8;
@@ -553,8 +554,10 @@ TEST(CacheConfigCreatorTest, ReplayRequiresCudaAndSelectsTargetLinearGroups) {
             SCOPED_TRACE(::testing::Message() << "tp_size=" << tp_size << ", vector_gate=" << vector_gate);
             linear.replay_vector_gate = vector_gate;
             CacheConfig config;
-            config.layer_num = 2;
-            config.setTopology({target, draft, full}, {{0, {"target_linear"}}, {1, {"full"}}, {2, {"draft_linear"}}});
+            config.layer_num = 3;
+            config.setTopology(
+                {target, draft, full, second_target},
+                {{0, {"target_linear_a"}}, {1, {"target_linear_b"}}, {2, {"full"}}, {3, {"draft_linear"}}});
 #if !USING_CUDA || USE_PPU
             EXPECT_ANY_THROW(
                 CacheConfigCreator::configureLinearReplay(config, model, parallelism, runtime, speculative, true));
@@ -568,7 +571,14 @@ TEST(CacheConfigCreatorTest, ReplayRequiresCudaAndSelectsTargetLinearGroups) {
             const int64_t gate_dim    = vector_gate ? 128 : 1;
             const int64_t channels    = 2 * key_heads * 128 + value_heads * 128;
             EXPECT_EQ(plan.group_ids,
-                      (std::vector<int>{static_cast<int>(config.topology().groupIdForTag("target_linear"))}));
+                      (std::vector<int>{static_cast<int>(config.topology().groupIdForTag("target_linear_a")),
+                                        static_cast<int>(config.topology().groupIdForTag("target_linear_b"))}));
+            for (const auto& group : config.groups()) {
+                const auto group_id = static_cast<int>(config.topology().groupIdForTag(group.tag));
+                const bool replay   = group.tag == "target_linear_a" || group.tag == "target_linear_b";
+                EXPECT_EQ(config.isLinearReplayGroup(group_id), replay);
+                EXPECT_EQ(config.isLegacyLinearGroup(group_id), group.tag == "draft_linear");
+            }
             EXPECT_EQ(plan.slotCount(), 5);
             EXPECT_EQ(plan.maxSteps(), 4);
             EXPECT_EQ(plan.k_shape, (std::array<int64_t, 4>{5, 4, key_heads, 128}));
@@ -576,12 +586,12 @@ TEST(CacheConfigCreatorTest, ReplayRequiresCudaAndSelectsTargetLinearGroups) {
             EXPECT_EQ(plan.g_shape, (std::array<int64_t, 4>{5, 4, value_heads, gate_dim}));
             EXPECT_EQ(plan.conv_input_shape, (std::array<int64_t, 3>{5, 4, channels}));
             EXPECT_EQ(plan.conv_dtype, DataType::TYPE_BF16);
-            // One target layer of 4-step logs per slot; draft layers must not contribute.
+            // Both target LINEAR layers need logs; FULL and draft layers do not.
             const size_t values_per_step = key_heads * 128 + value_heads * 128 + value_heads * gate_dim;
             EXPECT_EQ(plan.reserve_bytes,
                       5u
                           * (2u * sizeof(int64_t) + 2u * sizeof(int32_t)
-                             + 4u * (values_per_step * sizeof(float) + channels * sizeof(uint16_t))));
+                             + 2u * 4u * (values_per_step * sizeof(float) + channels * sizeof(uint16_t))));
         }
     }
 }

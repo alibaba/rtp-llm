@@ -129,9 +129,15 @@ public:
         return topology().groups();
     }
 
+    // Startup resolves the replay switch for all eligible target LINEAR groups.
+    // Group consumers share that decision instead of checking runtime flags.
+    bool isLinearReplayGroup(int group_id) const {
+        return linear_replay.containsGroup(group_id);
+    }
+
     bool isLegacyLinearGroup(int group_id) const {
         return groups()[static_cast<size_t>(group_id)].policy.group_type == CacheGroupType::LINEAR
-               && !linear_replay.containsGroup(group_id);
+               && !isLinearReplayGroup(group_id);
     }
 
     CacheTopology::GroupRefs groupsForLayer(int layer_id) const {

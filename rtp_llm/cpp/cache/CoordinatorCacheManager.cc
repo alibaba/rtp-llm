@@ -85,7 +85,7 @@ RequiredPositions chunkRequiredPositions(const MallocInfo&             malloc_in
 }
 
 bool isMutableLinearReplayGroup(const CacheConfig& config, const KVCacheResource& resource, int group_id) {
-    return config.linear_replay.containsGroup(group_id)
+    return config.isLinearReplayGroup(group_id)
            && resource.linearReplayPrefixLimit(config.groupTags()[static_cast<size_t>(group_id)])
                   != std::numeric_limits<size_t>::max();
 }
@@ -711,8 +711,8 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
         const auto& group            = *kv_cache_groups_[static_cast<size_t>(group_id)];
         const int   group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, common_seq_len);
         const auto  common_slots     = static_cast<size_t>(group.needBlocksNum(group_common_seq, 0));
-        const int   group_reserve    =
-            config_.linear_replay.containsGroup(group_id) ? 0 : malloc_info.complete_token_ids->getReserveStep();
+        const int   group_reserve =
+            config_.isLinearReplayGroup(group_id) ? 0 : malloc_info.complete_token_ids->getReserveStep();
         for (const size_t pos : chunkRequiredPositions(malloc_info, group, group_reserve)) {
             if (pos < common_slots) {
                 prepared.required_positions[static_cast<size_t>(group_id)].insert(pos);
@@ -833,7 +833,7 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
             const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
             auto&       filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(group_id)];
             auto&      group        = kv_cache_groups_[static_cast<size_t>(group_id)];
-            const bool replay_group = config_.linear_replay.containsGroup(group_id);
+            const bool  replay_group     = config_.isLinearReplayGroup(group_id);
             const int group_reserve = replay_group ? 0 : reserve_step;
             const bool replay_mutable =
                 isMutableLinearReplayGroup(config_, kv_resource->cacheResource(b), group_id);
@@ -878,8 +878,9 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
                 const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
                 kv_cache_groups_[static_cast<size_t>(group_id)]->removeSkippedBlocks(
                     kv_resource->mutableBlockIds(b, tag),
-                    malloc_info.reuse_cache && !isMutableLinearReplayGroup(config_, kv_resource->cacheResource(b), group_id),
-                    config_.linear_replay.containsGroup(group_id) ? 0 : reserve_step);
+                    malloc_info.reuse_cache
+                        && !isMutableLinearReplayGroup(config_, kv_resource->cacheResource(b), group_id),
+                    config_.isLinearReplayGroup(group_id) ? 0 : reserve_step);
             }
         }
         return {true, 0};
@@ -929,7 +930,7 @@ void CoordinatorCacheManager::pruneKVCache(const BatchKVCacheResourcePtr& resour
         for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
             const auto& group       = config_.groups()[static_cast<size_t>(group_id)];
             const int group_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, group.tag, completed_seq_len);
-            const int group_reserve = config_.linear_replay.containsGroup(group_id) ? 0 : reserve_step;
+            const int   group_reserve   = config_.isLinearReplayGroup(group_id) ? 0 : reserve_step;
             auto&     blocks        = resource->mutableBlockIds(batch, group.tag);
             auto&     manager       = kv_cache_groups_[static_cast<size_t>(group_id)];
             const int completed_slots = manager->needBlocksNum(group_seq_len, 0, group_reserve);
@@ -1571,7 +1572,7 @@ int CoordinatorCacheManager::getNeedBlocks(const MallocInfo& malloc_info) const 
             continue;
         }
         const int  reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, tag) : 0;
-        const int  group_reserve      = config_.linear_replay.containsGroup(group_id) ? 0 : reserve_step;
+        const int  group_reserve      = config_.isLinearReplayGroup(group_id) ? 0 : reserve_step;
         const auto required_positions = chunkRequiredPositions(malloc_info, *group, group_reserve);
         const auto need = group->getNeedBlocks(group_common_seq,
                                                group_seq_len,
@@ -1599,8 +1600,11 @@ int CoordinatorCacheManager::estimatePeakNeedBlocks(const KVCacheResource& kv_ca
             continue;
         }
         need_blocks += kv_cache_groups_[static_cast<size_t>(group_id)]->estimatePeakNeedBlocks(
-            seq_len, kv_cache_resource.blocks(tag), remaining_tokens,
-            config_.linear_replay.containsGroup(group_id) ? 0 : reserve_step, enable_reuse_cache);
+            seq_len,
+            kv_cache_resource.blocks(tag),
+            remaining_tokens,
+            config_.isLinearReplayGroup(group_id) ? 0 : reserve_step,
+            enable_reuse_cache);
     }
     return need_blocks;
 }
@@ -1614,8 +1618,12 @@ int CoordinatorCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
     int peak_blocks = 0;
     for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
         peak_blocks += kv_cache_groups_[static_cast<size_t>(group_id)]->estimateInitialBatchPeakNeedBlocks(
-            seq_len, common_seq_len, remaining_tokens,
-            config_.linear_replay.containsGroup(group_id) ? 0 : reserve_step, enable_reuse_cache, target_batch_size);
+            seq_len,
+            common_seq_len,
+            remaining_tokens,
+            config_.isLinearReplayGroup(group_id) ? 0 : reserve_step,
+            enable_reuse_cache,
+            target_batch_size);
     }
     return peak_blocks;
 }
@@ -1672,7 +1680,7 @@ int CoordinatorCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr
         }
         const int   cur_blocks        = batch_kv_cache_resource->blocksNum(0, tag);
         need_blocks += kv_cache_groups_[static_cast<size_t>(group_id)]->needBlocksNum(
-            effective_seq_len, cur_blocks, config_.linear_replay.containsGroup(group_id) ? 0 : reserve_step);
+            effective_seq_len, cur_blocks, config_.isLinearReplayGroup(group_id) ? 0 : reserve_step);
     }
     return need_blocks;
 }
@@ -2223,7 +2231,7 @@ CoordinatorCacheManager::evaluateInitCapacityImpl(const MallocInfo&             
         const auto& base_required_positions =
             required_positions == nullptr ? no_required_positions : (*required_positions)[group_index];
         const int group_reserve =
-            config_.linear_replay.containsGroup(group_id) ? 0 : malloc_info.complete_token_ids->getReserveStep();
+            config_.isLinearReplayGroup(group_id) ? 0 : malloc_info.complete_token_ids->getReserveStep();
         const auto group_required_positions =
             chunkRequiredPositions(malloc_info, *kv_cache_groups_[group_index], group_reserve, base_required_positions);
         const auto need = kv_cache_groups_[group_index]->getNeedBlocks(
@@ -2374,8 +2382,7 @@ void CoordinatorCacheManager::logMallocFailure(const MallocInfo& malloc_info,
             current_valid_blocks += static_cast<size_t>(std::count_if(
                 blocks.begin(), blocks.end(), [](auto block) { return !isNullBlockIdx(block) && block > 0; }));
             need_slots += kv_cache_groups_[group_index]->needBlocksNum(
-                group_seq_len, static_cast<int>(blocks.size()),
-                config_.linear_replay.containsGroup(gid) ? 0 : reserve_step);
+                group_seq_len, static_cast<int>(blocks.size()), config_.isLinearReplayGroup(gid) ? 0 : reserve_step);
         }
         if (incremental) {
             // Dense groups materialize every logical slot. Sparse groups
@@ -2390,9 +2397,12 @@ void CoordinatorCacheManager::logMallocFailure(const MallocInfo& malloc_info,
         } else {
             const int  group_common_len = cpEffectiveSeqLenForReserve(cp_mapper, config_, group.tag, raw_common_len);
             const int  reuse_blocks_len = malloc_info.reuse_cache ? resource->blocksNum(0, group.tag) : 0;
-            const auto need             = kv_cache_groups_[group_index]->getNeedBlocks(
-                group_common_len, group_seq_len, config_.linear_replay.containsGroup(gid) ? 0 : reserve_step,
-                reuse_blocks_len, malloc_info.reuse_cache);
+            const auto need =
+                kv_cache_groups_[group_index]->getNeedBlocks(group_common_len,
+                                                             group_seq_len,
+                                                             config_.isLinearReplayGroup(gid) ? 0 : reserve_step,
+                                                             reuse_blocks_len,
+                                                             malloc_info.reuse_cache);
             need_blocks = need.common_blocks + batch_size * need.extra_blocks;
         }
         if (gid == failed_group && failed_need_blocks >= 0) {

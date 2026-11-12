@@ -76,9 +76,8 @@ bool StreamCacheResource::copyChunkKernelBlocks(int batch, const std::string& ta
         return false;
     }
     const bool reuse = reuseCache();
-    const int group_reserve =
-        config.linear_replay.containsGroup(static_cast<int>(config.topology().groupIdForTag(tag))) ?
-            0 : stream_->reserveStep();
+    const int  group_reserve =
+        config.isLinearReplayGroup(static_cast<int>(config.topology().groupIdForTag(tag))) ? 0 : stream_->reserveStep();
     const auto banks =
         group.chunkCacheBlockCount(stream_->seqLength(), stream_->maxChunkSize(), reuse, group_reserve);
     if (banks == 0) {
