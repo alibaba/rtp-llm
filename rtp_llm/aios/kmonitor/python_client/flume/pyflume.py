@@ -76,3 +76,6 @@ class FlumeClient(object):
             logger.warn("send batch to flume exception:%s", e)
             logger.warn(traceback.format_exc())
             self._transObj.reconnect()
+
+    def close(self):
+        self._transObj.close()
