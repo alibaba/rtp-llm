@@ -16,7 +16,7 @@ from mock_framework.config.validation import Bounds
 from mock_framework.execution import ExecutionError
 from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
-from mock_framework.execution.step.step import Reference, resolve_refs
+from mock_framework.execution.step.step import Reference, StepContext, resolve_refs
 from mock_framework.execution.step.step_registry import StepRegistry, register_step
 
 
@@ -267,6 +267,30 @@ def test_existing_output_is_not_overwritten(setup, tmp_path):
     case, launch = setup([step()])
     with pytest.raises(FileExistsError):
         asyncio.run(run_case(case, launch, tmp_path))
+
+
+def test_step_globals_use_one_topology_snapshot():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    active = Mock(
+        return_value=[
+            {"role": "prefill", "rpc": "p:2"},
+            {"role": "master", "rpc": "m:1"},
+            {"role": "client", "rpc": "c:1"},
+            {"role": "decode", "rpc": "d:1"},
+            {"role": "prefill", "rpc": "p:1"},
+        ]
+    )
+    runtime = SimpleNamespace(topology=SimpleNamespace(active=active))
+    context = StepContext(runtime, records=None, query_time="", deadline=0)
+    assert context.globals() == {
+        "masters": ["m:1"],
+        "prefill": ["p:1", "p:2"],
+        "decode": ["d:1"],
+        "vit": [],
+    }
+    active.assert_called_once_with()
 
 
 def test_refs_do_not_eval_and_require_actual_fields():

@@ -198,12 +198,9 @@ class StepContext:
         return remaining
 
     def globals(self):
+        nodes = self.runtime.topology.active()
         return {
-            name: sorted(
-                item["rpc"]
-                for item in self.runtime.topology.active()
-                if item["role"] == role
-            )
+            name: sorted(item["rpc"] for item in nodes if item["role"] == role)
             for name, role in [
                 ("masters", "master"),
                 ("prefill", "prefill"),
