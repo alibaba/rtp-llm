@@ -459,17 +459,19 @@ class MoE(nn.Module):
                 x.device,
             )
         if T > 65536:
-            # Huge prefill: allocate the combined-output buffer per call
-            # instead of caching it. The cached [1048320, 5120] bf16 block
-            # (10.74 GiB) is dead weight through the whole attention/HC
-            # phase of every following layer and was part of the ~165 GiB
-            # live set when the FFN HC-pre collapse requested its 10 GiB
-            # readout (n21/n22/n23 all-rank OOMs; n23 proved allocator
-            # tuning alone can't assemble the request from the remaining
-            # holes). Per-call alloc/free lets the allocator recycle one
-            # clean segment, and the collapse readout fits the vacated
-            # 10.74 GiB hole exactly.
-            out = torch.empty((T, self.dim), dtype=x.dtype, device=x.device)
+            # Huge prefill: consume the input activation IN PLACE instead of
+            # materializing any full-T output. History: the cached
+            # [1048320, 5120] bf16 block (10.74 GiB) was dead weight through
+            # every attention phase (n21/n22/n23 OOMs); the per-call
+            # replacement then died being ALLOCATED at the tightest point of
+            # the ratio-0 layers (n27: Tried 10.00 GiB, moe_layer.py:472,
+            # after selection+SA+FFN-pre all passed). The chunk loop reads
+            # x[chunk] fully (gate, experts, shared expert) before
+            # combine_routed_and_shared writes out[chunk], and callers only
+            # use the returned tensor, so aliasing out=x is stream-ordered
+            # safe and removes the last 10 GiB-class fresh allocation from
+            # the per-layer peak.
+            out = x
         else:
             out = _get_or_create_final_out(T, self.dim, x.dtype, x.device)[:T]
         for token_start in range(0, T, chunk_tokens):
