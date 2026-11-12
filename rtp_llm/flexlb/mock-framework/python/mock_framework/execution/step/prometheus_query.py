@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
-from . import _metrics
-from ._metrics import QuerySample
+from .. import metrics
+from ..roles.prometheus import QuerySample
 from .step import StepContext
 from .step_registry import register_step
 
@@ -25,6 +25,6 @@ class QueryResult:
 async def prometheus_query(ctx: StepContext, args: PrometheusQueryArgs) -> QueryResult:
     """Execute raw PromQL at the fixed step time without rewriting it."""
     return QueryResult(
-        await _metrics.instant(ctx, args.promql, _metrics.epoch(ctx.query_time)),
+        await metrics.instant(ctx, args.promql, metrics.epoch(ctx.query_time)),
         ctx.query_time,
     )

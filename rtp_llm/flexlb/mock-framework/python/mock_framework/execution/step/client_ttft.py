@@ -1,4 +1,4 @@
-from ._metrics import LatencyArgs, latency
+from ..metrics import LatencyArgs, latency
 from .step import StepContext
 from .step_registry import register_step
 

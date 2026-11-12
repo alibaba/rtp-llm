@@ -2,9 +2,11 @@
 
 import asyncio
 import json
+import math
 import os
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime
 
 import yaml
@@ -26,6 +28,113 @@ def _epoch(value):
     if parsed.tzinfo is None:
         raise ExecutionError("Prometheus scrape timestamp must include timezone")
     return parsed.timestamp()
+
+
+@dataclass(frozen=True)
+class QuerySample:
+    labels: dict[str, str]
+    value: float
+    sample_time: float
+
+
+def _query(url, path, parameters, timeout):
+    if url is None:
+        raise ExecutionError("This Case needs a runner-managed Prometheus")
+    body = urllib.parse.urlencode(parameters).encode()
+    request = urllib.request.Request(
+        url.rstrip("/") + path,
+        body,
+        {"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw = response.read(16 * 1024 * 1024 + 1)
+    if len(raw) > 16 * 1024 * 1024:
+        raise ExecutionError("Prometheus response exceeds limit")
+    data = json.loads(
+        raw, parse_constant=lambda s: (_ for _ in ()).throw(ValueError(s))
+    )
+    if data.get("status") != "success" or data.get("warnings"):
+        raise ExecutionError("Prometheus failed or returned partial/warning results")
+    return data["data"]
+
+
+def _fetch(url, expression, at, timeout):
+    data = _query(
+        url,
+        "/api/v1/query",
+        {
+            "query": expression,
+            "time": at,
+            "timeout": f"{max(1, int(timeout * 1000))}ms",
+        },
+        timeout,
+    )
+    kind = data["resultType"]
+    if kind not in ("scalar", "vector"):
+        raise ExecutionError("Expected scalar or float instant vector")
+    rows = (
+        [{"metric": {}, "value": data["result"]}]
+        if kind == "scalar"
+        else data["result"]
+    )
+    result = []
+    for item in rows:
+        labels, pair = item["metric"], item["value"]
+        if (
+            not isinstance(labels, dict)
+            or any(type(k) is not str or type(v) is not str for k, v in labels.items())
+            or not isinstance(pair, list)
+            or len(pair) != 2
+            or type(pair[0]) not in (int, float)
+            or type(pair[1]) is not str
+        ):
+            raise ExecutionError("Invalid Prometheus sample")
+        value, sample_time = float(pair[1]), float(pair[0])
+        if not math.isfinite(value) or not math.isfinite(sample_time):
+            raise ExecutionError(
+                "Nonfinite Prometheus sample; missing observations or zero denominator"
+            )
+        result.append(QuerySample(labels, value, sample_time))
+    return result
+
+
+def _fetch_series(url, expression, start, end, step, timeout):
+    data = _query(
+        url,
+        "/api/v1/query_range",
+        {
+            "query": expression,
+            "start": start,
+            "end": end,
+            "step": step,
+            "timeout": f"{max(1, int(timeout * 1000))}ms",
+        },
+        timeout,
+    )
+    if data["resultType"] != "matrix":
+        raise ExecutionError("Expected a Prometheus range matrix")
+    series = []
+    for item in data["result"]:
+        labels = item["metric"]
+        if not isinstance(labels, dict) or any(
+            type(k) is not str or type(v) is not str for k, v in labels.items()
+        ):
+            raise ExecutionError("Invalid Prometheus labels")
+        samples = []
+        for pair in item["values"]:
+            if (
+                not isinstance(pair, list)
+                or len(pair) != 2
+                or type(pair[0]) not in (int, float)
+                or type(pair[1]) is not str
+            ):
+                raise ExecutionError("Invalid Prometheus range sample")
+            point, value = float(pair[0]), float(pair[1])
+            if not math.isfinite(point) or not math.isfinite(value):
+                raise ExecutionError("Nonfinite Prometheus range sample")
+            samples.append(QuerySample(labels, value, point))
+        series.append(samples)
+    return series
 
 
 class PrometheusRole:
@@ -127,6 +236,15 @@ class PrometheusRole:
             except (OSError, ValueError):
                 pass
             await asyncio.sleep(0.05)
+
+    async def query(self, expression, at, timeout):
+        # A cancelled read can outlive its await only until the bounded HTTP timeout.
+        return await asyncio.to_thread(_fetch, self.url, expression, at, timeout)
+
+    async def query_range(self, expression, start, end, step, timeout):
+        return await asyncio.to_thread(
+            _fetch_series, self.url, expression, start, end, step, timeout
+        )
 
     def register_target(self, instance_id, endpoint):
         try:

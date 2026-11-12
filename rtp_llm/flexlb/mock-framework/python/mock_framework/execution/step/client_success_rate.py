@@ -3,9 +3,8 @@ import math
 from dataclasses import dataclass
 from typing import Annotated, Literal
 
-from .. import ExecutionError
+from .. import ExecutionError, metrics
 from ..roles.client import ClientResult
-from . import _metrics
 from ._targets import Targets
 from .step import StepContext
 from .step_registry import register_step
@@ -43,15 +42,15 @@ async def client_success_rate(
             raise ExecutionError("Playback has no terminal observations")
         return sum(client.outcomes["success"] for client in clients) / finished
 
-    millis = _metrics.counter_window_ms(ctx, args)
-    labels, targets = _metrics.scope(ctx, args, "client")
+    millis = metrics.counter_window_ms(ctx, args)
+    labels, targets = metrics.scope(ctx, args, "client")
     name = "mock_client_requests_finished_total"
     success = f'{name}{{{labels},outcome="success"}}'
     total = f"{name}{{{labels}}}"
     expression = (
         f"sum(increase({success}[{millis}ms])) / sum(increase({total}[{millis}ms]))"
     )
-    value = await _metrics.evaluate(
+    value = await metrics.evaluate(
         ctx,
         args,
         expression,

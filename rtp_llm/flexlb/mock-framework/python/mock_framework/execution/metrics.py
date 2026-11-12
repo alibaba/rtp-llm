@@ -1,6 +1,5 @@
-"""Common Mock metric semantics. No request is routed through an Engine JVM."""
+"""Build metric queries and check sampling coverage for a Case."""
 
-import asyncio
 import json
 import math
 import re
@@ -8,12 +7,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Literal
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
-from ...config.validation import duration
-from .. import ExecutionError
-from ._targets import Targets
+from ..config.validation import duration
+from . import ExecutionError
+from .step._targets import Targets
 
 
 @dataclass(frozen=True)
@@ -27,13 +24,6 @@ class LatencyArgs(MetricArgs):
     statistic: Literal["mean", "p95", "p99"] = "mean"
 
 
-@dataclass(frozen=True)
-class QuerySample:
-    labels: dict[str, str]
-    value: float
-    sample_time: float
-
-
 def epoch(value):
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
@@ -41,74 +31,12 @@ def epoch(value):
     return parsed.timestamp()
 
 
-def _query(url, path, parameters, timeout):
-    body = urlencode(parameters).encode()
-    request = Request(
-        url.rstrip("/") + path,
-        body,
-        {"Content-Type": "application/x-www-form-urlencoded"},
-    )
-    with urlopen(request, timeout=timeout) as response:
-        raw = response.read(16 * 1024 * 1024 + 1)
-    if len(raw) > 16 * 1024 * 1024:
-        raise ExecutionError("Prometheus response exceeds limit")
-    data = json.loads(
-        raw, parse_constant=lambda s: (_ for _ in ()).throw(ValueError(s))
-    )
-    if data.get("status") != "success" or data.get("warnings"):
-        raise ExecutionError("Prometheus failed or returned partial/warning results")
-    return data["data"]
-
-
-def fetch(url, expression, at, timeout):
-    data = _query(
-        url,
-        "/api/v1/query",
-        {
-            "query": expression,
-            "time": at,
-            "timeout": f"{max(1, int(timeout * 1000))}ms",
-        },
-        timeout,
-    )
-    kind = data["resultType"]
-    if kind not in ("scalar", "vector"):
-        raise ExecutionError("Expected scalar or float instant vector")
-    rows = (
-        [{"metric": {}, "value": data["result"]}]
-        if kind == "scalar"
-        else data["result"]
-    )
-    result = []
-    for item in rows:
-        labels, pair = item["metric"], item["value"]
-        if (
-            not isinstance(labels, dict)
-            or any(type(k) is not str or type(v) is not str for k, v in labels.items())
-            or not isinstance(pair, list)
-            or len(pair) != 2
-            or type(pair[0]) not in (int, float)
-            or type(pair[1]) is not str
-        ):
-            raise ExecutionError("Invalid Prometheus sample")
-        value, sample_time = float(pair[1]), float(pair[0])
-        if not math.isfinite(value) or not math.isfinite(sample_time):
-            raise ExecutionError(
-                "Nonfinite Prometheus sample; missing observations or zero denominator"
-            )
-        result.append(QuerySample(labels, value, sample_time))
-    return result
-
-
 async def instant(ctx, expression, at):
     monitor = ctx.runtime.monitoring
-    if monitor is None or monitor.url is None:
+    if monitor is None:
         raise ExecutionError("This Case needs a runner-managed Prometheus")
-    # A cancelled read can outlive its await only until the same bounded HTTP timeout.
     try:
-        result = await asyncio.to_thread(
-            fetch, monitor.url, expression, at, ctx.timeout
-        )
+        result = await monitor.query(expression, at, ctx.timeout)
     except (OSError, ValueError, KeyError, TypeError) as error:
         raise ExecutionError(f"Prometheus query failed: {error}") from error
     ctx.records.emit(
@@ -185,51 +113,6 @@ async def metric(ctx, args, role, numerator, denominator=None, *, kind=None):
     return await evaluate(ctx, args, expression, histories)
 
 
-def fetch_series(url, expression, start, end, step, timeout):
-    data = _query(
-        url,
-        "/api/v1/query_range",
-        {
-            "query": expression,
-            "start": start,
-            "end": end,
-            "step": step,
-            "timeout": f"{max(1, int(timeout * 1000))}ms",
-        },
-        timeout,
-    )
-    if data["resultType"] != "matrix":
-        raise ExecutionError("Expected a Prometheus range matrix")
-    series = []
-    for item in data["result"]:
-        labels = item["metric"]
-        if not isinstance(labels, dict) or any(
-            type(k) is not str or type(v) is not str for k, v in labels.items()
-        ):
-            raise ExecutionError("Invalid Prometheus labels")
-        samples = []
-        for pair in item["values"]:
-            if (
-                not isinstance(pair, list)
-                or len(pair) != 2
-                or type(pair[0]) not in (int, float)
-                or type(pair[1]) is not str
-            ):
-                raise ExecutionError("Invalid Prometheus range sample")
-            point, value = float(pair[0]), float(pair[1])
-            if not math.isfinite(point) or not math.isfinite(value):
-                raise ExecutionError("Nonfinite Prometheus range sample")
-            samples.append(QuerySample(labels, value, point))
-        expected = int(round((end - start) / step)) + 1
-        if len(samples) != expected or any(
-            abs(s.sample_time - (start + i * step)) > 0.001
-            for i, s in enumerate(samples)
-        ):
-            raise ExecutionError("Incomplete metric range coverage")
-        series.append(samples)
-    return series
-
-
 def sample_period(ctx):
     # Like Grafana's minimum rate interval: enough scrapes for a stable counter delta.
     monitor = ctx.runtime.monitoring
@@ -247,14 +130,19 @@ def counter_window_ms(ctx, args):
 
 async def series_query(ctx, expression, start, end, step):
     monitor = ctx.runtime.monitoring
-    if monitor is None or monitor.url is None:
+    if monitor is None:
         raise ExecutionError("This Case needs a runner-managed Prometheus")
     try:
-        values = await asyncio.to_thread(
-            fetch_series, monitor.url, expression, start, end, step, ctx.timeout
-        )
+        values = await monitor.query_range(expression, start, end, step, ctx.timeout)
     except (OSError, ValueError, KeyError, TypeError) as error:
         raise ExecutionError(f"Prometheus range query failed: {error}") from error
+    expected = int(round((end - start) / step)) + 1
+    for samples in values:
+        if len(samples) != expected or any(
+            abs(sample.sample_time - (start + i * step)) > 0.001
+            for i, sample in enumerate(samples)
+        ):
+            raise ExecutionError("Incomplete metric range coverage")
     ctx.records.emit(
         event="metric_query",
         query_time=ctx.query_time,

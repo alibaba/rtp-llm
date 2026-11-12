@@ -4,10 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 from mock_framework.config import ConfigError
-from mock_framework.execution import ExecutionError
+from mock_framework.execution import ExecutionError, metrics
 from mock_framework.execution.roles import client as client_runtime
 from mock_framework.execution.roles.client import ClientRole
-from mock_framework.execution.step import _metrics as metrics
 from mock_framework.execution.step.client_qps import client_qps
 from mock_framework.execution.step.step_registry import StepRegistry
 from mock_framework.execution.test.helpers import FRAMEWORK

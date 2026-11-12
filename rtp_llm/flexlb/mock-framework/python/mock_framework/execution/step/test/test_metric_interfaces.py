@@ -6,8 +6,8 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs
 
 import pytest
-from mock_framework.execution import ExecutionError
-from mock_framework.execution.step import _metrics as metrics
+from mock_framework.execution import ExecutionError, metrics
+from mock_framework.execution.roles.prometheus import PrometheusRole, QuerySample
 from mock_framework.execution.step.client_success_rate import (
     SuccessRateArgs,
     client_success_rate,
@@ -17,10 +17,14 @@ from mock_framework.execution.step.engine_prefill_tps import engine_prefill_tps
 from mock_framework.execution.step.engine_prefill_tps_with_cache import (
     engine_prefill_tps_with_cache,
 )
+from mock_framework.execution.step.prometheus_query import (
+    PrometheusQueryArgs,
+    prometheus_query,
+)
 
 
 @pytest.fixture
-def prometheus():
+def prometheus(tmp_path):
     state = {
         "body": {"status": "success", "data": {"resultType": "vector", "result": []}},
         "requests": [],
@@ -41,7 +45,13 @@ def prometheus():
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    state["url"] = "http://127.0.0.1:" + str(server.server_port)
+    monitor = PrometheusRole(
+        None,
+        SimpleNamespace(directory=tmp_path),
+        {"startup_timeout": "2s", "scrape_interval": "1s"},
+    )
+    monitor.url = f"http://127.0.0.1:{server.server_port}"
+    state["monitor"] = monitor
     try:
         yield state
     finally:
@@ -53,13 +63,18 @@ def prometheus():
 def test_raw_promql_is_sent_unchanged_at_fixed_time_and_empty_vector_stays_empty(
     prometheus,
 ):
-    assert metrics.fetch(prometheus["url"], "sum(rate(x[2m]))", 123.25, 2) == []
+    ctx = context()
+    ctx.query_time = "1970-01-01T00:02:03.250Z"
+    ctx.timeout = 2
+    ctx.runtime.monitoring = prometheus["monitor"]
+    result = asyncio.run(prometheus_query(ctx, PrometheusQueryArgs("sum(rate(x[2m]))")))
+    assert result.samples == []
     assert prometheus["requests"] == [
         {"query": ["sum(rate(x[2m]))"], "time": ["123.25"], "timeout": ["2000ms"]}
     ]
     prometheus["body"]["data"] = {"resultType": "scalar", "result": [123.25, "4"]}
-    assert metrics.fetch(prometheus["url"], "4", 123.25, 2) == [
-        metrics.QuerySample({}, 4.0, 123.25)
+    assert asyncio.run(prometheus["monitor"].query("4", 123.25, 2)) == [
+        QuerySample({}, 4.0, 123.25)
     ]
 
 
@@ -85,7 +100,7 @@ def test_backend_errors_nonfinite_and_malformed_results_are_not_valid_observatio
 ):
     change(prometheus["body"])
     with pytest.raises(ExecutionError):
-        metrics.fetch(prometheus["url"], "x", 1, 2)
+        asyncio.run(prometheus["monitor"].query("x", 1, 2))
 
 
 def context():
@@ -116,10 +131,10 @@ def test_hit_rate_aggregates_counters_before_division_and_uses_one_query_time(
         calls.append((expression, at))
         if expression.startswith("count_over_time"):
             return [
-                metrics.QuerySample({"instance": f"127.0.0.1:{port}"}, 4, at)
+                QuerySample({"instance": f"127.0.0.1:{port}"}, 4, at)
                 for port in (1001, 1002)
             ]
-        return [metrics.QuerySample({}, 0.76, at)]
+        return [QuerySample({}, 0.76, at)]
 
     monkeypatch.setattr(metrics, "instant", instant)
     assert (
@@ -148,7 +163,7 @@ def test_missing_insufficient_or_duplicate_instance_history_fails_before_aggrega
     async def instant(ctx, expression, at):
         calls.append(expression)
         return [
-            metrics.QuerySample({"instance": f"127.0.0.1:{port}"}, count, at)
+            QuerySample({"instance": f"127.0.0.1:{port}"}, count, at)
             for port, count in zip(ports, counts)
         ]
 
@@ -201,11 +216,11 @@ def test_success_rate_aggregates_all_terminals_without_a_request_count_floor(
         calls.append((expression, at))
         if expression.startswith("count_over_time"):
             return [
-                metrics.QuerySample({"instance": f"127.0.0.1:{port}"}, 2, at)
+                QuerySample({"instance": f"127.0.0.1:{port}"}, 2, at)
                 for port in (1001, 1002)
             ]
         # Even one successful terminal in the interval is sufficient.
-        return [metrics.QuerySample({}, 1.0, at)]
+        return [QuerySample({}, 1.0, at)]
 
     monkeypatch.setattr(metrics, "instant", instant)
     assert (
@@ -240,10 +255,10 @@ def test_success_rate_rejects_zero_terminal_nan_and_invalid_ratios(monkeypatch, 
     async def instant(ctx, expression, at):
         if expression.startswith("count_over_time"):
             return [
-                metrics.QuerySample({"instance": f"127.0.0.1:{port}"}, 2, at)
+                QuerySample({"instance": f"127.0.0.1:{port}"}, 2, at)
                 for port in (1001, 1002)
             ]
-        return [metrics.QuerySample({}, value, at)]
+        return [QuerySample({}, value, at)]
 
     monkeypatch.setattr(metrics, "instant", instant)
     with pytest.raises(ExecutionError, match="terminal observations|finite sample"):
@@ -257,10 +272,7 @@ def test_success_rate_rejects_a_missing_outcome_series(monkeypatch):
 
     async def instant(ctx, expression, at):
         ports = (1001,) if 'outcome="timeout"' in expression else (1001, 1002)
-        return [
-            metrics.QuerySample({"instance": f"127.0.0.1:{port}"}, 2, at)
-            for port in ports
-        ]
+        return [QuerySample({"instance": f"127.0.0.1:{port}"}, 2, at) for port in ports]
 
     monkeypatch.setattr(metrics, "instant", instant)
     with pytest.raises(ExecutionError, match="coverage"):
@@ -320,8 +332,8 @@ def test_success_rate_window_keeps_selected_clients_and_fixed_end(monkeypatch):
     async def instant(ctx, expression, at):
         calls.append((expression, at))
         if expression.startswith("count_over_time"):
-            return [metrics.QuerySample({"instance": "127.0.0.1:1002"}, 2, at)]
-        return [metrics.QuerySample({}, 0.75, at)]
+            return [QuerySample({"instance": "127.0.0.1:1002"}, 2, at)]
+        return [QuerySample({}, 0.75, at)]
 
     monkeypatch.setattr(metrics, "instant", instant)
     result = asyncio.run(
@@ -357,23 +369,26 @@ def test_prefill_throughput_reads_the_real_named_gauge(monkeypatch, method, name
 
 
 def test_series_rejects_missing_points_and_nonfinite_samples(prometheus):
+    ctx = context()
+    ctx.runtime.monitoring = prometheus["monitor"]
+    ctx.timeout = 2
     prometheus["body"]["data"] = {
         "resultType": "matrix",
         "result": [{"metric": {}, "values": [[100, "0.8"], [101, "0.9"], [102, "1"]]}],
     }
-    samples = metrics.fetch_series(prometheus["url"], "ratio", 100, 102, 1, 2)
+    samples = asyncio.run(metrics.series_query(ctx, "ratio", 100, 102, 1))
     assert [s.value for s in samples[0]] == [0.8, 0.9, 1]
     assert prometheus["requests"][0]["step"] == ["1"]
     prometheus["body"]["data"]["result"][0]["values"].pop(1)
     with pytest.raises(ExecutionError, match="coverage"):
-        metrics.fetch_series(prometheus["url"], "ratio", 100, 102, 1, 2)
+        asyncio.run(metrics.series_query(ctx, "ratio", 100, 102, 1))
     prometheus["body"]["data"]["result"][0]["values"] = [
         [100, "NaN"],
         [101, "1"],
         [102, "1"],
     ]
     with pytest.raises(ExecutionError, match="Nonfinite"):
-        metrics.fetch_series(prometheus["url"], "ratio", 100, 102, 1, 2)
+        asyncio.run(metrics.series_query(ctx, "ratio", 100, 102, 1))
 
 
 def test_series_checks_every_point_and_each_instances_history(monkeypatch):
@@ -384,22 +399,19 @@ def test_series_checks_every_point_and_each_instances_history(monkeypatch):
 
     async def instant(ctx, expression, at):
         return [
-            metrics.QuerySample({"instance": f"127.0.0.1:{p}"}, 4, at)
-            for p in (1001, 1002)
+            QuerySample({"instance": f"127.0.0.1:{p}"}, 4, at) for p in (1001, 1002)
         ]
 
     async def series(ctx, expression, start, end, step):
         if expression.startswith("count_over_time"):
             return [
                 [
-                    metrics.QuerySample({"instance": f"127.0.0.1:{p}"}, 4, t)
+                    QuerySample({"instance": f"127.0.0.1:{p}"}, 4, t)
                     for t in (end - 1, end)
                 ]
                 for p in (1001, 1002)
             ]
-        return [
-            [metrics.QuerySample({}, v, t) for v, t in zip((0.9, 0.7), (end - 1, end))]
-        ]
+        return [[QuerySample({}, v, t) for v, t in zip((0.9, 0.7), (end - 1, end))]]
 
     monkeypatch.setattr(metrics, "instant", instant)
     monkeypatch.setattr(metrics, "series_query", series)
@@ -417,7 +429,7 @@ def test_series_checks_every_point_and_each_instances_history(monkeypatch):
 def test_latency_interval_uses_request_weights_and_merges_histogram_buckets(
     monkeypatch,
 ):
-    from mock_framework.execution.step._metrics import LatencyArgs
+    from mock_framework.execution.metrics import LatencyArgs
     from mock_framework.execution.step.client_ttft import client_ttft
 
     ctx = context()
@@ -433,17 +445,14 @@ def test_latency_interval_uses_request_weights_and_merges_histogram_buckets(
         if expression.startswith("count_over_time"):
             if "_bucket" in expression:
                 return [
-                    metrics.QuerySample(
-                        {"instance": f"127.0.0.1:{p}", "le": bound}, 4, at
-                    )
+                    QuerySample({"instance": f"127.0.0.1:{p}", "le": bound}, 4, at)
                     for p, bounds in bucket_bounds.items()
                     for bound in bounds
                 ]
             return [
-                metrics.QuerySample({"instance": f"127.0.0.1:{p}"}, 4, at)
-                for p in (1001, 1002)
+                QuerySample({"instance": f"127.0.0.1:{p}"}, 4, at) for p in (1001, 1002)
             ]
-        return [metrics.QuerySample({}, 0.25, at)]
+        return [QuerySample({}, 0.25, at)]
 
     monkeypatch.setattr(metrics, "instant", instant)
     assert asyncio.run(client_ttft(ctx, LatencyArgs(range=["-30s", "0s"]))) == 0.25
@@ -475,19 +484,18 @@ def test_prefill_priority_is_summed_before_time_average_and_coverage_is_per_work
         calls.append(expression)
         if expression.startswith("count_over_time"):
             return [
-                metrics.QuerySample({"instance": f"127.0.0.1:{p}"}, 4, at)
-                for p in (1001, 1002)
+                QuerySample({"instance": f"127.0.0.1:{p}"}, 4, at) for p in (1001, 1002)
             ]
-        return [metrics.QuerySample({}, 30, at)]
+        return [QuerySample({}, 30, at)]
 
     async def series(ctx, expression, start, end, step):
         calls.append(expression)
         if expression.startswith("count_over_time"):
             return [
-                [metrics.QuerySample({"instance": f"127.0.0.1:{p}"}, 4, end)]
+                [QuerySample({"instance": f"127.0.0.1:{p}"}, 4, end)]
                 for p in (1001, 1002)
             ]
-        return [[metrics.QuerySample({}, 30, end)]]
+        return [[QuerySample({}, 30, end)]]
 
     monkeypatch.setattr(metrics, "instant", instant)
     monkeypatch.setattr(metrics, "series_query", series)
@@ -508,7 +516,7 @@ def test_prefill_gauge_rejects_a_missing_worker_after_priority_aggregation(monke
     ctx.runtime.monitoring = SimpleNamespace(interval=1)
 
     async def instant(ctx, expression, at):
-        return [metrics.QuerySample({"instance": "127.0.0.1:1001"}, 4, at)]
+        return [QuerySample({"instance": "127.0.0.1:1001"}, 4, at)]
 
     monkeypatch.setattr(metrics, "instant", instant)
     with pytest.raises(ExecutionError, match="coverage"):

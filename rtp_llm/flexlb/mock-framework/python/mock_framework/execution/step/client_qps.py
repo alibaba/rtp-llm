@@ -1,5 +1,5 @@
-from . import _metrics
-from ._metrics import MetricArgs
+from .. import metrics
+from ..metrics import MetricArgs
 from .step import StepContext
 from .step_registry import register_step
 
@@ -7,6 +7,6 @@ from .step_registry import register_step
 @register_step("client/qps", effect="read", unit="requests/s")
 async def client_qps(ctx: StepContext, args: MetricArgs) -> float | list[float]:
     """Rate of Client calls started, not successful completions or Master acceptance."""
-    return await _metrics.metric(
+    return await metrics.metric(
         ctx, args, "client", "mock_client_requests_issued_total"
     )

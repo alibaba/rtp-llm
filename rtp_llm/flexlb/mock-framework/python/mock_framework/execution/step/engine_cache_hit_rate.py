@@ -1,5 +1,5 @@
-from . import _metrics
-from ._metrics import MetricArgs
+from .. import metrics
+from ..metrics import MetricArgs
 from .step import StepContext
 from .step_registry import register_step
 
@@ -8,7 +8,7 @@ from .step_registry import register_step
 async def engine_cache_hit_rate(
     ctx: StepContext, args: MetricArgs
 ) -> float | list[float]:
-    return await _metrics.metric(
+    return await metrics.metric(
         ctx,
         args,
         "prefill",

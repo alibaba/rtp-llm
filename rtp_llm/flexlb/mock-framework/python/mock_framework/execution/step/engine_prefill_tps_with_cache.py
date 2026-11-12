@@ -1,5 +1,5 @@
-from . import _metrics
-from ._metrics import MetricArgs
+from .. import metrics
+from ..metrics import MetricArgs
 from .step import StepContext
 from .step_registry import register_step
 
@@ -8,4 +8,4 @@ from .step_registry import register_step
 async def engine_prefill_tps_with_cache(
     ctx: StepContext, args: MetricArgs
 ) -> float | list[float]:
-    return await _metrics.gauge(ctx, args, "prefill", "rtp_llm_context_tps_with_cache")
+    return await metrics.gauge(ctx, args, "prefill", "rtp_llm_context_tps_with_cache")

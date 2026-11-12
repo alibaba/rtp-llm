@@ -9,7 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-from mock_framework.execution.step import _metrics
+from mock_framework.execution import metrics
+from mock_framework.execution.roles.prometheus import QuerySample
 from mock_framework.execution.test.helpers import FRAMEWORK
 
 
@@ -27,10 +28,10 @@ def test_tps_queries_preserve_sparse_priorities_and_unequal_batch_weights(
     async def instant(ctx, expression, at):
         expressions.append(expression)
         if expression.startswith("count_over_time"):
-            return [_metrics.QuerySample({"instance": i}, 8, at) for i in ("a", "b")]
-        return [_metrics.QuerySample({}, 0, at)]
+            return [QuerySample({"instance": i}, 8, at) for i in ("a", "b")]
+        return [QuerySample({}, 0, at)]
 
-    monkeypatch.setattr(_metrics, "instant", instant)
+    monkeypatch.setattr(metrics, "instant", instant)
     ctx = SimpleNamespace(
         query_time="1970-01-01T00:00:17.500Z",
         runtime=SimpleNamespace(
@@ -42,9 +43,9 @@ def test_tps_queries_preserve_sparse_priorities_and_unequal_batch_weights(
         records=SimpleNamespace(emit=lambda **event: None),
     )
     asyncio.run(
-        _metrics.gauge(
+        metrics.gauge(
             ctx,
-            _metrics.MetricArgs(range=["-8s", "0s"]),
+            metrics.MetricArgs(range=["-8s", "0s"]),
             "prefill",
             "rtp_llm_context_tps",
         )
