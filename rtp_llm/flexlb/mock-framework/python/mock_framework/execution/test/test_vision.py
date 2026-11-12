@@ -178,7 +178,6 @@ def test_vision_playback_through_real_master(tmp_path):
                 str(host),
                 "org.flexlb.mock.engine.EngineMain",
             ],
-            "env": {"MOCK_BIND_HOST": "0.0.0.0", "MOCK_ADVERTISE_HOST": "127.0.0.1"},
         }
     launch = prepare_launch(
         {

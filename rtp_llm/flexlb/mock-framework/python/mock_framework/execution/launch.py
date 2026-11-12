@@ -72,12 +72,7 @@ def prepare_launch(raw, case, base):
             not isinstance(k, str) or not isinstance(v, str) for k, v in env.items()
         ):
             raise ExecutionError("Launch env must contain string keys and values")
-        address_env = (
-            {"MOCK_BIND_HOST", "MOCK_ADVERTISE_HOST"}
-            if role in {"prefill", "decode", "vit"}
-            else set()
-        )
-        if any(k.startswith("MOCK_") and k not in address_env for k in env):
+        if any(k.startswith("MOCK_") for k in env):
             raise ExecutionError("MOCK_* launch variables are assigned by the runner")
         startup = launch_config.get("startup_timeout", "30s")
         duration(startup, positive=True)

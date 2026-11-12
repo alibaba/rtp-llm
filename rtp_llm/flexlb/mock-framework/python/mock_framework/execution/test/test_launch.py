@@ -226,6 +226,17 @@ def test_cli_resolves_packaged_classpath_after_runtime_is_moved(
         )
 
 
+@pytest.mark.parametrize("variable", ["MOCK_BIND_HOST", "MOCK_ADVERTISE_HOST"])
+def test_launch_rejects_runner_assigned_engine_addresses(case, artifacts, variable):
+    framework, java, prometheus = artifacts
+    launch = local_launch(case, java, prometheus, framework=framework)
+    launch["components"]["prefill"]["env"][variable] = "127.0.0.1"
+    with pytest.raises(
+        ExecutionError, match="launch variables are assigned by the runner"
+    ):
+        prepare_launch(launch, case, framework)
+
+
 def test_launch_rejects_duplicate_master_business_setting(case, artifacts, tmp_path):
     framework, java, prometheus = artifacts
     launch = local_launch(case, java, prometheus, framework=framework)
