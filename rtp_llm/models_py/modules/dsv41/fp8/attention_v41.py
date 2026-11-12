@@ -2643,9 +2643,12 @@ class AttentionV41FP8(AttentionFP8):
                 global_idx = torch.where(ordered >= 0, offsets + ordered, -1)
                 indices = torch.cat((global_idx, swidx), -1).int()
                 # FlashMLA's length bounds count a compact valid prefix.
-                indices = indices.gather(
-                    1, torch.argsort(indices < 0, dim=-1, stable=True)
-                )
+                # Order within the top-k is irrelevant to sparse attention, so
+                # sort the values themselves: valid non-negative indices move
+                # to the front and -1 padding to the back.  Sorting values also
+                # avoids materialising a full int64 argsort permutation, which
+                # does not fit the A100 reserve at 1M context.
+                indices = torch.sort(indices, dim=-1, descending=True).values
                 lens = (indices >= 0).sum(-1).int()
                 if indices.shape[1] % 64:
                     indices = F.pad(indices, (0, 64 - indices.shape[1] % 64), value=-1)
