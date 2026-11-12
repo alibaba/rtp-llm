@@ -87,6 +87,20 @@ class BackendRpcClientTest {
         }
     }
 
+    @Test void invalidRequestDoesNotResendGenerateInput() throws Exception {
+        try (var h = new Harness();
+             var client = new BackendRpcClient(event -> {}, 1000, 0L, 1,
+                 () -> List.of(new MasterDiscovery.Target(h.endpoint().get("rpc"), false)))) {
+            h.route = response -> FlexlbScheduleResponsePB.newBuilder().setCode(8406)
+                .setErrorMessage("missing serialized generate_input for batch dispatch").build();
+            var result = h.result(client.send(request(1), input(1), Duration.ofSeconds(2), List.of()));
+            assertEquals(BackendRpcClient.Outcome.error, result.outcome());
+            assertEquals(8406, result.errorCode());
+            assertEquals(1, h.schedules.get());
+            assertTrue(h.scheduleInputs.remove().getGenerateInput().isEmpty());
+        }
+    }
+
     @Test void successFlagWithFailureCodeCannotPass() throws Exception {
         try (var h = new Harness()) {
             h.route = r -> r.toBuilder().setCode(500).build();
@@ -385,7 +399,7 @@ class BackendRpcClientTest {
         volatile String leader;
 
         volatile int heartbeatStatus = 200;
-        volatile Boolean requiresGenerateInput;
+        volatile boolean requiresGenerateInput = true;
 
         final BackendRpcClient client;
 
@@ -422,9 +436,8 @@ class BackendRpcClientTest {
             heartbeat = heartbeatListener();
             leader = "127.0.0.1:" + heartbeat.getAddress().getPort();
             heartbeat.createContext("/rtp_llm/master/info", exchange -> {
-                var capability = requiresGenerateInput;
-                byte[] body = ("{\"real_master_host\":\"" + leader + "\",\"queue_length\":0"
-                    + (capability == null ? "" : ",\"requires_generate_input\":" + capability) + "}")
+                byte[] body = ("{\"real_master_host\":\"" + leader + "\",\"queue_length\":0,\"ready\":true"
+                    + ",\"requires_generate_input\":" + requiresGenerateInput + "}")
                     .getBytes(java.nio.charset.StandardCharsets.UTF_8);
                 exchange.sendResponseHeaders(heartbeatStatus, body.length);
                 try (var output = exchange.getResponseBody()) { output.write(body); }

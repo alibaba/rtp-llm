@@ -23,7 +23,6 @@ public final class BackendRpcClient implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger(BackendRpcClient.class.getName());
 
     private static final int GENERATE_INPUT_REQUIRED = 8409;
-    private static final int INVALID_REQUEST = 8406;
 
     private final java.util.function.Supplier<List<MasterDiscovery.Target>> masters;
     private final java.util.function.Consumer<ObjectNode> events;
@@ -329,8 +328,7 @@ public final class BackendRpcClient implements AutoCloseable {
 
         private boolean rejectedWithoutInput(FlexlbScheduleResponsePB route) {
             return !route.getSuccess() && !route.hasLifecycle() && !route.getEnqueuedByMaster() && route.getServerStatusCount() == 0
-                && (route.getCode() == GENERATE_INPUT_REQUIRED || route.getCode() == INVALID_REQUEST
-                    && route.getErrorMessage().equals("missing serialized generate_input for batch dispatch"));
+                && route.getCode() == GENERATE_INPUT_REQUIRED;
         }
 
         private void prepareVision(FlexlbScheduleResponsePB route) {

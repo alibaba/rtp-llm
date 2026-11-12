@@ -1,7 +1,6 @@
 package org.flexlb.mock.client;
 
 import com.fasterxml.jackson.databind.*;
-import com.fasterxml.jackson.databind.node.BooleanNode;
 import java.io.*;
 import java.net.*;
 import java.net.http.*;
@@ -76,10 +75,10 @@ final class MasterDiscovery implements AutoCloseable {
             Host host = entry.getKey();
             JsonNode value = entry.getValue().get();
             host.lastProbe = System.nanoTime();
-            host.requiresGenerateInput = value == null || !BooleanNode.FALSE.equals(value.get("requires_generate_input"));
+            host.requiresGenerateInput = value == null || value.get("requires_generate_input").booleanValue();
             if (value == null) {
                 if (++host.failures >= 2) host.healthy = false;
-            } else if (value.has("ready") && !BooleanNode.TRUE.equals(value.get("ready"))) {
+            } else if (!value.get("ready").booleanValue()) {
                 host.failures++;
                 host.healthy = false;
                 host.leader = false;
@@ -113,7 +112,8 @@ final class MasterDiscovery implements AutoCloseable {
             var response = http.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() == 200) {
                 var value = JSON.readTree(response.body());
-                if (value != null && value.isObject()) return value;
+                if (value != null && value.isObject()
+                        && value.path("ready").isBoolean() && value.path("requires_generate_input").isBoolean()) return value;
             }
         } catch (IOException | IllegalArgumentException error) {
             // Failed heartbeats are availability observations, not playback infrastructure errors.

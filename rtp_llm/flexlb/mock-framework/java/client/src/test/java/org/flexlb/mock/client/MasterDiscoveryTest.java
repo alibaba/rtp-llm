@@ -54,6 +54,28 @@ class MasterDiscoveryTest {
         assertRoutesAfterFirstFailure(503, true);
     }
 
+    @Test void heartbeatRequiresBothBooleanFields() throws Exception {
+        Path topology = directory.resolve("topology.json");
+        for (String response : List.of("{\"ready\":true}", "{\"requires_generate_input\":false}",
+                "{\"ready\":\"true\",\"requires_generate_input\":false}",
+                "{\"ready\":true,\"requires_generate_input\":null}")) {
+            try (var master = new BackendRpcClientTest.Harness()) {
+                publish(topology, List.of(master.endpoint()));
+                master.heartbeat.removeContext("/rtp_llm/master/info");
+                master.heartbeat.createContext("/rtp_llm/master/info", exchange -> {
+                    try (exchange) {
+                        byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
+                        exchange.sendResponseHeaders(200, bytes.length);
+                        exchange.getResponseBody().write(bytes);
+                    }
+                });
+                try (var discovery = new MasterDiscovery(topology, null)) {
+                    assertTrue(discovery.routes().isEmpty(), response);
+                }
+            }
+        }
+    }
+
     @Test void explicitSelectionStaysFixedAndMalformedDiscoveryFailsPlayback() throws Exception {
         Path topology = directory.resolve("topology.json");
         try (var first = new BackendRpcClientTest.Harness(); var second = new BackendRpcClientTest.Harness()) {
@@ -133,8 +155,8 @@ class MasterDiscoveryTest {
                     int probe = probes.incrementAndGet();
                     // The previous refresh has published its snapshot before the next probe starts.
                     if (probe == 3) routesAfterFirstFailure.complete(addresses(active.get()));
-                    var body = json.createObjectNode().put("real_master_host", first.leader);
-                    if (probe == 2 && status == 200) body.put("ready", false);
+                    var body = json.createObjectNode().put("real_master_host", first.leader)
+                        .put("requires_generate_input", true).put("ready", probe != 2 || status != 200);
                     byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
                     exchange.sendResponseHeaders(probe == 1 ? 200 : probe == 2 ? status : 503, bytes.length);
                     exchange.getResponseBody().write(bytes);
