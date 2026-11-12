@@ -5,7 +5,6 @@ import logging
 import os
 import sys
 import threading
-import time
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
@@ -25,6 +24,7 @@ from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor im
     V41ImageProcessorConfig,
     _preprocess_rgb_on_device,
     _rgb_tensor,
+    image_download_deadline,
     load_image_source,
     num_image_tokens,
     plan_image_grid,
@@ -573,11 +573,7 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         # Legacy image hints are ignored; the model config owns preprocessing.
         results = []
         inspection_sources = []
-        deadline = (
-            min(deadline, time.monotonic() + 60)
-            if deadline is not None
-            else time.monotonic() + 60
-        )
+        deadline = image_download_deadline(deadline)
         for media_index, media in enumerate(mm_inputs):
             with vit_media.input_scope(media_index):
                 with vit_preprocess_timer(

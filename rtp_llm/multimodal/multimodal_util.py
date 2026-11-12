@@ -109,11 +109,14 @@ def request_get(url, headers, timeout=None, *, deadline=None, cancellation_event
         _check_download(deadline, cancellation_event)
         try:
             if deadline is not None:
-                return REQUEST_GET(
-                    url,
-                    headers,
-                    timeout=max(0.001, min(10, deadline - time.monotonic())),
-                )
+                # Recompute before every connect retry, not just the initial GET.
+                remaining = max(0.001, deadline - time.monotonic())
+                if isinstance(timeout, tuple):
+                    connect, read = timeout
+                    attempt_timeout = (min(connect, remaining), min(read, remaining))
+                else:
+                    attempt_timeout = min(10 if timeout is None else timeout, remaining)
+                return REQUEST_GET(url, headers, timeout=attempt_timeout)
             if timeout is not None:
                 return REQUEST_GET(url, headers, timeout=timeout)
             return REQUEST_GET(url, headers)

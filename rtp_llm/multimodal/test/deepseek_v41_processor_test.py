@@ -144,6 +144,52 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
         cache_patch.start()
         self.addCleanup(cache_patch.stop)
 
+    def test_http_attempts_share_the_download_deadline(self):
+        from rtp_llm.multimodal import multimodal_util as util
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41 import (
+            deepseek_v41_processor as processor,
+        )
+
+        for caller_deadline, budget in ((None, 30), (190.0, 30), (102.0, 2)):
+            with self.subTest(caller_deadline=caller_deadline):
+                clock = [100.0]
+                timeouts = []
+
+                def advance(seconds):
+                    clock[0] += seconds
+
+                def stalled_get(url, headers, timeout):
+                    connect, read = timeout
+                    timeouts.append(timeout)
+                    if len(timeouts) == 1:
+                        advance(connect)
+                        raise requests.ConnectTimeout()
+                    advance(read)
+                    raise requests.ReadTimeout()
+
+                fake_time = SimpleNamespace(monotonic=lambda: clock[0], sleep=advance)
+                with patch.object(processor, "time", fake_time), patch.object(
+                    util, "time", fake_time
+                ), patch.object(util, "REQUEST_GET", stalled_get):
+                    with self.assertRaises(FtRuntimeException) as raised:
+                        processor.load_image_source(
+                            "https://example.invalid/image.png",
+                            deadline=caller_deadline,
+                        )
+                self.assertEqual(
+                    raised.exception.exception_type, ExceptionType.MM_DOWNLOAD_FAILED
+                )
+                self.assertAlmostEqual(clock[0] - 100.0, budget)
+                if budget == 2:
+                    self.assertEqual(timeouts, [(2, 2)])
+                else:
+                    # The first connect retry and the next outer GET both spend
+                    # the original budget (including 0.2 s of retry backoff).
+                    self.assertEqual(timeouts[:2], [(3, 20), (3, 20)])
+                    self.assertEqual(len(timeouts), 3)
+                    self.assertEqual(timeouts[2][0], 3)
+                    self.assertAlmostEqual(timeouts[2][1], 6.8)
+
     def run_loader(
         self,
         statuses,
