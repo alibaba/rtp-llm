@@ -18,7 +18,7 @@ from ..transport import post
 from . import register_ready_instance
 
 
-def bind_discovery(config, topology, directory, *, require_engines):
+def bind_discovery(config, topology, directory, *, require_engines=True):
     env = {}
     for key, value in config.items():
         if key.isupper():
@@ -85,12 +85,6 @@ def bind_discovery(config, topology, directory, *, require_engines):
     return env
 
 
-def write_master_env(config, topology, directory, *, require_engines=True):
-    env = bind_discovery(config, topology, directory, require_engines=require_engines)
-    write_json(directory / "native-environment.json", env)
-    return env
-
-
 def refresh_discovery(config, topology, directory):
     if "MODEL_SERVICE_CONFIG" in config:
         # The consumer owns reload timing; only publish the current addresses here.
@@ -124,7 +118,6 @@ class MasterRole:
         self._lock = asyncio.Lock()
 
     def configure_election(self, connect):
-        directory = self.records.directory / "zookeeper"
         self.election_env = {
             "HIPPO_ROLE": "mock-" + uuid.uuid4().hex,
             "FLEXLB_SYNC_CONSISTENCY_CONFIG": json.dumps(
@@ -137,10 +130,9 @@ class MasterRole:
                 master_port(self.role_config["deployment"]["replicas"])
             ),
         }
-        write_json(directory / "master-environment.json", self.election_env)
 
-    def _write_env(self, index, directory):
-        env = write_master_env(
+    def _prepare_env(self, index, directory):
+        env = bind_discovery(
             self.role_config["config"],
             self.topology.active(),
             directory,
@@ -150,7 +142,6 @@ class MasterRole:
             host = master_host(index)
             check_master_ports(host, int(self.election_env["MOCK_MASTER_PORT"]))
             env.update(self.election_env, FLEXLB_ADVERTISED_IP=host)
-            write_json(directory / "native-environment.json", env)
         return env
 
     def _validate_endpoint(self, instance_id, index, endpoint, control):
@@ -197,7 +188,7 @@ class MasterRole:
             self._role_configs,
             identity,
             self.launch_config,
-            configure=lambda directory: self._write_env(identity.index, directory),
+            configure=lambda directory: self._prepare_env(identity.index, directory),
         )
         if endpoint is None and self.election_env:
             raise ExecutionError("Native Master did not publish endpoints")

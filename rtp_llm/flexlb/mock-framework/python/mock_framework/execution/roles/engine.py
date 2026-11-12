@@ -127,19 +127,19 @@ class EngineRole:
                 if child.returncode is not None:
                     ready = self.records.directory / "components" / node / "ready.json"
                     ready.unlink(missing_ok=True)
+                    self.topology.retire(node)
+                    if self.monitoring:
+                        self.monitoring.retire(node)
+                    self.records.emit(
+                        event="instance_stopped",
+                        node=node,
+                        rpc=item["rpc"],
+                        role=role,
+                        instance_id=node,
+                        generation=0,
+                    )
                 if errors:
                     raise ExecutionError("; ".join(errors))
-                self.topology.retire(node)
-                if self.monitoring:
-                    self.monitoring.retire(node)
-                self.records.emit(
-                    event="instance_stopped",
-                    node=node,
-                    rpc=item["rpc"],
-                    role=role,
-                    instance_id=node,
-                    generation=0,
-                )
             return [item["rpc"] for item in selected]
 
     async def start(self):

@@ -456,15 +456,16 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
         and len({v["rpc"] for v in masters}) == 3
         and len({v["control"] for v in masters}) == 3
     )
-    native_envs = [
+    effective_configs = [
         json.loads(
-            (output / f"components/{v['id']}/native-environment.json").read_text()
+            (output / f"components/{node['id']}/effective-config.json").read_text()
         )
-        for v in masters
+        for node in masters
     ]
-    assert len({v["HIPPO_ROLE"] for v in native_envs}) == 1
-    assert len({v["FLEXLB_SYNC_CONSISTENCY_CONFIG"] for v in native_envs}) == 1
-    assert len({v["MOCK_MASTER_PORT"] for v in native_envs}) == 1
+    for key in ("HIPPO_ROLE", "FLEXLB_SYNC_CONSISTENCY_CONFIG", "server_port"):
+        assert all(
+            config[key] == effective_configs[0][key] for config in effective_configs
+        )
     assert json.loads((output / "topology.json").read_text()) == []
     assert all(
         not (output / f"components/{node}/ready.json").exists()

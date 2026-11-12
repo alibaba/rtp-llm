@@ -19,11 +19,13 @@ async def post(url, payload, *, limit=16 * 1024 * 1024):
         raise ExecutionError(
             "Component endpoint must be an HTTP URL without credentials/query/fragment"
         )
+    body = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()
+    if len(body) > 1024 * 1024:
+        raise ExecutionError("Control request exceeds the 1 MiB limit")
     reader, writer = await asyncio.open_connection(
         address.hostname, address.port or 80, limit=65536
     )
     try:
-        body = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()
         path = address.path.rstrip("/") + "/invoke"
         writer.write(
             (

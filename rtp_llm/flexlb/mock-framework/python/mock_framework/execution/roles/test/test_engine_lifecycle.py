@@ -440,7 +440,7 @@ def test_allocator_exhaustion_fails_without_reusing_a_retired_listener(monkeypat
         owner._port()
 
 
-@pytest.mark.parametrize("operation", ["create", "stop"])
+@pytest.mark.parametrize("operation", ["create", "stop", "stop_after_exit"])
 def test_partial_scale_failure_is_not_replayed_or_reported_as_success(
     tmp_path, operation
 ):
@@ -457,6 +457,9 @@ def test_partial_scale_failure_is_not_replayed_or_reported_as_success(
                 ctx.records.emit(
                     event="injected_failure", operation=operation, calls=calls
                 )
+                if operation == "stop_after_exit":
+                    assert await original(*args) == []
+                    return ["injected process failure"]
                 raise ExecutionError("injected process failure")
             return await original(*args)
 
@@ -464,7 +467,13 @@ def test_partial_scale_failure_is_not_replayed_or_reported_as_success(
         if operation == "create":
             await engine_scale(ctx, EngineScaleArgs(direction="out", count=2))
         else:
-            await engine_scale(ctx, EngineScaleArgs(direction="in", count=2))
+            try:
+                await engine_scale(ctx, EngineScaleArgs(direction="in", count=2))
+            except ExecutionError:
+                assert len(ctx.runtime.topology.active("prefill")) == (
+                    0 if operation == "stop_after_exit" else 1
+                )
+                raise
         raise AssertionError("Partial failure was swallowed")
 
     case, launch = setup_case(tmp_path, exercise)
@@ -478,7 +487,7 @@ def test_partial_scale_failure_is_not_replayed_or_reported_as_success(
         4 if operation == "create" else 3
     )
     assert len([e for e in events if e["event"] == "instance_stopped"]) == (
-        1 if operation == "stop" else 0
+        {"create": 0, "stop": 1, "stop_after_exit": 2}[operation]
     )
     assert json.loads((output / "topology.json").read_text()) == []
 

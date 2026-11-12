@@ -1,7 +1,6 @@
 """Client JVMs and the one current playback; Java client0 owns traffic coordination."""
 
 import asyncio
-import json
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -86,8 +85,6 @@ class ClientRole:
             "args": args,
             "timeout_ms": max(1, int(timeout * 1000)),
         }
-        if len(json.dumps(envelope).encode()) > 1024 * 1024:
-            raise ExecutionError("Client control parameters exceed the 1 MiB limit")
         return await post(self._coordinator(), envelope)
 
     async def start_playback(self, body, timeout):
