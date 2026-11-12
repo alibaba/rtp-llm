@@ -389,7 +389,25 @@ def _prefill_q_rope(x, freqs, rope_dim, *, rope_view=None):
     return rope_only(x, freqs, rope_dim)
 
 
+# Row budget for fake-quant roundtrips on huge prefills: the monolithic
+# expression materializes 3-4 simultaneous fp32 copies of x — for the 1M
+# indexer Q [1048320, 4096] that is 16 GiB per copy (n18, 2026-11-12:
+# all ranks OOMed inside fp8_roundtrip via _select_indices with 175.84 GiB
+# allocated requesting one 16.00 GiB copy). Scales are per-row and the ops
+# are elementwise, so row slicing is bit-identical while the temporaries
+# shrink to ~1.5 GiB. The returned fp32 tensor is unchanged in shape/dtype.
+_ROUNDTRIP_CHUNK_ROWS = 32768
+
+
 def fp8_roundtrip(x):
+    if x.is_cuda and x.dim() >= 2 and x.shape[0] > _ROUNDTRIP_CHUNK_ROWS:
+        out = torch.empty(x.shape, dtype=torch.float32, device=x.device)
+        for begin in range(0, x.shape[0], _ROUNDTRIP_CHUNK_ROWS):
+            end = min(begin + _ROUNDTRIP_CHUNK_ROWS, x.shape[0])
+            xc = x[begin:end].float()
+            scale = (xc.abs().amax(-1, keepdim=True) / 448.0).clamp_min(1e-12)
+            out[begin:end] = (xc / scale).to(torch.float8_e4m3fn).float() * scale
+        return out
     scale = (x.float().abs().amax(-1, keepdim=True) / 448.0).clamp_min(1e-12)
     return (x.float() / scale).to(torch.float8_e4m3fn).float() * scale
 
