@@ -1,0 +1,8 @@
+# Runtime additions for installing the prebuilt RTP-LLM CUDA13 wheel.
+# DeepGEMM loads these CUDA libraries without declaring wheel dependencies.
+nvidia-cuda-runtime==13.0.96
+nvidia-cuda-nvrtc==13.0.88
+# Keep the numerical stack compatible at runtime.
+numpy==1.26.4
+scipy==1.14.1
+scikit-learn==1.5.1

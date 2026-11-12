@@ -36,7 +36,7 @@ static void instantiate_v41_wo_a() {
                                                                     cutlass::float_e4m3_t,
                                                                     cutlass::float_e4m3_t,
                                                                     cutlass::float_e4m3_t,
-                                                                    epilogue::operators::QuantizeToFP8>);
+                                                                    epilogue::operators::V41QuantizeToFP8>);
     auto large = reinterpret_cast<void*>(&v41_wo_a_group32_epilogue<cute::UMMA::Major::K,
                                                                     cute::UMMA::Major::K,
                                                                     32,
@@ -66,7 +66,7 @@ static void instantiate_v41_wo_a() {
                                                                     cutlass::float_e4m3_t,
                                                                     cutlass::float_e4m3_t,
                                                                     cutlass::float_e4m3_t,
-                                                                    epilogue::operators::QuantizeToFP8>);
+                                                                    epilogue::operators::V41QuantizeToFP8>);
 }
 
 using SmallStorage = layout::SM100FP8FP4GemmSharedStorage<11,
@@ -98,5 +98,8 @@ using LargeStorage = layout::SM100FP8FP4GemmSharedStorage<5,
                                                           cutlass::float_e4m3_t,
                                                           cutlass::float_e4m3_t>;
 
-extern "C" __device__ __constant__ unsigned v41_wo_a_metadata[5] = {
-    sizeof(SmallStorage), sizeof(LargeStorage), V41_NUM_SMS, sizeof(EpilogueOperatorArgs), offsetof(EpilogueOperatorArgs, alpha)};
+extern "C" __device__ __constant__ unsigned v41_wo_a_metadata[5] = {sizeof(SmallStorage),
+                                                                    sizeof(LargeStorage),
+                                                                    V41_NUM_SMS,
+                                                                    sizeof(EpilogueOperatorArgs),
+                                                                    offsetof(EpilogueOperatorArgs, alpha)};

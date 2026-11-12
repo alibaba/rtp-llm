@@ -21,6 +21,7 @@ import importlib
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -344,13 +345,13 @@ class DecodeTopkLengthPlumbingTest(unittest.TestCase):
             return out, lse
 
         fake.flash_mla_with_kvcache = fake_kv
-        old = sys.modules.get("flash_mla")
-        old_flash_mla_legacy = sys.modules.get("flash_mla_legacy")
-        # The production shim prefers the isolated legacy wheel; alias the
-        # fake under both names so the mock still intercepts it.
-        sys.modules["flash_mla"] = fake
-        sys.modules["flash_mla_legacy"] = fake
-        try:
+        with patch.dict(
+            sys.modules,
+            {
+                name: fake
+                for name in ("flash_mla", "flash_mla_legacy", "flash_mla.legacy")
+            },
+        ):
             module = importlib.import_module(
                 "rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op"
             )
@@ -359,15 +360,6 @@ class DecodeTopkLengthPlumbingTest(unittest.TestCase):
                 n_heads=2, head_dim=HEAD_DIM, softmax_scale=HEAD_DIM**-0.5
             )
             fn(op, calls)
-        finally:
-            if old is None:
-                sys.modules.pop("flash_mla", None)
-            else:
-                sys.modules["flash_mla"] = old
-        if old_flash_mla_legacy is None:
-            sys.modules.pop("flash_mla_legacy", None)
-        else:
-            sys.modules["flash_mla_legacy"] = old_flash_mla_legacy
         return calls
 
     def test_dual_paged_forwards_both_lengths(self) -> None:

@@ -121,3 +121,9 @@ models_py_test(
     src = "qwen4_mtp_norm_test.py",
     gpu = "RTX_5000_PRO_CU13",
 )
+
+cuda13_sm100_py_test(
+    name = "fused_activation_index_test",
+    srcs = ["fused_activation_index_test.py"],
+    deps = py_test_deps,
+)

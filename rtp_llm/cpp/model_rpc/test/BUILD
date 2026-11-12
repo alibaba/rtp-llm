@@ -109,6 +109,21 @@ cc_test(
 )
 
 cc_test(
+    name = "remote_rpc_server_init_test",
+    srcs = ["RemoteRpcServerInitTest.cc"],
+    copts = test_copts,
+    # rtp_llm::createMemoryUtilImpl(bool), isolated from the real RDMA device pool.
+    linkopts = ["-Wl,--wrap=_ZN7rtp_llm20createMemoryUtilImplEb"],
+    deps = test_deps + ["//rtp_llm/cpp/normal_engine/test:mock_engine"],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+        "LD_PRELOAD": "libtorch_cpu.so",
+    },
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
     name = "generate_context_lifecycle_test",
     srcs = [
         "GenerateContextLifecycleTest.cc",
@@ -223,6 +238,7 @@ cc_test(
     ],
     copts = test_copts,
     deps = test_deps + [
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
     ],
     env = {
