@@ -82,6 +82,8 @@ class FlexlbTraceTest {
             FlexlbTrace.markBusinessError(context, 500, "FLEXLB_INTERNAL_ERROR");
             FlexlbTrace.recordPlacement(context, System.nanoTime(), "BLOCKED", Map.of("workers", 42), null);
             FlexlbTrace.recordScheduleFailure(context, 8431, "ERROR", Map.of("queueDepth", 2463));
+            FlexlbTrace.recordScheduleEvent(context, "flexlb.queue.enqueued", Attributes.empty());
+            FlexlbTrace.recordScheduleResponse(context, false, 8431, "LOCAL_MASTER", "ignored");
             FlexlbTrace.finish(owner, new IllegalStateException("ignored"));
             FlexlbTrace.finishWithGrpcStatus(owner, "INTERNAL", 13, false);
             assertTrue(owner.isRecording());
@@ -203,6 +205,32 @@ class FlexlbTraceTest {
         assertEquals(8431L, data.getAttributes().get(FlexlbTrace.SCHEDULE_CODE));
         assertEquals(2463L, data.getAttributes().get(AttributeKey.longKey("flexlb.queue.depth")));
         assertEquals(StatusCode.ERROR, data.getStatus().getStatusCode());
+    }
+
+    @Test
+    void lifecycleEventsRetainThreadContextAndFailureDetails() throws Exception {
+        Span root = FlexlbTrace.startServer("Schedule", Context.root());
+        Context context = root.storeInContext(Context.root());
+        Thread worker = new Thread(() -> {
+            FlexlbTrace.recordScheduleEvent(context, "flexlb.queue.enqueued",
+                    Attributes.builder().put("flexlb.queue.depth", 3L).build());
+            FlexlbTrace.recordScheduleResponse(context, false, 8431, "LOCAL_MASTER", "capacity exhausted");
+            FlexlbTrace.recordScheduleFailure(context, 8431, "RESOURCE_EXHAUSTED",
+                    Map.of("role", "DECODE", "group", "g1", "cause", "no free KV blocks"));
+        });
+        worker.start();
+        worker.join(3000);
+        assertFalse(worker.isAlive());
+        FlexlbTrace.finish(root);
+        SpanData data = exporter.spans.getFirst();
+        assertEquals(List.of("flexlb.queue.enqueued", "flexlb.response.ready", "flexlb.schedule.failed"),
+                data.getEvents().stream().map(event -> event.getName()).toList());
+        assertEquals("capacity exhausted", data.getAttributes().get(AttributeKey.stringKey("flexlb.failure.message")));
+        assertEquals("DECODE", data.getAttributes().get(AttributeKey.stringKey("flexlb.failure.role")));
+        assertEquals("g1", data.getAttributes().get(AttributeKey.stringKey("flexlb.failure.group")));
+        assertTrue(data.getEvents().getFirst().getEpochNanos() <= data.getEvents().getLast().getEpochNanos());
+        FlexlbTrace.recordScheduleEvent(new ThrowingSpan().storeInContext(Context.root()),
+                "ignored", Attributes.empty());
     }
 
     @Test

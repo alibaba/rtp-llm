@@ -2,8 +2,8 @@ package org.flexlb.httpserver;
 
 import io.grpc.Context;
 import io.grpc.Status;
-import io.grpc.stub.StreamObserver;
 import io.grpc.stub.ServerCallStreamObserver;
+import io.grpc.stub.StreamObserver;
 import io.opentelemetry.api.trace.Span;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestState;
@@ -97,6 +97,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     @Override
     public void schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
                          StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver) {
+        FlexlbTrace.recordScheduleEvent(entryTraceContext(), "flexlb.request.received",
+                io.opentelemetry.api.common.Attributes.empty());
         long requestId = request.getRequestId();
         Long interceptedEntryNanos = GrpcServerTimingInterceptor.getNanos();
         serverLatencyRecorder.recordArrival(
@@ -112,6 +114,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             boolean masterAtEntry = consistencyEnabled
                     && masterElectService.isMaster();
             boolean forwardToMaster = consistencyEnabled && !masterAtEntry;
+            FlexlbTrace.recordScheduleEvent(requestContext.getTraceContext(), "flexlb.routing.started",
+                    io.opentelemetry.api.common.Attributes.builder()
+                            .put("flexlb.forward_to_master", forwardToMaster).build());
             engineHealthReporter.reportArriveDelayTime(requestContext);
 
             if (forwardToMaster) {
@@ -1013,6 +1018,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             // response is the result actually delivered to this caller.
             io.opentelemetry.context.Context traceContext = ctx == null
                     ? entryTraceContext() : ctx.getTraceContext();
+            FlexlbTrace.recordScheduleResponse(traceContext, response.getSuccess(), response.getCode(),
+                    origin.name(), response.getErrorMessage());
             FlexlbTrace.setScheduleAttribute(traceContext, FlexlbTrace.SCHEDULE_CODE,
                     (long) response.getCode());
             FlexlbTrace.setScheduleAttribute(traceContext, FlexlbTrace.ENQUEUED_BY_MASTER,

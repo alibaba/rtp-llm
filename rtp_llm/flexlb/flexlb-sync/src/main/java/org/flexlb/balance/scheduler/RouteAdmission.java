@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import io.opentelemetry.api.common.Attributes;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -16,6 +17,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.telemetry.FlexlbTrace;
 
 import java.util.List;
 import java.util.Objects;
@@ -160,6 +162,8 @@ public final class RouteAdmission implements AutoCloseable {
         return switch (result) {
             case SUCCESS -> {
                 markCommitted();
+                FlexlbTrace.recordScheduleEvent(context.getTraceContext(),
+                        "flexlb.prefill_queue.enqueued", Attributes.empty());
                 yield PlacementResult.success(item);
             }
             case BLOCKED -> {

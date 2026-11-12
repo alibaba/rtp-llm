@@ -211,6 +211,29 @@ public final class FlexlbTrace {
         }
     }
 
+    /** Record a lifecycle boundary on the request context carried across scheduler threads. */
+    public static void recordScheduleEvent(Context context, String name, Attributes attributes) {
+        if (!enabled) { return; }
+        try {
+            spanFromContext(context).addEvent(name, attributes);
+        } catch (Throwable ignored) {
+            // Observability cannot change scheduling or response publication.
+        }
+    }
+
+    /** Records the response ready for publication, including forwarded responses. */
+    public static void recordScheduleResponse(Context context, boolean success, int code,
+                                               String origin, String message) {
+        var attributes = Attributes.builder().put(SCHEDULE_CODE, (long) code)
+                .put("flexlb.response.success", success).put("flexlb.response.origin", origin);
+        if (!success && message != null && !message.isEmpty()) {
+            String detail = bounded(message);
+            attributes.put("flexlb.failure.message", detail);
+            setScheduleAttribute(context, AttributeKey.stringKey("flexlb.failure.message"), detail);
+        }
+        recordScheduleEvent(context, "flexlb.response.ready", attributes.build());
+    }
+
     /** Record on the existing request span carried explicitly across scheduler threads. */
     public static void recordPlacement(Context context, long startedNanos, String outcome,
                                        Map<String, Object> diagnostics, Throwable failure) {
@@ -247,6 +270,11 @@ public final class FlexlbTrace {
             if (!span.isRecording()) { return; }
             var attributes = Attributes.builder().put(SCHEDULE_CODE, (long) code).put(ERROR_TYPE, type);
             if (diagnostics != null) {
+                for (String key : new String[] {"role", "group"}) {
+                    if (diagnostics.get(key) instanceof String value) {
+                        attributes.put("flexlb.failure." + key, bounded(value));
+                    }
+                }
                 if (diagnostics.get("queueDepth") instanceof Number depth) {
                     attributes.put("flexlb.queue.depth", depth.longValue());
                 }
