@@ -781,13 +781,16 @@ def forward_layers(
                     # pre_mix_out ADDRESS in at capture time; the compact path
                     # re-points/reshapes those buffers every compacted forward,
                     # so replay would read stale rows (the L21 corruption
-                    # seen on the debug pool). Suspend replay for the compacted layer
-                    # sequence (resumed in the finally below).
+                    # seen on the debug pool). R59: the probes now key on the premix
+                    # (shape, dtype, ptr) — stale replay is impossible — so the
+                    # broad suspension is an opt-in escape only
+                    # (DSV41_GRAPH_REPLAY_SUSPEND_COMPACT=1).
                     from rtp_llm.models_py.modules.dsv4 import (
                         _v41_graph_probe as _graph_probe,
                     )
 
-                    _graph_probe.suspend_graph_replay()
+                    if _graph_probe.suspend_compact_enabled():
+                        _graph_probe.suspend_graph_replay()
                     build_and_propagate_prefill_meta_fp8(
                         v4,
                         h,
@@ -900,7 +903,8 @@ def forward_layers(
                     _v41_graph_probe as _graph_probe,
                 )
 
-                _graph_probe.resume_graph_replay()
+                if _graph_probe.suspend_compact_enabled():
+                    _graph_probe.resume_graph_replay()
             ced_shared = v4.layers[0].attn._shared_attention
             ced_shared.pop("ced_swa_start", None)
             ced_shared.pop("ced_indexer_projection", None)

@@ -28,13 +28,18 @@ dt = importlib.import_module("rtp_llm.models_py.modules.dsv4._v41_decoder_trim")
 
 
 class DecoderTrimFlagTest(unittest.TestCase):
-    def test_default_off(self):
-        # R58c: gate PASSED (no additional error) but the net TTFT win washed
-        # out (graph-replay suspension), so the trim stays default-off; set
-        # DSV41_DECODER_TRIM_KEEP=140 to enable the validated rectangle.
+    def test_default_on_140(self):
+        # R59: the trim is the default (address-safe boundary probes keep
+        # GraphReplay on; R58c replay gate proved no additional error).
+        # DSV41_DECODER_TRIM_KEEP=0 is the escape hatch.
         env = dict(os.environ)
         env.pop("DSV41_DECODER_TRIM_KEEP", None)
         with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(dt.decoder_trim_keep(), 140)
+            self.assertTrue(dt.decoder_trim_enabled())
+
+    def test_escape_zero(self):
+        with mock.patch.dict(os.environ, {"DSV41_DECODER_TRIM_KEEP": "0"}):
             self.assertEqual(dt.decoder_trim_keep(), 0)
             self.assertFalse(dt.decoder_trim_enabled())
 

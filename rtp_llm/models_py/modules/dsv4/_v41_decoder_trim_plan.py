@@ -290,7 +290,25 @@ class DecoderTrimPlan:
         if candidates is not None:
             shared["candidates"] = self._gather_canonical(candidates)
         if pre_mix is not None:
-            v4.layers[0].ffn_hc.pre_mix_out = self._gather_canonical(pre_mix)
+            # R59: publish the compacted premix through a STABLE per-unit
+            # buffer (was: fresh gathered tensor every compacted forward).
+            # The successor boundary probes key on the predecessor premix's
+            # (shape, dtype, ptr); a recurring address lets them replay-hit,
+            # while any shape/address change now safely recaptures/falls back
+            # (address-safe keying) instead of reading stale rows.
+            unit = v4.layers[0].ffn_hc
+            gathered = self._gather_canonical(pre_mix)
+            buf = getattr(unit, "_trim_compact_premix", None)
+            if (
+                buf is None
+                or buf.shape != gathered.shape
+                or buf.dtype != gathered.dtype
+                or buf.device != gathered.device
+            ):
+                buf = torch.empty_like(gathered)
+                unit._trim_compact_premix = buf
+            buf.copy_(gathered)
+            unit.pre_mix_out = buf
         shared["topk"] = {20: compact_topk}
         for key in _DERIVED_KEYS:
             shared.pop(key, None)

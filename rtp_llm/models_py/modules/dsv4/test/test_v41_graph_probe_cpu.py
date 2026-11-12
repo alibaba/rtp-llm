@@ -158,6 +158,67 @@ class FallbackTest(unittest.TestCase):
         probe.run([t], lambda _s: "eager2")
         self.assertEqual(len(probe.failed_keys), 1)
 
+    def test_key_extra_separates_side_channel_addresses(self):
+        # R59: two sightings with the SAME input but DIFFERENT key_extra
+        # (e.g. a re-pointed predecessor premix) must occupy DISTINCT keys —
+        # a stale graph can never replay into the wrong side-channel buffer.
+        # (Note: a key lives in pending AND failed_keys after a failed capture
+        # attempt, so count the union.)
+        module = _load(flag="1")
+        probe = module.GraphReplay("test")
+        x = _FakeTensor(0x1000)
+        mix_a = _FakeTensor(0xA000, shape=(1024, 4))
+        mix_b = _FakeTensor(0xB000, shape=(36, 4))
+
+        def n_keys():
+            return len(set(probe.pending) | set(probe.failed_keys))
+
+        for _ in range(3):
+            probe.run([x], lambda _s: None, key_extra=(mix_a,))
+        # one distinct key (failed on CPU after the 2nd-sighting capture try)
+        self.assertEqual(n_keys(), 1)
+        probe.run([x], lambda _s: None, key_extra=(mix_b,))
+        # new side-channel address/shape -> a second, independent key
+        self.assertEqual(n_keys(), 2)
+        # and the first key is untouched (its failed state persists)
+        probe.run([x], lambda _s: None, key_extra=(mix_a,))
+        self.assertEqual(n_keys(), 2)
+
+    def test_suspend_compact_flag_default_off(self):
+        self.assertFalse(_load().suspend_compact_enabled())
+        env = {"DSV41_GRAPH_REPLAY_SUSPEND_COMPACT": "1"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            import importlib.util as _ilu
+
+            spec = _ilu.spec_from_file_location("dsv4_graph_probe_test2", HELPER)
+            module = _ilu.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        self.assertTrue(module.suspend_compact_enabled())
+
+    def test_boundary_key_extra_reads_predecessor_premix(self):
+        module = _load()
+
+        class _Unit:
+            def __init__(self, mix):
+                self.pre_mix_out = mix
+
+        import weakref
+
+        mix = _FakeTensor(0xA000)
+        prev = _Unit(mix)
+        unit = _Unit(None)
+        unit._previous_ref = weakref.ref(prev)
+        self.assertEqual(module.boundary_key_extra(unit), (mix,))
+        # no predecessor -> empty (nothing side-channelled into the boundary)
+        solo = _Unit(None)
+        solo._previous_ref = None
+        self.assertEqual(module.boundary_key_extra(solo), ())
+        # predecessor without premix yet -> empty
+        prev2 = _Unit(None)
+        unit2 = _Unit(None)
+        unit2._previous_ref = weakref.ref(prev2)
+        self.assertEqual(module.boundary_key_extra(unit2), ())
+
     def test_not_implemented_error_is_permanent(self):
         module = _load(flag="1")
         probe = module.GraphReplay("test")

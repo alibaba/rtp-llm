@@ -40,14 +40,12 @@ _ANNOUNCED = [False]
 
 
 def decoder_trim_keep() -> int:
-    """DSV41_DECODER_TRIM_KEEP: absent/0 = OFF (today's exact path). R58c proved
-    the trim adds no additional error (routing-replay gate: bitwise vs the mask
-    reference) but the net TTFT win is currently ~0 (the correctness-required
-    graph-replay suspension over the compacted region eats the small-M GEMM
-    savings), so it stays opt-in: a positive int = keep that many tail tokens
-    in the decoder layers (140 = the validated DeepInfer rectangle). Reject
-    negatives and non-integers loudly."""
-    raw = os.environ.get(DECODER_TRIM_KEEP_FLAG, "0")
+    """DSV41_DECODER_TRIM_KEEP: absent = 140 (R59: default ON — the address-safe
+    boundary-probe keying keeps GraphReplay ON over the compacted region, so the
+    trim's TTFT win no longer washes out; the R58c replay gate proved the
+    machinery bit-lossless at fixed routing). 0 = escape, restoring the exact
+    pre-trim path. Reject negatives and non-integers loudly."""
+    raw = os.environ.get(DECODER_TRIM_KEEP_FLAG, "140")
     try:
         value = int(raw)
     except ValueError:

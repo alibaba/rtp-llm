@@ -189,10 +189,28 @@ def _prefill_cp_async_workspace_reads_enabled() -> bool:
 
 # Start the current-layer SWA ``kv_full`` all-gather on the shared CP
 # communication stream instead of holding the main stream for it, and drain it
-# in ``_ensure_prefill_kv_full``. Off by default: it changes when the NCCL op is
-# enqueued relative to the compressor gathers that share that stream.
+# in ``_ensure_prefill_kv_full``. R61: default ON (R60 measured ~24 ms TTFT win,
+# byte-exact, engagement proven on every layer); escape DSV4_CP_SWA_KV_ASYNC=0
+# restores the baseline ordering (the NCCL op is then enqueued after the
+# compressor gathers that share that stream).
 def _cp_swa_kv_async_enabled() -> bool:
-    return os.environ.get("DSV4_CP_SWA_KV_ASYNC", "0") == "1"
+    return os.environ.get("DSV4_CP_SWA_KV_ASYNC", "1") == "1"
+
+
+# R60 engagement evidence (one print per layer per path; stderr).
+_OVERLAP_ANNOUNCED = set()
+
+
+def _overlap_announce(tag: str, layer_id: int, detail: str) -> None:
+    key = (tag, layer_id)
+    if key in _OVERLAP_ANNOUNCED:
+        return
+    _OVERLAP_ANNOUNCED.add(key)
+    import sys
+
+    print(
+        f"[{tag}] engaged layer=L{layer_id:02d} {detail}", file=sys.stderr, flush=True
+    )
 
 
 _CP_POST_GATHER_STREAMS: Dict[int, torch.cuda.Stream] = {}
@@ -2851,6 +2869,11 @@ class AttentionFP8(nn.Module):
         # gather drains on the side stream. The baseline path below is
         # left untouched for non-overlap and warmup forwards.
         if self._should_overlap_cp_for_prefill(common):
+            _overlap_announce(
+                "CPOVERLAP",
+                self.layer_id,
+                f"DSV4_PREFILL_CP_OVERLAP=1 ratio={self.compress_ratio}",
+            )
             if self.compress_ratio == 128:
                 with record_function_range("dsv4.fp8.attn.prefill.path_hca_overlap"):
                     return self._forward_prefill_hca_overlapped(x, qkv, common)
@@ -5598,6 +5621,9 @@ class AttentionFP8(nn.Module):
                 f"dsv4.cp.all_gather.L{self.layer_id:02d}.swa_kv_full.varlen"
             )
             if _cp_swa_kv_async_enabled() and not _fp8_gather_enabled("kv"):
+                _overlap_announce(
+                    "CPSWAKVASYNC", self.layer_id, "DSV4_CP_SWA_KV_ASYNC=1"
+                )
                 # Deferred to _ensure_prefill_kv_full: the main stream runs the
                 # compressor / indexer projections (and enqueues their own NCCL
                 # on this same stream) while this all-gather is in flight.

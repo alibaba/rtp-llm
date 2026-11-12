@@ -559,11 +559,16 @@ class Block(nn.Module):
                     xp, po, co = ffn_hc_pre(_staged[0])
                     return _prefill_fast_norm(self.ffn_norm, xp), po, co
 
+                from rtp_llm.models_py.modules.dsv4._v41_graph_probe import (
+                    boundary_key_extra,
+                )
+
                 (x_pre, post, comb), _kind = self._ffn_boundary_probe.run(
                     [x],
                     _boundary,
                     side_get=lambda: self.ffn_hc.pre_mix_out,
                     side_set=lambda v: setattr(self.ffn_hc, "pre_mix_out", v),
+                    key_extra=boundary_key_extra(self.ffn_hc),
                 )
             ffn_out = self.ffn(x_pre, input_ids)
             return ffn_hc_post(ffn_out, residual, post, comb)
@@ -682,12 +687,17 @@ class Block(nn.Module):
             )  # [T, dim], [T, hc, 1], [T, hc, hc]
             x_pre, shared_input_quant = self._attn_boundary_norm(x_pre)
         else:
+            from rtp_llm.models_py.modules.dsv4._v41_graph_probe import (
+                boundary_key_extra,
+            )
+
             (x_pre, post, comb, shared_input_quant), _kind = (
                 self._attn_boundary_probe.run(
                     [x],
                     self._attn_boundary_fn(x),
                     side_get=lambda: self.attn_hc.pre_mix_out,
                     side_set=lambda v: setattr(self.attn_hc, "pre_mix_out", v),
+                    key_extra=boundary_key_extra(self.attn_hc),
                 )
             )
         if _dbg_layer:
@@ -830,11 +840,16 @@ class Block(nn.Module):
                 xp, po, co = self.ffn_hc.pre(_staged[0], dbg_tag=None)
                 return self.ffn_norm(xp), po, co
 
+            from rtp_llm.models_py.modules.dsv4._v41_graph_probe import (
+                boundary_key_extra,
+            )
+
             (x_pre, post, comb), _kind = self._ffn_boundary_probe.run(
                 [x],
                 _boundary,
                 side_get=lambda: self.ffn_hc.pre_mix_out,
                 side_set=lambda v: setattr(self.ffn_hc, "pre_mix_out", v),
+                key_extra=boundary_key_extra(self.ffn_hc),
             )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_in", x_pre)

@@ -56,7 +56,21 @@ _ANNOUNCED = [False]
 # shapes, so any boundary graph captured on the compact shape replays stale
 # addresses (the R58 debug-cluster corruption: L21 rel_l2 0.57). Suspension forces
 # the eager (correct) path for exactly the compacted layer sequence.
+#
+# R59: the ROOT FIX is address-safe keying — boundary probes now fold the
+# predecessor premix's (shape, dtype, ptr) into the graph key (see
+# ``boundary_key_extra``), so a re-pointed/reshaped premix can NEVER replay a
+# stale graph (it produces a fresh key -> recapture-or-fallback). The broad
+# suspension is retained ONLY as an escape hatch behind
+# DSV41_GRAPH_REPLAY_SUSPEND_COMPACT=1 (default 0 = off).
 _REPLAY_SUSPENDED = [0]
+
+GRAPH_SUSPEND_COMPACT_FLAG = "DSV41_GRAPH_REPLAY_SUSPEND_COMPACT"
+_SUSPEND_COMPACT = os.environ.get(GRAPH_SUSPEND_COMPACT_FLAG, "0") == "1"
+
+
+def suspend_compact_enabled() -> bool:
+    return _SUSPEND_COMPACT
 
 
 def suspend_graph_replay() -> None:
@@ -69,6 +83,18 @@ def resume_graph_replay() -> None:
 
 def graph_replay_suspended() -> bool:
     return _REPLAY_SUSPENDED[0] > 0
+
+
+def boundary_key_extra(hc_unit) -> tuple:
+    """R59: boundary regions (``hc.pre``) read the PREDECESSOR unit's
+    ``pre_mix_out`` through a side channel that is NOT in the probe's input
+    list, so its address is baked into a captured graph invisibly. Fold that
+    tensor's (shape, dtype, ptr) into the key: a compacted/re-pointed premix
+    yields a new key (recapture or fallback), never a stale replay."""
+    ref = getattr(hc_unit, "_previous_ref", None)
+    prev = ref() if ref is not None else None
+    mix = getattr(prev, "pre_mix_out", None) if prev is not None else None
+    return (mix,) if mix is not None else ()
 
 
 def graph_probe_enabled() -> bool:
@@ -159,7 +185,7 @@ class GraphReplay:
         self.static_bufs = {}  # copy_in index -> static staging buffer
         self.permanently_off = False
 
-    def run(self, inputs, fn, side_get=None, side_set=None, copy_in=()):
+    def run(self, inputs, fn, side_get=None, side_set=None, copy_in=(), key_extra=()):
         """Returns (outputs, kind) with kind in replay|captured|fallback.
 
         ``copy_in``: indices of inputs that are small, per-chunk-rebuilt
@@ -168,6 +194,13 @@ class GraphReplay:
         address key and staged through one static buffer per probe (copied
         in before every capture and every replay); ``fn`` receives the
         staged input list.
+
+        ``key_extra`` (R59): additional tensors the captured computation
+        reads OUTSIDE the input list (e.g. the predecessor mHC unit's
+        ``pre_mix_out`` via the delayed-chain side channel). Their
+        (shape, dtype, ptr) join the key, so a re-pointed/reshaped side
+        channel yields a fresh key (recapture or fallback) instead of
+        replaying a graph with a stale baked address.
         """
         if self.permanently_off or graph_replay_suspended():
             _note(self.name, "fallback")
@@ -177,6 +210,10 @@ class GraphReplay:
             for i, t in enumerate(inputs)
             if i not in copy_in
         )
+        if key_extra:
+            key = key + tuple(
+                (tuple(t.shape), str(t.dtype), t.data_ptr()) for t in key_extra
+            )
         staged = list(inputs)
         entry = self.graphs.get(key)
         if entry is not None:

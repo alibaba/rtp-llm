@@ -467,11 +467,24 @@ class DelayedHCUnit(HCUnitBase):
         # R29/A: pin pre_mix_out to a per-unit static buffer so any graph
         # capturing a SUCCESSOR boundary reads a permanently stable address
         # with always-current content (the observed stale-read fix).
+        # R59: keep one static buffer PER SHAPE (was: a single buffer
+        # reallocated on shape change) — the decoder-trim oscillates units
+        # between full (1024-row) and compact (36-row) premix shapes, and the
+        # reallocation churned the address the boundary probes key on. With
+        # per-shape pins both addresses stay stable -> probes hit on both.
         if self.pre_mix_out is not None and _premix_pin_enabled():
-            buf = getattr(self, "_premix_static", None)
-            if buf is None or buf.shape != self.pre_mix_out.shape:
+            bufs = getattr(self, "_premix_static_by_shape", None)
+            if bufs is None:
+                bufs = self._premix_static_by_shape = {}
+            skey = (
+                tuple(self.pre_mix_out.shape),
+                self.pre_mix_out.dtype,
+                self.pre_mix_out.device,
+            )
+            buf = bufs.get(skey)
+            if buf is None:
                 buf = torch.empty_like(self.pre_mix_out)
-                self._premix_static = buf
+                bufs[skey] = buf
             buf.copy_(self.pre_mix_out)
             self.pre_mix_out = buf
         return out
