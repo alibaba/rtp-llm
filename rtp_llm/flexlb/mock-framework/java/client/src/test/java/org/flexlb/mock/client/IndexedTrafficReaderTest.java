@@ -11,7 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.flexlb.mock.client.ClientProtocol.*;
-import org.flexlb.mock.client.ClientNode.Session;
+import org.flexlb.mock.client.ClientNode.ReplayWorker;
 import org.flexlb.mock.protocol.MultimodalProtocol;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -53,12 +53,12 @@ class IndexedTrafficReaderTest {
         data[Math.toIntExact(header.getLong(56) + header.getLong(112 + 20))] ^= 1;
         Files.write(path, data);
         var plan = new ClientReplayPlan(1, null, path.toString(), 2, 0, 2048, 100, identity, null, 2.0, 1, 4, 1000, 1000);
-        var items = new ArrayList<Session.Item>();
+        var items = new ArrayList<ReplayWorker.Item>();
         long past = System.nanoTime() - 2_000_000_000;
-        Session.play(plan, past, MultimodalProtocol.IMAGE_TOKEN, items::add);
-        assertEquals(List.of(100L, 2148L), items.stream().map(Session.Item::requestId).toList());
+        ReplayWorker.play(plan, past, MultimodalProtocol.IMAGE_TOKEN, items::add);
+        assertEquals(List.of(100L, 2148L), items.stream().map(ReplayWorker.Item::requestId).toList());
         assertEquals(List.of(0L, 1_024_000_000L), items.stream().map(item -> {
-            try { return Session.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), null, 2.0, null); }
+            try { return ReplayWorker.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), null, 2.0, null); }
             catch (IOException error) { throw new AssertionError(error); }
         }).toList());
         assertEquals(List.of(924, 924, 924), items.getFirst().entry().expectedImageTokens());
@@ -77,8 +77,8 @@ class IndexedTrafficReaderTest {
                 var plan = new ClientReplayPlan(1, null, path.toString(), expected.get(worker).size(), worker, 2,
                     100, input.identity, 100.0, null, 1, 4, 1000, 1000);
                 var times = new ArrayList<Long>();
-                Session.play(plan, past, MultimodalProtocol.IMAGE_TOKEN, item -> times.add(assertDoesNotThrow(() ->
-                    Session.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), plan.qps(), null, null))));
+                ReplayWorker.play(plan, past, MultimodalProtocol.IMAGE_TOKEN, item -> times.add(assertDoesNotThrow(() ->
+                    ReplayWorker.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), plan.qps(), null, null))));
                 assertEquals(expected.get(worker), times);
             }
         }
@@ -86,17 +86,17 @@ class IndexedTrafficReaderTest {
 
     @Test void warmupScalesBothClocksAndJoinsTheFormalScheduleAtTheBoundary() throws Exception {
         var warmup = new Warmup(4000, 0.25);
-        assertEquals(0L, Session.delayNanos(0, 0, 2.0, null, warmup));
-        assertEquals(2_000_000_000L, Session.delayNanos(1, 0, 2.0, null, warmup));
-        assertEquals(4_000_000_000L, Session.delayNanos(2, 0, 2.0, null, warmup));
-        assertEquals(4_500_000_000L, Session.delayNanos(3, 0, 2.0, null, warmup));
+        assertEquals(0L, ReplayWorker.delayNanos(0, 0, 2.0, null, warmup));
+        assertEquals(2_000_000_000L, ReplayWorker.delayNanos(1, 0, 2.0, null, warmup));
+        assertEquals(4_000_000_000L, ReplayWorker.delayNanos(2, 0, 2.0, null, warmup));
+        assertEquals(4_500_000_000L, ReplayWorker.delayNanos(3, 0, 2.0, null, warmup));
 
-        assertEquals(2_000_000_000L, Session.delayNanos(9, 1000, null, 2.0, warmup));
-        assertEquals(4_000_000_000L, Session.delayNanos(10, 2000, null, 2.0, warmup));
-        assertEquals(4_500_000_000L, Session.delayNanos(11, 3000, null, 2.0, warmup));
-        assertThrows(IOException.class, () -> Session.checkPlaybackEnd(1, 0, 2.0, null, warmup));
-        assertDoesNotThrow(() -> Session.checkPlaybackEnd(2, 0, 2.0, null, warmup));
-        assertThrows(IOException.class, () -> Session.checkPlaybackEnd(0, 172_800_000, null, 2.0, warmup));
+        assertEquals(2_000_000_000L, ReplayWorker.delayNanos(9, 1000, null, 2.0, warmup));
+        assertEquals(4_000_000_000L, ReplayWorker.delayNanos(10, 2000, null, 2.0, warmup));
+        assertEquals(4_500_000_000L, ReplayWorker.delayNanos(11, 3000, null, 2.0, warmup));
+        assertThrows(IOException.class, () -> ReplayWorker.checkPlaybackEnd(1, 0, 2.0, null, warmup));
+        assertDoesNotThrow(() -> ReplayWorker.checkPlaybackEnd(2, 0, 2.0, null, warmup));
+        assertThrows(IOException.class, () -> ReplayWorker.checkPlaybackEnd(0, 172_800_000, null, 2.0, warmup));
         assertThrows(IllegalArgumentException.class, () -> new Warmup(0, 0.25));
         assertThrows(IllegalArgumentException.class, () -> new Warmup(1000, 1.0));
     }
@@ -114,15 +114,15 @@ class IndexedTrafficReaderTest {
             assertEquals(1, dataset.missingOutput);
             var observed = dataset.entry(0, 1000);
             assertEquals(8192, observed.maxOutputTokens());
-            assertEquals(37, Session.playbackLimit(observed, 6));
-            assertEquals(8192, Session.playbackLimit(dataset.entry(1, 1000), 6));
-            assertEquals(9, Session.playbackLimit(dataset.entry(2, 1000), null));
+            assertEquals(37, ReplayWorker.playbackLimit(observed, 6));
+            assertEquals(8192, ReplayWorker.playbackLimit(dataset.entry(1, 1000), 6));
+            assertEquals(9, ReplayWorker.playbackLimit(dataset.entry(2, 1000), null));
             var unknown = dataset.entry(3, 1000);
-            assertThrows(IOException.class, () -> Session.playbackLimit(unknown, null));
-            assertEquals(6, Session.playbackLimit(unknown, 6));
+            assertThrows(IOException.class, () -> ReplayWorker.playbackLimit(unknown, null));
+            assertEquals(6, ReplayWorker.playbackLimit(unknown, 6));
             var zero = dataset.entry(4, 1000);
             assertEquals(0, zero.observedOutputTokens());
-            assertThrows(IOException.class, () -> Session.playbackLimit(zero, 6));
+            assertThrows(IOException.class, () -> ReplayWorker.playbackLimit(zero, 6));
         }
         try (var client = new ClientNode("client-0", directory.resolve("topology.json"), directory.resolve("worker"))) {
             new ObjectMapper().writeValue(directory.resolve("topology.json").toFile(),

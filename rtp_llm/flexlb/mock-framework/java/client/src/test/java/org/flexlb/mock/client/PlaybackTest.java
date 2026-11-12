@@ -9,7 +9,7 @@ import org.flexlb.mock.protocol.MultimodalProtocol;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.flexlb.mock.client.ClientProtocol.*;
-import org.flexlb.mock.client.ClientNode.Session;
+import org.flexlb.mock.client.ClientNode.ReplayWorker;
 
 /**
  * Verifies paced playback, concurrency, and shutdown for one or more Clients.
@@ -281,9 +281,9 @@ class PlaybackTest {
         assertThrows(IllegalArgumentException.class, () -> new Start(null, null, 1.0, null, 1, 1, 100, 100));
     }
 
-    private Session worker(ClientReplayPlan plan, ClientMetrics metrics, BackendRpcClientTest.Harness harness)
+    private ReplayWorker worker(ClientReplayPlan plan, ClientMetrics metrics, BackendRpcClientTest.Harness harness)
             throws Exception {
-        return new Session(plan, metrics, topology(harness), directory.resolve(UUID.randomUUID() + ".jsonl"),
+        return new ReplayWorker(plan, metrics, topology(harness), directory.resolve(UUID.randomUUID() + ".jsonl"),
             "client-0", MultimodalProtocol.IMAGE_TOKEN, 0, 0L, 1);
     }
 }

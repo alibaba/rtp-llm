@@ -35,11 +35,11 @@ public final class ClientNode implements AutoCloseable {
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
     private final ControlServer api;
 
-    private volatile Session session;
+    private volatile ReplayWorker worker;
 
     private long sequence, nextRequestId = 1;
 
-    private Group group;
+    private ReplayCoordinator coordinator;
 
     private boolean collected = true;
     private volatile boolean closed;
@@ -62,29 +62,29 @@ public final class ClientNode implements AutoCloseable {
     }
 
     public synchronized Ack prepare(ClientReplayPlan args) throws Exception {
-        if (closed || session != null && (args.sequence() <= session.plan.sequence() || !session.state().done()))
+        if (closed || worker != null && (args.sequence() <= worker.plan.sequence() || !worker.state().done()))
             throw new IllegalStateException("Previous Client playback has not ended or stale prepare");
         var playback = directory.resolve("playback/" + args.sequence());
         Files.createDirectories(playback.getParent()); Files.createDirectory(playback);
         save(playback.resolve("plan.json"), args);
-        if (session != null) session.close();
-        session = new Session(args, metrics, topology, playback.resolve("requests.jsonl"), id, imageToken, physicalBlockSize, cacheKeySeed, prefillCpSize);
+        if (worker != null) worker.close();
+        worker = new ReplayWorker(args, metrics, topology, playback.resolve("requests.jsonl"), id, imageToken, physicalBlockSize, cacheKeySeed, prefillCpSize);
         return new Ack(true);
     }
 
-    public Ack begin(Begin args) { session(args.sequence()).begin(args.start_epoch_ms()); return new Ack(true); }
+    public Ack begin(Begin args) { worker(args.sequence()).begin(args.start_epoch_ms()); return new Ack(true); }
 
-    public Ack halt(Sequence args) { session(args.sequence()).halt(); return new Ack(true); }
+    public Ack halt(Sequence args) { worker(args.sequence()).halt(); return new Ack(true); }
 
     public State state(Sequence args) {
-        return session(args.sequence()).state();
+        return worker(args.sequence()).state();
     }
 
     public Ack start(Start args) throws Exception {
-        Group created;
+        ReplayCoordinator created;
         synchronized (this) {
             if (!id.equals("client-0") || closed) throw new IllegalStateException("Start must target live client-0");
-            if (group != null && (!group.finished.isDone() || !collected))
+            if (coordinator != null && (!coordinator.finished.isDone() || !collected))
                 throw new IllegalStateException("Call stop to collect the previous playback before starting again");
             var nodes = JSON.readTree(topology.toFile());
             var peers = new ArrayList<String>();
@@ -93,8 +93,8 @@ public final class ClientNode implements AutoCloseable {
                     || args.total_concurrency() < peers.size())
                 throw new IllegalArgumentException("Need unique Client endpoints and at least one request/concurrency slot per Client");
             long firstId = nextRequestId;
-            created = new Group(++sequence, List.copyOf(peers), args, firstId);
-            group = created; collected = false;
+            created = new ReplayCoordinator(++sequence, List.copyOf(peers), args, firstId);
+            coordinator = created; collected = false;
         }
         try {
             save(directory.resolve("coordinator/" + created.number + "/plan.json"), Map.of("clients", created.peers, "config", args));
@@ -106,7 +106,7 @@ public final class ClientNode implements AutoCloseable {
                 total = input.count;
                 identity = input.identity;
                 if (total < created.peers.size()) throw new IOException("Need at least one request per Client");
-                Session.checkPlaybackEnd(total - 1, input.lastArrival, args.qps(), args.replay_speed(), args.warmup());
+                ReplayWorker.checkPlaybackEnd(total - 1, input.lastArrival, args.qps(), args.replay_speed(), args.warmup());
             }
             synchronized (this) { nextRequestId = Math.addExact(created.firstId, total); }
             save(directory.resolve("coordinator/" + created.number + "/input.json"),
@@ -139,10 +139,10 @@ public final class ClientNode implements AutoCloseable {
     public String url() { return api.url(); }
 
     public Summary stop(Empty args) throws Exception {
-        Group current;
+        ReplayCoordinator current;
         synchronized (this) {
             if (!id.equals("client-0")) throw new IllegalStateException("Stop must target client-0");
-            current = group;
+            current = coordinator;
         }
         if (current == null) return new Summary(Map.of(), List.of());
         current.stop = true;
@@ -152,8 +152,8 @@ public final class ClientNode implements AutoCloseable {
     }
 
     @Override public void close() {
-        Session owned;
-        synchronized (this) { if (closed) return; closed = true; owned = session; if (group != null) group.stop = true; }
+        ReplayWorker owned;
+        synchronized (this) { if (closed) return; closed = true; owned = worker; if (coordinator != null) coordinator.stop = true; }
         if (owned != null) owned.close();
         api.close(); http.shutdownNow();
     }
@@ -186,8 +186,8 @@ public final class ClientNode implements AutoCloseable {
         return result.get("result");
     }
 
-    private Session session(long expected) {
-        var current = session;
+    private ReplayWorker worker(long expected) {
+        var current = worker;
         if (current == null || expected != current.plan.sequence()) throw new IllegalStateException("Stale/unknown worker command");
         return current;
     }
@@ -195,7 +195,7 @@ public final class ClientNode implements AutoCloseable {
     /**
      * Coordinates one round across Client processes and collects their final states.
      */
-    private final class Group {
+    private final class ReplayCoordinator {
         final long number, firstId;
 
         final List<String> peers;
@@ -205,7 +205,7 @@ public final class ClientNode implements AutoCloseable {
 
         volatile boolean stop;
 
-        Group(long number, List<String> peers, Start config, long firstId) {
+        ReplayCoordinator(long number, List<String> peers, Start config, long firstId) {
             this.number = number; this.peers = peers; this.config = config; this.firstId = firstId;
         }
 
@@ -267,7 +267,7 @@ public final class ClientNode implements AutoCloseable {
     /**
      * Owns one round of local playback, from pacing through drain.
      */
-    static final class Session implements AutoCloseable {
+    static final class ReplayWorker implements AutoCloseable {
         private final ClientReplayPlan plan;
         private final BackendRpcClient client;
         private final RequestJournal journal;
@@ -294,7 +294,7 @@ public final class ClientNode implements AutoCloseable {
 
         private long issued, finished, drainDeadline = Long.MAX_VALUE;
 
-        Session(ClientReplayPlan plan, ClientMetrics metrics, Path topology, Path evidence, String id,
+        ReplayWorker(ClientReplayPlan plan, ClientMetrics metrics, Path topology, Path evidence, String id,
                      int imageToken, int physicalBlockSize, long seed, int prefillCpSize) throws Exception {
             this.imageToken = imageToken; this.physicalBlockSize = physicalBlockSize;
             this.plan = plan; this.metrics = metrics;
@@ -329,7 +329,7 @@ public final class ClientNode implements AutoCloseable {
                 catch (InterruptedException interrupted) { if (!stopped) fail("Player interrupted unexpectedly"); }
                 catch (java.io.InterruptedIOException interrupted) { if (!stopped) fail(interrupted.toString()); }
                 catch (java.io.IOException | RuntimeException error) { fail(error.toString()); }
-                finally { synchronized (Session.this) { finishInput(); } }
+                finally { synchronized (ReplayWorker.this) { finishInput(); } }
             });
             LockSupport.unpark(dispatcher);
         }
@@ -487,7 +487,7 @@ public final class ClientNode implements AutoCloseable {
                 metrics.issued();
             }
             call.completion().whenComplete((result, error) -> {
-                synchronized (Session.this) {
+                synchronized (ReplayWorker.this) {
                     active.remove(item.requestId());
                     synchronized (stateLock) {
                         finished++;

@@ -95,10 +95,10 @@ class RequestJournalTest {
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
             zero.start(InputFixture.plan(directory, null, 100, 10, 4, 16, 3000, 1000));
             PlaybackTest.eventually(() -> one.state(new ClientProtocol.Sequence(1)).issued() > 0);
-            var sessionField = ClientNode.class.getDeclaredField("session"); sessionField.setAccessible(true);
-            var journalField = ClientNode.Session.class.getDeclaredField("journal"); journalField.setAccessible(true);
+            var workerField = ClientNode.class.getDeclaredField("worker"); workerField.setAccessible(true);
+            var journalField = ClientNode.ReplayWorker.class.getDeclaredField("journal"); journalField.setAccessible(true);
             var channelField = RequestJournal.class.getDeclaredField("file"); channelField.setAccessible(true);
-            var journal = (RequestJournal) journalField.get(sessionField.get(one));
+            var journal = (RequestJournal) journalField.get(workerField.get(one));
             ((FileChannel) channelField.get(journal)).close();
             PlaybackTest.eventually(() -> zero.state(new ClientProtocol.Sequence(1)).done());
             var result = zero.stop(new ClientProtocol.Empty());
