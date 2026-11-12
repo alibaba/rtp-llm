@@ -83,6 +83,63 @@ def debug_slot_drops(tag, positions, slots, ratio):
         logging.exception("[DSV41_SLOT_DROP] instrumentation error in %s", tag)
 
 
+# Diagnostic (DSV41_DEBUG_DUMP_KV_DIR, shared env with the CompressorFP8 dump):
+# persist producer-path tensors so two runs under different prefill chunk
+# sizes can be diffed per position. The fail29 tag census (only _slots tags,
+# zero compressor.kv tags) and zero dump files from load71dump512 proved the
+# fused CompressorFP8 launcher never executes in this deployment — the live
+# sm89 writer path is AttentionV41FP8._produce_global (compress_main /
+# quantize_and_insert_k_cache_fp4 / store_index) with cross-chunk predecessor
+# state from _read_state(CSA_STATE). These hooks dump (a) the previous-state
+# read at forward start and (b) the pool rows written per tile.
+_DEBUG_DUMP_ROWS_DIR = os.getenv("DSV41_DEBUG_DUMP_KV_DIR", "")
+DEBUG_DUMP_ROWS = _DEBUG_DUMP_ROWS_DIR != ""
+_debug_dump_rows_files = 0
+_DEBUG_DUMP_ROWS_MAX_FILES = 6000
+
+
+def gather_pool_rows(pool, slots):
+    """Flat-slot row gather for 2-D and 3-D [blocks, eb, width] pool views."""
+    if pool is None or slots is None:
+        return None, None
+    valid = slots >= 0
+    idx = slots[valid].to(torch.long)
+    if idx.numel() == 0:
+        return valid, None
+    if pool.dim() == 3:
+        eb = pool.shape[1]
+        rows = pool[idx // eb, idx % eb]
+    else:
+        rows = pool[idx]
+    return valid, rows
+
+
+def debug_dump_rows(tag, **payload):
+    """Save named tensors/values to one file. Capture/warmup-safe; capped."""
+    global _debug_dump_rows_files
+    if not DEBUG_DUMP_ROWS:
+        return
+    try:
+        if torch.cuda.is_current_stream_capturing():
+            return
+        if os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD"):
+            return
+        if _debug_dump_rows_files >= _DEBUG_DUMP_ROWS_MAX_FILES:
+            return
+        saved = {}
+        for name, value in payload.items():
+            saved[name] = value.detach().cpu() if isinstance(value, torch.Tensor) else value
+        os.makedirs(_DEBUG_DUMP_ROWS_DIR, exist_ok=True)
+        rank = os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0"))
+        path = os.path.join(
+            _DEBUG_DUMP_ROWS_DIR, f"rows_{tag}_r{rank}_{_debug_dump_rows_files}.pt"
+        )
+        torch.save(saved, path)
+        _debug_dump_rows_files += 1
+    except Exception:  # pragma: no cover - diagnostics must never break a run
+        logging.exception("[DSV41_DUMP_ROWS] failed for %s", tag)
+
+
 def _integer_vector(value, rows, device):
     return (
         value.device == device

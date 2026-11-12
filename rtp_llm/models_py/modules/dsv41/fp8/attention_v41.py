@@ -1472,6 +1472,17 @@ class AttentionV41FP8(AttentionFP8):
                     (starts - 1).clamp_min(0),
                     torch.arange(len(starts), device=x_full.device),
                 )
+            if prefill_metadata.DEBUG_DUMP_ROWS:
+                # Diagnostic: the cross-chunk predecessor-state read. Diffing
+                # this across chunk sizes separates state read/write faults
+                # from compression-computation faults.
+                prefill_metadata.debug_dump_rows(
+                    f"prev_L{self.layer_id}",
+                    previous=previous,
+                    starts=starts,
+                    lengths=lengths,
+                    ratio=ratio,
+                )
         # Warmup (pool unbound) still needs the full keys for the shared
         # materialization, so it keeps every tile's keys; the pool path drops
         # them right after quantization.
@@ -1731,6 +1742,30 @@ class AttentionV41FP8(AttentionFP8):
                     quantize_indexer_k_fp4(
                         index_keys.contiguous(), index_slots, index_pool
                     )
+                if prefill_metadata.DEBUG_DUMP_ROWS:
+                    # Diagnostic: the pool rows this tile just wrote, keyed by
+                    # absolute boundary position, for cross-chunk-size diffs.
+                    try:
+                        valid_m, rows_m = prefill_metadata.gather_pool_rows(
+                            main_pool, main_slots
+                        )
+                        valid_i, rows_i = prefill_metadata.gather_pool_rows(
+                            index_pool, index_slots
+                        )
+                        prefill_metadata.debug_dump_rows(
+                            f"prod_L{self.layer_id}",
+                            ratio=ratio,
+                            pos_main=(
+                                boundary_pos[valid_m] if valid_m is not None else None
+                            ),
+                            main_rows=rows_m,
+                            pos_index=(
+                                boundary_pos[valid_i] if valid_i is not None else None
+                            ),
+                            index_rows=rows_i,
+                        )
+                    except Exception:  # diagnostics must never break a run
+                        pass
             else:
                 warm_keys.append((boundary_pos, boundary_req, global_keys, index_keys))
             # Release all consumer views before the next group is allocated.
