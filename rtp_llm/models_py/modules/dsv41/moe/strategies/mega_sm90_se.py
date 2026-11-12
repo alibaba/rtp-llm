@@ -57,8 +57,9 @@ class SM90MegaMoEFusedSEStrategy(SM90MegaMoEStrategy):
             return False
         if cfg.n_shared_experts < 1:
             return False
-        # The fused shared GEMM consumes 128x128 block FP8 weights.
-        if cfg.shared_fp8_block_size != _SHARED_BLOCK:
+        # The fused shared GEMM takes 128x128 FP32 block scales; MXFP8 32x32
+        # checkpoint scales are folded into the FP8 bytes at weight setup.
+        if cfg.shared_fp8_block_size not in (_SHARED_BLOCK, 32):
             return False
         return super().can_handle(cfg, explicit=explicit)
 
@@ -77,13 +78,24 @@ class SM90MegaMoEFusedSEStrategy(SM90MegaMoEStrategy):
         cfg = self.cfg
         inter, dim = cfg.moe_inter_dim, cfg.dim
 
-        def block_scales(scale: torch.Tensor, n: int, k: int) -> torch.Tensor:
+        def block_scales(
+            weight: torch.Tensor, scale: torch.Tensor, n: int, k: int
+        ):
+            """Return (fp8 weights, FP32 128x128 scales) for the fused GEMM."""
             if tuple(scale.shape) == (n // _SHARED_BLOCK, k // _SHARED_BLOCK):
-                return scale.float().contiguous()
-            raise ValueError(
-                "fused SM90 shared expert needs 128x128 FP8 block scales, got "
-                f"{tuple(scale.shape)} for {(n, k)}"
+                return weight.contiguous(), scale.float().contiguous()
+            # MXFP8 32x32 UE8M0: fold the per-block exponent into the FP8 bytes
+            # and keep one residual FP32 scale per 128x128 tile.
+            import deep_gemm
+
+            folded, residual = deep_gemm.fold_shared_k32_scales(weight, scale)
+            logging.info(
+                "[SM90 MegaMoE] folded MXFP8 32x32 shared scales to 128x128: "
+                "w=%s residual=%s",
+                tuple(folded.shape),
+                tuple(residual.shape),
             )
+            return folded, residual
 
         w13 = layer_weights.pop(W.v4_shared_w13_w)
         s13 = layer_weights.pop(W.v4_shared_w13_s)
@@ -94,8 +106,8 @@ class SM90MegaMoEFusedSEStrategy(SM90MegaMoEStrategy):
                 f"fused SM90 shared geometry mismatch: w13={tuple(w13.shape)} "
                 f"w2={tuple(w2.shape)} expected {(2 * inter, dim)}/{(dim, inter)}"
             )
-        self._shared_l1 = (w13.contiguous(), block_scales(s13, 2 * inter, dim))
-        self._shared_l2 = (w2.contiguous(), block_scales(s2, dim, inter))
+        self._shared_l1 = block_scales(w13, s13, 2 * inter, dim)
+        self._shared_l2 = block_scales(w2, s2, dim, inter)
         logging.info(
             "[SM90 MegaMoE] fused shared expert enabled: w13=%s w2=%s",
             tuple(w13.shape),
