@@ -114,7 +114,7 @@ private:
         PPTickets execution_result_sends;
     };
 
-    struct ResultTask {
+    struct ResultRecvTask {
         StreamGroups                   stream_groups;
         int64_t                        schedule_time_us = 0;
         RtpLLMExecutorMetricsCollector executor_collector;
@@ -122,24 +122,41 @@ private:
         WallTpsActiveGuard             wall_tps_active_guard;
     };
 
+    struct ResultSendTask {
+        PPExecutionPlan                plan;
+        PPPendingResult                pending;
+        size_t                         slot;
+        RtpLLMExecutorMetricsCollector executor_collector;
+    };
+
     absl::Status warmUp(const ScheduleOutput& schedule_output);
 
     absl::Status processImpl(const ScheduleOutput& schedule_output, int64_t schedule_time_us, bool shutdown);
 
-    void enqueueResultTask(ResultTask task);
+    void enqueueResultRecvTask(ResultRecvTask task);
 
-    void resultLoop();
+    void resultRecvLoop();
 
     void receiveAndProcessResult(const StreamGroups&             stream_groups,
                                  int64_t                         schedule_time_us,
                                  RtpLLMExecutorMetricsCollector& executor_collector);
 
     /** Ask the first-stage root's result thread to exit after its queued tasks; does not join. */
-    void requestResultStop();
+    void requestResultRecvStop();
+
+    void enqueueResultSendTask(ResultSendTask task);
+
+    void resultSendLoop();
+
+    void processResultAndSend(ResultSendTask& task);
+
+    void stopResultSender();
 
     void waitLastRun();
 
     void releaseAllModelBuffers();
+
+    void ensureModelInputOnGpu(GptModelInputs& model_input);
 
     static std::optional<ErrorInfo> validateStream(const GenerateStream& stream, SpeculativeType sp_type);
 
@@ -151,9 +168,6 @@ private:
     PPSamplingOutput sampleTokens(const PPExecutionPlan&  plan,
                                   const GptModelOutputs&  model_output,
                                   GrammarPrefetchContext* grammar_prefetch = nullptr);
-
-    void finishDSparkPrefillCachePublication(const GptModelInputs&    model_input,
-                                             std::vector<ErrorInfo>& request_errors);
 
     void advanceSamplingStates(const PPSamplingPlan& sampling_plan, PPExecutionResult& result);
 
@@ -249,7 +263,7 @@ private:
     bool    is_dspark_              = false;
     int64_t propose_step_           = 0;
     size_t  position_id_len_factor_ = 1;
-    const mtp::DraftInputLayout                      draft_input_layout_ = mtp::DraftInputLayout::COMPACT;
+    const mtp::DraftInputLayout                      draft_input_layout_;
     size_t                                           draft_vocab_size_   = 0;
     torch::Tensor                                    d2t_map_;
     torch::Tensor                                    dspark_markov_w1_;
@@ -267,14 +281,22 @@ private:
     std::vector<InflightBatch>   slots_;
     size_t                       current_slot_ = 0;
 
-    std::mutex              result_mutex_;
-    std::condition_variable result_cv_;
-    std::deque<ResultTask>  result_tasks_;
-    bool                    result_processing_ = false;
-    bool                    result_stop_ = false;
-    std::thread             result_thread_;
+    std::mutex                 result_recv_mutex_;
+    std::condition_variable    result_recv_cv_;
+    std::deque<ResultRecvTask> result_recv_tasks_;
+    bool                       result_recv_processing_ = false;
+    bool                       result_recv_stop_       = false;
+    std::thread                result_recv_thread_;
 
-    /** Covers the last execution's model-buffer consumers, including outgoing activation copies. */
+    /** One pending result is sufficient: waitLastRun() completes it before the next batch uses its state. */
+    std::mutex                    result_send_mutex_;
+    std::condition_variable       result_send_cv_;
+    std::optional<ResultSendTask> result_send_task_;
+    bool                          result_send_stop_ = false;
+    std::thread                   result_send_thread_;
+
+    /** Track GPU compute, outgoing activation copies and result D2H copies.
+     * The result worker waits on this event so the compute thread can advance. */
     torch::Event last_compute_done_ = cuda_graph::makeGraphEvent();
 
     /**
@@ -286,11 +308,6 @@ private:
     std::array<PPIntermediateTensors, 2> recv_buffers_;
     size_t                               next_recv_buffer_ = 0;
     torch::Stream                        recv_stream_;
-
-    /** Match MTP publication completion on the DSpARK P tail, which owns the draft COMMIT. */
-    const bool    track_dspark_cache_store_;
-    torch::Stream dspark_cache_store_sync_stream_;
-    torch::Tensor dspark_cache_store_status_;
 
     bool                               enable_detail_log_ = false;
     std::shared_ptr<ModelInputsLogger> model_inputs_logger_;

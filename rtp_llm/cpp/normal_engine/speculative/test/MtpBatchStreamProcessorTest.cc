@@ -1679,7 +1679,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputCompactsC
     EXPECT_EQ(expect_combo_position_ids, toVec<int>(combo_position_ids));
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodeDraftModelInputAdvancesComboPositionIds) {
+TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodeDraftModelInputKeepsCudaLengthsAndPositionDevice) {
     ModelConfig                 model_config;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
@@ -1691,27 +1691,58 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodeDraftModelInputAdvancesCombo
     model_config.num_layers                            = 1;
     model_config.mm_model_config.mm_position_ids_style = MROPE;
     model_config.attn_config.rope_config.index_factor  = 3;
-    sp_config.gen_num_per_cycle                        = 2;
+    sp_config.gen_num_per_cycle                        = 4;
 
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
 
-    GptModelInputs model_input;
-    model_input.combo_tokens       = torch::tensor({11, 21}, torch::kInt32);
-    model_input.sequence_lengths   = torch::tensor({5, 7}, torch::kInt32);
-    model_input.combo_position_ids = torch::tensor({5, 6, 7, 10, 11, 12}, torch::kInt32);
+    for (bool cuda_lengths : {false, true}) {
+        for (const std::string positions : {"none", "cpu", "cuda"}) {
+            SCOPED_TRACE(::testing::Message() << "cuda_lengths=" << cuda_lengths << ", positions=" << positions);
+            GptModelInputs model_input;
+            model_input.combo_tokens = torch::tensor({11, 21}, torch::kInt32).cuda();
+            model_input.sequence_lengths =
+                torch::tensor({5, 7}, torch::kInt32).to(cuda_lengths ? torch::kCUDA : torch::kCPU);
+            model_input.prefix_lengths = model_input.sequence_lengths;
+            if (positions != "none") {
+                model_input.combo_position_ids = torch::tensor({5, 6, 7, 10, 11, 12}, torch::kInt32)
+                                                     .to(positions == "cuda" ? torch::kCUDA : torch::kCPU);
+            }
+            TensorHolder holder;
+            for (int step = 1; step <= 2; ++step) {
+                const auto      previous_lengths   = model_input.sequence_lengths;
+                const auto      previous_positions = model_input.combo_position_ids;
+                GptModelOutputs model_output;
+                model_output.all_hidden_states = torch::full({2, 2}, static_cast<float>(step)).cuda();
+                auto draft_token_ids = torch::tensor({11 + step, 21 + step}, torch::kInt32).reshape({2, 1}).cuda();
 
-    GptModelOutputs model_output;
-    model_output.all_hidden_states = torch::tensor({0.1f, 0.2f, 1.1f, 1.2f}, torch::kFloat32).reshape({2, 2});
-    auto draft_token_ids           = torch::tensor({12, 22}, torch::kInt32).reshape({2, 1});
+                processor.updateDecodeDraftModelInput(model_input, model_output, draft_token_ids, holder);
 
-    TensorHolder holder;
-    processor.updateDecodeDraftModelInput(model_input, model_output, draft_token_ids, holder);
-
-    EXPECT_EQ((vector<int>{12, 22}), toVec<int>(model_input.combo_tokens));
-    EXPECT_EQ((vector<int>{6, 8}), toVec<int>(model_input.sequence_lengths));
-    EXPECT_EQ((vector<float>{0.1, 0.2, 1.1, 1.2}), toVec<float>(model_input.last_hidden_states));
-    EXPECT_EQ((vector<int>{6, 7, 8, 11, 12, 13}), toVec<int>(model_input.combo_position_ids));
+                EXPECT_EQ((vector<int>{11 + step, 21 + step}), toVec<int>(model_input.combo_tokens));
+                EXPECT_TRUE(model_input.sequence_lengths.is_cuda());
+                EXPECT_EQ(model_input.sequence_lengths.scalar_type(), torch::kInt32);
+                EXPECT_EQ((vector<int64_t>{2}), model_input.sequence_lengths.sizes().vec());
+                EXPECT_EQ((vector<int>{5 + step, 7 + step}), toVec<int>(model_input.sequence_lengths));
+                EXPECT_EQ((vector<int>{4 + step, 6 + step}), toVec<int>(previous_lengths));
+                EXPECT_EQ((vector<int>{5, 7}), toVec<int>(model_input.prefix_lengths));
+                EXPECT_EQ(model_input.last_hidden_states.data_ptr(), model_output.all_hidden_states.data_ptr());
+                EXPECT_TRUE(
+                    torch::equal(model_input.last_hidden_states.cpu(), torch::full({2, 2}, static_cast<float>(step))));
+                if (positions == "none") {
+                    EXPECT_FALSE(model_input.combo_position_ids.defined());
+                } else {
+                    EXPECT_EQ(model_input.combo_position_ids.device(), previous_positions.device());
+                    EXPECT_EQ(model_input.combo_position_ids.scalar_type(), torch::kInt32);
+                    EXPECT_EQ((vector<int64_t>{6}), model_input.combo_position_ids.sizes().vec());
+                    EXPECT_EQ(model_input.combo_position_ids.is_pinned(), positions == "cpu");
+                    EXPECT_EQ((vector<int>{5 + step, 6 + step, 7 + step, 10 + step, 11 + step, 12 + step}),
+                              toVec<int>(model_input.combo_position_ids));
+                    EXPECT_EQ((vector<int>{4 + step, 5 + step, 6 + step, 9 + step, 10 + step, 11 + step}),
+                              toVec<int>(previous_positions));
+                }
+            }
+        }
+    }
 }
 
 #if USING_CUDA

@@ -79,11 +79,11 @@ void syncDraftPrefillAfterVerify(GptModelInputs&          draft_input,
                                  DraftInputLayout         layout,
                                  const ParallelismConfig& parallelism_config);
 
+/** Advance lengths and positions out of place to preserve tensors shared with the previous input.
+ * Keep their devices unchanged and CPU positions pinned; the caller handles transfers. */
 void advanceDraftInput(GptModelInputs&      draft_input,
                        const torch::Tensor& draft_hidden_states,
-                       const torch::Tensor& draft_token_ids,
-                       size_t               position_id_len_factor,
-                       TensorHolder&        host_holder);
+                       const torch::Tensor& draft_token_ids);
 
 /** Immutable state shared by proposal construction, sampling and target verification in one DSpARK round.
  * anchors [batch]: each request's newest committed token.

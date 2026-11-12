@@ -25,10 +25,6 @@ public:
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
         dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor) {}
 
-    size_t positionIdLenFactor() const {
-        return model_input_gatherer_config_.position_id_len_factor;
-    }
-
     mtp::DraftInputLayout draftInputLayout() const;
 
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,

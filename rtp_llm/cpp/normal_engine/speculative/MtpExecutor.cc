@@ -3019,11 +3019,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
         // update model input
         if (i + 1 < decode_steps) {
-            mtp::advanceDraftInput(model_input,
-                                   draft_decode_model_output.all_hidden_states,
-                                   draft_token_ids,
-                                   batch_stream_processor_->positionIdLenFactor(),
-                                   buffer_holder_);
+            batch_stream_processor_->updateDecodeDraftModelInput(
+                model_input, draft_decode_model_output, draft_token_ids, buffer_holder_);
         }
     }
 

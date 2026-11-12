@@ -30,6 +30,12 @@ struct PPDraftOutput {
     torch::Tensor hidden_states;
 };
 
+struct PPPendingResult {
+    PPExecutionResult                     result;
+    torch::Tensor                         success;
+    std::vector<std::optional<ErrorInfo>> processor_errors;
+};
+
 class PPBatchStreamProcessor: public NormalBatchStreamProcessor {
 public:
     PPBatchStreamProcessor(const ModelConfig&                 model_config,
@@ -66,12 +72,14 @@ public:
                                       size_t                                                propose_step  = 0,
                                       const torch::Tensor&                                  verify_tokens = {}) const;
 
-    /** Called after draft submission; completes target/draft outputs and their CPU copies before sending. */
-    void fillExecutionResult(const PPExecutionPlan&  plan,
-                             const GptModelOutputs&  model_output,
-                             const PPSamplingOutput& sampling_output,
-                             const PPDraftOutput&    draft_output,
-                             PPExecutionResult&     result) const;
+    /** Enqueue result GPU work and D2H copies; the caller records their completion event after this returns. */
+    PPPendingResult submitExecutionResult(const PPExecutionPlan&  plan,
+                                          const GptModelOutputs&  model_output,
+                                          const PPSamplingOutput& sampling_output,
+                                          const PPDraftOutput&    draft_output) const;
+
+    /** Finalize CPU outputs and request errors after the caller waits for the submitted GPU work and copies. */
+    void finishExecutionResult(const PPExecutionPlan& plan, PPPendingResult& pending) const;
 
     void prepareDraftPrefillAfterTargetPrefill(GptModelInputs&      draft_prefill_input,
                                                const torch::Tensor& target_hidden_states,
@@ -132,11 +140,6 @@ private:
                            bool                                                  score_batch,
                            size_t                                                propose_step,
                            const torch::Tensor&                                  verify_tokens) const;
-
-    static void collectRequestErrors(const PPSamplingPlan&                        sampling_plan,
-                                     const std::vector<std::optional<ErrorInfo>>& processor_errors,
-                                     const torch::Tensor&                         success_cpu,
-                                     std::vector<ErrorInfo>&                      request_errors);
 
     void fillOptionalOutputs(const PPExecutionPlan& plan,
                              const GptModelOutputs& model_output,

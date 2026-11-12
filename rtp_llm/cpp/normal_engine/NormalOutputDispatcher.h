@@ -14,12 +14,14 @@
 
 namespace rtp_llm {
 
+/** Set blocking=false to defer the D2H wait; the caller must complete the copies before reading CPU outputs. */
 std::optional<PromptLogitsOutput> makePromptLogitsOutput(const torch::Tensor& request_logits,
                                                          const torch::Tensor& request_tokens,
                                                          int                  top_k,
                                                          int                  start,
                                                          int                  end,
-                                                         bool                 return_target_logprob);
+                                                         bool                 return_target_logprob,
+                                                         bool                 blocking = true);
 
 std::optional<ErrorInfo> collectStreamSamplerError(const std::vector<std::optional<ErrorInfo>>& processor_errors,
                                                    const torch::Tensor&                         success_cpu,
