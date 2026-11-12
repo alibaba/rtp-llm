@@ -817,23 +817,33 @@ def cp_all_gather_full_varlen(
     with record_function_range(f"{profile_name}.launch"):
         gathered = _cp_all_gather_into_empty(local_2d, group=Group.TP)
     with record_function_range(f"{profile_name}.restore"):
-        if not replay_only:
-            # The gather output and the row-reordered full tensor coexist here.
-            # Release allocator scratch first; long-context A100 prefill has
-            # just enough residual reserve for the second 1 GiB block but not
-            # for both blocks plus a stale allocator cache.
+        if replay_only:
+            full = gathered.index_select(0, cp_ctx.unpad_restore)
+        elif cp_ctx.seq_len_full > 262144:
+            # At near-1M context the NCCL gather output and the row-reordered
+            # full tensor are two 1 GiB blocks that cannot coexist in the A100
+            # reserve. Stage the gather through host memory: the 1 GiB device
+            # block is released before the restored block is allocated. This
+            # is 2 GiB of PCIe traffic per layer and only affects long context.
             import gc
 
+            device = gathered.device
+            dtype = gathered.dtype
+            shape = (cp_ctx.seq_len_full,) + tuple(gathered.shape[1:])
+            gathered_host = gathered.to("cpu", non_blocking=False)
+            del gathered
             gc.collect()
             try:
                 torch.cuda.empty_cache()
             except Exception:
                 pass
-        full = (
-            gathered.index_select(0, cp_ctx.unpad_restore)
-            if replay_only
-            else _cp_restore_gathered_full_2d(gathered, cp_ctx)
-        )
+            restore_host = cp_ctx.unpad_restore.to("cpu", non_blocking=False)
+            restored_host = gathered_host.index_select(0, restore_host)
+            del gathered_host, restore_host
+            full = restored_host.to(device=device, dtype=dtype, non_blocking=False).view(shape)
+            del restored_host
+        else:
+            full = _cp_restore_gathered_full_2d(gathered, cp_ctx)
     return full.view((full.shape[0],) + trailing)
 
 
