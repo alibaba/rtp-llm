@@ -343,11 +343,12 @@ class GatedResidualTest(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_extended_bf16_projection_and_combine_graph(self):
-        import os
         from unittest.mock import patch
+        from rtp_llm.models_py.modules.hybrid.gated_residual import inject_into_residual
+        from rtp_llm.models_py.triton_kernels.common import gated_residual_prefill_inject_norm_triton as inject_norm
 
         if torch.cuda.get_device_capability() != (9, 0):
-            self.skipTest("SM90 candidate")
+            self.skipTest("SM90 required")
         torch.manual_seed(71)
         width, rank = 10240, 320
         gamma = torch.randn(width, device="cuda", dtype=torch.bfloat16) * 0.1
@@ -355,45 +356,33 @@ class GatedResidualTest(unittest.TestCase):
         up = torch.randn(width, rank, device="cuda", dtype=torch.bfloat16) * 0.02
         inject = torch.randn(4, width, device="cuda", dtype=torch.bfloat16) * 0.02
         model = GatedResidual(gamma, down, up, inject, hc_mult=4, norm_eps=_EPS)
-        for rows in (33, 128):
+        reference = GatedResidual(gamma, down, up, inject, hc_mult=4, norm_eps=_EPS)
+        reference.merged_down_inject = None
+        for rows in (1, 33, 128):
             x = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
             sub = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
             gate = torch.randn(rows, 4, device="cuda", dtype=torch.bfloat16)
-            with patch.dict(os.environ, {"RTP_LLM_QWEN4_HC_FUSION_EXTENDED": "0"}):
-                expected = model.forward_with_injection(x, sub, gate)
-            with patch.dict(os.environ, {"RTP_LLM_QWEN4_HC_FUSION_EXTENDED": "1"}):
-                from rtp_llm.models_py.triton_kernels.common import gated_residual_prefill_inject_norm_triton as inject_norm
-
-                with patch.object(
-                    inject_norm, "try_inject_grouped_norm", wraps=inject_norm.try_inject_grouped_norm
-                ) as combined, patch(
-                    "rtp_llm.models_py.modules.hybrid.gated_residual.F.linear",
-                    wraps=F.linear,
-                ) as linear:
-                    actual = model.forward_with_injection(x, sub, gate)
-                self.assertTrue(combined.called)
-                self.assertTrue(any(call.args[1] is model.merged_down_inject for call in linear.call_args_list))
-                for got, want in zip(actual, expected):
-                    torch.testing.assert_close(got, want, atol=8e-3, rtol=1e-2)
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
-                    actual = model.forward_with_injection(x, sub, gate)
-                x.normal_()
-                sub.normal_()
-                gate.normal_()
-                graph.replay()
-            with patch.dict(os.environ, {"RTP_LLM_QWEN4_HC_FUSION_EXTENDED": "0"}):
-                expected = model.forward_with_injection(x, sub, gate)
-            for got, want in zip(actual, expected):
+            def expected():
+                return reference(inject_into_residual(x, sub, gate))
+            with patch.object(inject_norm, "try_inject_grouped_norm", wraps=inject_norm.try_inject_grouped_norm) as combined:
+                actual = model.forward_with_injection(x, sub, gate)
+            self.assertTrue(combined.called)
+            for got, want in zip(actual, expected()):
+                torch.testing.assert_close(got, want, atol=8e-3, rtol=1e-2)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = model.forward_with_injection(x, sub, gate)
+            x.normal_()
+            sub.normal_()
+            gate.normal_()
+            graph.replay()
+            for got, want in zip(actual, expected()):
                 torch.testing.assert_close(got, want, atol=8e-3, rtol=1e-2)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
-    def test_fp8_down_bf16_merged_candidate_and_graph(self):
-        import os
-        from unittest.mock import patch
-
+    def test_fp8_down_bf16_merged_default_and_graph(self):
         if torch.cuda.get_device_capability() != (9, 0):
-            self.skipTest("SM90 candidate")
+            self.skipTest("SM90 required")
         torch.manual_seed(73)
         width, rank = 10240, 320
         gamma = torch.randn(width, device="cuda", dtype=torch.bfloat16) * 0.01
@@ -401,48 +390,64 @@ class GatedResidualTest(unittest.TestCase):
         down_scale = torch.tensor([0.002], device="cuda", dtype=torch.float32)
         up = torch.randn(width, rank, device="cuda", dtype=torch.bfloat16) * 0.005
         inject = torch.randn(4, width, device="cuda", dtype=torch.bfloat16) * 0.005
-        settings = {
-            "RTP_LLM_QWEN4_HC_BF16_DOWN_INJECT": "1",
-            "RTP_LLM_QWEN4_HC_FUSION_EXTENDED": "0",
-            "RTP_LLM_QWEN4_HC_SM90_UP_MIX": "0",
-        }
-        with patch.dict(os.environ, settings):
-            model = GatedResidual(
-                gamma, down, up, inject, hc_mult=4, norm_eps=_EPS,
-                weight_scales=(down_scale, None, None),
-            )
-            self.assertEqual(model.bf16_fp8_down_inject.shape, (336, width))
-            expected_down = (down.float() * down_scale).to(torch.bfloat16)
-            torch.testing.assert_close(model.bf16_fp8_down_inject[:320], expected_down, rtol=0, atol=0)
-            torch.testing.assert_close(model.bf16_fp8_down_inject[320:324], inject, rtol=0, atol=0)
-            reference = GatedResidual(
-                gamma, expected_down, up, inject, hc_mult=4, norm_eps=_EPS
-            )
-            reference.merged_down_inject = None
-            for rows in (1, 12, 33, 128):
-                with self.subTest(rows=rows):
-                    x = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
-                    self.assertTrue(model._use_bf16_down_inject(x))
-                    expected = reference(x)
-                    actual = model(x)
-                    for got, want in zip(actual, expected):
-                        torch.testing.assert_close(got, want, atol=8e-3, rtol=1e-2)
-            x = torch.randn(12, width, device="cuda", dtype=torch.bfloat16)
-            model(x)
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                actual = model(x)
-            x.normal_()
-            graph.replay()
-            for got, want in zip(actual, reference(x)):
+        model = GatedResidual(gamma, down, up, inject, hc_mult=4, norm_eps=_EPS,
+                              weight_scales=(down_scale, None, None))
+        self.assertEqual(model.bf16_fp8_down_inject.shape, (336, width))
+        for tensor in (down, down_scale, inject):
+            self.assertTrue(tensor._rtp_requires_restart_for_update)
+        expected_down = (down.float() * down_scale).to(torch.bfloat16)
+        torch.testing.assert_close(model.bf16_fp8_down_inject[:320], expected_down, rtol=0, atol=0)
+        torch.testing.assert_close(model.bf16_fp8_down_inject[320:324], inject, rtol=0, atol=0)
+        reference = GatedResidual(gamma, expected_down, up, inject, hc_mult=4, norm_eps=_EPS)
+        reference.merged_down_inject = None
+        for rows in (1, 12, 33, 128):
+            x = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
+            self.assertTrue(model._use_bf16_down_inject(x))
+            for got, want in zip(model(x), reference(x)):
                 torch.testing.assert_close(got, want, atol=8e-3, rtol=1e-2)
-        with patch.dict(os.environ, {"RTP_LLM_QWEN4_HC_BF16_DOWN_INJECT": "0"}):
-            self.assertFalse(model._use_bf16_down_inject(x))
-            disabled = GatedResidual(
-                gamma, down, up, inject, hc_mult=4, norm_eps=_EPS,
-                weight_scales=(down_scale, None, None),
-            )
-            self.assertIsNone(disabled.bf16_fp8_down_inject)
+        x = torch.randn(12, width, device="cuda", dtype=torch.bfloat16)
+        model(x)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = model(x)
+        x.normal_()
+        graph.replay()
+        for got, want in zip(actual, reference(x)):
+            torch.testing.assert_close(got, want, atol=8e-3, rtol=1e-2)
+        model.bf16_fp8_down_inject = None
+        self.assertFalse(model._use_bf16_down_inject(x))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_fp8_up_bf16_default_and_graph(self):
+        if torch.cuda.get_device_capability() != (9, 0):
+            self.skipTest("SM90 required")
+        torch.manual_seed(74)
+        width, rank = 10240, 320
+        gamma = torch.randn(width, device="cuda", dtype=torch.bfloat16) * 0.01
+        down = torch.randn(rank, width, device="cuda", dtype=torch.bfloat16) * 0.005
+        up = (torch.randn(width, rank, device="cuda") * 8).to(torch.float8_e4m3fn)
+        scale = torch.tensor([0.002], device="cuda", dtype=torch.float32)
+        inject = torch.randn(4, width, device="cuda", dtype=torch.bfloat16) * 0.005
+        model = GatedResidual(gamma, down, up, inject, hc_mult=4, norm_eps=_EPS,
+                              weight_scales=(None, scale, None))
+        self.assertTrue(up._rtp_requires_restart_for_update)
+        self.assertTrue(scale._rtp_requires_restart_for_update)
+        expected_up = (up.float() * scale).to(torch.bfloat16)
+        torch.testing.assert_close(model.bf16_fp8_up, expected_up, rtol=0, atol=0)
+        reference = GatedResidual(gamma, down, expected_up, inject, hc_mult=4, norm_eps=_EPS)
+        for rows in (1, 12, 33, 128):
+            x = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
+            for got, want in zip(model(x), reference(x)):
+                torch.testing.assert_close(got, want, atol=8e-3, rtol=1e-2)
+        x = torch.randn(12, width, device="cuda", dtype=torch.bfloat16)
+        model(x)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = model(x)
+        x.normal_()
+        graph.replay()
+        for got, want in zip(actual, reference(x)):
+            torch.testing.assert_close(got, want, atol=8e-3, rtol=1e-2)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_fused_group_norm_matches_torch_and_replays(self):
