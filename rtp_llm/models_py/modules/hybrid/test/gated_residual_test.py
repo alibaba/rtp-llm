@@ -349,10 +349,10 @@ class GatedResidualTest(unittest.TestCase):
         self.assertEqual(torch.count_nonzero(result[0]), 0)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
-    def test_extended_bf16_projection_and_combine_graph(self):
+    def test_bf16_injection_norm_and_graph_replay(self):
         from unittest.mock import patch
         from rtp_llm.models_py.modules.hybrid.gated_residual import inject_into_residual
-        from rtp_llm.models_py.triton_kernels.common import gated_residual_prefill_inject_norm_triton as inject_norm
+        from rtp_llm.models_py.triton_kernels.gated_residual import prefill_inject_norm as inject_norm
 
         if torch.cuda.get_device_capability() != (9, 0):
             self.skipTest("SM90 required")

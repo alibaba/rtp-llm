@@ -56,13 +56,16 @@ def fused_mix_reduce(
         (*logits.shape[:-1], hidden), device=logits.device, dtype=logits.dtype
     )
     block, warps = 128, 4
-    if hidden == 2560 and cached_device_capability(logits.device) == (12, 0):
-        # Fewer CTAs for the bandwidth-bound prefill consumer. The four BF16
-        # products and their sequential FP32 sum keep the original boundaries.
-        if 4093 <= rows <= 4096:
-            block = 2048
-        elif rows == 12288:
+    if hidden == 2560:
+        capability = cached_device_capability(logits.device)
+        if capability == (9, 0) and rows >= 4096:
             block, warps = 256, 2
+        elif capability == (12, 0):
+            # Fewer CTAs for the bandwidth-bound prefill consumer.
+            if 4093 <= rows <= 4096:
+                block = 2048
+            elif rows == 12288:
+                block, warps = 256, 2
     _mix_reduce_kernel[(rows, triton.cdiv(hidden, block))](
         logits,
         normed,

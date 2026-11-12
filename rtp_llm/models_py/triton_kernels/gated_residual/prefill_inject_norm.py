@@ -1,4 +1,4 @@
-"""Materialize the residual and its normalized consumer in one FP8 HC producer."""
+"""Materialize the residual and its normalized consumer in one HC kernel."""
 
 import math
 
@@ -109,7 +109,7 @@ def try_inject_grouped_norm(x, sublayer, gates, gamma, eps, *, collect_scale=Tru
             1 <= x.numel() // 10240 <= 32
             or 4093 <= x.numel() // 10240 <= 16384
             or (
-                x.numel() // 10240 <= 4096
+                1 <= x.numel() // 10240 <= (12288 if collect_scale else 32768)
                 and cached_device_capability(x.device) == (9, 0)
             )
         )
