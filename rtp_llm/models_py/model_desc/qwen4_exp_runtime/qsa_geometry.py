@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
 
 from .qsa_cache_views import _block_table, _typed_2d_pool, _validate_required_blocks
 from .qsa_plans import IncrementalPrefillPlan, TargetVerifyPlan
+from .step_metadata import cached_query_geometry, cached_step_value, tensor_signature
 
 
 def _draft_incremental_prefill_geometry(
@@ -436,16 +437,24 @@ def _target_verify_geometry(
             "qwen4_exp QSA target-verify prefix lengths must be non-negative"
         )
     prefix_source = self.main_inputs.prefix_lengths_device if graph_target else prefixes
-    prefixes_device = prefix_source.to(
-        device=device, dtype=torch.int32, non_blocking=True
-    ).contiguous()
+    prefixes_device = cached_step_value(
+        self,
+        ("verify_prefixes", tensor_signature(prefix_source), device),
+        lambda: prefix_source.to(
+            device=device, dtype=torch.int32, non_blocking=True
+        ).contiguous(),
+    )
 
-    expected_cu = torch.arange(
-        0,
-        (batch_size + 1) * query_len,
-        query_len,
-        dtype=torch.int32,
-        device=device,
+    expected_cu = cached_step_value(
+        self,
+        ("query_cu", batch_size, query_len, device),
+        lambda: torch.arange(
+            0,
+            (batch_size + 1) * query_len,
+            query_len,
+            dtype=torch.int32,
+            device=device,
+        ),
     )
     cu_seqlens = self.main_inputs.cu_seqlens_device
     if (
@@ -561,19 +570,9 @@ def _target_verify_geometry(
         device=device,
     )
 
-    from rtp_llm.models_py.kernels.cuda.qsa.target_metadata_triton import (
-        try_target_metadata,
+    visible_lengths, compressed_lengths, query_positions, block_starts = (
+        cached_query_geometry(self, prefixes_device, query_len, ratio)
     )
-
-    metadata = try_target_metadata(prefixes_device, query_len, ratio)
-    query_positions = block_starts = None
-    if metadata is None:
-        if offsets is None:
-            offsets = torch.arange(query_len, dtype=torch.int32, device=device)
-        visible_lengths = prefixes_device[:, None] + offsets[None, :] + 1
-        compressed_lengths = visible_lengths // ratio
-    else:
-        visible_lengths, compressed_lengths, query_positions, block_starts = metadata
     if self.main_inputs.is_s_padded:
         active = state_table.ne(0).any(dim=1, keepdim=True) | kv_table.ne(0).any(
             dim=1, keepdim=True
