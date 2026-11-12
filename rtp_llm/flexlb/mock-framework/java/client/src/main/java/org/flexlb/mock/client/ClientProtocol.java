@@ -10,6 +10,27 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 public final class ClientProtocol {
     private ClientProtocol() {}
 
+    private static List<String> validateReplay(List<String> masters, String requestsFile, Double qps, Double replaySpeed,
+                                               int concurrency, int queueCapacity, long requestTimeoutMs,
+                                               long drainTimeoutMs, Integer fallbackMaxOutputTokens) {
+        if (requestsFile == null || requestsFile.isBlank()
+                || !java.nio.file.Path.of(requestsFile).isAbsolute() || !requestsFile.endsWith(".mckidx"))
+            throw new IllegalArgumentException("requests_file must be an absolute .mckidx path");
+        if (masters != null) {
+            masters = List.copyOf(masters);
+            if (masters.isEmpty() || new HashSet<>(masters).size() != masters.size() || masters.stream().anyMatch(String::isBlank))
+                throw new IllegalArgumentException("masters must be nonempty and unique when supplied");
+        }
+        if (fallbackMaxOutputTokens != null && fallbackMaxOutputTokens < 1)
+            throw new IllegalArgumentException("fallback_max_output_tokens must be positive");
+        Double rate = qps != null ? qps : replaySpeed;
+        if ((qps == null) == (replaySpeed == null) || !Double.isFinite(rate) || rate <= 0
+                || concurrency < 1 || queueCapacity < 1 || queueCapacity > 100000
+                || requestTimeoutMs < 1 || requestTimeoutMs > 3600000 || drainTimeoutMs < 1 || drainTimeoutMs > 3600000)
+            throw new IllegalArgumentException("Invalid finite playback plan (maximum 24 hours)");
+        return masters;
+    }
+
     public record Empty() {}
 
     /**
@@ -29,19 +50,8 @@ public final class ClientProtocol {
                 request_timeout_ms, drain_timeout_ms, false, null, null);
         }
         public Start {
-            if (requests_file == null || requests_file.isBlank() || !java.nio.file.Path.of(requests_file).isAbsolute() || !requests_file.endsWith(".mckidx"))
-                throw new IllegalArgumentException("requests_file must be an absolute .mckidx path");
-            if (masters != null) {
-                masters = List.copyOf(masters);
-                if (masters.isEmpty() || new HashSet<>(masters).size() != masters.size() || masters.stream().anyMatch(String::isBlank))
-                    throw new IllegalArgumentException("masters must be nonempty and unique when supplied");
-            }
-            if (fallback_max_output_tokens != null && fallback_max_output_tokens < 1)
-                throw new IllegalArgumentException("fallback_max_output_tokens must be positive");
-            if ((qps == null) == (replay_speed == null)
-                    || !Double.isFinite(qps != null ? qps : replay_speed) || (qps != null ? qps : replay_speed) <= 0 || total_concurrency < 1 || queue_capacity < 1 || queue_capacity > 100000
-                    || request_timeout_ms < 1 || request_timeout_ms > 3600000 || drain_timeout_ms < 1 || drain_timeout_ms > 3600000)
-                throw new IllegalArgumentException("Invalid finite playback plan (maximum 24 hours)");
+            masters = validateReplay(masters, requests_file, qps, replay_speed, total_concurrency, queue_capacity,
+                request_timeout_ms, drain_timeout_ms, fallback_max_output_tokens);
         }
     }
 
@@ -63,8 +73,8 @@ public final class ClientProtocol {
                 replay_speed, concurrency, queue_capacity, request_timeout_ms, drain_timeout_ms, false, null, null);
         }
         public ClientReplayPlan {
-            masters = new Start(masters, requests_file, qps, replay_speed, concurrency, queue_capacity,
-                request_timeout_ms, drain_timeout_ms, reuse_cache, fallback_max_output_tokens, warmup).masters();
+            masters = validateReplay(masters, requests_file, qps, replay_speed, concurrency, queue_capacity,
+                request_timeout_ms, drain_timeout_ms, fallback_max_output_tokens);
             if (sequence < 1 || count < 1 || first_index < 0 || stride < 1 || first_index >= stride || first_request_id < 1
                     || sha256 == null || !sha256.matches("[0-9a-f]{64}"))
                 throw new IllegalArgumentException("Invalid worker playback plan");
