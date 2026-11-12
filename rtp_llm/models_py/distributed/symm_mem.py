@@ -80,11 +80,11 @@ def _agree_across_group(group: ProcessGroup, local_ok: bool, tag: str) -> bool:
     votes = [store.get(k) == b"1" for k in keys]
     if not all(votes):
         logging.warning(
-            "TorchSymmMemCommunicator: disabling symmetric memory for %s on all "
-            "%d rank(s) of group %s; rank(s) %s could not initialize it.",
+            "TorchSymmMemCommunicator: group %s declined %s across %d rank(s); "
+            "rank(s) %s voted against it.",
+            group_name,
             tag,
             group_size,
-            group_name,
             [r for r, ok in enumerate(votes) if not ok],
         )
         return False
@@ -98,7 +98,7 @@ class TorchSymmMemCommunicator:
     This communicator:
       - Validates device capability and world size.
       - Allocates a shared symmetric buffer.
-      - Chooses between 'multimem' and 'two-shot' all-reduce kernels.
+      - Selects a multicast, one-shot, or two-shot all-reduce.
       - Exposes a fast-path all_reduce() compatible with bfloat16 inputs.
 
     If any prerequisite is not met, the instance remains disabled and will
@@ -112,6 +112,8 @@ class TorchSymmMemCommunicator:
         9: [4, 6, 8],
         10: [6, 8],
     }
+    # One-shot avoids separate staging and output copies for small TP2 tensors.
+    _H20_TP2_ONE_SHOT_MAX_BYTES = 320 * 1024
 
     def __init__(self, group: ProcessGroup, device: Union[int, str, torch.device]):
         """
@@ -223,6 +225,15 @@ class TorchSymmMemCommunicator:
             self.disabled = True
             return
 
+        self._one_shot_copy_out = None
+        if self.world_size == 2:
+            one_shot = getattr(torch.ops.symm_mem, "one_shot_all_reduce_copy_out", None)
+            if _agree_across_group(
+                self.group,
+                one_shot is not None and "H20" in torch.cuda.get_device_name(self.device),
+                "one-shot",
+            ):
+                self._one_shot_copy_out = one_shot
         self.disabled = False
 
     def should_torch_symm_mem_allreduce(self, inp: torch.Tensor):
@@ -261,23 +272,57 @@ class TorchSymmMemCommunicator:
         Returns:
             The reduced tensor (same shape as inp), or None if disabled.
 
-        Implementation details:
-            - Stages 'inp' into the symmetric buffer.
-            - Selects 'multimem' or 'two_shot' kernel based on topology.
-            - Writes the result into 'out' and returns it.
+        Stages 'inp' into symmetric memory and writes the result into 'out'.
         """
         if out is None:
             out = torch.empty_like(inp)
-        self.buffer[: inp.numel()].copy_(inp.view(-1))
+        staged = self.buffer[: inp.numel()]
+        local = inp.view(-1)
+        size = local.numel() * local.element_size()
+        if (
+            self._one_shot_copy_out is not None
+            and inp.dtype == self.dtype
+            and 0 < size <= self._H20_TP2_ONE_SHOT_MAX_BYTES
+            and size % 16 == 0
+        ):
+            # Keep the collective choice rank-invariant. Normalize a local
+            # strided or unaligned view instead of changing the collective.
+            if local.device != staged.device:
+                local = local.to(staged.device)
+            if (
+                not local.is_contiguous()
+                or local.data_ptr() % 16
+                or local.storage_offset() * local.element_size() % 16
+            ):
+                local = local.clone(memory_format=torch.contiguous_format)
+            out_ptr = out.data_ptr()
+            local_ptr = local.data_ptr()
+            direct = (
+                out.is_contiguous()
+                and out.numel() == local.numel()
+                and out.dtype == self.dtype
+                and out.device == self.device
+                and out_ptr % 16 == 0
+                and (out_ptr == local_ptr or abs(out_ptr - local_ptr) >= size)
+            )
+            target = out.view(-1) if direct else torch.empty_like(staged)
+            self._one_shot_copy_out(
+                staged, local, "sum", self.group.group_name, target
+            )
+            if not direct:
+                out.copy_(target.view(out.shape))
+            return out
+
+        staged.copy_(local)
         if self.world_size in self._WORLD_SIZES_MULTIMEM[self.device_capability]:
             torch.ops.symm_mem.multimem_all_reduce_(
-                self.buffer[: inp.numel()], "sum", self.group.group_name
+                staged, "sum", self.group.group_name
             )
         else:
             torch.ops.symm_mem.two_shot_all_reduce_(
-                self.buffer[: inp.numel()], "sum", self.group.group_name
+                staged, "sum", self.group.group_name
             )
-        out.copy_(self.buffer[: inp.numel()].view(out.shape))
+        out.copy_(staged.view(out.shape))
         return out
 
     # adapter from torch/distributed/_symmetric_memory/__init__.py

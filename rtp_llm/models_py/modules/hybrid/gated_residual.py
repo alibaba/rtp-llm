@@ -3,6 +3,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.nn.modules import module as module_hooks
 
 from rtp_llm.models_py.modules.base.common.fp8_linear import (
     dense_projection,
@@ -255,27 +256,40 @@ class GatedResidual(nn.Module):
             and self.down_projection.use_scaled_mm
             and tuple(self.down_projection.weight.shape) == (320, 10240)
         )
+        rows = hyper_input.numel() // self.hc_hidden_size
         bf16_candidate = (
-            self.down_projection is None
-            and self.merged_down_inject is not None
+            (
+                (self.hc_hidden_size == 10240 and 4096 <= rows <= 32768)
+                or (
+                    self.down_projection is None
+                    and self.merged_down_inject is not None
+                )
+            )
             and hyper_input.is_cuda
             and torch.version.hip is None
             and torch.cuda.get_device_capability(hyper_input.device) == (9, 0)
         )
-        if fp8_down or bf16_candidate:
+        if (fp8_down or bf16_candidate) and not (
+            self._forward_pre_hooks
+            or self._forward_hooks
+            or module_hooks._global_forward_pre_hooks
+            or module_hooks._global_forward_hooks
+        ):
             from rtp_llm.models_py.triton_kernels.common.gated_residual_prefill_inject_norm_triton import (
                 try_inject_grouped_norm,
             )
 
-            if fp8_down and not self._use_bf16_down_inject(hyper_input):
-                fused = try_inject_grouped_norm(
-                    hyper_input, sublayer_out, inject_weights, self.norm_gamma, self.norm_eps
-                )
-            else:
-                fused = try_inject_grouped_norm(
-                    hyper_input, sublayer_out, inject_weights, self.norm_gamma,
-                    self.norm_eps, collect_scale=False
-                )
+            collect_scale = (
+                fp8_down and rows <= 12288 and not self._use_bf16_down_inject(hyper_input)
+            )
+            fused = try_inject_grouped_norm(
+                hyper_input,
+                sublayer_out,
+                inject_weights,
+                self.norm_gamma,
+                self.norm_eps,
+                collect_scale=collect_scale,
+            )
             if fused is not None:
                 residual, normed, scale = fused
                 return self._forward_normed(residual, normed, down_input_scale=scale)
@@ -289,19 +303,14 @@ class GatedResidual(nn.Module):
         bf16_fp8_candidate = self._use_bf16_down_inject(normed)
         merged = self.bf16_fp8_down_inject if bf16_fp8_candidate else self.merged_down_inject
         rows = normed.numel() // self.hc_hidden_size
-        extended_bf16 = (
-            merged is not None
-            and normed.is_cuda
-            and torch.version.hip is None
-            and 33 <= rows <= 12288
-            and torch.cuda.get_device_capability(normed.device) == (9, 0)
-        )
+        # Wide BF16 inputs use separate projections to preserve the model's
+        # down/inject rounding.
         if (
             merged is not None
             and normed.is_contiguous()
             and normed.dtype == merged.dtype
             and normed.device == merged.device
-            and (1 <= rows <= 32 or extended_bf16 or bf16_fp8_candidate)
+            and (1 <= rows <= 32 or bf16_fp8_candidate)
         ):
             from rtp_llm.models_py.triton_kernels.common.gated_residual_down_triton import (
                 down_inject_epilogue,

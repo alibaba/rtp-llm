@@ -1,10 +1,9 @@
 """Paged sparse GQA attention for Qwen4 decode and context-style prefill.
 
-The QSA indexer returns request-local absolute token indices.  This kernel maps
-each selected token through the main MHA cache block table and performs GQA
-attention without materialising gathered K/V tensors.  It is intentionally
-Qwen4-specific: BF16 or FP8 E4M3 HND cache layout, token-level selections, and block id zero
-reserved as the allocator sentinel.
+The QSA indexer returns request-local absolute token indices. The kernels
+resolve these through the main MHA cache block table. The grouped path reads
+HND pages directly. The SM90 graph decode path packs selected BF16 K/V for
+varlen FlashAttention. Block id zero is the allocator sentinel.
 
 The same B/S-shaped primitive serves ordinary decode, target verification, and
 the correctness-first MTP draft incremental-prefill bridge (which invokes it
@@ -393,6 +392,7 @@ def _sparse_paged_grouped_split_kernel(
     BLOCK_N: tl.constexpr,
     WITH_GATE: tl.constexpr = False,
     OUT_BTHD: tl.constexpr = False,
+    RESOLVED_SLOTS: tl.constexpr = False,
 ):
     """Tensor-core grouped sparse paged GQA.
 
@@ -422,7 +422,8 @@ def _sparse_paged_grouped_split_kernel(
     )
 
     row = selected_ptr + batch * stride_sel_b + query * stride_sel_s
-    kv_len = tl.load(kv_lens_ptr + batch * stride_len_b + query * stride_len_s)
+    if not RESOLVED_SLOTS:
+        kv_len = tl.load(kv_lens_ptr + batch * stride_len_b + query * stride_len_s)
     count = (
         tl.minimum(tl.maximum(tl.load(row + selected_width), 0), selected_width)
         if HAS_COUNT
@@ -441,21 +442,26 @@ def _sparse_paged_grouped_split_kernel(
     for tile in range(tile_start, tile_end):
         offset = tile * BLOCK_N + columns
         index = tl.load(row + offset, mask=offset < count, other=-1)
-        logical = index // PAGE_SIZE
-        candidate = (offset < count) & (index >= 0) & (index < kv_len)
-        physical = tl.load(
-            block_table_ptr + batch * stride_bt_b + logical * stride_bt_block,
-            mask=candidate & (logical < max_blocks),
-            other=0,
-        )
-        valid = (
-            candidate
-            & (logical < max_blocks)
-            & (physical > 0)
-            & (physical < cache_blocks)
-        )
-        safe_page = tl.maximum(physical, 0).to(tl.int64)
-        page_slot = tl.maximum(index, 0) % PAGE_SIZE
+        if RESOLVED_SLOTS:
+            valid = (offset < count) & (index >= 0)
+            safe_page = (index // PAGE_SIZE).to(tl.int64)
+            page_slot = index % PAGE_SIZE
+        else:
+            logical = index // PAGE_SIZE
+            candidate = (offset < count) & (index >= 0) & (index < kv_len)
+            physical = tl.load(
+                block_table_ptr + batch * stride_bt_b + logical * stride_bt_block,
+                mask=candidate & (logical < max_blocks),
+                other=0,
+            )
+            valid = (
+                candidate
+                & (logical < max_blocks)
+                & (physical > 0)
+                & (physical < cache_blocks)
+            )
+            safe_page = tl.maximum(physical, 0).to(tl.int64)
+            page_slot = tl.maximum(index, 0) % PAGE_SIZE
         keys = tl.load(
             cache_ptr
             + safe_page[None, :] * stride_cache_page
@@ -601,6 +607,343 @@ def _merge_sparse_paged_splits_kernel(
     tl.store(out_ptr + offset, out.to(out_ptr.dtype.element_ty))
 
 
+@triton.jit
+def _resolve_paged_slots(
+    selected,
+    block_table,
+    cu_seqlens,
+    lengths,
+    slots,
+    selected_row_stride,
+    cu_stride,
+    length_stride,
+    table_row_stride,
+    table_col_stride,
+    batch,
+    width,
+    logical_blocks,
+    cache_blocks,
+    PAGE: tl.constexpr,
+    ROW_BLOCK: tl.constexpr,
+    REQUEST_BLOCK: tl.constexpr,
+    DECODE: tl.constexpr = False,
+):
+    # Resolve pages before the attention loop, as in SGLang's QSA paged reader.
+    # The scan keeps the tail after the compressed selection, including on rows
+    # with holes between those two regions.
+    row = tl.program_id(0)
+    if DECODE:
+        request = row
+        visible = tl.load(lengths + row * length_stride)
+    else:
+        req = tl.arange(0, REQUEST_BLOCK)
+        end = tl.load(
+            cu_seqlens + (req + 1) * cu_stride, req < batch, other=2147483647
+        )
+        request = tl.sum((row >= end).to(tl.int32), axis=0)
+        start = tl.load(cu_seqlens + request * cu_stride)
+        visible = tl.load(lengths + request * length_stride) + row - start + 1
+
+    column = tl.arange(0, ROW_BLOCK)
+    token = tl.load(
+        selected + row * selected_row_stride + column, column < width, other=-1
+    )
+    logical = token // PAGE
+    candidate = (token >= 0) & (token < visible) & (logical < logical_blocks)
+    physical = tl.load(
+        block_table + request * table_row_stride + logical * table_col_stride,
+        candidate, other=0,
+    )
+    valid = candidate & (physical > 0) & (physical < cache_blocks)
+    packed_offset = tl.cumsum(valid.to(tl.int32)) - 1
+    slot_row = slots + row * (width + 1)
+    tl.store(slot_row + packed_offset, physical * PAGE + token % PAGE, valid)
+    tl.store(slot_row + width, tl.sum(valid.to(tl.int32), axis=0))
+
+
+def _main_cache_hnd_view(kv_cache, kv_head_num, page_size, head_dim):
+    if kv_cache.dim() == 2:
+        if kv_head_num is None or kv_head_num <= 0:
+            raise ValueError("kv_head_num is required for a packed HybridPool view")
+        required_width = 2 * kv_head_num * page_size * head_dim
+        if int(kv_cache.shape[1]) < required_width:
+            raise ValueError(
+                f"packed kv_cache width {kv_cache.shape[1]} is smaller than "
+                f"the required main-cache width {required_width}"
+            )
+        if kv_cache.stride(1) != 1:
+            raise ValueError("packed HybridPool rows must have contiguous elements")
+        kv_cache = torch.as_strided(
+            kv_cache,
+            (int(kv_cache.shape[0]), 2, kv_head_num, page_size, head_dim),
+            (
+                kv_cache.stride(0),
+                kv_head_num * page_size * head_dim,
+                page_size * head_dim,
+                head_dim,
+                1,
+            ),
+        )
+    if kv_cache.dim() != 5 or int(kv_cache.shape[1]) != 2:
+        raise ValueError("kv_cache must be [pages, 2, H_kv, page_size, D]")
+    _, _, kv_heads, cache_page_size, cache_head_dim = kv_cache.shape
+    if kv_head_num is not None and kv_heads != kv_head_num:
+        raise ValueError(
+            f"kv_cache has {kv_heads} KV heads, expected kv_head_num={kv_head_num}"
+        )
+    if cache_page_size != page_size or cache_head_dim != head_dim:
+        raise ValueError(
+            "kv_cache page/head geometry does not match q: "
+            f"cache={tuple(kv_cache.shape)}, page_size={page_size}, D={head_dim}"
+        )
+    expected_inner_strides = (
+        kv_heads * page_size * head_dim,
+        page_size * head_dim,
+        head_dim,
+        1,
+    )
+    if kv_cache.stride()[1:] != expected_inner_strides:
+        raise ValueError(
+            f"kv_cache must use HND inner layout; got strides {kv_cache.stride()}"
+        )
+    return kv_cache
+
+
+def _pack_paged_slots(
+    selected: torch.Tensor,
+    block_table: torch.Tensor,
+    lengths: torch.Tensor,
+    *,
+    page_size: int,
+    cache_blocks: int,
+    cu_seqlens: torch.Tensor | None = None,
+) -> torch.Tensor:
+    rows, width = selected.shape
+    batch, logical_blocks = block_table.shape
+    slots = torch.empty((rows, width + 1), device=selected.device, dtype=torch.int32)
+    decode = cu_seqlens is None
+    _resolve_paged_slots[(rows,)](
+        selected,
+        block_table,
+        lengths if decode else cu_seqlens,
+        lengths,
+        slots,
+        selected.stride(0),
+        0 if decode else cu_seqlens.stride(0),
+        lengths.stride(0),
+        *block_table.stride(),
+        batch,
+        width,
+        logical_blocks,
+        cache_blocks,
+        PAGE=page_size,
+        ROW_BLOCK=triton.next_power_of_2(width),
+        REQUEST_BLOCK=1 if decode else triton.next_power_of_2(batch),
+        DECODE=decode,
+        num_warps=4,
+    )
+    return slots
+
+
+def _supports_sm90_paged_packing(q, kv_cache, page_size, kv_head_num):
+    return (
+        torch.version.hip is None
+        and q.is_cuda
+        and q.dtype == kv_cache.dtype == torch.bfloat16
+        and q.shape[-2:] == (12, 256)
+        and (kv_head_num, page_size) == (1, 128)
+        and kv_cache.shape[0] * page_size <= 2**31
+        and torch.cuda.get_device_capability(q.device) == (9, 0)
+    )
+
+
+def try_sm90_packed_paged_prefill(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    prefixes: torch.Tensor,
+    selected: torch.Tensor,
+    *,
+    page_size: int,
+    kv_head_num: int,
+    output_gate: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """Resolve trusted ragged prefill slots once, then reuse grouped attention.
+
+    The caller has validated the paged cache geometry and request partition.
+    Small chunks keep the existing split-K path. The row limit bounds the
+    temporary slot matrix to the validated long-prefill range.
+    """
+    rows, heads, dim = q.shape
+    if (
+        not 4096 <= rows <= 32768
+        or selected.shape != (rows, 2051)
+        or selected.stride(-1) != 1
+        or q.stride(-1) != 1
+        or not _supports_sm90_paged_packing(q, kv_cache, page_size, kv_head_num)
+    ):
+        return None
+    kv_cache = _main_cache_hnd_view(kv_cache, kv_head_num, page_size, dim)
+    cache_blocks = int(kv_cache.shape[0])
+    logical_blocks = block_table.shape[1]
+    width = selected.shape[1]
+    slots = _pack_paged_slots(
+        selected,
+        block_table,
+        prefixes,
+        page_size=page_size,
+        cache_blocks=cache_blocks,
+        cu_seqlens=cu_seqlens,
+    )
+    block_n = 32
+    out = torch.empty(q.shape, device=q.device, dtype=q.dtype)
+    _sparse_paged_grouped_split_kernel[(rows, kv_head_num)](
+        q,
+        kv_cache,
+        kv_cache,
+        block_table,
+        prefixes,
+        slots,
+        out,
+        output_gate if output_gate is not None else out,
+        0,
+        q.stride(1),
+        q.stride(0),
+        *kv_cache.stride()[:4],
+        0,
+        0,
+        0,
+        0,
+        *block_table.stride(),
+        0,
+        0,
+        0,
+        slots.stride(0),
+        width,
+        logical_blocks,
+        cache_blocks,
+        HAS_COUNT=True,
+        FP8_CACHE=False,
+        H_Q=heads,
+        GROUP_SIZE=heads,
+        QUERY_LEN=rows,
+        PAGE_SIZE=page_size,
+        D=dim,
+        SCALE=dim**-0.5,
+        NUM_SPLITS=1,
+        NUM_TILES=triton.cdiv(width, block_n),
+        BLOCK_M=16,
+        BLOCK_N=block_n,
+        WITH_GATE=output_gate is not None,
+        OUT_BTHD=True,
+        RESOLVED_SLOTS=True,
+        num_warps=4,
+        num_stages=2,
+    )
+    return out
+
+
+@triton.jit
+def _paged_decode_cu_seqlens(slots, cu_q, cu_k, batch, width, BLOCK: tl.constexpr):
+    rows = tl.arange(0, BLOCK)
+    counts = tl.load(slots + rows * (width + 1) + width, rows < batch, other=0)
+    tl.store(cu_q, 0)
+    tl.store(cu_k, 0)
+    tl.store(cu_q + rows + 1, rows + 1, rows < batch)
+    tl.store(cu_k + rows + 1, tl.cumsum(counts, 0), rows < batch)
+
+
+@triton.jit
+def _gather_paged_decode_kv(
+    cache,
+    slots,
+    cu_k,
+    k,
+    v,
+    width,
+    cache_stride,
+    PAGE: tl.constexpr,
+    D: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    column = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    dim = tl.arange(0, D)
+    start = tl.load(cu_k + row)
+    valid = column < tl.load(cu_k + row + 1) - start
+    slot = tl.load(slots + row * (width + 1) + column, valid, other=0)
+    src = (slot // PAGE).to(tl.int64) * cache_stride + (slot % PAGE) * D
+    dst = (start + column) * D
+    key = tl.load(cache + src[:, None] + dim[None, :], valid[:, None], other=0)
+    value = tl.load(
+        cache + src[:, None] + PAGE * D + dim[None, :], valid[:, None], other=0
+    )
+    tl.store(k + dst[:, None] + dim[None, :], key, valid[:, None])
+    tl.store(v + dst[:, None] + dim[None, :], value, valid[:, None])
+
+
+def try_sm90_packed_paged_decode(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    kv_lens: torch.Tensor,
+    selected: torch.Tensor,
+    *,
+    page_size: int,
+    kv_head_num: int,
+    output_gate: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """Gather the selected paged KV, then run native varlen FlashAttention.
+
+    This follows SGLang's SM90 decode packing. All lengths and page lookups
+    stay on-device so each graph replay can change the selected KV.
+    """
+    batch, heads, dim = q.shape
+    if (
+        not 16 <= batch <= 64
+        or selected.shape != (batch, 1, 2051)
+        or selected.stride(-1) != 1
+        or not _supports_sm90_paged_packing(q, kv_cache, page_size, kv_head_num)
+        or not torch.backends.cuda.is_flash_attention_available()
+    ):
+        return None
+    kv_cache = _main_cache_hnd_view(kv_cache, kv_head_num, page_size, dim)
+    width = selected.shape[-1]
+    slots = _pack_paged_slots(
+        selected[:, 0],
+        block_table,
+        kv_lens,
+        page_size=page_size,
+        cache_blocks=kv_cache.shape[0],
+    )
+    cu_q, cu_k = torch.empty((2, batch + 1), device=q.device, dtype=torch.int32)
+    _paged_decode_cu_seqlens[(1,)](
+        slots, cu_q, cu_k, batch, width, BLOCK=triton.next_power_of_2(batch), num_warps=1
+    )
+    k, v = torch.empty((2, batch * width, 1, dim), device=q.device, dtype=q.dtype)
+    block = 16
+    _gather_paged_decode_kv[(batch, triton.cdiv(width, block))](
+        kv_cache,
+        slots,
+        cu_k,
+        k,
+        v,
+        width,
+        kv_cache.stride(0),
+        PAGE=page_size,
+        D=dim,
+        BLOCK=block,
+        num_warps=4,
+    )
+    # Each request has one query and all packed KV are already causal.
+    output = torch.ops.aten._flash_attention_forward(
+        q.contiguous(), k, v, cu_q, cu_k, 1, width, 0.0, False, False, scale=dim**-0.5
+    )[0]
+    output = output.view(batch, heads * dim)
+    return output if output_gate is None else output * torch.sigmoid(output_gate)
+
+
 def sparse_paged_gqa_attn(
     q: torch.Tensor,
     kv_cache: torch.Tensor,
@@ -683,41 +1026,8 @@ def sparse_paged_gqa_attn(
     if selected_has_count and selected.shape[-1] != 2052:
         raise ValueError("packed QSA requires 2051 token slots and one valid_count")
 
-    if kv_cache.dim() == 2:
-        if kv_head_num is None or kv_head_num <= 0:
-            raise ValueError("kv_head_num is required for a packed HybridPool view")
-        required_width = 2 * kv_head_num * page_size * head_dim
-        if int(kv_cache.shape[1]) < required_width:
-            raise ValueError(
-                f"packed kv_cache width {kv_cache.shape[1]} is smaller than "
-                f"the required main-cache width {required_width}"
-            )
-        if kv_cache.stride(1) != 1:
-            raise ValueError("packed HybridPool rows must have contiguous elements")
-        elem_stride = kv_cache.stride(1)
-        kv_cache = torch.as_strided(
-            kv_cache,
-            (int(kv_cache.shape[0]), 2, kv_head_num, page_size, head_dim),
-            (
-                kv_cache.stride(0),
-                kv_head_num * page_size * head_dim * elem_stride,
-                page_size * head_dim * elem_stride,
-                head_dim * elem_stride,
-                elem_stride,
-            ),
-        )
-    if kv_cache.dim() != 5 or int(kv_cache.shape[1]) != 2:
-        raise ValueError("kv_cache must be [pages, 2, H_kv, page_size, D]")
-    cache_blocks, _, kv_heads, cache_page_size, cache_head_dim = kv_cache.shape
-    if kv_head_num is not None and kv_heads != kv_head_num:
-        raise ValueError(
-            f"kv_cache has {kv_heads} KV heads, expected kv_head_num={kv_head_num}"
-        )
-    if cache_page_size != page_size or cache_head_dim != head_dim:
-        raise ValueError(
-            "kv_cache page/head geometry does not match q: "
-            f"cache={tuple(kv_cache.shape)}, page_size={page_size}, D={head_dim}"
-        )
+    kv_cache = _main_cache_hnd_view(kv_cache, kv_head_num, page_size, head_dim)
+    cache_blocks, _, kv_heads, _, _ = kv_cache.shape
     if kv_heads <= 0 or q_heads % kv_heads:
         raise ValueError(
             f"query heads {q_heads} must be divisible by KV heads {kv_heads}"
@@ -732,17 +1042,6 @@ def sparse_paged_gqa_attn(
     )
     scale_pointer = kv_cache if scale_view is None else scale_view
     scale_strides = (0, 0, 0, 0) if scale_view is None else scale_view.stride()
-    expected_inner_strides = (
-        kv_heads * page_size * head_dim,
-        page_size * head_dim,
-        head_dim,
-        1,
-    )
-    if tuple(kv_cache.stride()[1:]) != expected_inner_strides:
-        raise ValueError(
-            "kv_cache must use HND inner layout; got strides "
-            f"{tuple(kv_cache.stride())}"
-        )
     if int(block_table.shape[1]) == 0:
         raise ValueError("block_table must contain at least one logical block")
     if graph_capture:

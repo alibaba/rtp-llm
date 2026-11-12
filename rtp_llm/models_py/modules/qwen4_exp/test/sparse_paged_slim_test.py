@@ -26,6 +26,7 @@ import torch
 from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
     _grouped_split_config,
     sparse_paged_gqa_attn,
+    try_sm90_packed_paged_decode,
 )
 from rtp_llm.models_py.triton_kernels.common.zero_centered_rms_norm import (
     is_small_qk_supported,
@@ -411,6 +412,7 @@ class RaggedPathSlimTest(unittest.TestCase):
                 [[1, 4, 6, 5], [2, 4, 6, 5]], dtype=torch.int32, device=_DEVICE
             ),
             requests=[r0, r1],
+            step_plan=None,
         )
 
     def test_ragged_loop_fuses_gate_and_bthd(self):
@@ -462,6 +464,123 @@ class RaggedPathSlimTest(unittest.TestCase):
             [n for n in names if "sigmoid" in n or "copy" in n or "direct_copy" in n],
             f"ragged loop still launches gate/layout kernels: {names}",
         )
+
+
+    def test_packed_prefill_resolves_ragged_pages_and_fixed_tail(self):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import (
+            SparseGqaFmhaImpl,
+        )
+
+        torch.manual_seed(73)
+        owner = self._owner(q_width=12 * 256)
+        owner.head_num, owner.kv_head_num, owner.head_dim = 12, 1, 256
+        rows, cut, page = 4096, 1536, 128
+        qkv = torch.randn(rows, 14 * 256, device=_DEVICE, dtype=torch.bfloat16)
+        q = qkv[:, :owner.q_width]
+        gate = torch.randn(rows, owner.q_width, device=_DEVICE, dtype=torch.bfloat16)
+        cache = torch.randn(26, 2 * page * 256 + 16, device=_DEVICE, dtype=torch.bfloat16)
+        table = torch.stack(
+            [
+                torch.arange(13, 0, -1, device=_DEVICE, dtype=torch.int32).repeat(2)[:22],
+                torch.arange(25, 3, -1, device=_DEVICE, dtype=torch.int32),
+            ]
+        )
+        prefixes = torch.tensor([page, 0], device=_DEVICE, dtype=torch.int32)
+        cu = torch.tensor([0, cut, rows], device=_DEVICE, dtype=torch.int32)
+        selected = torch.full((rows, 2051), -1, device=_DEVICE, dtype=torch.int32)
+        requests = []
+        for start, end, prefix in ((0, cut, page), (cut, rows, 0)):
+            visible = prefix + torch.arange(
+                1, end - start + 1, device=_DEVICE, dtype=torch.int32
+            )
+            selected[start:end, 0] = 0
+            selected[start:end, 1] = visible
+            selected[start:end, 2048] = visible - 1
+            requests.append(
+                SimpleNamespace(
+                    start=start,
+                    end=end,
+                    kv_lens=visible[None],
+                    selected_indices=selected[None, start:end],
+                )
+            )
+        plan = SimpleNamespace(
+            tokens=rows,
+            page_size=page,
+            block_table=table,
+            requests=requests,
+            step_plan=SimpleNamespace(cu_seqlens=cu),
+            prefixes_device=prefixes,
+            selected_indices=selected,
+        )
+        cache_view = SimpleNamespace(kv_cache_base=cache)
+
+        def forward():
+            return SparseGqaFmhaImpl._forward_ragged_paged(
+                owner, q, cache_view, plan, validate_selected=False, output_gate=gate
+            )
+
+        with patch.dict(os.environ, _PRODUCTION_ENV):
+            got = forward()
+            self.assertIn("_resolve_paged_slots", _kernel_names(forward))
+            plan.step_plan = None
+            expected = forward()
+        torch.testing.assert_close(got, expected, rtol=0.02, atol=0.008)
+
+
+@unittest.skipUnless(_SM90, "SM90 required")
+class PackedPagedDecodeTest(unittest.TestCase):
+    @unittest.skipUnless(
+        torch.backends.cuda.is_flash_attention_available(), "FlashAttention required"
+    )
+    def test_graph_replay_uses_current_selection_lengths_and_pages(self):
+        torch.manual_seed(97)
+        batch, page, heads, dim = 16, 128, 12, 256
+        q = torch.randn(batch, heads, dim, device=_DEVICE, dtype=torch.bfloat16)
+        cache = torch.randn(5, 2, 1, page, dim, device=_DEVICE, dtype=torch.bfloat16)
+        table = torch.tensor([[1, 4]], device=_DEVICE, dtype=torch.int32).repeat(batch, 1)
+        lengths = torch.full((batch, 1), 132, device=_DEVICE, dtype=torch.int32)
+        selected = torch.full((batch, 1, 2051), -1, device=_DEVICE, dtype=torch.int32)
+        selected[:, 0, :64] = torch.arange(64, device=_DEVICE)
+        selected[:, 0, 2048] = 128
+        gate = torch.randn(batch, heads * dim, device=_DEVICE, dtype=torch.bfloat16)
+
+        def packed():
+            return try_sm90_packed_paged_decode(
+                q,
+                cache,
+                table,
+                lengths,
+                selected,
+                page_size=page,
+                kv_head_num=1,
+                output_gate=gate,
+            )
+
+        packed()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = packed()
+
+        table[0, 0] = 0
+        table[2, 1] = 3
+        lengths[0, 0] = 128  # Unallocated first page and an invisible tail.
+        selected[1, 0, 3] = -1
+        selected[3, 0, 2048] = 131
+        graph.replay()
+        with patch.dict(os.environ, _PRODUCTION_ENV):
+            expected = sparse_paged_gqa_attn(
+                q.unsqueeze(2),
+                cache,
+                table,
+                lengths,
+                selected,
+                page_size=page,
+                validate_selected=False,
+                output_gate=gate.view(batch, 1, heads, dim),
+            ).view_as(output)
+        torch.testing.assert_close(output, expected, atol=0.005, rtol=0.025)
+        torch.testing.assert_close(output[0], torch.zeros_like(output[0]))
 
 
 if __name__ == "__main__":

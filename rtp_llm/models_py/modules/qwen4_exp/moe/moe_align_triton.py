@@ -30,6 +30,7 @@ def _offsets_and_padding(
     padded,
     ROUTES,
     EXPERTS: tl.constexpr,
+    EXPERT_TILE: tl.constexpr,
     BLOCK: tl.constexpr,
     ROUTE_TILE: tl.constexpr,
     SLOT_TILE: tl.constexpr,
@@ -39,11 +40,11 @@ def _offsets_and_padding(
 ):
     r = tl.arange(0, ROUTE_TILE)
     route_ids = tl.load(ids + r, mask=r < ROUTES, other=0)
-    counts = tl.histogram(route_ids, EXPERTS, mask=r < ROUTES)
+    counts = tl.histogram(route_ids, EXPERT_TILE, mask=r < ROUTES)
     padded_counts = tl.cdiv(counts, BLOCK) * BLOCK
     inclusive = tl.cumsum(padded_counts, 0)
-    e = tl.arange(0, EXPERTS)
-    tl.store(offsets + e, inclusive - padded_counts)
+    e = tl.arange(0, EXPERT_TILE)
+    tl.store(offsets + e, inclusive - padded_counts, e < EXPERTS)
     total = tl.sum(padded_counts, 0)
     tl.store(offsets + EXPERTS, total)
     tl.store(padded, total)
@@ -88,10 +89,8 @@ def moe_align_decode(topk_ids, block_size, num_experts):
         and topk_ids.dim() == 2
         and topk_ids.dtype == torch.int32
         and topk_ids.is_contiguous()
-        and 0 < topk_ids.numel() <= 320
-        and num_experts > 0
-        and num_experts <= 512
-        and num_experts & (num_experts - 1) == 0
+        and 0 < topk_ids.numel() <= 640
+        and 0 < num_experts <= 513
         and block_size in (8, 16, 32, 64)
     ):
         raise ValueError("unsupported Qwen4 decode alignment geometry")
@@ -112,6 +111,7 @@ def moe_align_decode(topk_ids, block_size, num_experts):
         padded,
         ROUTES=routes,
         EXPERTS=num_experts,
+        EXPERT_TILE=triton.next_power_of_2(num_experts),
         BLOCK=block_size,
         ROUTE_TILE=route_tile,
         SLOT_TILE=triton.next_power_of_2(max_slots),
