@@ -46,7 +46,7 @@ public class FixtureReporter implements MetricReporter {
     private Path destination;
     public void initialize(Map<String,String> env) { destination = Path.of(env.get("REPORT_CAPTURE")); }
     public long intervalMillis() { return 50; }
-    public void observe(String name, Map<String,String> tags, double value) {
+    public void observe(String name, EventKind kind, Map<String,String> tags, double value) {
         try { Files.writeString(destination, name + tags + "=" + value + "\\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND); }
         catch (java.io.IOException error) { throw new java.io.UncheckedIOException(error); }
     }
@@ -129,16 +129,20 @@ def test_provider_disables_pull_and_receives_role_metrics(
             stderr=subprocess.STDOUT,
         )
         try:
+            expected = (
+                "py_rtp_vit_qps" if role == "VIT" else "rtp_llm_kv_cache_left_seq"
+            )
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline and process.poll() is None:
                 try:
                     with urllib.request.urlopen(
                         f"http://127.0.0.1:{port}/health", timeout=0.5
                     ) as health:
+                        reported = capture.read_text() if capture.exists() else ""
                         if (
                             health.status == 200
-                            and capture.exists()
-                            and "push-test" in capture.read_text()
+                            and expected in reported
+                            and "push-test" in reported
                         ):
                             break
                 except (urllib.error.URLError, TimeoutError):
@@ -150,10 +154,6 @@ def test_provider_disables_pull_and_receives_role_metrics(
             with pytest.raises(urllib.error.HTTPError) as error:
                 urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=1)
             assert error.value.code == 404
-            expected = (
-                "py_rtp_vit_qps" if role == "VIT" else "rtp_llm_kv_cache_left_seq"
-            )
-            assert expected in capture.read_text()
             log.seek(0)
             assert '"metrics_backend":"kmonitor"' in log.read()
         finally:

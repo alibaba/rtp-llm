@@ -105,8 +105,11 @@ def test_real_frontend_and_mock_have_identical_signed_block_keys(
         else shutil.which("java")
     )
     classpath = os.pathsep.join(
-        str(FRAMEWORK / "java/protocol/target" / entry)
-        for entry in ("test-classes", "classes")
+        str(FRAMEWORK / entry)
+        for entry in (
+            "java/protocol/target/test-classes",
+            "java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar",
+        )
     )
     completed = subprocess.run(
         [
