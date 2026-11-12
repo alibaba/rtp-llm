@@ -133,7 +133,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     size_t from_batch_idx_in = 0, to_batch_idx_in = 0;
     size_t from_batch_idx_out = 0;
     bool   deferred_token_sampling = false;
-    torch::Tensor compact_logits, compact_ids, dense_fallback, fallback_rows, prepared_rejection_rng;
+    torch::Tensor compact_logits, compact_ids, dense_fallback, fallback_rows, prepared_rejection_rng, log_normalizer;
 
     while (from_batch_idx_in < inputs.batch_size) {
         auto cur_num_beams_in  = num_beams_in[from_batch_idx_in];
@@ -223,6 +223,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                 compact_ids            = greedy_output.deferred_token_ids;
                 dense_fallback         = greedy_output.deferred_dense_fallback;
                 fallback_rows          = greedy_output.deferred_fallback_rows;
+                log_normalizer         = greedy_output.deferred_log_normalizer;
                 prepared_rejection_rng = greedy_output.prepared_rejection_rng;
             }
             if (greedy_output.success.defined()) {
@@ -311,7 +312,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
          dense_fallback,
          fallback_rows,
          prepared_rejection_rng,
-         deferred_token_sampling ? verify_do_sample : torch::Tensor()});
+         deferred_token_sampling ? verify_do_sample : torch::Tensor(),
+         log_normalizer});
 }
 
 void Sampler::preprocessLogits(const SamplerInputs& inputs) {

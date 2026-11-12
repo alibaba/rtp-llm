@@ -33,6 +33,7 @@ def _compact_rejection_kernel(
     DENSE_VOCAB: tl.constexpr,
     HAS_CAP: tl.constexpr,
     FORCED: tl.constexpr,
+    HAS_LOGZ: tl.constexpr = False,
 ):
     req = tl.program_id(0).to(tl.int64)
     logits = tl.load(addresses + 0).to(tl.uint64).to(float_ptr.dtype)
@@ -45,6 +46,9 @@ def _compact_rejection_kernel(
     ids = tl.load(addresses + 8).to(tl.uint64).to(int_ptr.dtype)
     dense = tl.load(addresses + 9).to(tl.uint64).to(float_ptr.dtype)
     fallback = tl.load(addresses + 10).to(tl.uint64).to(int_ptr.dtype)
+    logz = float_ptr
+    if HAS_LOGZ:
+        logz = tl.load(addresses + 11).to(tl.uint64).to(float_ptr.dtype)
     seed, position = tl.load(seeds + req), tl.load(positions + req)
     random = tl.load(sample + req)
     cap = ROWS - 1
@@ -70,7 +74,15 @@ def _compact_rejection_kernel(
             # Forced random verification needs no target statistics. Forced
             # greedy still needs recovery argmax when a cap/invalid draft stops
             # verification, because that token bypasses the resample stage.
-            if not FORCED or (not random and ((draft < 0) | (u >= 1.0))):
+            reuse = False
+            if HAS_LOGZ:
+                reuse = random & ~overflow
+            if reuse and not FORCED:
+                values, keys, valid = _load_row(logits, ids, dense, fallback, row, lane, DENSE_VOCAB)
+                draft_logit = tl.max(tl.where(valid & (keys == draft), values, float("-inf")), 0)
+                maximum = tl.load(logz + row)
+                sumexp = 1.0
+            elif not FORCED or (not random and ((draft < 0) | (u >= 1.0))):
                 for block_idx in range(blocks):
                     values, keys, valid = _load_row(
                         logits,
