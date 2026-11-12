@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include <atomic>
+
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "kmonitor/client/KMonitorFactory.h"
@@ -1197,7 +1199,7 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*              t
 
 namespace {
 
-bool kmonitorTransportDeferred = false;
+std::atomic<bool> kmonitorTransportDeferred{false};
 
 bool deferKmonitorTransportForScr() {
     const auto phase = autil::EnvUtil::getEnv("SCR_PHASE", "");

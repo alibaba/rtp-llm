@@ -209,7 +209,7 @@ class BackendManager(object):
             "engine created successfully: self.engine.task_type=%s",
             self.engine.task_type,
         )
-        get_template_lifecycle().register_fixup(f"backend-endpoints:{id(self)}", self)
+        get_template_lifecycle().register_fixup("backend-endpoints", self)
 
     def restore_fixup(self, context: RestoreContext) -> None:
         if self._engine_config is None or self._world_info is None:

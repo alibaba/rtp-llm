@@ -775,7 +775,7 @@ class DashScApp:
                     max_seq_len=model_config.max_seq_len,
                 )
                 get_template_lifecycle().register_fixup(
-                    f"dash-inference:{id(servicer)}", servicer
+                    "dash-inference", servicer
                 )
 
             loop = self._start_enqueue_loop()

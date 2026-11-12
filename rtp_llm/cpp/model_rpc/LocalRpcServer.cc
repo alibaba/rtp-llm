@@ -328,7 +328,13 @@ void LocalRpcServer::startDeferredServices() {
         THROW_IF_STATUS_ERROR(engine_->startLoop());
         defer_engine_loop_ = false;
     }
-    if (!defer_tp_broadcaster_ || tp_broadcaster_ || maga_init_params_.parallelism_config.tp_rank != 0
+    if (!defer_tp_broadcaster_) {
+        return;
+    }
+    // The deferred window is over once services start, whether or not this
+    // rank owns a broadcaster; endpoint updates must not be accepted later.
+    defer_tp_broadcaster_ = false;
+    if (tp_broadcaster_ || maga_init_params_.parallelism_config.tp_rank != 0
         || maga_init_params_.runtime_config.worker_grpc_addrs.empty()) {
         return;
     }
@@ -337,7 +343,6 @@ void LocalRpcServer::startDeferredServices() {
         RTP_LLM_LOG_WARNING("failed to init deferred tp broadcaster");
         tp_broadcaster_.reset();
     }
-    defer_tp_broadcaster_ = false;
 }
 
 grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorInfo error_info) {
