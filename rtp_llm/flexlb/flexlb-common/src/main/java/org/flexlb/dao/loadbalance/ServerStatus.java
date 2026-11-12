@@ -49,7 +49,6 @@ public class ServerStatus {
     @JsonProperty("message")
     private String message;
 
-
     /**
      * Returns an independent copy, or null when the source is null.
      * The ViT generation remains part of the copied selection identity.

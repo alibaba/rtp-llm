@@ -1,6 +1,8 @@
 package org.flexlb.cache.core;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.cache.primitive.LongObjectMap;
+import org.flexlb.cache.primitive.SmallOwnerSet;
 import org.flexlb.dao.master.EndpointTrace;
 import org.springframework.stereotype.Component;
 
@@ -9,8 +11,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import org.flexlb.cache.primitive.LongObjectMap;
-import org.flexlb.cache.primitive.SmallOwnerSet;
 import java.util.concurrent.atomic.LongAdder;
 
 /**

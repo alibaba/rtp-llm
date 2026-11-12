@@ -1,9 +1,9 @@
 package org.flexlb.dao.master;
 
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.testfixture.WorkerStatusTestFixtures;
-import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
