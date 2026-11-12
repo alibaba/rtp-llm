@@ -618,9 +618,9 @@ void AwiService::barrier(const std::unique_ptr<http_server::HttpResponseWriter>&
 
 std::string AwiService::weightsCensusJson() {
     std::lock_guard<std::mutex> lock(weights_mutex_);
-    if (!weights_census_cache_.empty()) {
-        return weights_census_cache_;
-    }
+    // Rebuild on every observation.  Engram host rows are published by
+    // Engram.from_checkpoint after ModelLoader.load_weights returns, so a
+    // cache populated during startup would permanently omit all 12 keys.
     std::string result = "[]";
     try {
         py::gil_scoped_acquire gil;
@@ -642,8 +642,7 @@ std::string AwiService::weightsCensusJson() {
     if (result.empty()) {
         result = "[]";
     }
-    weights_census_cache_ = result;
-    return weights_census_cache_;
+    return result;
 }
 
 void AwiService::observations(const std::unique_ptr<http_server::HttpResponseWriter>& writer,

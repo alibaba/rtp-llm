@@ -58,7 +58,6 @@ private:
     ModelConfig                                         model_config_;
     py::object                                          weights_loader_;
     std::mutex                                          weights_mutex_;
-    std::string                                         weights_census_cache_;
 };
 
 }  // namespace rtp_llm

@@ -41,6 +41,7 @@ _EXTRA_RESIDENT_NAMES = {"image_start", "image_newline", "image_end"}
 def reset() -> None:
     with _LOCK:
         _RECORDS.clear()
+    _EXTRA_RESIDENT.clear()
 
 
 def _is_hip() -> bool:

@@ -961,6 +961,12 @@ class FrontendApp(object):
             request_id = request.headers.get("X-AWI-Request-ID")
             if request_id:
                 headers["X-AWI-Request-ID"] = request_id
+            # Preserve the raw body's media type; the C++ listener chooses its
+            # JSON parser from it.  Dropping it turns a JSON request into
+            # application/octet-stream and the engine rejects the body.
+            content_type = request.headers.get("Content-Type")
+            if content_type:
+                headers["Content-Type"] = content_type
             body = await request.body()
             timeout = aiohttp.ClientTimeout(total=None, sock_connect=30)
             async with aiohttp.ClientSession(timeout=timeout) as session:
