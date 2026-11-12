@@ -2648,7 +2648,7 @@ class AttentionV41FP8(AttentionFP8):
                 # to the front and -1 padding to the back.  Sorting values also
                 # avoids materialising a full int64 argsort permutation, which
                 # does not fit the A100 reserve at 1M context.
-                if indices.shape[0] > 262144:
+                if indices.numel() > 32000000:
                     # Sorting the full [1M, topk+window] index tensor in place
                     # needs another 640 MiB device block.  Stage the one-time
                     # index plan through host memory instead; layers reuse it.
