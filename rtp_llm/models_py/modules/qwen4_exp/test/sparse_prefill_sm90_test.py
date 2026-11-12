@@ -6,6 +6,9 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.modules.qwen4_exp.qsa import sparse_fmha, sparse_prefill_sm90
+from rtp_llm.models_py.modules.qwen4_exp.qsa.prefill_filtered_topk import (
+    BLOCK_SELECTION_WIDTH,
+)
 from rtp_llm.models_py.modules.qwen4_exp.test.sparse_prefill_sm90_test_utils import (
     errors,
     fixture,
@@ -35,6 +38,7 @@ class SparsePrefillLaunchConfigTest(unittest.TestCase):
             (1, 1025, "NVIDIA H20", (16, 1)),
             (1, 5120, "NVIDIA H20", (16, 1)),
             (1, 20480, "NVIDIA H20", (16, 1)),
+            (1, 32768, "NVIDIA H20", (32, 4)),
         ]
         for batch, length, device_name, expected in cases:
             with self.subTest(batch=batch, length=length, device_name=device_name):
@@ -57,6 +61,28 @@ class SparsePrefillSm90Test(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         torch.backends.cuda.matmul.allow_tf32 = cls.old_tf32
+
+    def test_counted_selection_matches_compaction(self):
+        rows = 257
+        q = torch.randn((1, 12, rows, 256), device="cuda", dtype=torch.bfloat16)
+        k = torch.randn((1, 1, rows, 256), device="cuda", dtype=torch.bfloat16)
+        v = torch.randn_like(k)
+        legacy = torch.full((1, rows, 2051), -1, device="cuda", dtype=torch.int32)
+        legacy[:, 1:, :8] = torch.arange(4, 8, device="cuda").repeat(2)
+        legacy[:, 1:, 2048:2050] = torch.arange(8, 10, device="cuda")
+        packed = torch.full(
+            (1, rows, BLOCK_SELECTION_WIDTH), -1, device="cuda", dtype=torch.int32
+        )
+        packed[:, 1:, :3] = torch.tensor([1, 1, 2], device="cuda")
+        packed[:, :, -1] = 10
+        packed[:, 0, -1] = 0
+        expected = sparse_prefill_sm90.try_sm90_sparse_prefill(q, k, v, legacy)
+        with patch.object(sparse_prefill_sm90, "_compact_sm90_selection") as compact:
+            actual = sparse_prefill_sm90.try_sm90_sparse_prefill(
+                q, k, v, packed, selected_has_count=True
+            )
+            compact.__getitem__.assert_not_called()
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
     def _run_cases(self, name, cases):
         record = {"status": "RUNNING", "metadata": metadata(), "cases": []}

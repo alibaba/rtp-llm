@@ -11,7 +11,10 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.cub_topk import _TORCH_GIT
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill_score import (
     try_prefill_score,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa.prefill_filtered_topk import _load_module
+from rtp_llm.models_py.modules.qwen4_exp.qsa.prefill_filtered_topk import (
+    BLOCK_SELECTION_WIDTH,
+    _load_module,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.prefill_packed_indexer import (
     _packed_norm_rope,
     try_packed_prefill,
@@ -62,7 +65,8 @@ class PackedIndexerTest(unittest.TestCase):
                         [-torch.inf, torch.inf, -0.0, 0.0], device="cuda"
                     )
                 scores[row, length:] = -torch.inf
-            positions = visible * 4 + 1
+            tail_counts = torch.arange(len(cases), device="cuda", dtype=torch.int32) % 4
+            positions = visible * 4 + tail_counts - 1
             out = torch.empty((len(cases), 2051), device="cuda", dtype=torch.int32)
             _load_module().select(scores, visible, positions, out, 0)
             values, indices = scores.topk(min(512, columns), dim=-1)
@@ -70,12 +74,26 @@ class PackedIndexerTest(unittest.TestCase):
             tokens = indices[:, :, None] * 4 + torch.arange(4, device="cuda")
             tokens.masked_fill_(~(values > -torch.inf)[:, :, None], -1)
             expected[:, : tokens.shape[1] * 4] = tokens.flatten(1).int()
-            expected[:, 2048:2050] = visible[:, None] * 4 + torch.arange(
-                2, device="cuda"
+            tail_offsets = torch.arange(3, device="cuda", dtype=torch.int32)
+            expected[:, 2048:] = torch.where(
+                tail_offsets < tail_counts[:, None],
+                visible[:, None] * 4 + tail_offsets,
+                -1,
             )
             torch.testing.assert_close(
                 out, expected, rtol=0, atol=0, msg=f"width={columns}"
             )
+            packed = torch.empty(
+                (len(cases), BLOCK_SELECTION_WIDTH), device="cuda", dtype=torch.int32
+            )
+            _load_module().select(scores, visible, positions, packed, 0)
+            valid = expected >= 0
+            slot = torch.arange(2051, device="cuda")
+            stable_order = torch.where(valid, slot, slot + 2051).argsort(dim=-1)
+            torch.testing.assert_close(packed[:, -1], valid.sum(dim=-1).int())
+            expanded = packed[:, slot // 4] * 4 + (slot % 4).int()
+            expanded.masked_fill_(slot >= packed[:, -1:], -1)
+            torch.testing.assert_close(expanded, expected.gather(1, stable_order))
 
     def test_build_failure_falls_back_once(self):
         from rtp_llm.models_py.modules.qwen4_exp.qsa import (

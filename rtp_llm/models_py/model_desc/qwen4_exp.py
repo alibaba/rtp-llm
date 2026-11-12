@@ -179,6 +179,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
         qsa_runtime: Qwen4ExpQSARuntimeContext,
         *,
         projected=None,
+        selected_has_count: bool = False,
     ) -> torch.Tensor:
         """Project once, persist raw keys, then build request-local selections."""
         assert self.qsa_indexer is not None
@@ -392,6 +393,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 lengths,
                 self.qsa_indexer.q_norm_gamma,
                 self.qsa_indexer.norm_eps,
+                selected_has_count=selected_has_count,
             )
             if selected is not None:
                 return selected
@@ -508,6 +510,27 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 from rtp_llm.models_py.modules.base.common.fp8_linear import (
                     project_fp8_pair,
                 )
+                from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import (
+                    SparseGqaFmhaImpl,
+                )
+
+                trusted_selection = (
+                    type(self) is Qwen4ExpAttention
+                    and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
+                    and type(fmha_impl) is SparseGqaFmhaImpl
+                    and bool(qsa_runtime.main_inputs.is_prefill)
+                    and not bool(qsa_runtime.main_inputs.is_target_verify)
+                    and not bool(qsa_runtime.main_inputs.is_cuda_graph)
+                    and "_qsa_selected_indices" not in self.__dict__
+                    and "forward_causal_from_projected" not in self.qsa_indexer.__dict__
+                )
+                selection_kwargs = (
+                    {"selected_has_count": True}
+                    if trusted_selection
+                    and (fmha_impl.head_num, fmha_impl.kv_head_num, fmha_impl.head_dim)
+                    == (12, 1, 256)
+                    else {}
+                )
 
                 with record_function_range("qwen4.qsa.indexer"):
                     prepared = None
@@ -535,35 +558,16 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                         )
                     if prepared is None:
                         gate = self.gate(hidden_states)
-                        selected = self._qsa_selected_indices(
-                            hidden_states, qsa_runtime
-                        )
                     else:
                         gate, projected_qk = prepared
-                        selected = self._qsa_selected_indices(
-                            hidden_states,
-                            qsa_runtime,
-                            projected=self.qsa_indexer.split_projected(projected_qk),
+                        selection_kwargs["projected"] = (
+                            self.qsa_indexer.split_projected(projected_qk)
                         )
-                from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import (
-                    SparseGqaFmhaImpl,
-                )
-
-                trusted_setter = getattr(
-                    fmha_impl, "set_trusted_selected_indices", None
-                )
-                if (
-                    type(self) is Qwen4ExpAttention
-                    and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
-                    and type(fmha_impl) is SparseGqaFmhaImpl
-                    and bool(qsa_runtime.main_inputs.is_prefill)
-                    and not bool(qsa_runtime.main_inputs.is_target_verify)
-                    and not bool(qsa_runtime.main_inputs.is_cuda_graph)
-                    and "_qsa_selected_indices" not in self.__dict__
-                    and "forward_causal_from_projected" not in self.qsa_indexer.__dict__
-                    and callable(trusted_setter)
-                ):
-                    trusted_setter(selected)
+                    selected = self._qsa_selected_indices(
+                        hidden_states, qsa_runtime, **selection_kwargs
+                    )
+                if trusted_selection:
+                    fmha_impl.set_trusted_selected_indices(selected)
                 else:
                     set_selected(selected)
                 with record_function_range("qwen4.qsa.fmha"):
