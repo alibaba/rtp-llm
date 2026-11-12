@@ -184,7 +184,9 @@ class GenericMoeLayer(nn.Module):
             return torch.sigmoid(gate_output) * shared_expert_output
         return shared_expert_output
 
-    def _forward_routed(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _forward_routed(
+        self, hidden_states: torch.Tensor, *, skip_tp_allreduce: bool = False
+    ) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
 
@@ -231,7 +233,7 @@ class GenericMoeLayer(nn.Module):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
-            skip_tp_allreduce=self.use_unified_tp_allreduce,
+            skip_tp_allreduce=skip_tp_allreduce or self.use_unified_tp_allreduce,
         )
         return experts_output
 
