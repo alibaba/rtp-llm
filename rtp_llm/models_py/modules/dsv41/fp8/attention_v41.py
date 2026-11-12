@@ -1189,6 +1189,20 @@ class AttentionV41FP8(AttentionFP8):
         return pool.shape[1]
 
     def _slots(self, region, positions, req_ids, *, state_end=None):
+        slots = self._slots_impl(region, positions, req_ids, state_end=state_end)
+        if prefill_metadata.DEBUG_SLOT_DROPS and region != CSA_STATE:
+            # Diagnostic-only (DSV41_DEBUG_SLOT_DROPS=1): surface silently
+            # dropped compressed-KV writes. STATE regions are excluded —
+            # their -1 slots are legitimate end-gated rows.
+            prefill_metadata.debug_slot_drops(
+                f"_slots[{region}] layer={self.layer_id}",
+                positions,
+                slots,
+                self.compress_ratio,
+            )
+        return slots
+
+    def _slots_impl(self, region, positions, req_ids, *, state_end=None):
         pool = self._source_pool(region)
         if pool is None or self._block_tables_by_type is None:
             return None

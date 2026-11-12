@@ -7,9 +7,54 @@ and valid request IDs; invalid positions are skipped before table loads.
 
 from __future__ import annotations
 
+import logging
+import os
+
 import torch
 import triton
 import triton.language as tl
+
+# Diagnostic (DSV41_DEBUG_SLOT_DROPS=1, default off, NOT a delivery launch
+# env): silent -1 slot drops on compressed-KV writes are the prime suspect for
+# deterministic long-context semantic corruption (frozen smoke case2 emits
+# hallucinated text at 4261 prompt tokens while <=608-token prompts stay
+# coherent, and forcing all-keys attention selection does not help). Both the
+# Triton kernel above and the torch fallbacks drop boundary rows when the
+# per-forward block-table width lags the chunk's positions (column >= COLS) or
+# when the referenced table cell still reads 0 — without any log. Count those
+# drops per call and surface them as WARNINGs when the env is set.
+DEBUG_SLOT_DROPS = os.getenv("DSV41_DEBUG_SLOT_DROPS", "0") == "1"
+
+
+def debug_slot_drops(tag, positions, slots, ratio):
+    """Log boundary positions whose slot mapping returned -1.
+
+    ``ratio`` is the compression ratio; boundary rows ((pos + 1) % ratio == 0)
+    are exactly the rows that must receive a compressed write, so any -1 among
+    them is a silently dropped KV row. STATE regions must not be passed here:
+    their -1 entries are legitimate end-gated rows.
+    """
+    if not DEBUG_SLOT_DROPS or slots is None or ratio not in (1, 2):
+        return
+    try:
+        boundary = (positions + 1) % ratio == 0
+        dropped = boundary & (slots < 0)
+        count = int(dropped.sum())
+        if count == 0:
+            return
+        pos = positions[dropped]
+        logging.warning(
+            "[DSV41_SLOT_DROP] %s: %d/%d boundary rows dropped (slot=-1); "
+            "pos_min=%d pos_max=%d first_up_to_16=%s",
+            tag,
+            count,
+            int(boundary.sum()),
+            int(pos.min()),
+            int(pos.max()),
+            pos[:16].tolist(),
+        )
+    except Exception:  # pragma: no cover - diagnostics must never break a run
+        logging.exception("[DSV41_SLOT_DROP] instrumentation error in %s", tag)
 
 
 def _integer_vector(value, rows, device):

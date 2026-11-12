@@ -553,6 +553,18 @@ class CompressorFP8(PoolBackedModule):
                 ),
             )
         )
+        from rtp_llm.models_py.modules.dsv41.fp8 import (
+            _v41_prefill_metadata as _prefill_meta,
+        )
+
+        if _prefill_meta.DEBUG_SLOT_DROPS and cp_size == 1:
+            # Diagnostic-only (DSV41_DEBUG_SLOT_DROPS=1): count boundary rows
+            # whose compressed-KV slot came back -1 (silent write drop). Under
+            # CP sharding non-owned rows are legitimately -1, so skip there.
+            # state_slots are end-gated and not instrumented.
+            _prefill_meta.debug_slot_drops(
+                "compressor.kv", positions, kv_slots, self.compress_ratio
+            )
         meta = CompressorMeta(
             positions=positions,
             b_idx=b_idx,
