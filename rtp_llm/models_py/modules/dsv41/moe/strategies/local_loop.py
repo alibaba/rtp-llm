@@ -485,16 +485,13 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             group * self._W1_w.shape[1] * self._W1_w.shape[2] * 2,
             group * self._W2_w.shape[1] * self._W2_w.shape[2] * 2,
         )
-        dequant_buf = getattr(self, "_awi_dequant_buf", None)
-        if (
-            dequant_buf is None
-            or dequant_buf.numel() < dequant_numel
-            or dequant_buf.device != x.device
-        ):
-            dequant_buf = torch.empty(
-                dequant_numel, dtype=torch.bfloat16, device=x.device
-            )
-            self._awi_dequant_buf = dequant_buf
+        # Keep the destination for this forward only. A persistent buffer
+        # allocated during warmup starved cudaGraphInstantiate of 32 MiB;
+        # the per-call buffer is released before capture and reused by all
+        # W1/W3/W2 groups inside the call.
+        dequant_buf = torch.empty(
+            dequant_numel, dtype=torch.bfloat16, device=x.device
+        )
 
         for g in range(n_local // group):
             a = g * group
