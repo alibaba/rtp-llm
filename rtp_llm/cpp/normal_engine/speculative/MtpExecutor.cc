@@ -3310,7 +3310,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
 
     torch::Tensor next_kv_cache_block_id;
     torch::Tensor next_kv_cache_kernel_block_id;
-    if (useDeviceInput() && kv_cache_block_id.defined() && kv_cache_block_id.is_cuda()
+    if (is_linear_attention_model_ && useDeviceInput() && kv_cache_block_id.defined() && kv_cache_block_id.is_cuda()
         && kv_cache_kernel_block_id.defined() && kv_cache_kernel_block_id.is_cuda()) {
         RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id.dim() == 3 && kv_cache_block_id.size(1) == batch_size,
                                 "MTP physical cache snapshot source must be [group,batch,blocks], batch=%ld",
