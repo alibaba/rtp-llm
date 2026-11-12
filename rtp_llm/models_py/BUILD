@@ -426,3 +426,17 @@ filegroup(
     ], exclude = ["**/test/**", "**/tests/**"]) + [":ppu_jit_sources", "//rtp_llm:models/deepseek_v4.py"],
     visibility = ["//visibility:public"],
 )
+
+py_library(
+    name = "new_loader_core",
+    srcs = ["__init__.py", "model_loader.py", "module_base.py", "registry.py", "weight_mapper.py"],
+    deps = ["//rtp_llm:new_loader_device_type", "//rtp_llm:safetensors", "//rtp_llm:torch"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "quantization_exclusion",
+    srcs = ["quantization_exclusion.py"],
+    deps = ["//rtp_llm:new_loader_device_type"],
+    visibility = ["//visibility:public"],
+)

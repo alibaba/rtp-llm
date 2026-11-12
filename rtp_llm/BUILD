@@ -971,3 +971,17 @@ py_library(
         ":aiohttp",
     ]
 )
+
+# Lightweight package imports used by CPU-only loader infrastructure tests.
+py_library(
+    name = "new_loader_device_type",
+    srcs = ["device/__init__.py", "device/device_type.py"],
+    deps = [":torch"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "new_loader_policy",
+    srcs = ["utils/new_loader.py"],
+    visibility = ["//visibility:public"],
+)
