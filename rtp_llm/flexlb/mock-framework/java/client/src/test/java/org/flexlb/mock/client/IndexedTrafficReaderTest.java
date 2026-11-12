@@ -125,11 +125,16 @@ class IndexedTrafficReaderTest {
             assertThrows(IOException.class, () -> ReplayWorker.playbackLimit(zero, 6));
         }
         try (var client = new ClientNode("client-0", directory.resolve("topology.json"), directory.resolve("worker"))) {
-            new ObjectMapper().writeValue(directory.resolve("topology.json").toFile(),
+            var json = new ObjectMapper();
+            json.writeValue(directory.resolve("topology.json").toFile(),
                 List.of(Map.of("role", "client", "control", client.url())));
             var error = assertThrows(IOException.class, () ->
                 client.start(new Start(null, path.toString(), 1.0, null, 1, 4, 1000, 1000)));
             assertTrue(error.getMessage().contains("fallback_max_output_tokens"));
+            var plan = json.readTree(directory.resolve("worker/coordinator/1/plan.json").toFile());
+            assertEquals(path.toString(), plan.path("config").path("requests_file").asText());
+            assertFalse(plan.has("count"));
+            assertFalse(plan.has("sha256"));
             assertFalse(client.stop(new Empty()).errors().isEmpty());
             assertFalse(Files.exists(directory.resolve("worker/playback")));
         }

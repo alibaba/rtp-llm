@@ -97,7 +97,11 @@ public final class ClientNode implements AutoCloseable {
             coordinator = created; collected = false;
         }
         try {
-            save(directory.resolve("coordinator/" + created.number + "/plan.json"), Map.of("clients", created.peers, "config", args));
+            var planPath = directory.resolve("coordinator/" + created.number + "/plan.json");
+            var plan = new LinkedHashMap<String, Object>();
+            plan.put("clients", created.peers);
+            plan.put("config", args);
+            save(planPath, plan);
             long total;
             String identity;
             try (var input = new IndexedTrafficReader(Path.of(args.requests_file()))) {
@@ -109,8 +113,9 @@ public final class ClientNode implements AutoCloseable {
                 ReplayWorker.checkPlaybackEnd(total - 1, input.lastArrival, args.qps(), args.replay_speed(), args.warmup());
             }
             synchronized (this) { nextRequestId = Math.addExact(created.firstId, total); }
-            save(directory.resolve("coordinator/" + created.number + "/input.json"),
-                Map.of("count", total, "path", args.requests_file(), "sha256", identity));
+            plan.put("count", total);
+            plan.put("sha256", identity);
+            save(planPath, plan);
             int clients = created.peers.size();
             for (int i = 0; i < clients; i++) {
                 if (created.stop || closed) throw new IOException("Client start stopped during preparation");

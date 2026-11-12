@@ -597,18 +597,19 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
         and json.loads(line).get("node", "").startswith("client-")
     ]
     assert len(set(pids)) == replicas
-    manifest = json.loads(
-        (output / "components/client-0/coordinator/1/input.json").read_text()
-    )
-    assert manifest["count"] == count and manifest["path"] == str(source)
-    assert not (output / "components/client-0/coordinator/1/shards").exists()
+    coordinator = output / "components/client-0/coordinator/1"
+    coordinator_plan = json.loads((coordinator / "plan.json").read_text())
+    assert coordinator_plan["count"] == count
+    assert coordinator_plan["config"]["requests_file"] == str(source)
+    assert not (coordinator / "input.json").exists()
+    assert not (coordinator / "shards").exists()
     for i in range(replicas):
         plan = json.loads(
             (output / f"components/client-{i}/playback/1/plan.json").read_text()
         )
         assert (
             plan["requests_file"] == str(source)
-            and plan["sha256"] == manifest["sha256"]
+            and plan["sha256"] == coordinator_plan["sha256"]
         )
         assert (plan["first_index"], plan["stride"]) == (i, replicas)
     assert not (output / "topology-history.json").exists()
