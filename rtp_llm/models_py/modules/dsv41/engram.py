@@ -1337,6 +1337,39 @@ def _engram_inject_supported(hidden, q_weight, k_weight, token_mask):
     )
 
 
+def _engram_stream_inplace_safe(hidden, token_mask=None) -> bool:
+    """Geometry-only alias check for huge-prefill chunked injection.
+
+    Mirrors the hidden/token_mask half of :func:`_engram_inject_supported`
+    without the q/k device check: on ROCm the gate matrices are pinned host
+    tensors that ``_forward_rows`` stages to the device per call BEFORE
+    either out consumer runs, and both consumers are row-alias safe (the
+    triton inject kernel owns disjoint rows — "out may exactly alias
+    hidden" — and the torch fallback materializes its per-chunk result
+    before ``out.copy_``). Only consulted when hidden exceeds the chunk
+    row budget (huge prefills); decode/8K paths keep the original inplace
+    decision.
+    """
+    return (
+        not torch.is_grad_enabled()
+        and hidden.is_cuda
+        and hidden.ndim == 3
+        and hidden.numel() > 0
+        and hidden.shape[-2:] == (4, 5120)
+        and hidden.dtype == torch.bfloat16
+        and hidden.is_contiguous()
+        and (
+            token_mask is None
+            or (
+                token_mask.device == hidden.device
+                and token_mask.dtype == torch.bool
+                and token_mask.shape == hidden.shape[:-2]
+                and token_mask.is_contiguous()
+            )
+        )
+    )
+
+
 def gated_engram_residual(
     hidden: torch.Tensor,
     kv: torch.Tensor,
@@ -2687,11 +2720,24 @@ class Engram(nn.Module):
             if cpu_work is not None:
                 self._cpu_lookup_work = None
                 rows = cpu_work.consume(hash_ids, hidden)
-            output = (
-                hidden
-                if inplace
-                else torch.empty_like(hidden, memory_format=torch.contiguous_format)
-            )
+            if inplace:
+                output = hidden
+            elif _engram_stream_inplace_safe(hidden, token_mask):
+                # Huge prefill: materializing a SECOND full [T, hc, dim]
+                # stream costs another 39.99 GiB at 1M on top of the ~124.6
+                # GiB layer-start base — the n17 recorded allocator snapshot
+                # shows exactly this empty_like as a never-freed 39.99 GiB
+                # block at OOM. ``inplace`` is False on ROCm only because the
+                # q/k gate matrices are pinned-host at this point; they are
+                # staged to the device inside _forward_rows before either
+                # consumer touches out, and both are row-alias safe (see
+                # _engram_stream_inplace_safe). Chunked injection therefore
+                # writes the stream in place, bounded per 32K-row chunk.
+                output = hidden
+            else:
+                output = torch.empty_like(
+                    hidden, memory_format=torch.contiguous_format
+                )
             for begin in range(0, hidden.shape[0], chunk_rows):
                 end = min(begin + chunk_rows, hidden.shape[0])
                 self._forward_rows(
