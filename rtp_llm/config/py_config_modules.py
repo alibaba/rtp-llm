@@ -3,7 +3,7 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Optional
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
@@ -206,6 +206,31 @@ class LoraConfig:
         return f"lora_info: {self.lora_info}\n" f"merge_lora: {self.merge_lora}\n"
 
 
+@dataclass(slots=True)
+class ResidentWeightsConfig:
+    """Whether the loaded and transformed weights stay resident in the local store process.
+
+    ``mode`` is ``none`` (off), ``dev`` (the store outlives every exit until the user stops
+    it) or ``prod`` (start_server owns an instance store and stops it on a clean exit).
+    One model role of one engine: the target and its draft each get their own record, so they
+    carry the same switches under a different ``role``.
+    """
+
+    mode: str = "none"
+    verify: bool = False
+    role: str = "target"
+
+    @property
+    def enable(self) -> bool:
+        return self.mode != "none"
+
+    def with_role(self, role: str) -> "ResidentWeightsConfig":
+        return replace(self, role=role)
+
+    def to_string(self):
+        return f"mode: {self.mode}\n" f"verify: {self.verify}\n" f"role: {self.role}"
+
+
 class LoadConfig:
     def __init__(self):
         self.fastsafetensors_config_json: Optional[str] = None
@@ -216,6 +241,7 @@ class LoadConfig:
         self.moe_pure_tp_preshard: bool = False
         self.loader_drop_page_cache: bool = True
         self.loader_drop_page_cache_threshold_mb: int = 2048
+        self.resident_weights_config: ResidentWeightsConfig = ResidentWeightsConfig()
 
     def to_string(self):
         return (
@@ -225,7 +251,10 @@ class LoadConfig:
             f"moe_pure_tp_preshard: {self.moe_pure_tp_preshard}\n"
             f"loader_drop_page_cache: {self.loader_drop_page_cache}\n"
             f"loader_drop_page_cache_threshold_mb: "
-            f"{self.loader_drop_page_cache_threshold_mb}"
+            f"{self.loader_drop_page_cache_threshold_mb}\n"
+            f"resident_weights_mode: {self.resident_weights_config.mode}\n"
+            f"resident_weights_verify: {self.resident_weights_config.verify}\n"
+            f"resident_weights_role: {self.resident_weights_config.role}"
         )
 
 

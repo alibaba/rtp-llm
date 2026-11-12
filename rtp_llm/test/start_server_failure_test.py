@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import patch
 
@@ -95,6 +96,71 @@ class StartServerFailureTest(unittest.TestCase):
 
         request_shutdown.assert_not_called()
         monitor_and_release.assert_called_once()
+
+
+def run_server(mode="none", exits_cleanly=True, env=None):
+    """Run start_server around a stubbed backend and frontends; report what the monitor saw."""
+    py_env_configs = PyEnvConfigs()
+    py_env_configs.role_config.role_type = RoleType.PREFILL
+    py_env_configs.server_config.start_port = 23456
+    py_env_configs.load_config.resident_weights_config.mode = mode
+    seen = {}
+
+    def monitor(manager):
+        seen["store_env"] = os.environ.get("RTP_LLM_RESIDENT_STORE")
+        if not exits_cleanly:
+            raise SystemExit(1)  # stands for os._exit(1) inside the monitor
+
+    with (
+        patch.dict(os.environ, env or {}, clear=False),
+        patch("rtp_llm.start_server.start_backend_server_impl"),
+        patch("rtp_llm.start_server.start_frontend_server_impl"),
+        patch("rtp_llm.start_server.start_dash_sc_server_impl"),
+        patch("rtp_llm.start_server._maybe_run_startup_real_warmup"),
+        patch.object(ProcessManager, "run_health_checks", return_value=True),
+        patch.object(
+            ProcessManager,
+            "monitor_and_release_processes",
+            autospec=True,
+            side_effect=monitor,
+        ),
+        patch("rtp_llm.start_server._stop_instance_resident_store") as stop_store,
+    ):
+        if "RTP_LLM_RESIDENT_STORE" not in (env or {}):
+            os.environ.pop("RTP_LLM_RESIDENT_STORE", None)
+        try:
+            start_server(py_env_configs)
+        except SystemExit:
+            pass
+    return seen, stop_store
+
+
+class StartServerResidentStoreTest(unittest.TestCase):
+    """Which resident store start_server owns, by --resident_weights_mode."""
+
+    def test_none_and_dev_leave_the_store_alone(self):
+        for mode in ("none", "dev"):
+            with self.subTest(mode=mode):
+                seen, stop_store = run_server(mode=mode)
+                self.assertIsNone(seen["store_env"])
+                stop_store.assert_not_called()
+
+    def test_prod_stops_the_instance_store_on_clean_exit(self):
+        seen, stop_store = run_server(mode="prod")
+        name = f"rtp_llm_resident_weights.{os.getuid()}.23456"
+        self.assertEqual(seen["store_env"], name)
+        stop_store.assert_called_once_with(name)
+
+    def test_operator_store_name_is_kept(self):
+        seen, stop_store = run_server(
+            mode="prod", env={"RTP_LLM_RESIDENT_STORE": "resident-my-task"}
+        )
+        self.assertEqual(seen["store_env"], "resident-my-task")
+        stop_store.assert_called_once_with("resident-my-task")
+
+    def test_failure_exit_keeps_the_store(self):
+        _, stop_store = run_server(mode="prod", exits_cleanly=False)
+        stop_store.assert_not_called()
 
 
 if __name__ == "__main__":

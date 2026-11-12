@@ -411,6 +411,11 @@ def default_store_name() -> str:
     )
 
 
+def instance_store_name(start_port: int) -> str:
+    """Store owned by one serving instance: START_PORT is unique per network namespace."""
+    return f"rtp_llm_resident_weights.{os.getuid()}.{int(start_port)}"
+
+
 def _address(name: str) -> str:
     # Abstract socket: no file to go stale after SIGKILL, no path length limit from TMPDIR.
     return "\0" + name
@@ -591,7 +596,12 @@ def stop_store(store_name: str) -> None:
 def ensure_running(
     name: str, timeout: float = 30.0, owner_pid: Optional[int] = None
 ) -> None:
-    """Start a detached store for ``name`` unless one is already serving."""
+    """Start a detached store for ``name`` unless one is already serving.
+
+    The store outlives the engine that started it. Only start_server in ``prod`` mode
+    stops its own instance store, and only on a clean exit; otherwise the user stops it
+    (``store stop``) or it ends with the container.
+    """
     try:
         list_store(name)
         return

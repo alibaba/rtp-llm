@@ -2276,5 +2276,93 @@ class BatchRecordArgsTest(TestCase):
                 self.assertEqual(config.record_decode_sample_rate, float(good))
 
 
+class ResidentWeightsArgsTest(TestCase):
+    """--resident_weights_mode / --verify_resident_weights bind to the nested
+    ResidentWeightsConfig, not to LoadConfig itself."""
+
+    def parse_load_config(self, args, env):
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.server_args.load_group_args import init_load_group_args
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        cfgs = PyEnvConfigs()
+        parser = EnvArgumentParser()
+        parser.set_root_config(cfgs)
+        init_load_group_args(parser, cfgs.load_config, cfgs.model_args)
+        with patch.dict(os.environ, env, clear=True):
+            parser.parse_args(args)
+        return cfgs.load_config
+
+    def test_defaults_keep_the_feature_off(self):
+        resident = self.parse_load_config([], {}).resident_weights_config
+        self.assertEqual(resident.mode, "none")
+        self.assertFalse(resident.enable)
+        self.assertFalse(resident.verify)
+        self.assertEqual(resident.role, "target")
+
+    def test_cli_sets_the_nested_fields(self):
+        for mode in ("dev", "prod"):
+            with self.subTest(mode=mode):
+                resident = self.parse_load_config(
+                    [
+                        "--resident_weights_mode",
+                        mode,
+                        "--verify_resident_weights",
+                        "true",
+                    ],
+                    {},
+                ).resident_weights_config
+                self.assertEqual(resident.mode, mode)
+                self.assertTrue(resident.enable)
+                self.assertTrue(resident.verify)
+
+    def test_env_sets_the_nested_fields(self):
+        resident = self.parse_load_config(
+            [],
+            {
+                "RESIDENT_WEIGHTS_MODE": "prod",
+                "VERIFY_RESIDENT_WEIGHTS": "true",
+            },
+        ).resident_weights_config
+        self.assertEqual(resident.mode, "prod")
+        self.assertTrue(resident.verify)
+
+    def test_an_unknown_mode_is_rejected(self):
+        with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with self.assertRaises(SystemExit):
+                self.parse_load_config(["--resident_weights_mode", "true"], {})
+            self.assertIn("--resident_weights_mode", stderr.getvalue())
+
+    def test_the_old_flag_names_are_gone(self):
+        """Retired names must fail, not resolve to an abbreviation of another flag.
+
+        This is why the verify switch is --verify_resident_weights: with a
+        --resident_weights_verify spelling, argparse accepts the retired
+        --resident_weights as its unambiguous prefix and silently turns verify on.
+        """
+        for flag in ("--resident_weights", "--enable_resident_weights"):
+            with self.subTest(flag=flag):
+                with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    with self.assertRaises(SystemExit):
+                        self.parse_load_config([flag, "true"], {})
+                    self.assertIn(flag, stderr.getvalue())
+
+    def test_to_string_reports_every_field(self):
+        load_config = self.parse_load_config(["--resident_weights_mode", "dev"], {})
+        text = load_config.to_string()
+        self.assertIn("resident_weights_mode: dev", text)
+        self.assertIn("resident_weights_verify: False", text)
+        self.assertIn("resident_weights_role: target", text)
+
+    def test_with_role_leaves_the_original_alone(self):
+        resident = self.parse_load_config(
+            ["--resident_weights_mode", "dev"], {}
+        ).resident_weights_config
+        draft = resident.with_role("draft")
+        self.assertEqual(draft.role, "draft")
+        self.assertEqual(draft.mode, "dev")
+        self.assertEqual(resident.role, "target")
+
+
 if __name__ == "__main__":
     main()

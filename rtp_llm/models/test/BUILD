@@ -47,3 +47,10 @@ py_test(
     srcs = ["glm5_kv_cache_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "resident_weights_wiring_test",
+    srcs = ["resident_weights_wiring_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "0"},
+)
