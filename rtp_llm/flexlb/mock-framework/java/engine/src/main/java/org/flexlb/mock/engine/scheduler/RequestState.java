@@ -19,7 +19,7 @@ public final class RequestState {
     private int uses, generated, iterations;
     private long executionNanos;
     private boolean forward;
-    private boolean terminating, delivered;
+    private boolean terminating, finalizationStarted;
 
     private RequestFailure failure;
 
@@ -85,8 +85,8 @@ public final class RequestState {
     public boolean expired() { return System.nanoTime() >= deadline; }
 
     private void releaseIfReady() {
-        if (!terminating || delivered || uses != 0) return;
-        delivered = true;
+        if (!terminating || finalizationStarted || uses != 0) return;
+        finalizationStarted = true;
         try {
             if (resource != null && failure == null) publish.run();
         } catch (Exception error) { failedCleanup(error); }

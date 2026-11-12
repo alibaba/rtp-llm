@@ -116,13 +116,14 @@ Python 把 `client/start` 交给 Java client0。`ClientNode` 固定参与者、�
 
 `LLMMockEngine` 装配每个 P/D 实例的 RPC、`EngineLoop`、`EngineScheduler` 和 `KvCacheManager`。协议层拥有会话、校验报文、准备输入并处理取消。图片展开和 prompt cache key 计算在调度锁外完成，入队前再校验请求身份与 deadline。准备中的 P 请求可按 PENDING 查询，成功入队后由 Scheduler 提供执行状态。
 
-| 组件                                                   | 拥有的状态与行为                                                |
-| ------------------------------------------------------ | --------------------------------------------------------------- |
-| `RtpRpcService`、`PrefillRpcServer`、`DecodeRpcServer` | 原生报文、会话、P/D 阶段校验、异步响应。                        |
-| `EngineLoop`                                           | 等待唤醒和最近 deadline，维护在途 Forward，协调计算与回调。     |
-| `EngineScheduler`                                      | 准入、队列、组批、生成进度、KV 申请和请求终态。                 |
-| `SimulatedCompute`                                     | 根据本轮 `ForwardBatch` 计算模拟耗时和结果，由 Scheduler 提交。 |
-| `KvCacheManager`                                       | 前缀匹配、LRU、容量、资源引用和有效块元数据。                   |
+| 组件                                                   | 拥有的状态与行为                                            |
+| ------------------------------------------------------ | ----------------------------------------------------------- |
+| `RtpRpcService`、`PrefillRpcServer`、`DecodeRpcServer` | 原生报文、会话、P/D 阶段校验、异步响应。                    |
+| `EngineLoop`                                           | 等待唤醒和最近 deadline，维护在途 Forward，协调计算与回调。 |
+| `EngineScheduler`                                      | 准入、队列、组批、生成进度、KV 申请和请求终态。             |
+| `ComputeModel`                                         | 根据本轮 `ForwardBatch` 估算耗时和结果。                    |
+| `SimulatedCompute`                                     | 接收 `EngineLoop` 提交的计算计划，模拟执行并返回结果。      |
+| `KvCacheManager`                                       | 前缀匹配、LRU、容量、资源引用和有效块元数据。               |
 
 ```mermaid
 flowchart LR
@@ -130,7 +131,8 @@ flowchart LR
     enqueue --> step["EngineLoop.step"]
     wake["完成、取消、容量变化或到期"] --> step
     step --> schedule["准备 KV 与选批"]
-    schedule --> forward["SimulatedCompute.forward"]
+    schedule --> plan["ComputeModel.plan"]
+    plan --> forward["SimulatedCompute.submit"]
     forward --> outputs["Scheduler.processOutputs"]
     outputs --> step
     outputs --> notify["锁外通知协议层"]

@@ -5,7 +5,8 @@ import java.util.logging.Logger;
 import org.flexlb.mock.engine.scheduler.EngineScheduler.Task;
 
 /**
- * Bounded native finished-version log shared by P and D; does not own requests or KV.
+ * Records a bounded history of finished tasks for one Prefill or Decode instance.
+ * Provides versioned updates for worker status replies.
  */
 public final class TaskHistory {
     private static final Logger LOG = Logger.getLogger(TaskHistory.class.getName());

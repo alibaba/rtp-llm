@@ -37,7 +37,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
 
     private final boolean groups;
 
-    private final AtomicLong onflightRequests = new AtomicLong();
+    private final AtomicLong inflightRequests = new AtomicLong();
     private final AtomicLong statusVersion = new AtomicLong();
 
     private volatile boolean closed;
@@ -136,7 +136,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
             long micros = Math.multiplyExact(System.currentTimeMillis(), 1000);
             long version = statusVersion.updateAndGet(previous -> Math.max(previous + 1, micros));
             var tasks = prefill == null ? decode.snapshot(request.getLatestFinishedVersion()) : prefill.snapshot(request.getLatestFinishedVersion());
-            long collected = System.nanoTime();
+            long collectedAtNanos = System.nanoTime();
             finished.reportGaps();
             var result = WorkerStatusPB.newBuilder().setRole("RoleType." + role)
                 .setRoleType(RoleTypePB.valueOf("ROLE_TYPE_" + role)).setAlive(true).setKvCacheGroupMode(KvCacheGroupModePB.KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY)
@@ -146,7 +146,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
                 .addAllRunningTaskInfo(tasks.tasks().stream().map(RpcMessages::task).toList())
                 .addAllFinishedTaskList(tasks.finished().stream().map(RpcMessages::task).toList()).setLatestFinishedVersion(tasks.finishedVersion())
                 .build();
-            return new StatusResult<>(result, collected);
+            return new StatusResult<>(result, collectedAtNanos);
         });
     }
 
@@ -154,12 +154,12 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         statusReply("cache_status", response, () -> {
             var snapshot = cache.snapshot(request.getLatestCacheVersion(), request.getNeedCacheKeys());
             // Real measures cache collection only, before protobuf construction.
-            long collected = System.nanoTime();
+            long collectedAtNanos = System.nanoTime();
             var result = CacheStatusPB.newBuilder().setTotalKvCache(tokens(snapshot.totalBlocks()))
                 .setAvailableKvCache(tokens(snapshot.availableBlocks())).setBlockSize(config.tokensPerCacheKey()).setVersion(snapshot.version());
             if (decode != null) result.setMockDecodeCacheSeed(config.cacheKeySeed());
             for (long key : snapshot.keys()) result.addCacheKeyList(key);
-            return new StatusResult<>(result.build(), collected);
+            return new StatusResult<>(result.build(), collectedAtNanos);
         });
     }
 
@@ -169,11 +169,11 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
 
     // Real samples at GenerateContext destruction, before its AtomicGuard decrements.
     private Runnable trackRequest() {
-        onflightRequests.incrementAndGet();
+        inflightRequests.incrementAndGet();
         var completed = new java.util.concurrent.atomic.AtomicBoolean();
         return () -> {
             if (completed.compareAndSet(false, true))
-                rpcMetrics.observe("rtp_llm_rpc_onflight_request", onflightRequests.getAndDecrement());
+                rpcMetrics.observe("rtp_llm_rpc_onflight_request", inflightRequests.getAndDecrement());
         };
     }
 
@@ -188,7 +188,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         long completed;
         try {
             if (closed) throw Status.UNAVAILABLE.withDescription("RTP node is closed").asRuntimeException();
-            var result = read.get(); value = result.value(); completed = result.collected();
+            var result = read.get(); value = result.value(); completed = result.collectedAtNanos();
         } catch (RuntimeException error) { failure = error; completed = System.nanoTime(); }
         long elapsed = completed - started;
         rpcMetrics.increment("rtp_llm_rpc_" + kind + "_qps");
@@ -230,5 +230,5 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         }
     }
 
-    private record StatusResult<T>(T value, long collected) {}
+    private record StatusResult<T>(T value, long collectedAtNanos) {}
 }
