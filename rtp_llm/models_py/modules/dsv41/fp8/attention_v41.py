@@ -2648,7 +2648,25 @@ class AttentionV41FP8(AttentionFP8):
                 # to the front and -1 padding to the back.  Sorting values also
                 # avoids materialising a full int64 argsort permutation, which
                 # does not fit the A100 reserve at 1M context.
-                indices = torch.sort(indices, dim=-1, descending=True).values
+                if indices.shape[0] > 262144:
+                    # Sorting the full [1M, topk+window] index tensor in place
+                    # needs another 640 MiB device block.  Stage the one-time
+                    # index plan through host memory instead; layers reuse it.
+                    import gc
+
+                    _dev = indices.device
+                    _host = indices.to("cpu")
+                    del indices
+                    gc.collect()
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                    _host = torch.sort(_host, dim=-1, descending=True).values
+                    indices = _host.to(_dev)
+                    del _host
+                else:
+                    indices = torch.sort(indices, dim=-1, descending=True).values
                 lens = (indices >= 0).sum(-1).int()
                 if indices.shape[1] % 64:
                     indices = F.pad(indices, (0, 64 - indices.shape[1] % 64), value=-1)
