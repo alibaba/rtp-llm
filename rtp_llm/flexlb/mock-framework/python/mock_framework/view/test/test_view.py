@@ -143,7 +143,6 @@ def completed(tmp_path):
             "run_id": "run",
             "phase_id": "traffic",
             "step_id": "qps",
-            "query_time": gates[0]["query_time"],
             "start": 1793232005,
             "end": 1793232010,
             "recorded_at": "2026-10-29T00:00:10Z",

@@ -246,7 +246,6 @@ def test_success_rate_aggregates_all_terminals_without_a_request_count_floor(
     assert events == [
         {
             "event": "metric_window",
-            "query_time": ctx.query_time,
             "start": calls[-1][1] - 20,
             "end": calls[-1][1],
         }

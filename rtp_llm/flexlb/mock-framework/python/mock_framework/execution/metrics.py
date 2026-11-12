@@ -164,9 +164,7 @@ async def evaluate(ctx, args, expression, histories):
         if not 1 <= count <= 10000:
             raise ExecutionError("series requires 1–10000 sampling points")
         start = at - (count - 1) * step
-    ctx.records.emit(
-        event="metric_window", query_time=ctx.query_time, start=start, end=at
-    )
+    ctx.records.emit(event="metric_window", start=start, end=at)
 
     if args.mode == "interval":
         for name, labels, targets in histories:
