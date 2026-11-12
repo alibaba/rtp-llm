@@ -31,6 +31,7 @@ class PpuDecodeProvider(PpuModuleProvider):
             strategy_type = PpuMegaMoEFP4Strategy
             strategy_kwargs["resources"] = self._mega_resources
             strategy_kwargs["module_name"] = self._mega_module_name
+            strategy_kwargs["streamed"] = self._mega_streamed
         return PpuEPMoE(
             *args,
             platform_provider=self,
@@ -74,9 +75,18 @@ class PpuDecodeProvider(PpuModuleProvider):
             raise ValueError("DSV4_PPU_MTP_BATCH_INDEXER must be 0 or 1")
         self._mtp_batch_indexer = batch_indexer == "1"
         self._decode_fusions = self._bool("DSV4_PPU_DECODE_FUSIONS", False)
+        self._projection_tiles = self._bool("DSV4_PPU_DECODE_PROJECTION_TILES", False)
         self._moe_backend = self.execution_options.get("DSV4_PPU_DECODE_MOE_BACKEND", "deepep")
         if self._moe_backend not in ("deepep", "megamoe"):
             raise ValueError("DSV4_PPU_DECODE_MOE_BACKEND must be deepep or megamoe")
+        self._mega_streamed = self._bool("DSV4_PPU_MEGAMOE_STREAMED", False)
+        if self._mega_streamed and self._moe_backend != "megamoe":
+            raise ValueError("Streamed execution requires the MegaMoE backend")
+        self._shared_staged = self._bool("DSV4_PPU_MEGAMOE_SHARED_STAGED", False)
+        if self._shared_staged and self._moe_backend != "megamoe":
+            raise ValueError("Staged shared execution requires the MegaMoE backend")
+        if self._mega_streamed and self._shared_staged:
+            raise ValueError("Streamed MegaMoE does not support staged shared experts")
         self._mega_resources = None
         self._mega_module_name = "deep_gemm_mega"
         if self._moe_backend == "megamoe":
@@ -90,9 +100,11 @@ class PpuDecodeProvider(PpuModuleProvider):
         self._decode_attention_refs = []
 
     def build_fp8_linear(self, default_factory, *args, **kwargs):
-        return super().build_fp8_linear(
+        linear = super().build_fp8_linear(
             default_factory, *args, quantization="v2_column", **kwargs
         )
+        linear._decode_projection_gemm = self._projection_tiles
+        return linear
 
     def build_wo_a_fp8_linear(self, default_factory, *args, **kwargs):
         linear = super().build_wo_a_fp8_linear(
@@ -104,6 +116,8 @@ class PpuDecodeProvider(PpuModuleProvider):
     def build_shared_expert(self, *args, **kwargs):
         shared = super().build_shared_expert(*args, **kwargs)
         shared.fuse_activation_quant = self._decode_fusions
+        for linear in (shared.w13, shared.w2):
+            linear._decode_projection_gemm = self._projection_tiles
         return shared
 
     def build_attention(self, default_factory, *args, **kwargs):
@@ -125,7 +139,13 @@ class PpuDecodeProvider(PpuModuleProvider):
         for linear in (attention.wq_b, attention.wo_a, attention.wo_b):
             if type(linear) in (PpuFp8Linear, PpuWoAFp8Linear):
                 linear._decode_attention_gemm = self._decode_fusions
+        if type(attention._decode_qkv_projection) is PpuFp8Linear:
+            attention._decode_qkv_projection._decode_projection_gemm = (
+                self._projection_tiles
+            )
         if attention.indexer is not None:
+            if type(attention.indexer.wq_b) is PpuFp8Linear:
+                attention.indexer.wq_b._decode_projection_gemm = self._projection_tiles
             attention.indexer.compressor._fuse_decode_queries = self._decode_fusions
             attention.indexer._fuse_query_slices = self._decode_fusions
             attention.indexer._fuse_topk_order = self._decode_fusions
@@ -136,7 +156,9 @@ class PpuDecodeProvider(PpuModuleProvider):
         from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_shared_expert import PpuSharedExpertExecutor
 
         return PpuSharedExpertExecutor(
-            stream_pool=self.stream_pool, start_before_routing=True,
+            stream_pool=self.stream_pool,
+            start_before_routing=True,
+            staged=self._shared_staged,
         )
 
     def build_hc_unit(self, *args, **kwargs):
@@ -150,6 +172,10 @@ class PpuDecodeProvider(PpuModuleProvider):
             fuse_norm=True,
             fuse_moe_sum=self._decode_fusions,
             fuse_pre_quant=self._decode_fusions,
+            # Keep small-batch POST tiling opt-in until the local kernel
+            # improvement is established on the service's critical path.
+            fuse_post=self._decode_fusions
+            and self._bool("DSV4_PPU_HC_POST_TILING", False),
             **kwargs,
         )
 
@@ -173,7 +199,10 @@ class PpuDecodeProvider(PpuModuleProvider):
 
 
     def build_decode_metadata(self, default_factory, *args, **kwargs):
-        if not self._mtp_metadata_graph:
+        config = args[0] if args else kwargs.get("config")
+        if getattr(config, "q_len", None) != 1 and not self._mtp_metadata_graph:
+            # Verify and draft catch-up use the existing multi-token metadata
+            # updater, whose slot mappings include speculative ring entries.
             return default_factory(*args, **kwargs)
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
             DSv4DecodeFmhaImplFP8,

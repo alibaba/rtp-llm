@@ -92,7 +92,7 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
         ) == (4096, 2048, 256, 6)
 
     def __init__(
-        self, cfg, *, resources, module_name="deep_gemm_mega", **kwargs
+        self, cfg, *, resources, module_name="deep_gemm_mega", streamed=False, **kwargs
     ):
         kwargs.setdefault("output_dtype", torch.bfloat16)
         if kwargs["output_dtype"] != torch.bfloat16:
@@ -115,6 +115,11 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
                 "PPU MegaMoE requires a DeepGEMM build with the MegaMoE API"
             )
         self._mega = deep_gemm
+        self._streamed = streamed
+        if streamed and not callable(
+            getattr(deep_gemm, "fp4_fp4_mega_moe_streamed", None)
+        ):
+            raise RuntimeError("Streamed MegaMoE requires the DeepGEMM streamed API")
         self._resources = resources
         self._sym = None
 
@@ -126,8 +131,22 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
         for name, value in zip(("_w13", "_s13", "_w2", "_s2"), (*pair13, *pair2)):
             self.register_buffer(name, value, persistent=False)
 
-    def forward(self, x, weights, indices, *, active_token_mask=None):
+    def require_staged_shared(self):
+        import inspect
+
+        if (
+            "after_gemm1"
+            not in inspect.signature(self._mega.fp4_fp4_mega_moe).parameters
+        ):
+            raise RuntimeError(
+                "Staged shared execution requires DeepGEMM's after_gemm1 API"
+            )
+
+    def forward(self, x, weights, indices, *, active_token_mask=None, after_gemm1=None):
         from rtp_llm.models_py.kernels.ppu.attention.ppu_topk_padding import pad_inactive_routes
+
+        if self._streamed and after_gemm1 is not None:
+            raise ValueError("Streamed MegaMoE does not support after_gemm1")
 
         if self._sym is None:
             wrapper = self._bind_wrapper()
@@ -158,7 +177,15 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
             scheduling["expected_m"] = max(
                 1, token_count * self.cfg.n_activated_experts // self.cfg.n_local_experts + 1
             )
-        self._mega.fp4_fp4_mega_moe(
+        if self._streamed:
+            gemm = self._mega.fp4_fp4_mega_moe_streamed
+            call_kwargs = {}
+        else:
+            gemm = self._mega.fp4_fp4_mega_moe
+            call_kwargs = {"fuse_reduce": False}
+            if after_gemm1 is not None:
+                call_kwargs["after_gemm1"] = after_gemm1
+        gemm(
             y,
             (self._w13, self._s13),
             (self._w2, self._s2),
@@ -167,7 +194,7 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             preserve_bf16=True,
-            fuse_reduce=False,
+            **call_kwargs,
             **scheduling,
         )
         return hierarchy.combine(y, token_count) if hierarchy is not None else y

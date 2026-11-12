@@ -3,7 +3,7 @@
 import unittest
 import threading
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -12,6 +12,23 @@ from rtp_llm.models_py.modules.dsv4.ppu.manifest import DECODE_EXECUTION_OPTIONS
 
 
 class MetadataFactoryTest(unittest.TestCase):
+    def test_plain_decode_selects_graph_metadata_without_mtp_flag(self):
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
+            DSv4DecodeFmhaImplFP8,
+        )
+
+        provider = PpuDecodeProvider(DECODE_EXECUTION_OPTIONS)
+        with self.assertRaisesRegex(ValueError, "constructed"):
+            provider.build_decode_metadata(
+                DSv4DecodeFmhaImplFP8, SimpleNamespace(q_len=1)
+            )
+        reference = Mock(return_value="reference")
+        self.assertEqual(
+            provider.build_decode_metadata(reference, SimpleNamespace(q_len=2)),
+            "reference",
+        )
+        reference.assert_called_once()
+
     def test_shared_rope_options_and_late_materialization(self):
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
             DSv4DecodeFmhaImplFP8,

@@ -12,6 +12,8 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
+#include "autil/EnvUtil.h"
+
 using namespace std;
 namespace rtp_llm {
 
@@ -22,6 +24,14 @@ int64_t computeChunkGrant(int64_t budget, int64_t rows, int64_t remaining, int64
 
     const int64_t max_len = budget / rows;
     return remaining <= max_len ? remaining : (max_len / block_size) * block_size;
+}
+
+int64_t alignFinalChunkGrant(int64_t grant, int64_t remaining, int64_t block_size) {
+    if (grant != remaining || block_size <= 0 || remaining <= block_size) {
+        return grant;
+    }
+    const int64_t suffix = remaining % block_size;
+    return suffix > 0 ? remaining - suffix : grant;
 }
 
 FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runtime_config,
@@ -38,6 +48,14 @@ FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runt
     max_inited_kv_cache_streams_(
         std::max<int64_t>(runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams, 0)),
     prefill_chunk_size_(runtime_config.fifo_scheduler_config.prefill_chunk_size),
+    align_final_suffix_(
+#if USE_PPU
+        autil::EnvUtil::getEnv("DSV4_PPU_PREFIX_REUSE", false)
+            && autil::EnvUtil::getEnv("DSV4_PPU_PREFIX_TAIL_ALIGN", false)
+#else
+        false
+#endif
+    ),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
     metrics_reporter_(metrics_reporter) {}
 
@@ -275,7 +293,10 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
             continue;
         }
 
-        const int64_t grant = computeChunkGrant(budget_left, rows, remaining, block_size);
+        int64_t grant = computeChunkGrant(budget_left, rows, remaining, block_size);
+        if (align_final_suffix_) {
+            grant = alignFinalChunkGrant(grant, remaining, block_size);
+        }
 
         if (grant <= 0) {
             if (!selected.empty()) {

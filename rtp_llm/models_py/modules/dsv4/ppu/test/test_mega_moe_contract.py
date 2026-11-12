@@ -140,6 +140,42 @@ class MegaMoEContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be deepep or megamoe"):
             PpuDecodeProvider({**options, "DSV4_PPU_DECODE_MOE_BACKEND": "typo"})
 
+    def test_streamed_options_are_snapshotted_and_validated(self):
+        options = {**DECODE_EXECUTION_OPTIONS, "DSV4_PPU_DECODE_MOE_BACKEND": "megamoe"}
+        default = PpuDecodeProvider(options)
+        options["DSV4_PPU_MEGAMOE_STREAMED"] = "1"
+        streamed = PpuDecodeProvider(options)
+        options["DSV4_PPU_MEGAMOE_STREAMED"] = "0"
+        self.assertFalse(default._mega_streamed)
+        self.assertTrue(streamed._mega_streamed)
+        with self.assertRaisesRegex(ValueError, "MegaMoE backend"):
+            PpuDecodeProvider(
+                {
+                    **DECODE_EXECUTION_OPTIONS,
+                    "DSV4_PPU_DECODE_MOE_BACKEND": "deepep",
+                    "DSV4_PPU_MEGAMOE_STREAMED": "1",
+                }
+            )
+
+    def test_streamed_dispatch_selects_the_streamed_entry(self):
+        strategy = object.__new__(PpuMegaMoEFP4Strategy)
+        torch.nn.Module.__init__(strategy)
+        strategy.cfg = self.cfg
+        strategy._sym = object()
+        strategy._w13 = strategy._s13 = strategy._w2 = strategy._s2 = object()
+        strategy._mega = Mock()
+        strategy._streamed = True
+        x = torch.zeros((8, 4096), dtype=torch.bfloat16)
+        indices = torch.zeros((8, 8), dtype=torch.int64)
+        weights = torch.ones((8, 8))
+        strategy.forward(x, weights, indices)
+        strategy._mega.fp4_fp4_mega_moe_streamed.assert_called_once()
+        strategy._mega.fp4_fp4_mega_moe.assert_not_called()
+        self.assertEqual(
+            strategy._mega.fp4_fp4_mega_moe_streamed.call_args.kwargs,
+            {"activation_clamp": 10.0, "preserve_bf16": True},
+        )
+
     def test_dispatch_preserves_bf16_and_separate_reduction(self):
         strategy = object.__new__(PpuMegaMoEFP4Strategy)
         torch.nn.Module.__init__(strategy)
