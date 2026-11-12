@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
+#include <atomic>
 #include <chrono>
 #include <fstream>
 #include <limits>
@@ -1382,6 +1384,11 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs&                inpu
                 state.current_real_graph_bs,
                 state.current_real_graph_bs * num_tokens_per_bs_,
                 state.seq_len_sum);
+            static std::atomic<int> replay_trace{0};
+            if (replay_trace.fetch_add(1) < 4) {
+                std::fprintf(stderr, "[AWI_GRAPH] replay_decode key=%d seq_len_sum=%d\n",
+                             state.current_real_graph_bs, state.seq_len_sum);
+            }
             replayDecode(state.current_real_graph_bs);
             outputs.decode_graph_replay = true;
         }
@@ -1565,6 +1572,7 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
     const int  graph_key = is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
     const auto graph_it  = graph_instances_.find(graph_key);
     if (graph_it == graph_instances_.end()) {
+        if (trace_canrun) std::fprintf(stderr, "[AWI_GRAPH] fallback=key_not_captured key=%d\n", graph_key);
         if (observe_fallback) {
             RTP_LLM_LOG_WARNING("CUDA graph key %d was not captured, fallback to normal run", graph_key);
         }
@@ -1603,6 +1611,7 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
     size_t      copy_numel            = 0;
     const auto& captured_position_ids = graph_it->second.mem_hold_.py_model_inputs_.combo_position_ids;
     if (!validateComboPositionIds(inputs, state, captured_position_ids, copy_numel)) {
+        if (trace_canrun) std::fprintf(stderr, "[AWI_GRAPH] fallback=combo_position_ids key=%d\n", graph_key);
         if (observe_fallback) {
             const FallbackTick tick = tickFallback(combo_position_fallback_count_);
             // Log the first fallback and then at powers of two. This keeps the
@@ -1647,7 +1656,17 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
 bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state, CudaGraphCheckMode mode) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.canRun");
     const bool observe_fallback = mode == CudaGraphCheckMode::FORWARD;
+    static std::atomic<int> canrun_trace{0};
+    const bool trace_canrun = observe_fallback && canrun_trace.fetch_add(1) < 8;
+    if (trace_canrun) {
+        std::fprintf(stderr, "[AWI_GRAPH] canRun begin this=%p enable=%d prefill=%d range=%zu instances=%zu bs=%lld\n",
+                     (void*)this, (int)enable_cuda_graph_, (int)is_prefill_cuda_graph_mode_,
+                     capture_range_.size(), graph_instances_.size(),
+                     inputs.attention_inputs.input_lengths.defined()
+                         ? (long long)inputs.attention_inputs.input_lengths.size(0) : -1LL);
+    }
     if (!enable_cuda_graph_) {
+        if (trace_canrun) std::fprintf(stderr, "[AWI_GRAPH] fallback=disabled\n");
         return false;
     }
     if (isGenerationPrefillCudaGraph()) {
