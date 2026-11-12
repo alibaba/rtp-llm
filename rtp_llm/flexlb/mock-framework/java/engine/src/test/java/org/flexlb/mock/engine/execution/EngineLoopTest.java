@@ -81,6 +81,36 @@ class EngineLoopTest {
         }
     }
 
+    @Test void prefillOverheadDelaysNextRoundWithoutChangingForward() throws Exception {
+        var committedAt = new java.util.concurrent.atomic.AtomicLong();
+        var nextAt = new CompletableFuture<Long>();
+        var planNanos = new CompletableFuture<Long>();
+        var policy = new Policy(false) {
+            @Override public Work schedule() {
+                var work = super.schedule();
+                if (work != null && work.batch().id().equals("next")) nextAt.complete(System.nanoTime());
+                return work;
+            }
+            @Override public void processOutputs(Work work, SimulatedCompute.Outcome result) {
+                if (work.batch().id().equals("first")) {
+                    queue.add(work("next"));
+                    committedAt.set(System.nanoTime());
+                    planNanos.complete(result.sample().planned().toNanos());
+                }
+                super.processOutputs(work, result);
+            }
+        };
+        policy.queue.add(work("first"));
+        try (var cache = new org.flexlb.mock.engine.cache.KvCacheManager(1, 1, 0);
+             var loop = new EngineLoop(policy, policy, new TaskHistory(), cache, compute("1"), Role.prefill, "overhead", 24)) {
+            loop.wakeUp();
+            assertEquals("first", policy.finished.poll(2, TimeUnit.SECONDS));
+            assertEquals("next", policy.finished.poll(2, TimeUnit.SECONDS));
+            assertEquals(TimeUnit.MILLISECONDS.toNanos(1), planNanos.get(2, TimeUnit.SECONDS));
+            assertTrue(nextAt.get(2, TimeUnit.SECONDS) - committedAt.get() >= TimeUnit.MILLISECONDS.toNanos(24));
+        }
+    }
+
     @Test void cancelledExecutionCallbackCannotCompleteItsReplacement() throws Exception {
         var policy = new Policy(false);
         var first = work("same"); var second = work("same");

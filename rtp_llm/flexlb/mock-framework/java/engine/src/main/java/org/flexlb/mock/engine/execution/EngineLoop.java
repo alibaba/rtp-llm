@@ -25,10 +25,12 @@ public final class EngineLoop implements AutoCloseable {
     private final ComputeModel model;
     private final Role role;
     private final String identity;
+    private final long stepOverheadNanos;
     private final SimulatedCompute compute = new SimulatedCompute();
     private final ExecutorService notifications = Executors.newVirtualThreadPerTaskExecutor();
 
     private ForwardExecution inFlightForward;
+    private long nextForwardAt;
 
     private volatile boolean closed;
     private boolean dirty;
@@ -42,6 +44,14 @@ public final class EngineLoop implements AutoCloseable {
 
     public EngineLoop(Object lock, EngineScheduler scheduler, TaskHistory finished, KvCacheManager cache,
                          ComputeModel model, Role role, String identity) {
+        this(lock, scheduler, finished, cache, model, role, identity, 0);
+    }
+
+    public EngineLoop(Object lock, EngineScheduler scheduler, TaskHistory finished, KvCacheManager cache,
+                      ComputeModel model, Role role, String identity, int prefillStepOverheadMs) {
+        if (prefillStepOverheadMs < 0 || prefillStepOverheadMs > 0 && role != Role.prefill) {
+            throw new IllegalArgumentException("Invalid Prefill step overhead");
+        }
         this.lock = Objects.requireNonNull(lock);
         this.finished = Objects.requireNonNull(finished);
         this.scheduler = Objects.requireNonNull(scheduler);
@@ -49,6 +59,7 @@ public final class EngineLoop implements AutoCloseable {
         this.model = Objects.requireNonNull(model);
         this.role = Objects.requireNonNull(role);
         this.identity = Objects.requireNonNull(identity);
+        this.stepOverheadNanos = TimeUnit.MILLISECONDS.toNanos(prefillStepOverheadMs);
         cache.onChange(this::wakeUp);
         Thread.ofVirtual().name("mock-engine-" + identity).start(this::loop);
     }
@@ -164,6 +175,9 @@ public final class EngineLoop implements AutoCloseable {
                     dispatchCallbacks();
                     if (closed) return;
                     deadline = scheduler.nextDeadline();
+                    if (nextForwardAt != 0) {
+                        deadline = Math.min(deadline, nextForwardAt);
+                    }
                 }
             }
         } catch (InterruptedException error) {
@@ -181,6 +195,10 @@ public final class EngineLoop implements AutoCloseable {
             inFlightForward = null;
             cancelled.execution.cancel();
             scheduler.failForward(cancelled.work, new RequestFailure(RequestFailure.Reason.CANCELLED, "All batch members stopped"));
+        }
+        if (nextForwardAt != 0) {
+            if (nextForwardAt - System.nanoTime() > 0) return;
+            nextForwardAt = 0;
         }
         while (inFlightForward == null && !closed) {
             var work = scheduler.schedule();
@@ -207,7 +225,12 @@ public final class EngineLoop implements AutoCloseable {
         synchronized (lock) {
             if (inFlightForward != execution) return;
             inFlightForward = null;
-            try { scheduler.processOutputs(execution.work, outcome); }
+            try {
+                scheduler.processOutputs(execution.work, outcome);
+                if (stepOverheadNanos > 0 && outcome.state() == SimulatedCompute.State.COMPLETED) {
+                    nextForwardAt = System.nanoTime() + stepOverheadNanos;
+                }
+            }
             catch (RuntimeException error) { failEngine(error); }
             if (closed) dispatchCallbacks();
         }

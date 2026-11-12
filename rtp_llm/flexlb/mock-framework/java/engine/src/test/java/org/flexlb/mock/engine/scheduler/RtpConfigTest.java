@@ -16,6 +16,23 @@ class RtpConfigTest {
 
     @TempDir Path directory;
 
+    @Test void prefillOverheadIsOptionalAndValidated() throws Exception {
+        var root = root();
+        var values = (ObjectNode) root.path("component").path("config");
+        var key = "mock.compute.prefill.step.overhead.ms";
+        assertEquals(0, load(root).prefillStepOverheadMs());
+        values.put(key, 24);
+        var configured = load(root);
+        assertEquals(24, configured.effective().path(key).asInt());
+        assertEquals(24, RtpConfig.fromEnvironment(configured.id(), configured.role(),
+            environmentOf(configured.business())).prefillStepOverheadMs());
+        values.put(key, -1);
+        assertThrows(IllegalArgumentException.class, () -> load(root));
+        values.put(key, 24);
+        root.put("component_role", "decode");
+        assertThrows(IllegalArgumentException.class, () -> load(root));
+    }
+
     @Test void schedulerModeSelectsPolicyAndRejectsUnknownValues() throws Exception {
         var root = root();
         var values = (ObjectNode) root.path("component").path("config");

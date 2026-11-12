@@ -42,7 +42,8 @@ public final class LLMMockEngine implements AutoCloseable {
             var scheduler = schedulers.create(lock, cacheManager, finished);
             var samples = AbstractRtpScheduler.metricsFor(scheduler);
             if (samples != null) metricSource = samples;
-            engine = new EngineLoop(lock, scheduler, finished, cacheManager, config.compute(), config.role(), config.id());
+            engine = new EngineLoop(lock, scheduler, finished, cacheManager, config.compute(), config.role(),
+                config.id(), config.prefillStepOverheadMs());
             try {
                 service = new RtpRpcService(RtpRpcService.Config.from(config), cacheManager, lock, finished, engine, config.groupScheduling(), config);
             } catch (RuntimeException | Error failure) {
