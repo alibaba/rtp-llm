@@ -55,6 +55,22 @@ def _hc_fallback_chunk_rows() -> int:
     return max(1, rows)
 
 
+# Cache for huge-prefill collapse readouts, keyed by exact output
+# shape/device/dtype. See collapse_delayed's chunked branch for why the
+# buffer must not be freshly allocated per call (n24: 10.00 GiB request
+# failed with 9.91 GiB free mid-prefill).
+_COLLAPSE_OUT_CACHE: dict = {}
+
+
+def _collapse_out_cached(x: torch.Tensor) -> torch.Tensor:
+    key = (x.device, tuple((*x.shape[:-2], x.shape[-1])), x.dtype)
+    buf = _COLLAPSE_OUT_CACHE.get(key)
+    if buf is None:
+        buf = torch.empty(key[1], dtype=x.dtype, device=x.device)
+        _COLLAPSE_OUT_CACHE[key] = buf
+    return buf
+
+
 def collapse_delayed(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
     """Read residual streams using FP32 coefficients and accumulation."""
     # TileLang/TileKernels are CUDA-only; ROCm uses the pure-torch path.
@@ -71,7 +87,15 @@ def collapse_delayed(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
         return (x.float() * pre_mix.unsqueeze(-1)).sum(dim=-2).to(x.dtype)
     # Token-chunked identical math (see _HC_FALLBACK_CHUNK_ROWS): the fp32
     # product temporary shrinks from [T, hc, dim] to [rows, hc, dim].
-    y = torch.empty((*x.shape[:-2], x.shape[-1]), dtype=x.dtype, device=x.device)
+    # The readout itself comes from a per-forward-shape cached buffer:
+    # n24 (2026-11-12) died requesting exactly this fresh [1048320, 5120]
+    # bf16 10.00 GiB tensor with 9.91 GiB free - even after every prior
+    # reduction, a NEW 10 GiB allocation per HC pre cannot be assembled
+    # from the fragmented headroom mid-prefill. One cached buffer
+    # (created at layer 0 while ~68 GiB is free, rewritten in place by
+    # every later collapse, all same-stream ordered, consumers done
+    # before the next rewrite) removes the allocation entirely.
+    y = _collapse_out_cached(x)
     for begin in range(0, t, rows):
         end = min(begin + rows, t)
         y[begin:end] = (
