@@ -19,6 +19,7 @@ def sm120_suites():
             smoke_test(
                 name = "generation_prefill_cuda_graph_sm120",
                 task_info = "data/model/qwen25/q_r_generation_prefill_cuda_graph_sm120.json",
+                envs = ["FLASHINFER_USE_CUDA_NORM=1"],
                 # Keep framework warmup enabled and let it size the production
                 # KV pool. This gates graph capture memory accounting instead of
                 # bypassing it with a fixed test_block_num.
@@ -42,7 +43,7 @@ def sm120_suites():
             smoke_test(
                 name = "dense_fp8pb_dynamic_sm120",
                 task_info = "data/model/qwen3/q_r_1_7b_fp8pb_tp2_sm120.json",
-                envs = ["LOAD_PYTHON_MODEL=1"],
+                envs = ["LOAD_PYTHON_MODEL=1", "FLASHINFER_USE_CUDA_NORM=1"],
                 smoke_args = dense_args + " --reuse_cache 0",
                 gpu_type = ["RTX_5000_PRO_CU13"],
             ),

@@ -29,6 +29,7 @@ SMOKE_CASES = {
     },
     "generation_prefill_cuda_graph_sm120": {
         "task_info": "data/model/qwen25/q_r_generation_prefill_cuda_graph_sm120.json",
+        "envs": ["FLASHINFER_USE_CUDA_NORM=1"],
         "smoke_args": "--act_type BF16 --warm_up 1 --seq_size_per_block 64 --concurrency_limit 5 --max_context_batch_size 5 --enable_cuda_graph 1 --decode_capture_config '1' --generation_prefill_cuda_graph_max_requests 5 --generation_prefill_capture_config '64,256'",
         "gpu_type": "RTX_5000_PRO_CU13",
         "platform": "cuda",
@@ -45,7 +46,7 @@ SMOKE_CASES = {
     },
     "dense_fp8pb_dynamic_sm120": {
         "task_info": "data/model/qwen3/q_r_1_7b_fp8pb_tp2_sm120.json",
-        "envs": ["LOAD_PYTHON_MODEL=1"],
+        "envs": ["LOAD_PYTHON_MODEL=1", "FLASHINFER_USE_CUDA_NORM=1"],
         "smoke_args": "--quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0 --tp_size 2 --world_size 2 --seq_size_per_block 2048 --max_seq_len 16384 --reserver_runtime_mem_mb 16005 --concurrency_limit 4 --enable_cuda_graph 1 --decode_capture_config '1,2' --reuse_cache 0",
         "gpu_type": "RTX_5000_PRO_CU13",
         "platform": "cuda",
