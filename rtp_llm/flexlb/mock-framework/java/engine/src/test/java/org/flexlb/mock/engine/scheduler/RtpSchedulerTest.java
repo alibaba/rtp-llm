@@ -7,6 +7,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.engine.cache.KvCacheManager;
+import org.flexlb.mock.engine.cache.KvCacheManager.Ready;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.execution.EngineLoop;
 import org.flexlb.mock.engine.forward.SimulatedCompute;
@@ -198,7 +199,7 @@ class RtpSchedulerTest {
         var config = config("prefill", "1", 2, 100);
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 12, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
-            var held = cache.acquire(12L * config.physicalBlockSize(), List.of()).lease();
+            var held = assertInstanceOf(Ready.class, cache.prepare(12L * config.physicalBlockSize(), List.of())).lease();
             var first = new Listener(); scheduler.enqueue(input(1, false), first); scheduler.enqueue(input(2, false), new Listener());
             assertNull(scheduler.schedule()); assertFalse(first.terminal.isDone());
             held.close();
@@ -492,7 +493,7 @@ class RtpSchedulerTest {
     @Test void prefillCapacityWaitExpiresOrCancelsWithoutRevivingAfterRelease() throws Exception {
         var config = config("prefill", "1", 2); var lock = new Object();
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 3, 0);
-             var owner = cache.acquire(6, List.of()).lease();
+             var owner = assertInstanceOf(Ready.class, cache.prepare(6, List.of())).lease();
              var engine = new EngineLoop(lock, AbstractRtpScheduler.factory(config), new org.flexlb.mock.engine.scheduler.TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             var expired = new Listener(); var cancelled = new Listener();
             long now = System.nanoTime();

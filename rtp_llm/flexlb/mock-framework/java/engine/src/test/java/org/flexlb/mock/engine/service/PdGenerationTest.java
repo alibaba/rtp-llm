@@ -18,6 +18,7 @@ import org.flexlb.mock.engine.forward.ComputeModel;
 import org.flexlb.mock.engine.scheduler.LLMMockEngineTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.flexlb.mock.engine.cache.KvCacheManager.Ready;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -635,7 +636,7 @@ class PdGenerationTest {
     }
 
     @Test void prefillDoesNotStartBeforeDecodeAllocationAcknowledgement() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1); var holder = d.node.cacheManager().acquire(12, List.of()).lease();
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1); var holder = assertInstanceOf(Ready.class, d.node.cacheManager().prepare(12, List.of())).lease();
                 var call = new Call(p, input(d, 1, 5, 4, 2500, true))) {
             await(() -> d.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 1);
             assertEquals(1, p.status().getRunningTaskInfoCount());
@@ -648,7 +649,7 @@ class PdGenerationTest {
     }
 
     @Test void growthPressureFailsLikeRtpAndCannotResumeAfterRelease() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 4, 10); var holder = d.node.cacheManager().acquire(4, List.of()).lease();
+        try (var p = node("prefill", 8, 1); var d = node("decode", 4, 10); var holder = assertInstanceOf(Ready.class, d.node.cacheManager().prepare(4, List.of())).lease();
                 var call = new Call(p, input(d, 1, 3, 6, 2500, true))) {
             assertEquals(602, code(call.errorAfterProgress(Status.Code.RESOURCE_EXHAUSTED, 2)));
             assertEquals(4, d.status().getAvailableKvCache()); holder.close();
@@ -667,7 +668,7 @@ class PdGenerationTest {
     }
 
     @Test void deadlineDuringCapacityWaitReleasesRequestAndDoesNotWakeIntoGeneration() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 4, 1); var holder = d.node.cacheManager().acquire(6, List.of()).lease();
+        try (var p = node("prefill", 8, 1); var d = node("decode", 4, 1); var holder = assertInstanceOf(Ready.class, d.node.cacheManager().prepare(6, List.of())).lease();
                 var call = new Call(p, input(d, 1, 3, 6, 300, true))) {
             await(() -> d.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 1);
             call.error(Status.Code.DEADLINE_EXCEEDED);
@@ -785,7 +786,7 @@ class PdGenerationTest {
     @Test void masterBatchWaitsForAllDecodePreparationsAndExecutesOnePrefillForward() throws Exception {
         var settings = Map.<String, Object>of("settings", Map.of("concurrency_limit", 4, "max_batch_tokens_size", 100));
         try (var p = node("prefill", 16, 10, settings); var d = node("decode", 8, 1);
-             var holder = d.node.cacheManager().acquire(8, List.of()).lease();
+             var holder = assertInstanceOf(Ready.class, d.node.cacheManager().prepare(8, List.of())).lease();
              var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var accepted = workers.submit(() -> enqueue(p, 2000,
                 input(d, 701, 5, 3, 3000, true), input(d, 702, 7, 3, 3000, true)));
@@ -816,7 +817,7 @@ class PdGenerationTest {
     @Test void cancellingOneMemberDuringBatchPreparationUnblocksTheRemainingGroup() throws Exception {
         var settings = Map.<String, Object>of("settings", Map.of("concurrency_limit", 4, "max_batch_tokens_size", 100));
         try (var p = node("prefill", 16, 10, settings); var d = node("decode", 8, 1);
-             var holder = d.node.cacheManager().acquire(8, List.of()).lease();
+             var holder = assertInstanceOf(Ready.class, d.node.cacheManager().prepare(8, List.of())).lease();
              var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var accepted = workers.submit(() -> enqueue(p, 2000,
                 input(d, 721, 5, 3, 3000, true), input(d, 722, 5, 3, 3000, true)));

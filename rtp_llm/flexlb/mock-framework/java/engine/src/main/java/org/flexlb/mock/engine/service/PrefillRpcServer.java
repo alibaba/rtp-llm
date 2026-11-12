@@ -132,26 +132,6 @@ final class PrefillRpcServer implements AutoCloseable {
             throw RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid input length or local generation settings"), 605);
     }
 
-    Session submit(GenerateInputPB input) { return submit(input, Long.MAX_VALUE); }
-
-    Session submit(GenerateInputPB input, long rpcDeadline) { return submit(input, rpcDeadline, false); }
-
-    Session submit(GenerateInputPB input, long rpcDeadline, boolean retained) {
-        return submit(input, rpcDeadline, retained, System.nanoTime());
-    }
-
-    Session submit(GenerateInputPB input, long rpcDeadline, boolean retained, long started) {
-        return submit(MultimodalProtocol.text(input), rpcDeadline, retained, started);
-    }
-
-    Session submit(MultimodalProtocol.Prepared prepared, long rpcDeadline, boolean retained, long started) {
-        var input = prepared.input();
-        validate(input, retained);
-        requirePrepared(input);
-        var session = new Session(input, retained, started, RpcMessages.deadline(input, started, rpcDeadline));
-        return submit(session, prepared);
-    }
-
     Session submit(Session session, MultimodalProtocol.Prepared prepared) {
         try {
             requirePrepared(prepared.input());

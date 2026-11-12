@@ -16,6 +16,7 @@ import org.flexlb.mock.engine.execution.LLMMockEngine;
 import org.flexlb.mock.engine.scheduler.LLMMockEngineTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.flexlb.mock.engine.cache.KvCacheManager.Ready;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -37,7 +38,7 @@ class DecodeAdmissionTest {
     }
 
     @Test void temporaryPressureWaitsPastOldRetryBudgetAndWakesOnRelease() throws Exception {
-        try (var node = node(false); var owner = node.node.cacheManager().acquire(12, List.of()).lease(); var call = new Call(node, 0)) {
+        try (var node = node(false); var owner = assertInstanceOf(Ready.class, node.node.cacheManager().prepare(12, List.of())).lease(); var call = new Call(node, 0)) {
             call.request.onNext(input("p", 1, 5, 0));
             await(() -> node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 1);
             assertEquals(TaskPhase.TASK_PHASE_RECEIVED, node.status().getRunningTaskInfo(0).getPhase());
@@ -47,7 +48,7 @@ class DecodeAdmissionTest {
     }
 
     @Test void waitingDeadlineHasNative603AndCannotAllocateAfterExpiry() throws Exception {
-        try (var node = node(false); var owner = node.node.cacheManager().acquire(12, List.of()).lease(); var call = new Call(node, 0)) {
+        try (var node = node(false); var owner = assertInstanceOf(Ready.class, node.node.cacheManager().prepare(12, List.of())).lease(); var call = new Call(node, 0)) {
             call.request.onNext(input("p", 1, 5, 50));
             assertEquals(603, engineCode(call.error(Status.Code.DEADLINE_EXCEEDED)));
             owner.close(); Thread.sleep(100);
@@ -87,7 +88,7 @@ class DecodeAdmissionTest {
             try (var node = node(disabled); var first = new Call(node, 0); var second = new Call(node, 0)) {
                 var request = input("p", 1, 5, 0);
                 var prompt = request.getMockDecodePrompt();
-                try (var lease = node.node.cacheManager().acquire(6, List.of()).lease()) {
+                try (var lease = assertInstanceOf(Ready.class, node.node.cacheManager().prepare(6, List.of())).lease()) {
                     lease.publish(prompt.getBlockKeysList(), 5);
                 }
                 first.request.onNext(request); first.ack();
@@ -144,7 +145,7 @@ class DecodeAdmissionTest {
                 var full = new org.flexlb.mock.protocol.MultimodalProtocol.Prepared(all, spans);
                 var allKeys = org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(full, 2, 0, 1).keys();
                 await(() -> cacheKeys(node.node).equals(Set.copyOf(promptCacheKeys.keys())));
-                try (var lease = node.node.cacheManager().acquire(8, allKeys).lease()) {
+                try (var lease = assertInstanceOf(Ready.class, node.node.cacheManager().prepare(8, allKeys)).lease()) {
                     assertNotNull(lease);
                     assertEquals(2, lease.reusedTokens());
                 }
@@ -200,7 +201,7 @@ class DecodeAdmissionTest {
     }
 
     @Test void cancellingCapacityWaitCannotResurrectAnAllocationOrReportForwardWork() throws Exception {
-        try (var node = node(false); var owner = node.node.cacheManager().acquire(12, List.of()).lease(); var call = new Call(node, 0)) {
+        try (var node = node(false); var owner = assertInstanceOf(Ready.class, node.node.cacheManager().prepare(12, List.of())).lease(); var call = new Call(node, 0)) {
             call.request.onNext(input("p", 1, 5, 0)); await(() -> node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 1);
             call.close(); await(() -> node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 0);
             owner.close(); Thread.sleep(100);

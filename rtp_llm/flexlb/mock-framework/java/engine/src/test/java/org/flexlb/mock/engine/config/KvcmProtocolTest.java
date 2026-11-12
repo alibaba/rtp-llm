@@ -16,6 +16,7 @@ import org.flexlb.mock.engine.execution.LLMMockEngine;
 import org.flexlb.mock.engine.scheduler.LLMMockEngineTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.flexlb.mock.engine.cache.KvCacheManager.Ready;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -34,11 +35,11 @@ class KvcmProtocolTest {
                 assertEquals("QT_PREFIX_MATCH",registered.path("default_query_type").asText());
                 assertEquals(16,registered.path("block_size").intValue());
                 assertEquals("FP16",registered.path("model_deployment").path("dtype").asText());
-                try(var lease = node.cacheManager().acquire(32,List.of()).lease()) { lease.publish(List.of(11L,22L),32); }
+                try(var lease = assertInstanceOf(Ready.class, node.cacheManager().prepare(32,List.of())).lease()) { lease.publish(List.of(11L,22L),32); }
                 await(() -> meta.has("EVENT_BLOCK_ADD"));
                 var adds = meta.requests.stream().flatMap(r -> r.path("events").findValues("block_add").stream()).toList();
                 assertTrue(adds.stream().anyMatch(a -> a.path("block_key").asText().equals("22")));
-                try(var lease = node.cacheManager().acquire(128,List.of()).lease()) { await(() -> meta.has("EVENT_BLOCK_DELETE")); }
+                try(var lease = assertInstanceOf(Ready.class, node.cacheManager().prepare(128,List.of())).lease()) { await(() -> meta.has("EVENT_BLOCK_DELETE")); }
                 meta.expire.set(true); await(() -> meta.registrations.get() >= 2);
                 meta.expireItem.set(true); await(() -> meta.registrations.get() >= 3);
             }
@@ -72,7 +73,7 @@ class KvcmProtocolTest {
                 cache.startKvcmReporter(config, "127.0.0.1:12345");
                 await(() -> meta.has("EVENT_BLOCK_SNAPSHOT"));
                 assertEquals(true, cache.kvcmStatus().get("registered"));
-                try (var lease = cache.acquire(16, List.of()).lease()) { lease.publish(List.of(99L), 16); }
+                try (var lease = assertInstanceOf(Ready.class, cache.prepare(16, List.of())).lease()) { lease.publish(List.of(99L), 16); }
                 await(() -> meta.has("EVENT_BLOCK_ADD"));
                 cache.close(); cache.close();
                 assertTrue(meta.has("EVENT_HOST_DOWN"));

@@ -46,6 +46,42 @@ def test_topology_readers_and_publishers_cannot_mutate_current_instances(tmp_pat
     assert not (tmp_path / "topology-history.json").exists()
 
 
+def test_client_start_fails_without_endpoints(tmp_path):
+    async def exercise():
+        role_config = {"deployment": {"replicas": 1}}
+        ready = json.dumps({"url": "http://127.0.0.1:18080"})
+        script = (
+            "import os, time\n"
+            "from pathlib import Path\n"
+            f"Path(os.environ['MOCK_READY_FILE']).write_text({ready!r})\n"
+            "time.sleep(30)\n"
+        )
+        runtime = RunEnvironment(
+            SimpleNamespace(environment={"client": role_config}),
+            {
+                "components": {
+                    "client": {
+                        "command": [sys.executable, "-c", script],
+                        "cwd": str(tmp_path),
+                        "env": {},
+                        "startup_timeout": "3s",
+                    },
+                }
+            },
+            SimpleNamespace(directory=tmp_path, emit=lambda **event: None),
+        )
+        try:
+            with pytest.raises(
+                ExecutionError, match=r"client-0: missing endpoints[.]json"
+            ):
+                await runtime.start()
+            assert runtime.topology.active("client") == []
+        finally:
+            errors = await runtime.close()
+        assert errors == []
+        assert runtime.supervisor.children == ()
+
+
 def test_discovery_failure_after_launch_still_reaps_process(tmp_path, monkeypatch):
     from mock_framework.execution.roles.master import MasterRole
     from mock_framework.execution.roles.test.test_master_lifecycle import (

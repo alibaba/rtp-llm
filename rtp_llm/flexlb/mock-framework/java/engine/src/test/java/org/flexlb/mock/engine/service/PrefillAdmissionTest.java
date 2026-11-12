@@ -8,12 +8,14 @@ import java.util.*;
 import java.util.concurrent.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.cache.KvCacheManager;
+import org.flexlb.mock.engine.cache.KvCacheManager.Ready;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.execution.LLMMockEngine;
 import org.flexlb.mock.engine.scheduler.LLMMockEngineTest;
 import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler;
 import org.flexlb.mock.engine.scheduler.RtpTestMetrics;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
+import org.flexlb.mock.protocol.MultimodalProtocol;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
@@ -32,14 +34,20 @@ class PrefillAdmissionTest {
              var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
             var raw = input(1, 0, true).toBuilder()
                 .addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl("image")).build();
-            var error = assertThrows(io.grpc.StatusRuntimeException.class, () -> engine.submit(raw));
-            assertEquals(Status.Code.INVALID_ARGUMENT, error.getStatus().getCode());
             var batch = engine.submit(List.of(new PrefillRpcServer.Submission(raw, Long.MAX_VALUE)));
             assertNull(batch.getFirst().session());
             assertEquals(Status.Code.INVALID_ARGUMENT, Status.fromThrowable(batch.getFirst().failure()).getCode());
             assertEquals(8, cache.snapshot(0, false).availableBlocks());
             assertTrue(engine.snapshot(0).tasks().isEmpty());
             assertTrue(engine.snapshot(0).finished().isEmpty());
+
+            var session = engine.new Session(raw, false, System.nanoTime(), Long.MAX_VALUE);
+            var error = assertThrows(io.grpc.StatusRuntimeException.class,
+                () -> engine.submit(session, MultimodalProtocol.text(raw)));
+            assertEquals(Status.Code.INVALID_ARGUMENT, error.getStatus().getCode());
+            assertNull(session.request);
+            assertTrue(engine.snapshot(0).tasks().isEmpty());
+            assertEquals(8, cache.snapshot(0, false).availableBlocks());
         }
     }
 
@@ -54,11 +62,11 @@ class PrefillAdmissionTest {
         var config = config("totalComputeTokens");
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
             assertTrue(engine.snapshot(-1).finished().isEmpty());
-            var first = engine.submit(input(1, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            var first = submit(engine, input(1, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
             assertTrue(first.status().isOk());
             assertTrue(first.output().getFlattenOutput().getAuxInfo(0).getFirstTokenCostTimeUs() >= 5000);
             assertEquals(2, cache.snapshot(-1, true).keys().length);
-            var second = engine.submit(input(2, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            var second = submit(engine, input(2, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
             assertEquals(4, second.output().getFlattenOutput().getAuxInfo(0).getTotalReuseLen());
             assertTrue(second.output().getFlattenOutput().getAuxInfo(0).getFirstTokenCostTimeUs() >= 1000);
             assertEquals(8, cache.snapshot(-1, false).availableBlocks());
@@ -74,13 +82,13 @@ class PrefillAdmissionTest {
         ((ObjectNode) root.path("component").path("config")).put("concurrency_limit", 1);
         var config = RtpConfig.load(root);
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
-            var first = engine.submit(input(1, 0, true));
-            var queued = engine.submit(input(2, 25, true));
+            var first = submit(engine, input(1, 0, true));
+            var queued = submit(engine, input(2, 25, true));
             var result = queued.completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
             assertEquals(Status.Code.DEADLINE_EXCEEDED, result.status().getCode()); assertEquals(603, result.engineCode());
             assertEquals(5, cache.snapshot(-1, false).availableBlocks());
             assertEquals(List.of(RUNNING), engine.snapshot(0).tasks().stream().map(EngineScheduler.Task::phase).toList());
-            var rpcBound = engine.submit(input(3, 0, true), System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(25));
+            var rpcBound = submit(engine, input(3, 0, true), System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(25));
             assertEquals(Status.Code.DEADLINE_EXCEEDED, rpcBound.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
             assertEquals(5, cache.snapshot(-1, false).availableBlocks());
             first.cancel();
@@ -90,10 +98,10 @@ class PrefillAdmissionTest {
     @Test void cancellationReleasesLeaseAndCannotCommitLaterOrCancelNewSameId() throws Exception {
         var config = config("500");
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
-            var old = engine.submit(input(1, 0, true)); old.cancel();
+            var old = submit(engine, input(1, 0, true)); old.cancel();
             assertEquals(Status.Code.CANCELLED, old.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
             assertEquals(0, cache.snapshot(-1, true).keys().length);
-            var fresh = engine.submit(input(1, 0, true)); old.cancel();
+            var fresh = submit(engine, input(1, 0, true)); old.cancel();
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
             while (engine.snapshot(0).tasks().stream().noneMatch(task -> task.phase() == RUNNING)) {
                 assertTrue(System.nanoTime() < deadline); Thread.sleep(1);
@@ -109,10 +117,10 @@ class PrefillAdmissionTest {
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0)) {
             var engine = server(config, cache, AbstractRtpScheduler.factory(config));
             try {
-                var timed = engine.submit(input(1, 25, true));
+                var timed = submit(engine, input(1, 25, true));
                 assertEquals(Status.Code.DEADLINE_EXCEEDED, timed.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
                 assertEquals(8, cache.snapshot(-1, false).availableBlocks());
-                var running = engine.submit(input(2, 0, true)); var queued = engine.submit(input(3, 0, true));
+                var running = submit(engine, input(2, 0, true)); var queued = submit(engine, input(3, 0, true));
                 engine.close();
                 for (var session : List.of(running, queued))
                     assertEquals(Status.Code.UNAVAILABLE, session.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
@@ -125,16 +133,16 @@ class PrefillAdmissionTest {
     @Test void allocationAndFormulaFailureDoNotLeakOrBlockTheNextRequest() throws Exception {
         var config = config("sqrt(-1)");
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
-            assertEquals(Status.Code.INTERNAL, engine.submit(input(1, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
+            assertEquals(Status.Code.INTERNAL, submit(engine, input(1, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
             assertEquals(8, cache.snapshot(-1, false).availableBlocks());
-            try (var owner = cache.acquire(6L * config.physicalBlockSize(), List.of()).lease()) {
-                var waiting = engine.submit(input(2, 0, true)).completion().toCompletableFuture();
+            try (var owner = assertInstanceOf(Ready.class, cache.prepare(6L * config.physicalBlockSize(), List.of())).lease()) {
+                var waiting = submit(engine, input(2, 0, true)).completion().toCompletableFuture();
                 assertFalse(waiting.isDone());
                 assertEquals(List.of(RECEIVED), engine.snapshot(0).tasks().stream().map(EngineScheduler.Task::phase).toList());
                 owner.close();
                 assertEquals(Status.Code.INTERNAL, waiting.get(2, TimeUnit.SECONDS).status().getCode());
             }
-            assertEquals(Status.Code.INTERNAL, engine.submit(input(3, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
+            assertEquals(Status.Code.INTERNAL, submit(engine, input(3, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
             assertEquals(8, cache.snapshot(-1, false).availableBlocks());
         }
     }
@@ -144,7 +152,7 @@ class PrefillAdmissionTest {
         var metrics = new RtpTestMetrics(config);
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, metrics)) {
             for (int i = 0; i < 100; i++) {
-                var session = engine.submit(input(i, 0, true)); session.cancel();
+                var session = submit(engine, input(i, 0, true)); session.cancel();
                 var result = session.completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
                 assertTrue(result.status().isOk() || result.status().getCode() == Status.Code.CANCELLED);
                 assertEquals(8, cache.snapshot(-1, false).availableBlocks());
@@ -161,10 +169,10 @@ class PrefillAdmissionTest {
         var config = config("0");
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
             var exact = input(1, 0, true).toBuilder().clearTokenIds().addAllTokenIds(List.of(1, 2, 3, 4)).build();
-            engine.submit(exact).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
-            var reused = engine.submit(exact.toBuilder().setRequestId(2).build()).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            submit(engine, exact).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            var reused = submit(engine, exact.toBuilder().setRequestId(2).build()).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
             assertEquals(2, reused.output().getFlattenOutput().getAuxInfo(0).getTotalReuseLen());
-            var disabled = engine.submit(input(3, 0, false)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            var disabled = submit(engine, input(3, 0, false)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
             assertEquals(0, disabled.output().getFlattenOutput().getAuxInfo(0).getTotalReuseLen());
         }
     }
@@ -172,7 +180,7 @@ class PrefillAdmissionTest {
     @Test void disabledReuseDoesNotPublishNewCacheKeys() throws Exception {
         var config = config("0");
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
-            assertTrue(engine.submit(input(1, 0, false)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().isOk());
+            assertTrue(submit(engine, input(1, 0, false)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().isOk());
             assertEquals(0, cache.snapshot(-1, true).keys().length);
             assertEquals(8, cache.snapshot(-1, false).freeBlocks());
         }
@@ -182,7 +190,7 @@ class PrefillAdmissionTest {
         var config = config("0");
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
             for (int i = 0; i <= 1024; i++)
-                engine.submit(input(i, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
+                submit(engine, input(i, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
             var snapshot = engine.snapshot(0);
             assertEquals(1024, snapshot.finished().size());
             assertEquals(1024 + 1, snapshot.finishedVersion());
@@ -194,10 +202,10 @@ class PrefillAdmissionTest {
     @Test void duplicateIdsRejectButWaitingRequestsHaveNoInventedCapacity() throws Exception {
         var config = config("3600000");
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
-            engine.submit(input(0, 0, true));
-            var duplicate = assertThrows(io.grpc.StatusRuntimeException.class, () -> engine.submit(input(0, 0, true)));
+            submit(engine, input(0, 0, true));
+            var duplicate = assertThrows(io.grpc.StatusRuntimeException.class, () -> submit(engine, input(0, 0, true)));
             assertEquals(Status.Code.ALREADY_EXISTS, duplicate.getStatus().getCode());
-            for (int i = 1; i <= 1024; i++) engine.submit(input(i, 0, true));
+            for (int i = 1; i <= 1024; i++) submit(engine, input(i, 0, true));
             assertEquals(5, cache.snapshot(-1, false).availableBlocks());
             assertEquals(1024, engine.snapshot(0).tasks().stream().filter(task -> task.phase() == RECEIVED).count());
             engine.close(); assertEquals(8, cache.snapshot(-1, false).availableBlocks());
@@ -217,7 +225,7 @@ class PrefillAdmissionTest {
                 var gate = new CountDownLatch(1);
                 var submit = workers.submit(() -> {
                     gate.await();
-                    try { engine.submit(session, org.flexlb.mock.protocol.MultimodalProtocol.text(raw)); }
+                    try { engine.submit(session, MultimodalProtocol.text(raw)); }
                     catch (io.grpc.StatusRuntimeException expected) { assertEquals(Status.Code.CANCELLED, expected.getStatus().getCode()); }
                     return null;
                 });
@@ -232,7 +240,7 @@ class PrefillAdmissionTest {
             var fresh = engine.new Session(input(99, 0, true), false, System.nanoTime(), Long.MAX_VALUE);
             old.cancel();
             assertEquals(99, engine.snapshot(0).tasks().getFirst().requestId());
-            engine.submit(fresh, org.flexlb.mock.protocol.MultimodalProtocol.text(input(99, 0, true)));
+            engine.submit(fresh, MultimodalProtocol.text(input(99, 0, true)));
             assertTrue(fresh.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().isOk());
             assertEquals(32, engine.snapshot(0).finished().size());
             assertEquals(8, cache.snapshot(0, false).availableBlocks());
@@ -248,8 +256,8 @@ class PrefillAdmissionTest {
             var ready = admission.new Session(input(2, 0, true), true, System.nanoTime(), Long.MAX_VALUE);
             cancelled.cancel();
             var batch = admission.submit(List.of(
-                new PrefillRpcServer.Submission(org.flexlb.mock.protocol.MultimodalProtocol.text(input(1, 0, true)), Long.MAX_VALUE, cancelled),
-                new PrefillRpcServer.Submission(org.flexlb.mock.protocol.MultimodalProtocol.text(input(2, 0, true)), Long.MAX_VALUE, ready)));
+                new PrefillRpcServer.Submission(MultimodalProtocol.text(input(1, 0, true)), Long.MAX_VALUE, cancelled),
+                new PrefillRpcServer.Submission(MultimodalProtocol.text(input(2, 0, true)), Long.MAX_VALUE, ready)));
             assertEquals(Status.Code.CANCELLED, Status.fromThrowable(batch.get(0).failure()).getCode());
             assertSame(ready, batch.get(1).session());
             assertTrue(ready.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().isOk());
@@ -271,7 +279,7 @@ class PrefillAdmissionTest {
             assertTrue(admission.snapshot(0).tasks().isEmpty());
             assertEquals(1, admission.snapshot(0).finished().size());
             assertThrows(io.grpc.StatusRuntimeException.class,
-                () -> admission.submit(pending, org.flexlb.mock.protocol.MultimodalProtocol.text(input(1, 0, true))));
+                () -> admission.submit(pending, MultimodalProtocol.text(input(1, 0, true))));
             pending.cancel(); admission.close();
             assertEquals(1, admission.snapshot(0).finished().size());
             assertEquals(8, cache.snapshot(0, false).availableBlocks());
@@ -284,6 +292,17 @@ class PrefillAdmissionTest {
         if (groups) ((ObjectNode) root.path("component").path("config")).put("mock.scheduler.mode", "group");
         ((ObjectNode) root.path("component").path("config").path("mock.compute").path("forward")).put("expression", expression);
         var path = directory.resolve("config.json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
+    }
+
+    private static PrefillRpcServer.Session submit(PrefillRpcServer server, GenerateInputPB input) {
+        return submit(server, input, Long.MAX_VALUE);
+    }
+
+    private static PrefillRpcServer.Session submit(PrefillRpcServer server, GenerateInputPB input, long rpcDeadline) {
+        long started = System.nanoTime();
+        server.validate(input, false);
+        var session = server.new Session(input, false, started, RpcMessages.deadline(input, started, rpcDeadline));
+        return server.submit(session, MultimodalProtocol.text(input));
     }
 
     private static PrefillRpcServer server(RtpConfig config, KvCacheManager cache, EngineScheduler.Factory factory) {

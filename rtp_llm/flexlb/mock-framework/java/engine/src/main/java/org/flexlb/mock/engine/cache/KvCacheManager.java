@@ -95,18 +95,12 @@ public final class KvCacheManager implements AutoCloseable {
     }
 
     public synchronized Preparation prepare(long requiredTokens, List<Long> keys) {
-        var admission = acquire(requiredTokens, keys);
-        if (admission.failure() != null) return new Failed(admission.failure(), requiredTokens, keys);
-        return new Ready(admission.lease(), admission.matchNanos());
-    }
-
-    public synchronized Admission acquire(long requiredTokens, List<Long> keys) {
         if (closed) throw new IllegalStateException("Cache is closed");
         validate(keys);
         long blockDemand = blocksFor(requiredTokens);
         if (keys.size() > requiredTokens / blockSize) throw new IllegalArgumentException("Keys exceed complete input blocks");
         tree.validatePath(keys);
-        if (requiredTokens > maxRequestTokens()) return rejected(Failure.PERMANENT);
+        if (requiredTokens > maxRequestTokens()) return new Failed(Failure.PERMANENT, requiredTokens, keys);
         int demand = (int) blockDemand;
         long matchStarted = System.nanoTime();
         // Real refreshes LRU at lookup. A later allocation rejection only releases request references.
@@ -119,12 +113,12 @@ public final class KvCacheManager implements AutoCloseable {
         // Retaining a cached match pins it before checking the device bound; failure rolls it back.
         if ((long) need + reserve > deviceAvailable() || !makePoolFree(need)) {
             for (var slot : slots) slot.reference.close();
-            return rejected(Failure.RETRYABLE);
+            return new Failed(Failure.RETRYABLE, requiredTokens, keys);
         }
         for (var ref : Objects.requireNonNull(pool.allocate(need, REQUEST))) slots.add(new Slot(ref, null));
         var lease = new Lease(slots, matched.size());
         active.add(lease);
-        return new Admission(lease, null, matchNanos);
+        return new Ready(lease, matchNanos);
     }
 
     /** Maximum size of one request, independent of current leases and evictable cache entries. */
@@ -171,8 +165,6 @@ public final class KvCacheManager implements AutoCloseable {
         }
     }
 
-    private Admission rejected(Failure failure) { return new Admission(null, failure, 0); }
-
     /** Both freed capacity and newly reusable prefixes can make a rejected request admissible. */
     private long allocationGeneration() { return pool.generation() + tree.version(); }
 
@@ -199,8 +191,7 @@ public final class KvCacheManager implements AutoCloseable {
     public enum Failure { PERMANENT, RETRYABLE }
 
     /**
-     * A Mock restore source reports the number of consecutive suffix blocks read successfully.
-     * The future must be returned without blocking and never owns local block references.
+     * Reports an acquired cache lease or an allocation failure.
      */
     public sealed interface Preparation permits Ready, Failed {}
 
@@ -231,8 +222,6 @@ public final class KvCacheManager implements AutoCloseable {
             }
         }
     }
-
-    public record Admission(Lease lease, Failure failure, long matchNanos) {}
 
     /**
      * Keys are a detached copy, safe to encode after releasing the cache monitor.

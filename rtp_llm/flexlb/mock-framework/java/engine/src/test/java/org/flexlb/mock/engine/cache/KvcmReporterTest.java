@@ -10,6 +10,7 @@ import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.flexlb.mock.engine.cache.KvCacheManager.Ready;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -67,7 +68,7 @@ class KvcmReporterTest {
                     await(() -> Boolean.FALSE.equals(reporter.status().get("registered")));
                     assertEquals(1, registrations.get(), "Re-registration must drain an old snapshot upload");
                 }
-                try (var lease = cache.acquire(1, List.of()).lease()) { lease.publish(List.of(99L), 1); }
+                try (var lease = assertInstanceOf(Ready.class, cache.prepare(1, List.of())).lease()) { lease.publish(List.of(99L), 1); }
                 if (!registrationLost) await(added::get); // The first snapshot is still uploading.
                 release.countDown();
                 if (!registrationLost) {
@@ -170,10 +171,10 @@ class KvcmReporterTest {
             })) {
                 try {
                     await(() -> meta.count("EVENT_BLOCK_SNAPSHOT") == 1);
-                    try (var lease = cache.acquire(1, List.of()).lease()) { lease.publish(List.of(11L), 1); }
+                    try (var lease = assertInstanceOf(Ready.class, cache.prepare(1, List.of())).lease()) { lease.publish(List.of(11L), 1); }
                     assertTrue(observed.get().await(2, TimeUnit.SECONDS));
                     now.addAndGet(TimeUnit.SECONDS.toNanos(59)); observed.set(new CountDownLatch(1));
-                    try (var lease = cache.acquire(1, List.of()).lease()) { lease.publish(List.of(22L), 1); }
+                    try (var lease = assertInstanceOf(Ready.class, cache.prepare(1, List.of())).lease()) { lease.publish(List.of(22L), 1); }
                     assertTrue(observed.get().await(2, TimeUnit.SECONDS));
                     now.addAndGet(TimeUnit.SECONDS.toNanos(1)); releaseHeartbeat.countDown();
                     heartbeat(meta); assertEquals(1, meta.registrations(), "The mutation ACK refreshed the original deadline");

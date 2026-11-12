@@ -17,6 +17,7 @@ import org.flexlb.kvcm.grpc.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.flexlb.mock.engine.cache.KvCacheManager.Ready;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -61,7 +62,7 @@ class KvcmDiscoveryTest {
         try (var first = new Meta(); var second = new Meta(); var cache = new KvCacheManager(1, 4, 0)) {
             var vip = new Vip(); vip.hosts.set(List.of(first.host()));
             var resolver = new KvcmDiscovery(null, "kvcm-domain", "shared_128", vip);
-            try (var lease = cache.acquire(1, List.of()).lease()) { lease.publish(List.of(99L), 1); }
+            try (var lease = assertInstanceOf(Ready.class, cache.prepare(1, List.of())).lease()) { lease.publish(List.of(99L), 1); }
             try (var reporter = new KvcmReporter(new KvcmReporter.Configuration(resolver, true, 600000),
                     new KvcmReporter.Identity("shared_128", "group", "127.0.0.1:18080", "full", "FP16", false, 1, 1, "hbm"), cache)) {
                 try { await(() -> first.snapshots.get() > 0); }

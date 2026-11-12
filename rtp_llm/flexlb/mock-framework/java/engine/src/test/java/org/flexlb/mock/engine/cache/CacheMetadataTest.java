@@ -2,6 +2,7 @@ package org.flexlb.mock.engine.cache;
 
 import java.util.*;
 import org.junit.jupiter.api.Test;
+import org.flexlb.mock.engine.cache.KvCacheManager.Ready;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -12,13 +13,13 @@ class CacheMetadataTest {
         try (var cache = new KvCacheManager(1, 4, 0)) {
             var changes = new ArrayList<CacheMetadata.Change>();
             try (var observation = cache.observeMetadata(changes::add)) {
-                var lease = cache.acquire(1, List.of()).lease();
+                var lease = assertInstanceOf(Ready.class, cache.prepare(1, List.of())).lease();
                 assertEquals(0, cache.metadataKeys().keys().length); assertTrue(changes.isEmpty());
                 lease.publish(List.of(11L), 1); lease.close();
                 var initial = cache.metadataKeys();
                 assertArrayEquals(new long[]{11L}, initial.keys());
                 // Force eviction from the single local pool.
-                try (var pressure = cache.acquire(4, List.of()).lease()) {
+                try (var pressure = assertInstanceOf(Ready.class, cache.prepare(4, List.of())).lease()) {
                     assertNotNull(pressure);
                     assertEquals(0, cache.metadataKeys().keys().length);
                     assertArrayEquals(new long[]{11L}, initial.keys());

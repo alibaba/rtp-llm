@@ -12,6 +12,7 @@ import org.flexlb.mock.engine.scheduler.RequestState;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 import org.junit.jupiter.api.Test;
+import org.flexlb.mock.engine.cache.KvCacheManager.Ready;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -153,7 +154,7 @@ class EngineLoopTest {
 
     @Test void externalCapacityReleaseWakesAnOtherwiseIdleEngine() throws Exception {
         try (var cache = new org.flexlb.mock.engine.cache.KvCacheManager(1, 1, 0)) {
-            var owner = cache.acquire(1, List.of()).lease();
+            var owner = assertInstanceOf(Ready.class, cache.prepare(1, List.of())).lease();
             var tried = new CountDownLatch(1);
             var attempts = new java.util.concurrent.atomic.AtomicInteger();
             var policy = new Policy(false) {
@@ -161,9 +162,9 @@ class EngineLoopTest {
                 @Override public Work schedule() {
                     if (lease != null) return null;
                     attempts.incrementAndGet();
-                    var admission = cache.acquire(1, List.of());
-                    if (admission.lease() == null) { tried.countDown(); return null; }
-                    lease = admission.lease();
+                    var admission = cache.prepare(1, List.of());
+                    if (!(admission instanceof Ready ready)) { tried.countDown(); return null; }
+                    lease = ready.lease();
                     return work("capacity");
                 }
                 @Override public void processOutputs(Work work, SimulatedCompute.Outcome result) {

@@ -20,7 +20,7 @@ import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
  * Runs one replay worker per JVM. Client-0 partitions the plan and coordinates the workers,
  * and each worker paces and drains its own requests.
  */
-public final class ClientNode implements ClientProtocol, AutoCloseable {
+public final class ClientNode implements AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private final String id;
@@ -61,7 +61,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
             .metrics(metrics::scrape).start();
     }
 
-    @Override public synchronized Ack prepare(ClientReplayPlan args) throws Exception {
+    public synchronized Ack prepare(ClientReplayPlan args) throws Exception {
         if (closed || session != null && (args.sequence() <= session.plan.sequence() || !session.state().done()))
             throw new IllegalStateException("Previous Client playback has not ended or stale prepare");
         var playback = directory.resolve("playback/" + args.sequence());
@@ -72,15 +72,15 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         return new Ack(true);
     }
 
-    @Override public Ack begin(Begin args) { session(args.sequence()).begin(args.start_epoch_ms()); return new Ack(true); }
+    public Ack begin(Begin args) { session(args.sequence()).begin(args.start_epoch_ms()); return new Ack(true); }
 
-    @Override public Ack halt(Sequence args) { session(args.sequence()).halt(); return new Ack(true); }
+    public Ack halt(Sequence args) { session(args.sequence()).halt(); return new Ack(true); }
 
-    @Override public State state(Sequence args) {
+    public State state(Sequence args) {
         return session(args.sequence()).state();
     }
 
-    @Override public Ack start(Start args) throws Exception {
+    public Ack start(Start args) throws Exception {
         Group created;
         synchronized (this) {
             if (!id.equals("client-0") || closed) throw new IllegalStateException("Start must target live client-0");
@@ -114,7 +114,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
             int clients = created.peers.size();
             for (int i = 0; i < clients; i++) {
                 if (created.stop || closed) throw new IOException("Client start stopped during preparation");
-                long count = ClientProtocol.requestCount(total, i, clients);
+                long count = requestCount(total, i, clients);
                 int slots = args.total_concurrency() / clients + (i < args.total_concurrency() % clients ? 1 : 0);
                 call(created.peers.get(i), "worker/prepare", new ClientReplayPlan(created.number, args.masters(), args.requests_file(),
                     count, i, clients, created.firstId, identity, args.qps(), args.replay_speed(), slots,
@@ -138,7 +138,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
 
     public String url() { return api.url(); }
 
-    @Override public Summary stop(Empty args) throws Exception {
+    public Summary stop(Empty args) throws Exception {
         Group current;
         synchronized (this) {
             if (!id.equals("client-0")) throw new IllegalStateException("Stop must target client-0");
@@ -159,6 +159,10 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
     }
 
     void publishReady(Path path) throws IOException { api.publishReady(path); }
+
+    private static long requestCount(long total, long firstIndex, int stride) {
+        return total / stride + (firstIndex < total % stride ? 1 : 0);
+    }
 
     private static void save(Path path, Object value) throws IOException {
         Files.createDirectories(path.getParent());
@@ -332,7 +336,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
 
         static void play(ClientReplayPlan plan, long startNanos, int imageToken, Consumer<Item> submit) throws IOException, InterruptedException {
             try (var indexed = new IndexedTrafficReader(Path.of(plan.requests_file()))) {
-                long expected = ClientProtocol.requestCount(indexed.count, plan.first_index(), plan.stride());
+                long expected = requestCount(indexed.count, plan.first_index(), plan.stride());
                 if (!indexed.identity.equals(plan.sha256()) || expected != plan.count())
                     throw new IOException("Indexed traffic changed after planning");
                 checkPlaybackEnd(indexed.count - 1, indexed.lastArrival, plan.qps(), plan.replay_speed(), plan.warmup());

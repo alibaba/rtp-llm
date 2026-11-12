@@ -16,6 +16,7 @@ import org.flexlb.mock.engine.execution.LLMMockEngine;
 import org.flexlb.mock.engine.scheduler.LLMMockEngineTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.flexlb.mock.engine.cache.KvCacheManager.Ready;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -91,7 +92,7 @@ class LocalRpcTest {
 
     @Test void cacheStatusPreservesVersionedKeysAndLiveCapacityOnTheWire() throws Exception {
         try (var node = LLMMockEngine.start(config("1"))) {
-            try (var seed = node.cacheManager().acquire(4, List.of()).lease()) {
+            try (var seed = assertInstanceOf(Ready.class, node.cacheManager().prepare(4, List.of())).lease()) {
                 assertTrue(seed.publish(List.of(Long.MIN_VALUE, Long.MAX_VALUE), 4));
             }
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
@@ -105,7 +106,7 @@ class LocalRpcTest {
                 assertEquals(2, first.getBlockSize());
                 assertEquals(16, first.getTotalKvCache());
                 assertEquals(16, first.getAvailableKvCache());
-                try (var held = node.cacheManager().acquire(2, List.of()).lease()) {
+                try (var held = assertInstanceOf(Ready.class, node.cacheManager().prepare(2, List.of())).lease()) {
                     assertNotNull(held);
                     var unchanged = rpc.getCacheStatus(query.toBuilder().setLatestCacheVersion(first.getVersion()).build());
                     assertEquals(first.getVersion(), unchanged.getVersion());

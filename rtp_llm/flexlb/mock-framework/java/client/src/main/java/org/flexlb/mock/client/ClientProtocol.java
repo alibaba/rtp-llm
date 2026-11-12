@@ -7,30 +7,16 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 /**
  * Defines the control messages exchanged by the Case runner and replay Clients.
  */
-public interface ClientProtocol {
-    static long requestCount(long total, long firstIndex, int stride) {
-        return total / stride + (firstIndex < total % stride ? 1 : 0);
-    }
+public final class ClientProtocol {
+    private ClientProtocol() {}
 
-    Ack start(Start args) throws Exception;
-
-    Summary stop(Empty args) throws Exception;
-
-    Ack prepare(ClientReplayPlan args) throws Exception;
-
-    Ack begin(Begin args);
-
-    Ack halt(Sequence args);
-
-    State state(Sequence args);
-
-    record Empty() {}
+    public record Empty() {}
 
     /**
      * Starts one replay using a concurrency budget shared by all Clients.
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    record Start(@OptionalArgument List<String> masters, String requests_file,
+    public record Start(@OptionalArgument List<String> masters, String requests_file,
                  @OptionalArgument Double qps, @OptionalArgument Double replay_speed,
                  int total_concurrency, int queue_capacity,
                  long request_timeout_ms, long drain_timeout_ms,
@@ -63,7 +49,7 @@ public interface ClientProtocol {
      * Assigns one Client its request ordinals and concurrency budget for a replay.
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    record ClientReplayPlan(long sequence, @OptionalArgument List<String> masters, String requests_file,
+    public record ClientReplayPlan(long sequence, @OptionalArgument List<String> masters, String requests_file,
                  long count, long first_index, int stride, long first_request_id, String sha256,
                  @OptionalArgument Double qps, @OptionalArgument Double replay_speed,
                  int concurrency, int queue_capacity, long request_timeout_ms, long drain_timeout_ms,
@@ -90,7 +76,7 @@ public interface ClientProtocol {
     /**
      * Scales replay progress for a fixed amount of elapsed time from the common start.
      */
-    record Warmup(long duration_ms, double rate_scale) {
+    public record Warmup(long duration_ms, double rate_scale) {
         public Warmup {
             if (duration_ms < 1 || duration_ms > 86_400_000 || !Double.isFinite(rate_scale)
                     || rate_scale <= 0 || rate_scale >= 1)
@@ -98,14 +84,14 @@ public interface ClientProtocol {
         }
     }
 
-    record Begin(long sequence, long start_epoch_ms) {}
+    public record Begin(long sequence, long start_epoch_ms) {}
 
-    record Sequence(long sequence) {}
+    public record Sequence(long sequence) {}
 
-    record Ack(boolean accepted) {}
+    public record Ack(boolean accepted) {}
 
-    record State(boolean done, boolean stopped, long produced, long issued, long finished, long unsent,
+    public record State(boolean done, boolean stopped, long produced, long issued, long finished, long unsent,
                  int queued, int inflight, Map<String, Long> outcomes, List<String> errors) {}
 
-    record Summary(Map<String, State> clients, List<String> errors) {}
+    public record Summary(Map<String, State> clients, List<String> errors) {}
 }

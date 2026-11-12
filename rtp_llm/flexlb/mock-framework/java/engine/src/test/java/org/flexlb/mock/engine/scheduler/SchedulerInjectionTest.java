@@ -49,7 +49,7 @@ class SchedulerInjectionTest {
                 }));
             assertEquals(returnsNull ? NullPointerException.class : IllegalStateException.class, error.getClass());
             assertNotNull(resource.get());
-            assertThrows(IllegalStateException.class, () -> resource.get().acquire(1, List.of()));
+            assertThrows(IllegalStateException.class, () -> resource.get().prepare(1, List.of()));
         }
     }
 

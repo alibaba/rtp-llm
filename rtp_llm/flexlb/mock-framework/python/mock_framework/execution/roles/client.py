@@ -61,6 +61,8 @@ class ClientRole:
                 identity,
                 self.launch_config,
             )
+            if endpoint is None:
+                raise ExecutionError(f"{identity.instance_id}: missing endpoints.json")
             register_ready_instance(
                 self.topology,
                 self.monitoring,

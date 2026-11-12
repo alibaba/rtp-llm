@@ -11,6 +11,7 @@ import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.execution.LLMMockEngine;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.flexlb.mock.engine.cache.KvCacheManager.Ready;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -45,20 +46,20 @@ public class LLMMockEngineTest {
                 assertEquals(1, status.getDpSize()); assertEquals(0, status.getDpRank()); assertEquals(1, status.getTpSize());
                 assertEquals(4096, status.getMaxBatchTokensSize());
                 assertTrue(rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getStatusVersion() > status.getStatusVersion());
-                var lease = node.cacheManager().acquire(32, List.of()).lease();
+                var lease = assertInstanceOf(Ready.class, node.cacheManager().prepare(32, List.of())).lease();
                 assertEquals(96, rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
                 lease.publish(List.of(1L, -2L), 32); lease.close();
                 var snapshot = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
                 assertEquals(Set.of(1L, -2L), Set.copyOf(snapshot.getCacheKeyListList()));
                 assertEquals(16, snapshot.getBlockSize()); assertEquals(128, snapshot.getAvailableKvCache());
-                try (var extra = node.cacheManager().acquire(112, List.of()).lease()) {
+                try (var extra = assertInstanceOf(Ready.class, node.cacheManager().prepare(112, List.of())).lease()) {
                     assertTrue(extra.publish(List.of(10L, 11L, 12L, 13L, 14L, 15L, 16L), 112));
                 }
                 assertEquals(9, node.cacheManager().itemCount()); // Logical cache now exceeds eight device blocks.
                 assertEquals(128, rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getTotalKvCache());
                 snapshot = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
                 assertEquals(9, snapshot.getCacheKeyListCount());
-                var pinned = node.cacheManager().acquire(16, List.of(1L)).lease();
+                var pinned = assertInstanceOf(Ready.class, node.cacheManager().prepare(16, List.of(1L))).lease();
                 var unchanged = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(snapshot.getVersion()).build());
                 assertEquals(snapshot.getVersion(), unchanged.getVersion()); assertEquals(0, unchanged.getCacheKeyListCount());
                 assertEquals(112, unchanged.getAvailableKvCache()); pinned.close();
