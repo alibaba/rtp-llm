@@ -33,6 +33,28 @@ def _tile_ops():
     )
 
 
+# Row budget for token-chunked HC fallback math on huge prefills. The
+# pure-torch paths below materialize [T, hc_mult*dim] FP32 temporaries:
+# at 1M tokens that is [1048320, 20480] fp32 = 79.98 GiB per temporary
+# (n14, 2026-11-12: fatal GPU OOM with 54.95 GiB free, traceback frame
+# delayed.py:143 `x.flatten(-2).float()`; n13 died identically). Every HC
+# op here is token-local, so beyond this budget the same math runs over
+# row slices. At or below it (decode graph captures, 8K smokes) the
+# original single-shot expressions run verbatim - captured graphs stay
+# byte-identical.
+_HC_FALLBACK_CHUNK_ROWS = 16384
+
+
+def _hc_fallback_chunk_rows() -> int:
+    try:
+        rows = int(
+            os.environ.get("DSV4_HC_CHUNK_ROWS", "") or _HC_FALLBACK_CHUNK_ROWS
+        )
+    except ValueError:
+        rows = _HC_FALLBACK_CHUNK_ROWS
+    return max(1, rows)
+
+
 def collapse_delayed(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
     """Read residual streams using FP32 coefficients and accumulation."""
     # TileLang/TileKernels are CUDA-only; ROCm uses the pure-torch path.
@@ -43,7 +65,19 @@ def collapse_delayed(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
             x.reshape(1, -1, shape[-2], shape[-1]),
             pre_mix.reshape(1, -1, shape[-2], 1).contiguous(),
         ).reshape(*shape[:-2], shape[-1])
-    return (x.float() * pre_mix.unsqueeze(-1)).sum(dim=-2).to(x.dtype)
+    rows = _hc_fallback_chunk_rows()
+    t = x.shape[0]
+    if t <= rows:
+        return (x.float() * pre_mix.unsqueeze(-1)).sum(dim=-2).to(x.dtype)
+    # Token-chunked identical math (see _HC_FALLBACK_CHUNK_ROWS): the fp32
+    # product temporary shrinks from [T, hc, dim] to [rows, hc, dim].
+    y = torch.empty((*x.shape[:-2], x.shape[-1]), dtype=x.dtype, device=x.device)
+    for begin in range(0, t, rows):
+        end = min(begin + rows, t)
+        y[begin:end] = (
+            x[begin:end].float() * pre_mix[begin:end].unsqueeze(-1)
+        ).sum(dim=-2).to(x.dtype)
+    return y
 
 
 def can_fuse_big_pre() -> bool:
@@ -140,10 +174,30 @@ class DelayedHCUnit(HCUnitBase):
             post = post.reshape(*shape[:-1], 1)
             comb = comb.reshape(*shape[:-2], self.hc_mult, self.hc_mult)
         else:
-            flattened = x.flatten(-2).float()
-            mixes = F.linear(flattened, self.fn.float()) * torch.rsqrt(
-                flattened.square().mean(dim=-1, keepdim=True) + self.norm_eps
-            )
+            w = self.fn.float()
+            t = x.shape[0]
+            rows = _hc_fallback_chunk_rows()
+            if t <= rows:
+                flattened = x.flatten(-2).float()
+                mixes = F.linear(flattened, w) * torch.rsqrt(
+                    flattened.square().mean(dim=-1, keepdim=True) + self.norm_eps
+                )
+            else:
+                # Token-chunked identical math (see _HC_FALLBACK_CHUNK_ROWS):
+                # bounded [rows, hc*dim] fp32 temporaries instead of one
+                # [T, 20480] fp32 (79.98 GiB at 1M - the n13/n14 OOM frame).
+                # mixes is [T, mix_width] fp32 (~100 MB at 1M), and the
+                # sinkhorn split below is row-local on it.
+                mixes = torch.empty(
+                    (t, w.shape[0]), dtype=torch.float32, device=x.device
+                )
+                for begin in range(0, t, rows):
+                    end = min(begin + rows, t)
+                    flattened = x[begin:end].flatten(-2).float()
+                    mixes[begin:end] = F.linear(flattened, w) * torch.rsqrt(
+                        flattened.square().mean(dim=-1, keepdim=True)
+                        + self.norm_eps
+                    )
             pre, post, comb = _hc_split_sinkhorn(
                 mixes,
                 self.scale,
@@ -187,17 +241,45 @@ class DelayedHCUnit(HCUnitBase):
             # working eagerly. Unroll the hc_mult=4 combination as
             # elementwise multiply + reduce: identical math, capture-safe,
             # and bounded temporary memory (one [T,j,dim] product per lane).
-            residual_f = residual.float()
-            comb_f = comb.float()
-            # out[..., i, d] = sum_j comb[..., j, i] * residual[..., j, d]
-            lanes = [
-                (residual_f * comb_f[..., lane : lane + 1]).sum(-2)
-                for lane in range(comb_f.shape[-1])
-            ]
-            mixed = torch.stack(lanes, dim=-2)
-            return (post.float() * x.float().unsqueeze(-2) + mixed).to(
-                residual.dtype
-            )
+            t = residual.shape[0]
+            rows = _hc_fallback_chunk_rows()
+            if t <= rows:
+                residual_f = residual.float()
+                comb_f = comb.float()
+                # out[..., i, d] = sum_j comb[..., j, i] * residual[..., j, d]
+                lanes = [
+                    (residual_f * comb_f[..., lane : lane + 1]).sum(-2)
+                    for lane in range(comb_f.shape[-1])
+                ]
+                mixed = torch.stack(lanes, dim=-2)
+                return (post.float() * x.float().unsqueeze(-2) + mixed).to(
+                    residual.dtype
+                )
+            # Token-chunked identical math (see _HC_FALLBACK_CHUNK_ROWS).
+            # Written IN PLACE into the residual stream: a fresh [T,hc,dim]
+            # bf16 output would transiently double the 39.99 GiB stream at
+            # 1M and blow the ~20 GiB headroom left after the pre pass.
+            # Every caller immediately rebinds its stream reference to this
+            # return value (block.py fast paths: `x = attn_hc_post(...)`,
+            # `residual = x`, `return ffn_hc_post(...)`); the deferred
+            # decode-transition post only ever sees decode-sized t and keeps
+            # the fresh-tensor path above. Chunk-local: reads of a row slice
+            # complete (fp32 copy) before that slice is overwritten.
+            comb_shape = comb.shape[-1]
+            for begin in range(0, t, rows):
+                end = min(begin + rows, t)
+                residual_f = residual[begin:end].float()
+                comb_f = comb[begin:end].float()
+                lanes = [
+                    (residual_f * comb_f[..., lane : lane + 1]).sum(-2)
+                    for lane in range(comb_shape)
+                ]
+                mixed = torch.stack(lanes, dim=-2)
+                residual[begin:end] = (
+                    post[begin:end].float() * x[begin:end].float().unsqueeze(-2)
+                    + mixed
+                ).to(residual.dtype)
+            return residual
         return (
             post.float() * x.float().unsqueeze(-2)
             + torch.matmul(comb.float().transpose(-1, -2), residual.float())
