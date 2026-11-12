@@ -48,6 +48,7 @@ from rtp_llm.ops.fused_rope_kvcache_op import (
 
 from . import fmha_inputs, fmha_validation
 from .fmha_plans import IncrementalPrefillInputs, PagedInputs
+from .prefill_filtered_topk import BLOCK_SELECTION_WIDTH
 
 
 class SparseGqaFmhaImpl(FMHAImplBase):
@@ -671,6 +672,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         )
         from rtp_llm.models_py.kernels.cuda.qsa.sparse_prefill_sm90 import (
             supports_sm90_sparse_prefill,
+            try_sm90_sparse_prefill,
         )
 
         tokens = int(qkv.shape[0])
@@ -710,6 +712,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         if (
             trusted_selected
             and self.attn_configs.indexer_topk == 512
+            and selected_indices.shape[-1] != BLOCK_SELECTION_WIDTH
             and isinstance(cu, torch.Tensor)
             and isinstance(owner_cu, torch.Tensor)
             and cu.device == owner_cu.device
@@ -739,8 +742,18 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             seq_out = None
             # Together with the 2051-column selection, 512 scored blocks
             # identify the four-token compression layout.
-            if trusted_selected and self.attn_configs.indexer_topk == 512:
+            if (
+                trusted_selected
+                and self.attn_configs.indexer_topk == 512
+                and seq_selected.shape[-1] != BLOCK_SELECTION_WIDTH
+            ):
                 seq_out = try_causal_qsa_prefill(seq_q, seq_k, seq_v, seq_selected)
+            if trusted_selected and seq_selected.shape[-1] == BLOCK_SELECTION_WIDTH:
+                seq_out = try_sm90_sparse_prefill(
+                    seq_q, seq_k, seq_v, seq_selected, selected_has_count=True
+                )
+                if seq_out is None:
+                    raise ValueError("counted QSA selection requires SM90 prefill geometry")
             if seq_out is None:
                 if not supports_sm90_sparse_prefill(seq_q, seq_k, seq_v, seq_selected):
                     seq_q, seq_k, seq_v = (
@@ -784,7 +797,27 @@ class SparseGqaFmhaImpl(FMHAImplBase):
 
         from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
             sparse_paged_gqa_attn,
+            try_sm90_packed_paged_decode,
         )
+
+        if (
+            self.attn_inputs.is_cuda_graph
+            and not self.is_target_verify
+            and not self._is_mtp_draft
+            and query_len == 1
+        ):
+            output = try_sm90_packed_paged_decode(
+                q.view(batch, self.head_num, self.head_dim),
+                kv_cache.kv_cache_base,
+                block_table,
+                kv_lens,
+                selected_indices,
+                page_size=page_size,
+                kv_head_num=self.kv_head_num,
+                output_gate=output_gate,
+            )
+            if output is not None:
+                return output
 
         q = q.view(batch, query_len, self.head_num, self.head_dim).transpose(1, 2)
         output = sparse_paged_gqa_attn(
@@ -818,7 +851,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         self,
         q: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
-        plan: PagedInputs | IncrementalPrefillInputs,
+        plan: IncrementalPrefillInputs,
         *,
         trusted_selected: bool = False,
         output_gate: Optional[torch.Tensor] = None,
@@ -834,7 +867,30 @@ class SparseGqaFmhaImpl(FMHAImplBase):
 
         from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
             sparse_paged_gqa_attn,
+            try_sm90_packed_paged_prefill,
         )
+
+        step = plan.step_plan
+        if (
+            not self._is_mtp_draft
+            and trusted_selected
+            and step is not None
+            and not fmha_validation.qsa_strict_validation_enabled()
+            and step.cu_seqlens is not None
+        ):
+            output = try_sm90_packed_paged_prefill(
+                q.view(tokens, self.head_num, self.head_dim),
+                kv_cache.kv_cache_base,
+                plan.block_table,
+                step.cu_seqlens,
+                plan.prefixes_device,
+                plan.selected_indices,
+                page_size=plan.page_size,
+                kv_head_num=self.kv_head_num,
+                output_gate=output_gate,
+            )
+            if output is not None:
+                return output.view(tokens, self.q_width)
 
         block_table = plan.block_table
         page_size = int(plan.page_size)
@@ -855,7 +911,6 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             # validity mask and padded KV lengths; the prepare pass served it
             # from a fingerprint-validated plan hit, so only plans built
             # without one fall back to the inline rebuild below.
-            step = plan.step_plan
             if (
                 step is not None
                 and step.selection_row_map is not None

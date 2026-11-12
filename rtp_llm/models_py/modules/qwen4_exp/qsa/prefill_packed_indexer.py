@@ -1,10 +1,10 @@
 """Packed zero-prefix QSA selection, adapted from vLLM's prefill indexer.
 
 The score grid follows vLLM 83f5de466 (Apache-2.0): request/query/key tiles,
-causal tile pruning, and bounded logits workspace. The output keeps RTP's
-2051-column ABI, including the fixed tail offset at 2048. Histogram selection
-uses the vLLM register histogram; stable sorting and expansion share a
-separate small block so the two stages retain their own occupancy.
+causal tile pruning, and bounded logits workspace. The SM90 reader consumes
+compact block IDs with a trailing token count. Other readers use the
+2051-column selection with a fixed tail offset at 2048. Histogram selection
+and stable sorting/expansion use separate blocks for their own occupancy.
 """
 
 from bisect import bisect_left, bisect_right
@@ -154,7 +154,9 @@ def _is_supported(q, keys, cos, sin, cu, lengths, gamma):
     )
 
 
-def try_packed_prefill(q, block_keys, cos, sin, cu, lengths, gamma, eps):
+def try_packed_prefill(
+    q, block_keys, cos, sin, cu, lengths, gamma, eps, *, selected_has_count=False
+):
     """Return None outside the validated eager SM90 zero-prefix geometry.
 
     Cu and lengths are the partition already checked by the transactional
@@ -164,7 +166,7 @@ def try_packed_prefill(q, block_keys, cos, sin, cu, lengths, gamma, eps):
         q, block_keys, cos, sin, cu, lengths, gamma
     ):
         return None
-    from .prefill_filtered_topk import _load_module
+    from .prefill_filtered_topk import BLOCK_SELECTION_WIDTH, _load_module
 
     selector = _load_module()
     if selector is None:
@@ -190,7 +192,11 @@ def try_packed_prefill(q, block_keys, cos, sin, cu, lengths, gamma, eps):
         num_warps=1,
         enable_fp_fusion=False,
     )
-    output = torch.empty((rows, 2051), device=q.device, dtype=torch.int32)
+    output = torch.empty(
+        (rows, BLOCK_SELECTION_WIDTH if selected_has_count else 2051),
+        device=q.device,
+        dtype=torch.int32,
+    )
     # Bound temporary logits to 512 MiB, as in vLLM; never specialize on rows.
     chunk_rows = min(rows, (512 * 1024 * 1024) // (columns * 4))
     scores = torch.empty((chunk_rows, columns), device=q.device, dtype=torch.float32)

@@ -11,6 +11,8 @@ from pathlib import Path
 
 import torch
 
+BLOCK_SELECTION_WIDTH = 514  # 512 selected blocks, one tail block, token count
+
 _MODULE = None
 _BUILD_FAILED = False
 _LOCK = threading.Lock()
@@ -41,6 +43,8 @@ _CUDA = r"""
 #include "topk_histogram_4096_overflow.cuh"
 
 namespace {
+constexpr int kBlockSelectionWidth = 514;
+
 __device__ uint32_t ordered_key(float value) {
   uint32_t bits;
   asm("mov.b32 %0, %1;" : "=r"(bits) : "f"(value));
@@ -129,12 +133,15 @@ __global__ __launch_bounds__(1024, 2) void qsaFilteredTopK(const float* scores,
 struct Greater {
   __device__ bool operator()(uint32_t a, uint32_t b) const { return a > b; }
 };
+template <bool PACKED>
 __global__ __launch_bounds__(128) void qsaStableOrderExpand(
     const float* scores, const int* selected, const int* visible,
     const int* positions, int* output, int columns, int offset) {
   using Sort = cub::BlockMergeSort<uint32_t, 128, 4, uint32_t>;
+  using Scan = cub::BlockScan<int, 128>;
   __shared__ union {
     typename Sort::TempStorage sort;
+    typename Scan::TempStorage scan;
     int selected[512];
   } scratch;
   const int row = blockIdx.x;
@@ -154,23 +161,42 @@ __global__ __launch_bounds__(128) void qsaStableOrderExpand(
   }
   Sort(scratch.sort).StableSort(key, column, Greater{});
   __syncthreads();
+  int blocks[4];
+  int valid = 0;
 #pragma unroll
-  for (int i = 0; i < 4; ++i)
+  for (int i = 0; i < 4; ++i) {
     // Preserve value > -inf: exclude NaN and -inf, but retain +inf.
-    scratch.selected[threadIdx.x * 4 + i] =
+    blocks[i] =
         key[i] > 0x007fffffu && key[i] <= 0xff800000u ? int(column[i]) : -1;
+    valid += blocks[i] >= 0;
+  }
+  const int tail_start = length * 4;
+  const int tail_count = min(3, max(0, positions[offset + row] + 1 - tail_start));
+  if constexpr (PACKED) {
+    int start, block_count;
+    Scan(scratch.scan).ExclusiveSum(valid, start, block_count);
+    int* dest = output + int64_t(offset + row) * kBlockSelectionWidth;
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+      if (blocks[i] >= 0) dest[start++] = blocks[i];
+    if (threadIdx.x == 0) {
+      if (tail_count > 0) dest[block_count] = length;
+      dest[kBlockSelectionWidth - 1] = block_count * 4 + tail_count;
+    }
+    return;
+  }
+#pragma unroll
+  for (int i = 0; i < 4; ++i) scratch.selected[threadIdx.x * 4 + i] = blocks[i];
   __syncthreads();
   int* dest = output + int64_t(offset + row) * 2051;
-  // Coalesce the 2051-stride token output; four-token vector stores would
-  // be misaligned on three out of four rows.
   for (int col = threadIdx.x; col < 2051; col += 128) {
     int token;
     if (col < 2048) {
       int chosen = scratch.selected[col / 4];
       token = chosen >= 0 ? chosen * 4 + col % 4 : -1;
     } else {
-      int tail = length * 4 + col - 2048;
-      token = tail <= positions[offset + row] ? tail : -1;
+      int tail_offset = col - 2048;
+      token = tail_offset < tail_count ? tail_start + tail_offset : -1;
     }
     dest[col] = token;
   }
@@ -198,7 +224,9 @@ void qsa_filtered_topk(torch::Tensor scores, torch::Tensor visible,
   TORCH_CHECK(offset >= 0 && visible.dim() == 1 && positions.dim() == 1 &&
                   visible.numel() >= offset + scores.size(0) &&
                   positions.numel() >= offset + scores.size(0) &&
-                  output.dim() == 2 && output.size(1) == 2051 &&
+                  output.dim() == 2 &&
+                  (output.size(1) == 2051 ||
+                   output.size(1) == kBlockSelectionWidth) &&
                   output.size(0) >= offset + scores.size(0),
               "invalid QSA packed shape or offset");
   if (scores.size(0) == 0) return;
@@ -214,10 +242,12 @@ void qsa_filtered_topk(torch::Tensor scores, torch::Tensor visible,
       scores.data_ptr<float>(), visible.data_ptr<int>(),
       selected.data_ptr<int>(), scores.size(1), offset);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  qsaStableOrderExpand<<<scores.size(0), 128, 0, stream>>>(
-      scores.data_ptr<float>(), selected.data_ptr<int>(),
-      visible.data_ptr<int>(), positions.data_ptr<int>(),
-      output.data_ptr<int>(), scores.size(1), offset);
+  auto expand = output.size(1) == kBlockSelectionWidth
+                    ? qsaStableOrderExpand<true>
+                    : qsaStableOrderExpand<false>;
+  expand<<<scores.size(0), 128, 0, stream>>>(
+      scores.data_ptr<float>(), selected.data_ptr<int>(), visible.data_ptr<int>(),
+      positions.data_ptr<int>(), output.data_ptr<int>(), scores.size(1), offset);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 """

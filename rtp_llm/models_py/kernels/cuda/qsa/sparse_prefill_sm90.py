@@ -5,16 +5,16 @@
 
 The online exp2 softmax and BF16 probability product follow the pinned upstream
 implementation. QK scaling stays in FP32 after the
-BF16 dot product, preserving RTP's scaling precision rather than rounding
-pre-scaled Q back to BF16. RTP adaptations are
-independent BHSD strides, stable selection compaction with a device count, range
-masking, and zero output for an empty row. Counts replace the upstream causal
-row-length assumption, preserving duplicates and arbitrary selected token order.
+BF16 dot product. The kernel supports independent BHSD strides, compact block
+or token selections, range masking, and zero output for an empty row. Counts
+preserve duplicates and arbitrary selected token order.
 """
 
 import torch
 import triton
 import triton.language as tl
+
+from .prefill_filtered_topk import BLOCK_SELECTION_WIDTH
 
 
 @triton.jit
@@ -69,6 +69,7 @@ def _sparse_gqa_prefill_sm90(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    BLOCK_IDS: tl.constexpr = False,
 ):
     query = tl.program_id(0).to(tl.int64)
     batch = tl.program_id(1).to(tl.int64)
@@ -89,7 +90,14 @@ def _sparse_gqa_prefill_sm90(
     offs_n = tl.arange(0, BLOCK_N)
     for start in range(0, count, BLOCK_N):
         current = start + offs_n
-        token = tl.load(idx_row + current, mask=current < count, other=-1)
+        if BLOCK_IDS:
+            block = start // 4 + tl.arange(0, BLOCK_N // 4)
+            block_id = tl.load(idx_row + block, mask=block * 4 < count, other=-1)
+            token = tl.reshape(
+                block_id[:, None] * 4 + tl.arange(0, 4)[None, :], (BLOCK_N,)
+            )
+        else:
+            token = tl.load(idx_row + current, mask=current < count, other=-1)
         valid = (current < count) & (token >= 0) & (token < S)
         keys = tl.load(
             k_base + token[None, :] * sk_s + offs_d[:, None],
@@ -124,7 +132,13 @@ def _sparse_gqa_prefill_sm90(
     )
 
 
-def supports_sm90_sparse_prefill(q, k, v, selected, *, blk_k=64):
+# Largest prefill handled by the packed indexer and this attention launch.
+_MAX_SM90_PREFILL_LENGTH = 32768
+
+
+def supports_sm90_sparse_prefill(
+    q, k, v, selected, *, blk_k=64, selected_has_count=False
+):
     """Shape-only support check; no selected data read or CUDA synchronization."""
     if not (
         q.is_cuda
@@ -142,9 +156,11 @@ def supports_sm90_sparse_prefill(q, k, v, selected, *, blk_k=64):
         1 <= batch <= 2
         and heads == 12
         and dim == 256
-        and 128 <= length <= 20480
+        and 128 <= length <= _MAX_SM90_PREFILL_LENGTH
         and k.shape == v.shape == (batch, 1, length, 256)
-        and selected.shape == (batch, length, 2051)
+        and selected.shape
+        == (batch, length, BLOCK_SELECTION_WIDTH if selected_has_count else 2051)
+        and (not selected_has_count or selected.is_contiguous())
         and all(t.stride(-1) == 1 for t in (q, k, v, selected))
         and all(stride > 0 for t in (q, k, v, selected) for stride in t.stride())
     ):
@@ -154,7 +170,9 @@ def supports_sm90_sparse_prefill(q, k, v, selected, *, blk_k=64):
 
 def _prefill_launch_config(batch, length, device_name):
     if "H20" in device_name:
-        return (32, 4) if batch * length <= 1024 else (16, 1)
+        if length > 20480 or batch * length <= 1024:
+            return 32, 4
+        return 16, 1
     if batch == 1 and 5120 <= length <= 20480:
         return 64, 2
     if batch * length <= 128:
@@ -164,26 +182,29 @@ def _prefill_launch_config(batch, length, device_name):
     return 16, 1
 
 
-def try_sm90_sparse_prefill(q, k, v, selected, *, blk_k=64):
-    """Return the adopted result, or None for the existing generic fallback."""
-    if not supports_sm90_sparse_prefill(q, k, v, selected, blk_k=blk_k):
+def try_sm90_sparse_prefill(q, k, v, selected, *, blk_k=64, selected_has_count=False):
+    """Consume trusted block IDs or compact ordinary token indices first."""
+    if not supports_sm90_sparse_prefill(
+        q, k, v, selected, blk_k=blk_k, selected_has_count=selected_has_count
+    ):
         return None
     batch, _, length, _ = q.shape
-    packed = torch.empty((batch, length, 2052), device=q.device, dtype=torch.int32)
-    _compact_sm90_selection[(batch * length,)](
-        selected,
-        packed,
-        selected.stride(0),
-        selected.stride(1),
-        S=length,
-        T=length,
-        WIDTH=2051,
-        BLOCK=4096,
-        num_warps=8,
-    )
-    block_n, warps = _prefill_launch_config(
-        batch, length, torch.cuda.get_device_name(q.device)
-    )
+    packed = selected
+    if not selected_has_count:
+        packed = torch.empty((batch, length, 2052), device=q.device, dtype=torch.int32)
+        _compact_sm90_selection[(batch * length,)](
+            selected,
+            packed,
+            selected.stride(0),
+            selected.stride(1),
+            S=length,
+            T=length,
+            WIDTH=2051,
+            BLOCK=4096,
+            num_warps=8,
+        )
+    device_name = torch.cuda.get_device_name(q.device)
+    block_n, warps = _prefill_launch_config(batch, length, device_name)
     # Return the public BHSD shape backed by NHD storage, avoiding a copy in
     # the packed-token consumer when it transposes the result back to NHD.
     out = torch.empty((batch, length, 12, 256), device=q.device, dtype=q.dtype).permute(
@@ -203,11 +224,14 @@ def try_sm90_sparse_prefill(q, k, v, selected, *, blk_k=64):
         v.stride(2),
         *out.stride()[:3],
         S=length,
-        WIDTH=2051,
+        WIDTH=packed.shape[-1] - 1,
         BLOCK_M=16,
         BLOCK_N=block_n,
         HEAD_DIM=256,
+        BLOCK_IDS=selected_has_count,
         num_warps=warps,
         num_stages=2,
+        # On H20, the register limit improves residency for the 32-key tile.
+        maxnreg=96 if "H20" in device_name and length > 20480 else None,
     )
     return out
