@@ -67,13 +67,13 @@ class SegmentAdmission:
         self.moe_rows = frozenset(
             int(row)
             for row in os.environ.get(
-                "QWEN_PREFILL_GRAPH_MOE_ROWS", "96,768,3072"
+                "QWEN_PREFILL_GRAPH_MOE_ROWS", "96,768,3072,5376"
             ).split(",")
             if row.strip()
         )
         self.budget = SegmentBudget(
-            int(os.environ.get("QWEN_PREFILL_GRAPH_MAX_ENTRIES", "7")),
-            int(os.environ.get("QWEN_PREFILL_GRAPH_MAX_TOKENS", "20832")),
+            int(os.environ.get("QWEN_PREFILL_GRAPH_MAX_ENTRIES", "8")),
+            int(os.environ.get("QWEN_PREFILL_GRAPH_MAX_TOKENS", "26208")),
         )
         self.segment_budget = SegmentBudget(
             int(os.environ.get("QWEN_PREFILL_SEGMENT_MAX_ENTRIES", "4")),
@@ -243,6 +243,23 @@ def graph_memory_bytes(snapshot, pools, input_bytes):
     return total
 
 
+def reuse_moe_input_slot(slot, result):
+    """Publish the result after the graph has finished consuming its input.
+
+    The slot is a private copy, shared across decoder layers of this shape.
+    Its previous result must be consumed before the next MoE replay. Copying
+    here keeps each layer's temporary output reclaimable in the shared pool.
+    """
+    if (
+        not isinstance(result, torch.Tensor)
+        or result.shape != slot.shape
+        or result.dtype != slot.dtype
+        or result.device != slot.device
+    ):
+        raise RuntimeError("MoE graph output must match its private input slot")
+    return slot.copy_(result)
+
+
 class StaticPrefillSegment:
     def __init__(self, layer_idx, name, admission, mega=None):
         self.layer_idx = layer_idx
@@ -329,7 +346,13 @@ class StaticPrefillSegment:
                 self.mega._prefill_graph_recording = True
             try:
                 with torch.cuda.graph(graph, pool=pool, stream=stream):
-                    output = eager(*static)
+                    # Keep the 3072-row latency-sensitive path copy-free.
+                    # Its per-layer outputs use the same shared byte budget;
+                    # other MoE shapes reclaim outputs through the input slot.
+                    if self.name == "moe" and x.shape[0] != 3072:
+                        output = reuse_moe_input_slot(static[0], eager(*static))
+                    else:
+                        output = eager(*static)
             finally:
                 if self.mega is not None:
                     self.mega._prefill_graph_recording = False
