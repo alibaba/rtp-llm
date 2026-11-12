@@ -365,6 +365,12 @@ void AwiService::generate(const std::unique_ptr<http_server::HttpResponseWriter>
             return std::max<int64_t>(0, parsed);
         }();
         const int64_t fill_limit = std::max<int64_t>(0, static_cast<int64_t>(input_ids.size()) - fill_tail);
+        // Keep the last completed prefix-fill stream alive until the real
+        // request has been admitted and has read its KV blocks.  Its cached
+        // prefix is the bridge that makes the bounded tail cheap; releasing it
+        // at the end of the fill block lets the cache evict the prefix and the
+        // real request then re-prefills the whole context and OOMs.
+        std::shared_ptr<GenerateStream> held_fill;
         if (fill_chunk > 0 && fill_limit > fill_chunk) {
             // The evaluator sends one full-context request.  Materialise its
             // prefix in bounded, cache-reusing prefill-only streams so the
@@ -377,7 +383,6 @@ void AwiService::generate(const std::unique_ptr<http_server::HttpResponseWriter>
             // prefix's KV reference so the reuse cache can evict it.  Without
             // this, all 31 growing prefixes stay strongly referenced and the
             // cache fills before the final request can be admitted.
-            std::shared_ptr<GenerateStream> last_fill;
             for (int64_t end = fill_chunk; end < fill_limit; end += fill_chunk) {
                 auto fill_input          = std::make_shared<GenerateInput>();
                 fill_input->request_id   = request_counter_->incAndReturn();
@@ -429,7 +434,7 @@ void AwiService::generate(const std::unique_ptr<http_server::HttpResponseWriter>
                                "kv_capacity_exceeded");
                     return;
                 }
-                last_fill = fill_stream;
+                held_fill = fill_stream;
             }
         }
 
@@ -542,6 +547,7 @@ void AwiService::generate(const std::unique_ptr<http_server::HttpResponseWriter>
             << ",\"total_tokens\":" << (static_cast<int64_t>(input_ids.size()) + completion_tokens) << "}}";
         writeJson(writer, out.str());
         runtime.unbindRequest(stream->streamId());
+        held_fill.reset();
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("/awi/generate failed: %s", e.what());
         // Do not strand decodes held by a barrier if a member fails mid-flight.
