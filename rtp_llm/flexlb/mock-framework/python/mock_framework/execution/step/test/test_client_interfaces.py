@@ -159,11 +159,11 @@ def test_invalid_plans_fail_at_python_boundary(changes):
 
 
 def test_qps_reuses_metric_aggregation_and_measures_issued_not_finished(monkeypatch):
-    async def metric(ctx, selection, role, numerator):
+    async def query_counter(ctx, selection, role, numerator):
         assert role == "client" and numerator == "mock_client_requests_issued_total"
         return 123.0
 
-    monkeypatch.setattr(metrics, "metric", metric)
+    monkeypatch.setattr(metrics, "query_counter", query_counter)
     assert asyncio.run(client_query_qps(context(), metrics.MetricArgs())) == 123.0
 
 

@@ -4,10 +4,9 @@ import asyncio
 from dataclasses import dataclass
 from typing import Annotated
 
-from ...config.validation import validate
+from ...config.validation import Bounds, schema, validate
 from .. import ExecutionError
 from ..processes import ProcessIdentity, start_instance
-from ..step.step_registry import Bounds, schema
 from ..transport import post
 from . import register_ready_instance
 

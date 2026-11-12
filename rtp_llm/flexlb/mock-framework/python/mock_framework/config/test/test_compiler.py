@@ -5,12 +5,9 @@ from typing import Annotated
 import pytest
 from mock_framework.config import ConfigError, compile_case
 from mock_framework.config.compiler import expand_config
+from mock_framework.config.validation import Bounds, schema
 from mock_framework.execution.step.step import Reference, Step
-from mock_framework.execution.step.step_registry import (
-    Bounds,
-    StepRegistry,
-    register_step,
-)
+from mock_framework.execution.step.step_registry import StepRegistry, register_step
 from mock_framework.execution.test.helpers import FRAMEWORK
 
 
@@ -226,7 +223,6 @@ def test_component_config_file_rejects_missing_empty_or_remote_paths(
 
 def test_nullable_reference_preserves_both_possible_types():
     from mock_framework.config.validation import compatible
-    from mock_framework.execution.step.step_registry import schema
 
     assert compatible(schema(list[str] | None), schema(list[str] | None))
     assert not compatible(schema(list[str] | None), schema(list[str]))

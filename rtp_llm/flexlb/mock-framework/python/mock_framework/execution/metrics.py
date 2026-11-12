@@ -95,7 +95,7 @@ def _check_history(name, targets, series):
         raise ExecutionError("Incomplete metric coverage for selected instances")
 
 
-async def metric(ctx, args, role, numerator, denominator=None, *, kind=None):
+async def query_counter(ctx, args, role, numerator, denominator=None, *, kind=None):
     millis = counter_window_ms(ctx, args)
     labels, targets = scope(ctx, args, role)
     numerator_labels = labels + (f",kind={json.dumps(kind)}" if kind else "")

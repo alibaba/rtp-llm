@@ -12,15 +12,12 @@ from typing import Annotated
 import pytest
 import yaml
 from mock_framework.config import compile_case
+from mock_framework.config.validation import Bounds
 from mock_framework.execution import ExecutionError
 from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
 from mock_framework.execution.step.step import Reference, resolve_refs
-from mock_framework.execution.step.step_registry import (
-    Bounds,
-    StepRegistry,
-    register_step,
-)
+from mock_framework.execution.step.step_registry import StepRegistry, register_step
 
 
 @dataclass(frozen=True)

@@ -1,8 +1,9 @@
 from dataclasses import dataclass
 from typing import Annotated
 
+from ...config.validation import Bounds
 from .step import StepContext
-from .step_registry import Bounds, register_step
+from .step_registry import register_step
 
 
 @dataclass(frozen=True)

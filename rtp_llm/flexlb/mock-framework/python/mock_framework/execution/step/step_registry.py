@@ -9,28 +9,13 @@ from typing import (
     Annotated,
     Awaitable,
     Callable,
-    Literal,
     Union,
     get_args,
     get_origin,
     get_type_hints,
 )
 
-from ...config.validation import ConfigError, validate
-
-_PRIMITIVES = {
-    str: "string",
-    int: "integer",
-    float: "number",
-    bool: "boolean",
-    type(None): "null",
-}
-
-
-@dataclass(frozen=True)
-class Bounds:
-    minimum: float | None = None
-    maximum: float | None = None
+from ...config.validation import ConfigError, schema, validate
 
 
 @dataclass(frozen=True)
@@ -42,49 +27,6 @@ class Targets:
             not self.targets or len(set(self.targets)) != len(self.targets)
         ):
             raise ValueError("targets must be nonempty and unique when supplied")
-
-
-def schema(kind):
-    origin = get_origin(kind)
-    arguments = get_args(kind)
-    if origin is Annotated:
-        base, *rules = arguments
-        result = schema(base)
-        for rule in rules:
-            if rule in ("duration", "range"):
-                result = {"type": rule}
-                if rule == "range" and get_origin(base) is list:
-                    result["allow_latest"] = False
-            elif isinstance(rule, Bounds):
-                if rule.minimum is not None:
-                    result["minimum"] = rule.minimum
-                if rule.maximum is not None:
-                    result["maximum"] = rule.maximum
-            else:
-                raise ConfigError(f"Unsupported type annotation: {rule!r}")
-        return result
-    if origin in (Union, UnionType):
-        return {"type": "union", "variants": [schema(item) for item in arguments]}
-    if origin is Literal:
-        if not arguments or any(type(item) is not str for item in arguments):
-            raise ConfigError("Only string Literal types are supported")
-        return {"type": "string", "enum": list(arguments)}
-    if kind in _PRIMITIVES:
-        return {"type": _PRIMITIVES[kind]}
-    if origin is list and len(arguments) == 1:
-        return {"type": "array", "items": schema(arguments[0])}
-    if origin is dict and len(arguments) == 2 and arguments[0] is str:
-        return {"type": "object", "values": schema(arguments[1])}
-    if is_dataclass(kind):
-        hints = get_type_hints(kind, include_extras=True)
-        properties = {}
-        required = []
-        for field in data_fields(kind):
-            properties[field.name] = schema(hints[field.name])
-            if field.default is MISSING and field.default_factory is MISSING:
-                required.append(field.name)
-        return {"type": "object", "properties": properties, "required": required}
-    raise ConfigError(f"Unsupported interface type: {kind!r}")
 
 
 def _construct(kind, value, where="argument"):

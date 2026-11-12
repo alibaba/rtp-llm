@@ -1,7 +1,6 @@
 """Native Master configuration binding and per-Master state reads."""
 
 import asyncio
-import copy
 import errno
 import json
 import os
@@ -18,29 +17,22 @@ from ..transport import post
 from . import register_ready_instance
 
 
-def bind_discovery(config, topology, directory, *, require_engines=True):
-    env = {}
-    for key, value in config.items():
-        if key.isupper():
-            if not isinstance(value, str):
-                raise ExecutionError(
-                    f"Master native setting {key} must be an environment string"
-                )
-            env[key] = value
-    if "MODEL_SERVICE_CONFIG" not in env:
-        return env  # Generic transport probes do not launch the native Master.
+def _resolve_discovery(route_json, topology, *, require_engines):
+    if not isinstance(route_json, str):
+        raise ExecutionError(
+            "Master native setting MODEL_SERVICE_CONFIG must be an environment string"
+        )
     try:
-        route = json.loads(env["MODEL_SERVICE_CONFIG"])
+        route = json.loads(route_json)
         groups = route["role_endpoints"]
         if not isinstance(groups, list) or len(groups) != 1:
             raise ValueError(
                 "local Master currently requires exactly one endpoint group"
             )
-        route = copy.deepcopy(route)
         hosts = {}
         configured = {node["role"] for node in topology}
         for role in ("prefill", "decode", "vit"):
-            endpoint = route["role_endpoints"][0].get(role + "_endpoint")
+            endpoint = groups[0].get(role + "_endpoint")
             if endpoint is None:
                 if role in configured:
                     raise ValueError(f"Missing native {role}_endpoint")
@@ -68,27 +60,43 @@ def bind_discovery(config, topology, directory, *, require_engines=True):
             if require_engines and not addresses:
                 raise ValueError(f"No running Engines for native {role}_endpoint")
             hosts[domain] = addresses
-        if (
-            not hosts
-            or route["role_endpoints"][0].get("pd_fusion_endpoint") is not None
-        ):
+        if not hosts or groups[0].get("pd_fusion_endpoint") is not None:
             raise ValueError("local Master supports separate P/D/V endpoints only")
-        discovery = directory / "discovery.json"
-        write_json(discovery, hosts)
-        route.pop("hosts", None)
-        route["discovery_file"] = str(discovery)
-        env["MODEL_SERVICE_CONFIG"] = json.dumps(route, ensure_ascii=False)
+        return route, hosts
     except (ValueError, KeyError, TypeError, AttributeError) as error:
         raise ExecutionError(
             f"Cannot bind local MODEL_SERVICE_CONFIG: {error}"
         ) from error
+
+
+def prepare_master_env(config, topology, directory, *, require_engines=True):
+    env = {}
+    for key, value in config.items():
+        if key.isupper():
+            if not isinstance(value, str):
+                raise ExecutionError(
+                    f"Master native setting {key} must be an environment string"
+                )
+            env[key] = value
+    if "MODEL_SERVICE_CONFIG" not in env:
+        return env  # Generic transport probes do not launch the native Master.
+    route, hosts = _resolve_discovery(
+        env["MODEL_SERVICE_CONFIG"], topology, require_engines=require_engines
+    )
+    discovery = directory / "discovery.json"
+    write_json(discovery, hosts)
+    route.pop("hosts", None)
+    route["discovery_file"] = str(discovery)
+    env["MODEL_SERVICE_CONFIG"] = json.dumps(route, ensure_ascii=False)
     return env
 
 
 def refresh_discovery(config, topology, directory):
     if "MODEL_SERVICE_CONFIG" in config:
-        # The consumer owns reload timing; only publish the current addresses here.
-        bind_discovery(config, topology, directory, require_engines=False)
+        _, hosts = _resolve_discovery(
+            config["MODEL_SERVICE_CONFIG"], topology, require_engines=False
+        )
+        write_json(directory / "discovery.json", hosts)
 
 
 class MasterRole:
@@ -132,7 +140,7 @@ class MasterRole:
         }
 
     def _prepare_env(self, index, directory):
-        env = bind_discovery(
+        env = prepare_master_env(
             self.role_config["config"],
             self.topology.active(),
             directory,

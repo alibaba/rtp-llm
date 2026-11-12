@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 from mock_framework.execution import ExecutionError
-from mock_framework.execution.roles.master import bind_discovery
+from mock_framework.execution.roles.master import prepare_master_env, refresh_discovery
 from mock_framework.execution.step.master_list_addresses import (
     MasterListAddressesArgs,
     master_list_addresses,
@@ -44,7 +44,7 @@ def topology():
 
 def test_binds_only_run_owned_discovery_and_preserves_business_document(tmp_path):
     config = configuration()
-    env = bind_discovery(config, topology(), tmp_path)
+    env = prepare_master_env(config, topology(), tmp_path)
     assert env["FLEXLB_CONFIG"] == config["FLEXLB_CONFIG"]
     assert "old-host" in config["MODEL_SERVICE_CONFIG"]
     route = json.loads(env["MODEL_SERVICE_CONFIG"])
@@ -52,6 +52,11 @@ def test_binds_only_run_owned_discovery_and_preserves_business_document(tmp_path
     assert json.loads(Path(route["discovery_file"]).read_text()) == {
         "p-domain": ["127.0.0.1:30001"],
         "d-domain": ["127.0.0.1:40001"],
+    }
+    refresh_discovery(config, topology()[:1], tmp_path)
+    assert json.loads(Path(route["discovery_file"]).read_text()) == {
+        "p-domain": ["127.0.0.1:30001"],
+        "d-domain": [],
     }
     assert not (tmp_path / "native-environment.json").exists()
 
@@ -70,16 +75,16 @@ def test_invalid_native_settings_fail_instead_of_starting_a_different_configurat
     config = configuration()
     change(config)
     with pytest.raises(ExecutionError):
-        bind_discovery(config, topology(), tmp_path)
+        prepare_master_env(config, topology(), tmp_path)
 
 
 def test_missing_running_role_is_rejected(tmp_path):
     with pytest.raises(ExecutionError, match="No running Engines"):
-        bind_discovery(configuration(), topology()[:1], tmp_path)
+        prepare_master_env(configuration(), topology()[:1], tmp_path)
 
 
 def test_generic_transport_probe_does_not_require_a_native_master(tmp_path):
-    assert bind_discovery({"a": {"b": 2}}, [], tmp_path) == {}
+    assert prepare_master_env({"a": {"b": 2}}, [], tmp_path) == {}
 
 
 @pytest.mark.parametrize(
@@ -654,7 +659,9 @@ def test_explicit_master_selection_and_empty_selection_do_not_broadcast(monkeypa
 
 
 def test_replacement_master_can_discover_roles_scaled_to_zero(tmp_path):
-    environment = bind_discovery(configuration(), [], tmp_path, require_engines=False)
+    environment = prepare_master_env(
+        configuration(), [], tmp_path, require_engines=False
+    )
     route = json.loads(environment["MODEL_SERVICE_CONFIG"])
     assert json.loads(Path(route["discovery_file"]).read_text()) == {
         "p-domain": [],

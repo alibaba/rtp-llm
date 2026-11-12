@@ -1,9 +1,10 @@
 from dataclasses import dataclass
 from typing import Annotated, Literal
 
+from ...config.validation import Bounds
 from ..roles.engine import MAX_ENGINE_START_COUNT
 from .step import StepContext
-from .step_registry import Bounds, Targets, register_step
+from .step_registry import Targets, register_step
 
 
 @dataclass(frozen=True, kw_only=True)

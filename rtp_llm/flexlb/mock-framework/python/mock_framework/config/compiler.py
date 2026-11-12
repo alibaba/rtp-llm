@@ -352,7 +352,7 @@ def _compile_deployment(raw, role):
     return deployment
 
 
-def _load_component_config(raw, role, directory):
+def _load_role_config(raw, role, directory):
     if isinstance(raw, str):
         value = text(raw, f"{role}.config")
         if "://" in value or directory is None:
@@ -383,7 +383,7 @@ def compile_environment(raw, *, directory=None):
             raise ConfigError(f"{role}.engine: only RTP is implemented")
 
         deployment = _compile_deployment(component.get("deployment", {}), role)
-        native = _load_component_config(component.get("config", {}), role, directory)
+        native = _load_role_config(component.get("config", {}), role, directory)
         if role == "master":
             validate_master_config(native)
         result[role] = {"deployment": deployment, "config": expand_config(native)}

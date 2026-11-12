@@ -8,7 +8,7 @@ from .step_registry import register_step
 async def engine_query_cache_hit_rate(
     ctx: StepContext, args: MetricArgs
 ) -> float | list[float]:
-    return await metrics.metric(
+    return await metrics.query_counter(
         ctx,
         args,
         "prefill",

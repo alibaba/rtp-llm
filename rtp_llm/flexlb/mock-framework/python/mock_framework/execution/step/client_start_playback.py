@@ -3,10 +3,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Annotated
 
-from ...config.validation import duration
+from ...config.validation import Bounds, duration
 from .. import ExecutionError
 from .step import StepContext
-from .step_registry import Bounds, register_step
+from .step_registry import register_step
 
 
 @dataclass(frozen=True)
