@@ -83,8 +83,8 @@ inline DeviceBlockPoolConfig createTestConfig(size_t   k_block_stride_bytes = 51
     auto               spec      = createTestKvCacheSpec(
         kLayerNum, dtype, local_head_num_kv, seq_size_per_block, k_block_stride_bytes, v_block_stride_bytes);
     CacheConfig cache_config;
-    cache_config.layer_num          = kLayerNum;
-    cache_config.dtype              = dtype;
+    cache_config.main_config.layer_num = kLayerNum;
+    cache_config.main_config.dtype     = dtype;
     cache_config.seq_size_per_block = seq_size_per_block;
     std::vector<int> layer_ids(kLayerNum);
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
@@ -94,7 +94,8 @@ inline DeviceBlockPoolConfig createTestConfig(size_t   k_block_stride_bytes = 51
                               {kBlockNum},
                               {k_block_stride_bytes + v_block_stride_bytes},
                               {k_scale_stride_bytes + v_scale_stride_bytes});
-    return DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front());
+    return DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config.main_config,
+                                                             cache_config.topology().groups().front());
 }
 
 inline void createDevice() {

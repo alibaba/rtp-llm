@@ -54,25 +54,25 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
                                                  const std::string& linear_tag   = "linear",
                                                  const std::string& second_tag   = "") {
     CacheConfig config;
-    config.dtype              = rtp_llm::DataType::TYPE_FP16;
-    config.layer_num          = 4;
+    config.main_config.dtype                   = rtp_llm::DataType::TYPE_FP16;
+    config.main_config.layer_num               = 4;
     config.seq_size_per_block = 4;
-    config.reuse_cache_tail_blocks = 2;
+    config.main_config.reuse_cache_tail_blocks = 2;
 
     const auto resolved_second_tag = second_tag.empty() ? (second_type == CacheGroupType::SWA ? "swa" : "full") :
                                                          second_tag;
-    auto linear_spec = makeResolvedLinearSpec(config.dtype,
+    auto linear_spec = makeResolvedLinearSpec(config.dtype(),
                                               1,
                                               1,
                                               1,
                                               1,
                                               2,
                                               static_cast<uint32_t>(config.seq_size_per_block),
-                                              config.dtype,
-                                              config.dtype,
+                                              config.dtype(),
+                                              config.dtype(),
                                               linear_tag);
     auto full_spec = makeResolvedMhaSpec(
-        config.dtype, 1, 1, static_cast<uint32_t>(config.seq_size_per_block), resolved_second_tag);
+        config.dtype(), 1, 1, static_cast<uint32_t>(config.seq_size_per_block), resolved_second_tag);
 
     config.fromGroupedSpecs({linear_spec, full_spec},
                             {{0, 1}, {2, 3}},
@@ -94,13 +94,13 @@ static CacheConfig makeTinySwaMultiPoolHybridConfig(uint32_t linear_block_num = 
 
 static CacheConfig makeTinyFullSwaMultiPoolHybridConfig(uint32_t full_block_num = 12, uint32_t swa_block_num = 12) {
     CacheConfig config;
-    config.dtype              = DataType::TYPE_FP16;
-    config.layer_num          = 4;
+    config.main_config.dtype                   = DataType::TYPE_FP16;
+    config.main_config.layer_num               = 4;
     config.seq_size_per_block = 4;
-    config.reuse_cache_tail_blocks = 2;
+    config.main_config.reuse_cache_tail_blocks = 2;
 
-    auto full_spec                 = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "full");
-    auto swa_spec                  = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "swa");
+    auto full_spec                 = makeResolvedMhaSpec(config.dtype(), 1, 1, 4, "full");
+    auto swa_spec                  = makeResolvedMhaSpec(config.dtype(), 1, 1, 4, "swa");
     auto full_policy               = defaultCacheGroupPolicy(CacheGroupType::FULL);
     auto swa_policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
     swa_policy.enable_prefix_reuse = true;
@@ -413,7 +413,7 @@ static CompleteTokenIdsPtr makeCompleteTokenIds(int batch_size, int seq_length, 
 static BatchKVCacheResourcePtr makeBatchResource(int batch_size, const CacheConfig& config) {
     auto res = std::make_shared<BatchKVCacheResource>();
     res->resetBatchSize(batch_size);
-    res->initGroups(config.topologyPtr());
+    res->initGroups(config);
     return res;
 }
 
@@ -662,8 +662,8 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, RecomputePreservesCompactCpReadyPr
             const auto  desc = makeDsv4Desc(tag, "state", 4, DataType::TYPE_FP32);
             const auto  spec = SpecBuilder::build(desc, context);
             CacheConfig config;
-            config.dtype     = context.dtype;
-            config.layer_num = 1;
+            config.main_config.dtype     = context.dtype;
+            config.main_config.layer_num = 1;
             config.seq_size_per_block               = context.seq_size_per_block;
             config.fromGroupedSpecs({spec}, {{0}}, {CacheGroupType::SWA}, {tag}, {SpecBuilder::groupPolicy(desc)});
             config.setGroupBlockLayout({tag}, {8}, {spec->block_size_bytes()}, {0});
@@ -1261,7 +1261,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AllLayerCacheBaseExposesPerLayerAn
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
-    auto layout = allocator->allLayerCacheBase();
+    auto layout = allocator->getModuleLayout(0);
     ASSERT_EQ(layout.topology().layers().size(), config.topology().layers().size());
     for (const auto& layer : config.topology().layers()) {
         EXPECT_EQ(layout.topology().layer(layer.layer_id).group_tags, layer.group_tags);
@@ -1270,7 +1270,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AllLayerCacheBaseExposesPerLayerAn
         EXPECT_EQ(layout.topology().group(group.tag).policy.group_type, group.policy.group_type);
     }
     EXPECT_EQ(layout.groups().size(), static_cast<size_t>(config.groupNums()));
-    for (size_t i = 0; i < static_cast<size_t>(config.layer_all_num()); ++i) {
+    for (size_t i = 0; i < static_cast<size_t>(config.layer_num()); ++i) {
         const auto& layer = layout.topology().layer(static_cast<int>(i));
         ASSERT_FALSE(layer.group_tags.empty());
         for (const auto& tag : layer.group_tags) {
@@ -1787,7 +1787,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, SharedReuseTailConfigControlsOnlyR
             for (const int tail : {1, 3, std::numeric_limits<int>::max()}) {
                 SCOPED_TRACE(::testing::Message() << group_reuse << "/" << request_reuse << " tail=" << tail);
                 auto config                    = makeTinySwaMultiPoolHybridConfig(12, 12);
-                config.reuse_cache_tail_blocks = tail;
+                config.main_config.reuse_cache_tail_blocks = tail;
                 auto groups                    = config.groups();
                 for (auto& group : groups) {
                     group.policy.enable_prefix_reuse = group_reuse;
@@ -2382,7 +2382,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4FixedTagPoolsUsePinnedHostBack
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4HCAStateReuseEnabledAllocatesTailOnly) {
     auto config        = makeDSV4HybridPoolConfig(/*block_num=*/200);
-    config.reuse_cache_tail_blocks = 4;
+    config.main_config.reuse_cache_tail_blocks = 4;
     auto allocator     = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
@@ -2557,7 +2557,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4StateSwaPoolsWithoutExplicitBl
     ParallelismConfig pc;
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
     auto config        = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
-    config.reuse_cache_tail_blocks = 4;
+    config.main_config.reuse_cache_tail_blocks = 4;
 
     RuntimeConfig rt;
     config.finalizeBlockNums(/*global_block_num=*/128, rt);
@@ -2571,7 +2571,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4StateSwaPoolsWithoutExplicitBl
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, FinalizeNonExplicitSwaBlocksFollowsBaseline) {
     auto config        = makeTinySwaMultiPoolHybridConfig();
-    config.reuse_cache_tail_blocks = 4;
+    config.main_config.reuse_cache_tail_blocks = 4;
     RuntimeConfig rt;
 
     config.finalizeBlockNums(/*global_block_num=*/1, rt);
@@ -2586,7 +2586,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, FinalizeNonExplicitSwaBlocksFollow
     EXPECT_EQ(config.group("linear").block_num, 9u);
     EXPECT_EQ(config.group("swa").block_num, 9u);
 
-    config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
+    config.main_config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
     config.finalizeBlockNums(/*global_block_num=*/9, rt);
     EXPECT_EQ(config.group("linear").block_num, 9u);
     EXPECT_EQ(config.group("swa").block_num, 9u);
@@ -2599,7 +2599,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4ConvertIndexToAddrByTagRoutesT
 
     // CSA layer (compress_ratio=4) -- pick the first one.
     int csa_layer = -1;
-    for (size_t l = 0; l < config.layer_all_num(); ++l) {
+    for (size_t l = 0; l < config.layer_num(); ++l) {
         const auto& tags = config.topology().layer(static_cast<int>(l)).group_tags;
         if (std::find(tags.begin(), tags.end(), "csa_kv") != tags.end()) {
             csa_layer = static_cast<int>(l);
@@ -2632,7 +2632,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4ConvertIndexToBufferByTagAndPa
     ASSERT_TRUE(allocator->init());
 
     int csa_layer = -1;
-    for (size_t l = 0; l < config.layer_all_num(); ++l) {
+    for (size_t l = 0; l < config.layer_num(); ++l) {
         const auto& tags = config.topology().layer(static_cast<int>(l)).group_tags;
         if (std::find(tags.begin(), tags.end(), "csa_kv") != tags.end()) {
             csa_layer = static_cast<int>(l);
@@ -2656,8 +2656,8 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4AllLayerCacheBaseHasPerGroupTe
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
-    auto layout = allocator->allLayerCacheBase();
-    for (size_t l = 0; l < static_cast<size_t>(config.layer_all_num()); ++l) {
+    auto layout = allocator->getModuleLayout(0);
+    for (size_t l = 0; l < static_cast<size_t>(config.layer_num()); ++l) {
         EXPECT_TRUE(layout.group("swa_kv").hasLayer(l)) << "layer " << l << " missing SWA_KV tensor";
     }
     EXPECT_EQ(layout.groups().size(), 7u);

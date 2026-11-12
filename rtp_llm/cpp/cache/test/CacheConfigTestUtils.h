@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <numeric>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -187,15 +189,57 @@ inline void setTestGroupPolicies(CacheConfig& config, const std::vector<CacheGro
     config.setTopology(std::move(groups), config.topology().layers());
 }
 
+// Production declares module-scoped draft cache tags in the Python model
+// description (``ModelConfig.cache_tag_prefix``): every draft tag is published
+// as ``mtp_<tag>``.  Tests building a draft directly apply the same declaration.
+inline constexpr const char* kDraftCacheTagPrefix = "mtp_";
+
+inline void declareModuleScopedTags(ModelConfig& draft_model_config, const std::string& prefix = kDraftCacheTagPrefix) {
+    for (auto& layer_descs : draft_model_config.kv_cache_spec_descs) {
+        for (auto& desc : layer_descs) {
+            if (desc.tag.rfind(prefix, 0) != 0) {
+                desc.tag = prefix + desc.tag;
+            }
+        }
+    }
+}
+
+inline CacheModuleConfig declareModuleScopedTags(CacheModuleConfig  module_config,
+                                                 const std::string& prefix = kDraftCacheTagPrefix) {
+    auto groups = module_config.topology().groups();
+    auto layers = module_config.topology().layers();
+    for (auto& group : groups) {
+        if (group.tag.rfind(prefix, 0) == 0) {
+            continue;
+        }
+        const std::string new_tag = prefix + group.tag;
+        if (group.spec != nullptr) {
+            auto spec  = group.spec->clone();
+            spec->tag  = new_tag;
+            group.spec = std::move(spec);
+        }
+        group.tag = new_tag;
+    }
+    for (auto& layer : layers) {
+        for (auto& tag : layer.group_tags) {
+            if (tag.rfind(prefix, 0) != 0) {
+                tag = prefix + tag;
+            }
+        }
+    }
+    module_config.setTopology(std::move(groups), std::move(layers));
+    return module_config;
+}
+
 inline size_t explicitPoolReserveBytes(const CacheConfig& config) {
     size_t reserve = 0;
-    if (config.groupNums() == 0) {
-        return reserve;
-    }
-    for (const auto& group : config.groups()) {
+    for (size_t module_id = 0; module_id < config.moduleCount(); ++module_id) {
+        const auto& module_config = config.moduleConfig(module_id);
+        for (const auto& group : module_config.groups()) {
         const auto& policy = group.policy;
         if (policy.explicit_block_num > 0 && policy.charge_to_paged_budget) {
-            reserve += static_cast<size_t>(group.block_num) * config.blockSizeBytesForGroup(group.tag);
+                reserve += static_cast<size_t>(group.block_num) * module_config.blockSizeBytesForGroup(group.tag);
+            }
         }
     }
     return reserve;
@@ -295,9 +339,10 @@ inline KVCacheSpecPtr makeResolvedOpaqueSpec(bool               state_cache,
     return SpecBuilder::build(desc, ctx);
 }
 
-inline std::shared_ptr<FixedStateCacheSpec> makeTestFixedStateSpec(uint32_t seq_size_per_block) {
-    return std::dynamic_pointer_cast<FixedStateCacheSpec>(makeResolvedOpaqueSpec(
-        true, "test_fixed_state", DataType::TYPE_FP32, 1024u * 128u * sizeof(float), seq_size_per_block));
+inline std::shared_ptr<FixedStateCacheSpec> makeTestFixedStateSpec(uint32_t           seq_size_per_block,
+                                                                 const std::string& tag = "test_fixed_state") {
+    return std::dynamic_pointer_cast<FixedStateCacheSpec>(
+        makeResolvedOpaqueSpec(true, tag, DataType::TYPE_FP32, 1024u * 128u * sizeof(float), seq_size_per_block));
 }
 
 inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
@@ -530,10 +575,11 @@ inline KVCacheSpecPtr makeLinearSpec(const std::string& tag,
 inline CacheConfig
 makeSingleGroupCacheConfig(KVCacheSpecPtr spec, CacheGroupType group_type, int layer_num, int block_num) {
     CacheConfig config;
-    config.dtype     = spec->memoryLayoutDType();
-    config.layer_num = static_cast<uint32_t>(layer_num);
+    config.main_config.dtype     = spec->memoryLayoutDType();
+    config.main_config.layer_num = static_cast<uint32_t>(layer_num);
 
-    config.seq_size_per_block = spec->seq_size_per_block;
+    config.seq_size_per_block            = spec->seq_size_per_block;
+    config.main_config.seq_size_per_block = spec->seq_size_per_block;
 
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
@@ -575,11 +621,11 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
                                                   uint32_t          local_head_num_kv = 1,
                                                   uint32_t          size_per_head     = 1) {
     CacheConfig config;
-    config.dtype     = dtype;
-    config.layer_num = static_cast<uint32_t>(layer_num);
+    config.main_config.dtype     = dtype;
+    config.main_config.layer_num = static_cast<uint32_t>(layer_num);
 
     config.seq_size_per_block            = tokens_per_block;
-    config.reuse_cache_tail_blocks       = 2;
+    config.main_config.reuse_cache_tail_blocks = 2;
     const int normalized_group_layer_num = std::max(group_layer_num, 1);
 
     if (layer_num <= 0 || (layer_num % normalized_group_layer_num) != 0

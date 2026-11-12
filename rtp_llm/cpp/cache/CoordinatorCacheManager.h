@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -8,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
@@ -73,17 +75,45 @@ public:
     bool                           init();
     virtual void                   free(const FreeInfo& free_info);
     virtual void                   insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
-    virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const;
-    virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const;
+    virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id, size_t module_id = 0) const;
+    virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id, size_t module_id = 0) const;
     virtual std::vector<BlockInfo>
-                          convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
-    virtual BlockAddrInfo convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id) const;
-    virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const;
-    virtual std::vector<BlockInfo> convertIndexToBuffer(
-        int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
+    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id, size_t module_id = 0) const;
+    virtual BlockAddrInfo
+    convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id, size_t module_id = 0) const;
+    virtual std::vector<BlockInfo>
+    convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id, size_t module_id = 0) const;
+    virtual std::vector<BlockInfo> convertIndexToBuffer(int                layer_id,
+                                                        const std::string& group_tag,
+                                                        int                block_id,
+                                                        int                partition_count,
+                                                        int                partition_id,
+                                                        size_t             module_id = 0) const;
     virtual std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector = false);
-    virtual GroupedCacheLayerLayout allLayerCacheBase() const;
+    GroupedCacheLayerLayout getModuleLayout(size_t module_id = 0) const;
+
+    // Snapshot of tag -> runtime pool index, built once during doInit().
+    // Replaces repeated allGroupTags()/groupIdForTagGlobal() scans.
+    const std::unordered_map<std::string, size_t>& tagToRuntimeIndex() const {
+        return tag_to_runtime_index_;
+    }
+
+    // Enumerate every module's buffer layout for P2P/external registration.
+    // Returns one GroupedCacheLayerLayout per module, in module order.
+    virtual std::vector<GroupedCacheLayerLayout> allModuleLayouts() const;
+
+    // Tag ownership bindings used by P2P/layer-coordinate consumers. A tag belongs
+    // to exactly one module; mixed-build peers that send merged layer coordinates
+    // are rejected by the layer-membership check instead of silently mismatching.
+    virtual size_t moduleOfTag(const std::string& tag) const {
+        return config_.moduleOfTag(tag);
+    }
+    virtual bool tagOwnsLayer(const std::string& tag, int layer_id) const {
+        const size_t           module_id = moduleOfTag(tag);
+        const std::vector<int> layer_ids = config_.moduleConfig(module_id).layerIdsForGroup(tag);
+        return std::find(layer_ids.begin(), layer_ids.end(), layer_id) != layer_ids.end();
+    }
     virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                                                   const std::vector<int>&         block_src_batch,
                                                   bool                            copy_last_block,
@@ -170,8 +200,6 @@ public:
     virtual size_t               maxAvailableTokensNum() const;
     virtual KVCacheTokenCapacity tokenCapacity(size_t default_seq_size_per_block) const;
     virtual std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const;
-    /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
-    uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 
 protected:
     // Which capacity snapshots evaluateInitCapacity() is allowed to consult.
@@ -303,8 +331,6 @@ protected:
                                                                     size_t                                reserve_blocks,
                                                                     InitCapacityMode                      mode,
                                                                     const std::vector<RequiredPositions>* required_positions) const;
-    int                                    validateGroupIdForLayer(int layer_id, int group_id) const;
-    int                                    defaultGroupIdForLayer(int layer_id) const;
     size_t                                 minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
     size_t                                 totalReservableFreeBlocks() const;
     size_t                                 reserveBlocksForPool(size_t group_id) const;
@@ -315,7 +341,16 @@ protected:
     std::unique_ptr<GpuBlockCopy> gpu_block_copy_;
 
 private:
+    // Flat union of every module's groups (main first, then MTP). The internal
+    // kv_cache_groups_/group_block_pools_ vectors are indexed by this ordering.
+    int              allGroupNums() const;
+    std::string      allGroupTag(size_t flat_id) const;
+    const GroupBase& allGroup(size_t flat_id) const;
     size_t groupIdForTag(std::string_view tag) const;
+
+    // Tag -> runtime index into kv_cache_groups_/group_block_pools_.
+    // Built once during doInit() after all pools are created.
+    std::unordered_map<std::string, size_t> tag_to_runtime_index_;
 };
 
 using CoordinatorCacheManagerPtr = std::shared_ptr<CoordinatorCacheManager>;

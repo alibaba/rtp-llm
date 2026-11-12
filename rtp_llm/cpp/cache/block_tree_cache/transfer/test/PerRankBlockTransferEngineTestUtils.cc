@@ -83,6 +83,15 @@ std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<TestGroupConfi
     return test::makeIndexedTestTopology(std::move(groups), layers_by_group);
 }
 
+std::shared_ptr<const CacheConfig> makeTestCacheConfig(const CacheTopology& topology) {
+    auto cache_config                            = std::make_shared<CacheConfig>();
+    cache_config->seq_size_per_block             = topology.groups().front().seqSizePerBlock();
+    cache_config->main_config.seq_size_per_block = cache_config->seq_size_per_block;
+    cache_config->main_config.layer_num          = static_cast<uint32_t>(topology.layers().size());
+    cache_config->setTopology(topology.groups(), topology.layers());
+    return cache_config;
+}
+
 BackingLayout makeTestBackingLayout(size_t payload_bytes, bool enable_crc, bool physical_geometry) {
     const size_t storage_bytes = enable_crc ? CrcBlockCopyBatch::encodedBytes(payload_bytes) : payload_bytes;
     return {physical_geometry ? payload_bytes : 0, storage_bytes, ((storage_bytes + 4095) / 4096) * 4096, enable_crc};
@@ -123,8 +132,13 @@ GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
             payload_bytes += topology->blockSizeBytesForGroup(tag);
         }
     }
+    auto cache_config                            = std::make_shared<CacheConfig>();
+    cache_config->seq_size_per_block             = topology->groups().front().seqSizePerBlock();
+    cache_config->main_config.seq_size_per_block = cache_config->seq_size_per_block;
+    cache_config->main_config.layer_num          = static_cast<uint32_t>(topology->layers().size());
+    cache_config->setTopology(topology->groups(), topology->layers());
     group_set->initialize(group_set_id,
-                          std::move(topology),
+                          std::move(cache_config),
                           std::move(group_tags),
                           makeTestBackingLayout(payload_bytes, enable_crc, physical_payload_bytes > 0));
     return group_set;

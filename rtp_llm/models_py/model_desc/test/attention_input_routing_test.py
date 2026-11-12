@@ -23,6 +23,7 @@ from rtp_llm.models_py.model_desc.qwen3_next import (
     _validate_aiter_flydsl_gdn_decode_eager_state,
     _write_cp_cache_store,
 )
+from rtp_llm.models_py.utils.kvcache import ModuleLocalKVCache
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 
 
@@ -536,6 +537,47 @@ class AttentionInputRoutingTest(unittest.TestCase):
             [(cache.layer_idx, cache.tag) for cache in published],
             [(0, "swa_kv"), (1, "swa_kv")],
         )
+
+    def test_dspark_commit_finds_swa_inputs_of_a_prefixed_draft_module(self):
+        """A draft module publishes ``mtp_swa_kv`` and C++ collapses the
+        single-group attention inputs to a bare ``PyAttentionInputs``; the
+        commit path must still find the SWA group by its canonical tag."""
+        model = object.__new__(DeepSeekV4DSparkModel)
+        nn.Module.__init__(model)
+
+        class DraftKVCache:
+            group_tags = ["mtp_swa_kv"]
+
+            def get_layer_cache(self, layer_idx, tag):
+                return SimpleNamespace(layer_idx=layer_idx, tag=tag)
+
+        model.kv_cache = ModuleLocalKVCache(DraftKVCache())
+        model.v4 = SimpleNamespace(layers=[object()])
+        model._swa_block_table = Mock(return_value=torch.ones(1, 1, dtype=torch.int32))
+        model._commit_layer_features = Mock()
+        attention_inputs = SimpleNamespace(is_prefill=True)
+        inputs = SimpleNamespace(attention_inputs=attention_inputs)
+        writers = []
+
+        def make_writer(group_inputs, kv_cache):
+            writers.append((group_inputs, kv_cache))
+            return lambda layer_cache: None
+
+        module = "rtp_llm.models_py.model_desc.deepseek_v4_dspark_model"
+        with patch(f"{module}.require_pool_tokens_per_block", return_value=16), patch(
+            f"{module}.create_write_cache_store_impl", side_effect=make_writer
+        ):
+            model.commit_feature_rows(
+                torch.zeros(1, 4),
+                torch.zeros(1, dtype=torch.int32),
+                torch.zeros(1, dtype=torch.int32),
+                torch.ones(1, dtype=torch.int32),
+                inputs,
+            )
+
+        self.assertEqual(len(writers), 1)
+        self.assertIs(writers[0][0], attention_inputs)
+        self.assertEqual(model.kv_cache.get_layer_cache(0, "swa_kv").tag, "mtp_swa_kv")
 
 
 if __name__ == "__main__":

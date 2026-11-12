@@ -235,10 +235,11 @@ struct GroupSpec {
 
 CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
     CacheConfig config;
-    config.dtype                     = DataType::TYPE_INT8;
-    config.layer_num                 = 1;
+    config.main_config.dtype                     = DataType::TYPE_INT8;
+    config.main_config.layer_num                 = 1;
     config.seq_size_per_block        = groups.front().tokens_per_block;
-    config.use_opaque_kv_cache_store = true;
+    config.main_config.seq_size_per_block        = groups.front().tokens_per_block;
+    config.main_config.use_opaque_kv_cache_store = true;
 
     std::vector<GroupBase>   topology_groups;
     std::vector<std::string> layer_tags;
@@ -272,7 +273,7 @@ LayoutAndBases makeLayout(const CacheConfig& config) {
     std::map<std::string, uintptr_t>      bases;
     for (const auto& group : config.topology().groups()) {
         if (config.topology().layerIdsForGroup(group.tag).empty()) {
-            layouts.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>(config.layer_num)));
+            layouts.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>(config.layer_num())));
             continue;
         }
         auto storage =
@@ -683,9 +684,9 @@ Scenario makeDisabledMicroBatchScenario(int32_t token_count, bool capture_hidden
 
 Scenario makeMtpScenario() {
     auto main_config  = makeCacheConfig({{"main", 4, 16}});
-    auto draft_config = std::make_shared<CacheConfig>(makeCacheConfig({{"draft", 2, 32}}));
-    auto layout       = makeLayout(*draft_config);
-    main_config.mtp_sub_configs.push_back(draft_config);
+    auto draft_config = makeCacheConfig({{"draft", 2, 32}});
+    auto layout       = makeLayout(draft_config);
+    main_config.mtp_sub_configs.push_back(draft_config.main_config);
     auto     inputs = makeInputs(/*input_lengths=*/{4},
                              /*request_ids=*/{401},
                              /*cache_keys=*/{4101, 4102},
@@ -728,8 +729,7 @@ Scenario makeScenario(const std::string& name) {
         inputs.prefix_lengths                   = pinnedTensor({4, 0}, {2});
         inputs.cache_store_publish_start_tokens = pinnedTensor({4, 0}, {2});
         inputs.kv_cache_kernel_block_id = pinnedTensor(
-            {3, 4, 3, 4, 0, 0, 0, 0, 5, 6, 5, 6, 0, 0, 0, 0,
-             2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0, 0, 0, 0},
+            {3, 4, 3, 4, 0, 0, 0, 0, 5, 6, 5, 6, 0, 0, 0, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0, 0, 0, 0},
             {2, 2, 8});
         return {std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     }
@@ -737,12 +737,12 @@ Scenario makeScenario(const std::string& name) {
         || name == "single_model_extra_payload") {
         const bool single_group = name == "single_model_extra_payload";
         auto       main_config  = makeCacheConfig({{"unused", 2, 16}, {"draft", 2, 32}, {"other", 2, 24}});
-        auto       draft_config = std::make_shared<CacheConfig>(makeCacheConfig({{"draft", 2, 32}}));
+        auto       draft_config = makeCacheConfig({{"draft", 2, 32}});
         if (!single_group) {
-            draft_config->setTopology(main_config.topology().groups(), {LayerBase{kLayerId, {"draft"}}});
+            draft_config.setTopology(main_config.topology().groups(), {LayerBase{kLayerId, {"draft"}}});
         }
-        auto layout = makeLayout(*draft_config);
-        main_config.mtp_sub_configs.push_back(draft_config);
+        auto layout = makeLayout(draft_config);
+        main_config.mtp_sub_configs.push_back(draft_config.main_config);
         auto inputs = makeInputs(/*input_lengths=*/{4},
                                  /*request_ids=*/{401},
                                  /*cache_keys=*/{4101, 4102},

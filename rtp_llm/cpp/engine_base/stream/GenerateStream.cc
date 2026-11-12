@@ -1035,7 +1035,9 @@ bool GenerateStream::prepareMtpCacheForNextStep() {
     if (config.linear_replay.enabled() && !stream_cache_resource_->linearReplayLease()) {
         return false;
     }
-    const auto& tags     = config.groupTags();
+    // Snapshot rows cover every module's groups in main-then-sub order; the
+    // K3.1 replay/swap handling below applies to the main module only.
+    const auto tags     = config.allGroupTags();
     const auto& resource = stream_cache_resource_->kvCache();
     RTP_LLM_CHECK_WITH_INFO(state.next_kv_cache_block_id_gpu.size(0) == static_cast<int64_t>(tags.size()),
                             "MTP cache snapshot must match the allocator topology");
@@ -1044,7 +1046,11 @@ bool GenerateStream::prepareMtpCacheForNextStep() {
     std::vector<BlockIndicesType> previous_linear_blocks(tags.size());
     std::vector<size_t>           previous_kernel_sizes(tags.size(), 0);
     for (size_t row = 0; row < tags.size(); ++row) {
-        if (config.isLegacyLinearGroup(static_cast<int>(row))) {
+        const bool legacy_linear =
+            config.moduleOfTag(tags[row]) == 0 ?
+                config.isLegacyLinearGroup(static_cast<int>(row)) :
+                config.groupByTagGlobal(tags[row]).policy.group_type == CacheGroupType::LINEAR;
+        if (legacy_linear) {
             previous_linear_blocks[row] = resource.blocks(0, tags[row]);
             previous_kernel_sizes[row]  = resource.kernelBlocks(0, tags[row]).size();
         }

@@ -88,44 +88,71 @@ def cache_geometry(engine_log, role, local_tp, *, long_case, last_n_checkpoints=
         r"\[RANK (\d+)\][^\n]*cache manager initialized with config CacheConfig\{\n",
         text,
     ))
-    # Rank log records can interleave before the closing brace. Read the
-    # leading topology fields only, before the next rank's header.
-    layouts = {
-        header[1]: text[header.end():headers[i + 1].start() if i + 1 < len(headers) else None]
-        for i, header in enumerate(headers)
-    }
+    # Rank log records can interleave; a block ends at CacheConfig's own
+    # column-0 closing brace, not at the next rank header.
+    layouts = {}
+    for header in headers:
+        close = re.search(r"^}\n", text[header.end():], re.MULTILINE)
+        layouts[header[1]] = text[header.end():header.end() + close.end()] if close else text[header.end():]
     if set(layouts) != {str(rank) for rank in range(8)}:
         raise ValueError(f"{role}: missing finalized cache layout on some ranks")
 
     def field(body, key):
+        """Shared (CacheConfig-level) field printed at two-space indent."""
         match = re.search(rf"^  {re.escape(key)}=(.*)$", body, re.MULTILINE)
         if match is None:
             raise ValueError(f"{role}: missing finalized cache field {key}")
         return match[1]
 
+    def main_module(body):
+        """Main module block: `  main_config:` followed by a CacheModuleConfig."""
+        match = re.search(
+            r"^  main_config:\n  CacheModuleConfig\{\n(.*?)^  \}\n", body,
+            re.MULTILINE | re.DOTALL,
+        )
+        if match is None:
+            raise ValueError(f"{role}: missing finalized main module cache layout")
+        return match[1]
+
+    def module_field(main, key):
+        """CacheModuleConfig field printed at four-space indent."""
+        match = re.search(rf"^    {re.escape(key)}=(.*)$", main, re.MULTILINE)
+        if match is None:
+            raise ValueError(f"{role}: missing finalized cache field {key}")
+        return match[1]
+
+    def layer_all_num(body, main):
+        main_layers = int(module_field(main, "layer_num"))
+        modules = int(field(body, "mtp_sub_configs.size()"))
+        mtp_layers = [int(value) for value in re.findall(r"^      layer_num=(\d+)$", body, re.MULTILINE)]
+        if len(mtp_layers) != modules:
+            raise ValueError(f"{role}: MTP module layer counts were not fully logged")
+        return str(main_layers + sum(mtp_layers))
+
     capacity = {}
     for rank, body in layouts.items():
         physical_linear_pages = False
-        if (field(body, "layer_num"), field(body, "layer_all_num")) != ("93", "94"):
+        main = main_module(body)
+        if (module_field(main, "layer_num"), layer_all_num(body, main)) != ("93", "94"):
             raise ValueError(f"{role} rank {rank}: expected the full target and native MTP")
-        tags = [tag.strip() for tag in field(body, "group_tags").strip("[]").split(",")]
-        blocks = [int(value) for value in field(body, "group_block_nums").split(",")]
-        groups = json.loads(field(body, "layers_by_group"))
+        tags = [tag.strip() for tag in module_field(main, "group_tags").strip("[]").split(",")]
+        blocks = [int(value) for value in module_field(main, "group_block_nums").split(",")]
+        groups = json.loads(module_field(main, "layers_by_group"))
         if (len(tags) != len(blocks) or len(tags) != len(groups)
                 or set(tags) != {"full", "indexer_kv", "linear"}
-                or 93 not in groups[tags.index("full")]):
+                or 92 not in groups[tags.index("full")]):
             raise ValueError(f"{role} rank {rank}: target/draft full cache group is missing")
         if f"kernel_seq_size_per_block={kernel_tokens}\n" not in body:
             raise ValueError(f"{role} rank {rank}: expected {kernel_tokens}-token kernel pages")
         if last_n_checkpoints is not None:
             expected_n = last_n_checkpoints if role == "prefill" and not calibration else 2147483647
-            if (field(body, "reuse_cache_tail_blocks") != str(expected_n)
+            if (module_field(main, "reuse_cache_tail_blocks") != str(expected_n)
                     or field(body, "seq_size_per_block") != str(page_tokens)
                     or field(body, "local_kv_cache_sharded") != "true"):
                 raise ValueError(f"{role} rank {rank}: Last-N runtime configuration differs")
-            linear = re.search(r"LinearKVCacheSpec\{([^}]+)\}", body.split("# MTP Configurations:", 1)[0])
+            linear = re.search(r"LinearKVCacheSpec\{([^}]+)\}", main)
             if linear is None or re.search(
-                rf"^    cache_key_token_stride={page_tokens}$", linear[1], re.MULTILINE
+                rf"^      cache_key_token_stride={page_tokens}$", linear[1], re.MULTILINE
             ) is None:
                 raise ValueError(f"{role} rank {rank}: physical LINEAR checkpoint stride differs")
         elif role == "prefill":
@@ -136,20 +163,19 @@ def cache_geometry(engine_log, role, local_tp, *, long_case, last_n_checkpoints=
                 # BlockTreeCache publishes CP key strides on its cloned
                 # topology; CacheConfig logs the physical per-shard spec.
                 # The CP rows above prove the corresponding virtual span.
-                target = body.split("# MTP Configurations:", 1)[0]
-                linear = re.search(r"LinearKVCacheSpec\{([^}]+)\}", target)
+                linear = re.search(r"LinearKVCacheSpec\{([^}]+)\}", main)
                 valid_step = (
                     field(body, "seq_size_per_block") == "1024"
                     and field(body, "local_kv_cache_sharded") == "true"
                     and local_tp == 8
                     and linear is not None
-                    and re.search(r"^    cache_key_token_stride=1024$", linear[1], re.MULTILINE)
+                    and re.search(r"^      cache_key_token_stride=1024$", linear[1], re.MULTILINE)
                     is not None
                 )
                 physical_linear_pages = True
             if not valid_step:
                 raise ValueError(f"{role} rank {rank}: expected eight-page KDA checkpoints")
-        if prefill_tail_blocks is not None and field(body, "reuse_cache_tail_blocks") != str(prefill_tail_blocks):
+        if prefill_tail_blocks is not None and module_field(main, "reuse_cache_tail_blocks") != str(prefill_tail_blocks):
             raise ValueError(f"{role} rank {rank}: Prefill checkpoint retention differs")
         usable = {tag: count - 1 for tag, count in zip(tags, blocks)}
         if last_n_checkpoints is not None:

@@ -62,34 +62,12 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     KVCacheBlockBudget budget;
     budget.linear_prefill_pool_ratio = config.linear_prefill_pool_ratio;
     addBudgetBytes(budget.explicit_pool_reserve_bytes, config.linear_replay.reserve_bytes);
-    for (size_t gid = 0; gid < config.topology().groups().size(); ++gid) {
-        const auto& group          = config.topology().groups()[gid];
-        size_t      group_bytes    = 0;
-        const auto  append_segment = [&](const CacheConfig& source, const GroupBase& segment, bool main) {
-            const auto   layer_ids = source.layerIdsForGroup(segment.tag);
-            const size_t layer_count =
-                main ? std::count_if(
-                           layer_ids.begin(),
-                           layer_ids.end(),
-                           [&source](int id) { return id >= 0 && static_cast<uint32_t>(id) < source.layer_num; }) :
-                        layer_ids.size();
-            addBudgetBytes(group_bytes, segment.kvBlockStrideBytes(), layer_count);
-            addBudgetBytes(group_bytes, segment.kvScaleStrideBytes(), layer_count);
-        };
-        // Exactly the physical segments assembled by BlockPoolConfigHelper:
-        // target layers use the target Spec, draft layers use their own Specs.
-        append_segment(config, group, true);
-        for (const auto& sub : config.mtp_sub_configs) {
-            RTP_LLM_CHECK_WITH_INFO(sub != nullptr, "MTP cache configuration is null for tag=%s", group.tag.c_str());
-            RTP_LLM_CHECK_WITH_INFO(gid < sub->topology().groups().size(),
-                                    "MTP cache configuration is missing group index=%zu for tag=%s",
-                                    gid,
-                                    group.tag.c_str());
-            RTP_LLM_CHECK_WITH_INFO(sub->topology().groups()[gid].tag == group.tag,
-                                    "MTP group order is inconsistent for tag=%s",
-                                    group.tag.c_str());
-            append_segment(*sub, sub->topology().groups()[gid], false);
-        }
+    // Each module owns an independent pool per group tag, so the paged-HBM
+    // budget is the sum over every module's own group byte layout.
+    for (size_t module_id = 0; module_id < config.moduleCount(); ++module_id) {
+        const auto& module_config = config.moduleConfig(module_id);
+        for (const auto& group : module_config.groups()) {
+            const size_t group_bytes = module_config.blockSizeBytesForGroup(group.tag);
         const auto& policy = group.policy;
         if (policy.explicit_block_num > 0) {
             if (policy.charge_to_paged_budget) {
@@ -111,6 +89,7 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
                 break;
         }
     }
+    }
     return budget;
 }
 
@@ -123,7 +102,7 @@ void configureLinearPrefillPoolRatio(CacheConfig&             config,
     if (tokens == -1 || parallelism_config.role_type != RoleType::PREFILL || options.linear_pool_blocks > 0) {
         return;
     }
-    RTP_LLM_CHECK_WITH_INFO(options.reuse_cache && config.reuse_cache_tail_blocks < std::numeric_limits<int>::max(),
+    RTP_LLM_CHECK_WITH_INFO(options.reuse_cache && config.reuse_cache_tail_blocks() < std::numeric_limits<int>::max(),
                             "LINEAR_POOL_AVG_PROMPT_TOKENS requires REUSE_CACHE and a finite REUSE_CACHE_TAIL_BLOCKS");
 
     const auto cp_size        = config.local_kv_cache_sharded ? parallelism_config.tp_size : 1;
@@ -142,7 +121,7 @@ void configureLinearPrefillPoolRatio(CacheConfig&             config,
     RTP_LLM_CHECK_WITH_INFO(has_full_pages && model_config.max_seq_len > 0,
                             "LINEAR_POOL_AVG_PROMPT_TOKENS requires a shared full KV pool and a positive max_seq_len");
 
-    auto ratio = LinearPrefillPoolRatio::fromReferenceTokens(tokens, page_tokens, config.reuse_cache_tail_blocks);
+    auto ratio = LinearPrefillPoolRatio::fromReferenceTokens(tokens, page_tokens, static_cast<uint32_t>(config.reuse_cache_tail_blocks()));
     const auto max_prompt_pages = 1 + (model_config.max_seq_len - 1) / page_tokens;
     // A cold prompt can use at most one state per CP page it occupies.
     ratio.min_states                 = static_cast<uint32_t>(std::min<uint64_t>(ratio.reference_states, max_prompt_pages));
@@ -283,8 +262,8 @@ void populateGroups(CacheConfig&                 config,
         CacheGroupPolicy policy;
     };
     std::map<std::string, BuildState> groups_by_tag;
-    std::vector<LayerBase>            layers(static_cast<size_t>(config.layer_num));
-    for (uint32_t layer_id = 0; layer_id < config.layer_num; ++layer_id) {
+    std::vector<LayerBase>            layers(static_cast<size_t>(config.layer_num()));
+    for (uint32_t layer_id = 0; layer_id < config.layer_num(); ++layer_id) {
         layers[layer_id].layer_id = static_cast<int>(layer_id);
         const auto& descs         = descs_by_layer[layer_id];
         const auto& specs         = specs_by_layer[layer_id];
@@ -353,8 +332,8 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
         CacheConfigCreator::buildLayerSpecsFromDescs(model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
 
     CacheConfig config;
-    config.dtype                   = ctx.dtype;
-    config.layer_num               = static_cast<uint32_t>(model_config.num_layers);
+    config.main_config.dtype       = ctx.dtype;
+    config.main_config.layer_num   = static_cast<uint32_t>(model_config.num_layers);
     config.cache_min_replay_tokens = std::max(1, model_config.cache_min_replay_tokens);
     config.cache_key_hash_seed     = model_config.cache_key_hash_seed;
 
@@ -369,17 +348,18 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
                             "local PageRR allocation requires kv_cache_sharded transport metadata");
 
     config.seq_size_per_block = seq_size;
-    config.use_mla            = model_config.attn_config.use_mla;
-    config.is_sparse          = model_config.attn_config.is_sparse;
+    config.main_config.seq_size_per_block = seq_size;
+    config.main_config.use_mla            = model_config.attn_config.use_mla;
+    config.main_config.is_sparse          = model_config.attn_config.is_sparse;
     populateGroups(config, model_config.kv_cache_spec_descs, specs, model_config);
     for (const auto& group : config.topology().groups()) {
         const bool opaque =
             group.spec->type == KVCacheSpecType::OpaqueKV || group.spec->type == KVCacheSpecType::OpaqueState;
-        config.use_typed_cache_regions |= opaque;
-        config.use_opaque_kv_cache_store |= opaque;
-        config.is_sparse |= group.spec->type == KVCacheSpecType::OpaqueKV;
+        config.main_config.use_typed_cache_regions |= opaque;
+        config.main_config.use_opaque_kv_cache_store |= opaque;
+        config.main_config.is_sparse |= group.spec->type == KVCacheSpecType::OpaqueKV;
     }
-    config.disable_decode_first_malloc_device_reuse |= config.use_opaque_kv_cache_store;
+    config.main_config.disable_decode_first_malloc_device_reuse |= config.main_config.use_opaque_kv_cache_store;
     return config;
 }
 
@@ -429,7 +409,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   int                      gen_num_per_cycle) {
     auto config        = createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config.reuse_cache_tail_blocks > 0, "reuse_cache_tail_blocks must be positive");
-    config.reuse_cache_tail_blocks = kv_cache_config.reuse_cache_tail_blocks;
+    config.main_config.reuse_cache_tail_blocks = kv_cache_config.reuse_cache_tail_blocks;
     auto groups                    = config.topology().groups();
     for (auto& group : groups) {
         const uint32_t override_blocks =
@@ -488,18 +468,17 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     const int gen_num_per_cycle = draft_model_config != nullptr ? sp_config->gen_num_per_cycle : 0;
     auto      config = createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     if (draft_model_config != nullptr) {
-        auto draft = createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
-        // The executor currently reuses module 0 for every proposal step.
-        // gen_num_per_cycle controls proposal depth, not active module count.
-        const int num_mtp_modules = 1;
-        RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
-        config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));
-        for (int module = 0; module < num_mtp_modules; ++module) {
-            config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num));
-        }
+        auto draft_config =
+            createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+        // The draft module declares its own module-scoped tags in the Python
+        // model description (``ModelConfig.cache_tag_prefix``); no implicit
+        // renaming happens here.  Cross-module duplicates are rejected by
+        // ``validateCrossModuleInvariants``.
+        config.mtp_sub_configs.push_back(std::move(draft_config.main_config));
     }
 
     configureLinearPrefillPoolRatio(config, model_config, parallelism_config, kv_cache_config);
+    config.validateCrossModuleInvariants();
     return config;
 }
 
@@ -567,7 +546,7 @@ void CacheConfigCreator::configureLinearReplay(CacheConfig&                     
         }
         const auto layers = config.layerIdsForGroup(group.tag);
         const auto target_layers = std::count_if(layers.begin(), layers.end(), [&](int layer) {
-            return layer >= 0 && static_cast<uint32_t>(layer) < config.layer_num;
+            return layer >= 0 && static_cast<uint32_t>(layer) < config.layer_num();
         });
         if (target_layers > 0) {
             group_ids.push_back(static_cast<int>(group_id));
@@ -605,6 +584,7 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
                                                   const ParallelismConfig&                         parallelism_config,
                                                   const std::optional<WarmUpResult>&               warm_up_result,
                                                   const std::optional<SpeculativeExecutionConfig>& sp_config) {
+    config.validateCrossModuleInvariants();
     uint32_t block_num = 0;
     if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);

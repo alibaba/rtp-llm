@@ -104,7 +104,7 @@ TEST(CacheConfigLocalShardingTest, TargetAndDraftShareOneLocalLayout) {
     const auto config = CacheConfigCreator::createConfig(target, par, {}, sp, &draft);
     ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     EXPECT_TRUE(config.local_kv_cache_sharded);
-    EXPECT_TRUE(config.mtp_sub_configs[0]->local_kv_cache_sharded);
+    EXPECT_EQ(config.mtp_sub_configs[0].seq_size_per_block, config.seq_size_per_block);
 
     draft.local_kv_cache_sharded = false;
     EXPECT_ANY_THROW(CacheConfigCreator::createConfig(target, par, {}, sp, &draft));
@@ -126,7 +126,7 @@ static CompleteTokenIdsPtr makeTokenIds(int batch_size, int seq_len, int block_s
 static BatchKVCacheResourcePtr makeResource(int batch_size, const CacheConfig& config) {
     auto res = std::make_shared<BatchKVCacheResource>();
     res->resetBatchSize(batch_size);
-    res->initGroups(config.topologyPtr());
+    res->initGroups(config);
     return res;
 }
 

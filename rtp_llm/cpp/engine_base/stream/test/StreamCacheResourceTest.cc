@@ -362,9 +362,11 @@ protected:
                 pool->incRef(*allocated);
                 device_blocks.push_back(allocated->front());
             }
-            const bool stored = cache->executeTransfer(
-                TransferTask({TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks, block)},
-                             std::chrono::seconds(30))).ok();
+            const bool stored = cache
+                                    ->executeTransfer(TransferTask(
+                                        {TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks, block)},
+                                        std::chrono::seconds(30)))
+                                    .ok();
             for (size_t member = 0; member < device_blocks.size(); ++member) {
                 group->devicePools()[member]->decRef(device_blocks[member]);
             }
@@ -645,7 +647,7 @@ TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReorde
         }
         auto& batch = resource.kvCacheMutable();
         // Only the resource order changes; the manager keeps its original topology.
-        batch.initGroups(config.topologyPtr());
+        batch.initGroups(config);
         for (const auto& group : config.topology().groups()) {
             batch.mutableBlockIds(0, group.tag).assign({2, 5});
         }
@@ -693,7 +695,7 @@ TEST_F(StreamCacheResourceTest, PrefillIncrementAfterHostLoadPreservesLinearReus
     for (const int tail_blocks : {2, 8}) {
         SCOPED_TRACE(tail_blocks);
         auto config                    = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
-        config.reuse_cache_tail_blocks = tail_blocks;
+        config.main_config.reuse_cache_tail_blocks = tail_blocks;
         KVCacheConfig tiered_config;
         tiered_config.enable_device_cache  = false;
         tiered_config.enable_memory_cache  = true;
@@ -1137,7 +1139,7 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
                                                              /*tokens_per_block=*/2,
                                                              rtp_llm::DataType::TYPE_FP16,
                                                              /*group_layer_num=*/2);
-    cache_config.disable_decode_first_malloc_device_reuse = true;
+    cache_config.main_config.disable_decode_first_malloc_device_reuse = true;
     prepareResourceWithCacheConfig(cache_config, {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, RoleType::DECODE);
     auto& resource = stream_->streamCacheResource();
     ASSERT_GT(cache_manager_->cacheConfig().groupNums(), 1);
@@ -2114,9 +2116,8 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{"default", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
-    context->setMatchCallback([](LoadAsyncContext&, size_t) {
-        return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
-    });
+    context->setMatchCallback(
+        [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}; });
 
     resource.allocator_load_context_ = context;
     stream_->reportEvent(StreamEvents::CanRun);
@@ -2175,9 +2176,8 @@ TEST_F(StreamCacheResourceTest, testPrefillPermanentMaterializationFailureTermin
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{5678}), {{{"default", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
-    context->setMatchCallback([](LoadAsyncContext&, size_t) {
-        return LoadMatchResult{false, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED};
-    });
+    context->setMatchCallback(
+        [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED}; });
 
     resource.allocator_load_context_ = context;
     stream_->reportEvent(StreamEvents::CanRun);
@@ -2327,9 +2327,8 @@ TEST_F(StreamCacheResourceTest, PollAllocatorLoadPreservesRetryableMaterializati
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{"default", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, 0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
-    context->setMatchCallback([](LoadAsyncContext&, size_t) {
-        return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
-    });
+    context->setMatchCallback(
+        [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}; });
     resource.allocator_load_context_ = context;
     EXPECT_FALSE(resource.pollAllocatorLoad().has_value());
     context->startBackendMatch();

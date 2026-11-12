@@ -79,16 +79,30 @@ time.sleep(120)
                         pass
 
     def test_realized_capacity_requires_draft_and_generation_headroom(self):
-        def log(blocks, draft_layer=93, linear_blocks=135):
+        def log(blocks, draft_layer=92, linear_blocks=135):
             return "".join(
                 f"CP sharded KV cache enabled: cp_rank={rank}, cp_size=8, "
                 "block_size=1024, virtual_block_size=8192\n"
                 f"[RANK {rank}] cache manager initialized with config CacheConfig{{\n"
-                "  layer_num=93\n  layer_all_num=94\n  linear_step=8\n"
-                f"  group_block_nums={blocks},{blocks},{linear_blocks}\n"
-                "    kernel_seq_size_per_block=128\n"
-                "  group_tags=[full,indexer_kv,linear]\n"
-                f"  layers_by_group=[[3,{draft_layer}],[3],[0]]\n"
+                "  linear_step=8\n"
+                "  main_config:\n"
+                "  CacheModuleConfig{\n"
+                "    layer_num=93\n"
+                f"    group_block_nums={blocks},{blocks},{linear_blocks}\n"
+                "    group_tags=[full,indexer_kv,linear]\n"
+                f"    layers_by_group=[[3,{draft_layer}],[3],[0]]\n"
+                "    groups[2] {\n"
+                "    LinearKVCacheSpec{\n"
+                "      kernel_seq_size_per_block=128\n"
+                "    }\n"
+                "    }\n"
+                "  }\n"
+                "  mtp_sub_configs.size()=1\n"
+                "  mtp_sub_configs[0]:\n"
+                "    CacheModuleConfig{\n"
+                "      layer_num=1\n"
+                "    }\n"
+                "}\n"
                 for rank in range(8)
             )
 
@@ -103,7 +117,7 @@ time.sleep(120)
             path.write_text(log(131, linear_blocks=134))
             with self.assertRaisesRegex(ValueError, "capacity"):
                 cache_geometry(path, "prefill", 8, long_case=True)
-            path.write_text(log(131, draft_layer=92))
+            path.write_text(log(131, draft_layer=91))
             with self.assertRaisesRegex(ValueError, "draft"):
                 cache_geometry(path, "prefill", 8, long_case=True)
 
@@ -113,14 +127,27 @@ time.sleep(120)
                 f"CP sharded KV cache enabled: cp_rank={rank}, cp_size=8, "
                 "block_size=1024, virtual_block_size=8192\n"
                 f"[RANK {rank}] cache manager initialized with config CacheConfig{{\n"
-                "  layer_num=93\n  layer_all_num=94\n"
-                f"  seq_size_per_block=1024\n  local_kv_cache_sharded={sharded}\n"
-                f"  group_block_nums={blocks},{blocks},{linear_blocks}\n"
-                "    kernel_seq_size_per_block=128\n"
-                "  LinearKVCacheSpec{\n"
-                f"    cache_key_token_stride={stride}\n  }}\n"
-                "  group_tags=[full,indexer_kv,linear]\n"
-                "  layers_by_group=[[3,93],[3],[0]]\n"
+                "  seq_size_per_block=1024\n"
+                f"  local_kv_cache_sharded={sharded}\n"
+                "  main_config:\n"
+                "  CacheModuleConfig{\n"
+                "    layer_num=93\n"
+                f"    group_block_nums={blocks},{blocks},{linear_blocks}\n"
+                "    group_tags=[full,indexer_kv,linear]\n"
+                "    layers_by_group=[[3,92],[3],[0]]\n"
+                "    groups[2] {\n"
+                "    LinearKVCacheSpec{\n"
+                "      kernel_seq_size_per_block=128\n"
+                f"      cache_key_token_stride={stride}\n"
+                "    }\n"
+                "    }\n"
+                "  }\n"
+                "  mtp_sub_configs.size()=1\n"
+                "  mtp_sub_configs[0]:\n"
+                "    CacheModuleConfig{\n"
+                "      layer_num=1\n"
+                "    }\n"
+                "}\n"
                 for rank in range(8)
             )
 

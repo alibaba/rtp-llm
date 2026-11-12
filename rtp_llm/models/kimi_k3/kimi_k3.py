@@ -599,6 +599,15 @@ class KimiK3Mtp(KimiK3):
     """The independent, recurrent K3 MTP layer from a draft-only checkpoint."""
 
     @classmethod
+    def _post_build_model_config(cls, model_config) -> None:
+        super()._post_build_model_config(model_config)
+        # A draft module publishes its own module-scoped tags (mtp_<tag>) so
+        # the engine's tag -> module mapping stays bijective; C++ never renames.
+        from rtp_llm.models_py.utils.kvcache import declare_draft_cache_tags
+
+        declare_draft_cache_tags(model_config)
+
+    @classmethod
     def speculative_weight_alias_names(cls, target_model, draft_model_config):
         if type(target_model) is not (cls.TARGET_MODEL_CLASS or KimiK3):
             raise TypeError("Native K3 MTP requires a K3 target owner")

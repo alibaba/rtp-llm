@@ -36,9 +36,9 @@ struct P2PConnectorWorkerConfig {
     int64_t p2p_read_return_before_deadline_ms      = 100;
     int64_t p2p_layer_cache_buffer_store_timeout_ms = 100 * 1000;
 
-    int64_t  tp_size       = 1;
-    int64_t  tp_rank       = 0;
-    uint32_t layer_all_num = 0;
+    int64_t  tp_size         = 1;
+    int64_t  tp_rank         = 0;
+    uint32_t total_layer_num = 0;
     // Prefill page-RR shard geometry. cp_size==1 disables RR remap (legacy path);
     // cp_size>1 makes LayerCacheBufferUtil register cache_keys[cp_rank + i*cp_size]
     // for the i-th rank-local owned block (Stage 4 fix).
@@ -49,7 +49,7 @@ struct P2PConnectorWorkerConfig {
     static P2PConnectorWorkerConfig create(const CacheStoreConfig&  cache_store_config,
                                            const PDSepConfig&       pd_sep_config,
                                            const ParallelismConfig& parallelism_config,
-                                           uint32_t                 layer_all_num) {
+                                           uint32_t                 total_layer_num) {
         P2PConnectorWorkerConfig config;
         config.transfer_backend_config.cache_store_rdma_mode         = cache_store_config.cache_store_rdma_mode;
         config.transfer_backend_config.rdma_transfer_wait_timeout_ms = cache_store_config.rdma_transfer_wait_timeout_ms;
@@ -67,7 +67,7 @@ struct P2PConnectorWorkerConfig {
         config.p2p_read_return_before_deadline_ms      = cache_store_config.p2p_read_return_before_deadline_ms;
         config.tp_size                                 = parallelism_config.tp_size;
         config.tp_rank                                 = parallelism_config.tp_rank;
-        config.layer_all_num                           = layer_all_num;
+        config.total_layer_num                         = total_layer_num;
         config.kv_cache_sharded                        = parallelism_config.prefill_cp_config.kv_cache_sharded;
         if (config.kv_cache_sharded && parallelism_config.tp_size > 1) {
             config.cp_size = static_cast<int>(parallelism_config.tp_size);
@@ -88,14 +88,14 @@ struct P2PConnectorConfig {
                                      const CacheStoreConfig&  cache_store_config,
                                      const ParallelismConfig& parallelism_config,
                                      const PDSepConfig&       pd_sep_config,
-                                     uint32_t                 layer_all_num) {
+                                     uint32_t                 total_layer_num) {
         P2PConnectorConfig config;
         config.role_type = pd_sep_config.role_type;
         config.tp_rank   = parallelism_config.tp_rank;
         config.scheduler_config =
             P2PConnectorSchedulerConfig::create(runtime_config, cache_store_config, pd_sep_config);
         config.worker_config =
-            P2PConnectorWorkerConfig::create(cache_store_config, pd_sep_config, parallelism_config, layer_all_num);
+            P2PConnectorWorkerConfig::create(cache_store_config, pd_sep_config, parallelism_config, total_layer_num);
         return config;
     }
 };

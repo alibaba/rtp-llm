@@ -164,14 +164,16 @@ protected:
                 std::map<std::string, size_t> sizes;
                 autil::legacy::FromJson(sizes, object.at("location_spec_infos"));
                 for (size_t group = 0; group < pools_.size(); ++group) {
-                    const auto& topology_group = config_.group(config_.groupTags().at(group));
+                    const auto& topology_group = config_.groupByTagGlobal(config_.allGroupTags().at(group));
                     const auto  prefix         = group < 2 ? "F" : "L";
                     for (int tp = 0; tp < (rank == 0 ? 1 : 2); ++tp) {
                         EXPECT_EQ(sizes.at("tp" + std::to_string(tp) + "_" + prefix + topology_group.tag),
-                                  config_.blockSizeBytesForGroup(topology_group.tag));
+                                  config_.blockSizeBytesForGroup(topology_group.tag,
+                                                                 config_.moduleOfTag(topology_group.tag)));
                     }
                 }
-                EXPECT_NE(config_.blockSizeBytesForGroup("full0"), config_.blockSizeBytesForGroup("linear0"));
+                EXPECT_NE(config_.blockSizeBytesForGroup("full0"),
+                          config_.blockSizeBytesForGroup("linear0", config_.moduleOfTag("linear0")));
                 return std::move(meta);
             }));
         static const std::string storage_config = R"({"sdk_backend_configs":[]})";
@@ -220,15 +222,11 @@ protected:
                                                         nullptr,
                                                         wrapper_);
         if (fail_second || rank != 0) {
-            auto topology = config_.topologyPtr();
-            auto tags     = config_.groupTags();
+            auto tags  = config_.allGroupTags();
             auto pools    = pools_;
             if (reorder_binding) {
-                // Constructor config, bound topology, and input pool rows have
-                // three different orders. Registration must still join by tag.
-                auto groups = topology->groups();
-                std::reverse(groups.begin(), groups.end());
-                topology = CacheTopology::create(std::move(groups), topology->layers());
+                // Constructor config, pool rows, and request rows use three
+                // different orders. Registration must still join by tag.
                 std::rotate(tags.begin(), tags.begin() + 1, tags.end());
                 std::rotate(pools.begin(), pools.begin() + 1, pools.end());
             }
@@ -236,8 +234,12 @@ protected:
             for (size_t i = 0; i < tags.size(); ++i) {
                 EXPECT_TRUE(pools_by_tag.emplace(tags[i], pools[i]).second);
             }
-            return backend_->init(topology, std::move(pools_by_tag), [&](int layer, const std::string& tag, int block) {
-                return allocator_->convertIndexToBuffer(layer, tag, block);
+            auto cache_config   = std::make_shared<CacheConfig>(config_);
+            auto resolver_pools = pools_by_tag;
+            return backend_->init(cache_config,
+                                  std::move(pools_by_tag),
+                                  [resolver_pools](int layer_ordinal, const std::string& tag, int block) {
+                                      return resolver_pools.at(tag)->convertIndexToBuffer(layer_ordinal, block);
             });
         }
         cache_ = createBlockTreeCache(config_, options, allocator_, parallel, backend_);
@@ -247,17 +249,18 @@ protected:
     StorageRequest request() const {
         StorageRequest result;
         result.keys    = std::make_shared<CacheKeysType>(CacheKeysType{101});
-        result.handles = {{{config_.groupTags().at(2), blocks_[2]},
-                           {config_.groupTags().at(1), blocks_[1]},
-                           {config_.groupTags().at(0), blocks_[0]}}};
+        result.handles = {{{config_.allGroupTags().at(2), blocks_[2]},
+                           {config_.allGroupTags().at(1), blocks_[1]},
+                           {config_.allGroupTags().at(0), blocks_[0]}}};
         return result;
     }
 
     void fill(uint8_t value) {
         for (size_t group = 0; group < pools_.size(); ++group) {
-            for (int layer : config_.layerIdsForGroup(config_.groupTags().at(group))) {
-                for (const auto& buffer :
-                     allocator_->convertIndexToBuffer(layer, config_.groupTags().at(group), blocks_[group])) {
+            auto       tag       = config_.allGroupTags().at(group);
+            const auto module_id = config_.moduleOfTag(tag);
+            for (int layer : config_.layerIdsForGroup(tag, module_id)) {
+                for (const auto& buffer : allocator_->convertIndexToBuffer(layer, tag, blocks_[group], module_id)) {
                     ASSERT_EQ(cudaMemset(buffer.addr, value == 0 ? 0 : value + group, buffer.size_bytes), cudaSuccess);
                 }
             }
@@ -318,9 +321,10 @@ TEST_F(KVCMIndependentPoolTest, FactoryPublishesHeterogeneousSpecsAndRoundTripsE
     ASSERT_TRUE(read(*backend_, request(), matched.match_meta));
     EXPECT_EQ(state_->reads, (std::vector<size_t>{1, 1, 1}));
     for (size_t group = 0; group < pools_.size(); ++group) {
-        for (int layer : config_.layerIdsForGroup(config_.groupTags().at(group))) {
-            for (const auto& buffer :
-                 allocator_->convertIndexToBuffer(layer, config_.groupTags().at(group), blocks_[group])) {
+        auto       tag       = config_.allGroupTags().at(group);
+        const auto module_id = config_.moduleOfTag(tag);
+        for (int layer : config_.layerIdsForGroup(tag, module_id)) {
+            for (const auto& buffer : allocator_->convertIndexToBuffer(layer, tag, blocks_[group], module_id)) {
                 std::vector<uint8_t> bytes(buffer.size_bytes);
                 ASSERT_EQ(cudaMemcpy(bytes.data(), buffer.addr, bytes.size(), cudaMemcpyDeviceToHost), cudaSuccess);
                 EXPECT_EQ(bytes, std::vector<uint8_t>(bytes.size(), 17 + group));
@@ -330,6 +334,78 @@ TEST_F(KVCMIndependentPoolTest, FactoryPublishesHeterogeneousSpecsAndRoundTripsE
     }
     backend_->shutdown();
     EXPECT_EQ(state_->destroyed, 3u);
+}
+
+TEST_F(KVCMIndependentPoolTest, FactoryResolvesMtpDraftLocalLayerBeforeRemoteTransfer) {
+    // Rebind the existing linear group to module 1. Its union layer would be 2,
+    // whereas the independent draft pool addresses it as local layer 0.
+    const auto  full0  = config_.group("full0");
+    const auto  full1  = config_.group("full1");
+    const auto  linear = config_.group("linear0");
+    CacheConfig separated;
+    separated.seq_size_per_block             = 8;
+    separated.main_config                    = config_.main_config;
+    separated.main_config.seq_size_per_block = 8;
+    separated.main_config.layer_num          = 2;
+    separated.setTopology({full0, full1}, {{0, {"full0"}}, {1, {"full1"}}});
+    auto draft               = config_.main_config;
+    draft.layer_num          = 1;
+    draft.seq_size_per_block = 8;
+    draft.setTopology({linear}, {{0, {"linear0"}}});
+    separated.mtp_sub_configs.push_back(std::move(draft));
+    separated.validateCrossModuleInvariants();
+
+    refs_.clear();
+    allocator_.reset();
+    config_    = std::move(separated);
+    allocator_ = std::make_shared<CoordinatorCacheManager>(config_);
+    ASSERT_TRUE(allocator_->init());
+    state_ = std::make_shared<PoolTransferState>();
+    pools_ = allocator_->groupBlockPools();
+    ASSERT_EQ(pools_.size(), 3u);
+    blocks_.clear();
+    for (size_t group = 0; group < pools_.size(); ++group) {
+        refs_.push_back(std::make_unique<ScopedReferencedBlocks>(pools_[group], group + 2));
+        blocks_.push_back(refs_.back()->get().back());
+    }
+
+    ASSERT_TRUE(initialize());
+    kv_cache_manager::WriteLocation proposal;
+    proposal.write_session_id = "mtp_session";
+    proposal.block_mask       = kv_cache_manager::BlockMaskOffset{0};
+    proposal.locations        = {{{"tp0_Llinear0", "draft"}, {"tp0_Ffull1", "full1"}, {"tp0_Ffull0", "full0"}}};
+    EXPECT_CALL(*meta_, StartWrite(_, _, _, _, _, _))
+        .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, proposal)));
+    EXPECT_CALL(*meta_, FinishWrite(_, "mtp_session", _, _))
+        .WillOnce(Invoke([&](const auto&, const auto&, const auto&, const auto& locations) {
+            state_->locations = locations;
+            return kv_cache_manager::ClientErrorCode::ER_OK;
+        }));
+    fill(17);
+    backend_->write(backend_->prepareWrite(request()));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend_));
+    EXPECT_EQ(state_->spec_names, (std::vector<std::string>{"tp0_Ffull0", "tp0_Ffull1", "tp0_Llinear0"}));
+    EXPECT_EQ(state_->writes, (std::vector<size_t>{1, 1, 1}));
+    ASSERT_EQ(state_->locations.size(), 1u);
+    EXPECT_CALL(*meta_, MatchLocation(_, _, _, _, _, _, _))
+        .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, state_->locations)));
+    fill(0);
+    auto matched = match(*backend_, request());
+    ASSERT_EQ(matched.matched_blocks_num, 1u);
+    ASSERT_TRUE(read(*backend_, request(), matched.match_meta));
+    EXPECT_EQ(state_->reads, (std::vector<size_t>{1, 1, 1}));
+    for (size_t group = 0; group < pools_.size(); ++group) {
+        auto       tag       = config_.allGroupTags().at(group);
+        const auto module_id = config_.moduleOfTag(tag);
+        for (int layer : config_.layerIdsForGroup(tag, module_id)) {
+            for (const auto& buffer : allocator_->convertIndexToBuffer(layer, tag, blocks_[group], module_id)) {
+                std::vector<uint8_t> bytes(buffer.size_bytes);
+                ASSERT_EQ(cudaMemcpy(bytes.data(), buffer.addr, bytes.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+                EXPECT_EQ(bytes, std::vector<uint8_t>(bytes.size(), 17 + group));
+            }
+        }
+        EXPECT_EQ(pools_[group]->refCount(blocks_[group]), 1u);
+    }
 }
 
 TEST_F(KVCMIndependentPoolTest, PartialWriteFailureAbortsSessionAndReleasesPins) {
@@ -398,9 +474,10 @@ TEST_P(KVCMIndependentPoolFailureTest, SdkFailureProtectsWholeTaskOnlyOnTimeout)
         const std::vector<std::string> uris{"full0", "full1", "linear"};
         for (size_t group = 0; group < pools_.size(); ++group) {
             size_t bytes = 0;
-            for (const auto layer : config_.layerIdsForGroup(config_.groupTags().at(group))) {
-                for (const auto& buffer :
-                     allocator_->convertIndexToBuffer(layer, config_.groupTags().at(group), blocks_[group])) {
+            auto       tag       = config_.allGroupTags().at(group);
+            const auto module_id = config_.moduleOfTag(tag);
+            for (const auto layer : config_.layerIdsForGroup(tag, module_id)) {
+                for (const auto& buffer : allocator_->convertIndexToBuffer(layer, tag, blocks_[group], module_id)) {
                     bytes += buffer.size_bytes;
                 }
             }
@@ -473,7 +550,7 @@ TEST_F(KVCMIndependentPoolTest, WorkerRoutesRepeatedTagsAcrossIndependentOrdersA
     RemoteOperationRequestPB operation;
     operation.set_op(REMOTE_OPERATION_WRITE);
     for (size_t group : {2u, 0u, 1u, 0u}) {
-        operation.add_group_tags(config_.groupTags().at(group));
+        operation.add_group_tags(config_.allGroupTags().at(group));
         operation.add_block_ids(blocks_[group]);
         operation.add_uris("group_" + std::to_string(group) + "_" + std::to_string(operation.uris_size()));
     }

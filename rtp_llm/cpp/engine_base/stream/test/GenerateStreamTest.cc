@@ -280,8 +280,28 @@ protected:
 
     static std::shared_ptr<void> pendingMtpCacheSnapshot(const GenerateStreamPtr& stream, int next_bound) {
         GenerateStream::MtpAsyncDeviceState state;
-        state.next_kv_cache_block_id_gpu        = cacheTable(stream).to(torch::kCUDA);
-        state.next_kv_cache_kernel_block_id_gpu = cacheTable(stream, true).to(torch::kCUDA);
+        const auto& resource = stream->kvCache();
+        // Snapshot tables cover every group the stream owns; the row tags are
+        // what prepareMtpCacheForNextStep and the gatherer index them by.
+        const auto tags = resource.cacheResource().groupTags();
+        const auto tables = [&](bool kernel) {
+            int64_t width = 0;
+            for (const auto& tag : tags) {
+                const auto& ids = kernel ? resource.kernelBlocks(0, tag) : resource.blocks(0, tag);
+                width           = std::max<int64_t>(width, static_cast<int64_t>(ids.size()));
+            }
+            std::vector<int32_t> flat;
+            flat.reserve(tags.size() * static_cast<size_t>(width));
+            for (const auto& tag : tags) {
+                const auto& ids = kernel ? resource.kernelBlocks(0, tag) : resource.blocks(0, tag);
+                flat.insert(flat.end(), ids.begin(), ids.end());
+                flat.insert(flat.end(), static_cast<size_t>(width) - ids.size(), 0);
+            }
+            return torch::tensor(flat, torch::kInt32).reshape({static_cast<int64_t>(tags.size()), 1, width});
+        };
+        state.next_kv_cache_block_id_gpu        = tables(false).to(torch::kCUDA);
+        state.next_kv_cache_kernel_block_id_gpu = tables(true).to(torch::kCUDA);
+        state.next_kv_cache_row_tags            = tags;
         state.previous_seq_len_upper_bound      = stream->seqLength();
         state.next_seq_len_upper_bound          = next_bound;
         stream->setMtpAsyncDeviceState(std::move(state));

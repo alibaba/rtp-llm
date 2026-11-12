@@ -964,6 +964,13 @@ class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
 
 class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
     @classmethod
+    def _post_build_model_config(cls, model_config) -> None:
+        super()._post_build_model_config(model_config)
+        from rtp_llm.models_py.utils.kvcache import declare_draft_cache_tags
+
+        declare_draft_cache_tags(model_config)
+
+    @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)
         config.num_layers = 1
@@ -1091,6 +1098,13 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
 
 class DeepSeekV4DSpark(DeepSeekV4):
     """Runtime-fixed-width DeepSeek-V4 DSpARK proposal model."""
+
+    @classmethod
+    def _post_build_model_config(cls, model_config) -> None:
+        super()._post_build_model_config(model_config)
+        from rtp_llm.models_py.utils.kvcache import declare_draft_cache_tags
+
+        declare_draft_cache_tags(model_config)
 
     @classmethod
     def speculative_weight_alias_names(cls, target_model, draft_model_config):

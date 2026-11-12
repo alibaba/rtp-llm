@@ -5,6 +5,7 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcDumpWriter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
@@ -126,13 +127,13 @@ TEST(DeviceHostCopyTemplateTest, RejectsIncompleteLayersAndPayloadGeometry) {
         makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0, 1}, 16)}),
         {"group0"},
         {pool});
-    group->initialize(0, group->topologyPtr(), group->groupTags(), BackingLayout{48, 48, 48, false});
+    group->initialize(0, group->cacheConfig(), group->groupTags(), BackingLayout{48, 48, 48, false});
     EXPECT_TRUE(Cuda3DBatchDeviceHostCopyStrategy::initializeCopy3DTemplates(*group).empty());
 }
 
 TEST(DeviceHostCopyTemplateTest, CrcBackingsDoNotBuildPlain3DTemplates) {
     auto group = templateGroup(CacheGroupType::FULL);
-    group->initialize(0, group->topologyPtr(), group->groupTags(), BackingLayout{0, 64, 64, true});
+    group->initialize(0, group->cacheConfig(), group->groupTags(), BackingLayout{0, 64, 64, true});
     Cuda3DBatchDeviceHostCopyStrategy strategy({group});
     EXPECT_TRUE(strategy.templates_.empty());
 }
@@ -347,7 +348,7 @@ TEST(DeviceHostCopyTemplateTest, CrcBackingsDoNotDispatchPlainCopyStrategies) {
     BlockTreeTaskPool          tasks(1, 8, "CrcDispatchTest");
     DeviceHostTransferExecutor executor(tasks, 8);
     auto                       group = templateGroup(CacheGroupType::FULL);
-    group->initialize(0, group->topologyPtr(), group->groupTags(), BackingLayout{0, 64, 64, true});
+    group->initialize(0, group->cacheConfig(), group->groupTags(), BackingLayout{0, 64, 64, true});
     size_t attempts = 0;
     executor.strategies_.clear();
     executor.strategies_.push_back(std::make_unique<BatchProbe>([&] {
@@ -545,6 +546,120 @@ TEST(DeviceHostCopyTemplateTest, MixedDeviceBatchIsRejectedBeforePlanExecution) 
     EXPECT_EQ(executor.executeBatch({view, other}, {desc, desc}, {first.get(), second.get()}).copy_error,
               CacheCopyError::INVALID_REQUEST);
     EXPECT_TRUE(planned_devices.empty());
+}
+
+TEST(DeviceHostCopyTemplateTest, HeterogeneousModulesShareLocalLayerZeroRoundTrip) {
+    if (!Cuda3DBatchDeviceHostCopyStrategy::isSupported()) {
+        GTEST_SKIP() << "Requires a non-PPU CUDA 13 build/runtime and driver >= 13";
+    }
+    auto module_a =
+        makeTestGroupSet(0,
+                         makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 4)}),
+                         {"group0"},
+                         {regularPool(4, 1)});
+    auto module_b =
+        makeTestGroupSet(1,
+                         makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 8)}),
+                         {"group0"},
+                         {regularPool(8, 1)});
+    ASSERT_EQ(module_a->localLayerIdsForMember("group0"), (std::vector<int>{0}));
+    ASSERT_EQ(module_b->localLayerIdsForMember("group0"), (std::vector<int>{0}));
+    EXPECT_NE(module_a->groupSetId(), module_b->groupSetId());
+    void* raw = nullptr;
+    ASSERT_EQ(cudaMallocHost(&raw, 32), cudaSuccess);
+    std::unique_ptr<void, decltype(&cudaFreeHost)> storage(raw, cudaFreeHost);
+    auto*                                          input  = static_cast<uint8_t*>(raw);
+    auto*                                          output = input + 16;
+    for (size_t i = 0; i < 4; ++i)
+        input[i] = static_cast<uint8_t>(0xA0 + i);
+    for (size_t i = 0; i < 8; ++i)
+        input[4 + i] = static_cast<uint8_t>(0xB0 + i);
+    std::fill_n(output, 16, 0);
+    for (const auto& pool : {module_a->devicePools().front(), module_b->devicePools().front()}) {
+        ASSERT_EQ(cudaMemset(pool->getBaseAddress(), 0xCC, pool->getTotalSizeBytes()), cudaSuccess);
+    }
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    Cuda3DBatchDeviceHostCopyStrategy strategy({module_a, module_b});
+    auto streams = acquireDeviceHostCopyStreams(module_a->devicePools().front()->deviceIndex());
+    auto result =
+        strategy.tryExecute({{input, 4, 4}, {input + 4, 8, 8}},
+                            {TransferDescriptor::hostToDevice(0, 0, {1}), TransferDescriptor::hostToDevice(1, 0, {1})},
+                            {module_a.get(), module_b.get()},
+                            {streams, DeviceHostCopyDirection::H2D});
+    ASSERT_EQ(result.status, StrategyStatus::DONE);
+    result =
+        strategy.tryExecute({{output, 4, 4}, {output + 4, 8, 8}},
+                            {TransferDescriptor::deviceToHost(0, {1}, 0), TransferDescriptor::deviceToHost(1, {1}, 0)},
+                            {module_a.get(), module_b.get()},
+                            {streams, DeviceHostCopyDirection::D2H});
+    ASSERT_EQ(result.status, StrategyStatus::DONE);
+    EXPECT_TRUE(std::equal(input, input + 4, output));
+    EXPECT_TRUE(std::equal(input + 4, input + 12, output + 4));
+}
+
+TEST(DeviceHostCopyTemplateTest, LocalLayerIdsPreserveMemberOrderAndOffsets) {
+    auto        group     = templateGroup(CacheGroupType::FULL);
+    const auto  templates = Cuda3DBatchDeviceHostCopyStrategy::initializeCopy3DTemplates(*group);
+    const auto& tags      = group->groupTags();
+    ASSERT_EQ(templates.size(), 3u);
+    EXPECT_EQ(templates[0].member_index, 0u);
+    EXPECT_EQ(templates[1].member_index, 1u);
+    EXPECT_EQ(templates[2].member_index, 2u);
+    EXPECT_EQ(templates[0].host_offset, 0u);
+    EXPECT_EQ(templates[1].host_offset, 8u);
+    EXPECT_EQ(templates[2].host_offset, 32u);
+    EXPECT_EQ(templates[0].width_bytes, 4u);
+    EXPECT_EQ(templates[1].width_bytes, 8u);
+    EXPECT_EQ(templates[2].width_bytes, 16u);
+    EXPECT_EQ(templates[0].layer_count, 2u);
+    EXPECT_EQ(templates[1].layer_count, 3u);
+    EXPECT_EQ(templates[2].layer_count, 1u);
+    EXPECT_EQ(group->localLayerIdsForMember(tags[0]), (std::vector<int>{0, 1}));
+    EXPECT_EQ(group->localLayerIdsForMember(tags[1]), (std::vector<int>{0, 1, 2}));
+    EXPECT_EQ(group->localLayerIdsForMember(tags[2]), (std::vector<int>{0}));
+}
+
+TEST(DeviceHostCopyTemplateTest, RejectsUnsupportedScaleStrideLayoutAfterMigration) {
+    auto scale_pool = makeTestDevicePool({{16, 4}}, 4, "scale-fallback-migrated");
+    auto scaled     = makeTestGroupSet(
+        0,
+        makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 16, 4)}),
+        {"group0"},
+        {scale_pool});
+    EXPECT_TRUE(Cuda3DBatchDeviceHostCopyStrategy::initializeCopy3DTemplates(*scaled).empty());
+    auto pool       = regularPool(16, 2);
+    auto mismatched = makeTestGroupSet(
+        0,
+        makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0, 1}, 8)}),
+        {"group0"},
+        {pool});
+    EXPECT_TRUE(Cuda3DBatchDeviceHostCopyStrategy::initializeCopy3DTemplates(*mismatched).empty());
+}
+
+TEST(DeviceHostCopyTemplateTest, DumpMetadataIncludesModuleIdAndLocalLayerId) {
+    auto                            group = templateGroup(CacheGroupType::FULL);
+    const std::vector<BlockIdxType> blocks{1, 2, 3};
+    auto                            desc      = TransferDescriptor::deviceToHost(0, blocks, 1);
+    auto                            metadata  = CrcDumpWriter::dumpMetadata(desc, *group);
+    const auto                      module_id = std::to_string(group->groupSetId());
+    EXPECT_EQ(metadata.at("layout_tile_count"), "6");
+    EXPECT_EQ(metadata.at("layout_tile_0_module_id"), module_id);
+    EXPECT_EQ(metadata.at("layout_tile_0_layer_id"), "0");
+    EXPECT_EQ(metadata.at("layout_tile_0_module_layer_id"), module_id + ":0");
+    EXPECT_EQ(metadata.at("layout_tile_0_offset"), "0");
+    EXPECT_EQ(metadata.at("layout_tile_0_bytes"), "4");
+    EXPECT_EQ(metadata.at("layout_tile_0_member"), "0");
+    EXPECT_EQ(metadata.at("layout_tile_1_module_id"), module_id);
+    EXPECT_EQ(metadata.at("layout_tile_1_layer_id"), "1");
+    EXPECT_EQ(metadata.at("layout_tile_1_module_layer_id"), module_id + ":1");
+    EXPECT_EQ(metadata.at("layout_tile_1_offset"), "4");
+    EXPECT_EQ(metadata.at("layout_tile_1_bytes"), "4");
+    EXPECT_EQ(metadata.at("layout_tile_5_module_id"), module_id);
+    EXPECT_EQ(metadata.at("layout_tile_5_layer_id"), "0");
+    EXPECT_EQ(metadata.at("layout_tile_5_module_layer_id"), module_id + ":0");
+    EXPECT_EQ(metadata.at("layout_tile_5_offset"), "32");
+    EXPECT_EQ(metadata.at("layout_tile_5_bytes"), "16");
+    EXPECT_EQ(metadata.at("layout_tile_5_member"), "2");
 }
 
 }  // namespace

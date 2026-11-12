@@ -31,6 +31,7 @@ using block_tree_cache_test::insertGroupSetResources;
 using block_tree_cache_test::makeHostPool;
 using block_tree_cache_test::makeStructuralDevicePool;
 using block_tree_cache_test::releaseDeviceBlocks;
+using block_transfer_engine_test::makeTestCacheConfig;
 
 class ReadFailureBackend final: public StorageBackend {
 public:
@@ -87,8 +88,9 @@ TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
             pools.emplace(group->groupTags()[member], group->devicePools()[member]);
         }
     }
-    ASSERT_TRUE(backend->init(
-        environment->topology, pools, [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }));
+    ASSERT_TRUE(backend->init(makeTestCacheConfig(*environment->topology), pools, [](int, const std::string&, int) {
+        return std::vector<BlockInfo>{};
+    }));
     environment->cache->loader_.storage_backend_ = backend;
     CacheKeysType keys                           = environment->keys;
     keys.push_back(keys.back() + 1);

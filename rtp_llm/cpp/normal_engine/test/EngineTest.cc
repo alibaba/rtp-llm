@@ -37,8 +37,12 @@ public:
 TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
     class CopyPayloadProcessor: public NormalBatchStreamProcessor {
     public:
-        CopyPayloadProcessor(const ModelConfig& model, const CacheConfig& config, torch::Tensor mapping):
-            NormalBatchStreamProcessor(model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, config, false),
+        CopyPayloadProcessor(const ModelConfig&       model,
+                             const CacheModuleConfig& config,
+                             size_t                   seq_size_per_block,
+                             torch::Tensor            mapping):
+            NormalBatchStreamProcessor(
+                model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, config, seq_size_per_block, false),
             mapping_(std::move(mapping)) {}
 
         absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& groups,
@@ -69,11 +73,11 @@ TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
     model.attn_config.tokens_per_block        = 2;
     model.attn_config.kernel_tokens_per_block = 2;
     CacheConfig config;
-    config.layer_num          = 2;
+    config.main_config.layer_num = 2;
     config.seq_size_per_block = 2;
-    config.dtype              = DataType::TYPE_FP16;
-    config.fromGroupedSpecs({test::makeResolvedMhaSpec(config.dtype, 1, 4, 2, "second"),
-                             test::makeResolvedMhaSpec(config.dtype, 1, 4, 2, "first")},
+    config.main_config.dtype = DataType::TYPE_FP16;
+    config.fromGroupedSpecs({test::makeResolvedMhaSpec(config.dtype(), 1, 4, 2, "second"),
+                             test::makeResolvedMhaSpec(config.dtype(), 1, 4, 2, "first")},
                             {{1}, {0}},
                             {CacheGroupType::FULL, CacheGroupType::FULL});
     config.finalizeBlockNums(4, RuntimeConfig{});
@@ -112,7 +116,8 @@ TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
         reached_model = false;
         auto mapping  = invalid_row ? torch::tensor({1, 1, 2, 2, 1, 2}, torch::kInt32).reshape({2, 3}) :
                                       torch::tensor({1, 1, 2}, torch::kInt32).reshape({1, 3});
-        executor.setBatchProcessor(std::make_unique<CopyPayloadProcessor>(model, config, mapping));
+        executor.setBatchProcessor(
+            std::make_unique<CopyPayloadProcessor>(model, config.main_config, config.seq_size_per_block, mapping));
         auto query                   = std::make_shared<GenerateInput>();
         query->input_ids             = torch::tensor({1, 2, 3}, torch::kInt32);
         query->generate_config       = std::make_shared<GenerateConfig>();
@@ -120,7 +125,7 @@ TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
         auto stream = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, ResourceContext{}, nullptr);
         BatchKVCacheResource resource;
         resource.resetBatchSize(1);
-        resource.initGroups(config.topologyPtr());
+        resource.initGroups(config);
         resource.mutableBlockIds(0, "first").assign({1, 2});
         resource.mutableBlockIds(0, "second").assign({1, 2});
         stream->setKVCache(resource);

@@ -263,15 +263,14 @@ private:
             DeviceBlockPoolPtr pool;
             bool               known_tag = false;
             for (const auto& group_set : cache_.groupSets()) {
-                const auto& topology_tags = group_set->topologyPtr()->groupTags();
-                known_tag |= std::find(topology_tags.begin(), topology_tags.end(), tag) != topology_tags.end();
                 const auto& members      = group_set->groupTags();
                 const auto& member_pools = group_set->devicePools();
                 RTP_LLM_CHECK(members.size() == member_pools.size());
                 const auto found = std::find(members.begin(), members.end(), tag);
                 if (found != members.end()) {
                     RTP_LLM_CHECK(pool == nullptr);
-                    pool = member_pools[std::distance(members.begin(), found)];
+                    pool      = member_pools[std::distance(members.begin(), found)];
+                    known_tag = true;
                 }
             }
             RTP_LLM_CHECK(known_tag);
@@ -281,10 +280,10 @@ private:
         return pools;
     }
 
-    static void appendRequestBlocks(const GroupSetPtr&             group_set,
-                                    const BlockIndicesType&        blocks,
-                                    std::vector<BlockIndicesType>& request_blocks,
-                                    std::vector<std::string>&      request_group_tags) {
+    void appendRequestBlocks(const GroupSetPtr&             group_set,
+                             const BlockIndicesType&        blocks,
+                             std::vector<BlockIndicesType>& request_blocks,
+                             std::vector<std::string>&      request_group_tags) {
         const auto& group_tags = group_set->groupTags();
         RTP_LLM_CHECK(group_tags.size() == blocks.size());
         RTP_LLM_CHECK(request_group_tags.size() == request_blocks.size());
@@ -292,15 +291,15 @@ private:
             const auto& tag   = group_tags[member];
             auto        found = std::find(request_group_tags.begin(), request_group_tags.end(), tag);
             if (found == request_group_tags.end()) {
-                // Preserve leading empty rows from the topology order, without
+                // Preserve leading empty rows from the tag order, without
                 // interpreting another group's private index as ledger identity.
-                for (const auto& topology_tag : group_set->topologyPtr()->groupTags()) {
-                    if (std::find(request_group_tags.begin(), request_group_tags.end(), topology_tag)
+                for (const auto& ordered_tag : orderedGroupTags()) {
+                    if (std::find(request_group_tags.begin(), request_group_tags.end(), ordered_tag)
                         == request_group_tags.end()) {
-                        request_group_tags.push_back(topology_tag);
+                        request_group_tags.push_back(ordered_tag);
                         request_blocks.emplace_back();
                     }
-                    if (topology_tag == tag) {
+                    if (ordered_tag == tag) {
                         break;
                     }
                 }
@@ -309,6 +308,15 @@ private:
             }
             request_blocks[std::distance(request_group_tags.begin(), found)].push_back(blocks[member]);
         }
+    }
+
+    std::vector<std::string> orderedGroupTags() const {
+        std::vector<std::string> tags;
+        for (const auto& group_set : cache_.groupSets()) {
+            const auto& members = group_set->groupTags();
+            tags.insert(tags.end(), members.begin(), members.end());
+        }
+        return tags;
     }
 
     static BlockIndicesType uniqueHeldBlocks(const PreparedRequestResources& out, size_t group_set_id) {
@@ -457,8 +465,8 @@ std::unique_ptr<BlockTreeCache> TreeBenchmarkRunner::buildTreeCache(const Online
         group_payloads.push_back(BenchmarkFixture::computeScaledPayload(gs_info.payload_bytes));
         sliding_windows.push_back(gs_info.sliding_window_size);
     }
-    auto topology =
-        BenchmarkFixture::createTopology(group_specs, group_payloads, profile_.tokens_per_block, {}, sliding_windows);
+    auto cache_config = BenchmarkFixture::createCacheConfig(
+        group_specs, group_payloads, profile_.tokens_per_block, {}, sliding_windows);
 
     std::vector<GroupSetPtr> group_sets;
     for (size_t gs_idx = 0; gs_idx < profile_.group_sets.size(); ++gs_idx) {
@@ -476,13 +484,13 @@ std::unique_ptr<BlockTreeCache> TreeBenchmarkRunner::buildTreeCache(const Online
                                                                      host_pool,
                                                                      nullptr,
                                                                      gs_idx,
-                                                                     topology,
+                                                                     cache_config,
                                                                      group_tags,
                                                                      profile_.group_sets[gs_idx].sliding_window_size,
                                                                      profile_.tokens_per_block));
         } else {
-            group_sets.push_back(
-                BenchmarkFixture::createFullGroupSet({device_pool}, host_pool, nullptr, gs_idx, topology, group_tags));
+            group_sets.push_back(BenchmarkFixture::createFullGroupSet(
+                {device_pool}, host_pool, nullptr, gs_idx, cache_config, group_tags));
         }
     }
 

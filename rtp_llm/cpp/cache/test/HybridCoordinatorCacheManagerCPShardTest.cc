@@ -52,22 +52,23 @@ private:
 // Two-group hybrid; resolve pool IDs from tags because topology IDs are canonicalized.
 CacheConfig makeCPHybridConfig() {
     CacheConfig config;
-    config.dtype              = rtp_llm::DataType::TYPE_FP16;
-    config.layer_num          = 4;
+    config.main_config.dtype                   = rtp_llm::DataType::TYPE_FP16;
+    config.main_config.layer_num               = 4;
     config.seq_size_per_block = 4;
-    config.reuse_cache_tail_blocks = 2;
+    config.main_config.reuse_cache_tail_blocks = 2;
 
-    auto linear_spec = makeResolvedLinearSpec(config.dtype,
+    auto linear_spec = makeResolvedLinearSpec(config.dtype(),
                                               1,
                                               1,
                                               1,
                                               1,
                                               2,
                                               static_cast<uint32_t>(config.seq_size_per_block),
-                                              config.dtype,
-                                              config.dtype,
+                                              config.dtype(),
+                                              config.dtype(),
                                               "linear");
-    auto full_spec = makeResolvedMhaSpec(config.dtype, 1, 1, static_cast<uint32_t>(config.seq_size_per_block), "full");
+    auto full_spec =
+        makeResolvedMhaSpec(config.dtype(), 1, 1, static_cast<uint32_t>(config.seq_size_per_block), "full");
     full_spec->kernel_seq_size_per_block = 2;
 
     config.fromGroupedSpecs(
@@ -94,7 +95,7 @@ CompleteTokenIdsPtr makeTokens(int batch_size, int seq_length, int seq_size_per_
 BatchKVCacheResourcePtr makeBatchRes(int batch_size, const CacheConfig& config, CacheKeysType keys) {
     auto res = std::make_shared<BatchKVCacheResource>();
     res->resetBatchSize(batch_size);
-    res->initGroups(config.topologyPtr());
+    res->initGroups(config);
     for (int b = 0; b < batch_size; ++b) {
         res->setBatchCacheKeys(b, keys);
     }
@@ -115,7 +116,7 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, BorrowedPrefillAllocatesEffecti
     for (int n = 1; n <= 5; ++n) {
         for (int tail : {0, 1}) {
             auto config = makeCPHybridConfig();
-            config.reuse_cache_tail_blocks = n;
+            config.main_config.reuse_cache_tail_blocks = n;
             auto groups = config.topology().groups();
             for (auto& group : groups) {
                 group.policy.prefill_borrow_tail = group.policy.group_type == CacheGroupType::LINEAR;
@@ -156,7 +157,7 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, BorrowedPrefillAllocatesEffecti
 
 TEST_F(HybridCoordinatorCacheManagerCPShardTest, BorrowedPrefillLoadFallbackReplansAtomically) {
     auto config = makeCPHybridConfig();
-    config.reuse_cache_tail_blocks = 5;
+    config.main_config.reuse_cache_tail_blocks = 5;
     auto groups = config.topology().groups();
     for (auto& group : groups) {
         group.policy.prefill_borrow_tail = group.policy.group_type == CacheGroupType::LINEAR;
@@ -201,7 +202,7 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, BorrowedPrefillLoadFallbackRepl
 TEST_F(HybridCoordinatorCacheManagerCPShardTest, LocalDecodeFallbackPreservesPromptCheckpointsAndRollsOtherStates) {
     for (int n = 1; n <= 5; ++n) {
         auto config = makeCPHybridConfig();
-        config.reuse_cache_tail_blocks = n;
+        config.main_config.reuse_cache_tail_blocks = n;
         auto groups = config.topology().groups();
         for (auto& group : groups) {
             group.policy.prefill_borrow_tail = group.policy.group_type == CacheGroupType::LINEAR;
@@ -237,7 +238,7 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, LocalDecodeFallbackPreservesPro
 
 TEST_F(HybridCoordinatorCacheManagerCPShardTest, PrefillNeedBlocksUsesEachGroupsReuseLength) {
     auto config                    = makeCPHybridConfig();
-    config.reuse_cache_tail_blocks = 3;
+    config.main_config.reuse_cache_tail_blocks = 3;
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
     allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));

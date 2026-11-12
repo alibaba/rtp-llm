@@ -59,7 +59,7 @@ public:
     }
 
     void releaseRequestBlocks(std::vector<BlockIndicesType>& blocks, std::vector<std::string>& tags) override {
-        released_request_blocks = blocks;
+        released_request_blocks     = blocks;
         released_request_group_tags = tags;
         blocks.clear();
         tags.clear();
@@ -268,10 +268,10 @@ TEST(BenchmarkFixtureTest, SwaWindowUsesTokenGeometry) {
     // Cover windows spanning two blocks and fitting within a single block.
     for (const size_t tokens_per_block : {128u, 1024u}) {
         SCOPED_TRACE(tokens_per_block);
-        const auto topology = BenchmarkFixture::createTopology(
+        const auto cache_config = BenchmarkFixture::createCacheConfig(
             {{"swa", rtp_llm::CacheGroupType::SWA}}, {64}, tokens_per_block, {}, {129});
         auto group =
-            BenchmarkFixture::createSWAGroupSet({}, nullptr, nullptr, 0, topology, {"swa"}, 129, tokens_per_block);
+            BenchmarkFixture::createSWAGroupSet({}, nullptr, nullptr, 0, cache_config, {"swa"}, 129, tokens_per_block);
         const size_t window_blocks = tokens_per_block == 128 ? 2 : 1;
         EXPECT_EQ(group->computeReuseBlockCount(10), window_blocks);
         auto validator = group->createMatchValidator();

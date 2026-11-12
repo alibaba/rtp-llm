@@ -195,8 +195,8 @@ absl::Status FIFOSchedulerBase::checkChunkedPrefillRequest(const GenerateStreamP
     const int64_t block_size = stream->seqSizePerBlock();
     if (seq_length > 0 && rows > 0 && block_size > 0 && prefill_chunk_alignment_ > 0) {
         for (const auto& group : cache_config.groups()) {
-            const bool linear_reuse = reuse_cache && group.policy.enable_prefix_reuse
-                                      && group.policy.group_type == CacheGroupType::LINEAR;
+            const bool linear_reuse =
+                reuse_cache && group.policy.enable_prefix_reuse && group.policy.group_type == CacheGroupType::LINEAR;
             std::string error_msg;
             const bool  sparse_reuse =
                 reuse_cache && group.policy.enable_prefix_reuse && group.policy.group_type != CacheGroupType::FULL;
@@ -204,13 +204,13 @@ absl::Status FIFOSchedulerBase::checkChunkedPrefillRequest(const GenerateStreamP
                                          && group.supportsBorrowedLinearPrefill(cache_config.seq_size_per_block)
                                          && stream->resourceContext().role_type == RoleType::PREFILL
                                          && stream->maxBatchSize() == 1
-                                         && cache_config.reuse_cache_tail_blocks > 0
-                                         && cache_config.reuse_cache_tail_blocks < std::numeric_limits<int>::max();
+                                         && cache_config.reuse_cache_tail_blocks() > 0
+                                         && cache_config.reuse_cache_tail_blocks() < std::numeric_limits<int>::max();
             const int64_t prompt_blocks = (seq_length + group.seqSizePerBlock() - 1) / group.seqSizePerBlock();
-            if (sparse_reuse && !borrowed_linear && cache_config.reuse_cache_tail_blocks < prompt_blocks) {
+            if (sparse_reuse && !borrowed_linear && cache_config.reuse_cache_tail_blocks() < prompt_blocks) {
                 error_msg = "[chunked_prefill] cache group [" + group.tag
                             + "] requires reuse_cache_tail_blocks >= " + std::to_string(prompt_blocks) + ", got "
-                            + std::to_string(cache_config.reuse_cache_tail_blocks);
+                            + std::to_string(cache_config.reuse_cache_tail_blocks());
             } else if (cp_mapper && cp_mapper->isSharded() && group.policy.group_type != CacheGroupType::FULL
                        && group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
                 error_msg = "[chunked_prefill] cache group [" + group.tag
@@ -311,8 +311,8 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
     std::list<GenerateStreamPtr> selected;
 
     const auto finish_invalid_stream = [&active_streams](auto it, ErrorCode error_code, const std::string& reason) {
-        const auto error_msg = "[chunked_prefill] scheduler rejects stream[" + std::to_string((*it)->streamId())
-                               + "]: " + reason;
+        const auto error_msg =
+            "[chunked_prefill] scheduler rejects stream[" + std::to_string((*it)->streamId()) + "]: " + reason;
         (*it)->reportError(error_code, error_msg);
         (*it)->moveToNext();
         return active_streams.erase(it);
@@ -336,8 +336,8 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
         if (remaining <= 0 || block_size <= 0 || reuse < 0 || reuse % block_size != 0) {
             it = finish_invalid_stream(it,
                                        ErrorCode::EXECUTION_EXCEPTION,
-                                       "invalid chunk window (rows=" + std::to_string(rows)
-                                           + ", reuse=" + std::to_string(reuse) + ", remaining=" + std::to_string(remaining)
+                                       "invalid chunk window (rows=" + std::to_string(rows) + ", reuse="
+                                           + std::to_string(reuse) + ", remaining=" + std::to_string(remaining)
                                            + ", block_size=" + std::to_string(block_size) + ")");
             continue;
         }

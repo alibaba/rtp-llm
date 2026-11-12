@@ -152,7 +152,9 @@ makeDiskPool(size_t payload_bytes, size_t usable_count, std::unique_ptr<DiskBloc
 bool cudaAvailable() {
     try {
         return torch::cuda::is_available();
-    } catch (const std::exception&) { return false; }
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 DeviceBlockPoolPtr
@@ -371,6 +373,16 @@ DeviceBlockPoolPtr makeStructuralDevicePool(size_t group_set_id) {
 
 namespace {
 
+std::shared_ptr<const CacheConfig> makeFixtureCacheConfig(const CacheTopology& topology) {
+    RTP_LLM_CHECK(!topology.groups().empty());
+    auto config                            = std::make_shared<CacheConfig>();
+    config->seq_size_per_block             = topology.groups().front().seqSizePerBlock();
+    config->main_config.seq_size_per_block = config->seq_size_per_block;
+    config->main_config.layer_num          = static_cast<uint32_t>(topology.layers().size());
+    config->setTopology(topology.groups(), topology.layers());
+    return config;
+}
+
 void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
     const bool has_uninitialized = std::any_of(group_sets.begin(), group_sets.end(), [](const GroupSetPtr& group_set) {
         return group_set != nullptr && group_set->groupTags().empty();
@@ -409,9 +421,44 @@ void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
     }
 
     auto topology = block_transfer_engine_test::makeTestTopology(std::move(groups));
+    auto cache_config = makeFixtureCacheConfig(*topology);
     for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
-        group_sets[group_set_id]->initialize(group_set_id, topology, {topology->groupTags()[group_set_id]});
+        group_sets[group_set_id]->initialize(group_set_id, cache_config, {topology->groupTags()[group_set_id]});
     }
+}
+
+// Resolves the shared CacheConfig retained by initialized GroupSets.
+// For legacy single-module GroupSets (topology-only init), falls back to
+// makeFixtureCacheConfig from the first GroupSet's topology.
+// Rejects mismatched configs or missing metadata before storage init.
+std::shared_ptr<const CacheConfig> resolveStorageCacheConfig(const std::vector<GroupSetPtr>& group_sets) {
+    RTP_LLM_CHECK_WITH_INFO(!group_sets.empty(), "storage setup requires at least one group set");
+    RTP_LLM_CHECK_WITH_INFO(group_sets.front() != nullptr, "storage setup encountered null group set at index 0");
+    RTP_LLM_CHECK_WITH_INFO(!group_sets.front()->groupTags().empty(), "storage setup requires initialized group sets");
+
+    auto storage_config = group_sets.front()->cacheConfig();
+    if (storage_config) {
+        for (size_t i = 1; i < group_sets.size(); ++i) {
+            RTP_LLM_CHECK_WITH_INFO(
+                group_sets[i] != nullptr, "storage setup encountered null group set at index %zu", i);
+            RTP_LLM_CHECK_WITH_INFO(group_sets[i]->cacheConfig() == storage_config,
+                                    "fixture GroupSets must share the same CacheConfig; "
+                                    "group set %zu has a different config",
+                                    i);
+        }
+        return storage_config;
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(!group_sets.empty() && group_sets.front() != nullptr,
+                            "storage setup requires at least one group set");
+    auto cache_config = group_sets.front()->cacheConfig();
+    RTP_LLM_CHECK_WITH_INFO(cache_config != nullptr, "fixture group set has no cache config");
+    for (size_t i = 1; i < group_sets.size(); ++i) {
+        RTP_LLM_CHECK_WITH_INFO(group_sets[i] != nullptr, "storage setup encountered null group set at index %zu", i);
+        RTP_LLM_CHECK_WITH_INFO(group_sets[i]->cacheConfig() == cache_config,
+                                "fixture GroupSets must share the same CacheConfig");
+    }
+    return cache_config;
 }
 
 }  // namespace
@@ -429,24 +476,23 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
     if (!config.enable_remote_cache) {
         storage_backend = nullptr;
     }
-    std::shared_ptr<const CacheTopology> storage_topology;
+    std::shared_ptr<const CacheConfig>    storage_config;
     StorageBackend::PoolsByTag           storage_pools;
-    StorageBackend::BufferResolver       storage_buffer_resolver;
+    StorageBackend::StorageBufferResolver storage_buffer_resolver;
     if (storage_backend != nullptr) {
-        storage_topology = group_sets.front()->topologyPtr();
+        storage_config = resolveStorageCacheConfig(group_sets);
         for (const auto& group_set : group_sets) {
             for (size_t member = 0; member < group_set->groupTags().size(); ++member) {
                 RTP_LLM_CHECK(
                     storage_pools.emplace(group_set->groupTags()[member], group_set->devicePools()[member]).second);
             }
         }
-        storage_buffer_resolver = [topology = storage_topology,
-                                   pools    = storage_pools](int layer_id, const std::string& tag, int block_id) {
-            const auto layers = topology->layerIdsForGroup(tag);
-            const auto layer  = std::find(layers.begin(), layers.end(), layer_id);
-            RTP_LLM_CHECK(layer != layers.end());
-            return pools.at(tag)->convertIndexToBuffer(static_cast<int>(std::distance(layers.begin(), layer)),
-                                                       block_id);
+        storage_buffer_resolver = [cache_config = storage_config,
+                                   pools = storage_pools](int layer_ordinal, const std::string& tag, int block_id) {
+            const auto& module_config = cache_config->moduleConfig(cache_config->moduleOfTag(tag));
+            const auto  layer_ids     = module_config.layerIdsForGroup(tag);
+            RTP_LLM_CHECK(layer_ordinal >= 0 && static_cast<size_t>(layer_ordinal) < layer_ids.size());
+            return pools.at(tag)->convertIndexToBuffer(layer_ordinal, block_id);
         };
     }
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(std::move(metrics_reporter));
@@ -474,7 +520,7 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                   std::move(task_pool),
                                                   std::move(cache_metrics_reporter));
     if (cache->storageBackend()) {
-        RTP_LLM_CHECK_WITH_INFO(cache->storageBackend()->init(std::move(storage_topology),
+        RTP_LLM_CHECK_WITH_INFO(cache->storageBackend()->init(std::move(storage_config),
                                                               std::move(storage_pools),
                                                               std::move(storage_buffer_resolver)),
                                 "StorageBackend init failed");
@@ -703,7 +749,9 @@ bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& c
         return true;
     } catch (const std::exception& error) {
         ADD_FAILURE() << "queue-rejection guard failed to restore thread pool: " << error.what();
-    } catch (...) { ADD_FAILURE() << "queue-rejection guard failed to restore thread pool with unknown exception"; }
+    } catch (...) {
+        ADD_FAILURE() << "queue-rejection guard failed to restore thread pool with unknown exception";
+    }
     cache.task_pool_.reset();
     return false;
 }

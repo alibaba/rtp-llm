@@ -950,7 +950,9 @@ absl::Status MtpBatchStreamProcessor::gatherLinearReplayInputs(
     if (block_ids.dim() == 2) {
         block_ids = block_ids.unsqueeze(0);
     }
-    RTP_LLM_CHECK_WITH_INFO(block_ids.dim() == 3 && block_ids.size(0) == groups && block_ids.size(1) == batch,
+    // The table carries every module's rows in main-then-sub order; replay
+    // group ids are flat main-module ids, so the main prefix is what matters.
+    RTP_LLM_CHECK_WITH_INFO(block_ids.dim() == 3 && block_ids.size(0) >= groups && block_ids.size(1) == batch,
                             "LINEAR replay requires a grouped [group,batch,block] table");
     const auto active_rows = replay.slot_ids >= 0;
     for (const int group_id : cache_config.linear_replay.group_ids) {

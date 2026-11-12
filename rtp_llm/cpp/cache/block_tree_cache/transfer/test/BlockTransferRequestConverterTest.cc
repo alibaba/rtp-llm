@@ -75,7 +75,7 @@ std::vector<GroupSetPtr> protectedGroupSets() {
     auto groups = makeGroupSets();
     for (const auto& group : groups) {
         group->initialize(group->groupSetId(),
-                          group->topologyPtr(),
+                          group->cacheConfig(),
                           group->groupTags(),
                           block_transfer_engine_test::makeTestBackingLayout(group->payloadBytes(), true));
     }
@@ -482,7 +482,7 @@ TEST(BlockTransferRequestConverterTest, ResolvesReorderedLocalGroupSetAndPoolSlo
 
     const auto&                     source   = groupSets()[2];
     auto                            receiver = makeTestGroupSet(0,
-                                     source->topologyPtr(),
+                                     source->cacheConfig()->topologyPtr(),
                                      {"group4", "group3"},
                                      {source->devicePools()[1], source->devicePools()[0]},
                                      source->hostPool(),
@@ -593,13 +593,13 @@ TEST(BlockTransferRequestConverterTest, CrcRoutesReorderedGroupSetsAndMembersByT
     auto        sender_groups = protectedGroupSets();
     const auto& source        = sender_groups[2];
     auto        receiver      = makeTestGroupSet(0,
-                                     source->topologyPtr(),
+                                     source->cacheConfig()->topologyPtr(),
                                                  {"group4", "group3"},
                                                  {source->devicePools()[1], source->devicePools()[0]},
                                      source->hostPool(),
                                      source->diskPool());
     receiver->initialize(0,
-                         receiver->topologyPtr(),
+                         receiver->cacheConfig(),
                          receiver->groupTags(),
                          block_transfer_engine_test::makeTestBackingLayout(receiver->payloadBytes(), true));
     const std::vector<TransferDescriptor> inputs{
@@ -668,7 +668,7 @@ TEST(BlockTransferRequestConverterTest, CrcRejectsMalformedSecondItemWithoutPubl
 TEST(BlockTransferRequestConverterTest, MixedGroupLayoutsRoundTripWithLocalCrcConfiguration) {
     auto        groups   = protectedGroupSets();
     const auto& ordinary = groups[2];
-    ordinary->initialize(2, ordinary->topologyPtr(), ordinary->groupTags());
+    ordinary->initialize(2, ordinary->cacheConfig(), ordinary->groupTags());
     const auto               first  = TransferDescriptor::hostToDevice(0, 21, {11});
     const auto               second = TransferDescriptor::hostToDevice(2, 22, {12, 13});
     MemoryOperationRequestPB request;

@@ -119,9 +119,10 @@ public:
         return control_config_;
     }
 
-    bool init(const CacheTopology&                                                topology,
-              StorageBackend::BufferResolver                                      buffer_resolver,
+    bool init(std::shared_ptr<const CacheConfig>                                  cache_config,
+              StorageBackend::StorageBufferResolver                               buffer_resolver,
               const std::function<const DeviceBlockPoolPtr&(const std::string&)>& pool_resolver) {
+        RTP_LLM_CHECK_WITH_INFO(cache_config != nullptr, "KVCM storage backend requires a cache config");
         RTP_LLM_LOG_INFO("start init BlockTree KVCM storage backend");
         const auto quarantine_abort_ratio = remoteCacheQuarantineAbortRatio();
         if (!quarantine_abort_ratio.has_value()) {
@@ -136,13 +137,13 @@ public:
         }
         std::vector<std::string> full_group_tags;
         std::vector<std::string> other_group_tags;
-        // CacheConfig::blockSizeBytesForGroup resolves MTP child-owned physical
-        // strides; do not replace this with topology-derived geometry.
+        // CacheConfig::blockSizeBytesForGroup resolves the owning module's
+        // physical strides; do not replace this with topology-derived geometry.
         std::unordered_map<std::string, size_t> group_block_size_bytes;
-        const std::vector<GroupBase>&           groups = topology.groups();
-        topology_ = &topology;
-        group_block_size_bytes.reserve(groups.size());
-        for (const auto& group : groups) {
+        const auto                              identities = cache_config->allGroupIdentities();
+        group_block_size_bytes.reserve(identities.size());
+        for (const auto& identity : identities) {
+            const auto& group = cache_config->moduleConfig(identity.module_id).group(identity.tag);
             if (!group.policy.enable_prefix_reuse) {
                 continue;
             }
@@ -152,14 +153,15 @@ public:
             } else {
                 other_group_tags.push_back(group.tag);
             }
-            group_block_size_bytes.emplace(group.tag, cache_config_.blockSizeBytesForGroup(group.tag));
+            group_block_size_bytes.emplace(group.tag,
+                                           cache_config->blockSizeBytesForGroup(group.tag, identity.module_id));
         }
         if (other_group_tags.empty()) {
             group_policy_ = std::make_unique<kvcm::FullLayerGroupPolicy>(
-                topology, buffer_resolver, full_group_tags, other_group_tags, std::move(group_block_size_bytes));
+                cache_config, buffer_resolver, full_group_tags, other_group_tags, std::move(group_block_size_bytes));
         } else {
             group_policy_ = std::make_unique<kvcm::FullLinearLayerGroupPolicy>(
-                topology, buffer_resolver, full_group_tags, other_group_tags, std::move(group_block_size_bytes));
+                cache_config, buffer_resolver, full_group_tags, other_group_tags, std::move(group_block_size_bytes));
         }
         if (!group_policy_->init()) {
             RTP_LLM_LOG_ERROR("BlockTree KVCM group policy init failed");
@@ -175,7 +177,7 @@ public:
                     client_config_map.clear();
                     client_config_map.emplace("", std::move(config));
                 }
-                if (group_policy_->groups().size() != topology.groups().size()) {
+                if (group_policy_->groups().size() != static_cast<size_t>(cache_config->allGroupNums())) {
                     // Keep custom settings and aliases, but only advertise
                     // payloads that the runtime can actually reuse and transfer.
                     auto config = client_config_map.at("");
@@ -462,7 +464,7 @@ public:
         // A canonical CP key already covers every shard. Do not multiply this
         // logical token count by the number of TP ranks or payload groups.
         collector.remote_read_token_num =
-            static_cast<int64_t>(remote_blocks * topology_->groups().front().cacheKeyTokenStride());
+            static_cast<int64_t>(remote_blocks * cache_config_.groups().front().cacheKeyTokenStride());
         collector.remote_read_fail_qps = false;
     }
 
@@ -866,7 +868,8 @@ private:
                 }
                 auto& run = runs[group.tag];
                 run = available ? run + 1 : 0;
-                const size_t required = std::min(i + 1 - local, topology_->group(group.tag).reuseBlockCount(i + 1));
+                const size_t required =
+                    std::min(i + 1 - local, cache_config_.groupByTagGlobal(group.tag).reuseBlockCount(i + 1));
                 complete = complete && run >= required;
             }
             if (complete) {
@@ -877,7 +880,7 @@ private:
         for (size_t i = local; i < matched; ++i) {
             auto& location = locations[i];
             location.erase(std::remove_if(location.begin(), location.end(), [&](const auto& spec) {
-                const auto& group = topology_->group(infos.at(spec.spec_name).tag);
+                const auto& group = cache_config_.groupByTagGlobal(infos.at(spec.spec_name).tag);
                 return matched - i > group.reuseBlockCount(matched) || spec.uri.empty();
             }), location.end());
         }
@@ -982,9 +985,14 @@ private:
                 const std::string spec_name =
                     kvcm::genLocationSpecName(rank, group.group_name, runtime_config_.model_name, merge_full_specs_);
                 auto& size = (*infos)[spec_name];
-                RTP_LLM_CHECK_WITH_INFO(group.block_size_bytes <= static_cast<size_t>(std::numeric_limits<int64_t>::max() - size),
-                                        "KVCM location spec size overflow [%s]", spec_name.c_str());
-                size += group.block_size_bytes;
+                // Merged FULL specs share one location spec across several
+                // groups, so the spec size is the per-module payload sum.
+                const size_t group_block_size_bytes =
+                    cache_config_.blockSizeBytesForGroup(group.tag, cache_config_.moduleOfTag(group.tag));
+                RTP_LLM_CHECK_WITH_INFO(
+                    group_block_size_bytes <= static_cast<size_t>(std::numeric_limits<int64_t>::max() - size),
+                    "KVCM location spec size overflow [%s]", spec_name.c_str());
+                size += group_block_size_bytes;
             }
         }
         return {std::move(infos), std::move(groups)};
@@ -1006,7 +1014,7 @@ private:
         const auto& backends = sdk->sdk_backend_configs();
         if (runtime_config_.model_name == "DeepSeekV41" && full_group_tags.size() == 3 && backends.size() == 1
             && std::dynamic_pointer_cast<kvcm::TairMempoolSdkConfig>(backends.front())) {
-            const auto& first = topology_->group(full_group_tags.front());
+            const auto& first = cache_config_.groupByTagGlobal(full_group_tags.front());
             std::set<std::string> names;
             bool compatible = true;
             for (const auto& [id, group] : group_policy_->groups()) {
@@ -1014,7 +1022,7 @@ private:
                 if (!group.is_full)
                     continue;
                 names.insert(kvcm::genLocationSpecName(0, group.group_name, runtime_config_.model_name));
-                const auto& member = topology_->group(group.tag);
+                const auto& member = cache_config_.groupByTagGlobal(group.tag);
                 compatible = compatible && member.seqSizePerBlock() == first.seqSizePerBlock()
                              && member.cacheKeyTokenStride() == first.cacheKeyTokenStride()
                              && member.policy.cp_mapping == first.policy.cp_mapping
@@ -1025,7 +1033,7 @@ private:
         auto [location_infos, location_groups] = genLocationSpecs();
 
         const std::string model_name = runtime_config_.model_name;
-        const std::string dtype      = getDataTypeStr(cache_config_.dtype);
+        const std::string dtype      = getDataTypeStr(cache_config_.dtype());
         std::string       extra      = kv_cache_config_.kvcm_model_extra_info;
         extra += '/' + autil::EnvUtil::getEnv("BIZ_NAME", std::string("")) + '/'
                  + std::to_string(hashString(autil::EnvUtil::getEnv("CHECKPOINT_PATH", std::string(""))));
@@ -1036,7 +1044,7 @@ private:
         std::stringstream identity;
         identity << "instance_group: " << kv_cache_config_.kvcm_instance_group
                  << ";block_size:" << cache_config_.seq_size_per_block << ";model_name:" << model_name
-                 << ";dtype_str:" << dtype << ";use_mla:" << cache_config_.use_mla
+                 << ";dtype_str:" << dtype << ";use_mla:" << cache_config_.use_mla()
                  << ";fp8_kv_cache:" << kv_cache_config_.fp8_kv_cache << ";tp_size:" << parallelism_config_.tp_size
                  << ";dp_size:" << parallelism_config_.dp_size << ";extra_info:" << extra
                  << ";location_spec_info:" << autil::legacy::ToJsonString(location_infos, true)
@@ -1062,7 +1070,7 @@ private:
                                                location_groups,
                                                kvcm::ModelDeployment(model_name,
                                                                      dtype,
-                                                                     cache_config_.use_mla,
+                                                                     cache_config_.use_mla(),
                                                                      static_cast<int32_t>(parallelism_config_.tp_size),
                                                                      static_cast<int32_t>(parallelism_config_.dp_size),
                                                                      1,
@@ -1548,7 +1556,6 @@ private:
     std::atomic<uint64_t> write_trace_sequence_{1};
     std::atomic<uint64_t> finish_write_trace_sequence_{1};
     const bool            sdk_check_enabled_;
-    const CacheTopology*  topology_ = nullptr;
     bool                  has_swa_ = false;
     bool                  merge_full_specs_ = false;
     const int32_t         default_query_type_ = static_cast<int32_t>(kv_cache_manager::QueryType::QT_PREFIX_MATCH);
@@ -1597,10 +1604,12 @@ std::optional<KVCMStorageBackend::ControlConfig> KVCMStorageBackend::controlConf
 }
 
 bool KVCMStorageBackend::initImpl() {
+    // KVCM's protocol metadata is owned by the CP-adjusted CacheConfig the
+    // factory passed to StorageBackend, not by the transitional legacy topology.
     return impl_->init(
-        topology(),
-        [this](int layer_id, const std::string& tag, int block_id) {
-            return convertIndexToBuffer(layer_id, tag, block_id);
+        std::make_shared<CacheConfig>(cacheConfig()),
+        [this](int layer_ordinal, const std::string& tag, int block_id) {
+            return convertIndexToBuffer(layer_ordinal, tag, block_id);
         },
         [this](const std::string& tag) -> const DeviceBlockPoolPtr& { return devicePool(tag); });
 }
