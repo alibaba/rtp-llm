@@ -83,21 +83,32 @@ class CompressedTensorsNvfp4Test(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "dense Qwen3"):
             self.load(self.config)
 
-    def test_regex_exclusions(self):
-        result = CompressedTensorsNvfp4Config(
-            ignore_patterns=[r"re:^model\.layers\..*\.mlp\."]
-        )
-        self.assertTrue(result.is_module_excluded("model.layers.0.mlp.up_proj.weight"))
-        self.assertFalse(
-            result.is_module_excluded("model.layers.0.self_attn.q_proj.weight")
-        )
+    def test_layer_exclusions_rejected_before_loading(self):
+        for patterns in (
+            ["lm_head", "model.layers.0.mlp.down_proj"],
+            ["lm_head", r"re:^model\.layers\..*\.mlp\."],
+            [r"re:^lm_head$"],
+            [],
+            "lm_head",
+        ):
+            config = copy.deepcopy(self.config)
+            config["quantization_config"]["ignore"] = patterns
+            with self.subTest(patterns=patterns), self.assertRaises(ValueError):
+                self.load(config)
+
+    def test_global_scale_rank_is_canonical(self):
+        for shape in ((), (1,), (1, 1)):
+            with self.subTest(shape=shape):
+                value = reciprocal_global_scale([torch.tensor(2.0).reshape(shape)])
+                self.assertEqual(value.shape, torch.Size([]))
+                self.assertEqual(value.item(), 0.5)
 
     def test_reciprocal_and_gemm_scale_convention(self):
         weight = reciprocal_global_scale([torch.tensor([10560.0])] * 3)
         activation = reciprocal_global_scale([torch.tensor([[3968.0]])] * 3)
         self.assertAlmostEqual((1 / activation).item(), 3968.0, places=3)
         torch.testing.assert_close(
-            weight * activation, torch.tensor([[1 / (10560.0 * 3968.0)]])
+            weight * activation, torch.tensor(1 / (10560.0 * 3968.0))
         )
 
     def test_invalid_or_unequal_globals_fail(self):
@@ -133,6 +144,42 @@ class CompressedTensorsNvfp4Test(unittest.TestCase):
         self.assertTrue((scales >= 0).all())
         self.assertEqual(tile["weight_global_scale"], 10560.0)
         self.assertEqual(tile["input_global_scale"], 3968.0)
+
+    def test_full_checkpoint_global_audit(self):
+        fixtures = Path(__file__).parent / "fixtures/nvfp4"
+        report = json.loads((fixtures / "checkpoint_audit.json").read_text())
+        self.assertEqual(report["revision"], "e391349c110709b87bfc2ad2fde3f50dc5839fd8")
+        self.assertEqual(
+            hashlib.sha256((fixtures / "config.json").read_bytes()).hexdigest(),
+            report["config_sha256"],
+        )
+        self.assertEqual(len(report["values"]), 504)
+        self.assertEqual(
+            report["global_storage"], dict(dtype="F32", shape=[1], count=504)
+        )
+        checks = 0
+        for layer in range(36):
+            for suffix in ("weight_global_scale", "input_global_scale"):
+                for group in (
+                    ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"),
+                    ("mlp.gate_proj", "mlp.up_proj"),
+                ):
+                    values = [
+                        report["values"][f"model.layers.{layer}.{name}.{suffix}"]
+                        for name in group
+                    ]
+                    self.assertEqual(len(set(values)), 1)
+                    actual = reciprocal_global_scale(
+                        [torch.tensor([value]) for value in values]
+                    )
+                    self.assertEqual(actual.shape, torch.Size([]))
+                    checks += 1
+        self.assertEqual(checks, report["fused_global_checks"])
+        for source in report["range_sources"]:
+            payload = base64.b64decode(source["payload_base64"])
+            self.assertEqual(
+                hashlib.sha256(payload).hexdigest(), source["payload_sha256"]
+            )
 
     def test_modelopt_dispatch_unchanged(self):
         # Legacy native configuration round trip remains distinct from CT.

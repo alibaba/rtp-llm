@@ -1,0 +1,2 @@
+# Preserve the pinned upstream config bytes for SHA256 provenance checks.
+config.json -text

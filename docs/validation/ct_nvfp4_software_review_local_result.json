@@ -1,0 +1,59 @@
+{
+  "mode": "software_reference_only",
+  "native_nvfp4_tested": false,
+  "python": "3.11.18 | packaged by conda-forge | (main, Oct 26 2026, 11:29:07) [MSC v.1944 64 bit (AMD64)]",
+  "platform": "Windows-10-10.0.26100-SP0",
+  "torch": "2.5.1+cu124",
+  "cuda_runtime": "12.4",
+  "checks": {
+    "real_payload_hashes": true,
+    "real_weight_reconstruction": {
+      "max_abs_error": 2.980232241545089e-09
+    },
+    "all_256_packed_byte_patterns": true,
+    "all_254_finite_e4m3_codes": true,
+    "gpu_fp32_gemm": {
+      "max_abs_error": 2.0432425261278364e-10,
+      "relative_l2_error": 1.243562523624692e-07
+    },
+    "gemm_outer_alpha": {
+      "max_abs_error": 7.197721520364742e-11,
+      "relative_l2_error": 6.532895348403238e-08
+    },
+    "group_aligned_k_and_row_partition_algebra": true,
+    "zero_padding_algebra": true,
+    "negative_control_missing_global_reciprocal": {
+      "detected": true,
+      "relative_l2_error": 111513598.99999978
+    },
+    "negative_control_swapped_nibbles": {
+      "detected": true,
+      "relative_l2_error": 1.4295525905694109
+    },
+    "negative_control_wrong_group_scales": {
+      "detected": true,
+      "relative_l2_error": 0.5230824479563628
+    },
+    "unequal_fused_globals_rejected": true
+  },
+  "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "capability": [
+    8,
+    6
+  ],
+  "checkpoint": {
+    "model": "RedHatAI/Qwen3-8B-NVFP4",
+    "revision": "e391349c110709b87bfc2ad2fde3f50dc5839fd8",
+    "module": "model.layers.0.self_attn.q_proj",
+    "slice": "weight[0:128,0:128] (not a full layer)"
+  },
+  "status": "PASS",
+  "elapsed_seconds": 0.7854952812194824,
+  "peak_allocated_bytes": 9309696,
+  "limitations": [
+    "No native NVFP4 kernel",
+    "No production loader/TP/EP execution",
+    "No whole model",
+    "No performance claim"
+  ]
+}

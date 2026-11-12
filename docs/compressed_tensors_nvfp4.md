@@ -15,6 +15,7 @@ weights to a resident BF16 copy or introduce a new CUDA kernel.
 | `weight_global_scale`, FP32 scalar | `weight_scale_2 = reciprocal(weight_global_scale)` |
 | `input_global_scale`, FP32 scalar | `input_scale = reciprocal(input_global_scale)` |
 
+Global multipliers are normalized to zero-dimensional FP32 tensors.
 Runtime activation quantization receives `1/input_scale`; GEMM uses
 `alpha = weight_scale_2 * input_scale`. Thus alpha equals
 `1/(weight_global_scale * input_global_scale)`.
@@ -28,7 +29,7 @@ units separately. Existing tensor-parallel splitting and backend swizzling are r
 
 - One `Linear` config group, `nvfp4-pack-quantized`, compressed status.
 - Symmetric static float4/group16 weights and local dynamic float4/group16 activations.
-- Dense `qwen3`; unquantized `lm_head`; exact module and `re:` ignore patterns.
+- Dense `qwen3`; unquantized `lm_head`; only `ignore=["lm_head"]` (other BF16 islands are rejected).
 - No transform recipes, sparsity recipes, output/KV quantization, Hybrid models or MoE.
 - Native execution requires a supported Blackwell backend and built Linux RTP-LLM environment.
 
@@ -186,3 +187,77 @@ PR #1664 status checked on 2026-11-09: CLA success, no submitted reviews/comment
 the CI Request Trigger run reported `action_required` with no jobs. The repository
 workflow documents a fresh LGTM gate before internal CI is triggered. No CI pass
 or GPU result is inferred from those statuses.
+
+## Review audit (2026-11-12)
+
+### Merge conflict cause
+
+Upstream advanced from `97ebd38f8b` to `823f0173c1`. PR #1543 added the
+Qwen3.8-Flash-Next recipe/configuration and tests; #1521 also added test targets.
+The only conflicts were the compressed-tensors parsing hunk in
+`config/quant_config.py` (upstream formatting versus the adapter insertion),
+and appended targets in `config/test/BUILD` and `model_loader/test/BUILD`.
+Both sides' functionality/targets are preserved. These were overlapping edits,
+not a second implementation of this checkpoint adapter.
+
+### Five review findings
+
+1. **Local-scale layout: upstream contract confirmed for the pinned version.**
+   The exact checkpoint-declared package, normalized as
+   `compressed-tensors==0.11.1a20250917`, was downloaded from PyPI and SHA256
+   verified. Its compressor preserves scale tensors without swizzling; its
+   GROUP dequantization unflattens the last dimension and applies
+   `scale.unsqueeze(-1)`. Selected upstream pack/unpack/dequantize function
+   bodies were executed eagerly (compile decorators omitted), not reimplemented
+   as our reference. The real tile matches upstream dequantization within FP32
+   rounding. See [upstream format results](validation/ct_nvfp4_upstream_format_result.json).
+   This is not a full-package/native execution or original-BF16 quality test.
+2. **Mixed BF16 exclusions: confirmed scope/pricing gap, addressed by rejection.**
+   Arbitrary layer exclusions could leave BF16 linears under FP4 memory pricing.
+   The initial adapter now requires exactly `ignore=["lm_head"]` and rejects
+   extra exact names, regexes, empty lists and other forms before loading. It
+   does not change generic memory estimation or claim mixed-precision support.
+3. **Equal fused globals: intentional guard, now backed by a complete audit.**
+   Fresh bounded-range reads of both pinned safetensors shards confirm all
+   504 global values are positive F32 `[1]` scalars; all 144 QKV/gate-up pairs
+   of equality checks pass. All 252 local-scale tensor shapes/dtypes were
+   checked. [checkpoint_audit.json](../rtp_llm/config/test/fixtures/nvfp4/checkpoint_audit.json)
+   includes every scalar, source header hashes, raw scalar-region bytes/hashes
+   and layer-0 metadata. CPU tests independently repeat all equality checks.
+   This proves compatibility only for this pinned checkpoint, not all CT models.
+   Unequal globals remain rejected; errors now include actual layer/module
+   names and values. No silent max-scale substitution is introduced.
+4. **Scalar rank: normalized proactively; native rejection was not established.**
+   Source globals are `[1]` and the generic loader unsqueezes them to `[1,1]`.
+   The adapter now returns FP32 scalars with shape `[]`, matching the usual
+   fused ModelOpt path. Unit tests cover raw `[]`, `[1]` and `[1,1]`, and assert
+   actual loaded scalar shapes. The native test covers these ranks too, but
+   still needs execution on Blackwell.
+5. **Nibble-order oracle: test blind spot confirmed and corrected.**
+   The pinned upstream packer puts even K in the low nibble; all 256 packed
+   bytes round-trip, and the asymmetric pair `[0.5,6]` packs to `0x71`.
+   Earlier native-test references decoded both operands with one helper,
+   allowing a common adjacent-pair permutation to cancel. The revised native
+   test uses known asymmetric exactly representable activations (global=448)
+   and requires their quantization round-trip to match the pre-quantization
+   input exactly. Its expected GEMM uses that known input, and a weight-only
+   nibble-swap must change output substantially. This strengthened native test
+   is authored, not executed; CT-to-kernel compatibility still needs hardware.
+
+Reproduce external-source checks (network required; small bounded downloads):
+
+```sh
+python scripts/audit_ct_nvfp4_checkpoint.py --output /path/to/checkpoint_audit.json
+python scripts/audit_ct_nvfp4_format.py --wheel /path/to/compressed_tensors.whl --output /path/to/format_result.json
+```
+
+After merging upstream, 12 parser/scale/audit CPU tests and 25 isolated
+Python-loader/regression tests pass. The one native GPU test skips on the
+available hardware. The original 4060 report remains historical evidence
+for its original helper version; it is not presented as a rerun of the new code.
+
+The revised scalar helper also passed the 12 software checks again on the
+local RTX 3050 SM86; the new report is
+[ct_nvfp4_software_review_local_result.json](validation/ct_nvfp4_software_review_local_result.json).
+This rerun is separate from the historical RTX 4060 result and does not
+execute a native FP4 instruction/kernel.

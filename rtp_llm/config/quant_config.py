@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import re
 import weakref
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -909,15 +908,14 @@ class CompressedTensorsNvfp4Config(ModelOptFp4Config):
                 "compressed-tensors NVFP4 requires serialized float4/group16"
             )
         super().__init__(bits, group_size, is_quanted, **kwargs)
-        patterns = kwargs.get("ignore_patterns", [])
-        if not isinstance(patterns, list):
-            raise ValueError("NVFP4 ignore must be a list of module names or regexes")
-        self.ignore_patterns = list(patterns)
-        for pattern in self.ignore_patterns:
-            if not isinstance(pattern, str):
-                raise ValueError("NVFP4 ignore entries must be strings")
-            if pattern.startswith("re:"):
-                re.compile(pattern[3:])
+        patterns = kwargs.get("ignore_patterns", ["lm_head"])
+        # The current memory estimator does not price arbitrary BF16 islands.
+        # Keep this serialized recipe scoped to the audited dense checkpoint.
+        if patterns != ["lm_head"]:
+            raise ValueError(
+                "NVFP4 currently requires ignore=[lm_head]; mixed BF16 layer exclusions are not supported"
+            )
+        self.ignore_patterns = ["lm_head"]
 
     @classmethod
     def get_method(cls):
@@ -928,11 +926,7 @@ class CompressedTensorsNvfp4Config(ModelOptFp4Config):
         return cls(**config)
 
     def is_module_excluded(self, name):
-        module = name.removesuffix(".weight")
-        return any(
-            re.search(p[3:], module) is not None if p.startswith("re:") else p == module
-            for p in self.ignore_patterns
-        )
+        return name.removesuffix(".weight") == "lm_head"
 
     @classmethod
     def from_checkpoint(cls, config):

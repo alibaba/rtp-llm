@@ -96,15 +96,14 @@ class CompressedTensorsNvfp4WeightTest(unittest.TestCase):
             )
         )
         torch.testing.assert_close(
-            wrapper.scale_2.process_fun([torch.tensor([2.0])] * 3), torch.tensor([0.5])
+            wrapper.scale_2.process_fun([torch.tensor([2.0])] * 3), torch.tensor(0.5)
         )
         with self.assertRaisesRegex(ValueError, "identical"):
             wrapper.input_scale.process_fun([torch.tensor([2.0]), torch.tensor([3.0])])
 
-    def test_partial_fused_exclusion_fails(self):
-        quant = CompressedTensorsNvfp4Config(ignore_patterns=[r"re:q_proj$"])
-        with self.assertRaisesRegex(ValueError, "partially exclude"):
-            CompressedTensorsNvfp4Weight.support(quant, self.qkv())
+    def test_layer_exclusion_scope_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "ignore"):
+            CompressedTensorsNvfp4Config(ignore_patterns=[r"re:q_proj$"])
 
     def test_down_padding_uses_original_channels(self):
         src = FfnAtomicWeight(
@@ -224,6 +223,8 @@ class CompressedTensorsNvfp4WeightTest(unittest.TestCase):
         config = self.load_config()
         result = wrapper.load(source, 0, "cpu", config)
         tile, packed, scales = self.real_tile()
+        self.assertEqual(result[wrapper.scale_2.name].shape, torch.Size([]))
+        self.assertEqual(result[wrapper.input_scale.name].shape, torch.Size([]))
         self.assertEqual(len(source.reads), 12)
         self.assertEqual(set(source.reads), set(source.tensors))
         self.assertEqual(len(config.exported_device.conversions), 1)
@@ -396,8 +397,11 @@ class CompressedTensorsNvfp4WeightTest(unittest.TestCase):
         source.tensors["model.layers.0.self_attn.k_proj.weight_global_scale"] *= 2
         config = self.load_config()
         wrapper = WeightModule.create(self.qkv(), self.quant)
-        with self.assertRaisesRegex(ValueError, "identical"):
+        with self.assertRaisesRegex(ValueError, "identical") as context:
             wrapper.load(source, 0, "cpu", config)
+        self.assertIn("layer 0", str(context.exception))
+        self.assertIn("model.layers.0.self_attn.q_proj", str(context.exception))
+        self.assertIn("21120", str(context.exception))
         self.assertEqual(config.exported_device.conversions, [])
 
     def test_load_rejects_invalid_group_shape_before_layout(self):

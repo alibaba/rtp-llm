@@ -48,34 +48,52 @@ class CompressedTensorsNvfp4GpuTest(unittest.TestCase):
 
         weight = load("weight_packed", (128, 64))
         scales = load("weight_scale", (128, 8)).view(torch.float8_e4m3fn)
-        ig = torch.tensor([tile["input_global_scale"]], device="cuda")
-        wg = torch.tensor([tile["weight_global_scale"]], device="cuda")
-        torch.manual_seed(42)
-        x = (torch.randn(32, 128, device="cuda") * 0.1).bfloat16()
-        # Compare against the same quantized activations; this isolates adapter
-        # and layout correctness from activation quantization error.
+        # Asymmetric exact E2M1 values break the simultaneous-permutation
+        # ambiguity of decoding both operands with the same helper.
+        pattern = torch.tensor(
+            [0.5, 1, 1.5, 2, 3, 4, 6, -0.5, -1, -1.5, -2, -3, -4, -6, 0, 2],
+            device="cuda",
+        )
+        x = pattern.repeat(32, 8).bfloat16()
+        # Each group has amax=6, so global divisor=448 yields local scale=448
+        # and exactly representable activations, independent of weight globals.
+        ig = torch.tensor(448.0, device="cuda")
+        wg = torch.tensor(tile["weight_global_scale"], device="cuda")
         xq, xs = fp4_quantize(x, ig, is_sf_swizzled_layout=False)
-        reference = unpack_fp4(xq, xs, ig) @ unpack_fp4(weight, scales, wg).T
+        torch.testing.assert_close(unpack_fp4(xq, xs, ig), x.float(), rtol=0, atol=0)
+        reference = x.float() @ unpack_fp4(weight, scales, wg).T
         with patch.dict("os.environ", {"RTP_LLM_FP4_GEMM_BACKEND": "cutlass"}):
             packed, swizzled = CudaImpl.convert_fp4_gemm_weight_params(weight, scales)
-            linear = CudaFp4GEMMLinear(
-                weight=packed,
-                weight_scales=swizzled,
+            # Raw scalar ranks cover stored scalars and the loader's unsqueeze.
+            for shape in ((), (1,), (1, 1)):
+                with self.subTest(raw_global_shape=shape):
+                    linear = CudaFp4GEMMLinear(
+                        weight=packed,
+                        weight_scales=swizzled,
+                        input_scales=reciprocal_global_scale([ig.reshape(shape)]),
+                        weight_scale_2=reciprocal_global_scale([wg.reshape(shape)]),
+                        quant_config=CompressedTensorsNvfp4Config(),
+                    )
+                    self.assertEqual(linear.alpha.shape, torch.Size([]))
+                    torch.testing.assert_close(
+                        linear.forward(x).float(), reference, rtol=0.02, atol=2e-5
+                    )
+            # Mutate only weight packing; keep known input/reference fixed.
+            wrong = (weight >> 4) | ((weight & 15) << 4)
+            wrong_packed, wrong_scales = CudaImpl.convert_fp4_gemm_weight_params(
+                wrong, scales
+            )
+            wrong_linear = CudaFp4GEMMLinear(
+                weight=wrong_packed,
+                weight_scales=wrong_scales,
                 input_scales=reciprocal_global_scale([ig]),
                 weight_scale_2=reciprocal_global_scale([wg]),
                 quant_config=CompressedTensorsNvfp4Config(),
             )
-            self.assertTrue(
-                linear.can_handle(
-                    CompressedTensorsNvfp4Config(),
-                    packed,
-                    swizzled,
-                    weight_scale_2=linear.weight_scale_2,
-                    input_scale=linear.input_scale,
-                )
+            wrong_output = wrong_linear.forward(x).float()
+            self.assertGreater(
+                ((wrong_output - reference).norm() / reference.norm()).item(), 0.05
             )
-            actual = linear.forward(x)
-        torch.testing.assert_close(actual.float(), reference, rtol=0.02, atol=2e-5)
 
 
 if __name__ == "__main__":

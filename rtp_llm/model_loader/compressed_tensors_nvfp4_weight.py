@@ -96,9 +96,15 @@ class CompressedTensorsNvfp4Weight(PerGroupFp4Weight):
             )
 
     def _load_raw_tensor(self, tensor_source, layer_id, device, load_config):
-        tensors = super()._load_raw_tensor(
-            _ShapeCheckedSource(tensor_source), layer_id, device, load_config
-        )
+        try:
+            tensors = super()._load_raw_tensor(
+                _ShapeCheckedSource(tensor_source), layer_id, device, load_config
+            )
+        except ValueError as error:
+            names = [w.tensor_name(layer_id) for w in self.kernel.weights]
+            raise ValueError(
+                f"NVFP4 layer {layer_id}, modules {names}: {error}"
+            ) from error
         packed = tensors[self.kernel.name]
         scales = tensors[self.scale.name]
         _validate_packed_scale_shapes(packed.shape, scales.shape)

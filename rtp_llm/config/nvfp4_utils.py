@@ -17,8 +17,10 @@ def reciprocal_global_scale(tensors):
     if any(
         not torch.equal(first.reshape(()), t.float().reshape(())) for t in tensors[1:]
     ):
-        raise ValueError("Fused NVFP4 projections must have identical global scales")
-    result = first.reciprocal()
+        raise ValueError(
+            f"Fused NVFP4 projections must have identical global scales; got {[t.item() for t in tensors]}"
+        )
+    result = first.reciprocal().reshape(())
     if not torch.isfinite(result).all():
         raise ValueError("NVFP4 reciprocal global scale overflow")
     return result

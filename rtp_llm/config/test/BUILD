@@ -127,7 +127,11 @@ py_test(
 py_test(
     name = "compressed_tensors_nvfp4_test",
     srcs = ["compressed_tensors_nvfp4_test.py"],
-    data = ["fixtures/nvfp4/config.json", "fixtures/nvfp4/q_proj_tile.json"],
+    data = [
+        "fixtures/nvfp4/config.json",
+        "fixtures/nvfp4/q_proj_tile.json",
+        "fixtures/nvfp4/checkpoint_audit.json",
+    ],
     deps = ["//rtp_llm:config"],
 )
 
