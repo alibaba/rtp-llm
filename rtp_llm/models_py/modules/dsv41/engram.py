@@ -543,7 +543,7 @@ class _HostProjection(nn.Module):
         from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
         weight = self.weight.view_as(torch.float8_e4m3fn)
-        scales = self.scales.view_as(torch.uint8)
+        scales = self.scales.view_as(torch.float8_e8m0fnu)
         return V41MXFP8Linear(weight, scales)
 
     def forward(self, rows):
