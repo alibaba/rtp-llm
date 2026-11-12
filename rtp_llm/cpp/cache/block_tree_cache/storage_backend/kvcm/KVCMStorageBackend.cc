@@ -1637,6 +1637,10 @@ public:
     };
     using ReadExecutionPtr = std::shared_ptr<ReadExecution>;
 
+    void cleanupExpiredMissing() {
+        read_registry_->cleanupExpiredMissing();
+    }
+
     const TransferTaskRegistry& taskRegistry() const {
         return *read_registry_;
     }
@@ -3136,6 +3140,10 @@ bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, Remote
         response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
         return false;
     }
+}
+
+void KVCMStorageBackend::cleanupExpiredMissing() {
+    impl_->cleanupExpiredMissing();
 }
 
 const TransferTaskRegistry& KVCMStorageBackend::taskRegistry() const {

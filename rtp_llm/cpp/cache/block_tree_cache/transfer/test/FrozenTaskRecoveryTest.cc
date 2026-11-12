@@ -247,6 +247,7 @@ TEST(FrozenTaskRecoveryTest, ConfirmedMissingReleasesAndForgetsEveryParticipantW
     EXPECT_EQ(completed.size(), 0u);
     EXPECT_EQ(banned.queryLocal(std::vector<uint64_t>{92}).front(), State::REJECTED);
     EXPECT_FALSE(banned.begin(uint64_t{92}));
+    EXPECT_EQ(banned.queryLocal(std::vector<uint64_t>{92}).front(), State::UNKNOWN);
     EXPECT_EQ(recovery.runOnce(1000).released, 0u);
     EXPECT_EQ(cleanup->size(), 0u);
 }
