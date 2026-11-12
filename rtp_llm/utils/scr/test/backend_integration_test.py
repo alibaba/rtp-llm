@@ -51,7 +51,9 @@ class BackendScrIntegrationTest(unittest.TestCase):
     def _config(self, local_rank=1, world_rank=5):
         return SimpleNamespace(
             parallelism_config=SimpleNamespace(
-                local_rank=local_rank, world_rank=world_rank
+                local_rank=local_rank,
+                world_rank=world_rank,
+                local_world_size=4,
             )
         )
 
@@ -72,6 +74,9 @@ class BackendScrIntegrationTest(unittest.TestCase):
                 world_size=world_size,
                 world_rank=world_rank,
                 tp_size=tp_size,
+                pp_size=1,
+                dp_size=world_size,
+                local_world_size=1,
             ),
             server_config=SimpleNamespace(
                 frontend_server_count=frontend_server_count,
