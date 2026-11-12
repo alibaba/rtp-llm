@@ -389,6 +389,33 @@ def _prefill_q_rope(x, freqs, rope_dim, *, rope_view=None):
     return rope_only(x, freqs, rope_dim)
 
 
+def _rope_rows_bounded(q, freqs_cis, positions, rope_dim, rows=None):
+    """Row-chunked in-place RoPE for huge indexer queries.
+
+    The monolithic call rope_only(q, freqs_cis[positions], rope_dim) is
+    already in-place on q, but at 1M rows it (a) gathers freqs into
+    [1048320, rope_dim/2] complex64 = 8 GiB and (b) materializes
+    apply_rotary_emb's x.float() / complex-product temporaries (8 GiB
+    each) — n19 (2026-11-12) OOMed on exactly that 8.00 GiB alloc with
+    170.92 GiB allocated and 6.91 GiB free, 47 s into layer 02.
+    Chunking rows keeps the math identical (rotation is row-local):
+    per-chunk freqs gather (~0.25 GiB) + _prefill_q_rope, which uses the
+    fp32-temp-free rope_only_inplace kernel when its guard passes and
+    falls back to rope_only on the small chunk otherwise.
+    """
+    if rows is None:
+        rows = _ROUNDTRIP_CHUNK_ROWS
+    t = q.shape[0]
+    if t <= rows:
+        return _prefill_q_rope(q, freqs_cis[positions], rope_dim)
+    for begin in range(0, t, rows):
+        end = min(begin + rows, t)
+        _prefill_q_rope(
+            q[begin:end], freqs_cis[positions[begin:end]], rope_dim
+        )
+    return q
+
+
 # Row budget for fake-quant roundtrips on huge prefills: the monolithic
 # expression materializes 3-4 simultaneous fp32 copies of x — for the 1M
 # indexer Q [1048320, 4096] that is 16 GiB per copy (n18, 2026-11-12:
@@ -1916,7 +1943,9 @@ class AttentionV41FP8(AttentionFP8):
                 out.fill_(-1)
                 if candidates_out is not None:
                     candidates_out.fill_(-1)
-                q = rope_only(q, self.freqs_cis[positions], self.rope_head_dim)
+                q = _rope_rows_bounded(
+                    q, self.freqs_cis, positions, self.rope_head_dim
+                )
                 weights = (
                     raw_weights.float()
                     * (self.index_head_dim * self.index_n_heads) ** -0.5
