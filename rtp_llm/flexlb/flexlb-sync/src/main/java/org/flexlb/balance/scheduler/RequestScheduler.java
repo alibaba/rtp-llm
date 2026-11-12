@@ -105,7 +105,8 @@ public final class RequestScheduler {
         long decisionStartedNanos = System.nanoTime();
         FlexlbTrace.event(context.getTraceContext(), "flexlb.decision.started");
         try {
-            PlacementResult<RouteAdmission, PlacementKey> selection = router.select(context);
+            PlacementResult<RouteAdmission, PlacementKey> selection = FlexlbTrace.stage(
+                    context.getTraceContext(), "rtp_llm.flexlb.pd_decision", () -> router.select(context));
             FlexlbTrace.recordPlacement(context.getTraceContext(), decisionStartedNanos,
                     selection.status().name(), selection.diagnostics(), null);
             context.setSchedulingDiagnostics(selection.diagnostics());

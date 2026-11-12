@@ -35,6 +35,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FlexlbTraceTest {
@@ -223,7 +225,15 @@ class FlexlbTraceTest {
         worker.join(3000);
         assertFalse(worker.isAlive());
         FlexlbTrace.finish(root);
-        SpanData data = exporter.spans.getFirst();
+        SpanData data = exporter.spans.stream().filter(span -> span.getName().equals("Schedule")).findFirst().orElseThrow();
+        var points = exporter.spans.stream().filter(span -> !span.getName().equals("Schedule")).toList();
+        assertEquals(3, points.size());
+        for (var point : points) {
+            assertEquals(root.getSpanContext().getSpanId(), point.getParentSpanId());
+            assertEquals(SpanKind.INTERNAL, point.getKind());
+            assertEquals(point.getStartEpochNanos(), point.getEndEpochNanos());
+            assertTrue(point.getName().startsWith("rtp_llm.flexlb."));
+        }
         assertEquals(List.of("flexlb.queue.enqueued", "flexlb.decision.started", "flexlb.response.ready", "flexlb.schedule.failed"),
                 data.getEvents().stream().map(event -> event.getName()).toList());
         assertEquals("capacity exhausted", data.getAttributes().get(AttributeKey.stringKey("flexlb.failure.message")));
@@ -232,6 +242,25 @@ class FlexlbTraceTest {
         assertTrue(data.getEvents().getFirst().getEpochNanos() <= data.getEvents().getLast().getEpochNanos());
         FlexlbTrace.event(new ThrowingSpan().storeInContext(Context.root()),
                 "ignored");
+    }
+
+    @Test
+    void stageExportsDurationAndRethrowsTheOriginalException() {
+        Span root = FlexlbTrace.startServer("Schedule", Context.root());
+        Context context = root.storeInContext(Context.root());
+        Object expected = new Object();
+        assertSame(expected, FlexlbTrace.stage(context, "rtp_llm.flexlb.pd_decision", () -> expected));
+        var error = new IllegalStateException("selection failed");
+        assertSame(error, assertThrows(IllegalStateException.class,
+                () -> FlexlbTrace.stage(context, "rtp_llm.flexlb.pd_decision", () -> { throw error; })));
+        assertEquals(2, exporter.spans.size());
+        assertEquals(StatusCode.OK, exporter.spans.get(0).getStatus().getStatusCode());
+        assertEquals(StatusCode.ERROR, exporter.spans.get(1).getStatus().getStatusCode());
+        for (var span : exporter.spans) {
+            assertEquals(root.getSpanContext().getSpanId(), span.getParentSpanId());
+            assertTrue(span.getEndEpochNanos() >= span.getStartEpochNanos());
+        }
+        FlexlbTrace.finish(root);
     }
 
     @Test

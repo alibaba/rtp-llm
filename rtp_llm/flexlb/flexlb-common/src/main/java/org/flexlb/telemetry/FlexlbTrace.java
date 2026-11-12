@@ -14,6 +14,7 @@ import io.opentelemetry.context.Context;
 import io.opentelemetry.context.propagation.TextMapGetter;
 import io.opentelemetry.context.propagation.TextMapPropagator;
 import io.opentelemetry.context.propagation.TextMapSetter;
+import io.opentelemetry.sdk.common.Clock;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.enums.StatusEnum;
 
@@ -22,6 +23,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 /**
  * Small fail-open facade for the FlexLB manual tracing points.
@@ -216,13 +218,36 @@ public final class FlexlbTrace {
         event(context, name, Attributes.empty());
     }
 
-    /** Records a timestamped point with attributes using the same fail-open path. */
+    /** Records an event and an instantaneous child span for trace viewers that render spans. */
     public static void event(Context context, String name, Attributes attributes) {
         if (!enabled) { return; }
         try {
-            spanFromContext(context).addEvent(name, attributes);
+            Span parent = spanFromContext(context);
+            if (!parent.isRecording()) { return; }
+            long timestamp = Clock.getDefault().now();
+            parent.addEvent(name, attributes, timestamp, TimeUnit.NANOSECONDS);
+            Span point = tracer.spanBuilder("rtp_llm." + name)
+                    .setParent(context).setSpanKind(SpanKind.INTERNAL)
+                    .setStartTimestamp(timestamp, TimeUnit.NANOSECONDS)
+                    .setAllAttributes(attributes).startSpan();
+            point.setStatus(StatusCode.OK);
+            point.end(timestamp, TimeUnit.NANOSECONDS);
         } catch (Throwable ignored) {
             // Observability cannot change scheduling or response publication.
+        }
+    }
+
+    /** Measures synchronous work without retaining a thread scope across asynchronous callbacks. */
+    public static <T> T stage(Context context, String name, Supplier<T> action) {
+        Span span = startInternal(name, context);
+        Throwable failure = null;
+        try {
+            return action.get();
+        } catch (RuntimeException | Error error) {
+            failure = error;
+            throw error;
+        } finally {
+            finish(span, failure);
         }
     }
 

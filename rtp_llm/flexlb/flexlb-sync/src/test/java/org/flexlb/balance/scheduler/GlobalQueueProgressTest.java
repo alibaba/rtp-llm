@@ -60,15 +60,16 @@ class GlobalQueueProgressTest {
         FlexlbTrace.configure(OpenTelemetry.noop(), "test");
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
             var span = mock(Span.class);
+            when(span.isRecording()).thenReturn(true);
             when(span.storeInContext(any(Context.class))).thenCallRealMethod();
             BalanceContext context = RequestLifecycleTestSupport.context(f.config, 90L);
             context.setTraceContext(Context.root().with(span));
             f.groups.put(90L, "g1");
             f.scheduler.submit(context);
-            verify(span, timeout(1000)).addEvent(eq("flexlb.decision.started"), any(Attributes.class));
+            verify(span, timeout(1000)).addEvent(eq("flexlb.decision.started"), any(Attributes.class), anyLong(), eq(TimeUnit.NANOSECONDS));
             var order = org.mockito.Mockito.inOrder(span);
-            order.verify(span).addEvent(eq("flexlb.queue.enqueued"), any(Attributes.class));
-            order.verify(span).addEvent(eq("flexlb.decision.started"), any(Attributes.class));
+            order.verify(span).addEvent(eq("flexlb.queue.enqueued"), any(Attributes.class), anyLong(), eq(TimeUnit.NANOSECONDS));
+            order.verify(span).addEvent(eq("flexlb.decision.started"), any(Attributes.class), anyLong(), eq(TimeUnit.NANOSECONDS));
         } finally {
             FlexlbTrace.configure(null, "");
         }
