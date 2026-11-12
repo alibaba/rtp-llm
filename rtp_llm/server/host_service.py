@@ -14,11 +14,7 @@ from pydantic import BaseModel, Field
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
-from rtp_llm.utils.scr.lifecycle import (
-    CallbackHook,
-    get_template_lifecycle,
-    template_phase_active,
-)
+from rtp_llm.utils.scr.lifecycle import defer_until_release, template_phase_active
 
 route_logger = logging.getLogger("route_logger")
 
@@ -251,13 +247,7 @@ class MasterService:
         self.backend_refresh_thread = None
         if not self.master_vip.domain:
             return
-        if template_phase_active():
-            get_template_lifecycle().register(
-                "master-discovery",
-                CallbackHook(release=lambda _: self.start_refresh()),
-            )
-        else:
-            self.start_refresh()
+        defer_until_release("master-discovery", self.start_refresh)
 
     def start_refresh(self) -> None:
         # Template startup reaches this only after identity fixup and release.

@@ -48,20 +48,8 @@ def _start_native_kmonitor(generation: str) -> None:
         raise RuntimeError("native Kmonitor did not start after SCR identity fixup")
 
 
-def _start_python_kmonitor(generation: str) -> None:
-    module = sys.modules.get(
-        "rtp_llm.aios.kmonitor.python_client.kmonitor.report_worker"
-    )
-    worker = getattr(module, "report_worker", None)
-    if worker is not None:
-        worker.start_after_restore()
-
-
 get_template_lifecycle().register(
     "native-kmonitor", CallbackHook(release=_start_native_kmonitor)
-)
-get_template_lifecycle().register(
-    "python-kmonitor", CallbackHook(release=_start_python_kmonitor)
 )
 
 
