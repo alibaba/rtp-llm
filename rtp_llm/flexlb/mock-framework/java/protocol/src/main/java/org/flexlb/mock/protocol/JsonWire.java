@@ -4,7 +4,6 @@ import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.*;
 import java.io.IOException;
 import java.lang.reflect.*;
-import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -95,13 +94,9 @@ public final class JsonWire {
             case "integer", "number" -> {
                 require(node.isNumber() && Double.isFinite(node.doubleValue()), "Expected finite number");
                 if (type.equals("integer")) {
-                    int bits = ((Number) spec.getOrDefault("bits", 64)).intValue();
+                    int bits = ((Number) spec.get("bits")).intValue();
                     require(node.isIntegralNumber() && node.bigIntegerValue().bitLength() < bits, "Integer overflow/type mismatch");
                 }
-                if (spec.containsKey("minimum"))
-                    require(node.decimalValue().compareTo(new BigDecimal(spec.get("minimum").toString())) >= 0, "Below minimum");
-                if (spec.containsKey("maximum"))
-                    require(node.decimalValue().compareTo(new BigDecimal(spec.get("maximum").toString())) <= 0, "Above maximum");
             }
             case "boolean" -> require(node.isBoolean(), "Expected boolean");
             default -> throw new IllegalArgumentException("Unknown schema type: " + type);
