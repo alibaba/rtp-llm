@@ -279,6 +279,7 @@ KVCacheManager::~KVCacheManager() {
     // Queries, cleanup and capacity notifications must finish while the cache, RPC
     // manager and allocation wait state are still alive. Never join under a lock.
     stopFrozenTaskRecovery();
+    stopMissingCleanup();
     {
         std::lock_guard<std::mutex> lock(allocation_wait_state_->mutex);
         allocation_wait_state_->stopped.store(true, std::memory_order_release);
@@ -400,6 +401,8 @@ bool KVCacheManager::init() {
         });
     }
     initCacheEventPublisher();
+
+    missing_cleanup_thread_ = std::thread(&KVCacheManager::missingCleanupLoop, this);
 
     if (metrics_reporter_) {
         stop_.store(false, std::memory_order_relaxed);
@@ -988,8 +991,10 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
         return false;
     }
     RTP_LLM_LOG_INFO("transfer_lifecycle event=rpc_execute_enter trace=%lu request=%ld rank=%ld timeout_ms=%ld",
-                      request.mem_request().transfer_trace_id(), request.mem_request().transfer_request_id(),
-                      parallelism_config_.tp_rank, request.mem_request().timeout_ms());
+                     request.mem_request().transfer_trace_id(),
+                     request.mem_request().transfer_request_id(),
+                     parallelism_config_.tp_rank,
+                     request.mem_request().timeout_ms());
     if (!block_tree_cache_) {
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: block tree cache is not initialized");
         return false;
@@ -1062,8 +1067,10 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
     }
     BlockTransferRequestConverter::encodeTransferResult(*memory_response, status);
     RTP_LLM_LOG_INFO("transfer_lifecycle event=rpc_execute_exit trace=%lu rank=%ld code=%ld buffer_safe=%d",
-                      request.mem_request().transfer_trace_id(), parallelism_config_.tp_rank,
-                      static_cast<int64_t>(status.status.code()), status.buffer_safe);
+                     request.mem_request().transfer_trace_id(),
+                     parallelism_config_.tp_rank,
+                     static_cast<int64_t>(status.status.code()),
+                     status.buffer_safe);
     if (!status.ok()) {
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: grouped transfer failed");
         return true;
@@ -1283,6 +1290,32 @@ void KVCacheManager::stopCacheEventPublisher() {
         block_tree_cache_->setEventPublisher(nullptr, {});
     }
     cache_event_publisher_.reset();
+}
+
+void KVCacheManager::stopMissingCleanup() {
+    {
+        std::lock_guard<std::mutex> lock(missing_cleanup_mutex_);
+        missing_cleanup_stopped_ = true;
+    }
+    missing_cleanup_cv_.notify_all();
+    if (missing_cleanup_thread_.joinable()) {
+        missing_cleanup_thread_.join();
+    }
+}
+
+void KVCacheManager::missingCleanupLoop() {
+    pthread_setname_np(pthread_self(), "kv_missing_gc");
+    std::unique_lock<std::mutex> lock(missing_cleanup_mutex_);
+    while (!missing_cleanup_cv_.wait_for(lock, std::chrono::minutes(1), [this] { return missing_cleanup_stopped_; })) {
+        lock.unlock();
+        block_tree_cache_->cleanupExpiredMissing();
+#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
+        if (auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend())) {
+            backend->cleanupExpiredMissing();
+        }
+#endif
+        lock.lock();
+    }
 }
 
 void KVCacheManager::reportMetricsLoop() {

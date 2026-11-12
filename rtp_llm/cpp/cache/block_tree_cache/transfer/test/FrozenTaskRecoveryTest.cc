@@ -27,11 +27,11 @@ public:
     }
 };
 
-std::shared_ptr<RecoveryPool> makePool() {
+std::shared_ptr<RecoveryPool> makePool(size_t physical_block_count = 16) {
     auto config                            = std::make_shared<BlockPoolConfigBase>();
     config->pool_name                      = "frozen-recovery";
     config->pool_type                      = BlockPoolType::HOST;
-    config->physical_block_count           = 16;
+    config->physical_block_count           = physical_block_count;
     config->frozen_block_abort_lower_ratio = 0.0;
     config->frozen_block_abort_upper_ratio = 0.0;
     return std::make_shared<RecoveryPool>(std::move(config));
@@ -84,6 +84,40 @@ TransferCompletionQueryResult proof(const FrozenTask::ExecutionInfo& execution, 
         result.ranks.push_back(std::move(row));
     }
     return result;
+}
+
+TEST(FrozenTaskRecoveryTest, MissingFenceStillRejectsLateAdmissionAfterReleaseReuseAndMetadataExpiry) {
+    auto                 now = TransferTaskRegistry::Clock::time_point{};
+    TransferTaskRegistry registry([&] { return now; });
+    auto                 pool  = makePool(2);
+    const auto           block = hold(pool);
+    auto                 task  = makeTask(uint64_t{808}, pool, block);
+    task->freeze();
+    pool->decTreeRef(block, BlockTreeRefType::CACHE);
+    TransferCompletionQuery query(nullptr, [&](const TransferExecutionTrace& trace) {
+        return registry.queryAndBlockMissing(std::vector<uint64_t>{std::get<uint64_t>(trace)}).front();
+    });
+    FrozenTaskRecovery      recovery([&] { return std::vector<std::shared_ptr<FrozenTask>>{task}; },
+                                [&](const auto& execution, int timeout) { return query.query(execution, timeout); });
+    ASSERT_EQ(recovery.runOnce(1000).released, 1u);
+    ASSERT_EQ(task->snapshot().state, FrozenTask::State::RELEASED);
+    ASSERT_FALSE(pool->isAllocated(block));
+    const auto replacement = pool->malloc();
+    ASSERT_TRUE(replacement.has_value());
+    ASSERT_EQ(*replacement, block);
+    pool->incTreeRef(*replacement, BlockTreeRefType::CACHE);
+    now += std::chrono::hours(2);
+    ASSERT_EQ(registry.cleanupExpiredMissing(), 1u);
+    EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{808}).front(), State::REJECTED);
+    EXPECT_EQ(registry.forget(uint64_t{808}), TransferTaskRegistry::ForgetResult::DONE);
+    EXPECT_FALSE(registry.begin(uint64_t{808}));
+    EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{808}).front(), State::UNKNOWN);
+    EXPECT_FALSE(task->unfreeze());
+    EXPECT_TRUE(pool->isAllocated(*replacement));
+    EXPECT_FALSE(pool->isFrozen(*replacement));
+    EXPECT_EQ(pool->treeRefCount(*replacement), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
+    pool->decTreeRef(*replacement, BlockTreeRefType::CACHE);
 }
 
 TEST(FrozenTaskRecoveryTest, LocalNumericAndStringProofsRecoverNonRpcFailuresWithoutChangingBusinessResults) {
@@ -285,6 +319,7 @@ TEST(FrozenTaskRecoveryTest, ConfirmedMissingReleasesAndForgetsEveryParticipantW
     EXPECT_EQ(completed.size(), 0u);
     EXPECT_EQ(banned.queryLocal(std::vector<uint64_t>{92}).front(), State::REJECTED);
     EXPECT_FALSE(banned.begin(uint64_t{92}));
+    EXPECT_EQ(banned.queryLocal(std::vector<uint64_t>{92}).front(), State::UNKNOWN);
     EXPECT_EQ(recovery.runOnce(1000).released, 0u);
     EXPECT_EQ(cleanup->size(), 0u);
 }

@@ -67,11 +67,11 @@ private:
     std::future<void>                   completion_{completed_.get_future()};
 };
 
-TEST(KVCMWorkerRegistryRpcTest, RecoveryFenceRejectsLateReadBeforeSdkAdmission) {
+TEST(KVCMWorkerRegistryRpcTest, RecoveryFenceRejectsLateReadAndSupportsExplicitCleanup) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
-    auto environment = makeBackendEnvironment("kvcm_registry_read_fence");
-    auto client = std::make_shared<MockClientWrapper>();
+    auto            environment = makeBackendEnvironment("kvcm_registry_read_fence");
+    auto            client      = std::make_shared<MockClientWrapper>();
     EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client, shutdown()).Times(1);
     EXPECT_CALL(*client, loadKvCachesForTag(_, _, _, _)).Times(0);
@@ -85,15 +85,16 @@ TEST(KVCMWorkerRegistryRpcTest, RecoveryFenceRejectsLateReadBeforeSdkAdmission) 
     request.add_block_ids(environment.block_id);
     request.add_uris("pace://registry-read-fence");
     EXPECT_EQ(backend.backend->queryReadCompletion(request.trace_id()), RegistryState::REJECTED);
+    EXPECT_EQ(backend.backend->forgetReadCompletion(request.trace_id()), TransferTaskRegistry::ForgetResult::DONE);
+    EXPECT_EQ(backend.backend->taskRegistry().queryLocal(std::vector<std::string>{request.trace_id()}).front(),
+              RegistryState::REJECTED);
     RemoteOperationResponsePB response;
     (void)backend.backend->execute(request, response);
     EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
     EXPECT_TRUE(response.payload_buffer_safe());
-    EXPECT_EQ(backend.backend->queryReadCompletion(request.trace_id()), RegistryState::REJECTED);
-    EXPECT_EQ(backend.backend->forgetReadCompletion(request.trace_id()), TransferTaskRegistry::ForgetResult::DONE);
-    (void)backend.backend->execute(request, response);
-    EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
-    EXPECT_EQ(backend.backend->queryReadCompletion(request.trace_id()), RegistryState::REJECTED);
+    // Inspect without reinstalling a fence or resubmitting the execution.
+    EXPECT_EQ(backend.backend->taskRegistry().queryLocal(std::vector<std::string>{request.trace_id()}).front(),
+              RegistryState::UNKNOWN);
 }
 
 TEST(KVCMWorkerRegistryRpcTest, RpcDeadlineDoesNotCompleteWorkerEvidenceBeforeSdkReturns) {
