@@ -74,6 +74,25 @@ from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
+def _require_swa_ring_capacity(window: int, gamma: int, entries_per_block: int) -> None:
+    """Fail loudly when the SWA ring cannot hold ``window + gamma`` slots.
+
+    The proposal reads the sliding window and the whole query block in one pass,
+    so those ``window + gamma`` consecutive positions must land on distinct
+    ring slots. The C++ SWA ring is ``window + gamma`` rounded up to an even
+    count; a smaller ring would silently overwrite a slot the same block still
+    reads, so name the misconfiguration instead of emitting garbage.
+    """
+
+    if int(entries_per_block) < int(window) + int(gamma):
+        raise RuntimeError(
+            "DSpARK SWA ring is too small for the non-causal query block: "
+            f"entries_per_block={int(entries_per_block)} < window+gamma="
+            f"{int(window) + int(gamma)}; the query-block write would evict "
+            "slots the same block reads"
+        )
+
+
 class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     """DeepSeek-V4 implementation of the shared DSpark proposer.
 
@@ -682,6 +701,11 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             entries_per_block,
             pool,
         ):
+            _require_swa_ring_capacity(
+                int(self._v4_args.window_size),
+                int(self._gen_num_per_cycle),
+                entries_per_block,
+            )
             # Project and insert all query KVs before attention so each query
             # can read every other query position, including future noise.
             qkv = self._dspark_compute_qkv(attn, x, query_positions.reshape(-1))
