@@ -44,12 +44,11 @@ class EndpointRegistry:
             )
         if endpoint is not None:
             if (
-                endpoint.get("id", instance_id) != instance_id
-                or endpoint.get("role", role) != role
+                endpoint.get("id") != instance_id
+                or endpoint.get("role") != role
                 or endpoint.get("control") != control
             ):
                 raise ExecutionError("Instance endpoints differ from assigned identity")
-            endpoint = {**copy.deepcopy(endpoint), "id": instance_id, "role": role}
             if (
                 not isinstance(endpoint.get("rpc"), str)
                 or not endpoint["rpc"]
@@ -58,7 +57,7 @@ class EndpointRegistry:
                 raise ExecutionError(
                     "Instance RPC address is missing or already active"
                 )
-            self._active[instance_id] = endpoint
+            self._active[instance_id] = copy.deepcopy(endpoint)
         self.publish(engine_changed=endpoint is not None and role in ENGINE_ROLES)
 
     def retire(self, instance_id):

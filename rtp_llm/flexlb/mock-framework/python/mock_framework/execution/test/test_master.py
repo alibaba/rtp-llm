@@ -681,7 +681,16 @@ def test_starting_master_catches_engine_changes_before_registration(
             "127.0.0.1:40001"
         ]
         registry.retire("decode-0")
-        return None, control, {"rpc": "127.0.0.1:50000", "control": control}
+        return (
+            None,
+            control,
+            {
+                "id": identity.instance_id,
+                "role": identity.role,
+                "rpc": "127.0.0.1:50000",
+                "control": control,
+            },
+        )
 
     monkeypatch.setattr(master, "start_instance", start_instance)
     role = master.MasterRole(

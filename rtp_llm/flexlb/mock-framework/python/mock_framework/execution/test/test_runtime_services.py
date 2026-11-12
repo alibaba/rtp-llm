@@ -26,6 +26,8 @@ def test_only_engine_changes_publish_discovery_with_an_isolated_snapshot(
     topology.publish()
     assert received == []
     endpoint = {
+        "id": f"{role}-0",
+        "role": role,
         "rpc": "127.0.0.1:1001",
         "control": "http://127.0.0.1:1002",
         "extra": {"value": 1},
@@ -44,12 +46,21 @@ def test_only_engine_changes_publish_discovery_with_an_isolated_snapshot(
     with pytest.raises(ExecutionError, match="identity"):
         topology.register(f"{role}-0", role, endpoint["control"], endpoint)
     with pytest.raises(ExecutionError, match="RPC address"):
-        topology.register(f"{role}-1", role, endpoint["control"], endpoint)
+        duplicate = {**endpoint, "id": f"{role}-1"}
+        topology.register(duplicate["id"], role, duplicate["control"], duplicate)
     topology.register(f"{role}-1", role, endpoint["control"])
     for other in ("master", "client"):
         control = "http://127.0.0.1:1004"
         topology.register(
-            f"{other}-0", other, control, {"rpc": "127.0.0.1:1003", "control": control}
+            f"{other}-0",
+            other,
+            control,
+            {
+                "id": f"{other}-0",
+                "role": other,
+                "rpc": "127.0.0.1:1003",
+                "control": control,
+            },
         )
         assert json.loads((tmp_path / "topology.json").read_text())[-1]["role"] == other
         topology.retire(f"{other}-0")
@@ -59,6 +70,22 @@ def test_only_engine_changes_publish_discovery_with_an_isolated_snapshot(
     assert topology.active() == []
     assert json.loads((tmp_path / "topology.json").read_text()) == []
     assert not (tmp_path / "topology-history.json").exists()
+
+
+@pytest.mark.parametrize("field", ["id", "role"])
+def test_topology_rejects_endpoint_without_identity_field(tmp_path, field):
+    topology = EndpointRegistry(tmp_path)
+    control = "http://127.0.0.1:1002"
+    endpoint = {
+        "id": "client-0",
+        "role": "client",
+        "rpc": "127.0.0.1:1001",
+        "control": control,
+    }
+    del endpoint[field]
+    with pytest.raises(ExecutionError, match="endpoints differ from assigned identity"):
+        topology.register("client-0", "client", control, endpoint)
+    assert topology.active() == []
 
 
 def test_client_start_fails_without_endpoints(tmp_path):
