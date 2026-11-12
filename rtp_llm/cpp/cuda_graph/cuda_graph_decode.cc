@@ -19,6 +19,19 @@ void CudaGraphRunner::finishDeferredDecodeInit() {
     initCapture();
 }
 
+void CudaGraphRunner::releaseCapturedDecodeGraph() {
+    if (!hasCapturedDecodeGraph()) {
+        return;
+    }
+    cuda_graph::graphDeviceSynchronize();
+    graph_instances_.clear();
+    shared_graph_pool_ = {};
+    decode_capture_done_     = false;
+    decode_capture_deferred_ = true;
+    cuda_graph::graphEmptyCache();
+    RTP_LLM_LOG_INFO("Released captured decode CUDA graph before large prefill");
+}
+
 void CudaGraphRunner::replayDecode(int bs) {
     finishDeferredDecodeInit();
     replayGraph(bs);

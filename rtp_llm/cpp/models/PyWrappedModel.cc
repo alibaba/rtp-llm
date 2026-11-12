@@ -1373,6 +1373,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 py_model_inputs.engram_token_windows_host = inputs.engram_token_windows;
             }
             py::gil_scoped_acquire gil;
+            if (py_model_inputs.attention_inputs.is_prefill && graph_runner_ != nullptr) {
+                // A prior short request may have left a decode graph and its
+                // private pool resident. Full-context prefill needs that HBM;
+                // the graph is re-captured at this request's first decode.
+                graph_runner_->releaseCapturedDecodeGraph();
+            }
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
