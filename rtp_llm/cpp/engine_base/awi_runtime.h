@@ -183,6 +183,8 @@ private:
     bool                                                  last_graph_replay_      = false;
     std::string                                           last_graph_backend_;
     bool                                                  graph_seen_this_step_   = false;
+    bool                                                  telemetry_file_ready_   = false;
+    std::string                                           telemetry_path_;
 };
 
 // Helper used by PyWrappedModel::forward to bracket a single forward.

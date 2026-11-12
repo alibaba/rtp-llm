@@ -6,7 +6,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <sstream>
+#include <sys/stat.h>
 
 namespace rtp_llm {
 namespace awi {
@@ -147,6 +149,7 @@ std::string eventToJson(const Event& event, const std::string& operation_id) {
     if (!event.source.empty()) {
         out << ",\"source\":" << quote(event.source);
     }
+    out << ",\"recorded_ns\":" << nowNs();
     out << "}";
     return out.str();
 }
@@ -160,6 +163,10 @@ AwiRuntime& AwiRuntime::instance() {
 
 void AwiRuntime::setParallel(int32_t rank, int32_t world_size) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (rank_ != rank) {
+        telemetry_file_ready_ = false;
+        telemetry_path_.clear();
+    }
     rank_       = rank;
     world_size_ = std::max<int32_t>(1, world_size);
 }
@@ -279,6 +286,27 @@ void AwiRuntime::appendEventLocked(const Event& event) {
     constexpr size_t kMaxEvents = 200000;
     if (events_.size() > kMaxEvents) {
         events_.erase(events_.begin(), events_.begin() + (events_.size() - kMaxEvents));
+    }
+
+    // Cross-rank journal: every worker truncates its own file on first write
+    // and appends one JSON object per line.  The API layer merges all ranks so
+    // a synchronized step is reported once, with the slowest rank's latency
+    // and the full rank set.
+    if (!telemetry_file_ready_) {
+        const char* env = std::getenv("AWI_TELEMETRY_DIR");
+        std::string dir = (env != nullptr && *env != '\0') ? env : "/tmp/awi-telemetry";
+        ::mkdir(dir.c_str(), 0700);
+        telemetry_path_ = dir + "/rank-" + std::to_string(rank_) + ".jsonl";
+        std::ofstream truncate(telemetry_path_, std::ios::trunc);
+        telemetry_file_ready_ = true;
+    }
+    std::string op = event.operation_id;
+    if (op.empty() && !event.request_id.empty()) {
+        op = operationForRequestLocked(event.request_id);
+    }
+    std::ofstream journal(telemetry_path_, std::ios::app);
+    if (journal) {
+        journal << eventToJson(event, op) << "\n";
     }
 }
 

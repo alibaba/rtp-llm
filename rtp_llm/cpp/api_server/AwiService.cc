@@ -664,7 +664,19 @@ void AwiService::observations(const std::unique_ptr<http_server::HttpResponseWri
     }
     try {
         const auto weights = weightsCensusJson();
-        writeJson(writer, awi::AwiRuntime::instance().observationsJson(operation_id, weights));
+        // Merge every rank's journal into one prefill/decode event per
+        // request/step.  Fall back to this process's in-memory events only if
+        // the aggregation module cannot be imported.
+        std::string document;
+        try {
+            py::gil_scoped_acquire gil;
+            auto events_module = py::module_::import("rtp_llm.telemetry.awi_events");
+            document = py::cast<std::string>(
+                events_module.attr("observations_json")(operation_id, weights));
+        } catch (...) {
+            document = awi::AwiRuntime::instance().observationsJson(operation_id, weights);
+        }
+        writeJson(writer, document);
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("/awi/observations failed: %s", e.what());
         writeError(writer, 500, std::string("observations failed: ") + e.what());
