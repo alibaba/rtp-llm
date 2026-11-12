@@ -709,8 +709,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     || !((t.size() == 83 && t[1].cast<int>() == 13) || (t.size() == 84 && t[1].cast<int>() == 14)
                          || (t.size() == 85 && t[1].cast<int>() == 15) || (t.size() == 86 && t[1].cast<int>() == 16)
                          || (t.size() == 90 && t[1].cast<int>() == 17) || (t.size() == 91 && t[1].cast<int>() == 18)
-                         || (t.size() == 92 && t[1].cast<int>() == 19)
-                         || (t.size() == 94 && t[1].cast<int>() == 20))) {
+                         || (t.size() == 92 && t[1].cast<int>() == 19) || (t.size() == 94 && t[1].cast<int>() == 20))) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
 
@@ -812,7 +811,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.block_pool_frozen_abort_upper_ratio = t[90].cast<double>();
                 }
                 if (t.size() >= 94) {
-                    c.block_tree_frozen_recovery_interval_ms = t[92].cast<int64_t>();
+                    c.block_tree_frozen_recovery_interval_ms      = t[92].cast<int64_t>();
                     c.block_tree_frozen_recovery_query_timeout_ms = t[93].cast<int64_t>();
                 }
                 if (c.block_tree_frozen_recovery_interval_ms < 0
@@ -827,8 +826,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     || c.block_pool_frozen_abort_lower_ratio < 0.0
                     || c.block_pool_frozen_abort_lower_ratio > c.block_pool_frozen_abort_upper_ratio
                     || c.block_pool_frozen_abort_upper_ratio > 1.0) {
-                    throw std::runtime_error("invalid KVCacheConfig block pool frozen abort ratio range: expected finite "
-                                             "0 <= lower <= upper <= 1");
+                    throw std::runtime_error(
+                        "invalid KVCacheConfig block pool frozen abort ratio range: expected finite "
+                        "0 <= lower <= upper <= 1");
                 }
                 if (t.size() >= 90) {
                     c.btc_crc_slot_count            = t[86].cast<int64_t>();
@@ -1559,6 +1559,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("pdfusion_scheduler_mode", &FIFOSchedulerConfig::pdfusion_scheduler_mode)
         .def_readwrite("decode_prefill_ratio", &FIFOSchedulerConfig::decode_prefill_ratio)
         .def_readwrite("cp_force_single_prefill", &FIFOSchedulerConfig::cp_force_single_prefill)
+        .def_readwrite("prefill_async_scheduling", &FIFOSchedulerConfig::prefill_async_scheduling)
         .def_readwrite("max_inited_kv_cache_streams", &FIFOSchedulerConfig::max_inited_kv_cache_streams)
         .def_readwrite("max_batch_tokens_without_cache", &FIFOSchedulerConfig::max_batch_tokens_without_cache)
         .def("to_string", &FIFOSchedulerConfig::to_string)
@@ -1570,10 +1571,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.decode_prefill_ratio,
                                       self.cp_force_single_prefill,
                                       self.max_inited_kv_cache_streams,
-                                      self.max_batch_tokens_without_cache);
+                                      self.max_batch_tokens_without_cache,
+                                      self.prefill_async_scheduling);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7)
+                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 8)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
@@ -1589,6 +1591,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     if (t.size() >= 7) {
                         c.max_batch_tokens_without_cache = t[6].cast<int64_t>();
+                    }
+                    if (t.size() >= 8) {
+                        c.prefill_async_scheduling = t[7].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());

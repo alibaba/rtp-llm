@@ -658,6 +658,7 @@ public:
     // releaseResource waits for zero so worker-side update/specUpdate cannot
     // write into blocks already returned to the pool.
     void incPendingAsyncBookkeeping();
+    bool tryHoldPrefillResources();
     void decPendingAsyncBookkeepingAndMaybeRelease();
     bool hasPendingAsyncBookkeeping() const;
     void waitPendingAsyncBookkeeping();

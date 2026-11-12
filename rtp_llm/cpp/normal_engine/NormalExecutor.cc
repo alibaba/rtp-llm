@@ -204,6 +204,14 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     cudaProfilerBegin();
 }
 
+absl::StatusOr<PreparedPrefillInput> NormalExecutor::preparePrefillInput(const std::list<GenerateStreamPtr>& streams) {
+    PreparedPrefillInput prepared;
+    auto                 input = batch_stream_processor_->preparePrefillInput(StreamGroups(streams), prepared.holder);
+    RETURN_IF_STATUS_OR_ERROR(input);
+    prepared.input = std::move(input.value());
+    return prepared;
+}
+
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
     const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     if (schedule_time_us <= 0) {
@@ -244,10 +252,14 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.gather_model_input");
-        int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups, buffer_holder_);
-        RETURN_IF_STATUS_OR_ERROR(model_input_status);
-        model_input                              = std::move(model_input_status.value());
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        if (prepared_prefill_input_) {
+            model_input = consumePreparedPrefillInput(buffer_holder_, stream_groups.contextStreams());
+        } else {
+            auto model_input_status = batch_stream_processor_->gatherModelInput(stream_groups, buffer_holder_);
+            RETURN_IF_STATUS_OR_ERROR(model_input_status);
+            model_input = std::move(model_input_status.value());
+        }
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     {
@@ -309,6 +321,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
             const auto role = is_propose_ ? ModelInputsModelRole::DRAFT : ModelInputsModelRole::NORMAL;
             model_inputs_logger_->log(model_input, role, model_->model_id_);
         }
+        // Input ownership is fixed; only independent next-batch host work overlaps.
+        startNextPrefillPrepare();
         if (telemetry::TelemetryRuntime::isActive()) {
             const auto forward_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
             for (const auto& stream : streams) {
@@ -369,9 +383,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.sample_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    // Stream-async dispatch is opt-in and only useful for decode-only batches:
-    // the next iteration can overlap forward prep with worker D2H/update work.
-    // Prefill gets no overlap benefit and would only add worker startup cost.
+    // Decode uses asynchronous output dispatch. Prefill overlaps its next
+    // host preparation separately and retains completion on this thread.
     const bool is_decode_only = stream_groups.totalContextBatchSize() == 0 && stream_groups.totalDecodeBatchSize() > 0;
     StreamGroups::TokenCountsByPriority token_counts_by_priority;
     if (metrics_reporter_ && tp_rank_ == 0) {

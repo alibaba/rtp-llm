@@ -29,6 +29,7 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                       model_specific_config,
                       cache_manager,
                       metrics_reporter),
+    prefill_async_scheduling_(runtime_config.fifo_scheduler_config.prefill_async_scheduling),
     cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
                              && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
     max_batch_tokens_without_cache_(
@@ -63,19 +64,23 @@ void FIFOScheduler::cancelGroups(StreamGroupQueue& group_queue) {
 
 void FIFOScheduler::cancelExtraStreams() {
     cache_exposed_wait_start_.reset();
+    cancelStreams(completed_prefill_streams_);
     cancelGroups(waiting_group_queue_);
     cancelGroups(loading_cache_group_queue_);
 }
 
 bool FIFOScheduler::hasExtraStreams() const {
-    return !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty();
+    return !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty() || !executing_prefill_streams_.empty()
+           || !completed_prefill_streams_.empty();
 }
 
 int64_t FIFOScheduler::extraOnflightStreams() const {
-    return groupQueueStreamsSize(waiting_group_queue_) + groupQueueStreamsSize(loading_cache_group_queue_);
+    return groupQueueStreamsSize(waiting_group_queue_) + groupQueueStreamsSize(loading_cache_group_queue_)
+           + executing_prefill_streams_.size() + completed_prefill_streams_.size();
 }
 
 void FIFOScheduler::fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const {
+    collector.running_stream_size += executing_prefill_streams_.size() + completed_prefill_streams_.size();
     collector.wait_stream_size += groupQueueStreamsSize(waiting_group_queue_);
     collector.loading_cache_stream_size += groupQueueStreamsSize(loading_cache_group_queue_);
     collector.group_fallback_count = pending_group_fallback_count_.exchange(0, std::memory_order_relaxed);
@@ -150,8 +155,11 @@ bool FIFOScheduler::evaluateRunningBatch(const ScheduleRuntime&   schedule_runti
             return true;
         }
     }
-    // prefill and decode not mixed together
-    if (!running_streams_.empty()) {
+    // During lookahead, running_streams_ owns the unsubmitted ordinary batch.
+    // Its rows are already included in schedule_runtime by admitWaitingStreams.
+    const bool append_preparing = prefill_async_scheduling_ && !executing_prefill_streams_.empty()
+                                  && active_admission_lane_ == AdmissionLane::NORMAL;
+    if (!running_streams_.empty() && !append_preparing) {
         return false;
     }
     // Conservative CP prefill mode: cap at one stream per round unless
@@ -159,7 +167,7 @@ bool FIFOScheduler::evaluateRunningBatch(const ScheduleRuntime&   schedule_runti
     if (cp_force_single_prefill_ && admitted_stream_count > 0) {
         return false;
     }
-    if (running_streams_.size() + admitted_stream_count + 1 > max_generate_batch_size_) {
+    if ((append_preparing ? 0 : running_streams_.size()) + admitted_stream_count + 1 > max_generate_batch_size_) {
         return false;
     }
 
@@ -223,7 +231,9 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
     // Preserve the existing one-token reserve for each already-running stream.
     // Prefill is not mixed with a running batch, so this is normally zero, but
     // keeping it here makes both callers retain the original boundary semantics.
-    const auto running_token_reserve = running_streams_.size();
+    const bool preparing_prefill = prefill_async_scheduling_ && !executing_prefill_streams_.empty()
+                                   && active_admission_lane_ == AdmissionLane::NORMAL;
+    const auto running_token_reserve = preparing_prefill ? 0 : running_streams_.size();
     if (running_token_reserve >= max_batch_tokens_size_) {
         return false;
     }
@@ -288,7 +298,8 @@ size_t FIFOScheduler::countInitedKVCacheStreams() const {
     };
 
     size_t count = count_inited(waiting_streams_) + count_inited(loading_cache_streams_)
-                   + count_inited(cache_ready_streams_) + count_inited(running_streams_) + count_inited(new_streams_);
+                   + count_inited(cache_ready_streams_) + count_inited(running_streams_) + count_inited(new_streams_)
+                   + executing_inited_kv_streams_ + count_inited(completed_prefill_streams_);
     for (const auto& group : waiting_group_queue_) {
         count += count_inited(group);
     }
@@ -321,7 +332,7 @@ bool FIFOScheduler::waitPredicate() {
     // Check streams directly without calling empty() which acquires lock_ (already held by schedule())
     // Pending loads and capacity-blocked waiters are polled by the timed wait below. They are not
     // wakeup events themselves, otherwise a retryable KV shortage spins the scheduler.
-    return stop_ || schedule_trigger_ || !running_streams_.empty();
+    return stop_ || schedule_trigger_ || !running_streams_.empty() || !completed_prefill_streams_.empty();
 }
 
 void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_streams,
@@ -331,7 +342,7 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
     const auto   now_us               = autil::TimeUtility::currentTimeInMicroSeconds();
-    const size_t inited_kv_streams = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
+    const size_t inited_kv_streams    = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
 
     // Explicit groups are scheduled through enqueueGroup() and the dedicated group
     // queues. group_id/group_size on a stream in waiting_streams are status metadata;
@@ -656,11 +667,20 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
         cond_.wait(lock, [this] { return waitPredicate(); });
     }
 
+    if (stop_) {
+        return list<GenerateStreamPtr>{};
+    }
+
     schedule_trigger_                 = false;
     last_admitted_context_batch_size_ = 0;
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
 
+    if (running_streams_.empty() && !completed_prefill_streams_.empty()) {
+        running_streams_.splice(running_streams_.end(), completed_prefill_streams_);
+        // A continuing fallback batch keeps an isolated boundary.
+        active_admission_lane_ = AdmissionLane::GROUP;
+    }
     evaluateAndUpdateStreams(running_streams_);
 
     if (running_streams_.empty()) {
@@ -756,17 +776,163 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
     new_streams_.clear();
 
+    // Prepare the currently runnable batch immediately. Requests arriving after
+    // this snapshot belong to the next batch; token budgets remain upper bounds.
+    if (stop_) {
+        return list<GenerateStreamPtr>{};
+    }
+
     updateCacheExposedWait();
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
+    if (prefill_async_scheduling_ && !running_streams_.empty()
+        && std::all_of(running_streams_.begin(), running_streams_.end(), [](const auto& stream) {
+               return stream->isContextStream();
+           })) {
+        RTP_LLM_CHECK_WITH_INFO(!prepared_prefill_reserved_, "prepared Prefill batch scheduled twice");
+        for (auto it = running_streams_.begin(); it != running_streams_.end();) {
+            if ((*it)->tryHoldPrefillResources()) {
+                ++it;
+            } else {
+                if (!(*it)->hasError()) {
+                    (*it)->reportError(ErrorCode::CANCELLED, "Prefill cancelled before preparation");
+                }
+                (*it)->moveToNext();
+                it = running_streams_.erase(it);
+            }
+        }
+        prepared_prefill_reserved_ = !running_streams_.empty();
+    }
     return running_streams_;
+}
+
+bool FIFOScheduler::pruneInvalidPreparedPrefill(std::list<GenerateStreamPtr>& streams) {
+    std::list<GenerateStreamPtr> discarded;
+    {
+        std::lock_guard<std::mutex> lock(lock_);
+        if (!prepared_prefill_reserved_) {
+            return false;
+        }
+        for (auto it = running_streams_.begin(); it != running_streams_.end();) {
+            if ((*it)->checkTimeoutAndHasError()) {
+                auto invalid = it++;
+                discarded.splice(discarded.end(), running_streams_, invalid);
+            } else {
+                ++it;
+            }
+        }
+        if (discarded.empty()) {
+            return false;
+        }
+        streams                    = running_streams_;
+        prepared_prefill_reserved_ = !running_streams_.empty();
+        if (running_streams_.empty()) {
+            active_admission_lane_ = AdmissionLane::NONE;
+        }
+        schedule_trigger_ = true;
+    }
+    // Releasing a cancelled stream may wait for cache workers; never hold lock_.
+    for (const auto& stream : discarded) {
+        stream->decPendingAsyncBookkeepingAndMaybeRelease();
+        stream->moveToNext();
+    }
+    cond_.notify_all();
+    return true;
+}
+
+bool FIFOScheduler::beginPrefillExecution() {
+    std::lock_guard<std::mutex> lock(lock_);
+    RTP_LLM_CHECK(prefill_async_scheduling_ && executing_prefill_streams_.empty());
+    if (!prepared_prefill_reserved_) {
+        // Continuing Decode fallback retains the existing serial running list.
+        return false;
+    }
+    executing_inited_kv_streams_ = 0;
+    for (const auto& stream : running_streams_) {
+        executing_inited_kv_streams_ += stream->curBlocksNum() > 0;
+    }
+    executing_prefill_streams_.splice(executing_prefill_streams_.end(), running_streams_);
+    prepared_prefill_reserved_ = false;
+    active_admission_lane_     = AdmissionLane::NONE;
+    schedule_trigger_          = schedule_trigger_ || !cache_ready_streams_.empty() || !waiting_streams_.empty()
+                        || !loading_cache_streams_.empty() || !waiting_group_queue_.empty()
+                        || !loading_cache_group_queue_.empty();
+    return true;
+}
+
+int64_t FIFOScheduler::completePrefillExecution() {
+    // The engine loop is the sole writer of this list until shutdown joins it.
+    // Keep it visible to concurrent admission while lease release can block.
+    for (const auto& stream : executing_prefill_streams_) {
+        stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    }
+    int64_t released_us;
+    {
+        std::lock_guard<std::mutex> lock(lock_);
+        completed_prefill_streams_.splice(completed_prefill_streams_.end(), executing_prefill_streams_);
+        executing_inited_kv_streams_ = 0;
+        released_us                  = autil::TimeUtility::currentTimeInMicroSeconds();
+        schedule_trigger_            = true;
+    }
+    cond_.notify_all();
+    return released_us;
+}
+
+void FIFOScheduler::discardPreparedPrefill(const std::string& error) {
+    std::list<GenerateStreamPtr> discarded;
+    {
+        std::lock_guard<std::mutex> lock(lock_);
+        discarded.splice(discarded.end(), running_streams_);
+        if (prepared_prefill_reserved_) {
+            prepared_prefill_reserved_ = false;
+        } else {
+            RTP_LLM_CHECK(discarded.empty());
+        }
+    }
+    for (const auto& stream : discarded) {
+        stream->reportError(ErrorCode::EXECUTION_EXCEPTION, error);
+        stream->decPendingAsyncBookkeepingAndMaybeRelease();
+        stream->moveToNext();
+    }
+}
+
+absl::Status FIFOScheduler::stop() {
+    if (!prefill_async_scheduling_) {
+        return FIFOSchedulerBase::stop();
+    }
+    // The engine drains preparation/execution before finalizeStop releases pages.
+    {
+        std::lock_guard<std::mutex> lock(lock_);
+        stop_ = true;
+    }
+    cond_.notify_all();
+    return absl::OkStatus();
+}
+
+absl::Status FIFOScheduler::finalizeStop() {
+    if (prefill_async_scheduling_) {
+        // Called only after the engine, prepare task and executor workers exited.
+        for (const auto& stream : executing_prefill_streams_) {
+            stream->decPendingAsyncBookkeepingAndMaybeRelease();
+        }
+        cancelStreams(executing_prefill_streams_);
+        executing_inited_kv_streams_ = 0;
+        if (prepared_prefill_reserved_) {
+            for (const auto& stream : running_streams_) {
+                stream->decPendingAsyncBookkeepingAndMaybeRelease();
+            }
+            prepared_prefill_reserved_ = false;
+        }
+        return FIFOSchedulerBase::stop();
+    }
+    return absl::OkStatus();
 }
 
 void FIFOScheduler::updateCacheExposedWait() {
     // Measure scheduler-observed stalls between batches, after both lanes had
     // a chance to provide runnable work. A group parked here may already be ready.
     const bool waiting_for_cache =
-        running_streams_.empty()
+        running_streams_.empty() && executing_prefill_streams_.empty()
         && (!loading_cache_streams_.empty()
             || (!loading_cache_group_queue_.empty()
                 && std::any_of(loading_cache_group_queue_.front().begin(),

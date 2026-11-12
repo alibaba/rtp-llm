@@ -116,7 +116,7 @@ protected:
                                              const std::vector<int32_t>&         sampled_tokens) {
         StreamGroups stream_groups(streams);
         MergedOutput outputs;
-        outputs.model_output.logits = raw_logits.to(torch::kCUDA);
+        outputs.model_output.logits           = raw_logits.to(torch::kCUDA);
         outputs.sampler_output.sampling_probs = torch::softmax(
             outputs.model_output.logits.narrow(1, 0, streams.front()->vocabSize()).to(torch::kFloat32), -1);
         outputs.sampler_output.token_ids =
@@ -429,6 +429,35 @@ TEST_F(NormalBatchStreamProcessorTest, testZeroDispatchWorkerCount) {
 
 TEST_F(NormalBatchStreamProcessorTest, testNegativeDispatchWorkerCountIsRejected) {
     EXPECT_THROW(NormalOutputDispatcher({}, -1), std::invalid_argument);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, PreparedPrefillKeepsHostInputAndDoesNotAdvanceIteration) {
+    auto config                              = makeLogprobsModelConfig();
+    config.input_vocab_size                  = config.vocab_size;
+    auto                           stream    = makeLogprobsStream(config, false, 0, 1, false);
+    auto                           processor = makeLogprobsProcessor(config);
+    NormalModelInputGathererConfig gather_config;
+    gather_config.vocab_size          = 4;
+    gather_config.input_vocab_size    = 4;
+    gather_config.kv_cache_group_nums = 0;
+    gather_config.is_multimodal       = true;  // DSV4.1 model with a text-only request.
+    gather_config.warm_up             = true;
+    processor->model_input_gatherer_  = std::make_unique<NormalModelInputGatherer>(gather_config);
+    StreamGroups groups({stream});
+    TensorHolder holder;
+    const auto   before   = stream->iter_count_;
+    auto         prepared = processor->preparePrefillInput(groups, holder);
+    ASSERT_TRUE(prepared.ok()) << prepared.status();
+    EXPECT_EQ(stream->iter_count_, before);
+    EXPECT_FALSE(prepared->combo_tokens.is_cuda());
+    EXPECT_FALSE(prepared->input_lengths.is_cuda());
+    EXPECT_FALSE(prepared->prefix_lengths.is_cuda());
+    EXPECT_EQ(toVec<int32_t>(prepared->combo_tokens), (std::vector<int32_t>{0}));
+    auto serial = processor->gatherModelInput(groups, holder);
+    ASSERT_TRUE(serial.ok());
+    EXPECT_EQ(stream->iter_count_, before + 1);
+    EXPECT_TRUE(torch::equal(serial->combo_tokens, prepared->combo_tokens));
+    EXPECT_TRUE(torch::equal(serial->input_lengths, prepared->input_lengths));
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testWarmUpWithoutCacheManager) {
@@ -1293,8 +1322,8 @@ TEST_P(OutputDispatchTest, testStatefulProcessorsAdvanceForEveryDispatchedStream
     model_config.max_seq_len = 8;
     model_config.vocab_size  = 2;
     model_config.num_layers  = 1;
-    RuntimeConfig                                     runtime_config;
-    std::list<GenerateStreamPtr>                      streams;
+    RuntimeConfig                                             runtime_config;
+    std::list<GenerateStreamPtr>                              streams;
     std::vector<std::shared_ptr<TestStatefulLogitsProcessor>> processors;
     for (int input_token : {0, 1}) {
         auto query             = make_shared<GenerateInput>();
@@ -2772,11 +2801,11 @@ TEST_F(NormalBatchStreamProcessorTest, testThinkingSkipsLogprobsUntilAfterFirstC
         EXPECT_EQ(sampler_input->return_logprobs, expect_logprobs);
 
         MergedOutput outputs;
-        outputs.model_output                            = model_output;
-        outputs.sampler_output.token_ids                = torch::tensor({{sampled_token}}, torch::kInt32);
-        outputs.sampler_output.sampling_probs           = sampler_input->return_logprobs ?
-                                                              torch::softmax(sampler_input->logits.to(torch::kFloat32), -1) :
-                                                              torch::Tensor();
+        outputs.model_output                  = model_output;
+        outputs.sampler_output.token_ids      = torch::tensor({{sampled_token}}, torch::kInt32);
+        outputs.sampler_output.sampling_probs = sampler_input->return_logprobs ?
+                                                    torch::softmax(sampler_input->logits.to(torch::kFloat32), -1) :
+                                                    torch::Tensor();
         ASSERT_TRUE(processor->dispatch(stream_groups, outputs).ok());
     };
 
@@ -2897,11 +2926,11 @@ TEST_F(NormalBatchStreamProcessorTest, testProcessedLogprobsMixedBatchAndPaddedV
         ASSERT_TRUE(sampler_input->return_logprobs);
 
         MergedOutput outputs;
-        outputs.model_output                            = model_output;
-        outputs.sampler_output.token_ids                = torch::tensor({0, 1}, torch::kInt32).reshape({2, 1});
-        outputs.sampler_output.sampling_probs           = sampler_input->return_logprobs ?
-                                                              torch::softmax(sampler_input->logits.to(torch::kFloat32), -1) :
-                                                              torch::Tensor();
+        outputs.model_output                  = model_output;
+        outputs.sampler_output.token_ids      = torch::tensor({0, 1}, torch::kInt32).reshape({2, 1});
+        outputs.sampler_output.sampling_probs = sampler_input->return_logprobs ?
+                                                    torch::softmax(sampler_input->logits.to(torch::kFloat32), -1) :
+                                                    torch::Tensor();
         ASSERT_TRUE(processor->dispatch(stream_groups, outputs).ok());
 
         auto plain_result   = plain_stream->nextOutput();
@@ -2948,7 +2977,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDispatchLogprobsUsesProcessedProbabil
     auto            processor    = makeLogprobsProcessor(model_config);
     auto            requested    = makeLogprobsStream(model_config, true, 2, 2, true);
     auto            plain        = makeLogprobsStream(model_config, false, 0, 2, true);
-    GptModelInputs model_inputs;
+    GptModelInputs  model_inputs;
     GptModelOutputs model_output;
     model_output.logits = torch::tensor({{1.f, 2.f, 3.f, 4.f, 50.f, 60.f}, {6.f, 7.f, 8.f, 9.f, 70.f, 80.f}},
                                         torch::TensorOptions().device(torch::kCUDA));

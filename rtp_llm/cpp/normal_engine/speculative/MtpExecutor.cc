@@ -1343,10 +1343,14 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(gather_model_input)");
-        int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups, buffer_holder_);
-        RETURN_IF_STATUS_OR_ERROR(model_input_status);
-        model_input                              = std::move(model_input_status.value());
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        if (prepared_prefill_input_) {
+            model_input = consumePreparedPrefillInput(buffer_holder_, stream_groups.contextStreams());
+        } else {
+            auto model_input_status = batch_stream_processor_->gatherModelInput(stream_groups, buffer_holder_);
+            RETURN_IF_STATUS_OR_ERROR(model_input_status);
+            model_input = std::move(model_input_status.value());
+        }
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     {
@@ -1424,6 +1428,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         if (model_inputs_logger_) {
             model_inputs_logger_->log(model_input, ModelInputsModelRole::TARGET, model_->model_id_);
         }
+        // The full input snapshot and target/draft owners are already fixed.
+        startNextPrefillPrepare();
         if (telemetry::TelemetryRuntime::isActive()) {
             const auto forward_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
             for (const auto& stream : streams) {
@@ -3263,6 +3269,20 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
     };
     reject_mixed_execution_modes(prefill_streams);
     reject_mixed_execution_modes(decode_streams);
+}
+
+absl::StatusOr<PreparedPrefillInput> MtpExecutor::preparePrefillInput(const std::list<GenerateStreamPtr>& streams) {
+    for (const auto& stream : streams) {
+        if (validateMtpCompatibility(stream->getAllLogitsProcessorPtr()).has_value()) {
+            // Keep the existing per-stream rejection/filtering in prepareStreams.
+            return absl::UnimplementedError("MTP capability validation requires serial stream preparation");
+        }
+    }
+    PreparedPrefillInput prepared;
+    auto                 input = batch_stream_processor_->preparePrefillInput(StreamGroups(streams), prepared.holder);
+    RETURN_IF_STATUS_OR_ERROR(input);
+    prepared.input = std::move(input.value());
+    return prepared;
 }
 
 absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {

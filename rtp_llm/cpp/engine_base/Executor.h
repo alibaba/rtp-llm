@@ -9,13 +9,30 @@
 #include <cstdint>
 #include <memory>
 #include <cstdlib>
+#include <functional>
+#include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 
 namespace rtp_llm {
+
+struct PreparedPrefillInput {
+    GptModelInputs input;
+    TensorHolder   holder;
+};
 
 class Executor {
 public:
     Executor() {};
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) = 0;
+
+    virtual absl::StatusOr<PreparedPrefillInput> preparePrefillInput(const std::list<GenerateStreamPtr>&) {
+        return absl::UnimplementedError("executor does not support Prefill preparation");
+    }
+    void setPreparedPrefillInput(PreparedPrefillInput input) {
+        prepared_prefill_input_ = std::move(input);
+    }
+    void setNextPrefillPrepare(std::function<void()> prepare) {
+        next_prefill_prepare_ = std::move(prepare);
+    }
 
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,
@@ -84,7 +101,29 @@ public:
 
     virtual ~Executor() {};
 
-public:
+protected:
+    std::optional<PreparedPrefillInput> prepared_prefill_input_;
+    std::function<void()>               next_prefill_prepare_;
+
+    GptModelInputs consumePreparedPrefillInput(TensorHolder& holder, const std::list<GenerateStreamPtr>& streams) {
+        auto prepared = std::move(*prepared_prefill_input_);
+        prepared_prefill_input_.reset();
+        for (auto& tensor : prepared.holder.tensors) {
+            holder.hold(tensor);
+        }
+        for (const auto& stream : streams) {
+            stream->step();
+        }
+        return std::move(prepared.input);
+    }
+
+    void startNextPrefillPrepare() {
+        if (next_prefill_prepare_) {
+            auto prepare          = std::move(next_prefill_prepare_);
+            next_prefill_prepare_ = nullptr;
+            prepare();
+        }
+    }
 };
 
 }  // namespace rtp_llm
