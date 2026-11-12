@@ -50,7 +50,7 @@ from rtp_llm.server.request_headers import (
 )
 from rtp_llm.server.worker_status import _coerce_role_type
 from rtp_llm.telemetry import attributes as trace_attrs
-from rtp_llm.telemetry import start_client_span
+from rtp_llm.telemetry import internal_span, start_client_span
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 
@@ -244,6 +244,13 @@ class MasterClient:
                 client_span.set_attribute(
                     trace_attrs.RTP_LLM_VIT_ROUTE_ONLY, request_pb.vit_route_only
                 )
+                client_span.set_attribute(
+                    "rtp_llm.schedule.seq_len", request_pb.seq_len
+                )
+                client_span.set_attribute(
+                    "rtp_llm.schedule.has_selected_vit",
+                    request_pb.HasField("selected_vit"),
+                )
             try:
                 response = await stub.Schedule(
                     request_pb,
@@ -272,6 +279,17 @@ class MasterClient:
                 client_span.set_attribute(
                     trace_attrs.RTP_LLM_SCHEDULE_CODE, int(response.code)
                 )
+                client_span.set_attribute(
+                    "rtp_llm.schedule.enqueued_by_master", response.enqueued_by_master
+                )
+                if response.real_master_host:
+                    client_span.set_attribute(
+                        "rtp_llm.schedule.real_master_host", response.real_master_host
+                    )
+                if response.HasField("lifecycle"):
+                    client_span.set_attribute(
+                        "rtp_llm.schedule.request_state", response.lifecycle.state
+                    )
                 # A rejecting business code on an otherwise successful transport is
                 # still a failed schedule: the caller raises FtRuntimeException on
                 # it (see the SUCCESS_CODE branch below). Closing this span as OK
@@ -381,80 +399,94 @@ class MasterClient:
             else (timeout_s or default_timeout_s)
         )
 
-        gc = input.generate_config
-        api_key = self._extract_api_key(input)
-        priority = self._extract_priority(input)
-        request_pb = FlexlbScheduleRequestPB(
-            request_id=request_id,
-            block_cache_keys=block_cache_keys,
-            seq_len=input.prompt_length if seq_len is None else seq_len,
-            generate_timeout=ttft_timeout_ms,
-            request_time_ms=int(time.time() * 1000),
-            max_new_tokens=gc.max_new_tokens,
-            num_beams=gc.num_beams,
-            force_disable_sp_run=gc.force_disable_sp_run,
-            model="engine_service",
-            api_key=api_key,
-            cache_key_block_size=cache_key_block_size,
-            priority=priority,
-        )
-        request_pb.cache_affinity_keys.extend(cache_affinity_keys or [])
-        request_pb.vit_route_only = vit_only
-        if selected_vit is not None:
-            for name in (
-                "role",
-                "server_ip",
-                "http_port",
-                "grpc_port",
-                "group",
-                "worker_generation",
-            ):
-                value = selected_vit.get(name)
-                if value is not None:
-                    setattr(request_pb.selected_vit, name, value)
-        if input_pb is not None and not vit_only:
-            request_pb.generate_input = input_pb.SerializeToString()
+        with internal_span("rtp_llm.flexlb.prepare_request"):
+            gc = input.generate_config
+            api_key = self._extract_api_key(input)
+            priority = self._extract_priority(input)
+            request_pb = FlexlbScheduleRequestPB(
+                request_id=request_id,
+                block_cache_keys=block_cache_keys,
+                seq_len=input.prompt_length if seq_len is None else seq_len,
+                generate_timeout=ttft_timeout_ms,
+                request_time_ms=int(time.time() * 1000),
+                max_new_tokens=gc.max_new_tokens,
+                num_beams=gc.num_beams,
+                force_disable_sp_run=gc.force_disable_sp_run,
+                model="engine_service",
+                api_key=api_key,
+                cache_key_block_size=cache_key_block_size,
+                priority=priority,
+            )
+            request_pb.cache_affinity_keys.extend(cache_affinity_keys or [])
+            request_pb.vit_route_only = vit_only
+            if selected_vit is not None:
+                for name in (
+                    "role",
+                    "server_ip",
+                    "http_port",
+                    "grpc_port",
+                    "group",
+                    "worker_generation",
+                ):
+                    value = selected_vit.get(name)
+                    if value is not None:
+                        setattr(request_pb.selected_vit, name, value)
+            if input_pb is not None and not vit_only:
+                request_pb.generate_input = input_pb.SerializeToString()
 
         async def send_to(addr):
             nonlocal input_pb
-            started_at = time.monotonic()
-            response = await self._send_schedule_request(
-                addr, request_pb, timeout_s, request_id
-            )
-            # A heartbeat can be stale, or a follower can forward to a BATCH leader.
-            # Both rejection forms are emitted before scheduler admission.
-            if (
-                input_pb is None
-                and not vit_only
-                and response is not None
-                and (
-                    response.code == ExceptionType.MASTER_GENERATE_INPUT_REQUIRED
-                    or (
-                        response.code == ExceptionType.MASTER_INVALID_REQUEST
-                        and response.error_message
-                        == "missing serialized generate_input for batch dispatch"
-                    )
-                )
-                and not response.success
-                and not response.enqueued_by_master
-                and not response.server_status
-                and not response.HasField("lifecycle")
+            with internal_span(
+                "rtp_llm.flexlb.schedule_attempt",
+                **{
+                    "request_id": str(request_id),
+                    "rtp_llm.schedule.target_role": (
+                        "discovered_master"
+                        if addr == master_addr
+                        else "discovered_slave"
+                    ),
+                },
             ):
-                input_pb = trans_input(input)
-                request_pb.generate_input = input_pb.SerializeToString()
-                remaining = (
-                    timeout_s - (time.monotonic() - started_at)
-                    if timeout_s is not None
-                    else None
-                )
-                if remaining is not None and remaining <= 0:
-                    raise FtRuntimeException(
-                        ExceptionType.DEADLINE_EXCEEDED, "schedule deadline exceeded"
-                    )
+                started_at = time.monotonic()
                 response = await self._send_schedule_request(
-                    addr, request_pb, remaining, request_id
+                    addr, request_pb, timeout_s, request_id
                 )
-            return response
+                # A heartbeat can be stale, or a follower can forward to a BATCH leader.
+                # Both rejection forms are emitted before scheduler admission.
+                if (
+                    input_pb is None
+                    and not vit_only
+                    and response is not None
+                    and (
+                        response.code == ExceptionType.MASTER_GENERATE_INPUT_REQUIRED
+                        or (
+                            response.code == ExceptionType.MASTER_INVALID_REQUEST
+                            and response.error_message
+                            == "missing serialized generate_input for batch dispatch"
+                        )
+                    )
+                    and not response.success
+                    and not response.enqueued_by_master
+                    and not response.server_status
+                    and not response.HasField("lifecycle")
+                ):
+                    with internal_span("rtp_llm.flexlb.prepare_required_input"):
+                        input_pb = trans_input(input)
+                        request_pb.generate_input = input_pb.SerializeToString()
+                    remaining = (
+                        timeout_s - (time.monotonic() - started_at)
+                        if timeout_s is not None
+                        else None
+                    )
+                    if remaining is not None and remaining <= 0:
+                        raise FtRuntimeException(
+                            ExceptionType.DEADLINE_EXCEEDED,
+                            "schedule deadline exceeded",
+                        )
+                    response = await self._send_schedule_request(
+                        addr, request_pb, remaining, request_id
+                    )
+                return response
 
         response = await send_to(master_addr)
 
@@ -589,14 +621,24 @@ class MasterClient:
             except ValueError:
                 configured_probe_ms = DEFAULT_VIT_HASH_PROBE_TIMEOUT_MS
             probe_timeout = min(max(1, configured_probe_ms), min(limits)) / 1000.0
-        metadata = await self._get_vit_metadata(
-            address,
-            MultimodalHashRequestPB(keys=unique_keys),
-            probe_timeout,
-            headers=input.headers if input is not None else None,
-            fallback_on_unimplemented=input is not None,
-            request_id=input.request_id if input is not None else None,
-        )
+        with internal_span(
+            "rtp_llm.vit.hash_probe",
+            **{
+                trace_attrs.REQUEST_ID: (
+                    str(input.request_id) if input is not None else ""
+                ),
+                "rtp_llm.vit.key_count": len(unique_keys),
+                "rtp_llm.rpc.timeout_ms": probe_timeout * 1000,
+            },
+        ):
+            metadata = await self._get_vit_metadata(
+                address,
+                MultimodalHashRequestPB(keys=unique_keys),
+                probe_timeout,
+                headers=input.headers if input is not None else None,
+                fallback_on_unimplemented=input is not None,
+                request_id=input.request_id if input is not None else None,
+            )
         if metadata is _HASH_RPC_UNSUPPORTED:
             route_logger.info(
                 "ViT hash RPC unavailable at %s:%s; using legacy multimodal routing",
@@ -626,45 +668,60 @@ class MasterClient:
 
         # The cache-hit probe carries no URLs. On a miss serialize each distinct
         # missing input once, without copying image/video data into embeddings.
-        inputs = MultimodalInputsPB(request_id=input.request_id)
-        region = input.headers.get("region")
-        if region:
-            # Request-level: one value for every multimodal input submitted below.
-            inputs.region = region
-        input_inspection_enabled = extract_input_inspection_enabled(input.headers)
-        if input_inspection_enabled is not None:
-            inputs.input_inspection_enabled.CopyFrom(
-                BoolValue(value=input_inspection_enabled)
-            )
-        submitted = set()
-        for key, item in zip(
-            keys, iter_multimodal_inputs(input, input.generate_config)
+        with internal_span(
+            "rtp_llm.vit.prepare_missing_inputs",
+            **{
+                trace_attrs.REQUEST_ID: str(input.request_id),
+                "rtp_llm.vit.missing_key_count": len(missing),
+            },
         ):
-            if key in missing and key not in submitted:
-                inputs.multimodal_inputs.add().CopyFrom(item)
-                submitted.add(key)
-        if submitted != missing:
-            raise FtRuntimeException(
-                ExceptionType.MM_PROCESS_ERROR, "Missing ViT submission inputs"
-            )
+            inputs = MultimodalInputsPB(request_id=input.request_id)
+            region = input.headers.get("region")
+            if region:
+                # Request-level: one value for every multimodal input submitted below.
+                inputs.region = region
+            input_inspection_enabled = extract_input_inspection_enabled(input.headers)
+            if input_inspection_enabled is not None:
+                inputs.input_inspection_enabled.CopyFrom(
+                    BoolValue(value=input_inspection_enabled)
+                )
+            submitted = set()
+            for key, item in zip(
+                keys, iter_multimodal_inputs(input, input.generate_config)
+            ):
+                if key in missing and key not in submitted:
+                    inputs.multimodal_inputs.add().CopyFrom(item)
+                    submitted.add(key)
+            if submitted != missing:
+                raise FtRuntimeException(
+                    ExceptionType.MM_PROCESS_ERROR, "Missing ViT submission inputs"
+                )
         remaining = min(limits) / 1000.0 - (time.monotonic() - started)
         if remaining <= 0:
             raise FtRuntimeException(
                 ExceptionType.GENERATE_TIMEOUT, "ViT hash acquisition timed out"
             )
-        filled = await self._get_vit_metadata(
-            address,
-            MultimodalHashRequestPB(
-                keys=[key for key in unique_keys if key in missing],
-                inputs=inputs,
-                timeout_ms=max(1, int(remaining * 1000)),
-            ),
-            remaining,
-            required=True,
-            headers=input.headers,
-            fallback_on_unimplemented=True,
-            request_id=input.request_id,
-        )
+        with internal_span(
+            "rtp_llm.vit.hash_fill",
+            **{
+                trace_attrs.REQUEST_ID: str(input.request_id),
+                "rtp_llm.vit.missing_key_count": len(missing),
+                "rtp_llm.rpc.timeout_ms": remaining * 1000,
+            },
+        ):
+            filled = await self._get_vit_metadata(
+                address,
+                MultimodalHashRequestPB(
+                    keys=[key for key in unique_keys if key in missing],
+                    inputs=inputs,
+                    timeout_ms=max(1, int(remaining * 1000)),
+                ),
+                remaining,
+                required=True,
+                headers=input.headers,
+                fallback_on_unimplemented=True,
+                request_id=input.request_id,
+            )
         if filled is _HASH_RPC_UNSUPPORTED:
             return None
         if metadata and filled.get("worker_instance") != metadata.get(
@@ -709,7 +766,17 @@ class MasterClient:
     ):
         started = time.monotonic()
         try:
-            channel = await self._vit_channels.get(f"{address.ip}:{address.grpc_port}")
+            with internal_span(
+                "rtp_llm.vit.channel_acquire",
+                **{
+                    trace_attrs.REQUEST_ID: str(request_id),
+                    "server.address": address.ip,
+                    "server.port": address.grpc_port,
+                },
+            ):
+                channel = await self._vit_channels.get(
+                    f"{address.ip}:{address.grpc_port}"
+                )
             from rtp_llm.telemetry.vit_rpc import (
                 INTERNAL_REQUEST_ID_METADATA_KEY,
                 vit_client_span,
@@ -729,7 +796,8 @@ class MasterClient:
                     timeout=timeout_sec,
                     metadata=metadata,
                 )
-            return metadata_from_proto(response)
+            with internal_span("rtp_llm.vit.metadata_decode"):
+                return metadata_from_proto(response)
         except grpc.RpcError as error:
             if (
                 fallback_on_unimplemented
@@ -754,7 +822,8 @@ class MasterClient:
                         break
                 raise FtRuntimeException(code, message) from error
             route_logger.warning(
-                "ViT hash probe unavailable, address=%s:%s, status=%s",
+                "ViT hash probe unavailable, request_id=%s, address=%s:%s, status=%s",
+                request_id,
                 address.ip,
                 address.grpc_port,
                 error.code(),
@@ -770,10 +839,14 @@ class MasterClient:
                 raise FtRuntimeException(
                     code, f"ViT hash acquisition failed: {type(error).__name__}"
                 ) from error
-            route_logger.warning("ViT hash probe failed: %s", error)
+            route_logger.warning(
+                "ViT hash probe failed, request_id=%s: %s", request_id, error
+            )
             return None
         finally:
             route_logger.debug(
-                "ViT hash RPC elapsed_ms=%.3f",
+                "ViT hash RPC request_id=%s required=%s elapsed_ms=%.3f",
+                request_id,
+                required,
                 (time.monotonic() - started) * 1000,
             )

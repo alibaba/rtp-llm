@@ -610,6 +610,37 @@ class TestActiveRuntime(TracingTestCase):
         assert spans["schedule"].parent.span_id == spans["batch_wait"].context.span_id
         assert spans["schedule"].context.trace_id == spans["server"].context.trace_id
 
+    def test_nested_stages_restore_parent_after_cancellation(self):
+        import asyncio
+
+        exporter = _start_in_memory_runtime()
+        state = tracing.start_server_span("server", {})
+        with tracing.internal_span("route", request_id="42"):
+            route_context = tracing.CURRENT_INTERNAL_CONTEXT.get()
+            with self.assertRaises(asyncio.CancelledError):
+                with tracing.internal_span("hash_probe"):
+                    client, _ = tracing.start_client_span("rpc", "vit:8001")
+                    client.finish()
+                    raise asyncio.CancelledError()
+            self.assertIs(tracing.CURRENT_INTERNAL_CONTEXT.get(), route_context)
+            with tracing.internal_span("fallback"):
+                pass
+        self.assertIsNone(tracing.CURRENT_INTERNAL_CONTEXT.get())
+        state.finish()
+        tracing.shutdown_telemetry()
+        spans = {s.name: s for s in exporter.get_finished_spans()}
+        self.assertEqual(len(exporter.get_finished_spans()), 5)
+        for child, parent in (
+            ("route", "server"),
+            ("hash_probe", "route"),
+            ("rpc", "hash_probe"),
+            ("fallback", "route"),
+        ):
+            self.assertEqual(spans[child].parent.span_id, spans[parent].context.span_id)
+        self.assertEqual(spans["hash_probe"].status.status_code.name, "ERROR")
+        self.assertEqual(spans["hash_probe"].attributes["error.type"], "CancelledError")
+        self.assertEqual(spans["route"].attributes["request_id"], "42")
+
     def test_shutdown_idempotent(self):
         _start_in_memory_runtime()
         assert tracing.shutdown_telemetry()
@@ -1080,6 +1111,36 @@ class TestPlatformGapFixAttributes(TracingTestCase):
 
 
 class TestSpanEvents(TracingTestCase):
+    def test_deferred_dash_entry_timestamp_and_nested_stage_events(self):
+        exporter = _start_in_memory_runtime()
+        entered_at = time.time_ns()
+        state = tracing.start_server_span(
+            "dash_sc.ModelStreamInfer", {}, start_time=entered_at
+        )
+        state.add_event("dash_sc.request_received", timestamp=entered_at)
+        with tracing.internal_span("route"):
+            tracing.request_event("dash_sc.parameters_parse_completed", input_tokens=7)
+        state.finish()
+        tracing.request_event("too_late")
+        tracing.shutdown_telemetry()
+        spans = {s.name: s for s in exporter.get_finished_spans()}
+        root = spans["dash_sc.ModelStreamInfer"]
+        self.assertEqual(root.events[0].timestamp, root.start_time)
+        self.assertEqual(
+            [e.name for e in root.events],
+            ["dash_sc.request_received", "dash_sc.parameters_parse_completed"],
+        )
+        self.assertEqual(root.events[1].attributes["input_tokens"], 7)
+        self.assertFalse(spans["route"].events)
+
+    def test_request_event_without_context_and_sdk_failure_is_noop(self):
+        tracing.request_event("no_request")
+        with mock.patch.object(tracing, "CURRENT_TRACE_STATE") as carrier:
+            carrier.get.return_value.add_event.side_effect = RuntimeError(
+                "export failed"
+            )
+            tracing.request_event("event")
+
     """first_response_chunk span event contract."""
 
     def test_add_event_recorded_within_span_window(self):

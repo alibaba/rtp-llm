@@ -3,6 +3,10 @@
 
 def __getattr__(name):
     # 配置解析器可独立导入；仅请求运行时 API 时加载 SDK。
+    if name in ("RequestTimeline", "stage", "traced_stage"):
+        from rtp_llm.telemetry import timeline
+
+        return getattr(timeline, name)
     if name in __all__:
         from rtp_llm.telemetry import tracing
 
@@ -27,6 +31,11 @@ __all__ = [
     "shutdown_telemetry",
     "start_client_span",
     "start_internal_span",
+    "internal_span",
+    "request_event",
+    "RequestTimeline",
+    "stage",
+    "traced_stage",
     "start_server_span",
     "telemetry_state",
 ]

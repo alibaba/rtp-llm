@@ -31,9 +31,26 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyList;
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.isNull;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
+/**
+ * Verifies routing span parentage, decision diagnostics and fail-open telemetry.
+ */
 class VitCacheSelectorTraceTest {
     private final List<SpanData> spans = new ArrayList<>();
     private SdkTracerProvider provider;
@@ -100,8 +117,43 @@ class VitCacheSelectorTraceTest {
         assertEquals(parent.getSpanContext().getSpanId(), validation.getParentSpanId());
         assertEquals(StatusCode.ERROR, validation.getStatus().getStatusCode());
         assertEquals("VIT_ROUTE_STALE", validation.getAttributes().get(FlexlbTrace.ERROR_TYPE));
+        assertEquals("generation_mismatch", validation.getAttributes().get(FlexlbTrace.VIT_VALIDATION_REASON));
+        assertEquals(result.getWorkerGeneration(), validation.getAttributes().get(FlexlbTrace.VIT_WORKER_GENERATION));
+        assertEquals(result.getWorkerGeneration() - 1, validation.getAttributes().get(FlexlbTrace.VIT_CURRENT_GENERATION));
         assertNull(validation.getAttributes().get(FlexlbTrace.VIT_MM_INFLIGHT_INPUTS));
         assertNull(validation.getAttributes().get(FlexlbTrace.VIT_LOAD_STATE));
+    }
+
+    @Test
+    void validationExplainsWhichIdentityCheckFailed() {
+        assertFalse(selector.validate(ctx, null).isSuccess());
+        assertEquals("missing_selection", spans.getLast().getAttributes().get(FlexlbTrace.VIT_VALIDATION_REASON));
+
+        var selected = selector.select(ctx, null);
+        ctx.getRequest().setSelectedVit(selected);
+        assertFalse(selector.validate(ctx, "another-group").isSuccess());
+        var policy = spans.getLast().getAttributes();
+        assertEquals("policy_group_mismatch", policy.get(FlexlbTrace.VIT_VALIDATION_REASON));
+        assertEquals("another-group", policy.get(FlexlbTrace.VIT_POLICY_GROUP));
+        assertEquals("group", policy.get(FlexlbTrace.VIT_CURRENT_GROUP));
+        assertNull(policy.get(FlexlbTrace.VIT_CURRENT_GRPC_PORT));
+        assertNull(policy.get(FlexlbTrace.VIT_CURRENT_GENERATION));
+
+        selected.setGrpcPort(9999);
+        assertFalse(selector.validate(ctx, null).isSuccess());
+        assertEquals("grpc_port_mismatch", spans.getLast().getAttributes().get(FlexlbTrace.VIT_VALIDATION_REASON));
+        selected.setGrpcPort(8001);
+        selected.setGroup("old-group");
+        assertFalse(selector.validate(ctx, null).isSuccess());
+        assertEquals("selected_group_mismatch", spans.getLast().getAttributes().get(FlexlbTrace.VIT_VALIDATION_REASON));
+        selected.setGroup("group");
+        selected.setRole(RoleType.PREFILL);
+        assertFalse(selector.validate(ctx, null).isSuccess());
+        assertEquals("role_mismatch", spans.getLast().getAttributes().get(FlexlbTrace.VIT_VALIDATION_REASON));
+        selected.setRole(RoleType.VIT);
+        when(workers.captureEndpoint(eq(RoleType.VIT), any())).thenReturn(null);
+        assertFalse(selector.validate(ctx, null).isSuccess());
+        assertEquals("endpoint_unavailable", spans.getLast().getAttributes().get(FlexlbTrace.VIT_VALIDATION_REASON));
     }
 
     @Test
@@ -132,6 +184,13 @@ class VitCacheSelectorTraceTest {
         assertTrue(selector.validate(ctx, null).isSuccess());
         assertEquals(91L, spans.get(1).getAttributes().get(FlexlbTrace.VIT_MM_INFLIGHT_INPUTS));
         assertEquals("fresh", spans.get(1).getAttributes().get(FlexlbTrace.VIT_LOAD_STATE));
+        var validation = spans.get(1).getAttributes();
+        assertNull(validation.get(FlexlbTrace.VIT_VALIDATION_REASON));
+        assertNull(validation.get(FlexlbTrace.VIT_POLICY_GROUP));
+        assertNull(validation.get(FlexlbTrace.VIT_SELECTED_GROUP));
+        assertNull(validation.get(FlexlbTrace.VIT_CURRENT_GROUP));
+        assertNull(validation.get(FlexlbTrace.VIT_CURRENT_GRPC_PORT));
+        assertNull(validation.get(FlexlbTrace.VIT_CURRENT_GENERATION));
     }
 
     @Test
@@ -206,7 +265,10 @@ class VitCacheSelectorTraceTest {
         when(sdk.getTracer(anyString(), anyString())).thenReturn(tracer);
         when(tracer.spanBuilder(anyString())).thenThrow(new IllegalStateException("exporter failure"));
         FlexlbTrace.configure(sdk, "test");
-        assertTrue(selector.select(ctx, null).isSuccess());
+        var selected = selector.select(ctx, null);
+        assertTrue(selected.isSuccess());
+        ctx.getRequest().setSelectedVit(selected);
+        assertTrue(selector.validate(ctx, "group").isSuccess());
         assertTrue(spans.isEmpty());
     }
 }

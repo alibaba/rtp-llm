@@ -1,6 +1,12 @@
 load("@arch_config//:arch_select.bzl", "telemetry_test_deps")
 
 py_test(
+    name = "test_timeline",
+    srcs = ["test_timeline.py"],
+    deps = ["//rtp_llm:telemetry"] + telemetry_test_deps(),
+)
+
+py_test(
     name = "test_vit_media_tracing",
     srcs = ["test_vit_media_tracing.py"],
     deps = ["//rtp_llm:telemetry"] + telemetry_test_deps(),
