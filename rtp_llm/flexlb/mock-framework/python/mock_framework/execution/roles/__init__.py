@@ -1,5 +1,7 @@
 """Run-owned service roles."""
 
+ENGINE_ROLES = ("prefill", "decode", "vit")
+
 
 def register_ready_instance(
     topology, monitoring, records, identity, control, endpoint, *, pid=None

@@ -7,9 +7,8 @@ from itertools import zip_longest
 from ...config.validation import duration
 from .. import ExecutionError
 from ..processes import ProcessIdentity, start_instance
-from . import register_ready_instance
+from . import ENGINE_ROLES, register_ready_instance
 
-ROLES = ("prefill", "decode", "vit")
 INITIAL_START_CONCURRENCY = 32
 MAX_ENGINE_START_COUNT = 1024
 
@@ -88,7 +87,7 @@ class EngineRole:
 
     async def scale_in(self, role, targets, count):
         async with self.lock:
-            if role not in ROLES:
+            if role not in ENGINE_ROLES:
                 raise ExecutionError("scale_in requires an Engine role")
             candidates = self.topology.active(role)
             known = {item["rpc"]: item for item in candidates}
@@ -147,7 +146,7 @@ class EngineRole:
         counts = {
             role: self.role_configs[role]["deployment"]["replicas"]
             for role in self.launch_by_role
-            if role in ROLES
+            if role in ENGINE_ROLES
         }
         if counts:
             timeout = sum(
@@ -161,7 +160,7 @@ class EngineRole:
     async def _start_instances(self, counts, concurrency):
         async with self.lock:
             if any(
-                role not in ROLES
+                role not in ENGINE_ROLES
                 or role not in self.role_configs
                 or not 1 <= count <= MAX_ENGINE_START_COUNT
                 for role, count in counts.items()
@@ -214,12 +213,12 @@ class EngineRole:
             return result
 
     async def close(self):
-        processes = self.supervisor.process_identities(*ROLES)
+        processes = self.supervisor.process_identities(*ENGINE_ROLES)
         # All Engine JVMs shut down concurrently, including in full-scale Cases.
         errors = await self.supervisor.stop(
             [process.process_name for process in processes], 15
         )
-        remaining = set(self.supervisor.process_identities(*ROLES))
+        remaining = set(self.supervisor.process_identities(*ENGINE_ROLES))
         for process in processes:
             if process not in remaining:
                 (process.directory(self.records.directory) / "ready.json").unlink(

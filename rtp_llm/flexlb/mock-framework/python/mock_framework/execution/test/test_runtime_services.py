@@ -10,7 +10,10 @@ from mock_framework.execution.environment import EndpointRegistry, RunEnvironmen
 from mock_framework.execution.processes import ProcessIdentity, ProcessSupervisor
 
 
-def test_topology_readers_and_publishers_cannot_mutate_current_instances(tmp_path):
+@pytest.mark.parametrize("role", ["prefill", "decode", "vit"])
+def test_only_engine_changes_publish_discovery_with_an_isolated_snapshot(
+    tmp_path, role
+):
     topology = EndpointRegistry(tmp_path)
     received = []
 
@@ -20,15 +23,17 @@ def test_topology_readers_and_publishers_cannot_mutate_current_instances(tmp_pat
             nodes[0]["rpc"] = "corrupted"
 
     topology.set_discovery_publisher(publish)
+    topology.publish()
+    assert received == []
     endpoint = {
         "rpc": "127.0.0.1:1001",
         "control": "http://127.0.0.1:1002",
         "extra": {"value": 1},
     }
-    topology.register("prefill-0", "prefill", endpoint["control"], endpoint)
+    topology.register(f"{role}-0", role, endpoint["control"], endpoint)
     endpoint["extra"]["value"] = 2
     topology.active()[0]["extra"]["value"] = 3
-    assert topology.active("decode") == []
+    assert topology.active("master") == []
     assert topology.active()[0]["extra"]["value"] == 1
     assert received[-1][0]["rpc"] == "corrupted"
     assert topology.active()[0]["rpc"] == "127.0.0.1:1001"
@@ -37,10 +42,20 @@ def test_topology_readers_and_publishers_cannot_mutate_current_instances(tmp_pat
         == "127.0.0.1:1001"
     )
     with pytest.raises(ExecutionError, match="identity"):
-        topology.register("prefill-0", "prefill", endpoint["control"], endpoint)
+        topology.register(f"{role}-0", role, endpoint["control"], endpoint)
     with pytest.raises(ExecutionError, match="RPC address"):
-        topology.register("prefill-1", "prefill", endpoint["control"], endpoint)
-    topology.retire("prefill-0")
+        topology.register(f"{role}-1", role, endpoint["control"], endpoint)
+    topology.register(f"{role}-1", role, endpoint["control"])
+    for other in ("master", "client"):
+        control = "http://127.0.0.1:1004"
+        topology.register(
+            f"{other}-0", other, control, {"rpc": "127.0.0.1:1003", "control": control}
+        )
+        assert json.loads((tmp_path / "topology.json").read_text())[-1]["role"] == other
+        topology.retire(f"{other}-0")
+    assert len(received) == 1
+    topology.retire(f"{role}-0")
+    assert len(received) == 2 and received[-1] == []
     assert topology.active() == []
     assert json.loads((tmp_path / "topology.json").read_text()) == []
     assert not (tmp_path / "topology-history.json").exists()
@@ -82,8 +97,8 @@ def test_client_start_fails_without_endpoints(tmp_path):
         assert runtime.supervisor.children == ()
 
 
-def test_discovery_failure_after_launch_still_reaps_process(tmp_path, monkeypatch):
-    from mock_framework.execution.roles.master import MasterRole
+def test_topology_write_failure_after_launch_still_reaps_process(tmp_path, monkeypatch):
+    from mock_framework.execution import environment
     from mock_framework.execution.roles.test.test_master_lifecycle import (
         assert_reaped,
         generic,
@@ -92,15 +107,18 @@ def test_discovery_failure_after_launch_still_reaps_process(tmp_path, monkeypatc
     )
     from mock_framework.execution.runner import run_case
 
-    def publish(self, nodes):
-        if nodes:
-            raise OSError("discovery unavailable")
+    write_json = environment.write_json
 
-    monkeypatch.setattr(MasterRole, "publish_discovery", publish)
+    def fail_on_active_topology(path, nodes):
+        if nodes:
+            raise OSError("topology unavailable")
+        write_json(path, nodes)
+
+    monkeypatch.setattr(environment, "write_json", fail_on_active_topology)
     case, launch = generic(tmp_path, [step("never", "master/stop")])
     output = tmp_path / "run"
     result = asyncio.run(run_case(case, launch, output))
-    assert result["status"] == "ERROR" and "discovery unavailable" in result["error"]
+    assert result["status"] == "ERROR" and "topology unavailable" in result["error"]
     events = logs(output)
     assert len([e for e in events if e["event"] == "process_started"]) == 1
     assert not any(e["event"] == "step_started" for e in events)

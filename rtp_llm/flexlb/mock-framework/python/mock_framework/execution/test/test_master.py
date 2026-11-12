@@ -658,6 +658,53 @@ def test_explicit_master_selection_and_empty_selection_do_not_broadcast(monkeypa
     assert calls == ["http://m1"]
 
 
+def test_starting_master_catches_engine_changes_before_registration(
+    tmp_path, monkeypatch
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    from mock_framework.execution.environment import EndpointRegistry
+    from mock_framework.execution.processes import ProcessIdentity
+    from mock_framework.execution.roles import master
+
+    registry = EndpointRegistry(tmp_path)
+    for node in topology():
+        control = "http://" + node["rpc"]
+        registry.register(
+            node["id"], node["role"], control, {**node, "control": control}
+        )
+
+    identity = ProcessIdentity("master", 0)
+    directory = identity.directory(tmp_path)
+    directory.mkdir(parents=True)
+    control = "http://127.0.0.1:50001"
+
+    async def start_instance(*args, configure):
+        configure(directory)
+        assert json.loads((directory / "discovery.json").read_text())["d-domain"] == [
+            "127.0.0.1:40001"
+        ]
+        registry.retire("decode-0")
+        return None, control, {"rpc": "127.0.0.1:50000", "control": control}
+
+    monkeypatch.setattr(master, "start_instance", start_instance)
+    role = master.MasterRole(
+        role_config={"config": configuration(), "deployment": {"replicas": 1}},
+        launch_config={},
+        election=None,
+        supervisor=None,
+        topology=registry,
+        records=SimpleNamespace(directory=tmp_path),
+        monitoring=None,
+    )
+    asyncio.run(role.start())
+    assert json.loads((directory / "discovery.json").read_text()) == {
+        "p-domain": ["127.0.0.1:30001"],
+        "d-domain": [],
+    }
+
+
 def test_replacement_master_can_discover_roles_scaled_to_zero(tmp_path):
     environment = prepare_master_env(
         configuration(), [], tmp_path, require_engines=False

@@ -4,6 +4,7 @@ import copy
 
 from . import ExecutionError
 from .processes import ProcessSupervisor
+from .roles import ENGINE_ROLES
 from .roles.client import ClientRole
 from .roles.engine import EngineRole
 from .roles.master import MasterRole
@@ -30,10 +31,10 @@ class EndpointRegistry:
     def set_discovery_publisher(self, publish):
         self._publish_discovery = publish
 
-    def publish(self):
+    def publish(self, *, engine_changed=False):
         snapshot = self.active()
         write_json(self.directory / "topology.json", snapshot)
-        if self._publish_discovery is not None:
+        if engine_changed and self._publish_discovery is not None:
             self._publish_discovery(snapshot)
 
     def register(self, instance_id, role, control, endpoint=None):
@@ -58,13 +59,13 @@ class EndpointRegistry:
                     "Instance RPC address is missing or already active"
                 )
             self._active[instance_id] = endpoint
-        self.publish()
+        self.publish(engine_changed=endpoint is not None and role in ENGINE_ROLES)
 
     def retire(self, instance_id):
         if instance_id not in self._active:
             raise ExecutionError(f"Unknown active instance: {instance_id}")
-        self._active.pop(instance_id, None)
-        self.publish()
+        endpoint = self._active.pop(instance_id)
+        self.publish(engine_changed=endpoint["role"] in ENGINE_ROLES)
 
     def clear(self):
         self._active.clear()

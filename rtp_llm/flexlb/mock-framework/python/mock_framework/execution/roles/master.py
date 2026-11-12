@@ -14,7 +14,7 @@ from .. import ExecutionError
 from ..processes import ProcessIdentity, start_instance
 from ..step_trace import write_json
 from ..transport import post
-from . import register_ready_instance
+from . import ENGINE_ROLES, register_ready_instance
 
 
 def _resolve_discovery(route_json, topology, *, require_engines):
@@ -31,7 +31,7 @@ def _resolve_discovery(route_json, topology, *, require_engines):
             )
         hosts = {}
         configured = {node["role"] for node in topology}
-        for role in ("prefill", "decode", "vit"):
+        for role in ENGINE_ROLES:
             endpoint = groups[0].get(role + "_endpoint")
             if endpoint is None:
                 if role in configured:
@@ -137,10 +137,10 @@ class MasterRole:
             ),
         }
 
-    def _prepare_env(self, index, directory):
+    def _prepare_env(self, index, directory, engines):
         env = prepare_master_env(
             self.role_config["config"],
-            self.topology.active(),
+            engines,
             directory,
             require_engines=index < self.role_config["deployment"]["replicas"],
         )
@@ -188,13 +188,21 @@ class MasterRole:
                 refresh_discovery(self.role_config["config"], snapshot, directory)
 
     async def _start_instance(self, identity, *, expected_address=None):
+        def engine_endpoints():
+            return [
+                node for node in self.topology.active() if node["role"] in ENGINE_ROLES
+            ]
+
+        engines_at_start = engine_endpoints()
         _, control, endpoint = await start_instance(
             self.supervisor,
             self.records,
             self.role_config,
             identity,
             self.launch_config,
-            configure=lambda directory: self._prepare_env(identity.index, directory),
+            configure=lambda directory: self._prepare_env(
+                identity.index, directory, engines_at_start
+            ),
         )
         if endpoint is None and self.election_env:
             raise ExecutionError("Native Master did not publish endpoints")
@@ -206,6 +214,14 @@ class MasterRole:
             self._validate_endpoint(
                 identity.instance_id, identity.index, endpoint, control
             )
+            # An Engine change during startup cannot see this Master in the registry.
+            engines = engine_endpoints()
+            if engines != engines_at_start:
+                refresh_discovery(
+                    self.role_config["config"],
+                    engines,
+                    identity.directory(self.records.directory),
+                )
         register_ready_instance(
             self.topology, self.monitoring, self.records, identity, control, endpoint
         )

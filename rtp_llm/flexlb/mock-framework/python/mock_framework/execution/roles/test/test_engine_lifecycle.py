@@ -577,8 +577,14 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
                 removed = await engine_scale(
                     ctx, EngineScaleArgs(direction="in", count=1)
                 )
+                discovery = ctx.records.directory / "components/master-0/discovery.json"
+                assert (
+                    json.loads(discovery.read_text())["p-domain"]
+                    == ctx.globals()["prefill"]
+                )
                 created = await engine_scale(ctx, EngineScaleArgs(direction="out"))
                 expected = sorted(ctx.globals()["prefill"])
+                assert sorted(json.loads(discovery.read_text())["p-domain"]) == expected
                 observations = []
 
                 async def converged():
