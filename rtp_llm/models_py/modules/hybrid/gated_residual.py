@@ -1,4 +1,3 @@
-import os
 from typing import Optional, Tuple
 
 import torch
@@ -227,13 +226,6 @@ class GatedResidual(nn.Module):
             and (
                 1 <= hyper_input.numel() // self.hc_hidden_size <= 32
                 or 8192 <= hyper_input.numel() // self.hc_hidden_size <= 12288
-                or (
-                    os.environ.get("RTP_LLM_QWEN4_HC_SM90_PREFILL_NORM_SCALE", "0") == "1"
-                    and 33 <= hyper_input.numel() // self.hc_hidden_size <= 4096
-                    and hyper_input.is_cuda
-                    and torch.version.hip is None
-                    and torch.cuda.get_device_capability(hyper_input.device) == (9, 0)
-                )
             )
             and hyper_input.is_cuda
             and torch.version.hip is None
