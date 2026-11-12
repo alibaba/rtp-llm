@@ -284,6 +284,11 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             padded_s2[:, :, : source_inter // FP4_BLOCK].copy_(s2_raw)
             del w2, s2_raw
             w2, s2_raw = padded_w2, padded_s2
+        else:
+            # MegaMoE retains w2 as its resident L2 storage. Relocate it so
+            # loader pages shared with temporary weights can be unmapped;
+            # otherwise large expandable pages stay pinned by the raw down.
+            w2 = w2.clone()
         s2_int = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
         del s2_raw
         torch.cuda.empty_cache()
