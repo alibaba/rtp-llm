@@ -226,6 +226,12 @@ class WeightManager:
             ):
                 raise ValueError("Local expert refit is restricted to the opted-in Qwen3.8 EP32 world")
             local_experts = ExpertShardLayout.from_load_config(self._weights_loader.get_load_config())
+        if os.environ.get("RTP_RL_Q38_EXPERT_CUDA_GRAPH") == "1":
+            from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.qwen38_decode_expert_graph import (
+                begin_refit,
+            )
+
+            begin_refit(self._device)
         self._rl_update = RlWeightUpdate(
             self._weights_loader,
             self._weights,
@@ -261,6 +267,12 @@ class WeightManager:
             raise RuntimeError("no active RL weight transaction")
         result = self._rl_update.finish(timeout=timeout)
         self._rl_update = None
+        if os.environ.get("RTP_RL_Q38_EXPERT_CUDA_GRAPH") == "1":
+            from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.qwen38_decode_expert_graph import (
+                finish_refit,
+            )
+
+            finish_refit(self._device, result)
         return result
 
     def extract_layer_number(self, s: str) -> int | None:

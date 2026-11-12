@@ -61,6 +61,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         self.N = self.w1.size(1)  # 2 * inter_size
         self.K = self.w1.size(2)  # hidden_size
         self.inter_size = self.N // 2
+        self.qwen38_decode_graph = None
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
@@ -82,6 +83,24 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         assert topk_ids is not None
         assert topk_weights is not None
 
+        if self.qwen38_decode_graph is not None:
+            from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.env import (
+                is_decode_phase,
+            )
+
+            if is_decode_phase():
+                output = self.qwen38_decode_graph.execute(
+                    self._compute_experts,
+                    (hidden_states, topk_ids, topk_weights),
+                    self.w1,
+                    self.w2,
+                )
+                return CombineForwardPayload(fused_expert_output=output)
+
+        output = self._compute_experts(hidden_states, topk_ids, topk_weights)
+        return CombineForwardPayload(fused_expert_output=output)
+
+    def _compute_experts(self, hidden_states, topk_ids, topk_weights):
         if self.ep_size > 1:
             local_ids = topk_ids - self.start_expert_id
             local_mask = (local_ids >= 0) & (local_ids < self.num_experts_per_partition)
@@ -160,6 +179,4 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         )
 
         # Sum reduce over top_k: out is [M*top_k, K], reshape and sum
-        output = out.view(M, top_k, K).sum(dim=1)
-
-        return CombineForwardPayload(fused_expert_output=output)
+        return out.view(M, top_k, K).sum(dim=1)

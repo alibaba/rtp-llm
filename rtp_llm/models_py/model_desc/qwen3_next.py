@@ -1524,9 +1524,42 @@ class Qwen3NextModel(GptModelBase):
                 for idx in range(self.layer_num)
             ]
         )
+        if os.environ.get("RTP_RL_Q38_EXPERT_CUDA_GRAPH") == "1":
+            self._enable_qwen38_expert_graphs(
+                model_config, parallelism_config, max_generate_batch_size, enable_cuda_graph
+            )
         self.norm = _qwen_rms_res_norm(
             weights.global_weights, W.final_ln_gamma, model_config.layernorm_eps
         )
+
+    def _enable_qwen38_expert_graphs(self, config, parallel, decode_batch, full_graph):
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.qwen38_decode_expert_graph import (
+            DecodeExpertGraph,
+            register_run,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.triton_fused_executor import (
+            TritonFusedMoeExecutor,
+        )
+
+        if (
+            os.environ.get("RTP_LLM_RL_WORLD32") != "1"
+            or os.environ.get("RTP_LLM_RL_METADATA_BOOTSTRAP") != "1"
+            or config.model_type != "qwen38_moe_text"
+            or self.layer_num != 92
+            or (parallel.world_size, parallel.tp_size, parallel.dp_size, parallel.ep_size) != (32, 8, 4, 32)
+            or decode_batch != 8
+            or full_graph
+        ):
+            raise RuntimeError("Qwen3.8 expert graph requires the paused EP32 profile and decode concurrency 8")
+        backends = [layer.mlp.fused_moe for layer in self.layers]
+        if any(moe.strategy_name != "nccl_bf16_reference"
+               or not isinstance(moe.fused_experts, TritonFusedMoeExecutor)
+               for moe in backends):
+            raise RuntimeError("Qwen3.8 expert graph requires the BF16 reference MoE strategy")
+        executors = [moe.fused_experts for moe in backends]
+        run = register_run(parallel.world_rank, executors[0].w1.device, self.layer_num)
+        for layer, executor in enumerate(executors):
+            executor.qwen38_decode_graph = DecodeExpertGraph(run, layer, executor.w1, executor.w2)
 
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
         if self.kv_cache is None:
