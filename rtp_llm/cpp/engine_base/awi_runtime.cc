@@ -149,7 +149,7 @@ std::string eventToJson(const Event& event, const std::string& operation_id) {
     if (!event.source.empty()) {
         out << ",\"source\":" << quote(event.source);
     }
-    out << ",\"recorded_ns\":" << nowNs();
+    out << ",\"recorded_ns\":" << AwiRuntime::nowNs();
     out << "}";
     return out.str();
 }
