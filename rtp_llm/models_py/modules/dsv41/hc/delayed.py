@@ -195,13 +195,16 @@ class DelayedHCUnit(HCUnitBase):
         hc = residual.shape[-2]
         out = torch.empty_like(residual)
         for lane in range(hc):
-            acc = post[:, lane].float().unsqueeze(-1) * x[:, lane].float()
+            # post is [..., hc, 1], residual is [..., hc, dim], and x is
+            # [..., dim]; ellipsis indexing keeps the decode [B, S, ...]
+            # layout and the prefill [T, ...] layout on the same path.
+            acc = post[..., lane, :].float() * x.float()
             for src in range(hc):
                 acc.add_(
-                    comb[:, src, lane].float().unsqueeze(-1)
-                    * residual[:, src].float()
+                    comb[..., src, lane].float().unsqueeze(-1)
+                    * residual[..., src, :].float()
                 )
-            out[:, lane] = acc.to(out.dtype)
+            out[..., lane, :] = acc.to(out.dtype)
         return out
 
 
