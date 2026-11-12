@@ -215,10 +215,13 @@ class KvCacheManagerTest {
 
     @Test void logicalPoolEvictionUsesTotalCapacityRatherThanDeviceCapacity() {
         try (var cache = new KvCacheManager(1, 2, 4, 0, true)) {
+            var reclaims = new ArrayList<List<Integer>>();
+            cache.onReclaim((required, scheduled) -> reclaims.add(List.of(required, scheduled)));
             for (long key = 1; key <= 5; key++)
                 try (var seed = assertInstanceOf(Ready.class, cache.prepare(1, List.of())).lease()) { seed.publish(List.of(key), 1); }
             assertEquals(4, cache.itemCount());
             assertArrayEquals(new long[]{2, 3, 4, 5}, Arrays.stream(cache.snapshot(-1, true).keys()).sorted().toArray());
+            assertEquals(List.of(List.of(1, 1)), reclaims);
             assertEquals(2, cache.snapshot(0, false).availableBlocks());
             assertEquals(0, cache.snapshot(0, false).freeBlocks());
         }

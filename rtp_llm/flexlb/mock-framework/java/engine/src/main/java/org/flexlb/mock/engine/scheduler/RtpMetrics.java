@@ -18,6 +18,8 @@ final class RtpMetrics {
     public static final String FORWARD_TOKENS = "rtp_llm_forward_tokens_total";
     public static final String FORWARD_SECONDS = "rtp_llm_model_forward_seconds";
     private static final String[] LABELS = {"role"};
+    private static final Map<String, String> CAPACITY_EVICTION_TAGS =
+        Map.of("tier", "DEVICE", "trigger_type", "capacity", "group_type", "full");
 
     private static final long RECENT_CACHE_WINDOW_NANOS = TimeUnit.MINUTES.toNanos(30);
 
@@ -185,9 +187,17 @@ final class RtpMetrics {
     void cacheMatched(long nanos) { events.observe("rtp_llm_match_cost_time_us", nanos / 1000.0); }
 
     void blockEvicted(long lifetimeNanos, long idleNanos) {
-        var tags = Map.of("tier", "DEVICE", "trigger_type", "capacity", "group_type", "full");
-        events.observe("rtp_llm_kv_cache_evicted_block_lifetime_ms", lifetimeNanos / 1_000_000.0, tags);
-        events.observe("rtp_llm_kv_cache_evicted_block_idletime_ms", idleNanos / 1_000_000.0, tags);
+        events.observe("rtp_llm_kv_cache_evicted_block_lifetime_ms", lifetimeNanos / 1_000_000.0, CAPACITY_EVICTION_TAGS);
+        events.observe("rtp_llm_kv_cache_evicted_block_idletime_ms", idleNanos / 1_000_000.0, CAPACITY_EVICTION_TAGS);
+    }
+
+    void blocksReclaimed(int required, int scheduled) {
+        if (scheduled > 0) events.add("rtp_llm_kv_cache_eviction_trigger_qps", 1, CAPACITY_EVICTION_TAGS);
+        var tags = new HashMap<>(CAPACITY_EVICTION_TAGS);
+        tags.put("block_type", "required");
+        events.observe("rtp_llm_kv_cache_eviction_blocks_count", required, tags);
+        tags.put("block_type", "scheduled");
+        events.observe("rtp_llm_kv_cache_eviction_blocks_count", scheduled, tags);
     }
 
     void batchPrepared(long nanos) { positiveMicros("rtp_llm_gather_model_input_us", nanos); }

@@ -176,6 +176,27 @@ class RtpMetricsTest {
         }
     }
 
+    @Test void recordsBlocksForEmptyReclaimsAndCountsPartialReclaimsOnce() {
+        var metrics = new RtpMetrics("prefill", () -> IDLE);
+        String trigger = "rtp_llm_kv_cache_eviction_trigger_qps_total";
+        String blocks = "rtp_llm_kv_cache_eviction_blocks_count";
+        String required = "block_type=\"required\"";
+        String scheduled = "block_type=\"scheduled\"";
+        metrics.blocksReclaimed(4, 0);
+        var text = metrics.scrape();
+        assertFalse(text.contains(trigger));
+        assertEquals(4, sample(text, blocks + "_sum", required));
+        assertEquals(0, sample(text, blocks + "_sum", scheduled));
+        assertEquals(1, sample(text, blocks + "_count", scheduled));
+
+        metrics.blocksReclaimed(4, 2);
+        text = metrics.scrape();
+        assertEquals(1, sample(text, trigger, "trigger_type=\"capacity\""));
+        assertEquals(8, sample(text, blocks + "_sum", required));
+        assertEquals(2, sample(text, blocks + "_sum", scheduled));
+        assertEquals(2, sample(text, blocks + "_count", scheduled));
+    }
+
     @Test void nativeThroughputSeparatesActiveTimeWallTimeAndTerminalQpsAndClearsIdleWindows() {
         var clock = new java.util.concurrent.atomic.AtomicLong();
         var metrics = new RtpMetrics("prefill", () -> IDLE, clock::get);

@@ -392,6 +392,14 @@ Prefill 的有效执行时间从本批调度开始到处理完输出。各 prior
 | rtp_llm_stream_cache_device_reuse_length   | tokens，本地 KV 准入时复用的 token 数。        |
 | rtp_llm_kv_cache_match_to_ready_latency_us | 微秒，从准备到 KV 就绪，load_attempted=false。 |
 
+### P/D 缓存淘汰
+
+Mock 只统计统一池的容量回收，标签为 `tier=DEVICE`、`group_type=full`、`trigger_type=capacity`。存活时间和空闲时间按实际淘汰的块逐个采样，截止于选中淘汰时。
+
+- `rtp_llm_kv_cache_eviction_trigger_qps` 在一次回收至少淘汰一块时加一。本地 Prometheus 用 `rtp_llm_kv_cache_eviction_trigger_qps_total` 计算触发频率。
+- `rtp_llm_kv_cache_eviction_blocks_count` 每次尝试回收记录缺少的块数（`block_type=required`）和实际淘汰的块数（`block_type=scheduled`）。回收不到块时，后者为 0，仍有一次块数样本。
+- 默认大盘已有存活时间面板。空闲时间 `rtp_llm_kv_cache_evicted_block_idletime_ms`、触发频率和块数可直接查询 Prometheus，当前未配置面板。
+
 ### ViT 指标口径
 
 多图 RPC、单媒体工作和 Forward batch 分别计数。以下口径对照 real 的 `mm_process_engine.py`、`mm_scheduler.py`、`mm_preprocess.py` 和 `mm_embedding_cache.py`。

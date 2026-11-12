@@ -24,6 +24,7 @@ public final class KvCacheManager implements AutoCloseable {
     private volatile KvcmReporter reporter;
     private java.util.function.Consumer<CacheMetadata.Change> metadataObserver;
     private BiConsumer<Long, Long> evictionObserver = (lifetime, idle) -> {};
+    private BiConsumer<Integer, Integer> reclaimObserver = (required, scheduled) -> {};
     private Runnable changed = () -> {};
 
     public KvCacheManager(int blockSize, int blocks, int reserve) {
@@ -50,6 +51,10 @@ public final class KvCacheManager implements AutoCloseable {
 
     public synchronized void onEviction(BiConsumer<Long, Long> observer) {
         evictionObserver = Objects.requireNonNull(observer);
+    }
+
+    public synchronized void onReclaim(BiConsumer<Integer, Integer> observer) {
+        reclaimObserver = Objects.requireNonNull(observer);
     }
 
     public synchronized int itemCount() { return tree.size(); }
@@ -173,9 +178,12 @@ public final class KvCacheManager implements AutoCloseable {
 
     private boolean makePoolFree(int count) {
         int missing = count - pool.snapshot().free();
-        if (missing > 0)
-            for (var evicted : tree.evict(missing))
-                evictionObserver.accept(evicted.lifetimeNanos(), evicted.idleNanos());
+        if (missing > 0) {
+            var evicted = tree.evict(missing);
+            for (var block : evicted)
+                evictionObserver.accept(block.lifetimeNanos(), block.idleNanos());
+            reclaimObserver.accept(missing, evicted.size());
+        }
         return pool.snapshot().free() >= count;
     }
 
