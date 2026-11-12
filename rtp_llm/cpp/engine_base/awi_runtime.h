@@ -163,6 +163,7 @@ private:
 
     std::string operationForRequestLocked(const std::string& request_id) const;
     void        appendEventLocked(const Event& event);
+    void        writeJournalLocked(const Event& event);
     bool        barrierReadyLocked() const;
 
     mutable std::mutex                                    mutex_;

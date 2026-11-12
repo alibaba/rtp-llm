@@ -280,14 +280,7 @@ std::string AwiRuntime::operationForRequestLocked(const std::string& request_id)
     return it == request_operation_.end() ? std::string() : it->second;
 }
 
-void AwiRuntime::appendEventLocked(const Event& event) {
-    events_.push_back(event);
-    // Keep the evaluator response bounded even for long capacity searches.
-    constexpr size_t kMaxEvents = 200000;
-    if (events_.size() > kMaxEvents) {
-        events_.erase(events_.begin(), events_.begin() + (events_.size() - kMaxEvents));
-    }
-
+void AwiRuntime::writeJournalLocked(const Event& event) {
     // Cross-rank journal: every worker truncates its own file on first write
     // and appends one JSON object per line.  The API layer merges all ranks so
     // a synchronized step is reported once, with the slowest rank's latency
@@ -308,6 +301,16 @@ void AwiRuntime::appendEventLocked(const Event& event) {
     if (journal) {
         journal << eventToJson(event, op) << "\n";
     }
+}
+
+void AwiRuntime::appendEventLocked(const Event& event) {
+    events_.push_back(event);
+    // Keep the evaluator response bounded even for long capacity searches.
+    constexpr size_t kMaxEvents = 200000;
+    if (events_.size() > kMaxEvents) {
+        events_.erase(events_.begin(), events_.begin() + (events_.size() - kMaxEvents));
+    }
+    writeJournalLocked(event);
 }
 
 void AwiRuntime::recordCapture(const std::string& backend, const std::string& source) {
@@ -346,6 +349,10 @@ void AwiRuntime::recordPrefillChunk(const std::string& request_id,
         if (final_chunk) {
             it->step = 0;
         }
+        // Chunked prefill mutates the aggregate event in place.  Re-publish it
+        // so the cross-rank journal carries the final token count and end time,
+        // not just the first chunk.
+        writeJournalLocked(*it);
         return;
     }
     Event event;
