@@ -69,7 +69,7 @@ a1 ci pipeline run 1346 --repo "$CI_REPO" --branch "$RECIPE_REF" \
 
 同一次运行会先执行一次 `mock-ci-case-build`。共享构建验证 Case 文件并按 runner 规格分组，随后为每个 Case 展开独立 Job。各 Job 可以并行，独立上传报告。新增 Case 后直接传它的 ID 即可。
 
-Case Job 把 Java 运行包解到结果目录旁的 `<输出目录>.runtime`，包内 classpath 使用相对路径。启动配置生成时通过 `--runtime-root` 指定解包位置，并通过 `--scrape-interval` 设置采样间隔。运行包留在 Job 工作区，报告目录保存 `compiled.json`、`launch.yaml` 和 Case 结果。
+Case Job 把 Java 运行包解到结果目录旁的 `<输出目录>.runtime`，包内 classpath 使用相对路径。启动配置生成时通过 `--runtime-root` 指定解包位置，并通过 `--scrape-interval` 设置采样间隔。运行包留在 Job 工作区。报告目录保存 `exit-code`、生成的 `launch.yaml` 和 Case 的 `result/` 目录。
 
 ## 3. 下载和查看 Case 报告
 
@@ -97,5 +97,6 @@ cat "$RESULT_DIR/result.json"
 ```
 
 - `result.json` 是 Case 总结，包含运行状态和错误。若在 Case 启动前失败，先看 Job 的 `run-case` 日志和报告里的 `exit-code`。
+- `result/configuration.json` 保存编译后的 Case 和实际使用的启动配置。
 - `gates.jsonl` 记录每项门禁的实际值和判定，`events.jsonl` 记录运行时间线。
 - 如需回看曲线，保留完整的 `result/` 目录，将 `RESULT_DIR` 传给 [View 指南](view-guide.md) 中的 `mock-view`。曲线依赖报告中保留的 Prometheus 数据。

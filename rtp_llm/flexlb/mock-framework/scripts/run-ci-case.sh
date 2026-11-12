@@ -22,7 +22,6 @@ mkdir "$runtime_dir"
 tar -xzf "$2" -C "$runtime_dir"
 cd "$framework_dir"
 uv sync --locked --offline --no-dev
-uv run --locked --offline --no-dev mock-case compile "$case_file" --output "$output_dir/compiled.json"
 uv run --locked --offline --no-dev mock-case launch "$case_file" \
     --java "$JAVA_HOME/bin/java" --prometheus "$PROMETHEUS_BIN" \
     --runtime-root "$runtime_dir" --scrape-interval "${MOCK_CI_SCRAPE_INTERVAL:-1s}" \
