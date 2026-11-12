@@ -55,3 +55,19 @@ def init_load_group_args(parser, load_config, model_args):
         default=2048,
         help="单 shard 累计读取多少 MB 后执行一次 page cache 释放",
     )
+    load_group.add_argument(
+        "--enable_resident_weights",
+        env_name="ENABLE_RESIDENT_WEIGHTS",
+        bind_to=(load_config.resident_weights_config, "enable"),
+        type=str2bool,
+        default=False,
+        help="常驻加载并变换后的 GPU 权重，加速兼容环境下的重启；影响权重或布局的代码、依赖、checkpoint 变更需先 drop/stop 旧记录，配置指纹不检测所有变化",
+    )
+    load_group.add_argument(
+        "--verify_resident_weights",
+        env_name="VERIFY_RESIDENT_WEIGHTS",
+        bind_to=(load_config.resident_weights_config, "verify"),
+        type=str2bool,
+        default=False,
+        help="配合 --enable_resident_weights：本次照常从 ckpt 加载，逐个权重与已常驻的校验和比对并报告差异，然后替换常驻记录",
+    )

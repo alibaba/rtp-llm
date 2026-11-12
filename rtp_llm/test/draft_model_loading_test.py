@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from rtp_llm.config.layer_partition import local_layer_range
 from rtp_llm.config.model_args import ModelArgs
+from rtp_llm.config.py_config_modules import ResidentWeightsConfig
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.ops import RoleType, SpeculativeType, TaskType
@@ -32,6 +33,7 @@ def make_engine_config(sp_type, pp_size, pp_rank):
             loader_recycle_handles=False,
             moe_pure_tp_preshard=False,
             force_cpu_load_weights=False,
+            resident_weights_config=ResidentWeightsConfig(),
         ),
         pd_sep_config=SimpleNamespace(role_type=RoleType.PDFUSION),
         hw_kernel_config=MagicMock(),

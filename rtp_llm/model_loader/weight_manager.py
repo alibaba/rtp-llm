@@ -12,6 +12,7 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 
 # Assuming these imports are from your project and accessible
 from rtp_llm.model_loader.weight_module import WeightModule
+from rtp_llm.resident_weights import is_resident_weights_active
 
 from .tipc import CudaIpcHelper, SharedMemIpcMeta, SharedMemoryIPCHelper
 
@@ -171,6 +172,11 @@ class WeightManager:
             - `Exception`: If the tensor cannot be built from the IPC metadata (e.g., invalid descriptor).
                           This is a general catch-all for unexpected failures in `_t_helper.build_from_meta`.
         """
+        if is_resident_weights_active():
+            raise RuntimeError(
+                "weight updates are not supported with --enable_resident_weights: "
+                "the weights are mapped read-only"
+            )
         if "desc" not in req:
             raise KeyError(
                 "Update request is missing the 'desc' field. "
