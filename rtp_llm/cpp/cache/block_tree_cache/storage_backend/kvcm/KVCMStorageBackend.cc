@@ -1190,6 +1190,10 @@ public:
     };
     using ReadExecutionPtr = std::shared_ptr<ReadExecution>;
 
+    void cleanupExpiredMissing() {
+        read_registry_->cleanupExpiredMissing();
+    }
+
     const TransferTaskRegistry& taskRegistry() const {
         return *read_registry_;
     }
@@ -1355,7 +1359,8 @@ public:
         if (request.timeout_ms() < 0 || task.expired()) {
             if (request.op() == REMOTE_OPERATION_READ) {
                 RTP_LLM_LOG_WARNING("KVCM READ payload expired before I/O: trace=%s timeout_ms=%d",
-                                    request.trace_id().c_str(), request.timeout_ms());
+                                    request.trace_id().c_str(),
+                                    request.timeout_ms());
             }
             response.set_transfer_status(REMOTE_TRANSFER_STATUS_TIMEOUT);
             return false;
@@ -2585,6 +2590,10 @@ bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, Remote
         response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
         return false;
     }
+}
+
+void KVCMStorageBackend::cleanupExpiredMissing() {
+    impl_->cleanupExpiredMissing();
 }
 
 const TransferTaskRegistry& KVCMStorageBackend::taskRegistry() const {

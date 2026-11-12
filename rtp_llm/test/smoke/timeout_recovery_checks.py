@@ -9,7 +9,6 @@ import json
 import math
 import re
 
-
 _TIMEOUT_PATTERNS = {
     "local_business_queue": re.compile(
         r"(?:load|store) expired in business queue|store business queue timeout"

@@ -263,6 +263,11 @@ std::vector<CachePoolMetrics> BlockTreeCache::poolMetrics() const {
     return metrics_reporter_->collectPoolMetrics(tree_->groupSets());
 }
 
+void BlockTreeCache::cleanupExpiredMissing() const {
+    if (transfer_dispatcher_)
+        transfer_dispatcher_->cleanupExpiredMissing();
+}
+
 void BlockTreeCache::reportMetrics() const {
     EvictionVictimMetrics metrics_data;
     {

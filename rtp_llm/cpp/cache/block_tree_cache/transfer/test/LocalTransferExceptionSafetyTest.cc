@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceDiskTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceHostTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/HostDiskTransferExecutor.h"
@@ -202,6 +203,54 @@ TEST(LocalBufferSafetyFailureTest, CrcTerminalResultSurvivesDiagnosticAllocation
         EXPECT_EQ(result.ok(), terminal == CrcCopyState::OK);
         context.complete(std::move(result));
     }
+}
+
+TEST(LocalBufferSafetyFailureTest, MissingFenceAllocationFailuresKeepAdmissionAndRetentionConsistent) {
+    using Registry                = TransferTaskRegistry;
+    using State                   = Registry::State;
+    size_t     failures           = 0;
+    size_t     successful_queries = 0;
+    const auto before             = injected_allocations.load();
+    for (int position = 0; position < 96; ++position) {
+        SCOPED_TRACE(position);
+        auto                           now = Registry::Clock::time_point{};
+        Registry                       registry([&] { return now; });
+        const std::vector<std::string> traces{"allocation_fence_first_with_nontrivial_key",
+                                              "allocation_fence_second_with_nontrivial_key",
+                                              "allocation_fence_third_with_nontrivial_key"};
+        allocation_countdown = position;
+        try {
+            const auto response  = registry.queryAndBlockMissing(traces);
+            allocation_countdown = -1;
+            EXPECT_EQ(response, (std::vector<State>(traces.size(), State::REJECTED)));
+            ++successful_queries;
+        } catch (const std::bad_alloc&) {
+            allocation_countdown = -1;
+            ++failures;
+        }
+        const auto retained = registry.queryLocal(traces);
+        for (size_t index = 0; index < traces.size(); ++index) {
+            if (retained[index] == State::REJECTED) {
+                // A committed fence must own valid metadata and reject/consume
+                // exactly the late arrival, even after a later trace failed allocation.
+                EXPECT_FALSE(registry.begin(traces[index]));
+                EXPECT_EQ(registry.queryLocal(std::vector<std::string>{traces[index]}).front(), State::UNKNOWN);
+            } else {
+                EXPECT_EQ(retained[index], State::UNKNOWN);
+                EXPECT_TRUE(registry.begin(traces[index]));
+                EXPECT_TRUE(registry.finish(traces[index], true));
+                EXPECT_EQ(registry.forget(traces[index]), Registry::ForgetResult::DONE);
+            }
+        }
+        EXPECT_EQ(registry.size(), 0u);
+        now += std::chrono::hours(2);
+        // No orphan list node may survive either rollback or late-arrival consume.
+        EXPECT_EQ(registry.cleanupExpiredMissing(128), 0u);
+        EXPECT_EQ(registry.size(), 0u);
+    }
+    EXPECT_GT(failures, 0u);
+    EXPECT_GT(successful_queries, 0u);
+    EXPECT_GT(injected_allocations.load(), before);
 }
 
 TEST(LocalBufferSafetyFailureTest, DiagnosticFallbackPreservesUnknownErrorPriority) {

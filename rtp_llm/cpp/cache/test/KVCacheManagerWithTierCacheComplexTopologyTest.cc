@@ -563,6 +563,10 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
                     EXPECT_EQ(source.host_block,
                               host_loaded ? NULL_BLOCK_IDX : (*mixed)[path][group_set_id].host_block);
                     EXPECT_EQ(source.disk_block, (*mixed)[path][group_set_id].disk_block);
+                    if (host_loaded) {
+                        EXPECT_FALSE(source.hasTier(Tier::HOST));
+                        EXPECT_FALSE(group_set->hostPool()->isAllocated(host_sources[group_set_id]));
+                    }
                 }
                 for (size_t member = 0; member < group_set->groupTags().size(); ++member) {
                     const auto& blocks =

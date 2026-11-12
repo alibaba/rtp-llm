@@ -159,7 +159,8 @@ GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
 
 DeviceBlockPoolPtr makeTestDevicePool(const std::vector<std::pair<size_t, size_t>>& layer_bytes,
                                       size_t                                        usable_count,
-                                      const std::string&                            pool_name) {
+                                      const std::string&                            pool_name,
+                                      bool                                          disable_frozen_abort) {
     RTP_LLM_CHECK(!layer_bytes.empty());
     const size_t physical_block_count = usable_count + 1;
     auto         config               = std::make_shared<DeviceBlockPoolConfig>();
@@ -167,6 +168,8 @@ DeviceBlockPoolPtr makeTestDevicePool(const std::vector<std::pair<size_t, size_t
     config->pool_name                 = pool_name;
     config->physical_block_count      = physical_block_count;
     config->use_device_malloc_backing = true;
+    if (disable_frozen_abort)
+        config->frozen_block_abort_lower_ratio = 0.0;
 
     size_t offset = 0;
     for (const auto& [kv_bytes, scale_bytes] : layer_bytes) {
