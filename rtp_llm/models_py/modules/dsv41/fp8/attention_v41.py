@@ -2134,9 +2134,30 @@ class AttentionV41FP8(AttentionFP8):
                             if q_lazy_roundtrip
                             else q[chunk]
                         )
-                        logits = torch.einsum(
-                            "thd,kd->thk", q_chunk, keys.float()
-                        ).relu_()
+                        if key_count > 65536:
+                            # keys.float() is a [key_count, d] fp32 monolith
+                            # (8.00 GiB at the 1M-key ratio-0 layers) and was
+                            # recomputed for EVERY q chunk — n25 (2026-11-12)
+                            # OOMed on it with 163.02 GiB allocated / 1.91 GiB
+                            # free ~20 layers deep. Slice the key axis instead:
+                            # identical einsum math as batched matmuls into
+                            # the logits buffer, <=0.5 GiB fp32 key slice +
+                            # ~128 MiB product temporaries per key chunk.
+                            logits = torch.empty(
+                                (q_chunk.shape[0], q_chunk.shape[1], key_count),
+                                dtype=torch.float32,
+                                device=q_chunk.device,
+                            )
+                            for k0 in range(0, key_count, 65536):
+                                k1 = min(k0 + 65536, key_count)
+                                logits[:, :, k0:k1] = torch.matmul(
+                                    q_chunk, keys[k0:k1].float().t()
+                                )
+                            logits.relu_()
+                        else:
+                            logits = torch.einsum(
+                                "thd,kd->thk", q_chunk, keys.float()
+                            ).relu_()
                         logits = (logits * weights[chunk, :, None]).sum(1)
                         ids = torch.arange(key_count, device=x.device)
                         logits.masked_fill_(ids[None] >= visible[:, None], -torch.inf)
