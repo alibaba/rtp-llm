@@ -293,14 +293,30 @@ def _is_safe_to_kill(pid: int) -> bool:
     resource_tracker and similar daemon processes hold CUDA IPC state (symmetric
     memory, NCCL shared memory). Killing them corrupts the CUDA driver for the
     parent process, causing SIGSEGV in subsequent tests. These are harmless
-    daemon processes that die automatically when pytest exits.
+    daemon processes that die automatically when pytest exits. Persistent
+    Inductor compile workers also belong to the live pytest process.
     """
     try:
         import psutil
 
-        cmdline = " ".join(psutil.Process(pid).cmdline())
-        if "resource_tracker" in cmdline:
+        process = psutil.Process(pid)
+        if "resource_tracker" in " ".join(process.cmdline()):
             return False
+        # Inductor keeps its compile pool across tests. Killing it behind the
+        # live parent leaves cached futures/pipes unusable for the next test.
+        # Protect only this pytest process's pool and its descendants.
+        for ancestor in [process, *process.parents()]:
+            if ancestor.pid == os.getpid():
+                break
+            args = ancestor.cmdline()
+            if (
+                f"--parent={os.getpid()}" in args
+                and any(
+                    arg.endswith("/torch/_inductor/compile_worker/__main__.py")
+                    for arg in args
+                )
+            ):
+                return False
     except Exception:
         pass
     return True
@@ -315,7 +331,8 @@ def _cleanup_child_processes():
     This fixture tracks child PIDs before/after each test and terminates stragglers.
 
     Skips resource_tracker processes — killing them corrupts CUDA IPC state and
-    causes SIGSEGV in subsequent tests. They are harmless daemons that die at exit.
+    causes SIGSEGV in subsequent tests. Also preserves the live pytest process's
+    persistent Inductor pool, which is reused across tests and exits with pytest.
 
     NOTE: Does NOT protect against SIGSEGV (which bypasses Python teardown).
     For SIGSEGV resilience, test helpers should also call terminate() in finally blocks.
