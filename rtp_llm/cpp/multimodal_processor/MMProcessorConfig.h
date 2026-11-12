@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdlib>
 #include <string>
 
 #include "rtp_llm/cpp/config/RoleTypes.h"
@@ -36,8 +37,32 @@ inline const char* vitSeparationName(VitSeparation separation) {
 }
 
 // Keep this ownership rule aligned with LanguageCppEngine in rpc_engine.py.
+// MULTIMODAL_ENGINE_RANK (default "0") is the shared opt-in placement
+// override: the in-backend multimodal engine is created by that tp rank's OWN
+// backend process, so multimodal ingress ownership moves with it. Non-owning
+// ranks resolve to NONE and keep a null processor; every request-path consumer
+// (LocalRpcServer::prepareInput, ChatService, InferenceService,
+// EmbeddingEndpoint) is null-guarded, so text serving is unaffected on all
+// ranks. Image ingress is only served on the hosting rank; the standard
+// rank-0 gRPC entry would skip expansion under a non-zero override.
+inline int64_t multimodalEngineRank() {
+    const char* env = std::getenv("MULTIMODAL_ENGINE_RANK");
+    if (env == nullptr || env[0] == '\0') {
+        return 0;
+    }
+    char* end    = nullptr;
+    long  parsed = std::strtol(env, &end, 10);
+    if (end == env || *end != '\0' || parsed < 0) {
+        RTP_LLM_LOG_WARNING(
+            "ignoring invalid MULTIMODAL_ENGINE_RANK='%s'; multimodal ingress stays on tp_rank 0", env);
+        return 0;
+    }
+    return static_cast<int64_t>(parsed);
+}
+
 inline bool ownsMultimodalIngress(RoleType role_type, int64_t tp_rank) {
-    return tp_rank == 0 && (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL);
+    return tp_rank == multimodalEngineRank()
+           && (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL);
 }
 
 inline MMProcessorKind resolveMMProcessorKind(bool          is_multimodal,
