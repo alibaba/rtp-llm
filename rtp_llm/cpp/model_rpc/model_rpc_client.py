@@ -41,7 +41,9 @@ from rtp_llm.server.request_headers import (
 )
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
-from rtp_llm.telemetry import inject_context_to_metadata, start_client_span
+from rtp_llm.telemetry import inject_context_to_metadata, internal_span
+from rtp_llm.telemetry import request_event as trace_event
+from rtp_llm.telemetry import start_client_span
 from rtp_llm.utils.base_model_datatypes import (
     GENERATION_PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED,
     AuxInfo,
@@ -1256,7 +1258,8 @@ class ModelRpcClient(object):
             # matches the client gRPC deadline: engine-side timeout checks and
             # P2P deadlineMs() require a positive timeout_ms.
             input_py.generate_config.timeout_ms = int(effective_ms)
-        input_pb = trans_input(input_py)
+        with internal_span("rtp_llm.frontend.serialize_engine_input"):
+            input_pb = trans_input(input_py)
         response_iterator = None
         rpc_status = None
         stream_state = StreamState()
@@ -1333,9 +1336,11 @@ class ModelRpcClient(object):
                 # encoder's inspection verdict lands. A violation raises
                 # FtRuntimeException(UNSAFE_INPUT_CONTENT) here, short-circuiting the
                 # request before any LLM compute.
-                await self._wait_greennet_verdict(input_py, input_pb)
+                with internal_span("rtp_llm.frontend.wait_greennet_verdict"):
+                    await self._wait_greennet_verdict(input_py, input_pb)
             # Get channel from pool
-            channel = await self._channel_pool.get(target_address)
+            with internal_span("rtp_llm.frontend.engine_channel_acquire"):
+                channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
 
             grpc_kwargs = {}
@@ -1358,9 +1363,15 @@ class ModelRpcClient(object):
                 )
             else:
                 response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
+            trace_event("rtp_llm.engine_rpc_started")
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
+                first_response = last_output is None
+                if first_response:
+                    trace_event("rtp_llm.first_engine_response_received")
                 output_py = trans_output(input_py, response, stream_state)
+                if first_response:
+                    trace_event("rtp_llm.first_engine_response_decoded")
                 last_output = output_py
                 if use_fetch_response and _is_finished_response(response):
                     terminal_seen = True

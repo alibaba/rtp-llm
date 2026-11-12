@@ -5863,6 +5863,34 @@ class DashScInferenceTracingTest(unittest.IsolatedAsyncioTestCase):
         spans = {span.name: span for span in self._finished_spans()}
         server = spans["dash_sc.ModelStreamInfer"]
         client = spans["rtp_llm.generate_stream_call"]
+        event_names = [event.name for event in server.events]
+        expected_order = [
+            "dash_sc.request_received",
+            "dash_sc.request_frame_received",
+            "dash_sc.parameters_parse_started",
+            "dash_sc.parameters_parse_completed",
+            "dash_sc.multimodal_parse_started",
+            "dash_sc.multimodal_parse_completed",
+            "dash_sc.grammar_validation_started",
+            "dash_sc.grammar_validation_completed",
+            "dash_sc.generation_config_started",
+            "dash_sc.generation_config_completed",
+            "dash_sc.input_tensor_prepare_completed",
+            "dash_sc.response_builder_prepare_completed",
+            "dash_sc.backend_enqueue_started",
+            "dash_sc.backend_enqueue_completed",
+            "dash_sc.first_backend_output_received",
+            "dash_sc.first_response_yielded",
+            "dash_sc.first_token_response_yielded",
+            "dash_sc.finished_response_yielded",
+            "dash_sc.request_finished",
+        ]
+        positions = [event_names.index(name) for name in expected_order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(server.events[0].timestamp, server.start_time)
+        timestamps = [event.timestamp for event in server.events]
+        self.assertEqual(timestamps, sorted(timestamps))
+        self.assertGreaterEqual(server.end_time, timestamps[-1])
         self.assertEqual(server.context.trace_id, int(body_trace_id_hex, 16))
         self.assertEqual(server.parent.span_id, int(body_parent_span_hex, 16))
         self.assertEqual(client.parent.span_id, server.context.span_id)
@@ -5892,6 +5920,30 @@ class DashScInferenceTracingTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("traceparent", dict(visitor.metadata[0]))
         self.assertEqual(server.status.status_code.name, "OK")
         self.assertEqual(client.status.status_code.name, "OK")
+
+    async def test_grammar_rejection_records_stage_and_never_enqueues(self) -> None:
+        validator = MagicMock()
+        validator.validate_and_norm_response_format.side_effect = (
+            GrammarCompilationError("invalid grammar")
+        )
+        visitor = _FakeVisitor(self._terminal_stream())
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor, grammar_validator=validator
+        )
+        request = self._request("grammar-rejected")
+        request.parameters["response_format"].string_param = '{"type":"json_object"}'
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([request]), _FakeGrpcContext(()))
+        )
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        server = self._finished_spans()[-1]
+        names = [event.name for event in server.events]
+        self.assertIn("dash_sc.grammar_validation_started", names)
+        self.assertIn("dash_sc.grammar_validation_completed", names)
+        self.assertIn("dash_sc.grammar_rejected", names)
+        self.assertNotIn("dash_sc.backend_enqueue_started", names)
+        self.assertEqual(names[-1], "dash_sc.request_finished")
 
     async def test_parser_error_still_uses_valid_body_parent(self) -> None:
         metadata_trace_id = "11111111111111111111111111111111"

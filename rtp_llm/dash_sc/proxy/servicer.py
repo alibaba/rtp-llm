@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from typing import Optional
 
 import grpc
@@ -33,9 +32,10 @@ from rtp_llm.dash_sc.proxy.service_route import create_service_discovery_from_en
 from rtp_llm.server.server_args.grpc_group_args import (
     DEFAULT_DASH_SC_GRPC_MAX_MESSAGE_BYTES,
 )
-from rtp_llm.telemetry import CURRENT_TRACE_STATE
+from rtp_llm.telemetry import CURRENT_TRACE_STATE, RequestTimeline
 from rtp_llm.telemetry import attributes as trace_attrs
-from rtp_llm.telemetry import start_client_span, start_server_span
+from rtp_llm.telemetry import request_event as milestone
+from rtp_llm.telemetry import stage, start_client_span, start_server_span
 from rtp_llm.telemetry.tracing import (
     metadata_to_headers,
     select_valid_server_trace_carrier,
@@ -240,8 +240,7 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         )
 
     async def ModelStreamInfer(self, request_iterator, context):
-        request_start_time = time.time_ns()
-        request_start_ns = time.monotonic_ns()
+        timeline = RequestTimeline("dash_sc.proxy")
         try:
             invocation_metadata = context.invocation_metadata() or ()
         except Exception:
@@ -275,10 +274,11 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 _DASH_PROXY_SERVER_SPAN_NAME,
                 headers,
                 _DASH_SERVER_ATTRIBUTES,
-                start_time=request_start_time,
-                request_start_ns=request_start_ns,
+                start_time=timeline.started_at,
+                request_start_ns=timeline.started_ns,
             )
             if server_state is not None:
+                timeline.attach(server_state)
                 server_state.set_attribute("rtp_llm.trace_context_source", source)
             return server_state
 
@@ -288,6 +288,7 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             request_iter = request_iterator.__aiter__()
             try:
                 first_request = await request_iter.__anext__()
+                timeline.frame_received()
             except StopAsyncIteration:
                 record.mark_request_done("eof")
                 return
@@ -344,7 +345,9 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 finally:
                     record.mark_request_done(status)
 
-            route_addr = self._discovery.resolve()
+            with stage("dash_sc.proxy.discovery") as trace_result:
+                route_addr = self._discovery.resolve()
+                trace_result["available"] = route_addr is not None
             if route_addr is None:
                 record.mark_request_done("eof")
                 msg = "forward backend unavailable"
@@ -363,7 +366,8 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
 
             grpc_target = route_addr.grpc_target
             try:
-                channel = await self._channel_pool.get(grpc_target)
+                with stage("dash_sc.proxy.channel_acquire"):
+                    channel = await self._channel_pool.get(grpc_target)
             except RuntimeError as e:
                 record.mark_request_done("eof")
                 msg = _append_downstream_frontend_addr(
@@ -463,6 +467,7 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         downstream_metadata,
     ):
         access_record.mark_backend_call_start(addr)
+        milestone("dash_sc.proxy.forward_started")
 
         try:
             upstream_iter = stub.ModelStreamInfer(
@@ -485,8 +490,12 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         # aio call automatically. No ``context.add_callback`` plumbing needed.
 
         async def counting_response_iter():
+            first_response = True
             try:
                 async for resp in upstream_iter:
+                    if first_response:
+                        milestone("dash_sc.proxy.first_downstream_response_received")
+                        first_response = False
                     access_record.capture_backend_response_chunk(resp)
                     yield resp
             except BaseException as e:
@@ -625,6 +634,7 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         """
 
         def _set_stage(s):
+            milestone("dash_sc.proxy." + s)
             if access_record is not None:
                 try:
                     access_record.buffered_stage = s

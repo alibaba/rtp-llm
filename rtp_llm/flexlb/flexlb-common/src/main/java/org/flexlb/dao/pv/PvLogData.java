@@ -7,7 +7,10 @@ import org.flexlb.telemetry.FlexlbTrace;
 
 import java.util.Map;
 
-/** One completed FlexLB scheduling decision written to {@code pv.log}. */
+/**
+ * One completed scheduling decision written to {@code pv.log}, correlated with
+ * the saved request trace even when completion runs on another thread.
+ */
 @Data
 public class PvLogData {
 
@@ -51,12 +54,12 @@ public class PvLogData {
         this.success = ctx.isSuccess();
         if (!success) {
             this.schedulingDiagnostics = ctx.getSchedulingDiagnostics();
-            var span = FlexlbTrace.spanContext(ctx.getTraceContext());
-            if (span != null) {
-                this.traceId = span.getTraceId();
-                this.spanId = span.getSpanId();
-                this.traceSampled = span.isSampled();
-            }
+        }
+        var span = FlexlbTrace.spanContext(ctx.getTraceContext());
+        if (span != null) {
+            this.traceId = span.getTraceId();
+            this.spanId = span.getSpanId();
+            this.traceSampled = span.isSampled();
         }
         this.enqueueTime = ctx.getEnqueueTime();
         this.startTime = ctx.getStartTime();

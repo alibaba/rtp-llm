@@ -70,8 +70,8 @@ from rtp_llm.dash_sc.codec import (
     DASH_ERROR_INVALID_OUTPUT,
     DASH_ERROR_RESOURCE_EXHAUSTED,
     DASH_ERROR_TIMEOUT,
-    DASH_ERROR_TPM_THROTTLED,
     DASH_ERROR_TOO_LONG,
+    DASH_ERROR_TPM_THROTTLED,
     DASH_ERROR_UNSUPPORTED,
     DashErrorSpec,
     DashScInputIdsError,
@@ -116,7 +116,9 @@ from rtp_llm.server.request_headers import (
     extract_request_headers,
     extract_trace_id,
 )
-from rtp_llm.telemetry import CURRENT_TRACE_STATE, start_server_span
+from rtp_llm.telemetry import CURRENT_TRACE_STATE, RequestTimeline
+from rtp_llm.telemetry import request_event as milestone
+from rtp_llm.telemetry import stage, start_server_span, traced_stage
 from rtp_llm.telemetry.tracing import (
     metadata_to_headers,
     select_valid_server_trace_carrier,
@@ -168,6 +170,7 @@ _DASH_SERVER_ATTRIBUTES = {
 }
 
 
+@traced_stage("dash_sc.multimodal_parse")
 def _build_mm_inputs_from_request(
     request: predict_v2_pb2.ModelInferRequest,
 ) -> list:
@@ -971,6 +974,7 @@ def _early_first_packet_snapshot(
     )
 
 
+@traced_stage("dash_sc.input_tensor_prepare")
 def _make_generate_input(
     *,
     request_id: int,
@@ -1218,99 +1222,108 @@ async def iter_real_model_stream_infer(
         # obtain their token lengths from the backend's actual ViT features.
         image_tokens = 0 if v41_image_token_id is not None and not mm_inputs else None
         prompt_length = len(input_ids_list)
-        generate_config = sampling.to_generate_config(request_controls=request_controls)
-        generate_config.trace_id = trace_str
-        default_thinking_mode = (
-            thinking_mode_from_value(generate_env_config.think_mode)
-            if generate_env_config is not None
-            else ThinkingMode.DISABLED
-        )
-        begin_think_tokens = list(runtime.bos_tokens or tuple(echo_prefix_ids or ()))
-        env_budget = (
-            generate_env_config.max_thinking_tokens
-            if generate_env_config is not None
-            else None
-        )
-        if env_budget is not None:
-            generate_config.max_thinking_tokens = (
-                INT32_MAX if int(env_budget) < 0 else int(env_budget)
+        with stage("dash_sc.generation_config"):
+            generate_config = sampling.to_generate_config(
+                request_controls=request_controls
             )
-        _apply_dash_sc_controls_to_generate_config(
-            generate_config,
-            sampling,
-            request_controls,
-            runtime,
-            default_thinking_mode,
-        )
-        configured_thinking_mode = generate_config.thinking_mode
-        matched_think_bos_ids = matched_echo_ids or _matched_echo_prefix_ids(
-            input_ids_list, begin_think_tokens
-        )
-        if configured_thinking_mode == ThinkingMode.ADAPTIVE and matched_think_bos_ids:
-            generate_config.thinking_mode = ThinkingMode.ENABLED
-            generate_config.in_think_mode = True
-            configured_thinking_mode = ThinkingMode.ENABLED
-        # Boundary IDs are request metadata as well as processor inputs. Keep
-        # them available even when this request disables thinking.
-        if begin_think_tokens:
-            generate_config.begin_think_token_ids = begin_think_tokens
-        reasoning_format = None
-        if generate_env_config is not None and configured_thinking_mode in (
-            ThinkingMode.ENABLED,
-            ThinkingMode.ADAPTIVE,
-        ):
-            reasoning_format = _dash_sc_reasoning_format(
-                generate_env_config,
-                prompt_end_with_think=bool(matched_think_bos_ids),
+            generate_config.trace_id = trace_str
+            default_thinking_mode = (
+                thinking_mode_from_value(generate_env_config.think_mode)
+                if generate_env_config is not None
+                else ThinkingMode.DISABLED
             )
-        if extra_stop_word_ids:
-            existing = generate_config.stop_words_list
-            if existing:
-                # Slow path: request carries its own stops; dedup against them.
-                seen = {tuple(w) for w in existing}
-                for w in extra_stop_word_ids:
-                    t = tuple(w)
-                    if t not in seen:
-                        existing.append(w)
-                        seen.add(t)
-            else:
-                # Fast path: shallow-copy the startup snapshot. Outer copy keeps
-                # any future engine-side mutation request-local; inner lists are
-                # shared (snapshot is read-only by contract).
-                generate_config.stop_words_list = list(extra_stop_word_ids)
-        if generate_env_config is None:
-            final_constraint = generate_config.finalize_response_format()
-        else:
-            final_constraint = generate_config.add_thinking_params(
-                _hf_tokenizer(tokenizer),
-                generate_env_config,
-                enable_thinking=(
-                    None
-                    if configured_thinking_mode == ThinkingMode.ADAPTIVE
-                    else generate_config.in_think_mode
-                ),
-                reasoning_format=reasoning_format,
+            begin_think_tokens = list(
+                runtime.bos_tokens or tuple(echo_prefix_ids or ())
             )
-        if runtime.eos_tokens and not generate_config.end_think_token_ids:
-            generate_config.end_think_token_ids = list(runtime.eos_tokens)
-        # All these are pre-resolved at servicer init via ``build_think_runtime``;
-        # reading them here is O(1) and avoids per-request tokenizer.encode.
-        eos_id = runtime.eos_token_id
-        max_id = runtime.max_token_id
-        term_id = runtime.terminate_token_id
-        think_close_token_id = runtime.close_token_id
-        max_new_tokens = int(generate_config.max_new_tokens or 0)
-        # ``runtime.phase2_enabled`` is the init-time deployment/model/token gate.
-        # ``in_think_mode`` is per-request — ``add_thinking_params``
-        # sets it from generate_config and a request can override it.
-        phase2_enabled = runtime.phase2_enabled and (
-            configured_thinking_mode == ThinkingMode.ENABLED
-        )
-        adaptive_phase2_pending = runtime.phase2_enabled and (
-            configured_thinking_mode == ThinkingMode.ADAPTIVE
-        )
-        cumulative_sent_ids: list[int] = []
-        generate_think_token_num: Optional[int] = None
+            env_budget = (
+                generate_env_config.max_thinking_tokens
+                if generate_env_config is not None
+                else None
+            )
+            if env_budget is not None:
+                generate_config.max_thinking_tokens = (
+                    INT32_MAX if int(env_budget) < 0 else int(env_budget)
+                )
+            _apply_dash_sc_controls_to_generate_config(
+                generate_config,
+                sampling,
+                request_controls,
+                runtime,
+                default_thinking_mode,
+            )
+            configured_thinking_mode = generate_config.thinking_mode
+            matched_think_bos_ids = matched_echo_ids or _matched_echo_prefix_ids(
+                input_ids_list, begin_think_tokens
+            )
+            if (
+                configured_thinking_mode == ThinkingMode.ADAPTIVE
+                and matched_think_bos_ids
+            ):
+                generate_config.thinking_mode = ThinkingMode.ENABLED
+                generate_config.in_think_mode = True
+                configured_thinking_mode = ThinkingMode.ENABLED
+            # Boundary IDs are request metadata as well as processor inputs. Keep
+            # them available even when this request disables thinking.
+            if begin_think_tokens:
+                generate_config.begin_think_token_ids = begin_think_tokens
+            reasoning_format = None
+            if generate_env_config is not None and configured_thinking_mode in (
+                ThinkingMode.ENABLED,
+                ThinkingMode.ADAPTIVE,
+            ):
+                reasoning_format = _dash_sc_reasoning_format(
+                    generate_env_config,
+                    prompt_end_with_think=bool(matched_think_bos_ids),
+                )
+            if extra_stop_word_ids:
+                existing = generate_config.stop_words_list
+                if existing:
+                    # Slow path: request carries its own stops; dedup against them.
+                    seen = {tuple(w) for w in existing}
+                    for w in extra_stop_word_ids:
+                        t = tuple(w)
+                        if t not in seen:
+                            existing.append(w)
+                            seen.add(t)
+                else:
+                    # Fast path: shallow-copy the startup snapshot. Outer copy keeps
+                    # any future engine-side mutation request-local; inner lists are
+                    # shared (snapshot is read-only by contract).
+                    generate_config.stop_words_list = list(extra_stop_word_ids)
+            with stage("dash_sc.response_constraint"):
+                if generate_env_config is None:
+                    final_constraint = generate_config.finalize_response_format()
+                else:
+                    final_constraint = generate_config.add_thinking_params(
+                        _hf_tokenizer(tokenizer),
+                        generate_env_config,
+                        enable_thinking=(
+                            None
+                            if configured_thinking_mode == ThinkingMode.ADAPTIVE
+                            else generate_config.in_think_mode
+                        ),
+                        reasoning_format=reasoning_format,
+                    )
+            if runtime.eos_tokens and not generate_config.end_think_token_ids:
+                generate_config.end_think_token_ids = list(runtime.eos_tokens)
+            # All these are pre-resolved at servicer init via ``build_think_runtime``;
+            # reading them here is O(1) and avoids per-request tokenizer.encode.
+            eos_id = runtime.eos_token_id
+            max_id = runtime.max_token_id
+            term_id = runtime.terminate_token_id
+            think_close_token_id = runtime.close_token_id
+            max_new_tokens = int(generate_config.max_new_tokens or 0)
+            # ``runtime.phase2_enabled`` is the init-time deployment/model/token gate.
+            # ``in_think_mode`` is per-request — ``add_thinking_params``
+            # sets it from generate_config and a request can override it.
+            phase2_enabled = runtime.phase2_enabled and (
+                configured_thinking_mode == ThinkingMode.ENABLED
+            )
+            adaptive_phase2_pending = runtime.phase2_enabled and (
+                configured_thinking_mode == ThinkingMode.ADAPTIVE
+            )
+            cumulative_sent_ids: list[int] = []
+            generate_think_token_num: Optional[int] = None
         generate_input = _make_generate_input(
             request_id=rtp_llm_request_id,
             input_ids_list=input_ids_list,
@@ -1333,22 +1346,23 @@ async def iter_real_model_stream_infer(
         # Every streaming frame repeats the same tensor descriptors, request identity and
         # generation limits. The builder materializes that protobuf template once and
         # patches only the per-frame values (see ``StreamResponseBuilder``).
-        response_builder = StreamResponseBuilder(
-            dash_sc_request_id=request.id,
-            model_name=request.model_name,
-            request_log_tag=tag,
-            log_input_output=log_input_output,
-            debug=request_controls.debug,
-            request_input_ids=input_ids_list,
-            return_input_ids=request_controls.return_input_ids,
-            is_streaming=is_streaming,
-            generate_config=generate_config,
-            eos_token_id=eos_id,
-            max_token_id=max_id,
-            prompt_token_fallback=prompt_length,
-            image_tokens=image_tokens,
-            image_tokens_from_backend=v41_image_token_id is not None,
-        )
+        with stage("dash_sc.response_builder_prepare"):
+            response_builder = StreamResponseBuilder(
+                dash_sc_request_id=request.id,
+                model_name=request.model_name,
+                request_log_tag=tag,
+                log_input_output=log_input_output,
+                debug=request_controls.debug,
+                request_input_ids=input_ids_list,
+                return_input_ids=request_controls.return_input_ids,
+                is_streaming=is_streaming,
+                generate_config=generate_config,
+                eos_token_id=eos_id,
+                max_token_id=max_id,
+                prompt_token_fallback=prompt_length,
+                image_tokens=image_tokens,
+                image_tokens_from_backend=v41_image_token_id is not None,
+            )
         chunk_idx = 0
         phase2_needed = False
         # One-shot guard: ``phase2_triggered`` flips True the instant we
@@ -1359,7 +1373,8 @@ async def iter_real_model_stream_infer(
         # ``phase2_triggered`` blocks the second entry. Tracking only one
         # boolean keeps the guard cheap on the hot path.
         phase2_triggered = False
-        stream = await backend_visitor.enqueue(generate_input)
+        with stage("dash_sc.backend_enqueue", request_id=str(rtp_llm_request_id)):
+            stream = await backend_visitor.enqueue(generate_input)
         async for go in stream:
             if isinstance(go, MMRoutingSnapshot):
                 if not enable_fake_first_packet:
@@ -1389,16 +1404,22 @@ async def iter_real_model_stream_infer(
                     0,
                     (),
                 )
+                milestone("dash_sc.estimated_usage_frame_ready")
                 yield (fake, fake_stats) if yield_access_stats else fake
                 recheck = getattr(request_controls, "tpm_recheck", None)
                 if recheck is not None:
                     elapsed_ms = int(time.time() * 1000) - recheck.request_ready_time_ms
                     if elapsed_ms > recheck.interval_ms:
-                        result = await recheck_tpm(
-                            recheck.callback_url,
-                            timeout_ms=_tpm_recheck_timeout_ms(),
-                            request_id=str(request.id),
-                        )
+                        with stage("dash_sc.tpm_recheck") as trace_result:
+                            result = await recheck_tpm(
+                                recheck.callback_url,
+                                timeout_ms=_tpm_recheck_timeout_ms(),
+                                request_id=str(request.id),
+                            )
+                            trace_result["accepted"] = result.ok
+                            trace_result["status_code"] = int(
+                                result.callback_status_code
+                            )
                         if not result.ok:
                             error_resp = build_dash_error_response(
                                 str(request.id),
@@ -1446,11 +1467,15 @@ async def iter_real_model_stream_infer(
                             return
                 continue
             chunk_idx += 1
+            if chunk_idx == 1:
+                milestone("dash_sc.first_backend_output_received")
             logging.debug("[DashScGrpc] [%s] real infer chunk %s", tag, chunk_idx)
             if not go.generate_outputs:
                 raise ValueError("empty generate_outputs in backend chunk")
             out_py = go.generate_outputs[0]
             generated_ids = _token_ids_list_from_generate_output(out_py)
+            if chunk_idx == 1:
+                milestone("dash_sc.first_output_tokens_decoded")
             if adaptive_phase2_pending and generated_ids:
                 phase2_enabled = bool(
                     generate_config.begin_think_token_ids
@@ -1851,7 +1876,8 @@ async def iter_real_model_stream_infer(
                 phase2_tag,
                 phase2_generate_input if log_input_output else None,
             )
-            phase2_stream = await backend_visitor.enqueue(phase2_generate_input)
+            with stage("dash_sc.phase2_enqueue", request_id=str(phase2_request_id)):
+                phase2_stream = await backend_visitor.enqueue(phase2_generate_input)
             phase2_response_builder = StreamResponseBuilder(
                 dash_sc_request_id=f"{request.id}{_PHASE2_SUFFIX}",
                 model_name=request.model_name,
@@ -2164,6 +2190,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         self._v41_image_token_id = v41_image_token_id
         self._enable_fake_first_packet = _env_flag(_FAKE_FIRST_PACKET_ENV)
 
+    @traced_stage("dash_sc.grammar_validation")
     async def _validate_request_grammar(
         self, sampling: SamplingParams, request_id: str
     ) -> tuple[Optional[tuple[DashErrorSpec, str]], SamplingParams]:
@@ -2240,6 +2267,8 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
     ) -> None:
         """Capture the frame and fan out per-chunk metrics (records, no log)."""
         is_first, now = record.record_response_chunk(resp)
+        if is_first:
+            milestone("dash_sc.first_response_frame_ready")
         if prompt_token_num is not None and record.backend_input_len is None:
             record.backend_input_len = prompt_token_num
         if (
@@ -2300,8 +2329,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         )
 
     async def ModelStreamInfer(self, request_iterator, context):
-        request_start_time = time.time_ns()
-        request_start_ns = time.monotonic_ns()
+        timeline = RequestTimeline("dash_sc")
         try:
             invocation_metadata = context.invocation_metadata()
         except Exception:
@@ -2336,10 +2364,11 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 _DASH_SERVER_SPAN_NAME,
                 headers,
                 _DASH_SERVER_ATTRIBUTES,
-                start_time=request_start_time,
-                request_start_ns=request_start_ns,
+                start_time=timeline.started_at,
+                request_start_ns=timeline.started_ns,
             )
             if trace_state is not None:
+                timeline.attach(trace_state)
                 trace_state.set_attribute("rtp_llm.trace_context_source", source)
                 if current_rtp_llm_request_id is not None:
                     trace_state.set_attribute(
@@ -2354,9 +2383,11 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         exc: Optional[BaseException] = None
         try:
             emit_query_log(record, rank_id=self._rank_id, server_id=self._server_id)
+            timeline.query_logged()
             partial_metadata_sent = False
             first_request = True
             async for request in request_iterator:
+                timeline.frame_received()
                 record.req_count += 1
                 rtp_llm_request_id = self._next_rtp_llm_request_id()
                 current_rtp_llm_request_id = rtp_llm_request_id
@@ -2371,17 +2402,18 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 body_headers = extract_body_trace_headers(request)
                 _ensure_span(body_headers)
                 try:
-                    parsed_input_ids, sampling, request_controls = (
-                        parse_dash_sc_grpc_request(
-                            request,
-                            invocation_metadata=invocation_metadata or (),
-                            model_type=(
-                                "deepseek_v41"
-                                if self._v41_image_token_id is not None
-                                else None
-                            ),
+                    with stage("dash_sc.parameters_parse"):
+                        parsed_input_ids, sampling, request_controls = (
+                            parse_dash_sc_grpc_request(
+                                request,
+                                invocation_metadata=invocation_metadata or (),
+                                model_type=(
+                                    "deepseek_v41"
+                                    if self._v41_image_token_id is not None
+                                    else None
+                                ),
+                            )
                         )
-                    )
                     mm_inputs = _build_mm_inputs_from_request(request)
                     traceparent_new = _lookup_ds_request_control(
                         parse_ds_header_attributes(request), "traceparent_new"
@@ -2395,6 +2427,9 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                             "[DashScGrpc] body traceparent differs from traceparent_new"
                         )
                 except (DashScParameterError, DashScInputIdsError) as e:
+                    milestone(
+                        "dash_sc.parse_rejected", **{"error.type": type(e).__name__}
+                    )
                     if first_request:
                         record.record_request_frame(request)
                         record.mark_request_done("eof")
@@ -2420,6 +2455,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     yield resp
                     return
                 if parsed_input_ids is None:
+                    milestone("dash_sc.parse_rejected", reason="missing_input_ids")
                     if first_request:
                         record.record_request_frame(request)
                         record.mark_request_done("eof")
@@ -2497,6 +2533,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     sampling, str(request.id)
                 )
                 if invalid_grammar is not None:
+                    milestone("dash_sc.grammar_rejected")
                     error_spec, status_message = invalid_grammar
                     resp = build_dash_error_response(
                         str(request.id),
@@ -2566,6 +2603,11 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                             and request_controls.log_input_output,
                             finished=bool(finished),
                         )
+                        timeline.response_yielded(
+                            has_tokens=bool(generated_ids_for_log),
+                            finished=finished,
+                            finish_reason=finish_reason,
+                        )
                         yield resp
                 finally:
                     await response_iter.aclose()
@@ -2586,6 +2628,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             try:
                 _ensure_span()
                 end_ts = record.resolve_status(context, exc)
+                timeline.finished(record.status)
                 try:
                     # Log first, metrics second — a kmonitor hiccup must never delay or
                     # drop the access record (user-mandated ordering).

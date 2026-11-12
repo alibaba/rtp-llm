@@ -13,8 +13,8 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.VitCacheDirectory.Candidate;
 import org.flexlb.sync.status.WorkerDirectory;
-import org.flexlb.util.Logger;
 import org.flexlb.telemetry.FlexlbTrace;
+import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
@@ -24,13 +24,16 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
-/** Least-inflight-media routing, optionally preceded by cache affinity. */
+/**
+ * Selects ViT workers by cache affinity and inflight load, then revalidates the
+ * selected endpoint identity against the full route's policy before admission.
+ */
 @Component
 public class VitCacheSelector {
     private static final long MIN_PENDING_TTL_MS = 120_000;
@@ -247,16 +250,36 @@ public class VitCacheSelector {
     private ServerStatus validateImpl(BalanceContext ctx, String group, Span span) {
         ServerStatus selected = ctx.getRequest().getSelectedVit();
         if (selected == null) {
+            FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_VALIDATION_REASON, "missing_selection");
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
         try (var pin = workers.captureEndpoint(RoleType.VIT,
                 selected.getServerIp() + ":" + selected.getHttpPort())) {
             WorkerStatus worker = pin == null ? null : pin.endpoint().getStatus();
-            if (selected.getRole() != RoleType.VIT || worker == null
-                    || (group != null && !Objects.equals(group, worker.getGroup()))
-                    || selected.getGrpcPort() != worker.getGrpcPort()
-                    || !Objects.equals(selected.getGroup(), worker.getGroup())
-                    || selected.getWorkerGeneration() != pin.generationId()) {
+            String reason = "valid";
+            if (selected.getRole() != RoleType.VIT) {
+                reason = "role_mismatch";
+            } else if (worker == null) {
+                reason = "endpoint_unavailable";
+            } else if (group != null && !Objects.equals(group, worker.getGroup())) {
+                reason = "policy_group_mismatch";
+                FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_POLICY_GROUP, group);
+                FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_CURRENT_GROUP, worker.getGroup());
+            } else if (selected.getGrpcPort() != worker.getGrpcPort()) {
+                reason = "grpc_port_mismatch";
+                FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_ADDRESS, selected.getServerIp() + ":" + selected.getGrpcPort());
+                FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_CURRENT_GRPC_PORT, (long) worker.getGrpcPort());
+            } else if (!Objects.equals(selected.getGroup(), worker.getGroup())) {
+                reason = "selected_group_mismatch";
+                FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_SELECTED_GROUP, selected.getGroup());
+                FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_CURRENT_GROUP, worker.getGroup());
+            } else if (selected.getWorkerGeneration() != pin.generationId()) {
+                reason = "generation_mismatch";
+                FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_WORKER_GENERATION, selected.getWorkerGeneration());
+                FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_CURRENT_GENERATION, pin.generationId());
+            }
+            if (!reason.equals("valid")) {
+                FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_VALIDATION_REASON, reason);
                 return errorStatus(StrategyErrorType.NO_VIT_WORKER);
             }
             // Validation does not reselect by load: report its current snapshot separately.

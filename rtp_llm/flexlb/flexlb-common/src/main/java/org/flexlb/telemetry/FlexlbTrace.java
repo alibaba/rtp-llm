@@ -42,6 +42,12 @@ public final class FlexlbTrace {
     public static final AttributeKey<String> DECODE_ADDRESS = AttributeKey.stringKey("rtp_llm.decode_address");
     public static final AttributeKey<String> VIT_ADDRESS = AttributeKey.stringKey("rtp_llm.vit_address");
     public static final AttributeKey<Long> VIT_WORKER_GENERATION = AttributeKey.longKey("rtp_llm.vit.worker_generation");
+    public static final AttributeKey<String> VIT_VALIDATION_REASON = AttributeKey.stringKey("rtp_llm.vit.validation_reason");
+    public static final AttributeKey<String> VIT_POLICY_GROUP = AttributeKey.stringKey("rtp_llm.vit.policy_group");
+    public static final AttributeKey<String> VIT_SELECTED_GROUP = AttributeKey.stringKey("rtp_llm.vit.selected_group");
+    public static final AttributeKey<String> VIT_CURRENT_GROUP = AttributeKey.stringKey("rtp_llm.vit.current_group");
+    public static final AttributeKey<Long> VIT_CURRENT_GRPC_PORT = AttributeKey.longKey("rtp_llm.vit.current_grpc_port");
+    public static final AttributeKey<Long> VIT_CURRENT_GENERATION = AttributeKey.longKey("rtp_llm.vit.current_generation");
     public static final AttributeKey<Boolean> VIT_ROUTE_ONLY = AttributeKey.booleanKey("rtp_llm.vit.route_only");
     public static final AttributeKey<Boolean> VIT_CACHE_AFFINITY = AttributeKey.booleanKey("rtp_llm.vit.cache_affinity");
     public static final AttributeKey<Long> VIT_KEY_COUNT = AttributeKey.longKey("rtp_llm.vit.key_count");

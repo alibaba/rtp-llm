@@ -15,6 +15,7 @@ import grpc
 from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.py_config_modules import MasterConfig
 from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
+    REQUEST_STATE_ACKNOWLEDGED,
     FlexlbScheduleRequestPB,
     FlexlbScheduleResponsePB,
 )
@@ -40,9 +41,8 @@ class _RecordingSpan:
         self.finish_calls.append(kwargs)
 
 
-class _FakeResponse:
-    def __init__(self, code):
-        self.code = code
+def _FakeResponse(code):
+    return FlexlbScheduleResponsePB(code=code)
 
 
 class _FakeStub:
@@ -78,7 +78,7 @@ class MasterClientScheduleSpanTest(unittest.IsolatedAsyncioTestCase):
         self.client = MasterClient(MasterConfig())
         self.span = _RecordingSpan()
 
-    async def _send(self, stub):
+    async def _send(self, stub, request=None):
         """Drives the real method with the span factory and stub replaced."""
         with mock.patch.object(
             self.client, "_get_channel", return_value=object()
@@ -93,7 +93,11 @@ class MasterClientScheduleSpanTest(unittest.IsolatedAsyncioTestCase):
         ):
             return await self.client._send_schedule_request(
                 "127.0.0.1:7001",
-                FlexlbScheduleRequestPB(priority=50),
+                (
+                    request
+                    if request is not None
+                    else FlexlbScheduleRequestPB(priority=50)
+                ),
                 1.0,
                 3540218608800727041,
             )
@@ -111,11 +115,42 @@ class MasterClientScheduleSpanTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("rtp_llm.request_id", attributes)
         self.assertEqual("OK", attributes[trace_attrs.RPC_RESPONSE_STATUS_CODE])
         self.assertEqual(SUCCESS_CODE, attributes[trace_attrs.RTP_LLM_SCHEDULE_CODE])
+        self.assertFalse(attributes["rtp_llm.schedule.has_selected_vit"])
+        self.assertNotIn("rtp_llm.schedule.request_state", attributes)
+        self.assertNotIn("rtp_llm.schedule.real_master_host", attributes)
+        self.assertFalse(attributes["rtp_llm.schedule.enqueued_by_master"])
         # A successful schedule closes clean.
         self.assertEqual([{}], self.span.finish_calls)
 
         # rpc.system on this span breaks the platform's Total tokens aggregation.
         self.assertNotIn("rpc.system", self.span.attributes)
+
+    async def test_acknowledged_response_records_lifecycle_and_master(self):
+        response = FlexlbScheduleResponsePB(
+            code=SUCCESS_CODE, enqueued_by_master=True, real_master_host="master:7001"
+        )
+        response.lifecycle.state = REQUEST_STATE_ACKNOWLEDGED
+        await self._send(_FakeStub(response=response))
+        self.assertTrue(self.span.attributes["rtp_llm.schedule.enqueued_by_master"])
+        self.assertEqual(
+            REQUEST_STATE_ACKNOWLEDGED,
+            self.span.attributes["rtp_llm.schedule.request_state"],
+        )
+        self.assertEqual(
+            "master:7001", self.span.attributes["rtp_llm.schedule.real_master_host"]
+        )
+
+    async def test_pd_rejection_keeps_selected_vit_and_expanded_sequence_length(self):
+        request = FlexlbScheduleRequestPB(seq_len=1760, vit_route_only=False)
+        request.selected_vit.server_ip = "10.43.9.8"
+        response = await self._send(_FakeStub(response=_FakeResponse(8408)), request)
+        self.assertEqual(response.code, 8408)
+        self.assertTrue(self.span.attributes["rtp_llm.schedule.has_selected_vit"])
+        self.assertEqual(self.span.attributes["rtp_llm.schedule.seq_len"], 1760)
+        self.assertFalse(self.span.attributes[trace_attrs.RTP_LLM_VIT_ROUTE_ONLY])
+        self.assertEqual(
+            self.span.finish_calls, [{"error_type": "FlexlbBusinessRejected"}]
+        )
 
     async def test_rejecting_business_code_does_not_close_as_success(self):
         stub = _FakeStub(response=_FakeResponse(8402))

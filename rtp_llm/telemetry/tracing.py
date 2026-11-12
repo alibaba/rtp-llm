@@ -718,18 +718,30 @@ class RequestTraceState:
         except Exception:  # noqa: BLE001 - fail-open
             pass
 
-    def add_event(self, name: str, attributes: Optional[Dict[str, Any]] = None) -> None:
-        """Adds a span event stamped with the SDK wall-clock 'now'.
+    def add_event(
+        self,
+        name: str,
+        attributes: Optional[Dict[str, Any]] = None,
+        timestamp: Optional[int] = None,
+    ) -> None:
+        """Add an event at 'now', or a timestamp captured at the actual boundary.
 
         Callers must invoke this AT the moment the event happens (e.g. the
         first_response_chunk event fires when the first frontend response
         object becomes available, before SSE serialization), not post-hoc like
-        the aggregated Engine TTFT attribute. Dropped after finish(); fail-open.
+        the aggregated Engine TTFT attribute. Dash ingress can supply a saved
+        timestamp because its parent carrier is only known after reading the
+        first frame. Dropped after finish(); fail-open.
         """
         try:
             with self._lock:
                 if self.server_span is not None and not self._finished:
-                    self.server_span.add_event(name, attributes=attributes)
+                    if timestamp is None:
+                        self.server_span.add_event(name, attributes=attributes)
+                    else:
+                        self.server_span.add_event(
+                            name, attributes=attributes, timestamp=timestamp
+                        )
         except Exception:  # noqa: BLE001 - fail-open
             pass
 
@@ -974,7 +986,7 @@ def start_client_span(
 
 
 def start_internal_span(span_name: str) -> Optional[ClientSpanHandle]:
-    """Starts an INTERNAL span as child of the current request's SERVER span.
+    """Starts an INTERNAL span under the active stage or request SERVER span.
 
     For in-process orchestration stages (e.g. rtp_llm.master_route, which may
     resolve addrs without any outbound call when the request carries
@@ -993,13 +1005,41 @@ def start_internal_span(span_name: str) -> Optional[ClientSpanHandle]:
             return None
         span = tracer.start_span(
             span_name,
-            context=state.server_context,
+            context=CURRENT_INTERNAL_CONTEXT.get() or state.server_context,
             kind=trace.SpanKind.INTERNAL,
         )
         context_token = CURRENT_INTERNAL_CONTEXT.set(trace.set_span_in_context(span))
         return ClientSpanHandle(span, _internal_error_description, context_token)
     except Exception:  # noqa: BLE001 - fail-open
         return None
+
+
+def request_event(name: str, **attributes) -> None:
+    """Add a milestone to the request SERVER span, including from child stages."""
+    try:
+        state = CURRENT_TRACE_STATE.get()
+        if state is not None:
+            state.add_event(name, attributes or None)
+    except Exception:
+        pass
+
+
+@contextmanager
+def internal_span(span_name: str, **attributes):
+    """Scope an orchestration stage, restoring its parent even on cancellation."""
+    span = start_internal_span(span_name)
+    if span is not None:
+        for key, value in attributes.items():
+            span.set_attribute(key, value)
+    try:
+        yield span
+    except BaseException as error:
+        if span is not None:
+            span.finish(error=error, error_type=type(error).__name__)
+        raise
+    else:
+        if span is not None:
+            span.finish()
 
 
 def start_server_span(
