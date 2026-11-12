@@ -1,86 +1,55 @@
-"""
-Base modules - independent modules without dependencies on other modules.
-Different architectures may have different implementations.
-"""
+"""Base components with platform implementations loaded on first use."""
+
+from importlib import import_module
 
 from rtp_llm.device.device_type import DeviceType, get_device_type
 
-# Import common base modules (architecture-independent)
-from rtp_llm.models_py.modules.base.common.embedding import Embedding, EmbeddingBert
-from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
-from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
-    MultimodalDeepstackInjector,
-    MultimodalEmbeddingInjector,
-    reshape_extra_input_to_deepstack,
-)
-from rtp_llm.models_py.modules.base.common.norm import (
-    AddBiasResLayerNormTorch,
-    LayerNorm,
-    LayerNormTorch,
-    RMSNormTorch,
-    RMSResNormTorch,
-)
+_COMMON_MODULES = {
+    "Embedding": "embedding",
+    "EmbeddingBert": "embedding",
+    "WriteCacheStoreOp": "kvcache_store",
+    "MultimodalDeepstackInjector": "multimodal_embedding",
+    "MultimodalEmbeddingInjector": "multimodal_embedding",
+    "reshape_extra_input_to_deepstack": "multimodal_embedding",
+    "AddBiasResLayerNormTorch": "norm",
+    "LayerNormTorch": "norm",
+    "RMSNormTorch": "norm",
+    "RMSResNormTorch": "norm",
+}
+_PLATFORM_MODULES = {
+    "FusedSiluAndMul": "activation",
+    "SigmoidGateScaleAdd": "moe_gating",
+    "AddBiasResLayerNorm": "norm",
+    "FusedQKRMSNorm": "norm",
+    "LayerNorm": "norm",
+    "QKRMSNorm": "norm",
+    "RMSNorm": "norm",
+    "RMSResNorm": "norm",
+    "FakeBalanceExpert": "select_topk",
+    "GroupTopK": "select_topk",
+    "SelectTopk": "select_topk",
+    "IndexerOp": "indexer_op",
+}
+__all__ = list(_COMMON_MODULES) + list(_PLATFORM_MODULES)
 
-# Determine device type and import architecture-specific modules
-device_type = get_device_type()
 
-if device_type == DeviceType.ROCm:
-    from rtp_llm.models_py.modules.base.rocm.activation import FusedSiluAndMul
-    from rtp_llm.models_py.modules.base.rocm.moe_gating import SigmoidGateScaleAdd
-    from rtp_llm.models_py.modules.base.rocm.norm import (
-        AddBiasResLayerNorm,
-        FusedQKRMSNorm,
-        LayerNorm,
-        QKRMSNorm,
-        RMSNorm,
-        RMSResNorm,
-    )
-
-    # Import NotImplementedOp placeholders for ROCm
-    from rtp_llm.models_py.modules.base.rocm.not_implemented_ops import (
-        FakeBalanceExpert,
-        GroupTopK,
-        IndexerOp,
-    )
-    from rtp_llm.models_py.modules.base.rocm.select_topk import SelectTopk
-else:
-    from rtp_llm.models_py.modules.base.cuda.activation import FusedSiluAndMul
-    from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp
-    from rtp_llm.models_py.modules.base.cuda.moe_gating import SigmoidGateScaleAdd
-    from rtp_llm.models_py.modules.base.cuda.norm import (
-        AddBiasResLayerNorm,
-        FusedQKRMSNorm,
-        QKRMSNorm,
-        RMSNorm,
-        RMSResNorm,
-    )
-    from rtp_llm.models_py.modules.base.cuda.select_topk import (
-        FakeBalanceExpert,
-        GroupTopK,
-        SelectTopk,
-    )
-
-    __all__ = [
-        "Embedding",
-        "EmbeddingBert",
-        "WriteCacheStoreOp",
-        "AddBiasResLayerNorm",
-        "AddBiasResLayerNormTorch",
-        "LayerNorm",
-        "LayerNormTorch",
-        "RMSNormTorch",
-        "RMSResNormTorch",
-        "FusedQKRMSNorm",
-        "QKRMSNorm",
-        "RMSNorm",
-        "RMSResNorm",
-        "SelectTopk",
-        "GroupTopK",
-        "FakeBalanceExpert",
-        "FusedSiluAndMul",
-        "IndexerOp",
-        "SigmoidGateScaleAdd",
-        "MultimodalDeepstackInjector",
-        "MultimodalEmbeddingInjector",
-        "reshape_extra_input_to_deepstack",
-    ]
+def __getattr__(name: str):
+    # A leaf import such as common.fp8_linear must not initialize unrelated
+    # platform operators. Keep the existing package-level exports available.
+    if name in _COMMON_MODULES:
+        module = "common." + _COMMON_MODULES[name]
+    elif name in _PLATFORM_MODULES:
+        platform = "rocm" if get_device_type() == DeviceType.ROCm else "cuda"
+        operation = _PLATFORM_MODULES[name]
+        if platform == "rocm" and name in (
+            "FakeBalanceExpert",
+            "GroupTopK",
+            "IndexerOp",
+        ):
+            operation = "not_implemented_ops"
+        module = platform + "." + operation
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(f"{__name__}.{module}"), name)
+    globals()[name] = value
+    return value

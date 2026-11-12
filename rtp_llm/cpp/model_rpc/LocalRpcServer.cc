@@ -276,6 +276,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
                                                           !mm_process_engine.is_none(),
                                                           maga_init_params.pd_sep_config.role_type,
                                                           maga_init_params.parallelism_config.tp_rank,
+                                                          maga_init_params.parallelism_config.pp_rank,
                                                           maga_init_params.model_config_.model_type,
                                                           "LocalRpcServer");
     const auto mm_kind     = mm_decision.kind;
@@ -424,6 +425,11 @@ ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB&                   
     output.reset();
     try {
         output = QueryConverter::transQuery(&input_pb);
+        const auto& model_type = maga_init_params_.model_config_.model_type;
+        if ((model_type == "qwen4_exp" || model_type == "qwen4_exp_mtp") && output->v41_inputs) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR,
+                             "Qwen3.8-Flash-Next requires ordinary image/video media inputs");
+        }
         if (mm_processor_ != nullptr && (output->multimodal_inputs || output->v41_inputs)) {
             RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
             auto mm_res = updateMultimodalFeaturesWithTrace(output, parent_span, server_context);
@@ -1090,7 +1096,9 @@ grpc::Status LocalRpcServer::authorizeTorchAllocatorDumpInternal(grpc::ServerCon
     if (!authorization.ok()) {
         return authorization;
     }
-    if (maga_init_params_.parallelism_config.tp_size <= 1 || !isTorchAllocatorDumpInternalPeer(context)) {
+    const auto& parallelism_config = maga_init_params_.parallelism_config;
+    if ((parallelism_config.tp_size <= 1 && parallelism_config.pp_size <= 1)
+        || !isTorchAllocatorDumpInternalPeer(context)) {
         return grpc::Status(grpc::StatusCode::PERMISSION_DENIED, "allocator dump internal fanout denied");
     }
     return grpc::Status::OK;
@@ -1200,7 +1208,8 @@ TorchAllocatorDumpResultPB LocalRpcServer::dumpTorchAllocatorOnCurrentProcess(co
 
 grpc::Status LocalRpcServer::executeAdmittedTorchAllocatorDump(const TorchAllocatorDumpRequestPB& request,
                                                                TorchAllocatorDumpResponsePB*      response) {
-    if (maga_init_params_.parallelism_config.tp_size <= 1) {
+    const auto& parallelism_config = maga_init_params_.parallelism_config;
+    if (parallelism_config.tp_size <= 1 && parallelism_config.pp_size <= 1) {
         return aggregateTorchAllocatorDumpResults(
             request.dump_id(), {dumpTorchAllocatorOnCurrentProcess(request.dump_id())}, response);
     }

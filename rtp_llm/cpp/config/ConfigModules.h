@@ -65,6 +65,7 @@ struct ParallelismConfig {
     int64_t tp_rank          = 0;
     int64_t ep_rank          = 0;
     int64_t dp_rank          = 0;
+    int64_t pp_rank          = 0;
     int64_t ffn_tp_size      = 1;
     int64_t ffn_tp_rank      = 0;
     bool    use_ub_comm      = false;
@@ -74,6 +75,9 @@ struct ParallelismConfig {
     // DeepSeekV4Model's mega-MoE token bound cap) does not have to read
     // os.environ["ROLE_TYPE"] anymore.
     RoleType role_type = RoleType::PDFUSION;
+
+    /** Main-model layer counts per stage; ignored by drafts and single-stage models. */
+    std::vector<int64_t> pp_stage_layer_counts;
 
     // Context Parallel configuration
     PrefillCPConfig prefill_cp_config;
@@ -257,6 +261,23 @@ struct ProfilingDebugLoggingConfig {
     bool        enable_detail_log         = false;
     bool        check_nan                 = false;
     bool        enable_model_inputs_log   = false;
+    // Batch recording (ExecutionRecorder) switch and tuning knobs. Enabled
+    // only by the switch; queue size falls back to the default below when
+    // non-positive. Disk footprint is bounded by alog rotation (256MB x 160
+    // per process), not by a recorder-side budget. Manifest lands under
+    // LOG_PATH/batch_record.
+    // Decode-step sampling ratio applied only to batches containing decode
+    // streams (recording itself follows enable_batch_record): each decode
+    // step adds the ratio to a per-executor credit; crossing 1.0 records
+    // that step and spends the credit (deterministic, exact long-run
+    // fraction). 1.0 keeps every decode step, 0.0 records none.
+    // Out-of-range values are clamped at the consumer; prefill-only batches
+    // are never sampled. Mixed prefill/decode batches are sampled as a whole:
+    // skipping a batch also skips its prefill rows. At 0.0, only prefill-only
+    // batches are recorded.
+    bool    enable_batch_record       = true;
+    int64_t record_queue_size         = 4096;
+    double  record_decode_sample_rate = 0.1;
 
     std::string to_string() const;
 };
@@ -550,9 +571,6 @@ public:
     int getEpSize() const {
         return ep_size_;
     }
-    int getTpRank() const {
-        return world_rank_ % tp_size_;
-    }
     void setWorldRank(int world_rank) {
         world_rank_ = world_rank;
     }
@@ -632,7 +650,7 @@ struct GrpcMapsConfig {
 struct GrpcConfig: GrpcMapsConfig {
     /// If > 0, passed to gRPC sync server as ``MAX_POLLERS`` (per completion queue).
     int max_server_pollers = 0;
-    GrpcConfig(){};
+    GrpcConfig() {};
     GrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);
@@ -640,7 +658,7 @@ struct GrpcConfig: GrpcMapsConfig {
 
 /// DashSc gRPC (predict_v2.proto) Python client/server channel options.
 struct DashScGrpcConfig: GrpcMapsConfig {
-    DashScGrpcConfig(){};
+    DashScGrpcConfig() {};
     DashScGrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);

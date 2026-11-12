@@ -7,20 +7,38 @@ namespace rtp_llm {
 
 KVCacheSpecPtr SpecBuilder::build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
     RTP_LLM_CHECK_WITH_INFO(!desc.tag.empty(), "KVCacheSpecDesc tag must not be empty");
+    KVCacheSpecPtr spec;
     switch (desc.cache_type) {
         case KVCacheSpecType::MultiHeadAttention:
-            return MHAKVCacheSpec::build(desc, ctx);
+            spec = MHAKVCacheSpec::build(desc, ctx);
+            break;
         case KVCacheSpecType::MultiHeadLatentAttention:
-            return MLAKVCacheSpec::build(desc, ctx);
+            spec = MLAKVCacheSpec::build(desc, ctx);
+            break;
         case KVCacheSpecType::LinearAttention:
-            return LinearKVCacheSpec::build(desc, ctx);
+            spec = LinearKVCacheSpec::build(desc, ctx);
+            break;
         case KVCacheSpecType::OpaqueKV:
-            return CompressedKVCacheSpec::build(desc, ctx);
+            spec = CompressedKVCacheSpec::build(desc, ctx);
+            break;
         case KVCacheSpecType::OpaqueState:
-            return FixedStateCacheSpec::build(desc, ctx);
+            spec = FixedStateCacheSpec::build(desc, ctx);
+            break;
     }
-    RTP_LLM_CHECK_WITH_INFO(false, "unknown KVCacheSpecType=%d", static_cast<int>(desc.cache_type));
-    return nullptr;
+    RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "unknown KVCacheSpecType=%d", static_cast<int>(desc.cache_type));
+    const auto mode = desc.tp_transfer_mode;
+    RTP_LLM_CHECK_WITH_INFO(
+        mode == TpCacheTransferMode::LEGACY
+            || (mode == TpCacheTransferMode::LINEAR_QKV && desc.cache_type == KVCacheSpecType::LinearAttention)
+            || (mode == TpCacheTransferMode::MHA_HEADS && desc.cache_type == KVCacheSpecType::MultiHeadAttention)
+            || (mode == TpCacheTransferMode::REPLICATED
+                && (desc.cache_type == KVCacheSpecType::OpaqueKV || desc.cache_type == KVCacheSpecType::OpaqueState)),
+        "invalid cache TP transfer mode: tag=%s cache_type=%d mode=%d",
+        desc.tag.c_str(),
+        static_cast<int>(desc.cache_type),
+        static_cast<int>(mode));
+    spec->tp_transfer.mode = mode;
+    return spec;
 }
 
 CacheGroupType SpecBuilder::groupType(const KVCacheSpecDesc& desc) {

@@ -10,10 +10,116 @@ from pathlib import Path
 from unittest import TestCase, main
 from unittest.mock import patch
 
+from rtp_llm.config.collective_config import CollectiveConfig
+from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_ENV_CASES
 from rtp_llm.ops import HWKernelConfig, RoleType, TaskType
 from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
+
+
+class AllReduceArgumentsTest(TestCase):
+    def test_default_auto_and_retired_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        for value in (None, "0", "1"):
+            env = {} if value is None else {"FT_DISABLE_CUSTOM_AR": value}
+            with self.subTest(value=value), patch.dict(os.environ, env, clear=True):
+                configs = server_args.setup_args([])
+                self.assertEqual(configs.all_reduce_backend, "auto")
+                self.assertIsNone(configs.all_reduce_large_prefill)
+                self.assertFalse(hasattr(configs, "ft_disable_custom_ar_override"))
+
+    def test_retired_cli_is_rejected(self):
+        from rtp_llm.server.server_args import server_args
+
+        for option, value in (
+            ("--ft_disable_custom_ar", "1"),
+            ("--ffn_sp_size", "1"),
+            ("--qwen4_all_reduce_backend", "nccl"),
+            ("--qwen4_all_reduce_large_prefill", "1"),
+        ):
+            with self.subTest(option=option), patch.dict(os.environ, {}, clear=True):
+                with patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+                    server_args.setup_args([option, value])
+
+    def test_backend_and_large_prefill_cli_override_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        env = {
+            "RTP_LLM_ALL_REDUCE_BACKEND": "sm120_ipc",
+            "RTP_LLM_ALL_REDUCE_LARGE_PREFILL": "1",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            configs = server_args.setup_args([])
+            self.assertEqual(configs.all_reduce_backend, "sm120_ipc")
+            self.assertTrue(configs.all_reduce_large_prefill)
+            configs = server_args.setup_args(
+                [
+                    "--all_reduce_backend",
+                    "nccl",
+                    "--all_reduce_large_prefill",
+                    "0",
+                ]
+            )
+            self.assertEqual(configs.all_reduce_backend, "nccl")
+            self.assertFalse(configs.all_reduce_large_prefill)
+            environment = dict(os.environ)
+            policy = EngineConfig.create(configs).collective_config
+            self.assertEqual(policy, CollectiveConfig("nccl", False))
+            self.assertEqual(pickle.loads(pickle.dumps(policy)), policy)
+            self.assertEqual(dict(os.environ), environment)
+
+    def test_invalid_backend_is_rejected(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True), patch("sys.stderr", io.StringIO()):
+            with self.assertRaises(SystemExit):
+                server_args.setup_args(["--all_reduce_backend", "invalid"])
+
+
+class PipelinePartitionArgumentsTest(TestCase):
+    def test_partition_binds_to_parallel_config(self):
+        from rtp_llm.server.server_args import server_args
+
+        for args, env, expected in (
+            ([], {}, []),
+            (["--pp_stage_layer_counts", "[2, 3, 2]"], {}, [2, 3, 2]),
+            ([], {"PP_STAGE_LAYER_COUNTS": "[3, 4]"}, [3, 4]),
+        ):
+            with (
+                self.subTest(args=args, env=env),
+                patch.dict(os.environ, env, clear=True),
+            ):
+                configs = server_args.setup_args(args)
+                self.assertEqual(
+                    configs.parallelism_config.pp_stage_layer_counts, expected
+                )
+
+    def test_partition_rejects_invalid_environment_value_with_cli_args(self):
+        from rtp_llm.server.server_args import server_args
+
+        for raw_value in (
+            "[2, 3",
+            "null",
+            "3",
+            '"2,3"',
+            '{"stage0": 2}',
+            "[1.5, 2.5]",
+            "[true, 2]",
+            "[0, 2]",
+            "[-1, 3]",
+        ):
+            with (
+                self.subTest(raw_value=raw_value),
+                patch.dict(
+                    os.environ,
+                    {"PP_STAGE_LAYER_COUNTS": raw_value},
+                    clear=True,
+                ),
+            ):
+                with self.assertRaises(SystemExit):
+                    server_args.setup_args(["--tp_size", "1"])
 
 
 class CacheConfigArgumentsTest(TestCase):
@@ -129,9 +235,10 @@ class CacheConfigArgumentsTest(TestCase):
             ([], {"ENABLE_CRC": "invalid"}),
             (["--enable_crc", "invalid"], {}),
         ):
-            with self.subTest(args=args, env=env), patch(
-                "sys.stderr", new_callable=io.StringIO
-            ) as stderr:
+            with (
+                self.subTest(args=args, env=env),
+                patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
                 with self.assertRaises(SystemExit) as raised:
                     self.parse_cache_config(args, env)
                 self.assertEqual(raised.exception.code, 2)
@@ -184,9 +291,10 @@ class CacheConfigArgumentsTest(TestCase):
     def test_removed_cli_names_are_rejected(self):
         samples = self.startup_samples()
         for name, old_name in self.removed_names().items():
-            with self.subTest(old_name=old_name), patch(
-                "sys.stderr", new_callable=io.StringIO
-            ) as stderr:
+            with (
+                self.subTest(old_name=old_name),
+                patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
                 with self.assertRaises(SystemExit) as raised:
                     self.parse_cache_config([f"--{old_name}", str(samples[name])], {})
                 self.assertEqual(raised.exception.code, 2)
@@ -368,9 +476,11 @@ class ServerArgsPyEnvConfigsTest(TestCase):
         from rtp_llm.server.server_args import server_args
 
         for strategy in ("grouped_fp4", "local_loop"):
-            with self.subTest(strategy=strategy), patch.dict(
-                os.environ, {"MOE_STRATEGY": strategy}, clear=True
-            ), patch.object(sys, "argv", ["rtp_llm_server"]):
+            with (
+                self.subTest(strategy=strategy),
+                patch.dict(os.environ, {"MOE_STRATEGY": strategy}, clear=True),
+                patch.object(sys, "argv", ["rtp_llm_server"]),
+            ):
                 configs = server_args.setup_args()
                 self.assertEqual(configs.moe_config.moe_strategy, strategy)
 
@@ -386,9 +496,11 @@ class ServerArgsPyEnvConfigsTest(TestCase):
         self.assertEqual(rocm_configs.moe_config.moe_strategy, "rocm_ep_low_latency")
 
         for unsupported in ("no_auant_cpp",):
-            with self.subTest(unsupported=unsupported), patch.dict(
-                os.environ, {}, clear=True
-            ), patch("sys.stderr", new_callable=io.StringIO):
+            with (
+                self.subTest(unsupported=unsupported),
+                patch.dict(os.environ, {}, clear=True),
+                patch("sys.stderr", new_callable=io.StringIO),
+            ):
                 with self.assertRaises(SystemExit):
                     server_args.setup_args(["--moe_strategy", unsupported])
 
@@ -399,10 +511,11 @@ class ServerArgsPyEnvConfigsTest(TestCase):
             ["rtp_llm_server"],
             ["rtp_llm_server", "--tp_size", "1"],
         ):
-            with self.subTest(argv=argv), patch.dict(
-                os.environ, {"MOE_STRATEGY": "not_a_strategy"}, clear=True
-            ), patch.object(sys, "argv", argv), patch(
-                "sys.stderr", new_callable=io.StringIO
+            with (
+                self.subTest(argv=argv),
+                patch.dict(os.environ, {"MOE_STRATEGY": "not_a_strategy"}, clear=True),
+                patch.object(sys, "argv", argv),
+                patch("sys.stderr", new_callable=io.StringIO),
             ):
                 with self.assertRaises(SystemExit):
                     server_args.setup_args()
@@ -411,8 +524,9 @@ class ServerArgsPyEnvConfigsTest(TestCase):
         from rtp_llm.server.server_args import server_args
 
         for env_value in ("mega_moe", "not_a_strategy"):
-            with self.subTest(env_value=env_value), patch.dict(
-                os.environ, {"MOE_STRATEGY": env_value}, clear=True
+            with (
+                self.subTest(env_value=env_value),
+                patch.dict(os.environ, {"MOE_STRATEGY": env_value}, clear=True),
             ):
                 configs = server_args.setup_args(["--moe_strategy=local_loop"])
                 self.assertEqual(configs.moe_config.moe_strategy, "local_loop")
@@ -498,8 +612,9 @@ class ServerArgsSetTest(TestCase):
         config.torch_allocator_dump_auth_token = "secret"
         for cooldown in (-1.0, float("nan"), float("inf"), float("-inf")):
             config.torch_allocator_dump_cooldown_seconds = cooldown
-            with self.subTest(cooldown=cooldown), self.assertRaisesRegex(
-                ValueError, "finite and non-negative"
+            with (
+                self.subTest(cooldown=cooldown),
+                self.assertRaisesRegex(ValueError, "finite and non-negative"),
             ):
                 config.validate_allocator_dump_config()
 
@@ -523,19 +638,22 @@ class ServerArgsSetTest(TestCase):
             }
         )
         for dtype_name in ("bf16", "fp8_e4m3"):
-            with self.subTest(dtype=dtype_name), patch.dict(
-                os.environ,
-                {
-                    CONFIG_ENV: trace_json,
-                    "JSON_MODEL_OVERRIDE_ARGS": json.dumps(
-                        {
-                            "hidden_state_capture_layer_ids": [1],
-                            "hidden_state_capture_dtype": (
-                                "fp8_e4m3" if dtype_name == "bf16" else "bf16"
-                            ),
-                        }
-                    ),
-                },
+            with (
+                self.subTest(dtype=dtype_name),
+                patch.dict(
+                    os.environ,
+                    {
+                        CONFIG_ENV: trace_json,
+                        "JSON_MODEL_OVERRIDE_ARGS": json.dumps(
+                            {
+                                "hidden_state_capture_layer_ids": [1],
+                                "hidden_state_capture_dtype": (
+                                    "fp8_e4m3" if dtype_name == "bf16" else "bf16"
+                                ),
+                            }
+                        ),
+                    },
+                ),
             ):
                 configs = server_args.setup_args(
                     [
@@ -1345,8 +1463,9 @@ class ServerArgsSetTest(TestCase):
                     )
                     if source == "env_only":
                         args = None
-                    with patch.dict(os.environ, env, clear=True), patch.object(
-                        sys, "argv", ["prog"]
+                    with (
+                        patch.dict(os.environ, env, clear=True),
+                        patch.object(sys, "argv", ["prog"]),
                     ):
                         if value in ("0", "2"):
                             configs = server_args.setup_args(args)
@@ -1878,6 +1997,129 @@ class GenerateArgsFromEnvTest(TestCase):
         with patch.dict(os.environ, {"ENABLE_CRC": "not-a-bool"}, clear=True):
             with self.assertRaises(argparse.ArgumentTypeError):
                 read_env_value("ENABLE_CRC", True, str2bool)
+
+
+class BatchRecordArgsTest(TestCase):
+    ENV_BY_FIELD = {
+        "enable_batch_record": "RTP_LLM_ENABLE_BATCH_RECORD",
+        "record_queue_size": "RTP_LLM_RECORD_QUEUE_SIZE",
+        "record_decode_sample_rate": "RTP_LLM_RECORD_DECODE_SAMPLE_RATE",
+    }
+    DEFAULTS = {
+        "enable_batch_record": True,
+        "record_queue_size": 4096,
+        "record_decode_sample_rate": 0.1,
+    }
+    SAMPLES = {
+        "enable_batch_record": False,
+        "record_queue_size": 8192,
+        "record_decode_sample_rate": 0.25,
+    }
+
+    def parse_profile_config(self, args, env, use_sys_argv=False):
+        from rtp_llm.ops import ProfilingDebugLoggingConfig
+        from rtp_llm.server.server_args.profile_debug_logging_group_args import (
+            init_profile_debug_logging_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        config = ProfilingDebugLoggingConfig()
+        parser = EnvArgumentParser()
+        parser.set_root_config(config)
+        init_profile_debug_logging_group_args(parser, config)
+        argv = ["server", *args] if use_sys_argv else ["server"]
+        with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv):
+            parser.parse_args(None if use_sys_argv else args)
+        return config
+
+    def test_defaults(self):
+        for args in (None, []):
+            with self.subTest(args=args):
+                config = self.parse_profile_config(args, {})
+                for name, value in self.DEFAULTS.items():
+                    self.assertEqual(getattr(config, name), value, name)
+                # Byte budget removed: alog rotation (256MB x 160) is the cap.
+                self.assertFalse(hasattr(config, "record_total_bytes"))
+                # Decode follows enable_batch_record directly; only the
+                # sampling rate remains as a decode-side knob.
+                self.assertFalse(hasattr(config, "record_decode"))
+
+    def test_removed_record_total_bytes_is_rejected(self):
+        with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with self.assertRaises(SystemExit) as raised:
+                self.parse_profile_config(["--record_total_bytes", "1024"], {})
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn(
+                "unrecognized arguments: --record_total_bytes", stderr.getvalue()
+            )
+
+    def test_env_values_applied(self):
+        env = {
+            self.ENV_BY_FIELD[name]: str(value) for name, value in self.SAMPLES.items()
+        }
+        for args in (None, []):
+            with self.subTest(args=args):
+                config = self.parse_profile_config(args, env)
+                for name, value in self.SAMPLES.items():
+                    self.assertEqual(getattr(config, name), value, name)
+
+    def test_cli_overrides_environment(self):
+        env = {
+            self.ENV_BY_FIELD[name]: str(not value if isinstance(value, bool) else 0)
+            for name, value in self.SAMPLES.items()
+        }
+        for equals in (False, True):
+            args = []
+            for name, value in self.SAMPLES.items():
+                flag = f"--{name}"
+                args.extend([f"{flag}={value}"] if equals else [flag, str(value)])
+            for use_sys_argv in (False, True):
+                with self.subTest(equals=equals, use_sys_argv=use_sys_argv):
+                    config = self.parse_profile_config(args, env, use_sys_argv)
+                    for name, value in self.SAMPLES.items():
+                        self.assertEqual(getattr(config, name), value, name)
+
+    def test_invalid_bool_rejected(self):
+        for env_name in ("RTP_LLM_ENABLE_BATCH_RECORD",):
+            with (
+                self.subTest(env_name=env_name),
+                patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
+                with self.assertRaises(SystemExit) as raised:
+                    self.parse_profile_config([], {env_name: "not-a-bool"})
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("Boolean value expected", stderr.getvalue())
+
+    def test_invalid_sample_rate_rejected(self):
+        for bad in ("1.5", "-0.1", "2", "nan", "inf", "not-a-ratio"):
+            with (
+                self.subTest(bad=bad),
+                patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
+                with self.assertRaises(SystemExit) as raised:
+                    self.parse_profile_config(
+                        [], {"RTP_LLM_RECORD_DECODE_SAMPLE_RATE": bad}
+                    )
+                self.assertEqual(raised.exception.code, 2)
+                stderr_text = stderr.getvalue()
+                self.assertIn(
+                    "record_decode_sample_rate",
+                    stderr_text,
+                    f"missing field name for {bad}: {stderr_text}",
+                )
+                self.assertTrue(
+                    "Value must be within [0.0, 1.0]" in stderr_text
+                    or "Float value expected" in stderr_text,
+                    f"missing range/float error for {bad}: {stderr_text}",
+                )
+
+    def test_sample_rate_boundary_values_accepted(self):
+        for good in ("0.0", "1.0", "0.5"):
+            with self.subTest(good=good):
+                config = self.parse_profile_config(
+                    [], {"RTP_LLM_RECORD_DECODE_SAMPLE_RATE": good}
+                )
+                self.assertEqual(config.record_decode_sample_rate, float(good))
 
 
 if __name__ == "__main__":

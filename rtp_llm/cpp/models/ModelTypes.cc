@@ -94,6 +94,10 @@ torch::Tensor reorderCacheCopyRows(const torch::Tensor& mapping, const std::vect
 
 }  // namespace
 
+PPIntermediateTensors ModelBase::makePPWarmUpInputTensors(const GptModelInputs&, bool) {
+    RTP_LLM_FAIL("PP warmup input construction is not implemented by this model");
+}
+
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     GptModelInputShapeHints shape_hints{};
     const auto kernel_block_table = inspectKvBlockTable(inputs.kv_cache_kernel_block_id, "kv_cache_kernel_block_id");
@@ -192,6 +196,7 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     encode_flag(inputs.need_moe_gating, GptModelInputControlFlag::kControlNeedMoeGating);
     encode_flag(inputs.warmup, GptModelInputControlFlag::kControlWarmup);
     encode_flag(inputs.skip_run, GptModelInputControlFlag::kControlSkipRun);
+    encode_flag(inputs.shutdown, GptModelInputControlFlag::kControlShutdown);
     encode_flag(inputs.is_fake_stream, GptModelInputControlFlag::kControlFakeStream);
     encode_flag(inputs.is_target_verify, GptModelInputControlFlag::kControlTargetVerify);
     encode_flag(inputs.pd_separation, GptModelInputControlFlag::kControlPdSeparation);
@@ -238,7 +243,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
 
 torch::Tensor makeModelInputShapeHintsTensor(const GptModelInputs& inputs) {
     const auto shape_hints = getModelInputShapeHints(inputs);
-    auto       tensor      = torch::empty({static_cast<int64_t>(shape_hints.size())}, torch::kInt64).pin_memory();
+    auto tensor =
+        torch::empty({static_cast<int64_t>(shape_hints.size())}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
     std::copy(shape_hints.begin(), shape_hints.end(), tensor.data_ptr<int64_t>());
     return tensor;
 }
@@ -317,6 +323,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // first sync stage: shape hints
     auto shape_hints_t   = makeModelInputShapeHintsTensor(inputs);
     auto shape_hints_ptr = shape_hints_t.data_ptr<int64_t>();
+    shape_hints_ptr[GptModelInputIndex::recordExecutionId] = inputs.record_execution_id;
 
     // CPU broadcast: routed through CpuTpBroadcaster (UDS) when intra-node;
     // execBroadcastCpu's fallback path keeps the NCCL+cudaSyncAndCheck
@@ -344,6 +351,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.need_moe_gating           = has_flag(GptModelInputControlFlag::kControlNeedMoeGating);
     inputs.warmup                    = has_flag(GptModelInputControlFlag::kControlWarmup);
     inputs.skip_run                  = has_flag(GptModelInputControlFlag::kControlSkipRun);
+    inputs.shutdown                  = has_flag(GptModelInputControlFlag::kControlShutdown);
     inputs.is_fake_stream            = has_flag(GptModelInputControlFlag::kControlFakeStream);
     inputs.is_target_verify          = has_flag(GptModelInputControlFlag::kControlTargetVerify);
     inputs.pd_separation             = has_flag(GptModelInputControlFlag::kControlPdSeparation);
@@ -357,6 +365,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         static_cast<size_t>(checkedHint(GptModelInputIndex::seqSizePerBlock, "seqSizePerBlock"));
     inputs.kernel_seq_size_per_block =
         static_cast<size_t>(checkedHint(GptModelInputIndex::kernelSeqSizePerBlock, "kernelSeqSizePerBlock"));
+    inputs.record_execution_id = shape_hints_ptr[GptModelInputIndex::recordExecutionId];
     if (inputs.skip_run) {
         inputs.kv_cache_group_tags.clear();
         inputs.kv_cache_block_id           = torch::Tensor();
@@ -372,7 +381,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     const auto engram_width    = checkedHint(GptModelInputIndex::engramTokenWindowWidth, "engramTokenWindowWidth");
     const auto mm_features_num = checkedHint(GptModelInputIndex::mmFeaturesNum, "mmFeaturesNum");
     if (mm_features_num) {
-        mm_features_shape_t   = torch::empty({mm_features_num}, torch::kInt64).pin_memory();
+        mm_features_shape_t =
+            torch::empty({mm_features_num}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
         mm_features_shape_ptr = mm_features_shape_t.data_ptr<int64_t>();
         for (int64_t i = 0; i < mm_features_num; ++i) {
             mm_features_shape_ptr[i] =
@@ -386,7 +396,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // so we send its element count first ("先传shape") and allocate a 1-D buffer on non-root.
     const auto mm_extra_input_num = checkedHint(GptModelInputIndex::mmHasExtraInput, "mmHasExtraInput");
     if (mm_extra_input_num) {
-        mm_extra_input_shape_t   = torch::empty({mm_extra_input_num}, torch::kInt64).pin_memory();
+        mm_extra_input_shape_t =
+            torch::empty({mm_extra_input_num}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
         mm_extra_input_shape_ptr = mm_extra_input_shape_t.data_ptr<int64_t>();
         for (int64_t i = 0; i < mm_extra_input_num; ++i) {
             mm_extra_input_shape_ptr[i] =
@@ -433,13 +444,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         auto options = torch::TensorOptions(torch_dtype);
         if (atype == rtp_llm::AllocationType::DEVICE) {
             options = options.device(torch::kCUDA);
+        } else {
+            /** Allocate pinned storage directly to avoid copying uninitialized CPU data. */
+            options = options.pinned_memory(true);
         }
-        auto tensor = torch::empty(dims, options);
-        // NCCL broadcast requires pinned memory for CPU buffers
-        if (atype != rtp_llm::AllocationType::DEVICE) {
-            tensor = tensor.pin_memory();
-        }
-        return tensor;
+        return torch::empty(dims, options);
     };
 
     bool is_non_root = parallelism_config.tp_rank != 0;
@@ -489,11 +498,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.prefix_lengths       = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                {context_batch_size},
                                          pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
-        const auto publish_count = checkedHint(GptModelInputIndex::cacheStorePublishStartTokens,
-                                               "cacheStorePublishStartTokens");
-        inputs.cache_store_publish_start_tokens = publish_count ?
-            allocBuf(rtp_llm::DataType::TYPE_INT32, {publish_count}) :
-            torch::Tensor();
+        const auto publish_count =
+            checkedHint(GptModelInputIndex::cacheStorePublishStartTokens, "cacheStorePublishStartTokens");
+        inputs.cache_store_publish_start_tokens =
+            publish_count ? allocBuf(rtp_llm::DataType::TYPE_INT32, {publish_count}) : torch::Tensor();
         if (max_kernel_blocks != 0) {
             // kv_cache_kernel_block_id residency follows the producer (rank 0): device only when
             // RTP_LLM_DEVICE_INPUT publishes it to CUDA. Follow the root bitmap so the packed-buffer
@@ -716,7 +724,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     torch::Tensor cpu_packed, gpu_packed;
 
     if (cpu_total_bytes > 0) {
-        cpu_packed = torch::empty({cpu_total_bytes}, torch::kUInt8).pin_memory();
+        cpu_packed = torch::empty({cpu_total_bytes}, torch::TensorOptions(torch::kUInt8).pinned_memory(true));
         if (is_root) {
             auto* base = static_cast<uint8_t*>(cpu_packed.data_ptr());
             for (auto& e : cpu_entries) {

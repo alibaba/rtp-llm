@@ -16,4 +16,3 @@ cc_library(
     copts = rocm_copts() + ["-DUSE_ROCM=1"],
     visibility = ["//visibility:public"],
 )
-

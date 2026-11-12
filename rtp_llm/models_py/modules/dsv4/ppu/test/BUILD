@@ -37,7 +37,6 @@ _PPU_CONTRACT_TESTS = [
     "prefill_communication", "tp_prefill_workspace_dims",
 ]]
 
-
 py_library(
     name = "ppu_test_runtime",
     visibility = ["//visibility:public"],
@@ -108,8 +107,6 @@ py_test(
     main = "test_dsv4_config.py",
     data = ["//rtp_llm/models_py:modules/dsv4/ppu/manifest.py"],
 )
-
-
 
 py_test(
     name = "fp8_contract_test",

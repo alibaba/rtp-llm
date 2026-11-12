@@ -10,10 +10,11 @@
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <array>
+#include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
-#include <memory>
 #include <vector>
 
 namespace kmonitor {
@@ -23,6 +24,11 @@ class MetricsReporter;
 namespace rtp_llm {
 
 class KVCacheManager;  // Forward declaration
+
+/** Model-level container for stage-boundary tensors, independent of PP transport. */
+struct PPIntermediateTensors {
+    std::map<std::string, torch::Tensor> tensors;
+};
 
 struct GptModelDescription {
     rtp_llm::AttentionConfigs attention_conf;
@@ -61,11 +67,7 @@ struct GptModelInitParams {
     std::shared_ptr<KVCacheManager>              cache_manager;
     // nullopt selects the main-model cache config; otherwise selects this MTP module config.
     std::optional<int> mtp_cache_config_index;
-    // DSv4 head-channel residual multiplier. Default 1 (no expansion).
-    // When >1, the model's pre-output residual ([T, hc_mult*hidden_size])
-    // is the contract between target and draft for MTP — see
-    // makeFakeSPOutputBuffer (MtpExecutor.cc) and CudaGraphRunner
-    // input_hiddens.
+    // Hyper-connection residual multiplier for the MTP input hidden width.
     int64_t                                    hc_mult = 1;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter;
     // Final CUDA-graph kernel block-table width. Executors compute it from
@@ -74,6 +76,9 @@ struct GptModelInitParams {
 
     std::vector<int64_t>    hidden_state_capture_layer_ids;
     HiddenStateCaptureDtype hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
+
+    // Warmup wrappers borrow the Python model later used by the real executor.
+    bool owns_py_model = true;
 };
 
 enum GptModelInputIndex : size_t {
@@ -133,6 +138,7 @@ enum GptModelInputIndex : size_t {
     engramTokenWindowRows,
     engramTokenWindowWidth,
     kvCacheCopyTokenLengths,
+    recordExecutionId,
     gptModelInputLength,
 };
 
@@ -174,6 +180,7 @@ enum GptModelInputControlFlag : uint32_t {
     kControlPdSeparation        = 1u << 7,
     kControlDecodeEntrance      = 1u << 8,
     kControlOpaqueKvCacheStore  = 1u << 9,
+    kControlShutdown            = 1u << 10,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);
@@ -185,8 +192,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
 class ModelBase {
 public:
-    virtual ~ModelBase()                                                     = default;
-    virtual GptModelOutputs            forward(const GptModelInputs& inputs) = 0;
+    virtual ~ModelBase() = default;
+    /** Runs this model instance; a partitioned target executes only its local stage. */
+    virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
+    /** Builds rank-local PP warmup activations from full model inputs, applying CP padding when enabled. */
+    virtual PPIntermediateTensors      makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp);
     virtual void                       releaseBuffers() {}
     virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
     virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
@@ -202,6 +212,41 @@ public:
     // after draining actual CacheStore publication; models without deferred
     // publication have nothing to wait for.
     virtual std::string waitCacheStorePublication() {
+        return {};
+    }
+
+    // Optional target-verify side-state transaction. Models that stage
+    // recurrent/side-cache candidates during speculative target verification
+    // opt in here. The prepare phase must validate and select the accepted
+    // candidates without mutating persistent cache pools. Once every TP rank
+    // has prepared successfully, finish(true) tentatively applies that
+    // prevalidated plan while retaining enough original state for rollback.
+    // finish(false) discards an uncommitted plan or rolls back a tentative
+    // commit and must be idempotent. Both finish paths report errors instead
+    // of throwing so every TP rank can reach the same status rendezvous.
+    virtual bool hasSpeculativeTargetCommitHooks() const {
+        return false;
+    }
+
+    // Optional host consensus, selected collectively at model startup. nullopt
+    // means the original device collective. A transport/protocol exception is
+    // fail-stop and must propagate; asymmetric fallback is forbidden.
+    virtual std::optional<bool> reduceSpeculativeTargetPrepareStatus(bool /*local_ok*/) {
+        return std::nullopt;
+    }
+
+    virtual std::string prepareSpeculativeTargetCommit(const torch::Tensor& /*accept_len*/) {
+        return {};
+    }
+
+    virtual std::string finishSpeculativeTargetCommit(bool /*commit*/) {
+        return {};
+    }
+
+    // Called only after every TP rank has tentatively committed. This releases
+    // the retained originals/undo log without changing the committed state.
+    // A finalize error is fail-stop because rollback is no longer legal.
+    virtual std::string finalizeSpeculativeTargetCommit() {
         return {};
     }
 

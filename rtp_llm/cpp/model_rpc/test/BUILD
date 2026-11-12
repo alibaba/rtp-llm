@@ -168,6 +168,16 @@ cc_test(
 )
 
 cc_test(
+    name = "stage_peer_groups_test",
+    srcs = ["StagePeerGroupsTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+    exec_properties = {"gpu": "H20_CU13"},
+    tags = ["H20_CU13"],
+)
+
+cc_test(
     name = "decode_rpc_server_test",
     srcs = ["DecodeRpcServerTest.cc"],
     copts = test_copts,
@@ -261,4 +271,18 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
+)
+
+cc_test(
+    name = "registered_cache_staging_test",
+    srcs = ["RegisteredCacheStagingTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc:registered_cache_staging",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {},
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
 )

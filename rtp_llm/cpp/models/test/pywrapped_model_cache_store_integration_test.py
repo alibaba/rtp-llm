@@ -19,19 +19,23 @@ import torch
 from rtp_llm.config.cuda_graph import GenerationPrefillCudaGraphUnsupportedBackend
 
 
-def _install_single_rank_rocm_graph_capture_stub() -> None:
+def _install_isolated_graph_capture_stubs() -> None:
     """Keep this focused integration test independent of the production ops SO.
 
     The C++ test extension registers the same pybind types as the production
     extension, so importing ``rocm_rccl`` here would register those types a
-    second time. Single-rank capture has no RCCL work; these are the exact
-    no-op hooks used by the device shim for that case.
+    second time. This isolated fixture initializes no optional communicator;
+    these are the no-op graph admission hooks and single-rank RCCL hooks.
     """
 
     models_py = types.ModuleType("rtp_llm.models_py")
     models_py.__path__ = []
     distributed = types.ModuleType("rtp_llm.models_py.distributed")
     distributed.__path__ = []
+    collectives = types.ModuleType("rtp_llm.models_py.distributed.all_reduce")
+    collectives.begin_graph_capture = lambda: None
+    collectives.end_graph_capture = lambda: None
+    collectives.abort_graph_capture = lambda: None
     rocm_rccl = types.ModuleType("rtp_llm.models_py.distributed.rocm_rccl")
     rocm_rccl.set_graph_capture_nccl_comm = lambda *_args: None
     rocm_rccl.enter_graph_capture_mode = lambda *_args: None
@@ -39,14 +43,15 @@ def _install_single_rank_rocm_graph_capture_stub() -> None:
     rocm_rccl.finish_hipgraph_capture_session = lambda: None
 
     models_py.distributed = distributed
+    distributed.all_reduce = collectives
     distributed.rocm_rccl = rocm_rccl
     sys.modules["rtp_llm.models_py"] = models_py
     sys.modules["rtp_llm.models_py.distributed"] = distributed
+    sys.modules["rtp_llm.models_py.distributed.all_reduce"] = collectives
     sys.modules["rtp_llm.models_py.distributed.rocm_rccl"] = rocm_rccl
 
 
-if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-    _install_single_rank_rocm_graph_capture_stub()
+_install_isolated_graph_capture_stubs()
 
 _extension = importlib.import_module(
     "rtp_llm.cpp.models.test.libth_pywrapped_model_cache_store_integration_test"
@@ -437,6 +442,8 @@ def _register_no_collectives(allreduce=None) -> None:
         unexpected_collective,
         unexpected_collective if allreduce is None else allreduce,
         unexpected_collective,
+        unexpected_collective,
+        unexpected_collective,
     )
 
 
@@ -446,6 +453,9 @@ def _register_identity_allreduce() -> None:
         return tensor
 
     _register_no_collectives(identity_allreduce)
+
+
+run_speculative_commit_bridge = _extension.run_speculative_commit_bridge
 
 
 class CacheStoreForwardModel:
@@ -533,6 +543,51 @@ class CacheStoreForwardModel:
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
         self.forward_calls += 1
         return self._forward_one(inputs)
+
+
+class CloseAwareCacheStoreForwardModel(CacheStoreForwardModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+        self.close_calls = 0
+        self.initialize_calls = 0
+        self.fail_initialize = False
+
+    def initialize(self, resources) -> bool:
+        self.initialize_calls += 1
+        if self.fail_initialize:
+            raise RuntimeError("injected model initialize failure")
+        return super().initialize(resources)
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        if self.closed:
+            raise RuntimeError("model is closed")
+        return super().forward(inputs, fmha_impl)
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.closed = True
+
+
+class MixedDeviceMetadataModel(CacheStoreForwardModel):
+    def __init__(self):
+        super().__init__()
+        self.metadata = []
+
+    def _forward_one(self, inputs):
+        attn = inputs.attention_inputs
+        if isinstance(attn, dict):
+            attn = next(iter(attn.values()))
+        assert attn.input_lengths.is_cuda
+        assert not attn.prefix_lengths.is_cuda
+        self.metadata.append(
+            (
+                attn.cu_seqlens_device.cpu().tolist(),
+                attn.cu_kv_seqlens_device.cpu().tolist(),
+            )
+        )
+        return super()._forward_one(inputs)
+
 
 class DirtyGenerationPrefillCaptureModel:
     """Fail on the graph-capture body after all eager generation-prefill warmups."""
@@ -735,6 +790,52 @@ class UnsupportedCaptureModel:
         raise AssertionError("unsupported capture model must fail during construction")
 
 
+class SpeculativeCommitBridgeModel:
+    def __init__(
+        self,
+        *,
+        prepare_error: bool = False,
+        commit_error: bool = False,
+        abort_error: bool = False,
+    ):
+        self.prepare_error = prepare_error
+        self.commit_error = commit_error
+        self.abort_error = abort_error
+        self.finish_calls: list[bool] = []
+        self.finalize_calls = 0
+
+    def initialize(self, resources) -> bool:
+        return True
+
+    def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
+        raise AssertionError("bridge-only test must not execute forward")
+
+    def prepare_speculative_target_commit(self, accept_len: torch.Tensor) -> None:
+        if self.prepare_error:
+            raise RuntimeError("prepare bridge boom")
+
+    def finish_speculative_target_commit(self, commit: bool) -> None:
+        self.finish_calls.append(commit)
+        if commit and self.commit_error:
+            raise RuntimeError("commit bridge boom")
+        if not commit and self.abort_error:
+            raise RuntimeError("abort bridge boom")
+
+    def finalize_speculative_target_commit(self) -> None:
+        self.finalize_calls += 1
+
+
+class PrepareOnlySpeculativeCommitBridgeModel:
+    def initialize(self, resources) -> bool:
+        return True
+
+    def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
+        raise AssertionError("bridge-only test must not execute forward")
+
+    def prepare_speculative_target_commit(self, accept_len: torch.Tensor) -> None:
+        pass
+
+
 def _blocks_by_key(result: dict) -> dict[str, dict]:
     return {
         block["key"]: block
@@ -857,7 +958,11 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
                         frames.extend(tensor.clone() for tensor in tensors)
 
                     register_comm_ops(
-                        record_broadcast, unexpected_collective, unexpected_collective
+                        record_broadcast,
+                        unexpected_collective,
+                        unexpected_collective,
+                        unexpected_collective,
+                        unexpected_collective,
                     )
                     results = run_tp_sync_model_inputs_scenario(
                         0,
@@ -892,6 +997,8 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
                             # Replay actual root broadcasts, not independently encoded hints.
                             register_comm_ops(
                                 replay_broadcast,
+                                unexpected_collective,
+                                unexpected_collective,
                                 unexpected_collective,
                                 unexpected_collective,
                             )
@@ -943,6 +1050,66 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    def test_borrowed_warmup_model_survives_until_owning_wrapper_is_destroyed(self):
+        model = CloseAwareCacheStoreForwardModel()
+        run_scenario(model, "multi_tag", owns_py_model=False)
+        self.assertFalse(model.closed)
+        self.assertEqual(model.close_calls, 0)
+
+        run_scenario(model, "multi_tag")
+        self.assertEqual(model.initialize_calls, 2)
+        self.assertEqual(model.forward_calls, 2)
+        self.assertTrue(model.closed)
+        self.assertEqual(model.close_calls, 1)
+
+    def test_failed_borrowed_wrapper_does_not_close_shared_model(self):
+        model = CloseAwareCacheStoreForwardModel()
+        model.fail_initialize = True
+        with self.assertRaisesRegex(Exception, "injected model initialize failure"):
+            run_scenario(model, "multi_tag", owns_py_model=False)
+        self.assertFalse(model.closed)
+        self.assertEqual(model.close_calls, 0)
+
+        model.fail_initialize = False
+        run_scenario(model, "multi_tag")
+        self.assertEqual(model.forward_calls, 1)
+        self.assertTrue(model.closed)
+        self.assertEqual(model.close_calls, 1)
+
+    def test_failed_owning_wrapper_closes_model(self):
+        model = CloseAwareCacheStoreForwardModel()
+        model.fail_initialize = True
+        with self.assertRaisesRegex(Exception, "injected model initialize failure"):
+            run_scenario(model, "multi_tag")
+        self.assertTrue(model.closed)
+        self.assertEqual(model.close_calls, 1)
+
+    @unittest.skipIf(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM",
+        "ROCm normalizes these lengths to the host metadata path",
+    )
+    def test_cuda_lengths_host_prefix_metadata_updates_on_current_stream(self):
+        for custom_stream in (False, True):
+            with self.subTest(custom_stream=custom_stream):
+                stream = (
+                    torch.cuda.Stream()
+                    if custom_stream
+                    else torch.cuda.default_stream()
+                )
+                model = MixedDeviceMetadataModel()
+                with torch.cuda.stream(stream):
+                    result = run_scenario(model, "cuda_lengths_host_prefix")
+                stream.synchronize()
+                self.assertEqual(
+                    model.metadata,
+                    [
+                        ([0, 1, 4, 8], [0, 129, 388, 904]),
+                        ([0, 1, 4, 8], [0, 257, 388, 776]),
+                        ([0, 1, 4, 8], [0, 1, 4, 8]),
+                    ],
+                )
+                self.assertEqual(result["records"], [])
+
     def test_successful_generation_prefill_capture_does_not_reserve_request_blocks(
         self,
     ) -> None:
@@ -1087,6 +1254,80 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(model.prefill_forward_calls, 4)
         self.assertEqual(result["available_after"], result["available_before"])
         self.assertFalse(result["manager_retained"])
+
+    def test_pp_boundary_preserves_activations_and_auxiliary_features(self) -> None:
+        class BoundaryModel(CacheStoreForwardModel):
+            def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
+                super()._forward_one(inputs)
+                self.boundaries = inputs.pp_intermediates
+                self.engram_windows = inputs.engram_token_windows
+                self.output_flags = (
+                    inputs.need_all_logits,
+                    inputs.need_all_hidden_states,
+                )
+                # A non-tail stage can supply only boundary tensors. The wrapper
+                # must return before reading or validating a final hidden output.
+                output = PyModelOutputs()
+                output.pp_intermediates = self.boundaries
+                return output
+
+        model = BoundaryModel()
+        result = run_scenario(model, "pp_boundary")
+
+        self.assertEqual(model.capture_flags, [False])
+        self.assertEqual(model.output_flags, (False, False))
+        self.assertFalse(result["logits_defined"])
+        self.assertEqual(result["forward_hidden_states"], [None])
+        self.assertIsNone(result["mtp_target_hidden_states"])
+        self.assertEqual(result["deferred_capture_errors"], [])
+        self.assertEqual(result["capture_failure_count"], 0)
+        rows = sum(model.seen_input_lengths[0])
+        hidden = torch.arange(rows, dtype=torch.float16, device="cuda").reshape(rows, 1)
+        expected = {
+            "hidden_states": hidden,
+            "residual": hidden + 10,
+            "mtp_aux_hidden_states": torch.cat((hidden + 20, hidden + 30), dim=-1),
+        }
+        self.assertEqual(set(result["pp_intermediates"]), set(expected))
+        for name, tensor in expected.items():
+            actual = result["pp_intermediates"][name]
+            torch.testing.assert_close(actual, tensor)
+            self.assertEqual(actual.data_ptr(), model.boundaries[name].data_ptr())
+        self.assertTrue(model.engram_windows.is_cuda)
+        torch.testing.assert_close(
+            model.engram_windows.cpu(),
+            torch.arange(rows * 2, dtype=torch.int32).reshape(rows, 2),
+        )
+        self.assertTrue(result["records"])
+
+    def test_capture_layout_failure_preserves_mtp_features(self) -> None:
+        class MtpFeatureModel(MalformedCaptureLayoutModel):
+            def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
+                output = super()._forward_one(inputs)
+                self.features = torch.full(
+                    (inputs.input_ids.numel(), 2),
+                    37.0,
+                    dtype=torch.float16,
+                    device=inputs.input_ids.device,
+                )
+                output.mtp_target_hidden_states = self.features
+                return output
+
+        model = MtpFeatureModel()
+        result = run_scenario(model, "capture_bf16", ignore_deferred_errors=True)
+
+        self.assertEqual(model.capture_flags, [True])
+        self.assertEqual(len(result["deferred_capture_errors"]), 1)
+        self.assertIn("expected packed width 3", result["deferred_capture_errors"][0])
+        self.assertEqual(result["capture_failure_count"], 1)
+        self.assertEqual(result["pp_intermediates"], {})
+        torch.testing.assert_close(
+            result["mtp_target_hidden_states"], torch.full_like(model.features, 37.0)
+        )
+        self.assertEqual(
+            result["mtp_target_hidden_states"].data_ptr(), model.features.data_ptr()
+        )
+        self.assertEqual(_FakeEagleMooncakeStore.instances[-1].puts, [])
 
     def test_mtp_placeholders_preserve_model_tag_set_with_extra_payload_rows(self):
         for scenario in ("mtp_placeholders", "mtp_placeholders_extra_payload"):
@@ -1237,6 +1478,86 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             else:
                 self.assertEqual(metric_types[name], _KMONITOR_GAUGE)
 
+    def test_speculative_commit_hooks_must_be_implemented_as_a_pair(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "must implement.*as a pair"):
+            run_speculative_commit_bridge(
+                PrepareOnlySpeculativeCommitBridgeModel(), "has_hooks"
+            )
+
+    def test_speculative_commit_explicit_capability_disables_inactive_hooks(self):
+        model = SpeculativeCommitBridgeModel()
+        self.assertTrue(run_speculative_commit_bridge(model, "has_hooks"))
+        model.requires_speculative_target_commit = lambda: False
+        self.assertFalse(run_speculative_commit_bridge(model, "has_hooks"))
+        model.requires_speculative_target_commit = lambda: True
+        self.assertTrue(run_speculative_commit_bridge(model, "has_hooks"))
+        self.assertFalse(run_speculative_commit_bridge(model, "has_hooks", False))
+
+    def test_cpu_status_bridge_preserves_false_and_ignores_non_target(self):
+        model = SpeculativeCommitBridgeModel()
+        calls = []
+        model.has_speculative_target_status_reducer = lambda: True
+        model.reduce_speculative_target_prepare_status = lambda ok: (
+            calls.append(ok),
+            False,
+        )[1]
+        self.assertFalse(run_speculative_commit_bridge(model, "reduce_true"))
+        self.assertFalse(run_speculative_commit_bridge(model, "reduce_false"))
+        self.assertEqual(calls, [True, False])
+        self.assertIsNone(run_speculative_commit_bridge(model, "reduce_true", False))
+        self.assertEqual(calls, [True, False])
+
+    def test_cpu_status_bridge_optional_and_disabled_capabilities(self):
+        model = SpeculativeCommitBridgeModel()
+        self.assertIsNone(run_speculative_commit_bridge(model, "reduce_true"))
+        model.has_speculative_target_status_reducer = lambda: False
+        model.reduce_speculative_target_prepare_status = lambda ok: (
+            _ for _ in ()
+        ).throw(AssertionError("disabled hook"))
+        self.assertIsNone(run_speculative_commit_bridge(model, "reduce_true"))
+
+    def test_cpu_status_bridge_transport_errors_propagate(self):
+        model = SpeculativeCommitBridgeModel()
+        model.has_speculative_target_status_reducer = lambda: True
+
+        def fail(ok):
+            raise RuntimeError("status transport poisoned")
+
+        model.reduce_speculative_target_prepare_status = fail
+        with self.assertRaisesRegex(RuntimeError, "status transport poisoned"):
+            run_speculative_commit_bridge(model, "reduce_true")
+
+    def test_speculative_commit_prepare_exception_becomes_error(self) -> None:
+        model = SpeculativeCommitBridgeModel(prepare_error=True)
+
+        self.assertTrue(run_speculative_commit_bridge(model, "has_hooks"))
+        error = run_speculative_commit_bridge(model, "prepare")
+
+        self.assertIn("prepare bridge boom", error)
+
+    def test_speculative_commit_abort_exception_does_not_escape(self) -> None:
+        model = SpeculativeCommitBridgeModel(abort_error=True)
+
+        self.assertIsNone(run_speculative_commit_bridge(model, "abort"))
+        self.assertEqual(model.finish_calls, [False])
+
+    def test_speculative_commit_exception_becomes_error(self) -> None:
+        model = SpeculativeCommitBridgeModel(commit_error=True)
+
+        error = run_speculative_commit_bridge(model, "commit")
+
+        self.assertIn("commit bridge boom", error)
+        self.assertEqual(model.finish_calls, [True])
+
+    def test_non_target_wrapper_ignores_speculative_commit_hooks(self) -> None:
+        self.assertFalse(
+            run_speculative_commit_bridge(
+                PrepareOnlySpeculativeCommitBridgeModel(),
+                "has_hooks",
+                False,
+            )
+        )
+
     def test_multi_tag_uses_each_tag_local_physical_block_table(self) -> None:
         model = CacheStoreForwardModel()
         result = run_scenario(model, "multi_tag")
@@ -1291,9 +1612,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             ["301", "301", "302"],
         )
         middle = _record_for_request(result, 302)
-        self.assertTrue(
-            all("_tag_full" in block["key"] for block in middle["blocks"])
-        )
+        self.assertTrue(all("_tag_full" in block["key"] for block in middle["blocks"]))
         blocks = _blocks_by_key(result)
         for tag, stride, expected in (
             ("swa", 24, {3103: 3, 3104: 4}),
@@ -1508,10 +1827,13 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             scenarios += ["capture_fp8", "capture_cp"]
         for scenario in scenarios:
             namespace = (
-                "ProfileActor" + "A" * 256 if scenario == "capture_bf16" else "TestActor"
+                "ProfileActor" + "A" * 256
+                if scenario == "capture_bf16"
+                else "TestActor"
             )
-            with self.subTest(scenario=scenario), patch.dict(
-                os.environ, {_MOONCAKE_STORE_KEY_NAMESPACE_ENV: namespace}
+            with (
+                self.subTest(scenario=scenario),
+                patch.dict(os.environ, {_MOONCAKE_STORE_KEY_NAMESPACE_ENV: namespace}),
             ):
                 model_type = (
                     PositionAwareCaptureModel
@@ -1534,7 +1856,8 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 self.assertEqual(result["hidden_width"], baseline["hidden_width"])
                 for name in _CAPTURE_QPS_METRICS | _CAPTURE_STATUS_METRICS:
                     self.assertEqual(
-                        result["capture_metrics"][name], baseline["capture_metrics"][name]
+                        result["capture_metrics"][name],
+                        baseline["capture_metrics"][name],
                     )
                 self.assertEqual(
                     len(result["forward_hidden_states"]),
@@ -1595,7 +1918,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 children = {e.name: e for e in events if e.cpu_parent is publish[0]}
                 if scenario == "capture_non_owner":
                     self.assertNotIn("hidden_state_capture.gil_acquire", children)
-                    self.assertNotIn("hidden_state_capture.observe_async_errors", children)
+                    self.assertNotIn(
+                        "hidden_state_capture.observe_async_errors", children
+                    )
                     self.assertNotIn("hidden_state_capture.prepare_payload", children)
                     self.assertNotIn("hidden_state_capture.put_batch_admit", children)
                     self.assertNotIn("hidden_state_capture.flush", children)
@@ -1611,7 +1936,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                     if scenario == "capture_bf16":
                         self.assertGreater(len(marker.name), 256)
                     self.assertIs(marker.cpu_parent, publish[0])
-                    self.assertLessEqual(prepare.time_range.end, marker.time_range.start)
+                    self.assertLessEqual(
+                        prepare.time_range.end, marker.time_range.start
+                    )
                     self.assertLessEqual(marker.time_range.start, marker.time_range.end)
                     self.assertLessEqual(marker.time_range.end, admit.time_range.start)
                     self.assertLessEqual(prepare.time_range.end, admit.time_range.start)
@@ -1636,9 +1963,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 layout = next(
                     e for e in events if e.name == "py_model.capture_layout_status"
                 )
-                self.assertLessEqual(
-                    layout.time_range.end, publish[0].time_range.start
-                )
+                self.assertLessEqual(layout.time_range.end, publish[0].time_range.start)
                 if scenario == "capture_cp":
                     restore = next(
                         e for e in events if e.name == "py_model.capture_cp_restore"
@@ -1672,11 +1997,15 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                     return None
                 return errors
 
-            with self.subTest(failure=failure, poll=poll_failure_at), patch.multiple(
-                _FakeEagleMooncakeStore,
-                fail_put=failure == "fail_put",
-                fail_flush=failure == "fail_flush",
-            ), patch.object(_FakeEagleMooncakeStore, "take_async_errors", poll):
+            with (
+                self.subTest(failure=failure, poll=poll_failure_at),
+                patch.multiple(
+                    _FakeEagleMooncakeStore,
+                    fail_put=failure == "fail_put",
+                    fail_flush=failure == "fail_flush",
+                ),
+                patch.object(_FakeEagleMooncakeStore, "take_async_errors", poll),
+            ):
                 store_calls = []
                 _FakeEagleMooncakeStore.events = store_calls
                 with torch.profiler.profile(
@@ -1692,8 +2021,12 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 self.assertEqual(
                     metrics[f"{_CAPTURE_METRIC_PREFIX}publish_success_qps"], 0
                 )
-                self.assertEqual(metrics[f"{_CAPTURE_METRIC_PREFIX}store_failure_qps"], 1)
-                self.assertEqual(metrics[f"{_CAPTURE_METRIC_PREFIX}prepare_failure_qps"], 0)
+                self.assertEqual(
+                    metrics[f"{_CAPTURE_METRIC_PREFIX}store_failure_qps"], 1
+                )
+                self.assertEqual(
+                    metrics[f"{_CAPTURE_METRIC_PREFIX}prepare_failure_qps"], 0
+                )
                 self.assertCaptureStatus(metrics, enabled=1, broken=0)
                 events = prof.events()
                 self.assertCaptureProfileStoreCalls(events, store_calls)
@@ -2822,8 +3155,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             if missing_method is not None
             else contextlib.nullcontext()
         )
-        with missing_method_patch, patch.object(
-            _FakeMooncakeConfig, "from_env", tracked_from_env
+        with (
+            missing_method_patch,
+            patch.object(_FakeMooncakeConfig, "from_env", tracked_from_env),
         ):
             result = initialize_capture_publisher()
         self.assertCaptureMetricTypes(result)
@@ -3307,6 +3641,40 @@ class CustomOutputPostLayersTest(unittest.TestCase):
                 result = self.run_case(handler, python_norm=False)
                 self.assertIsNone(result["custom_output"])
                 self.assertIn(message, result["custom_output_error"])
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")
+class NativeLogitsBoundaryTest(unittest.TestCase):
+    def test_python_logits_hook_is_not_consulted(self):
+        for compact, graph in ((False, False), (False, True), (True, False)):
+            with self.subTest(compact=compact, graph=graph):
+
+                def run(model):
+                    return _extension.run_post_layers(
+                        model,
+                        None,
+                        torch.empty(0, dtype=torch.int64).pin_memory(),
+                        graph,
+                        compact,
+                    )
+
+                baseline = run(ForwardModel())
+                model = ForwardModel()
+
+                def forbidden(_):
+                    raise AssertionError(
+                        "native post-layers delegated LM head ownership to Python"
+                    )
+
+                model.compute_logits = forbidden
+                result = run(model)
+                torch.testing.assert_close(
+                    result["logits"], baseline["logits"], rtol=0, atol=0
+                )
+                if graph:
+                    torch.testing.assert_close(
+                        result["next_logits"], baseline["next_logits"], rtol=0, atol=0
+                    )
 
 
 if __name__ == "__main__":

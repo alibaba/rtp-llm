@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +21,8 @@ public:
         int64_t total              = 0;
     };
     using TokenCountsByPriority = std::map<int32_t, TokenCounts>;
+
+    StreamGroups() = default;
 
     StreamGroups(const std::list<GenerateStreamPtr>& streams) {
         for (auto& stream : streams) {
@@ -76,7 +79,7 @@ public:
             auto execute_token_size = use_mtp_snapshot ? static_cast<size_t>(cur_batch_size) :
                                                          static_cast<size_t>(stream->currentExecuteTokenSize());
             if (is_context) {
-                auto reuse_length = stream->reuseLength();
+                const auto reuse_length = reuseLengthForTps(stream);
                 context_execute_token_size_ += execute_token_size;
                 context_execute_token_size_with_cache_ += execute_token_size;
                 if (reuse_length > 0) {
@@ -100,14 +103,13 @@ public:
                 }
             }
             const int    snapshot_seq_len = mtp_state.next_seq_len_upper_bound;
-            const size_t seq_len          = use_mtp_snapshot && snapshot_seq_len > 0 ?
-                                                static_cast<size_t>(snapshot_seq_len) :
+            const size_t seq_len = use_mtp_snapshot && snapshot_seq_len > 0 ? static_cast<size_t>(snapshot_seq_len) :
                                                 static_cast<size_t>(stream->seqLength());
             max_seq_len_                  = std::max(max_seq_len_, seq_len);
             total_score_batch_size_ += stream->scoreLen();
             adapter_names.push_back(stream->adapterName());
-            gen_timeline_ |= use_mtp_snapshot ? stream->genTimelineAtSeqLength(static_cast<int>(seq_len)) :
-                                                stream->genTimeline();
+            gen_timeline_ |=
+                use_mtp_snapshot ? stream->genTimelineAtSeqLength(static_cast<int>(seq_len)) : stream->genTimeline();
         }
     }
 
@@ -159,8 +161,9 @@ public:
             counts.context += execute_token_size;
             counts.context_with_cache += execute_token_size;
             counts.total += execute_token_size;
-            if (stream->reuseLength() > 0) {
-                counts.context_with_cache += static_cast<int64_t>(stream->reuseLength()) * stream->currentBatchSize();
+            const auto reuse_length = reuseLengthForTps(stream);
+            if (reuse_length > 0) {
+                counts.context_with_cache += static_cast<int64_t>(reuse_length) * stream->currentBatchSize();
             }
         }
         for (const auto& stream : decode_streams_) {
@@ -330,19 +333,43 @@ public:
         return debug_string.str();
     }
 
-    void updateStreams(const std::vector<StreamSpecUpdateInfo>& spec_update_infos) const {
+    void updateStreams(const std::vector<StreamSpecUpdateInfo>& spec_update_infos,
+                       const std::shared_ptr<RecordedBatch>&    recorded_batch = nullptr) const {
         int stream_idx = 0;
+        size_t timing_idx = 0;
+        auto   slice      = [&](const GenerateStreamPtr& stream) {
+            RecordedTokenTiming* timings = nullptr;
+            if (recorded_batch) {
+                timings = recorded_batch->sliceTimings(timing_idx, stream->currentBatchSize());
+            }
+            timing_idx += stream->currentBatchSize();
+            return timings;
+        };
         for (auto& stream : decode_streams_) {
-            stream->specUpdate(spec_update_infos[stream_idx]);
+            auto* timings = slice(stream);
+            stream->specUpdate(
+                spec_update_infos[stream_idx], true, timings, timings ? stream->currentBatchSize() : 0);
             stream_idx++;
         }
         for (auto& stream : context_streams_) {
-            stream->specUpdate(spec_update_infos[stream_idx]);
+            auto* timings = slice(stream);
+            stream->specUpdate(
+                spec_update_infos[stream_idx], true, timings, timings ? stream->currentBatchSize() : 0);
             stream_idx++;
         }
     }
 
 private:
+    static int reuseLengthForTps(const GenerateStreamPtr& stream) {
+        // Later chunk prefixes include tokens already computed by this request.
+        // Credit the pre-existing cache prefix only in the first chunk. Use the
+        // chunk progress flag because initialReuseLength can use different CP units.
+        if (stream->chunkedPrefillEnabled() && stream->hasAdvancedChunk()) {
+            return 0;
+        }
+        return stream->reuseLength();
+    }
+
     std::list<GenerateStreamPtr> context_streams_;
     std::list<GenerateStreamPtr> decode_streams_;
     size_t                       total_sampler_batch_size_in_           = 0;

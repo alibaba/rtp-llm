@@ -60,6 +60,14 @@ _worker_preprocess_params: Optional[dict] = None
 _worker_preprocess_func: Optional[Callable] = None
 
 
+class _PreprocessTaskError(Exception):
+    """Keep task I/O failures distinct from broken pool communication."""
+
+    def __init__(self, error: Exception):
+        super().__init__(error)
+        self.error = error
+
+
 def _run_preprocess_task(
     preprocess_func: Callable,
     mm_inputs: List[MultimodalInput],
@@ -123,7 +131,33 @@ def _feature_hashes_from_result(result: Any) -> List[torch.Tensor]:
     """Build one sidecar hash tensor for every validated embedding tensor."""
     _validate_embedding_result(result)
     embeddings = maybe_tensor_to_list(result[0], ndim_threshold=2)
-    return [get_multimodal_feature_hash(embedding) for embedding in embeddings]
+    hashes = [get_multimodal_feature_hash(embedding) for embedding in embeddings]
+    extra = maybe_tensor_to_list(result[2], ndim_threshold=1) if len(result) > 2 else []
+    if (
+        extra
+        and len(extra) == len(embeddings)
+        and all(
+            isinstance(ids, torch.Tensor)
+            and ids.dtype == torch.int32
+            and ids.ndim == 1
+            and ids.numel() == embedding.shape[0]
+            for ids, embedding in zip(extra, embeddings)
+        )
+    ):
+        import hashlib
+
+        # Equal media embeddings with different vocabulary IDs or positions
+        # must not share language-model KV state (e.g. PLE and MRoPE).
+        identity = hashlib.sha256()
+        for tensor in [*extra, *maybe_tensor_to_list(result[1], ndim_threshold=2)]:
+            if tensor.device.type != "cpu":
+                raise ValueError(
+                    "semantic IDs and media coordinates must be produced on CPU"
+                )
+            identity.update(tensor.contiguous().numpy().tobytes())
+        salt = int.from_bytes(identity.digest()[:4], "little", signed=True)
+        hashes = [(value.to(torch.int64) ^ salt).to(torch.int32) for value in hashes]
+    return hashes
 
 
 def _worker_initializer(
@@ -153,12 +187,17 @@ def _worker_process_task(
     if _worker_preprocess_func is None:
         raise RuntimeError("Worker process has not been initialized correctly.")
 
-    return _run_preprocess_task(
-        _worker_preprocess_func,
-        mm_inputs,
-        _worker_vit_config,
-        _worker_preprocess_params,
-    )
+    try:
+        return _run_preprocess_task(
+            _worker_preprocess_func,
+            mm_inputs,
+            _worker_vit_config,
+            _worker_preprocess_params,
+        )
+    except (OSError, EOFError) as error:
+        # Invalid images and task I/O errors must not tear down healthy workers
+        # or discard unrelated requests that are queued in the same pool.
+        raise _PreprocessTaskError(error) from error
 
 
 def _unpack_preprocess_result(payload: Any) -> Tuple[Any, float, float]:
@@ -309,9 +348,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         self._preprocess_queue_lock = threading.Lock()
         self._pending_preprocess_tasks: Set[int] = set()
         self._next_preprocess_task_id = 0
-        # Serializes timeout-counter updates and pool rebuilds — without it
-        # concurrent get_result/submit callers can race to _rebuild_pool, double
-        # tear down the pool, or miscount consecutive timeouts.
+        # Serializes submissions, timeout-counter updates, and pool rebuilds.
         self._pool_lock = threading.Lock()
         _report_preprocess_queue_size(0)
         self._create_pool()
@@ -389,6 +426,9 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             # Serialize submission with pool rebuilds. This keeps a task from
             # being submitted to an old pool while its queue accounting resets.
             with self._pool_lock:
+                # A previous rebuild may have failed to create its replacement.
+                if self.pool is None:
+                    self._create_pool()
                 # Track only after taking the rebuild lock. Otherwise a pool
                 # rebuild can clear the task between accounting and submit.
                 task_id = self._track_preprocess_task()
@@ -431,6 +471,9 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             with self._pool_lock:
                 self._consecutive_timeouts = 0
             _report_preprocess_timing(preprocess_time, download_time)
+        except _PreprocessTaskError as e:
+            logging.error("Preprocessing task failed: %s", e.error, exc_info=True)
+            raise e.error from e
         except multiprocessing.pool.TimeoutError:
             with self._pool_lock:
                 self._consecutive_timeouts += 1

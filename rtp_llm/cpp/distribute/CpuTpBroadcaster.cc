@@ -22,7 +22,9 @@ namespace {
 
 constexpr int  kInitTimeoutMs  = 120 * 1000;
 constexpr char kLinkProbeToken = 0x5a;
+constexpr char kStopToken      = 0x53;
 
+constexpr uint32_t kStopMagic    = 0x52545053;  // "RTPS"
 constexpr uint32_t kFrameMagic   = 0x52545042;  // "RTPB"
 constexpr uint16_t kFrameVersion = 1;
 
@@ -68,7 +70,7 @@ bool waitFdUntil(int fd, short events, std::chrono::steady_clock::time_point dea
 
         const auto remaining_ms =
             static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
-        struct pollfd pfd {};
+        struct pollfd pfd{};
         pfd.fd     = fd;
         pfd.events = events;
         int rc     = ::poll(&pfd, 1, remaining_ms);
@@ -234,6 +236,67 @@ CpuTpBroadcaster::~CpuTpBroadcaster() {
     reset();
 }
 
+void CpuTpBroadcaster::requestStop() {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!initialized_.load(std::memory_order_acquire) || tp_size_ <= 1 || tp_rank_ == 0) {
+        return;
+    }
+    if (stop_requested_.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    // This direction is otherwise idle after bootstrap. Do not SHUT_RD: rank 0
+    // may already have sent this step's inputs and entered a model collective.
+    // The connected sockets are blocking, and this otherwise idle direction
+    // carries only one stop byte. Retry interrupted sends rather than losing
+    // the notification after stop_requested_ has been set.
+    const char token = kStopToken;
+    const auto n     = writeAll(peer_fds_[0], &token, 1);
+    if (n != 1) {
+        // Root may already have sent its terminal frame and closed the socket
+        // before the local stop() call. Let that call still join and clean up.
+        RTP_LLM_LOG_WARNING("CpuTpBroadcaster shutdown request failed: %s", std::strerror(errno));
+    }
+}
+
+bool CpuTpBroadcaster::shouldStop(bool locally_requested) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!initialized_.load(std::memory_order_acquire) || tp_size_ <= 1) {
+        return locally_requested;
+    }
+    if (tp_rank_ != 0) {
+        // A local stop must not strand rank 0 in the current (or already sent)
+        // step. Only the root's boundary stop frame ends the receiver loop.
+        return false;
+    }
+    if (locally_requested) {
+        return true;
+    }
+    for (int rank = 1; rank < tp_size_; ++rank) {
+        char token = 0;
+        if (::recv(peer_fds_[rank], &token, 1, MSG_PEEK | MSG_DONTWAIT) == 1 && token == kStopToken) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void CpuTpBroadcaster::finish() {
+    std::lock_guard<std::mutex> lock(broadcast_mu_);
+    if (!initialized_.load(std::memory_order_acquire) || tp_size_ <= 1 || tp_rank_ != 0 || broadcast_stopped_) {
+        return;
+    }
+    const BroadcastFrameHeader header{kStopMagic, kFrameVersion, sizeof(BroadcastFrameHeader), next_sequence_, 0};
+    for (int rank = 1; rank < tp_size_; ++rank) {
+        const auto n = writeAll(peer_fds_[rank], &header, sizeof(header));
+        if (n != static_cast<ssize_t>(sizeof(header))) {
+            // A departed peer must not prevent the remaining ranks from
+            // receiving their terminal frame, or throw out of the loop thread.
+            RTP_LLM_LOG_WARNING("CpuTpBroadcaster stop frame to rank %d failed: %s", rank, std::strerror(errno));
+        }
+    }
+    broadcast_stopped_ = true;
+}
+
 void CpuTpBroadcaster::reset() {
     std::lock_guard<std::mutex> lock(mu_);
     std::lock_guard<std::mutex> broadcast_lock(broadcast_mu_);
@@ -250,6 +313,8 @@ void CpuTpBroadcaster::reset() {
     tp_rank_       = 0;
     tp_size_       = 1;
     next_sequence_ = 0;
+    stop_requested_.store(false, std::memory_order_release);
+    broadcast_stopped_ = false;
     initialized_.store(false, std::memory_order_release);
 }
 
@@ -292,7 +357,7 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
             listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
             RTP_LLM_CHECK_WITH_INFO(listen_fd_ >= 0, "CpuTpBroadcaster socket: %s", std::strerror(errno));
 
-            struct sockaddr_un addr {};
+            struct sockaddr_un addr{};
             addr.sun_family = AF_UNIX;
             RTP_LLM_CHECK_WITH_INFO(
                 path.size() < sizeof(addr.sun_path), "CpuTpBroadcaster UDS path too long: %s", path.c_str());
@@ -360,7 +425,7 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
         }
     } else {
         const std::string  path = makeUdsPath(base_path, 0);
-        struct sockaddr_un addr {};
+        struct sockaddr_un addr{};
         addr.sun_family = AF_UNIX;
         RTP_LLM_CHECK_WITH_INFO(
             path.size() < sizeof(addr.sun_path), "CpuTpBroadcaster UDS path too long: %s", path.c_str());
@@ -423,6 +488,9 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
     if (tp_size_ <= 1) {
         return;
     }
+    if (broadcast_stopped_) {
+        throw CpuTpBroadcastStopped("CpuTpBroadcaster stopped at engine step boundary");
+    }
     RTP_LLM_CHECK_WITH_INFO(root == 0, "CpuTpBroadcaster supports only root=0 (star topology); got %d", root);
     RTP_LLM_CHECK_WITH_INFO(
         nbytes <= std::numeric_limits<uint64_t>::max(), "CpuTpBroadcaster payload is too large: %zu bytes", nbytes);
@@ -453,6 +521,12 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
                                 "CpuTpBroadcaster frame-header read from rank 0 failed at sequence %llu: %s",
                                 static_cast<unsigned long long>(next_sequence_),
                                 std::strerror(errno));
+        if (received_header.magic == kStopMagic && received_header.version == kFrameVersion
+            && received_header.header_bytes == sizeof(BroadcastFrameHeader)
+            && received_header.sequence == next_sequence_ && received_header.payload_bytes == 0) {
+            broadcast_stopped_ = true;
+            throw CpuTpBroadcastStopped("CpuTpBroadcaster stopped at engine step boundary");
+        }
         RTP_LLM_CHECK_WITH_INFO(
             received_header.magic == kFrameMagic && received_header.version == kFrameVersion
                 && received_header.header_bytes == sizeof(BroadcastFrameHeader),

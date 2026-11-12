@@ -59,6 +59,12 @@ py_test(
 )
 
 py_test(
+    name = "test_pp_layer_filter",
+    srcs = ["test_pp_layer_filter.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "test_model_weight_info",
     srcs = ["test_model_weight_info.py"],
     deps = py_test_deps + [
@@ -78,6 +84,20 @@ py_test(
     exec_properties = {
         'gpu': 'MI308X-ROCM7',
     },
+)
+
+py_test(
+    name = "test_online_modelopt_fp4",
+    srcs = ["test_online_modelopt_fp4.py"],
+    deps = py_test_deps,
+)
+
+py_test(
+    name = "nvfp4_cache_test",
+    srcs = ["nvfp4_cache_test.py"],
+    env = {"GPU_COUNT": "0"},
+    visibility = ["//rtp_llm/test/qwen4_exp:__pkg__"],
+    deps = ["//rtp_llm:testlib"],
 )
 
 py_test(

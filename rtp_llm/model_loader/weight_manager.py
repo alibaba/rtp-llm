@@ -186,6 +186,15 @@ class WeightManager:
                 "Update request is missing the 'method' field. "
                 "It must specify the IPC method (e.g., 'cuda_ipc' or 'shm')."
             )
+        if "layers" in req["name"]:
+            layer_id = self.extract_layer_number(req["name"])
+            internal_name = rename_function(req["name"])
+            if layer_id is not None and 0 <= layer_id < len(self._weights.weights):
+                destination = self._weights.weights[layer_id].get(internal_name)
+                if getattr(destination, "_rtp_requires_restart_for_update", False):
+                    raise PermissionError(
+                        f"shared projection {internal_name!r} requires a service restart to update"
+                    )
         method: str = req["method"]
         desc: str = req["desc"]
         name: str = req["name"]
@@ -226,6 +235,13 @@ class WeightManager:
                         f"Invalid layer weight name format: '{name}'. "
                         "Could not extract layer number. Expected format like 'model.layers.<id>...'"
                     )
+                if not 0 <= layer_id < config.num_layers:
+                    raise ValueError(
+                        f"Layer id {layer_id} from weight '{stored_name}' is out of "
+                        f"range for a model with {config.num_layers} layers."
+                    )
+                if layer_id not in config.layer_range:
+                    return
                 name: str = rename_function(name)
                 fail: bool = True
 
@@ -264,6 +280,8 @@ class WeightManager:
                     raise PermissionError(
                         f"global weight {name!r} is a non-owning alias; update its owner instead"
                     )
+                if not self._weights_loader.is_global_weight_local(name):
+                    return
                 fail: bool = True
                 for weight in self._weight_module.weights:
                     if weight.name == name:

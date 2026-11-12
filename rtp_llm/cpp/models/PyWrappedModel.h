@@ -1,12 +1,14 @@
 
 #pragma once
 #include <algorithm>
+#include <cstdint>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/models/HiddenStateCapturePublisher.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <limits>
 #include <optional>
@@ -21,6 +23,7 @@
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include <pybind11/pybind11.h>
 #include <pybind11/embed.h>
+#include <pybind11/stl.h>
 #include "rtp_llm/models_py/bindings/OpDefsUtils.h"
 // cuda_graph_base.h is platform-agnostic (only defines GraphParams/CudaGraphState structs),
 // safe to include unconditionally. cuda_graph_runner.h requires CUDA/ROCm runtime.
@@ -53,7 +56,7 @@ inline void syncCudaGraphCaptureRanks(const ParallelismConfig& parallelism_confi
     py::gil_scoped_acquire gil;
     try {
         auto collective = py::module_::import("rtp_llm.models_py.distributed.collective_torch");
-        auto group      = collective.attr("Group").attr("DP_AND_TP");
+        auto group      = collective.attr("Group").attr("STAGE");
         collective.attr("barrier")(group);
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("CUDA graph capture rank sync failed at %s:\n%s", phase, e.what());
@@ -85,6 +88,7 @@ public:
     ~PyWrappedModel();
 
     GptModelOutputs            forward(const GptModelInputs& inputs) override;
+    PPIntermediateTensors      makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
     void                       releaseBuffers() override;
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
@@ -95,6 +99,11 @@ public:
     std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
     std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
+    bool                       hasSpeculativeTargetCommitHooks() const override;
+    std::string                prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override;
+    std::string                finishSpeculativeTargetCommit(bool commit) override;
+    std::string                finalizeSpeculativeTargetCommit() override;
+    std::optional<bool>        reduceSpeculativeTargetPrepareStatus(bool local_ok) override;
 
 private:
     friend struct test::PyWrappedModelTestPeer;
@@ -103,10 +112,12 @@ private:
 
 private:
     // Helper functions to reduce code duplication
-    torch_ext::PyAttentionInputs    buildPyAttentionInputs(const GptModelInputs& inputs);
-    torch_ext::PyEmbeddingInputs    buildPyEmbeddingInputs(const GptModelInputs& inputs);
-    torch_ext::PyMultimodalInputs   buildPyMultimodalInputs(const GptModelInputs& inputs);
-    torch_ext::BertEmbeddingInputs  buildBertEmbeddingInputs(const GptModelInputs& inputs);
+    torch_ext::PyAttentionInputs  buildPyAttentionInputs(const GptModelInputs& inputs);
+    torch_ext::PyEmbeddingInputs  buildPyEmbeddingInputs(const GptModelInputs& inputs);
+    torch_ext::PyMultimodalInputs buildPyMultimodalInputs(const GptModelInputs& inputs);
+    torch_ext::BertEmbeddingInputs
+                                    buildBertEmbeddingInputs(const GptModelInputs& inputs,
+                                                             const torch::Tensor&  prepared_position_ids = torch::Tensor());
     torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                    const GptModelInputs&         inputs);
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
@@ -121,6 +132,7 @@ private:
     bool          shouldCaptureHiddenStates(const GptModelInputs& inputs);
 
     // Methods absorbed from GptModel
+    torch::Tensor   computeLogits(const torch::Tensor& hidden);
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
     GptModelOutputs forwardPostLayers(torch::Tensor         hidden,
                                       const bool            has_context_request,
@@ -145,7 +157,10 @@ private:
     const rtp_llm::ExecProperties                   device_props_;
     const DSparkModelRole                           dspark_model_role_;
     const bool                                      track_cache_store_completion_;
+    const bool                                      owns_py_model_;
     const size_t                                    layer_num_;
+    const int64_t                                   pp_size_;
+    const int64_t                                   hidden_size_;
     const GptModelDescription                       description_;
     std::optional<rtp_llm::GroupedCacheLayerLayout> kv_cache_layer_layout_;
     std::shared_ptr<KVCacheManager>                 cache_manager_;  // For cache_store access
@@ -167,6 +182,8 @@ private:
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     bool use_spec_decoding_{false};
     bool has_mtp_hidden_buffer_{false};
+    bool has_speculative_target_commit_hooks_{false};
+    bool has_speculative_target_status_reducer_{false};
     bool check_nan_{false};
 
     std::unique_ptr<HiddenStateCapturePublisher> hidden_state_capture_publisher_;
@@ -207,7 +224,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     // rejected at executor construction).
     dspark_model_role_(dspark_model_role),
     track_cache_store_completion_(track_cache_store_completion),
+    owns_py_model_(params.owns_py_model),
     layer_num_(params.weights.layers.size()),
+    pp_size_(params.parallelism_config.pp_size),
+    hidden_size_(params.hidden_size),
     description_(params.description),
     cache_manager_(params.cache_manager),
     owns_generation_prefill_cuda_graph_(shouldCreateGenerationPrefillCudaGraph(params.hw_kernel_config,
@@ -215,7 +235,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                                                is_prefill_cuda_graph_mode,
                                                                                params.parallelism_config.role_type,
                                                                                params.sp_config.type)),
-    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && allow_cuda_graph),
+    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && allow_cuda_graph && pp_size_ == 1),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
     generation_prefill_cuda_graph_init_status_(owns_generation_prefill_cuda_graph_ ?
                                                    GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE :
@@ -339,7 +359,43 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
-    py_model_                 = py_instance;
+    py_model_             = py_instance;
+    // MtpExecutor passes use_spec_decoding only to its target wrapper. The
+    // normal and draft wrappers may share the same Python class, but must not
+    // activate target transactions.
+    if (use_spec_decoding_) {
+        const bool has_prepare_speculative_target_commit = py::hasattr(py_model_, "prepare_speculative_target_commit");
+        const bool has_finish_speculative_target_commit  = py::hasattr(py_model_, "finish_speculative_target_commit");
+        const bool has_finalize_speculative_target_commit =
+            py::hasattr(py_model_, "finalize_speculative_target_commit");
+        RTP_LLM_CHECK_WITH_INFO(has_prepare_speculative_target_commit == has_finish_speculative_target_commit
+                                    && has_prepare_speculative_target_commit == has_finalize_speculative_target_commit,
+                                "Python speculative target model must implement prepare_speculative_target_commit and "
+                                "finish_speculative_target_commit as a pair, together with "
+                                "finalize_speculative_target_commit");
+        has_speculative_target_commit_hooks_ =
+            has_prepare_speculative_target_commit
+            && (!py::hasattr(py_model_, "requires_speculative_target_commit")
+                || py_model_.attr("requires_speculative_target_commit")().cast<bool>());
+        if (has_speculative_target_commit_hooks_ && py::hasattr(py_model_, "has_speculative_target_status_reducer")) {
+            has_speculative_target_status_reducer_ =
+                py_model_.attr("has_speculative_target_status_reducer")().cast<bool>();
+            RTP_LLM_CHECK_WITH_INFO(!has_speculative_target_status_reducer_
+                                        || py::hasattr(py_model_, "reduce_speculative_target_prepare_status"),
+                                    "Python target status reducer capability requires its reduce hook");
+        }
+        if (has_speculative_target_commit_hooks_ && enable_cuda_graph_) {
+            RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "on_cuda_graph_warmup")
+                                        && py::hasattr(py_model_, "on_cuda_graph_capture")
+                                        && py::hasattr(py_model_, "on_cuda_graph_replay"),
+                                    "speculative target CUDA Graph requires capture, save and replay transaction "
+                                    "hooks to preserve side-state across graph instances");
+        }
+        RTP_LLM_CHECK_WITH_INFO(!has_speculative_target_commit_hooks_ || params.parallelism_config.tp_size <= 1
+                                    || has_speculative_target_status_reducer_,
+                                "speculative target transactions require a CPU TP status reducer");
+    }
+
     auto py_initialize_method = py_model_.attr("initialize");
     try {
         py_init_result = py_initialize_method(init_resources);
@@ -376,11 +432,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
         graph_params.max_seq_len                  = params.max_seq_len;
         graph_params.hidden_size                  = params.hidden_size;
-        graph_params.hc_mult                      = params.hc_mult;
-        // Default input_hiddens row width for MTP: hc_mult * hidden_size. DSpARK
-        // consumes len(target_layer_ids) * hidden_size instead, which only the
-        // Python model knows.
-        graph_params.input_hidden_size = static_cast<size_t>(params.hidden_size) * static_cast<size_t>(params.hc_mult);
+        // Match eager MTP's hyper-connection input width.
+        graph_params.input_hidden_size =
+            static_cast<size_t>(resolveMtpInputHiddenSize(params.hidden_size, params.hc_mult));
         graph_params.input_embedding_scalar = description_.input_embedding_scalar;
         if (weights_.position_encoding) {
             graph_params.position_encoding = weights_.position_encoding->kernel.cuda();
@@ -388,6 +442,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         if (weights_.token_type_embedding) {
             graph_params.token_type_embedding = weights_.token_type_embedding->kernel.cuda();
         }
+        // DSpARK consumes len(target_layer_ids) * hidden_size instead, which
+        // only the Python model knows.
         if (dspark_model_role_ != DSparkModelRole::NONE) {
             auto width = py_instance.attr("cuda_graph_input_hidden_size")().cast<int64_t>();
             RTP_LLM_CHECK_WITH_INFO(width > 0, "DSpARK CUDA graph input hidden width must be positive, got %ld", width);
@@ -401,14 +457,20 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "cache-backed CUDA graph requires a cache manager");
             graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTags();
         }
-        // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
-        // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);
-        // >0 = factor (Mrope models such as qwen3-vl / qwen35-moe set rope_config.style
-        // = Mrope and rope_config.index_factor accordingly). No Python reflection — the
-        // rope style is intrinsic to the model description and already populated here.
+        // Most models transport explicit positions only for MRoPE. A model
+        // that consumes those positions with Base RoPE (Qwen4 MTP's indexer)
+        // declares the same capture-buffer factor through an explicit hook.
         graph_params.position_id_len_factor = (description_.attention_conf.rope_config.style == RopeStyle::Mrope) ?
                                                   description_.attention_conf.rope_config.index_factor :
                                                   0;
+        if (py::hasattr(py_instance, "cuda_graph_position_id_len_factor")) {
+            const int factor = py_instance.attr("cuda_graph_position_id_len_factor")().cast<int>();
+            RTP_LLM_CHECK_WITH_INFO(factor > 0 && factor == description_.attention_conf.rope_config.index_factor,
+                                    "CUDA graph position factor %d disagrees with model rope index factor %d",
+                                    factor,
+                                    description_.attention_conf.rope_config.index_factor);
+            graph_params.position_id_len_factor = factor;
+        }
 
         // clang-format off
         // Decision table for num_tokens_per_bs:

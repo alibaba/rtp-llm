@@ -155,24 +155,24 @@ per_tensor_absmax_kernel(const T* __restrict__ input, float* __restrict__ output
     unsigned int gid       = blockIdx.x * blockDim.x + threadIdx.x;
     const int    grid_size = blockDim.x * gridDim.x;
 
-    constexpr uint32_t vec_size = 16 / sizeof(T);
+    constexpr uint64_t vec_size = 16 / sizeof(T);
     using vec_t                 = rtp_llm::vec_t<T, vec_size>;
 
-    const int32_t num_vec_elems = num_elements / vec_size;
+    const int64_t num_vec_elems = num_elements / vec_size;
 
-    for (int32_t i = gid; i < num_vec_elems; i += grid_size) {
+    for (int64_t i = gid; i < num_vec_elems; i += grid_size) {
         vec_t input_vec;
         input_vec.cast_load(input + i * vec_size);
 
 #pragma unroll
-        for (uint32_t j = 0; j < vec_size; ++j) {
+        for (uint64_t j = 0; j < vec_size; ++j) {
             float val = static_cast<float>(input_vec[j]);
             max_value = fmaxf(max_value, fabsf(val));
         }
     }
 
-    const int32_t remaining_start = num_vec_elems * vec_size;
-    for (int32_t idx = remaining_start + gid; idx < num_elements; idx += grid_size) {
+    const int64_t remaining_start = num_vec_elems * vec_size;
+    for (int64_t idx = remaining_start + gid; idx < num_elements; idx += grid_size) {
         float val = static_cast<float>(input[idx]);
         max_value = fmaxf(max_value, fabsf(val));
     }
@@ -188,7 +188,8 @@ template<typename T, typename DST_DTYPE>
 __global__ void per_tensor_quant_fp8_kernel(const T* __restrict__ input,
                                             DST_DTYPE* __restrict__ output,
                                             const float* __restrict__ scale,
-                                            const int64_t num_elements) {
+                                            const int64_t num_elements,
+                                            const int64_t output_elements) {
     const int   gid        = blockIdx.x * blockDim.x + threadIdx.x;
     const int   grid_size  = blockDim.x * gridDim.x;
     float       safe_scale = fmax(1e-9, *scale);
@@ -196,18 +197,18 @@ __global__ void per_tensor_quant_fp8_kernel(const T* __restrict__ input,
 
     // We want to store 128 bits of data at a time. 16 = 128 / 8 bits
     // Load is already vectorized, so 16 elements work for T.
-    const uint32_t VEC_SIZE = 16;
+    const uint64_t VEC_SIZE = 16;
     using vec_t             = rtp_llm::vec_t<T, VEC_SIZE>;
 
-    const int32_t num_vec_elems = num_elements / VEC_SIZE;
+    const int64_t num_vec_elems = num_elements / VEC_SIZE;
 
-    for (int32_t i = gid; i < num_vec_elems; i += grid_size) {
+    for (int64_t i = gid; i < num_vec_elems; i += grid_size) {
         vec_t input_vec;
         input_vec.cast_load(input + i * VEC_SIZE);
 
         DST_DTYPE output_arr[VEC_SIZE];
 #pragma unroll
-        for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+        for (uint64_t j = 0; j < VEC_SIZE; ++j) {
             float val     = fmax(fmin(static_cast<float>(input_vec[j]) * scale_val, tensorrt_llm::common::FP8_E4M3_MAX),
                              -tensorrt_llm::common::FP8_E4M3_MAX);
             output_arr[j] = static_cast<DST_DTYPE>(val);
@@ -215,11 +216,16 @@ __global__ void per_tensor_quant_fp8_kernel(const T* __restrict__ input,
         *(uint4*)(output + i * VEC_SIZE) = *(uint4*)output_arr;
     }
 
-    const int32_t remaining_start = num_vec_elems * VEC_SIZE;
-    for (int32_t idx = remaining_start + gid; idx < num_elements; idx += grid_size) {
+    const int64_t remaining_start = num_vec_elems * VEC_SIZE;
+    for (int64_t idx = remaining_start + gid; idx < num_elements; idx += grid_size) {
         float val   = fmax(-tensorrt_llm::common::FP8_E4M3_MAX,
                          fmin(static_cast<float>(input[idx]) * scale_val, tensorrt_llm::common::FP8_E4M3_MAX));
         output[idx] = static_cast<DST_DTYPE>(val);
+    }
+    // Padded GEMM rows share this launch; the amax above still uses only the
+    // real input. Default-sized outputs do not enter the loop.
+    for (int64_t idx = num_elements + gid; idx < output_elements; idx += grid_size) {
+        output[idx] = static_cast<DST_DTYPE>(0.0f);
     }
 }
 
@@ -373,14 +379,16 @@ void per_tensor_quant_fp8(torch::Tensor input, torch::Tensor output_q, torch::Te
     CHECK_INPUT(input);
     CHECK_INPUT(output_q);
     CHECK_INPUT(output_s);
+    RTP_LLM_CHECK_WITH_INFO(output_q.numel() >= input.numel(), "FP8 quantized output must cover the input");
     if (is_static) {
         CHECK_EQ(output_s.numel(), 1);
     }
 
-    const int block_size   = 256;
-    const int num_elements = input.numel();
+    const int     block_size   = 256;
+    const int64_t num_elements = input.numel();
+    RTP_LLM_CHECK_WITH_INFO(num_elements > 0, "FP8 per-tensor quantization requires nonempty input");
     assert(num_elements % (16 / input.element_size()) == 0);
-    const int num_blocks = min((num_elements + block_size - 1) / block_size, 1024);
+    const int num_blocks = std::min<int64_t>((num_elements + block_size - 1) / block_size, 1024);
 
     dim3 grid(num_blocks);
     dim3 block(block_size);
@@ -396,7 +404,8 @@ void per_tensor_quant_fp8(torch::Tensor input, torch::Tensor output_q, torch::Te
             <<<grid, block, 0, stream>>>(static_cast<scalar_t*>(input.data_ptr()),
                                          static_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
                                          static_cast<float*>(output_s.data_ptr()),
-                                         num_elements);
+                                         num_elements,
+                                         output_q.numel());
         return true;
     });
 }

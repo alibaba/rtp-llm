@@ -9,7 +9,6 @@ CUDA13_X86_ONLY = select({
     "//conditions:default": ["@platforms//:incompatible"],
 })
 
-
 py_test(
     name = "generation_prefill_rope_cache_test",
     srcs = ["generation_prefill_rope_cache_test.py"],
@@ -48,7 +47,6 @@ flashinfer_deps = [
     "//rtp_llm:flashinfer-python",
     "//rtp_llm:flashinfer-cubin",
 ]
-
 
 CUDA13_ARM_ONLY = select({
     "@//:using_cuda13_arm": [],

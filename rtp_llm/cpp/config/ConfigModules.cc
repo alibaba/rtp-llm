@@ -60,6 +60,15 @@ std::string ParallelismConfig::to_string() const {
         << "world_size: " << world_size << "\n"
         << "world_rank: " << world_rank << "\n"
         << "pp_size: " << pp_size << "\n"
+        << "pp_rank: " << pp_rank << "\n"
+        << "pp_stage_layer_counts: [";
+    for (size_t i = 0; i < pp_stage_layer_counts.size(); ++i) {
+        if (i != 0) {
+            oss << ", ";
+        }
+        oss << pp_stage_layer_counts[i];
+    }
+    oss << "]\n"
         << "local_world_size: " << local_world_size << "\n"
         << "local_rank: " << local_rank << "\n"
         << "tp_rank: " << tp_rank << "\n"
@@ -177,7 +186,10 @@ std::string ProfilingDebugLoggingConfig::to_string() const {
         << "debug_start_fake_process: " << debug_start_fake_process << "\n"
         << "enable_detail_log: " << enable_detail_log << "\n"
         << "check_nan: " << check_nan << "\n"
-        << "enable_model_inputs_log: " << enable_model_inputs_log << "\n";
+        << "enable_model_inputs_log: " << enable_model_inputs_log << "\n"
+        << "enable_batch_record: " << enable_batch_record << "\n"
+        << "record_queue_size: " << record_queue_size << "\n"
+        << "record_decode_sample_rate: " << record_decode_sample_rate << "\n";
     return oss.str();
 }
 
@@ -548,7 +560,6 @@ void DashScGrpcConfig::from_json(const std::string& json_str) {
     server_config.clear();
     parse_grpc_client_server_maps_json(json_str, client_config, server_config);
 }
-
 
 // PDSepConfig
 std::string PDSepConfig::to_string() const {

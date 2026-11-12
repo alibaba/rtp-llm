@@ -1,11 +1,12 @@
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 import torch
 
+from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.py_config_modules import (
     MIN_WORKER_INFO_PORT_NUM,
@@ -67,6 +68,7 @@ class EngineConfig:
     dash_sc_grpc_config: DashScGrpcConfig
     grammar_config: GrammarConfig
     load_config: LoadConfig
+    collective_config: CollectiveConfig = field(default_factory=CollectiveConfig)
 
     def to_string(self) -> str:
         """Return a formatted string representation of EngineConfig for debugging.
@@ -82,6 +84,9 @@ class EngineConfig:
         # Parallelism and runtime configs
         lines.append("\n[ParallelismConfig]")
         lines.append(self.parallelism_config.to_string())
+
+        lines.append("\n[CollectiveConfig]")
+        lines.append(self.collective_config.to_string())
 
         lines.append("\n[RuntimeConfig]")
         lines.append(self.runtime_config.to_string())
@@ -180,6 +185,13 @@ class EngineConfig:
         grammar_config = py_env_configs.grammar_config
         load_config = py_env_configs.load_config
 
+        collective_config = CollectiveConfig(
+            all_reduce_backend=py_env_configs.all_reduce_backend,
+            large_prefill=py_env_configs.all_reduce_large_prefill,
+        )
+        # Also validate single-rank servers, which do not initialize Torch groups.
+        collective_config.validate_topology(parallelism_config)
+
         derive_grammar_compile_threads(grammar_config, parallelism_config)
 
         # Setup pd_sep_config role_type based on vit_separation
@@ -227,6 +239,7 @@ class EngineConfig:
             dash_sc_grpc_config=dash_sc_grpc_config,
             grammar_config=grammar_config,
             load_config=load_config,
+            collective_config=collective_config,
         )
 
         runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit

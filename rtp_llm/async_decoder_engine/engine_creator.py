@@ -42,6 +42,13 @@ def create_engine(
     ensure_engine_ops_loaded()
     torch.ops.rtp_llm.init_engine(alog_conf_path)
 
+    from rtp_llm.models_py.distributed.all_reduce import prepare_collective_workspaces
+
+    model_configs = [model.model_config]
+    if propose_model is not None and propose_model.model is not None:
+        model_configs.append(propose_model.model.model_config)
+    prepare_collective_workspaces(model_configs, engine_config)
+
     if model.model_config.task_type == TaskType.LANGUAGE_MODEL:
         from rtp_llm.async_decoder_engine.rpc_engine import LanguageCppEngine
 

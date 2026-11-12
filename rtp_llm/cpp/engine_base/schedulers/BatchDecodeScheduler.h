@@ -58,6 +58,7 @@ public:
         }
         {
             std::lock_guard<std::mutex> lock(lock_);
+            stream->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds());
             waiting_streams_.emplace_back(stream);
             if (waiting_streams_.size() % 16 == 0) {
                 RTP_LLM_LOG_DEBUG("BatchDecodeScheduler::enqueue: waiting_streams_.size() = %d",
@@ -92,6 +93,14 @@ public:
             enqueue_successes.push_back(success);
             if (success) {
                 stream_enqueued.emplace_back(stream);
+            }
+        }
+        if (!stream_enqueued.empty()) {
+            // One timestamp per group, mirroring FIFOSchedulerBase::enqueueGroup: publishes the
+            // recorded request identity before the streams become visible to the scheduler loop.
+            const auto enqueue_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            for (auto& stream : stream_enqueued) {
+                stream->recordSchedulerEnqueueTime(enqueue_time_us);
             }
         }
         {
@@ -223,7 +232,7 @@ public:
         }
     }
 
-    absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
+    absl::StatusOr<ScheduleOutput> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
         cond_.wait_for(lock, std::chrono::seconds(30), [this] {
             return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
@@ -249,7 +258,7 @@ public:
             }
         }
 
-        return running_streams_;
+        return ScheduleOutput{running_streams_};
     }
 
     absl::Status stop() override {

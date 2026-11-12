@@ -94,6 +94,7 @@ load("//rtp_llm/test/smoke:suites_sm100.bzl", "sm100_suites")
 load("//rtp_llm/test/smoke:suites_sm120.bzl", "sm120_suites")
 load("//rtp_llm/test/smoke:suites_rocm_oss.bzl", "rocm_oss_suites")
 load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "remote_cache_suites")
+load("//rtp_llm/test/smoke:suites_pp.bzl", "pp_suites")
 load("//rtp_llm/test/smoke:suites_ppu.bzl", "ppu_suites")
 
 h20_oss_suites()
@@ -103,6 +104,7 @@ sm100_suites()
 sm120_suites()
 rocm_oss_suites()
 remote_cache_suites()
+pp_suites(gpu_type = ["H20_CU13"])
 ppu_suites()
 
 # ============================================================================
@@ -142,11 +144,32 @@ test_suite(
         ":smoke_sm100_moe",
         ":smoke_sm120_dense",
         ":smoke_sm120_moe",
+        ":smoke_sm120_qwen4_exp",
         ":smoke_ppu_pd",
         ":smoke_ppu_qwen35_basic",
         ":smoke_ppu_qwen35_func",
     ],
 )
+
+# Supply QWEN4_EXP_CHECKPOINT for an expert-only ModelOpt NVFP4 checkpoint.
+# These profiles reuse the generation, golden, QSA and cache assertions.
+[
+    custom_smoke_test(
+        name = name,
+        main = "qwen4_exp_smoke_test.py",
+        smoke_args = "--load_method scratch --act_type BF16 --tp_size %d --ep_size %d --world_size %d --moe_strategy nvfp4_marlin --fp4_moe_op marlin --use_deepep_moe 0 --enable_fp32_lm_head 0 --reserver_runtime_mem_mb 4096 --max_seq_len 32768 --seq_size_per_block 128 --kernel_seq_size_per_block 128 --enable_cuda_graph 0 --reuse_cache 1" % (world_size, world_size, world_size) + speculative_args,
+        gpu_type = [gpu],
+        test_envs = {"QWEN4_REQUIRE_NVFP4": "1"},
+        data = ["//rtp_llm:sdk", ":smoke_framework_srcs", "data/model/qwen4_exp/q_r_qwen4_exp_fp8_full.json"],
+        deps = ["//rtp_llm:transformers"],
+    )
+    for name, speculative_args, gpu, world_size in [
+        ("qwen4_exp_nvfp4_source_tp2", "", "H20", 2),
+        ("qwen4_exp_nvfp4_source_tp2_mtp", " --sp_type mtp --sp_model_type qwen4_exp_mtp --sp_act_type BF16 --gen_num_per_cycle 3", "H20", 2),
+        ("qwen4_exp_nvfp4_source_tp8_sm120", "", "RTX_5000_PRO_CU13", 8),
+        ("qwen4_exp_nvfp4_source_tp8_mtp_sm120", " --sp_type mtp --sp_model_type qwen4_exp_mtp --sp_act_type BF16 --gen_num_per_cycle 3", "RTX_5000_PRO_CU13", 8),
+    ]
+]
 
 # Frontend, a real FlexLB master, separate prefill/decode, and two ViT workers.
 # Five real requests with the same image check that FlexLB keeps sending
@@ -182,8 +205,9 @@ custom_smoke_test(
     main = "deepseek_v41_full_contract_test.py",
     smoke_args = "--tp_size 2 --ep_size 2 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 24576 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --sp_type dspark --sp_model_type deepseek_v41_dspark --sp_act_type BF16 --gen_num_per_cycle 3",
     gpu_type = ["SM100_ARM_CU13"],
-    tags = ["dsv41_cuda13", "model_contract", "pd_contract", "dspark_contract"],
+    # Cold-starting the ARM checkpoint can exceed the default 30-minute watchdog.
     test_envs = {"RTP_TEST_WATCHDOG_SECONDS": "3600"},
+    tags = ["dsv41_cuda13", "model_contract", "pd_contract", "dspark_contract"],
     data = [
         "//rtp_llm:sdk",
         "data/model/deepseek_v41/full_feature_cp2_dp2.json",

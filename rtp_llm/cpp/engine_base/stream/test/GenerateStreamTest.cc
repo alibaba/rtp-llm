@@ -1,10 +1,12 @@
 
 #include "gtest/gtest.h"
+#include "autil/EnvUtil.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -15,6 +17,7 @@
 #include <functional>
 #include <ATen/record_function.h>
 #include <future>
+#include <limits>
 #include <mutex>
 #include <numeric>
 #include <thread>
@@ -79,8 +82,9 @@ public:
             /*layer_num=*/3, /*block_num=*/9, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
     }
 
-    GenerateStreamPtr createContextStream(const std::vector<int>& input_ids) {
-        return createContextStreamImpl(input_ids, runtime_config_, ResourceContext{}, nullptr);
+    GenerateStreamPtr createContextStream(const std::vector<int>& input_ids,
+                                          const ResourceContext&  resource_context = {}) {
+        return createContextStreamImpl(input_ids, runtime_config_, resource_context, nullptr);
     };
 
     void enableHiddenStateCapture() {
@@ -208,6 +212,27 @@ protected:
     }
 };
 
+class StreamCommitRecordingProcessor: public BaseLogitsProcessor {
+public:
+    std::optional<ErrorInfo> process(const SamplerInputs&, size_t, size_t) override {
+        return std::nullopt;
+    }
+
+    void updateMultiSeqStatus(const std::vector<int>&) override {}
+
+    std::optional<ErrorInfo> updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override {
+        const auto* tokens = new_tokens.data_ptr<int32_t>();
+        committed_tokens.insert(committed_tokens.end(), tokens, tokens + num_new_tokens);
+        return std::nullopt;
+    }
+
+    std::optional<int64_t> committedOutputLen() const override {
+        return static_cast<int64_t>(committed_tokens.size());
+    }
+
+    std::vector<int32_t> committed_tokens;
+};
+
 template<typename T>
 void waitForConsumer(std::future<T>& future, const std::shared_ptr<NormalGenerateStream>& stream) {
     const auto status = future.wait_for(std::chrono::seconds(5));
@@ -245,7 +270,8 @@ TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAux
     stream->generateConfig()->num_return_sequences = 1;
     stream->generateConfig()->max_new_tokens       = 4;
     stream->generateConfig()->aux_info             = true;
-    stream->generateConfig()->pd_separation        = true;
+    /** Streaming exposes prefill output without ending the request before the decode update. */
+    stream->generateConfig()->is_streaming = true;
     stream->reportEvent(StreamEvents::CanRun);
     ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
 
@@ -262,6 +288,7 @@ TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAux
                                  torch::Tensor()};
     update_info.generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
     stream->update(update_info);
+    ASSERT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
 
     auto output_result = stream->nextOutput();
     ASSERT_TRUE(output_result.ok());
@@ -301,7 +328,7 @@ TEST_F(GenerateStreamTest, mtpUpdateKeepsLastGpuProposalWhenNextProposalIsMissin
     StreamSpecUpdateInfo update_info{
         .new_tokens          = torch::tensor({{4}}, torch::kInt32),
         .num_new_tokens      = 1,
-        .draft_token         = -1,
+        .draft_tokens        = torch::Tensor(),
         .draft_hidden_states = torch::Tensor(),
         .draft_token_probs   = torch::Tensor(),
         .draft_token_gpu     = std::nullopt,
@@ -326,7 +353,7 @@ TEST_F(GenerateStreamTest, mtpUpdateRefreshesGpuProposalWithMultipleDrafts) {
     StreamSpecUpdateInfo update_info{
         .new_tokens          = torch::tensor({{4}}, torch::kInt32),
         .num_new_tokens      = 1,
-        .draft_token         = -1,
+        .draft_tokens        = torch::Tensor(),
         .draft_hidden_states = torch::Tensor(),
         .draft_token_probs   = torch::Tensor(),
         .draft_token_gpu     = new_gpu_proposal,
@@ -353,7 +380,7 @@ TEST_F(GenerateStreamTest, mtpCpuProposalClearsStaleGpuMirror) {
     StreamSpecUpdateInfo update_info{
         .new_tokens          = torch::tensor({{4}}, torch::kInt32),
         .num_new_tokens      = 1,
-        .draft_token         = 11,
+        .draft_tokens        = torch::tensor({11}, torch::kInt32),
         .draft_hidden_states = torch::Tensor(),
         .draft_token_probs   = torch::Tensor(),
         .draft_token_gpu     = torch::Tensor(),
@@ -929,10 +956,11 @@ TEST_F(GenerateStreamTest, publicReadinessReaderIsSafeDuringPublication) {
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
 }
 
-TEST_F(GenerateStreamTest, testSpeculativeMaxLengthUsesGreaterConfiguredAndAsyncReserve) {
+TEST_F(GenerateStreamTest, testSpeculativeNextStepLimitUsesGreaterConfiguredAndAsyncReserve) {
     autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "1");
-    auto            builder = GenerateStreamBuilder();
-    auto            stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
+    auto            builder                  = GenerateStreamBuilder();
+    auto            stream                   = builder.createContextStream({1, 2, 3, 4, 5, 6});
+    stream->generateConfig()->max_new_tokens = 2048;
 
     auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
     sp_output_buffer->propose_step = 3;
@@ -940,12 +968,216 @@ TEST_F(GenerateStreamTest, testSpeculativeMaxLengthUsesGreaterConfiguredAndAsync
 
     // The configured DSpark reserve can exceed async's 2 * gamma + 1 reserve.
     stream->setReserveStep(9);
-    EXPECT_EQ(stream->maxTokenNum(), 2039);
+    EXPECT_EQ(stream->nextStepSeqLengthLimit(), 2039u);
+    EXPECT_EQ(stream->maxTokenNum(), 2048u);
 
     // Conversely, a smaller configured reserve must not reduce async's dynamic
     // seven-token window for gamma=3.
     stream->setReserveStep(4);
-    EXPECT_EQ(stream->maxTokenNum(), 2041);
+    EXPECT_EQ(stream->nextStepSeqLengthLimit(), 2041u);
+    EXPECT_EQ(stream->maxTokenNum(), 2048u);
+
+    /** The async reserve can exceed INT_MAX before it saturates the remaining sequence length to zero. */
+    sp_output_buffer->propose_step = std::numeric_limits<int>::max() - 1;
+    EXPECT_EQ(stream->nextStepSeqLengthLimit(), 0u);
+    EXPECT_EQ(stream->maxTokenNum(), 2048u);
+}
+
+TEST_F(GenerateStreamTest, speculativeCommitCrossesNextRoundLimitAndCapsProcessorAndKvAtRequestLimit) {
+    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "0");
+    auto            builder           = GenerateStreamBuilder();
+    builder.model_config_.max_seq_len = 16;
+    const auto      cache_config      = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16);
+    ResourceContext resources;
+    resources.cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    for (const int max_new_tokens : {2, 32}) {
+        SCOPED_TRACE(max_new_tokens);
+        auto stream = builder.createContextStream(std::vector<int>(6, 1), resources);
+        stream->setReserveStep(9);
+        stream->generateConfig()->max_new_tokens = max_new_tokens;
+        stream->generate_status_->status.store(StreamState::RUNNING);
+        stream->fakeInitKVBlock(8);
+        for (const auto& group : cache_config.topology().groups()) {
+            stream->kvCacheMutable().mutableBlockIds(0, group.tag).assign({1, 2, 3, 4, 5, 6, 7, 8});
+        }
+        auto processor                            = std::make_shared<StreamCommitRecordingProcessor>();
+        stream->sampling_state_.logits_processors = {processor};
+        auto buffer                               = std::make_shared<SpeculativeExecutorStreamOutput>();
+        buffer->propose_step                      = 3;
+        buffer->tokens                            = torch::zeros({1, 4}, torch::kInt32);
+        stream->setSPOutputBuffer(buffer);
+        EXPECT_EQ(stream->nextStepSeqLengthLimit(), 7u);
+        EXPECT_EQ(stream->maxTokenNum(), max_new_tokens == 2 ? 8u : 16u);
+        EXPECT_FALSE(stream->needFinish());
+
+        StreamSpecUpdateInfo update_info{torch::tensor({{2, 3, 4, 5}}, torch::kInt32),
+                                         4,
+                                         torch::tensor({6, 7, 8}, torch::kInt32),
+                                         torch::Tensor(),
+                                         torch::Tensor()};
+        update_info.speculative_propose_step = 3;
+        update_info.accepted_draft_tokens    = 3;
+        stream->specUpdate(update_info);
+
+        EXPECT_TRUE(stream->statusInfo().ok()) << stream->statusInfo().ToString();
+        EXPECT_EQ(stream->seqLength(), max_new_tokens == 2 ? 8 : 10);
+        EXPECT_EQ(processor->committed_tokens,
+                  max_new_tokens == 2 ? (std::vector<int32_t>{2, 3}) : (std::vector<int32_t>{2, 3, 4, 5}));
+        EXPECT_EQ(stream->getProposeToken(), (std::vector<int>{5, 6, 7, 8}));
+        EXPECT_EQ(stream->speculativeAcceptedTokensPerPos(), (std::vector<int32_t>{1, 1, 1}));
+        /** Linear KV swaps must follow the committed prefix after request truncation. */
+        for (const auto& group : cache_config.topology().groups()) {
+            EXPECT_EQ(stream->kvCache().blocks(0, group.tag),
+                      group.policy.group_type == CacheGroupType::LINEAR && max_new_tokens == 32 ?
+                          (BlockIndicesType{1, 2, 3, 4, 6, 5, 7, 8}) :
+                          (BlockIndicesType{1, 2, 3, 4, 5, 6, 7, 8}));
+        }
+        EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+        EXPECT_TRUE(stream->needFinish());
+    }
+}
+
+TEST_F(GenerateStreamTest, ppCommitClipsToRequestAndModelCaps) {
+    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "0");
+    for (const int max_new_tokens : {1, 32}) {
+        auto stream = GenerateStreamBuilder().createContextStream(std::vector<int>(2046, 1));
+        stream->setReserveStep(0);
+        stream->generate_input_->generate_config->max_new_tokens = max_new_tokens;
+        stream->update({torch::tensor({{2, 3, 4}}, torch::kInt32), 3}, false);
+        EXPECT_EQ(stream->seqLength(), max_new_tokens == 1 ? 2047 : 2048);
+        EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+    }
+}
+
+TEST_F(GenerateStreamTest, intMaxRequestCapsCommitLimitAndCommitsOnlyProvidedToken) {
+    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "0");
+    const int       int_max = std::numeric_limits<int>::max();
+    for (const int input_length : {1, 3}) {
+        for (const int max_new_tokens : {int_max - input_length, int_max - input_length + 1, int_max}) {
+            SCOPED_TRACE(testing::Message()
+                         << "input_length=" << input_length << ", max_new_tokens=" << max_new_tokens);
+            auto stream = GenerateStreamBuilder().createContextStream(std::vector<int>(input_length, 1));
+            stream->generateConfig()->max_new_tokens = max_new_tokens;
+            ASSERT_EQ(stream->maxTokenNum(), stream->maxSeqLen());
+            ASSERT_EQ(stream->nextStepSeqLengthLimit(), stream->maxSeqLen());
+
+            stream->update({torch::tensor({{4}}, torch::kInt32), 1});
+            ASSERT_TRUE(stream->statusInfo().ok()) << stream->statusInfo().ToString();
+            EXPECT_EQ(stream->seqLength(), input_length + 1);
+            EXPECT_EQ(stream->completeTokenIds()[0][input_length].item<int>(), 4);
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, commitLimitAppliesBeforeEnqueueAndReserveSaturates) {
+    auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3});
+    stream->setReserveStep(2049);
+    stream->generate_input_->generate_config->max_new_tokens = 10;
+    EXPECT_EQ(stream->nextStepSeqLengthLimit(), 0u);
+    EXPECT_EQ(stream->maxTokenNum(), 13u);
+    /** Decode RPC commits its handoff token through ordinary update before enqueue. */
+    stream->update({torch::tensor({{4}}, torch::kInt32), 1});
+    EXPECT_EQ(stream->seqLength(), 4);
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+}
+
+TEST_F(GenerateStreamTest, lengthCompletionStillTrimsEosAndStopWordsAcrossUpdatePaths) {
+    enum class UpdatePath {
+        Normal,
+        Speculative,
+        Pipeline
+    };
+    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "0");
+    auto            builder           = GenerateStreamBuilder();
+    builder.model_config_.max_seq_len = 16;
+    ResourceContext resources;
+    resources.cache_manager = std::make_shared<KVCacheManager>(builder.init_config());
+    for (const auto path : {UpdatePath::Normal, UpdatePath::Speculative, UpdatePath::Pipeline}) {
+        for (const bool stop_words : {false, true}) {
+            for (const int reserve : {0, 9}) {
+                for (const int max_new_tokens : {3, 32}) {
+                    SCOPED_TRACE(::testing::Message()
+                                 << "path=" << static_cast<int>(path) << ", stop_words=" << stop_words
+                                 << ", reserve=" << reserve << ", max_new_tokens=" << max_new_tokens);
+                    builder.model_config_.special_tokens.eos_token_id = stop_words ? 1023 : 3;
+                    auto stream = builder.createContextStream(std::vector<int>(6, 1), resources);
+                    stream->setReserveStep(reserve);
+                    stream->generateConfig()->max_new_tokens = max_new_tokens;
+                    if (stop_words) {
+                        stream->generateConfig()->stop_words_list = {{2, 3}};
+                    }
+                    stream->generate_status_->status.store(StreamState::RUNNING);
+                    const auto tokens = torch::tensor({{2, 3, 4, 5}}, torch::kInt32);
+                    switch (path) {
+                        case UpdatePath::Normal:
+                            stream->update({tokens, 4});
+                            break;
+                        case UpdatePath::Speculative: {
+                            auto buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
+                            buffer->propose_step = 3;
+                            buffer->tokens       = torch::zeros({1, 4}, torch::kInt32);
+                            stream->setSPOutputBuffer(buffer);
+                            stream->specUpdate(
+                                {tokens, 4, torch::tensor({6, 7, 8}, torch::kInt32), torch::Tensor(), torch::Tensor()});
+                            break;
+                        }
+                        case UpdatePath::Pipeline:
+                            stream->update({tokens, 4}, false);
+                            break;
+                    }
+                    ASSERT_TRUE(stream->statusInfo().ok()) << stream->statusInfo().ToString();
+                    EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{1, 1, 1, 1, 1, 1, 2, 3}));
+                    EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+                    ASSERT_TRUE(stream->hasOutput());
+                    const auto output = stream->nextOutput();
+                    ASSERT_TRUE(output.ok());
+                    ASSERT_EQ(output.value().generate_outputs.size(), 1u);
+                    EXPECT_TRUE(output.value().generate_outputs[0].finished);
+                    EXPECT_TRUE(torch::equal(output.value().generate_outputs[0].output_ids,
+                                             torch::tensor({{2, 3}}, torch::kInt32)));
+                }
+            }
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, lengthCompletionPreservesIgnoreEosAndMinNewTokens) {
+    auto builder                                      = GenerateStreamBuilder();
+    builder.model_config_.max_seq_len                 = 16;
+    builder.model_config_.special_tokens.eos_token_id = 3;
+    for (const bool ignore_eos : {false, true}) {
+        for (const int min_new_tokens : {0, 5}) {
+            SCOPED_TRACE(::testing::Message() << "ignore_eos=" << ignore_eos << ", min_new_tokens=" << min_new_tokens);
+            auto stream = builder.createContextStream(std::vector<int>(6, 1));
+            stream->setReserveStep(9);
+            stream->generateConfig()->max_new_tokens  = 32;
+            stream->generateConfig()->min_new_tokens  = min_new_tokens;
+            stream->generateConfig()->ignore_eos      = ignore_eos;
+            stream->generateConfig()->stop_words_list = {{3}};
+            stream->generate_status_->status.store(StreamState::RUNNING);
+            stream->update({torch::tensor({{2, 3, 4, 5}}, torch::kInt32), 4}, false);
+            ASSERT_TRUE(stream->statusInfo().ok()) << stream->statusInfo().ToString();
+            EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+            EXPECT_EQ(stream->seqLength(), !ignore_eos && min_new_tokens == 0 ? 8 : 10);
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, cpuMultiDraftUpdateClearsGpuMirrorAndPreservesAllCandidates) {
+    auto stream                = GenerateStreamBuilder().createContextStream({1, 2, 3});
+    auto buffer                = std::make_shared<SpeculativeExecutorStreamOutput>();
+    buffer->tokens             = torch::zeros({1, 4}, torch::kInt32);
+    buffer->propose_tokens_gpu = torch::tensor({9}, torch::kInt32).to(torch::kCUDA);
+    stream->setSPOutputBuffer(buffer);
+    stream->specUpdate({torch::tensor({{4}}, torch::kInt32),
+                        1,
+                        torch::tensor({5, 6, 7}, torch::kInt32),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor()});
+    EXPECT_EQ(stream->getProposeToken(), (std::vector<int>{4, 5, 6, 7}));
+    EXPECT_TRUE(torch::equal(buffer->tokens, torch::tensor({{4, 5, 6, 7}}, torch::kInt32)));
+    EXPECT_FALSE(buffer->propose_tokens_gpu.defined());
 }
 
 // clearMtpAsyncDeviceState rejects stale epochs. A worker that
@@ -1414,6 +1646,75 @@ TEST_F(GenerateStreamTest, testChunkedPrefillWindowAndUpdate) {
     ASSERT_EQ(stream->seqLength(), original_seq_len + 1);
 }
 
+TEST_F(GenerateStreamTest, testChunkedPrefillTokenCountsIncludeCacheOnce) {
+    struct TestCase {
+        int              reuse_length;
+        int              initial_reuse_length;
+        std::vector<int> compute_tokens;
+        std::vector<int> tokens_with_cache;
+    };
+    const std::vector<TestCase> cases{{0, 0, {8, 8, 4}, {8, 8, 4}},
+                                      {4, 4, {8, 8}, {12, 8}},
+                                      {4, 8, {8, 8}, {12, 8}},
+                                      {19, 19, {1}, {20}},
+                                      {20, 20, {0}, {20}}};
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        for (const auto& test_case : cases) {
+            SCOPED_TRACE(testing::Message()
+                         << "role=" << static_cast<int>(role) << ", reuse=" << test_case.reuse_length);
+            GenerateStreamBuilder builder;
+            auto                  stream = builder.createChunkedContextStream(
+                makeInputIds(20), role, 8, [](GenerateInput& input, GenerateConfig&) { input.priority = 7; });
+            ASSERT_FALSE(stream->hasError());
+            stream->setReuseLength(test_case.reuse_length);
+            // Initial cache-hit metrics may use canonical CP tokens while reuseLength is rank-local.
+            stream->setInitialReuseLength(test_case.initial_reuse_length);
+            markRunning(stream);
+
+            size_t total_tokens_with_cache = 0;
+            size_t total_compute_tokens    = 0;
+            for (size_t chunk = 0; chunk < test_case.compute_tokens.size(); ++chunk) {
+                SCOPED_TRACE(chunk);
+                StreamGroups groups({stream});
+                const auto   counts = groups.tokenCountsByPriority().at(7);
+                EXPECT_EQ(groups.contextExecuteTokenSize(), test_case.compute_tokens[chunk]);
+                EXPECT_EQ(groups.contextExecuteTokenSizeWithCache(), test_case.tokens_with_cache[chunk]);
+                EXPECT_EQ(counts.context, test_case.compute_tokens[chunk]);
+                EXPECT_EQ(counts.context_with_cache, test_case.tokens_with_cache[chunk]);
+                EXPECT_EQ(counts.total, test_case.compute_tokens[chunk]);
+                EXPECT_EQ(groups.tokenCountsByPriority().at(7).context_with_cache, counts.context_with_cache);
+                total_compute_tokens += groups.contextExecuteTokenSize();
+                total_tokens_with_cache += groups.contextExecuteTokenSizeWithCache();
+                if (chunk + 1 < test_case.compute_tokens.size()) {
+                    ASSERT_TRUE(stream->isMiddleChunk());
+                    stream->advanceChunk();
+                }
+            }
+            EXPECT_TRUE(stream->isLastChunk());
+            EXPECT_EQ(total_compute_tokens, 20 - test_case.reuse_length);
+            EXPECT_EQ(total_tokens_with_cache, 20);
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, testUnchunkedPrefillTokenCountsIncludeCache) {
+    for (const int reuse_length : {0, 4, 19, 20}) {
+        SCOPED_TRACE(reuse_length);
+        GenerateStreamBuilder builder;
+        auto                  stream = builder.createChunkedContextStream(makeInputIds(20), RoleType::PREFILL, 0);
+        stream->setReuseLength(reuse_length);
+        stream->setInitialReuseLength(reuse_length);
+        markRunning(stream);
+        ASSERT_FALSE(stream->chunkedPrefillEnabled());
+        StreamGroups groups({stream});
+        const auto   counts = groups.tokenCountsByPriority().at(stream->priority());
+        EXPECT_EQ(groups.contextExecuteTokenSize(), 20 - reuse_length);
+        EXPECT_EQ(groups.contextExecuteTokenSizeWithCache(), 20);
+        EXPECT_EQ(counts.context, 20 - reuse_length);
+        EXPECT_EQ(counts.context_with_cache, 20);
+    }
+}
+
 TEST_F(GenerateStreamTest, testChunkedPrefillMiddleChunkPropagatesWorkerError) {
     auto             stream                = createRunningMiddleChunk();
     const int        original_reuse_length = stream->reuseLength();
@@ -1446,7 +1747,7 @@ TEST_F(GenerateStreamTest, testChunkedPrefillSpecUpdateMiddleChunkDiscards) {
     const int original_seq_len = stream->seqLength();
 
     auto new_tokens = torch::tensor(std::vector<int32_t>{101}, torch::kInt32).reshape({1, 1});
-    stream->specUpdate({new_tokens, 1, /*draft_token=*/42, torch::Tensor(), torch::Tensor()});
+    stream->specUpdate({new_tokens, 1, torch::tensor({42}, torch::kInt32), torch::Tensor(), torch::Tensor()});
     ASSERT_TRUE(stream->isContextStream());
     ASSERT_EQ(stream->seqLength(), original_seq_len);
     expectChunkWindow(stream, /*prefix=*/8, /*length=*/2, /*is_last=*/true);

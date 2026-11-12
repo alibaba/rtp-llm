@@ -30,7 +30,6 @@ cc_library(
     alwayslink = 1,
 )
 
-
 cc_library(
     name = "ppu_rope_kvcache_op",
     srcs = ["FusedRopeKVCacheOp.cc"],

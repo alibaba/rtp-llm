@@ -154,6 +154,8 @@ def make_configs(
     par_cfg = ParallelismConfig()
     par_cfg.tp_size = cp_size
     par_cfg.tp_rank = cp_rank
+    par_cfg.world_size = cp_size
+    par_cfg.world_rank = cp_rank
     return attn_cfg, par_cfg
 
 

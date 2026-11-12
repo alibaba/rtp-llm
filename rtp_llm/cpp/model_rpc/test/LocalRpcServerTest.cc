@@ -13,6 +13,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "autil/Scope.h"
 #include "opentelemetry/exporters/memory/in_memory_span_data.h"
 #include "opentelemetry/exporters/memory/in_memory_span_exporter_factory.h"
 #include "opentelemetry/sdk/trace/span_data.h"
@@ -55,6 +56,10 @@ public:
         return pollStreamOutput(nullptr, "request", writer, stream);
     }
 
+    void setModelType(const std::string& model_type) {
+        maga_init_params_.model_config_.model_type = model_type;
+    }
+
     ErrorInfo prepare(const GenerateInputPB& input, std::shared_ptr<GenerateInput>& output) {
         return prepareInput(input, output);
     }
@@ -70,11 +75,18 @@ public:
         torch_allocator_dump_cooldown_seconds_       = cooldown_seconds;
         maga_init_params_.parallelism_config.tp_rank = 0;
         maga_init_params_.parallelism_config.tp_size = 1;
+        maga_init_params_.parallelism_config.pp_size = 1;
     }
 
-    void configureInternalAllocatorDumpPeer(bool allowed) {
+    void configureInternalAllocatorDumpPeer(bool allowed, int tp_size = 2, int pp_size = 1) {
         internal_allocator_dump_peer_allowed_        = allowed;
-        maga_init_params_.parallelism_config.tp_size = 2;
+        maga_init_params_.parallelism_config.tp_size = tp_size;
+        maga_init_params_.parallelism_config.pp_size = pp_size;
+    }
+
+    bool initAllocatorDumpBroadcaster(const std::vector<std::string>& worker_addrs) {
+        tp_broadcaster_ = std::make_shared<BroadcastManager>(worker_addrs);
+        return tp_broadcaster_->init();
     }
 
     grpc::Status authorizeAllocatorDump(const TorchAllocatorDumpRequestPB& request) const {
@@ -635,10 +647,106 @@ TEST(LocalRpcServerTest, DirectAllocatorDumpRpcIsSingleFlight) {
     EXPECT_EQ(dump_calls.load(), 1);
 }
 
-TEST(LocalRpcServerTest, InternalAllocatorDumpRequiresTrustedTpPeer) {
+class AllocatorDumpRpcService: public RpcService::Service {
+public:
+    explicit AllocatorDumpRpcService(LocalRpcServer& server): server_(server) {}
+
+    grpc::Status DumpTorchAllocatorInternal(grpc::ServerContext*               context,
+                                            const TorchAllocatorDumpRequestPB* request,
+                                            TorchAllocatorDumpResultPB*        response) override {
+        return server_.DumpTorchAllocatorInternal(context, request, response);
+    }
+
+private:
+    LocalRpcServer& server_;
+};
+
+TEST(LocalRpcServerTest, AllocatorDumpBroadcastReachesAllTpOrPpRanks) {
+    for (const auto& [tp_size, pp_size] : {std::pair{2, 1}, std::pair{1, 2}}) {
+        SCOPED_TRACE(::testing::Message() << "tp_size=" << tp_size << " pp_size=" << pp_size);
+        std::array<TestLocalRpcServer, 2>                       workers;
+        std::array<std::atomic<int>, 2>                         dump_calls{0, 0};
+        std::array<std::unique_ptr<AllocatorDumpRpcService>, 2> services;
+        std::array<std::unique_ptr<grpc::Server>, 2>            rpc_servers;
+        autil::ScopeGuard shutdown_servers([&] {
+            for (auto& server : rpc_servers) {
+                if (server) {
+                    server->Shutdown();
+                    server->Wait();
+                }
+            }
+        });
+        std::vector<std::string> worker_addrs;
+        for (int rank = 0; rank < 2; ++rank) {
+            auto& worker = workers[rank];
+            worker.configureAllocatorDump(true, "secret");
+            worker.configureInternalAllocatorDumpPeer(true, tp_size, pp_size);
+            worker.setAllocatorDumpCallback([&, rank](const std::string& dump_id) {
+                ++dump_calls[rank];
+                TorchAllocatorDumpResultPB result;
+                result.set_dump_id(dump_id);
+                result.set_world_rank(rank);
+                result.set_success(true);
+                return result;
+            });
+            services[rank] = std::make_unique<AllocatorDumpRpcService>(worker);
+            int                 port = 0;
+            grpc::ServerBuilder builder;
+            builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+            builder.RegisterService(services[rank].get());
+            rpc_servers[rank] = builder.BuildAndStart();
+            ASSERT_NE(rpc_servers[rank], nullptr);
+            ASSERT_GT(port, 0);
+            worker_addrs.push_back("127.0.0.1:" + std::to_string(port));
+        }
+        ASSERT_TRUE(workers[0].initAllocatorDumpBroadcaster(worker_addrs));
+
+        TorchAllocatorDumpRequestPB request;
+        request.set_auth_token("secret");
+        request.set_dump_id("dump-parallel");
+        grpc::ServerContext          context;
+        TorchAllocatorDumpResponsePB response;
+        const auto                   status = workers[0].DumpTorchAllocator(&context, &request, &response);
+
+        ASSERT_TRUE(status.ok()) << status.error_message();
+        ASSERT_EQ(response.results_size(), 2);
+        for (int rank = 0; rank < 2; ++rank) {
+            EXPECT_EQ(dump_calls[rank].load(), 1);
+            EXPECT_EQ(response.results(rank).world_rank(), rank);
+            EXPECT_EQ(response.results(rank).dump_id(), request.dump_id());
+            EXPECT_TRUE(response.results(rank).success());
+        }
+    }
+}
+
+TEST(LocalRpcServerTest, InternalAllocatorDumpRequiresTrustedParallelPeer) {
+    for (const auto& [tp_size, pp_size] : {std::pair{2, 1}, std::pair{1, 2}}) {
+        SCOPED_TRACE(::testing::Message() << "tp_size=" << tp_size << " pp_size=" << pp_size);
+        TestLocalRpcServer server;
+        server.configureAllocatorDump(true, "secret");
+        server.configureInternalAllocatorDumpPeer(false, tp_size, pp_size);
+        TorchAllocatorDumpRequestPB request;
+        request.set_auth_token("secret");
+        request.set_dump_id("dump-internal");
+        grpc::ServerContext        context;
+        TorchAllocatorDumpResultPB response;
+
+        EXPECT_EQ(server.DumpTorchAllocatorInternal(&context, &request, &response).error_code(),
+                  grpc::StatusCode::PERMISSION_DENIED);
+        EXPECT_TRUE(response.dump_id().empty());
+
+        server.configureInternalAllocatorDumpPeer(true, tp_size, pp_size);
+        request.set_auth_token("wrong-secret");
+        EXPECT_EQ(server.DumpTorchAllocatorInternal(&context, &request, &response).error_code(),
+                  grpc::StatusCode::UNAUTHENTICATED);
+        EXPECT_TRUE(response.dump_id().empty());
+    }
+}
+
+TEST(LocalRpcServerTest, SingleRankAllocatorDumpRejectsInternalFanout) {
     TestLocalRpcServer server;
     server.configureAllocatorDump(true, "secret");
-    server.configureInternalAllocatorDumpPeer(false);
+    server.configureInternalAllocatorDumpPeer(true, 1, 1);
     TorchAllocatorDumpRequestPB request;
     request.set_auth_token("secret");
     request.set_dump_id("dump-internal");
@@ -772,6 +880,23 @@ TEST(LocalRpcServerTest, AllocatorDumpAggregationRejectsMismatchedIds) {
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::DATA_LOSS);
     EXPECT_EQ(response.results_size(), 0);
+}
+
+TEST(LocalRpcServerTest, AllowsQwen4MediaPastAdmission) {
+    for (const auto& model_type : {"qwen4_exp", "qwen4_exp_mtp"}) {
+        TestLocalRpcServer server;
+        server.setModelType(model_type);
+        GenerateInputPB input;
+        input.add_token_ids(1);
+        input.mutable_generate_config()->set_max_new_tokens(1);
+        input.add_multimodal_inputs();
+        std::shared_ptr<GenerateInput> output;
+        const auto                     result = server.prepare(input, output);
+        ASSERT_TRUE(result.ok()) << result.ToString();
+        ASSERT_NE(output, nullptr);
+        ASSERT_TRUE(output->multimodal_inputs.has_value());
+        EXPECT_EQ(output->multimodal_inputs->size(), 1);
+    }
 }
 
 TEST(LocalRpcServerTest, PrepareInputReturnsInvalidParamsMappedToInvalidArgument) {
