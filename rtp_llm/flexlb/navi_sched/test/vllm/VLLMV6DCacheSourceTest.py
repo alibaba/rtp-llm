@@ -13,6 +13,8 @@ from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest import mock
 
+from navi_sched.util import naviSchedModule
+
 SOURCE = Path(__file__).resolve().parents[2] / "adapters/vllm/VLLMEngineObserver.py"
 if __name__ == "__main__" and len(sys.argv) == 2:
     SOURCE = Path(sys.argv.pop())
@@ -43,6 +45,7 @@ class VLLMV6DCacheSourceTest(unittest.TestCase):
         module.body.append(node)
         ns = dict(
             json=json,
+            naviSchedModule=naviSchedModule,
             sys=sys,
             time=time,
             logger=logging.getLogger("v6d-cache-source-test"),
@@ -181,6 +184,100 @@ class VLLMV6DCacheSourceTest(unittest.TestCase):
         with mock.patch.dict(sys.modules, modules):
             self.function("_forward_batches")(observer)
         observer._poll_v6d_cache_source.assert_called_once()
+
+    def test_native_metadata_merges_objects_and_intersects_every_pp_worker(self):
+        def identity(group, *values):
+            return json.dumps(dict(group_id=group, block_hashes=values))
+
+        low, middle, high = "01" * 32, "80" * 32, "ff" * 32
+        nodes = [
+            [identity(3, high, low), identity(3, middle, low), identity(0, high)],
+            [identity(3, middle, high), identity(0, low)],
+            [identity(3, high, middle)],
+            [identity(3, middle)],
+        ]
+        self.assertEqual(
+            {0: (), 3: (bytes.fromhex(middle),)},
+            naviSchedModule().decode_v6d_cache_metadata(nodes, 4),
+        )
+
+    def test_native_metadata_empty_first_worker_cannot_restore_evicted_hashes(self):
+        identity = json.dumps(dict(group_id=3, block_hashes=["01" * 32]))
+        self.assertEqual(
+            {}, naviSchedModule().decode_v6d_cache_metadata([[], [identity]], 4)
+        )
+        self.assertEqual(
+            {3: ()}, naviSchedModule().decode_v6d_cache_metadata([[identity], []], 4)
+        )
+        self.assertEqual(
+            {3: (bytes.fromhex("01" * 32),)},
+            naviSchedModule().decode_v6d_cache_metadata([[identity], [identity]], 4),
+        )
+        self.assertEqual(
+            {3: ()}, naviSchedModule().decode_v6d_cache_metadata([[identity], []], 4)
+        )
+
+    def test_native_metadata_validates_later_workers_even_if_intersection_is_empty(self):
+        malformed = [
+            "not json",
+            "[]",
+            json.dumps(dict(group_id=True, block_hashes=["01" * 32])),
+            json.dumps(dict(group_id=4, block_hashes=["01" * 32])),
+            json.dumps(dict(group_id=-1, block_hashes=["01" * 32])),
+            json.dumps(dict(group_id=3.0, block_hashes=["01" * 32])),
+            json.dumps(dict(group_id=3, block_hashes=[])),
+            json.dumps(dict(group_id=3, block_hashes=["01" * 31])),
+            json.dumps(dict(group_id=3, block_hashes=["0 1" * 32])),
+            json.dumps(dict(group_id=3, block_hashes=["gg" * 32])),
+            json.dumps(dict(group_id=3, block_hashes=[None])),
+            json.dumps(dict(group_id=3)),
+        ]
+        for identity in malformed:
+            with self.subTest(identity=identity), self.assertRaises(ValueError):
+                naviSchedModule().decode_v6d_cache_metadata([[], [identity]], 4)
+
+    def test_native_metadata_preserves_hex_whitespace_sorting_and_last_json_field(self):
+        value = " \t" + "\n".join(["AB"] * 32) + "\r\v\f "
+        identity = json.dumps(dict(group_id=3, block_hashes=[value, "01" * 32]))
+        self.assertEqual(
+            {3: (bytes.fromhex("01" * 32), bytes.fromhex("ab" * 32))},
+            naviSchedModule().decode_v6d_cache_metadata([[identity]], 4),
+        )
+        duplicate = '{"group_id":0,"group_id":3,"block_hashes":["' + "01" * 32 + '"]}'
+        self.assertEqual(
+            {3: (bytes.fromhex("01" * 32),)},
+            naviSchedModule().decode_v6d_cache_metadata([[duplicate]], 4),
+        )
+
+    def test_native_metadata_releases_gil_during_decode(self):
+        identity = json.dumps(dict(group_id=3, block_hashes=["01" * 32] * 50000))
+        ready = threading.Event()
+        ran = threading.Event()
+        allow_worker = False
+
+        def worker():
+            ready.set()
+            while not allow_worker:
+                time.sleep(0)
+            ran.set()
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        ready.wait()
+        original_interval = sys.getswitchinterval()
+        try:
+            sys.setswitchinterval(60)
+            allow_worker = True
+            for _ in range(5):
+                naviSchedModule().decode_v6d_cache_metadata([[identity]], 4)
+            self.assertTrue(
+                ran.is_set(), "metadata decoding blocked the other Python thread"
+            )
+        finally:
+            sys.setswitchinterval(original_interval)
+            allow_worker = True
+            thread.join()
+
 
 
 if __name__ == "__main__":

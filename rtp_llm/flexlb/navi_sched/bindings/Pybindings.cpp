@@ -1,4 +1,7 @@
 #include <array>
+#include <iterator>
+#include <set>
+#include <rapidjson/document.h>
 #include <chrono>
 #include <cstring>
 #include <optional>
@@ -141,6 +144,137 @@ py::list hashVllmPlainTextKvBlocks(
     py::list result;
     for (const auto &digest : hashVllmPlainTextBlockDigests(tokenBuffer, blockSize, parent)) {
         result.append(py::bytes(reinterpret_cast<const char *>(digest.data()), digest.size()));
+    }
+    return result;
+}
+
+using V6dCacheHashes = std::set<VllmBlockDigest>;
+using V6dCacheGroups = std::map<int, V6dCacheHashes>;
+
+int hexDigit(char value)
+{
+    if (value >= '0' && value <= '9') {
+        return value - '0';
+    }
+    if (value >= 'a' && value <= 'f') {
+        return value - 'a' + 10;
+    }
+    if (value >= 'A' && value <= 'F') {
+        return value - 'A' + 10;
+    }
+    return -1;
+}
+
+VllmBlockDigest decodeV6dBlockHash(const rapidjson::Value &value)
+{
+    if (!value.IsString()) {
+        throw std::invalid_argument("invalid V6D source block hash");
+    }
+    VllmBlockDigest hash{};
+    const char *text = value.GetString();
+    const size_t length = value.GetStringLength();
+    size_t offset = 0;
+    size_t bytes = 0;
+    while (offset < length) {
+        // Match bytes.fromhex: ASCII whitespace is allowed between bytes.
+        if (std::strchr(" \t\n\r\v\f", text[offset]) && text[offset] != '\0') {
+            ++offset;
+            continue;
+        }
+        if (bytes == hash.size() || offset + 1 >= length) {
+            throw std::invalid_argument("invalid V6D source block hash");
+        }
+        const int high = hexDigit(text[offset]);
+        const int low = hexDigit(text[offset + 1]);
+        if (high < 0 || low < 0) {
+            throw std::invalid_argument("invalid V6D source block hash");
+        }
+        hash[bytes++] = static_cast<uint8_t>((high << 4) | low);
+        offset += 2;
+    }
+    if (bytes != hash.size()) {
+        throw std::invalid_argument("invalid V6D source block hash");
+    }
+    return hash;
+}
+
+py::dict decodeV6dCacheMetadata(
+    const std::vector<std::vector<std::string>> &nodeMetadata, size_t groupCount)
+{
+    if (nodeMetadata.empty() || groupCount == 0
+        || groupCount > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("V6D snapshot requires every physical node and cache policy");
+    }
+    V6dCacheGroups common;
+    {
+        py::gil_scoped_release release;
+        // Metadata is repeated across PP workers. Reuse parsing only within this
+        // snapshot; a later snapshot must observe eviction and newly sealed data.
+        std::unordered_map<std::string, std::pair<int, V6dCacheHashes>> decoded;
+        bool firstNode = true;
+        for (const auto &metadata : nodeMetadata) {
+            V6dCacheGroups groups;
+            for (const auto &identity : metadata) {
+                auto found = decoded.find(identity);
+                if (found == decoded.end()) {
+                    rapidjson::Document document;
+                    document.Parse(identity.data(), identity.size());
+                    if (document.HasParseError() || !document.IsObject()) {
+                        throw std::invalid_argument("invalid V6D cache metadata");
+                    }
+                    const rapidjson::Value *groupValue = nullptr;
+                    const rapidjson::Value *hashesValue = nullptr;
+                    for (auto member = document.MemberBegin(); member != document.MemberEnd(); ++member) {
+                        if (member->name == "group_id") {
+                            groupValue = &member->value;
+                        } else if (member->name == "block_hashes") {
+                            hashesValue = &member->value;
+                        }
+                    }
+                    if (!groupValue || !groupValue->IsInt64()
+                        || groupValue->GetInt64() < 0
+                        || static_cast<uint64_t>(groupValue->GetInt64()) >= groupCount
+                        || !hashesValue || !hashesValue->IsArray() || hashesValue->Empty()) {
+                        throw std::invalid_argument("invalid V6D cache metadata");
+                    }
+                    const int group = static_cast<int>(groupValue->GetInt64());
+                    V6dCacheHashes hashes;
+                    for (const auto &value : hashesValue->GetArray()) {
+                        hashes.insert(decodeV6dBlockHash(value));
+                    }
+                    found = decoded.emplace(identity, std::make_pair(group, std::move(hashes))).first;
+                }
+                const auto &entry = found->second;
+                auto &hashes = groups[entry.first];
+                hashes.insert(entry.second.begin(), entry.second.end());
+            }
+            if (firstNode) {
+                common = std::move(groups);
+                firstNode = false;
+                continue;
+            }
+            for (auto &entry : common) {
+                const auto available = groups.find(entry.first);
+                if (available == groups.end()) {
+                    entry.second.clear();
+                    continue;
+                }
+                V6dCacheHashes intersection;
+                std::set_intersection(entry.second.begin(), entry.second.end(),
+                                      available->second.begin(), available->second.end(),
+                                      std::inserter(intersection, intersection.end()));
+                entry.second = std::move(intersection);
+            }
+        }
+    }
+    py::dict result;
+    for (const auto &entry : common) {
+        py::tuple hashes(entry.second.size());
+        size_t index = 0;
+        for (const auto &hash : entry.second) {
+            hashes[index++] = py::bytes(reinterpret_cast<const char *>(hash.data()), hash.size());
+        }
+        result[py::int_(entry.first)] = std::move(hashes);
     }
     return result;
 }
@@ -1858,6 +1992,8 @@ void bindNaviSchedModule(py::module_ &module, const char *description)
                py::arg("token_buffer"), py::arg("block_size"));
     module.def("hash_vllm_plain_text_kv_blocks", &hashVllmPlainTextKvBlocks,
                py::arg("token_buffer"), py::arg("block_size"), py::arg("parent_hash"));
+    module.def("decode_v6d_cache_metadata", &decodeV6dCacheMetadata,
+               py::arg("node_metadata"), py::arg("group_count"));
     module.doc() = description;
     auto naviModule = module.def_submodule("navi", "Navi runtime configuration");
     registerNaviRuntimeConfigPybind(naviModule);

@@ -5944,34 +5944,23 @@ class VLLMEngineObserver:
         peer_cache_read_available = all(
             snapshot["peer_cache_read_available"] for snapshot in snapshots
         )
-        common = None
-        for snapshot in snapshots:
-            groups = {}
-            for obj in snapshot["objects"]:
-                if obj["tier"] != "vineyard" or obj["sealedResident"] is not True:
-                    continue
-                identity = obj["meta"].get("navi_sched_cache")
-                if identity is None:
-                    continue
-                identity = json.loads(identity)
-                group_id = identity["group_id"]
-                if type(group_id) is not int or not 0 <= group_id < len(
-                    self._cache_policy.group_roles
-                ):
-                    raise ValueError("invalid V6D cache group")
-                hashes = [bytes.fromhex(value) for value in identity["block_hashes"]]
-                if not hashes or any(len(value) != 32 for value in hashes):
-                    raise ValueError("invalid V6D source block hash")
-                groups.setdefault(group_id, set()).update(hashes)
-            if common is None:
-                common = groups
-            else:
-                for group_id in common:
-                    common[group_id].intersection_update(groups.get(group_id, ()))
+        node_metadata = [
+            [
+                obj["meta"]["navi_sched_cache"]
+                for obj in snapshot["objects"]
+                if obj["tier"] == "vineyard"
+                and obj["sealedResident"] is True
+                and obj["meta"].get("navi_sched_cache") is not None
+            ]
+            for snapshot in snapshots
+        ]
+        common = naviSchedModule().decode_v6d_cache_metadata(
+            node_metadata, len(self._cache_policy.group_roles)
+        )
         self.on_block_lifecycle_event(
             "snapshot",
             None,
-            {group_id: tuple(sorted(hashes)) for group_id, hashes in common.items()},
+            common,
             cause="v6d_resident_snapshot",
             cache_key_type=1,
         )

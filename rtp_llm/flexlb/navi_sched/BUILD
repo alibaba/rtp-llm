@@ -1018,6 +1018,7 @@ py_test(
     main = "test/vllm/VLLMV6DCacheSourceTest.py",
     data = ["adapters/vllm/VLLMEngineObserver.py"],
     python_version = "PY3",
+    deps = [":py_sched_lib"],
 )
 
 py_test(
