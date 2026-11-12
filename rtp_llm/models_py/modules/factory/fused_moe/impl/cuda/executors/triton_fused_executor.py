@@ -23,6 +23,7 @@ from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
     get_default_config,
     invoke_fused_moe_kernel,
     moe_align_block_size_torch,
+    sum_moe_routes,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -106,13 +107,17 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             if output is not None:
                 return CombineForwardPayload(fused_expert_output=output)
 
+        M, K = hidden_states.shape
+        use_decode_alignment = self._decode_alignment and 0 < M <= (
+            64 if self.E == 256 else 32
+        )
+        aligned_experts = self.E
         if self.ep_size > 1:
             local_ids = topk_ids - self.start_expert_id
             local_mask = (local_ids >= 0) & (local_ids < self.num_experts_per_partition)
-            topk_ids = local_ids.clamp(min=0, max=self.num_experts_per_partition - 1)
-            topk_weights = topk_weights * local_mask
+            topk_ids = torch.where(local_mask, local_ids, self.E)
+            aligned_experts += 1
 
-        M, K = hidden_states.shape
         top_k = topk_ids.size(1)
         device = hidden_states.device
         dtype = hidden_states.dtype
@@ -136,14 +141,14 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         block_m1 = config1["BLOCK_SIZE_M"]
         block_m2 = config2["BLOCK_SIZE_M"]
         align = moe_align_block_size_torch
-        if self._decode_alignment and 0 < M <= 32:
+        if use_decode_alignment:
             from rtp_llm.models_py.modules.qwen4_exp.moe.moe_align_triton import (
                 moe_align_decode,
             )
 
             align = moe_align_decode
         sorted_token_ids, expert_ids, num_tokens_post_padded = align(
-            topk_ids, block_m1, self.E
+            topk_ids, block_m1, aligned_experts
         )
         if block_m1 == block_m2:
             sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = (
@@ -153,7 +158,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             )
         else:
             sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = align(
-                topk_ids, block_m2, self.E
+                topk_ids, block_m2, aligned_experts
             )
 
         # GEMM1: hidden_states @ w1.T → intermediate1 [M*top_k, 2*inter]
@@ -171,6 +176,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             top_k=top_k,
             config=config1,
             compute_type=compute_type,
+            skip_remote_experts=self.ep_size > 1,
         )
 
         # Activation: silu_and_mul(intermediate1) → intermediate2 [M*top_k, inter]
@@ -194,9 +200,10 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             top_k=1,
             config=config2,
             compute_type=compute_type,
+            skip_remote_experts=self.ep_size > 1,
         )
 
         # Sum reduce over top_k: out is [M*top_k, K], reshape and sum
-        output = out.view(M, top_k, K).sum(dim=1)
+        output = sum_moe_routes(out.view(M, top_k, K))
 
         return CombineForwardPayload(fused_expert_output=output)

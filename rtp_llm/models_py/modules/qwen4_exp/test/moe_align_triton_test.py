@@ -11,6 +11,7 @@ from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
     get_default_config,
     invoke_fused_moe_kernel,
     moe_align_block_size_torch,
+    sum_moe_routes,
 )
 
 
@@ -83,6 +84,49 @@ class MoeAlignTritonTest(unittest.TestCase):
                             actual, expected, atol=0.0078125, rtol=0.008
                         )
 
+    def test_nonlocal_routes_write_zero_during_graph_replay(self):
+        rows, experts, top_k = 4, 3, 2
+        n, k = 64, 64
+        ids = torch.arange(rows * top_k, device="cuda", dtype=torch.int32).view(
+            rows, top_k
+        ) % (experts + 1)
+        a = torch.randn(rows, k, device="cuda", dtype=torch.bfloat16)
+        b = torch.randn(experts, n, k, device="cuda", dtype=torch.bfloat16)
+        weights = torch.rand(rows * top_k, device="cuda")
+        actual = torch.empty(rows * top_k, n, device="cuda", dtype=torch.bfloat16)
+        expected = torch.empty_like(actual)
+        config = get_default_config(rows, experts, n, k, top_k)
+
+        def run(route_ids, route_weights, out, aligned_experts):
+            layout = moe_align_block_size_torch(
+                route_ids, config["BLOCK_SIZE_M"], aligned_experts
+            )
+            invoke_fused_moe_kernel(
+                a,
+                b,
+                out,
+                route_weights,
+                route_ids.flatten(),
+                *layout,
+                True,
+                top_k,
+                config,
+                tl.bfloat16,
+                skip_remote_experts=aligned_experts > experts,
+            )
+
+        run(ids, weights, actual, experts + 1)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run(ids, weights, actual, experts + 1)
+        for shift in range(2):
+            ids.add_(shift).remainder_(experts + 1)
+            graph.replay()
+            local = ids != experts
+            run(ids.clamp(max=experts - 1), weights * local.flatten(), expected, experts)
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+            self.assertEqual(torch.count_nonzero(actual[~local.flatten()]).item(), 0)
+
     def compare(self, ids, block, experts):
         actual = moe_align_decode(ids, block, experts)
         expected = moe_align_block_size_torch(ids, block, experts)
@@ -103,27 +147,34 @@ class MoeAlignTritonTest(unittest.TestCase):
                         self.compare(ids.remainder(3), block, experts)
 
     def test_cuda_graph_refreshes_routing_and_padding_in_both_directions(self):
-        for batch in (1, 8, 32):
-            ids = torch.randint(512, (batch, 10), device="cuda", dtype=torch.int32)
+        for batch, experts in ((1, 512), (8, 512), (32, 512), (32, 513), (64, 257)):
+            ids = torch.randint(experts, (batch, 10), device="cuda", dtype=torch.int32)
             for _ in range(3):
-                moe_align_decode(ids, 16, 512)
+                moe_align_decode(ids, 16, experts)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                actual = moe_align_decode(ids, 16, 512)
-            for spread in (1, 512, 3, 512):
-                ids.copy_(
-                    torch.randint(spread, ids.shape, device="cuda", dtype=torch.int32)
-                )
+                actual = moe_align_decode(ids, 16, experts)
+            for first, last in ((0, 1), (0, experts), (experts - 1, experts)):
+                ids.random_(first, last)
                 graph.replay()
-                expected = moe_align_block_size_torch(ids, 16, 512)
+                expected = moe_align_block_size_torch(ids, 16, experts)
                 for a, e in zip(actual, expected):
                     torch.testing.assert_close(a, e, atol=0, rtol=0)
 
-    def test_rejects_unbounded_or_non_power_of_two_geometry(self):
-        for batch, experts in ((33, 512), (8, 511), (8, 1024)):
+    def test_rejects_unbounded_geometry(self):
+        for batch, experts in ((65, 512), (8, 514)):
             ids = torch.zeros(batch, 10, device="cuda", dtype=torch.int32)
             with self.assertRaises(ValueError):
                 moe_align_decode(ids, 16, experts)
+
+    def test_prefill_route_sum_matches_torch(self):
+        if torch.cuda.get_device_capability() != (9, 0):
+            self.skipTest("SM90 route reduction requires SM90")
+        for rows in (513, 8192):
+            routed = torch.randn((rows, 10, 2560), device="cuda", dtype=torch.bfloat16)
+            torch.testing.assert_close(
+                sum_moe_routes(routed), routed.sum(dim=1), atol=0, rtol=0
+            )
 
 
 if __name__ == "__main__":
