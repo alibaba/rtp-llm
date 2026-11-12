@@ -146,7 +146,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             }
             orderedQueue.add(entry);
             registered.put(future, entry);
-            FlexlbTrace.recordScheduleEvent(context.getTraceContext(), "flexlb.queue.enqueued",
+            FlexlbTrace.event(context.getTraceContext(), "flexlb.queue.enqueued",
                     Attributes.builder()
                             .put("flexlb.queue.depth", orderedQueue.size())
                             .put("flexlb.request.priority", priority).build());
@@ -181,7 +181,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             entry.context.setPlanCost(0L);
             entry.context.setVictimCount(0);
             orderedQueue.restore(entry);
-            FlexlbTrace.recordScheduleEvent(entry.context.getTraceContext(), "flexlb.queue.requeued",
+            FlexlbTrace.event(entry.context.getTraceContext(), "flexlb.queue.requeued",
                     Attributes.builder()
                             .put("flexlb.queue.depth", orderedQueue.size()).build());
             changed.signal();
@@ -364,8 +364,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             return Plan.done(entry, availabilitySequence);
         }
         long decisionStartedNanos = System.nanoTime();
-        FlexlbTrace.recordScheduleEvent(entry.context.getTraceContext(), "flexlb.decision.started",
-                Attributes.empty());
+        FlexlbTrace.event(entry.context.getTraceContext(), "flexlb.decision.started");
         try {
             // A wakeup grants a fresh fleet-wide decision, not an obligation
             // to return to the endpoint which published the capacity event.

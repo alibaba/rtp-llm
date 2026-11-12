@@ -97,8 +97,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     @Override
     public void schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
                          StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver) {
-        FlexlbTrace.recordScheduleEvent(entryTraceContext(), "flexlb.request.received",
-                io.opentelemetry.api.common.Attributes.empty());
+        FlexlbTrace.event(entryTraceContext(), "flexlb.request.received");
         long requestId = request.getRequestId();
         Long interceptedEntryNanos = GrpcServerTimingInterceptor.getNanos();
         serverLatencyRecorder.recordArrival(
@@ -114,7 +113,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             boolean masterAtEntry = consistencyEnabled
                     && masterElectService.isMaster();
             boolean forwardToMaster = consistencyEnabled && !masterAtEntry;
-            FlexlbTrace.recordScheduleEvent(requestContext.getTraceContext(), "flexlb.routing.started",
+            FlexlbTrace.event(requestContext.getTraceContext(), "flexlb.routing.started",
                     io.opentelemetry.api.common.Attributes.builder()
                             .put("flexlb.forward_to_master", forwardToMaster).build());
             engineHealthReporter.reportArriveDelayTime(requestContext);
