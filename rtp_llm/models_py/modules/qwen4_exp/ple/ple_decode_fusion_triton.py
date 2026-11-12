@@ -267,7 +267,14 @@ def try_ple_decode_fusion(
     output = torch.empty_like(hidden, memory_format=torch.contiguous_format)
     # Use separate tiling for the gate reduction and the history copy.
     if paged_write or (reuse_history and batch >= 16 and history.is_contiguous()):
-        gates = try_ple_gate(key, value, hidden, norm_key, norm_query, norm_conv, eps)
+        pages = (
+            (history_read_blocks, history_write_blocks, history_write_mode)
+            if paged_write
+            else None
+        )
+        gates = try_ple_gate(
+            key, value, hidden, norm_key, norm_query, norm_conv, eps, decode_pages=pages,
+        )
         if gates is not None:
             block = 512
             scratch = history.new_empty((batch, state_len, width)) if paged_write else None

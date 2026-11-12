@@ -9,8 +9,12 @@ import torch
 from rtp_llm.models_py.modules.qwen4_exp.ple import (
     ple_conv_triton,
     ple_decode_fusion_triton,
+    ple_gather_triton,
 )
-from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpPLELayer
+from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
+    Qwen4ExpNGramEmbedding,
+    Qwen4ExpPLELayer,
+)
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple_decode_plan_triton import (
     try_plan_decode_cache,
 )
@@ -241,7 +245,11 @@ class PLEDecodeFusionTest(unittest.TestCase):
             self.assert_exact((output, pool), (expected_output, expected_pool))
 
     def test_paged_conv_graph_switches_between_direct_and_staged_writes(self):
-        batch = 16
+        for batch in (16, 64, 128):
+            with self.subTest(batch=batch):
+                self._check_paged_conv_graph(batch)
+
+    def _check_paged_conv_graph(self, batch):
         kw = {"device": "cuda", "dtype": torch.bfloat16}
         hidden = torch.randn(batch, 1, 10240, **kw)
         key = torch.randn_like(hidden)
@@ -263,7 +271,7 @@ class PLEDecodeFusionTest(unittest.TestCase):
         def forward():
             read, write, ctx_write, history = try_plan_decode_cache(
                 lengths, ids, table, ctx_table, pool, context, 64,
-                graph_mode=True, state_write_mode=mode,
+                graph_mode=True,
             )
             output, state = fuse(
                 key, value, hidden, *norms, pool, weight, 1e-6, 3, add_residual=True,
@@ -284,6 +292,8 @@ class PLEDecodeFusionTest(unittest.TestCase):
             ([reads[0], *reads[:-1]], writes, 65, False),  # shared read pages
             (reads, writes, 64, False),  # same-page updates, one owner per page
             (reads, [reads[1], reads[0], *writes[2:]], 65, True),  # page swap
+            (reads, [reads[-1], *writes[1:]], 65, True),  # direct and staged in one batch
+            (reads, [writes[1], *writes[1:]], 65, True),  # duplicate, no read hazard
             ([0, *reads[1:]], [0, 0, *writes[2:]], 65, True),  # dummy alias
             (reads, writes, 65, False),
         )
@@ -317,6 +327,46 @@ class PLEDecodeFusionTest(unittest.TestCase):
                     (output, pool, context), (expected, expected_pool, expected_context)
                 )
                 self.assertEqual(bool((mode != 1).any().item()), staged)
+
+    def test_inline_bf16_hash_gather_graph_matches_separate_kernels(self):
+        eos = 151643
+        shard_size = 256
+        shards = [
+            torch.randn(shard_size, 160, dtype=torch.bfloat16).pin_memory()
+            for _ in range(4)
+        ]
+        embedding = Qwen4ExpNGramEmbedding(
+            shards,
+            torch.full((16,), 127, device="cuda", dtype=torch.int64),
+            torch.arange(16, device="cuda", dtype=torch.int64) * 128,
+            torch.tensor(
+                [8895235927375, -6951273546288326311, 1753814622540031003],
+                device="cuda", dtype=torch.int64,
+            ),
+            ngram_size=3, eos_token_id=eos, shard_indices=[0, 2, 5, 7],
+            total_shards=8, distributed_reduce=True, inline_cpu_uva_graph=True,
+        )
+        with patch.object(embedding, "_reduce_rows", side_effect=lambda x: x.flatten(-2)):
+            for batch in (16, 64, 128):
+                with self.subTest(batch=batch), embedding.lookup_context(True):
+                    history = torch.randint(eos, (batch, 3), device="cuda")
+                    embedding(history, 1)
+                    torch.cuda.synchronize()
+                    graph = torch.cuda.CUDAGraph()
+                    with patch.object(embedding, "_gather_local", side_effect=AssertionError):
+                        with torch.cuda.graph(graph):
+                            actual = embedding(history, 1)
+                    for column in range(3):
+                        history.random_(0, eos)
+                        history[0, column] = eos
+                        with patch.object(
+                            ple_gather_triton, "try_gather_hashed_decode", return_value=None,
+                        ):
+                            expected = embedding(history, 1)
+                        graph.replay()
+                        self.assert_exact((actual,), (expected,))
+                    del graph
+        embedding.close()
 
     def test_cache_plan_cross_page_independent_tables(self):
         lengths = torch.tensor([63, 64, 65, 128], device="cuda", dtype=torch.int32)

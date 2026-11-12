@@ -81,6 +81,11 @@ def _ple_gate(
     Normed,
     KS,
     VS,
+    StateReads,
+    StateWrites,
+    StateWriteMode,
+    DECODE_BATCH: tl.constexpr,
+    DECODE_TILE: tl.constexpr,
     WIDTH: tl.constexpr,
     H: tl.constexpr,
     EPS: tl.constexpr,
@@ -95,7 +100,21 @@ def _ple_gate(
     row = tl.program_id(0).to(tl.int64)
     col = tl.arange(0, BLOCK)
     valid = col < H
-    hc_col = tl.program_id(1) * H + col
+    branch = tl.program_id(1)
+    hc_col = branch * H + col
+    if DECODE_BATCH:
+        if branch == 0:
+            slots = tl.arange(0, DECODE_TILE)
+            target = tl.load(StateWrites + row).to(tl.int32)
+            live = slots < DECODE_BATCH
+            reads = tl.load(StateReads + slots, live, other=-1).to(tl.int32)
+            writes = tl.load(StateWrites + slots, live, other=-1).to(tl.int32)
+            aliased = tl.max(((slots != row) & (reads == target)).to(tl.int32), 0)
+            superseded = tl.max(((slots > row) & (writes == target)).to(tl.int32), 0)
+            # A direct write cannot clobber any peer's read, even if that peer
+            # stages its write. Only the last request targeting a page writes it.
+            mode = tl.where(superseded != 0, 0, tl.where(aliased != 0, 2, 1))
+            tl.store(StateWriteMode + row, mode)
     gated, normed = _gate_branch(
         Key, Value, Hidden, GK, GQ, GC, KS, VS, row, col, hc_col, valid,
         H, EPS, KEY_STRIDE, VALUE_STRIDE, HIDDEN_STRIDE, PROJECTED_FP32, PAGE,
@@ -115,6 +134,7 @@ def try_ple_gate(
     projection_scales=None,
     *,
     page_size=128,
+    decode_pages=None,
 ):
     projected = projection_scales is not None
     if projected and not (
@@ -167,6 +187,7 @@ def try_ple_gate(
     gated = torch.empty(hidden.shape, device=hidden.device, dtype=hidden.dtype)
     normed = torch.empty_like(gated)
     if hidden.shape[1]:
+        decode_batch = hidden.shape[0] if decode_pages is not None else 0
         # S=1 projection views may have the packed K/V row stride.
         row_dim = 0 if hidden.shape[1] == 1 else 1
         _ple_gate[(hidden.shape[0] * hidden.shape[1], 4)](
@@ -179,6 +200,9 @@ def try_ple_gate(
             gated,
             normed,
             *(projection_scales if projected else (None, None)),
+            *(decode_pages if decode_pages is not None else (None,) * 3),
+            DECODE_BATCH=decode_batch,
+            DECODE_TILE=triton.next_power_of_2(decode_batch) if decode_batch else 0,
             WIDTH=10240,
             H=2560,
             EPS=eps,

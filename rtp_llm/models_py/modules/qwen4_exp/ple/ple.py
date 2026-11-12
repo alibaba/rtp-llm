@@ -527,10 +527,37 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             # its device address before capture. Capture hash + UVA gather on
             # the model stream so each replay reads its own current history.
             # Eager prefetch and its ready/consumed lifecycle remain unchanged.
+            if (
+                seq_len == 1
+                and self.ngram_size == 3
+                and self.heads_per_ngram == 8
+                and self._cpu_uva_pointers is not None
+                and type(self) is Qwen4ExpNGramEmbedding
+                and type(self).hashed_ids is _NGRAM_HASHED_IDS
+                and type(self).gather is _NGRAM_GATHER
+                and "hashed_ids" not in self.__dict__
+                and "gather" not in self.__dict__
+            ):
+                from .ple_gather_triton import try_gather_hashed_decode
+
+                rows = try_gather_hashed_decode(
+                    token_history,
+                    self.vocab_sizes,
+                    self.offsets,
+                    self.multipliers,
+                    self.shards,
+                    self._cpu_uva_pointers,
+                    self.total_shards,
+                    self.eos_token_id,
+                )
+                if rows is not None:
+                    return self._reduce_rows(rows)
         return self.gather(self.hashed_ids(token_history.long(), seq_len))
 
 
 _NGRAM_FORWARD = Qwen4ExpNGramEmbedding.forward
+_NGRAM_HASHED_IDS = Qwen4ExpNGramEmbedding.hashed_ids
+_NGRAM_GATHER = Qwen4ExpNGramEmbedding.gather
 
 
 class Qwen4ExpPLELayer(nn.Module):

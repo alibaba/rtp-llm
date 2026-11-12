@@ -112,7 +112,6 @@ class PLEExecution:
         page_size,
         *,
         graph_mode,
-        state_write_mode=None,
     ):
         if not ids.is_cuda or torch.version.hip is not None:
             return None
@@ -141,7 +140,6 @@ class PLEExecution:
             ctx_pool,
             page_size,
             graph_mode=graph_mode,
-            state_write_mode=state_write_mode,
         )
 
     def _validate_ple_mode(
@@ -756,7 +754,6 @@ class PLEExecution:
                 ctx_pool,
                 page_size,
                 graph_mode=graph_capture,
-                state_write_mode=state_write_mode,
             )
             conv_read_blocks = None
             direct_write = {}

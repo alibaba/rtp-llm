@@ -45,7 +45,6 @@ def _decode_cache_plan(
     Blocks,
     History,
     Bad,
-    StateWriteMode,
     B: tl.constexpr,
     S_COLS: tl.constexpr,
     S_ROW: tl.constexpr,
@@ -57,7 +56,6 @@ def _decode_cache_plan(
     C_ROWS: tl.constexpr,
     BLOCK: tl.constexpr,
     GRAPH_MODE: tl.constexpr,
-    PLAN_DIRECT_WRITE: tl.constexpr,
 ):
     tile = tl.program_id(0)
     row = tile.to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
@@ -92,24 +90,6 @@ def _decode_cache_plan(
     first = tl.load(ContextPool + cr * 2, read_history, other=0)
     second = tl.load(ContextPool + cr * 2 + 1, read_history, other=0)
     token = tl.load(Ids + row, live, other=0).to(tl.int64)
-    if PLAN_DIRECT_WRITE:
-        # All requests fit in this CTA. Preserve the batch-wide read snapshot
-        # if a writer could clobber another request's read or write page.
-        slots = tl.arange(0, BLOCK)
-        read = sr.to(tl.int32)
-        write = sw.to(tl.int32)
-        both_live = live[:, None] & live[None, :]
-        shared_read = both_live & (slots[:, None] != slots[None, :]) & (
-            write[:, None] == read[None, :]
-        )
-        later_write = both_live & (slots[:, None] < slots[None, :]) & (
-            write[:, None] == write[None, :]
-        )
-        stage = tl.max(tl.max((shared_read | later_write).to(tl.int32), 1), 0)
-        last_writer = tl.max(later_write.to(tl.int32), 1) == 0
-        # 1: direct, 2: staged and committed after all reads, 0: superseded.
-        mode = tl.where(stage != 0, tl.where(last_writer, 2, 0), 1)
-        tl.store(StateWriteMode + row, mode, live)
     tl.store(Blocks + row, sr, live)
     tl.store(Blocks + B + row, sw, live)
     tl.store(Blocks + 2 * B + row, cw, live)
@@ -131,7 +111,6 @@ def try_plan_decode_cache(
     page_size,
     *,
     graph_mode=False,
-    state_write_mode=None,
 ):
     """Plan PLE cache accesses without writing persistent state.
 
@@ -185,21 +164,12 @@ def try_plan_decode_cache(
     # instead of growing one CTA's register footprint with the whole batch.
     block = min(triton.next_power_of_2(batch), 128)
     tiles = triton.cdiv(batch, block)
-    if state_write_mode is not None and (
-        tiles != 1
-        or state_write_mode.shape != (batch,)
-        or state_write_mode.device != ids.device
-        or state_write_mode.dtype != torch.int32
-        or not state_write_mode.is_contiguous()
-    ):
-        return None
     blocks = torch.empty((3, batch), device=ids.device, dtype=torch.int64)
     history = torch.empty((batch, 3), device=ids.device, dtype=torch.int64)
     bad = None if graph_mode else torch.empty(tiles, device=ids.device, dtype=torch.int32)
     device_lengths = (
         lengths if graph_mode else lengths.to(device=ids.device, non_blocking=True)
     )
-    wide_plan = state_write_mode is not None and block >= 32
     _decode_cache_plan[(tiles,)](
         device_lengths,
         ids,
@@ -209,7 +179,6 @@ def try_plan_decode_cache(
         blocks,
         history,
         bad,
-        state_write_mode,
         B=batch,
         S_COLS=state_table.shape[1],
         S_ROW=state_table.stride(0),
@@ -221,8 +190,7 @@ def try_plan_decode_cache(
         C_ROWS=context_pool.shape[0],
         BLOCK=block,
         GRAPH_MODE=graph_mode,
-        PLAN_DIRECT_WRITE=state_write_mode is not None,
-        num_warps=4 if wide_plan or block > 64 else 1,
+        num_warps=1 if block <= 64 else 4,
     )
     if bad is not None and bool((bad if tiles == 1 else bad.any()).item()):
         return None
