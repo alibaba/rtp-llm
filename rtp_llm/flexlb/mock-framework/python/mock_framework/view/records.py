@@ -311,7 +311,7 @@ def load_experiment_view(directory):
     if collection is not None and type(collection.get("complete")) is not bool:
         warnings.append("prometheus/collection.json: complete must be a boolean")
         collection = None
-    versions = optional("code.json", list)
+    versions = optional("git-state.json", list)
     return {
         "name": case.get("name") or case.get("id") or directory.name,
         "describe": case.get("describe", ""),

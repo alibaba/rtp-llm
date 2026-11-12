@@ -76,7 +76,7 @@ def completed(tmp_path):
     )
     (source / "case.yaml").write_text("id: basic\n")
     write(
-        source / "code.json",
+        source / "git-state.json",
         [{"commit": "saved-sha", "diff": "saved working tree diff"}],
     )
     write(
@@ -329,7 +329,7 @@ def test_view_refuses_to_write_inside_experiment_outputs(completed):
     [
         "configuration.json",
         "case.yaml",
-        "code.json",
+        "git-state.json",
         "prometheus/collection.json",
         "events.jsonl",
         "gates.jsonl",
@@ -346,7 +346,7 @@ def test_missing_optional_artifact_preserves_saved_verdict(completed, name):
 
 
 def test_damaged_optional_artifact_and_partial_journal_are_reported(completed):
-    (completed / "code.json").write_text("{broken")
+    (completed / "git-state.json").write_text("{broken")
     with (completed / "gates.jsonl").open("a") as stream:
         stream.write('{"step":\n')
         stream.write(json.dumps({"status": "PASS"}) + "\n")
@@ -358,7 +358,7 @@ def test_damaged_optional_artifact_and_partial_journal_are_reported(completed):
     assert body["versions"] is None
     assert len(body["gates"]) == 2
     assert body["result"]["status"] == "ERROR"
-    assert any("code.json" in warning for warning in body["warnings"])
+    assert any("git-state.json" in warning for warning in body["warnings"])
     assert any("gates.jsonl:3" in warning for warning in body["warnings"])
     assert any("gates.jsonl:4" in warning for warning in body["warnings"])
     assert any("events.jsonl:5" in warning for warning in body["warnings"])
@@ -552,7 +552,7 @@ def test_metrics_processes_are_reaped_after_failure_or_cancel(
 def test_nonfinite_optional_json_is_reported_instead_of_breaking_http(
     completed, number
 ):
-    (completed / "code.json").write_text('[{"value":' + number + "}]")
+    (completed / "git-state.json").write_text('[{"value":' + number + "}]")
     body = load_experiment_view(completed)
     assert body["versions"] is None
     json.dumps(body, allow_nan=False)

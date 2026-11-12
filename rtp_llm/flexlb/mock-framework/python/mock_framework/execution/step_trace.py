@@ -92,28 +92,38 @@ class StepTrace:
         )
         self._streams[stream].flush()
 
-    def versions(self, directories):
+    def record_git_state(self, directories):
+        def git(directory, *arguments):
+            return subprocess.run(
+                ["git", "-C", directory, *arguments],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
+            ).stdout
+
         versions = []
+        worktrees = {}
         for directory in sorted(set(map(str, directories))):
-            item = {"directory": directory}
-            for key, arguments in [
-                ("commit", ["rev-parse", "HEAD"]),
-                ("status", ["status", "--porcelain"]),
-                ("diff", ["diff", "--binary", "HEAD"]),
-            ]:
-                try:
-                    result = subprocess.run(
-                        ["git", "-C", directory, *arguments],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                        check=True,
-                    )
-                    item[key] = result.stdout.rstrip()
-                except (OSError, subprocess.SubprocessError) as error:
-                    item[key] = {"unavailable": str(error)}
-            versions.append(item)
-        write_json(self.directory / "code.json", versions)
+            try:
+                root = git(directory, "rev-parse", "--show-toplevel").rstrip("\n")
+            except (OSError, subprocess.SubprocessError):
+                root = directory
+
+            if root not in worktrees:
+                state = {}
+                for key, arguments in [
+                    ("commit", ["rev-parse", "HEAD"]),
+                    ("status", ["status", "--porcelain"]),
+                    ("diff", ["diff", "--binary", "HEAD"]),
+                ]:
+                    try:
+                        state[key] = git(root, *arguments).rstrip()
+                    except (OSError, subprocess.SubprocessError) as error:
+                        state[key] = {"unavailable": str(error)}
+                worktrees[root] = state
+            versions.append({"directory": directory, **worktrees[root]})
+        write_json(self.directory / "git-state.json", versions)
 
     def close(self, result):
         try:

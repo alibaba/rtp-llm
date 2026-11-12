@@ -61,7 +61,7 @@ async def run_case(case, launch, directory):
     result = {"status": "ERROR", "started_at": timestamp()}
     cancelled = False
     try:
-        records.versions(
+        records.record_git_state(
             [
                 Path(__file__).resolve().parents[3],
                 case.directory,
