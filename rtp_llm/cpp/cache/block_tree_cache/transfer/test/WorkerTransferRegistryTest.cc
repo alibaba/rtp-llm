@@ -100,6 +100,8 @@ TEST(WorkerTransferRegistryTest, RecoveryQueryRejectsLateExecutionWithFreshDeadl
     const auto              original = task(3);
     const auto              trace    = original.traceId();
     EXPECT_EQ(dispatcher.queryLocalCompletion(trace), State::REJECTED);
+    EXPECT_EQ(dispatcher.forgetLocalCompletion(trace), TransferTaskRegistry::ForgetResult::DONE);
+    EXPECT_EQ(state(dispatcher, trace), State::REJECTED);
     // The delayed RPC can reconstruct a fresh budget. The trace fence, rather
     // than its deadline, must reject it before any physical batch is submitted.
     auto late = task(3);
@@ -111,11 +113,44 @@ TEST(WorkerTransferRegistryTest, RecoveryQueryRejectsLateExecutionWithFreshDeadl
     EXPECT_TRUE(context->result().buffer_safe);
     EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
     EXPECT_EQ(engine->submissions, 0u);
-    EXPECT_EQ(state(dispatcher, trace), State::REJECTED);
+    EXPECT_EQ(state(dispatcher, trace), State::UNKNOWN);
+    EXPECT_EQ(dispatcher.taskRegistry().size(), 0u);
     EXPECT_EQ(dispatcher.forgetLocalCompletion(trace), TransferTaskRegistry::ForgetResult::DONE);
-    EXPECT_FALSE(dispatcher.executePerRank(late)->success());
-    EXPECT_EQ(engine->submissions, 0u);
+    EXPECT_EQ(state(dispatcher, trace), State::UNKNOWN);
+    // A subsequent recovery query starts a new retention fence.
     EXPECT_EQ(dispatcher.queryLocalCompletion(trace), State::REJECTED);
+}
+
+TEST(WorkerTransferRegistryTest, ExpiredMissingMetadataCannotAdmitLateIoWithFreshDeadline) {
+    auto                    now      = TransferTaskRegistry::Clock::time_point{};
+    auto                    registry = std::make_shared<TransferTaskRegistry>([&] { return now; });
+    auto                    engine   = std::make_shared<ControlledProducer>();
+    BlockTransferDispatcher dispatcher(engine);
+    dispatcher.task_registry_ = registry;
+    for (const bool query_again : {false, true}) {
+        const auto original = task(3);
+        const auto trace    = original.traceId();
+        ASSERT_EQ(dispatcher.queryLocalCompletion(trace), State::REJECTED);
+        now += std::chrono::hours(2);
+        ASSERT_EQ(registry->cleanupExpiredMissing(), 1u);
+        ASSERT_EQ(state(dispatcher, trace), State::REJECTED);
+        if (query_again) {
+            EXPECT_EQ(dispatcher.queryLocalCompletion(trace), State::REJECTED);
+        }
+        EXPECT_EQ(dispatcher.forgetLocalCompletion(trace), TransferTaskRegistry::ForgetResult::DONE);
+        auto late = task(3);
+        late.setTraceId(trace);
+        ASSERT_FALSE(late.expired());
+        auto context = dispatcher.executePerRank(std::move(late));
+        ASSERT_TRUE(context->done());
+        EXPECT_FALSE(context->success());
+        EXPECT_TRUE(context->result().buffer_safe);
+        EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
+        EXPECT_EQ(engine->submissions, 0u);
+        EXPECT_EQ(state(dispatcher, trace), State::UNKNOWN);
+        EXPECT_EQ(registry->size(), 0u);
+        EXPECT_EQ(registry->cleanupExpiredMissing(), 0u);
+    }
 }
 
 TEST(WorkerTransferRegistryTest, RecoveryQueryPreservesAlreadyAdmittedExecution) {

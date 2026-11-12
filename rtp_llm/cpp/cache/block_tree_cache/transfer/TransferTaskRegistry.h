@@ -1,11 +1,18 @@
 #pragma once
 
+#include <algorithm>
+#include <chrono>
+#include <functional>
+#include <iterator>
+#include <list>
+#include <limits>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <random>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -14,7 +21,12 @@ namespace rtp_llm {
 
 // Local completion evidence keyed by the caller's unique execution trace.
 // Completed entries remain queryable until explicitly forgotten or this registry is destroyed.
-// Rejected executions remain barred for the entire registry lifetime.
+// Missing executions remain barred until their sole late arrival is rejected
+// or this worker registry is destroyed. Expiring access/rotation metadata must
+// never reopen admission after a closed-admission proof authorized release.
+// Rejection records have no capacity limit. Safe reclamation requires proof
+// that the delayed execution can no longer arrive at this registry.
+// Execution IDs are never resent to a worker within the worker group's lifetime.
 // Ordinary transfer reuses its numeric trace ID; KVCM can reuse its existing string
 // identity in a separate registry instance. No per-task identity is generated here.
 // The worker group shares one lifetime; records are not reused across instances.
@@ -34,7 +46,10 @@ public:
         INVALID
     };
 
-    TransferTaskRegistry(): epoch_(makeEpoch()) {
+    using Clock = std::chrono::steady_clock;
+    using Now   = std::function<Clock::time_point()>;
+
+    explicit TransferTaskRegistry(Now now = [] { return Clock::now(); }): epoch_(makeEpoch()), now_(std::move(now)) {
         logEvent("create", "", State::UNKNOWN, "created");
     }
 
@@ -46,7 +61,7 @@ public:
         return epoch_;
     }
 
-    // Includes pending/completed executions and permanent rejection records.
+    // Includes pending/completed executions and retained missing records.
     size_t size() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return records_.size();
@@ -61,6 +76,19 @@ public:
         }
         std::lock_guard<std::mutex> lock(mutex_);
         const auto                  inserted = records_.emplace(trace_id, State::RUNNING);
+        if (!inserted.second && inserted.first->second == State::REJECTED) {
+            // The fence has intercepted its sole possible late execution. Consume
+            // it atomically, but reject this arrival without admitting any I/O.
+            const auto missing = missing_.find(trace_id);
+            if (missing != missing_.end()) {
+                missing_queue_.erase(missing->second.position);
+                missing_.erase(missing);
+            }
+            records_.erase(inserted.first);
+            logged_query_states_.erase(trace_id);
+            logEvent("begin", trace_id, State::REJECTED, "late_execution_rejected_and_removed");
+            return false;
+        }
         logEvent("begin", trace_id, inserted.first->second, inserted.second ? "inserted" : "duplicate");
         return inserted.second;
     }
@@ -80,7 +108,8 @@ public:
             return false;
         }
         if (it->second == State::REJECTED) {
-            // A late completion must not turn a ban into a forgettable record.
+            // A late completion must not turn a missing record into a safety proof.
+            touchMissing(trace_id, "finish");
             logEvent("finish", trace_id, it->second, "rejection_retained");
             return true;
         }
@@ -95,9 +124,10 @@ public:
         return trace_id != 0 && finish(std::to_string(trace_id), buffer_safe);
     }
 
-    // Only explicit safety proof permits deletion. Missing records are already
-    // forgotten; a later finish never recreates them. REJECTED records acknowledge
-    // cleanup with DONE but keep the ban for the registry lifetime.
+    // Admitted executions require safety proof before deletion. Absent records
+    // are already forgotten; a later finish never recreates them. Missing fences
+    // survive client cleanup: DONE lets the caller retire its cleanup record,
+    // while the server still rejects its sole late execution regardless of age.
     ForgetResult forget(const std::string& trace_id) {
         if (trace_id.empty()) {
             logEvent("forget", trace_id, State::UNKNOWN, "invalid");
@@ -110,7 +140,7 @@ public:
             return ForgetResult::DONE;
         }
         if (it->second == State::REJECTED) {
-            logEvent("forget", trace_id, it->second, "admission_ban_retained");
+            logEvent("forget", trace_id, State::REJECTED, "fence_retained_cleanup_acknowledged");
             return ForgetResult::DONE;
         }
         if (it->second != State::BUFFER_SAFE) {
@@ -128,7 +158,7 @@ public:
 
     // Recovery queries close admission for missing identities atomically with
     // begin(). Either execution registered first and remains RUNNING, or this
-    // query installs a permanent ban before reporting that no I/O can start.
+    // query installs a fence before reporting that no I/O can start.
     // Ordinary diagnostic queryLocal() remains read-only.
     std::vector<State> queryAndBlockMissing(const std::vector<std::string>& trace_ids) {
         std::vector<State>          states(trace_ids.size(), State::UNKNOWN);
@@ -140,6 +170,18 @@ public:
             }
             const auto inserted = records_.emplace(trace_ids[i], State::REJECTED);
             states[i]           = inserted.first->second;
+            if (states[i] == State::REJECTED) {
+                try {
+                    touchMissing(trace_ids[i], "query");
+                } catch (...) {
+                    // A new fence is not published until its retention metadata
+                    // owns a valid queue position. No query proof escapes on failure.
+                    // An existing compact fence survives a failed metadata rebuild.
+                    if (inserted.second)
+                        records_.erase(inserted.first);
+                    throw;
+                }
+            }
             if (inserted.second)
                 logEvent("reject", trace_ids[i], states[i], "missing_admission_closed");
             logQuery(trace_ids[i], states[i]);
@@ -190,7 +232,80 @@ public:
         return expected_epoch == epoch_ ? queryLocal(trace_ids) : std::vector<State>(trace_ids.size(), State::UNKNOWN);
     }
 
+    // Called once per minute by cache maintenance. Expire only access/rotation
+    // metadata, retaining the compact REJECTED identity until its sole arrival
+    // is rejected. Proof-bearing admission bans cannot expire with this queue.
+    // A busy request path takes priority; defer this bounded batch rather than wait.
+    size_t cleanupExpiredMissing(size_t budget = 128) {
+        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+        if (!lock.owns_lock())
+            return 0;
+        const auto now     = now_();
+        const auto count   = std::min(budget, missing_queue_.size());
+        size_t     removed = 0;
+        for (size_t i = 0; i < count; ++i) {
+            const auto first   = missing_queue_.begin();
+            const auto missing = missing_.find(*first);
+            if (missing->second.expire_time <= now) {
+                missing_.erase(missing);
+                missing_queue_.erase(first);
+                ++removed;
+            } else {
+                missing_queue_.splice(missing_queue_.end(), missing_queue_, first);
+            }
+        }
+        return removed;
+    }
+
 private:
+    struct MissingRecord {
+        uint64_t                         count{0};
+        Clock::time_point                expire_time{};
+        Clock::time_point                last_warning_time{};
+        bool                             warned{false};
+        std::list<std::string>::iterator position;
+    };
+
+    // Caller holds mutex_. Diagnostic reads do not extend retention.
+    void touchMissing(const std::string& trace_id, const char* source) {
+        const auto now      = now_();
+        auto       inserted = missing_.try_emplace(trace_id);
+        auto&      record   = inserted.first->second;
+        if (inserted.second) {
+            try {
+                missing_queue_.push_back(trace_id);
+            } catch (...) {
+                // Keep both containers atomic even when the list allocation fails.
+                missing_.erase(inserted.first);
+                throw;
+            }
+            record.position    = std::prev(missing_queue_.end());
+            record.expire_time = now;
+        }
+        if (record.count != std::numeric_limits<uint64_t>::max())
+            ++record.count;
+        const auto base    = std::max(record.expire_time, now);
+        record.expire_time = base > Clock::time_point::max() - std::chrono::hours(1) ? Clock::time_point::max() :
+                                                                                       base + std::chrono::hours(1);
+        if (record.expire_time - now > std::chrono::hours(24)
+            && (!record.warned || now - record.last_warning_time >= std::chrono::hours(1))) {
+            record.warned            = true;
+            record.last_warning_time = now;
+            try {
+                RTP_LLM_LOG_WARNING(
+                    "transfer missing repeatedly accessed trace=%s registry=%s source=%s count=%lu remaining_seconds=%ld",
+                    trace_id.c_str(),
+                    epoch_.c_str(),
+                    source,
+                    static_cast<unsigned long>(record.count),
+                    static_cast<long>(
+                        std::chrono::duration_cast<std::chrono::seconds>(record.expire_time - now).count()));
+            } catch (...) {
+                // Diagnostics must not affect admission or completion evidence.
+            }
+        }
+    }
+
     // Log under the registry lock so begin/finish/forget/query ordering is
     // unambiguous. Diagnostics must never affect completion evidence.
     void logEvent(const char* event, const std::string& trace_id, State state, const char* result) const noexcept {
@@ -239,7 +354,10 @@ private:
     }
 
     const std::string                              epoch_;
+    const Now                                      now_;
     mutable std::mutex                             mutex_;
+    std::list<std::string>                         missing_queue_;
+    std::unordered_map<std::string, MissingRecord> missing_;
     std::unordered_map<std::string, State>         records_;
     mutable std::unordered_map<std::string, State> logged_query_states_;
 };
