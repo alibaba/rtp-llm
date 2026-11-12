@@ -102,23 +102,28 @@ def _aggregate_decode(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(by_step.values(), key=lambda e: (e["request_id"], e["step"]))
 
 
-def _latest_resident(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    best: Optional[Dict[str, Any]] = None
-    best_key: Tuple[int, int] = (-1, -1)
+def _resident_snapshots(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # Every entry is a real scheduler snapshot.  Keep distinct snapshots
+    # (operation + exact request set) instead of only the largest one: a
+    # later/earlier capacity wave must not hide the snapshot that contains
+    # the requests currently being summarized.
+    distinct: Dict[Tuple[str, Tuple[str, ...]], Dict[str, Any]] = {}
     for event in events:
         sequences = event.get("sequences") or []
-        key = (len(sequences), int(event.get("recorded_ns") or event.get("end_ns") or 0))
-        if key >= best_key:
-            best_key = key
-            best = event
-    if best is None:
-        return []
-    return [
-        {
-            "kind": "resident",
-            "sequences": best.get("sequences") or [],
-        }
-    ]
+        key = (
+            str(event.get("operation_id") or ""),
+            tuple(sorted(str(seq.get("request_id")) for seq in sequences)),
+        )
+        stamp = int(event.get("recorded_ns") or event.get("end_ns") or 0)
+        current = distinct.get(key)
+        if current is None or stamp >= int(current.get("recorded_ns") or 0):
+            distinct[key] = {
+                "kind": "resident",
+                "operation_id": event.get("operation_id") or "",
+                "recorded_ns": stamp,
+                "sequences": sequences,
+            }
+    return sorted(distinct.values(), key=lambda e: e["recorded_ns"], reverse=True)[:128]
 
 
 def _first_reuse(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -162,7 +167,7 @@ def aggregate_events(raw: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     result: List[Dict[str, Any]] = []
     result.extend(_aggregate_prefill(buckets["prefill"]))
     result.extend(_aggregate_decode(buckets["decode"]))
-    result.extend(_latest_resident(buckets["resident"]))
+    result.extend(_resident_snapshots(buckets["resident"]))
     result.extend(_first_reuse(buckets["reuse"]))
     result.extend(_captures(buckets["capture"]))
     for row in buckets["capacity_failure"]:

@@ -577,6 +577,17 @@ size_t AwiRuntime::barrierRequestCount() const {
 }
 
 bool AwiRuntime::recordingEnabled() const {
+    // AWI request binding happens on the API/rank-0 process.  Worker ranks
+    // need the same scheduler/graph instrumentation, so an evaluator launch
+    // sets AWI_RECORD_ALL=1.  The resulting events are still emitted only by
+    // real engine steps; request ids keep unrelated traffic separate.
+    static const bool forced = []() {
+        const char* value = std::getenv("AWI_RECORD_ALL");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    if (forced) {
+        return true;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     return recording_;
 }
