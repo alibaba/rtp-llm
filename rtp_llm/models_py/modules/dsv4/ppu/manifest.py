@@ -16,6 +16,36 @@ def _check_execution_options(options, required):
     return SupportResult(True)
 
 
+DECODE_ATTN_PROFILES = ("auto", "large_ep_full")
+
+# Kernel-level switches replaced by DSV4_PPU_DECODE_ATTN_PROFILE. Fail closed so
+# a stale deployment cannot silently lose the tiles it used to request.
+_REMOVED_ATTN_SWITCHES = ("DSV4_PPU_WOA_SMALL_TILE", "DSV4_PPU_HCA_SPLIT")
+
+
+def _resolve_decode_attn_profile(options, parallelism):
+    for removed in _REMOVED_ATTN_SWITCHES:
+        if removed in options:
+            raise ValueError(
+                f"{removed} was removed; set "
+                "DSV4_PPU_DECODE_ATTN_PROFILE=large_ep_full instead"
+            )
+    profile = options.get("DSV4_PPU_DECODE_ATTN_PROFILE", "auto")
+    if profile not in DECODE_ATTN_PROFILES:
+        raise ValueError(
+            "DSV4_PPU_DECODE_ATTN_PROFILE must be one of "
+            f"{DECODE_ATTN_PROFILES}, got {profile!r}"
+        )
+    if profile != "auto" and (
+        parallelism.ep_size not in (16, 32) or parallelism.tp_size != 1
+    ):
+        raise ValueError(
+            "DSV4_PPU_DECODE_ATTN_PROFILE=large_ep_full requires EP16/32 with TP1, "
+            f"got EP{parallelism.ep_size}/TP{parallelism.tp_size}"
+        )
+    return profile
+
+
 def validate_cache_config(kv_cache_config):
     if (kv_cache_config is not None and kv_cache_config.reuse_cache
             and os.environ.get("DSV4_PPU_PREFIX_REUSE") != "1"):
@@ -74,7 +104,13 @@ def build_provider(model_config, parallelism, moe_config, max_generate_batch_siz
     if role == "DECODE":
         from rtp_llm.models_py.modules.dsv4.ppu.ppu_decode_provider import PpuDecodeProvider
 
-        return PpuDecodeProvider(options)
+        attn_profile = _resolve_decode_attn_profile(options, parallelism)
+        return PpuDecodeProvider(
+            options,
+            ep_size=parallelism.ep_size,
+            tp_size=parallelism.tp_size,
+            attn_profile=attn_profile,
+        )
     from rtp_llm.models_py.modules.dsv4.ppu.ppu_module_provider import PpuModuleProvider
 
     return PpuModuleProvider(options)
@@ -83,7 +119,6 @@ PREFILL_EXECUTION_OPTIONS = {
     "DSV4_HC_IMPL": "hybrid",
     "DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm_deterministic",
     "DSV4_MHC_POST_BACKEND": "tilelang",
-    "DSV4_MHC_POST_PDL": "0",
     "DSV4_PPU_SGLANG_MOE": "1",
     "DSV4_PPU_SGLANG_WO_A": "1",
     "DSV4_MOE_SHARED_EXPERT_OVERLAP": "0",
@@ -96,7 +131,6 @@ DECODE_EXECUTION_OPTIONS = {
     "DSV4_HC_IMPL": "hybrid",
     "DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm_deterministic",
     "DSV4_MHC_POST_BACKEND": "tilelang",
-    "DSV4_MHC_POST_PDL": "0",
     "DSV4_PPU_SGLANG_MOE": "1",
     "DSV4_PPU_SGLANG_WO_A": "1",
     "DSV4_MOE_SHARED_EXPERT_OVERLAP": "0",

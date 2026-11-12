@@ -1,6 +1,5 @@
 # PPU variant of rtp_llm/models_py/3rdparty/tile_kernels/mhc/post_kernel.py
 import math
-import os
 
 import tilelang
 import torch
@@ -174,7 +173,7 @@ def mhc_post_fwd(
     comb_res_mix: torch.Tensor,
     out: torch.Tensor | None = None,
     *,
-    enable_pdl: bool | None = None,
+    enable_pdl: bool = False,
     prefill_tuned: bool = False,
 ) -> torch.Tensor:
     num_seqs, num_tokens, mhc, hidden = residual.shape
@@ -204,8 +203,6 @@ def mhc_post_fwd(
 
     if out is None:
         out = torch.empty_like(residual)
-    if enable_pdl is None:
-        enable_pdl = os.environ.get("DSV4_MHC_POST_PDL", "1") != "0"
     if mhc == 4 and hidden == 4096 and not enable_pdl:
         from rtp_llm.models_py.kernels.ppu.hc.ppu_hc_sum import _hc_post_sum
 

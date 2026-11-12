@@ -1,6 +1,5 @@
 """PPU reciprocal-square-root compressor kernels; shared validation stays upstream."""
 
-import os
 from typing import Optional
 
 import torch
@@ -589,6 +588,9 @@ def run_fused_compress_kv_write(
     cu_seq_per_req: Optional[torch.Tensor] = None,  # [B+1] int64
     state_tokens_per_block: int,
     is_decode: bool = False,
+    # Large-EP Decode split kernel. The provider resolves the topology and the
+    # decode profile; this wrapper must never read EP_SIZE/TP_SIZE from env.
+    hca_split: bool = False,
 ) -> Optional[torch.Tensor]:
     """Boundary-token compress→norm→rope→fp8 quant→KV-pool store.
 
@@ -667,9 +669,8 @@ def run_fused_compress_kv_write(
         and compress_ratio == 128
         and not overlap
         and state_width == 512
-        and 0 < N <= 12 and os.environ.get("EP_SIZE") in ("16", "32")
-        and os.environ.get("TP_SIZE") == "1"
-        and os.environ.get("DSV4_PPU_HCA_SPLIT", "0") == "1"
+        and 0 < N <= 12
+        and hca_split
     ):
         from rtp_llm.models_py.kernels.ppu.attention.ppu_hca_split import hca_decode_split
 
