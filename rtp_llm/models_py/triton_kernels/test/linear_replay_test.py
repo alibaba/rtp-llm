@@ -506,6 +506,58 @@ class LinearReplayTest(unittest.TestCase):
                     torch.testing.assert_close(
                         actual.reshape_as(expected), expected, rtol=0, atol=0
                     )
+                    finalize_linear_replay(cache, inputs, steps)
+                    snapshots = {
+                        name: tensor.clone()
+                        for name, tensor in vars(cache).items()
+                        if isinstance(tensor, torch.Tensor)
+                    }
+                    anchors = inputs.active_block_ids[1].clone()
+                    destination = torch.arange(
+                        2 * batch + 1,
+                        3 * batch + 1,
+                        device="cuda",
+                        dtype=torch.int32,
+                    )
+                    inputs.state_read_block_ids[1].copy_(anchors)
+                    inputs.active_block_ids[1].copy_(destination)
+                    inputs.history_valid_lengths.fill_(steps)
+                    inputs.history_epochs.fill_(1)
+                    inputs.verify_epochs.fill_(2)
+                    inputs.init_kinds.zero_()
+                    for accepted in range(1, steps + 1):
+                        for name, tensor in snapshots.items():
+                            getattr(cache, name).copy_(tensor)
+                        inputs.prev_accept_lengths.fill_(accepted)
+                        linear_serial_replay(
+                            q,
+                            k,
+                            v,
+                            a,
+                            b,
+                            weights,
+                            alog,
+                            bias,
+                            ssm,
+                            conv,
+                            cache,
+                            inputs,
+                            group_id=1,
+                            vector_gate=False,
+                        )
+                        checkpoint = block_map[:, accepted - 1].long()
+                        torch.testing.assert_close(
+                            ssm[destination.long()],
+                            reference_ssm[checkpoint],
+                            rtol=0,
+                            atol=0,
+                        )
+                        torch.testing.assert_close(
+                            conv[destination.long()],
+                            reference_conv[checkpoint],
+                            rtol=0,
+                            atol=0,
+                        )
 
     def test_kda_verify_matches_production_decode_operators(self):
         # The synthetic reference above must also agree with the operators

@@ -175,7 +175,7 @@ def _rebuild_state_kernel(
                 other=0,
             )
             state *= exp(gate[None, :])
-        state += residual[:, None] * key[None, :]
+        state = tl.fma(residual[:, None], key[None, :], state)
     tl.store(State + destination * STATE_STRIDE + state_offset, state, state_mask)
 
 
@@ -418,7 +418,7 @@ def _serial_verify_kernel(
         if GD == 1:
             beta = beta.to(RawBeta.dtype.element_ty).to(tl.float32)
         residual = (v - tl.sum(state * k[None, :], 1)) * beta
-        state += residual[:, None] * k[None, :]
+        state = tl.fma(residual[:, None], k[None, :], state)
         output = tl.sum(state * q[None, :], 1)
         tl.store(Output + (token * HV + hv) * V + iv, output, iv < V)
         tl.store(ULog + ((slot * CAPACITY + t) * HV + hv) * V + iv, residual, iv < V)
