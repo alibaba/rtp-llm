@@ -28,6 +28,14 @@ from rtp_llm.telemetry import vit_media
 
 register_heif_opener()
 _METRIC_TAGS = {"model": "deepseek_v41", "mm_type": "image"}
+_IMAGE_CONNECT_TIMEOUT_S = 3
+_IMAGE_READ_TIMEOUT_S = 20
+_IMAGE_DOWNLOAD_BUDGET_S = 30
+
+
+def image_download_deadline(deadline: float | None = None) -> float:
+    local_deadline = time.monotonic() + _IMAGE_DOWNLOAD_BUDGET_S
+    return local_deadline if deadline is None else min(deadline, local_deadline)
 
 
 def _image_download_chunks(response, deadline, cancellation_event):
@@ -41,7 +49,9 @@ def _image_download_chunks(response, deadline, cancellation_event):
             connection = getattr(raw, "connection", None)
             sock = getattr(connection, "sock", None)
             if sock is not None:
-                sock.settimeout(min(20, max(0.001, deadline - time.monotonic())))
+                sock.settimeout(
+                    min(_IMAGE_READ_TIMEOUT_S, max(0.001, deadline - time.monotonic()))
+                )
             # Do not wait for a full chunk on a slow-drip response.
             chunk = read1(64 * 1024, decode_content=True)
             if not chunk:
@@ -77,11 +87,7 @@ def load_image_source(
     max_bytes = 10 * 1024 * 1024
     if max_file_size_kb is not None and max_file_size_kb > 0:
         max_bytes = min(max_bytes, max_file_size_kb * 1024)
-    deadline = (
-        min(deadline, time.monotonic() + 60)
-        if deadline is not None
-        else time.monotonic() + 60
-    )
+    deadline = image_download_deadline(deadline)
     if not url.startswith(("http://", "https://")):
         return get_bytes_io_from_url(
             url,
@@ -96,11 +102,12 @@ def load_image_source(
         download_recorded = False
         try:
             _check_download(deadline, cancellation_event)
-            remaining = deadline - time.monotonic()
             with request_get(
                 url,
                 _get_http_heads(download_headers),
-                timeout=(min(5, remaining), min(20, remaining)),
+                timeout=(_IMAGE_CONNECT_TIMEOUT_S, _IMAGE_READ_TIMEOUT_S),
+                deadline=deadline,
+                cancellation_event=cancellation_event,
             ) as response:
                 status = response.status_code
                 if status in (408, 429, 500, 502, 503, 504):
