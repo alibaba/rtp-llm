@@ -63,7 +63,21 @@ def _is_same_host(addr) -> bool:
         return True
     if host.startswith("127.") or host in ("::1", "[::1]", "", "localhost"):
         return True
-    return host in _local_hosts
+    if host in _local_hosts:
+        return True
+    # Cluster-internal RPC and NCCL bootstrap use private/link-local
+    # addresses that need not appear in the hostname's getaddrinfo result.
+    # They are not downloads; count only traffic that leaves the private
+    # network.
+    try:
+        import ipaddress
+
+        address = ipaddress.ip_address(host)
+        if address.is_private or address.is_loopback or address.is_link_local:
+            return True
+    except ValueError:
+        pass
+    return False
 
 
 def _audit_hook(event: str, args) -> None:
