@@ -205,7 +205,7 @@ class MetadataGraphTest(unittest.TestCase):
 
     @torch.inference_mode()
     def test_mtp_verify_and_draft_metadata_match_reference(self):
-        for width in (2, 3, 4):
+        for width in (2, 3, 4, 5, 6):
             for role in ("verify", "draft"):
                 with self.subTest(width=width, role=role):
                     self._check_model_metadata(
@@ -223,7 +223,7 @@ class MetadataGraphTest(unittest.TestCase):
 
     @torch.inference_mode()
     def test_inactive_token_mask_tracks_device_tables(self):
-        for width in (1, 2, 3, 4):
+        for width in (1, 2, 3, 4, 5, 6):
             with self.subTest(width=width):
                 self._check_model_metadata(
                     "graph_fused", shared_rope=True, q_len=width,

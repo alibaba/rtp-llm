@@ -130,8 +130,8 @@ def normalize_decode_qkv(
     Optional SWA output writes the packed cache in the KV program, skipping
     slot -1 and preserving the standalone writer's invalid-access checks.
     """
-    if raw.ndim != 3 or raw.shape[1] not in (1, 2, 3, 4) or raw.shape[2] != 1536:
-        raise ValueError("Merged Decode QKV must have shape [B,Q,1536], Q=1/2/3/4")
+    if raw.ndim != 3 or raw.shape[1] not in (1, 2, 3, 4, 5, 6) or raw.shape[2] != 1536:
+        raise ValueError("Merged Decode QKV must have shape [B,Q,1536], Q=1..6")
     batch, queries = raw.shape[:2]
     rows = batch * queries
     tensors = (raw, q_weight, kv_weight, freqs)
