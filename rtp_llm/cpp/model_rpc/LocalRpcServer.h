@@ -40,9 +40,11 @@ public:
 
     virtual void startDeferredServices();
     virtual void updateRuntimeEndpoints(const RuntimeConfig& runtime_config);
-    void setDeferServiceStart(bool defer) {
-        defer_tp_broadcaster_ = defer;
-        defer_engine_loop_ = defer;
+    // Every deployment is two-phase: init() prepares, startDeferredServices()
+    // binds.  There is no immediate-start variant to switch between.
+    void deferServiceStart() {
+        defer_tp_broadcaster_ = true;
+        defer_engine_loop_    = true;
     }
 
     grpc::Status

@@ -23,7 +23,6 @@ class LanguageCppEngine(BaseEngine):
         engine_config: EngineConfig,
         world_info=None,
         propose_model: Optional[ProposeModel] = None,
-        defer_service_start: bool = False,
     ) -> None:
         """Initialize RPCEngine with model and engine configuration.
 
@@ -74,36 +73,24 @@ class LanguageCppEngine(BaseEngine):
             self.token_processor,
             self.mm_process_engine,
         )
-        self.defer_service_start = defer_service_start
         self._service_started = False
 
     @timer_wrapper(description="start async engine")
     @override
     def _start(self) -> None:
         start_time = time.time()
-        self.rtp_llm_op_.start(defer_service_start=self.defer_service_start)
+        # Phase 1: build engine state.  Listeners start in start_service(),
+        # which every deployment calls right after its startup barrier.
+        self.rtp_llm_op_.start()
         consume_s = time.time() - start_time
         logging.info(f"start rtp_llm_op_ took {consume_s:.2f}s")
-        # Start HTTP server for language model tasks
-        if (
-            not self.defer_service_start
-            and self.config.task_type == TaskType.LANGUAGE_MODEL
-            and self.world_info is not None
-        ):
-            self.rtp_llm_op_.ft_op.start_http_server(
-                self.model.model_weights_loader,
-                self.world_info,
-                self.tokenizer,
-                None,  # chat_renderer is not needed for HTTP server startup
-            )
-            self._service_started = True
 
     def gpu_cache_tensors(self):
         return self.rtp_llm_op_.gpu_cache_tensors()
 
     def start_service(self) -> None:
-        """Release the deferred backend RPC/HTTP listeners after SCR arrival."""
-        if not self.defer_service_start or self._service_started:
+        """Phase 2: bind the RPC/HTTP listeners after the startup barrier."""
+        if self._service_started:
             return
         self.rtp_llm_op_.start_service()
         if self.config.task_type == TaskType.LANGUAGE_MODEL and self.world_info is not None:
@@ -111,7 +98,7 @@ class LanguageCppEngine(BaseEngine):
                 self.model.model_weights_loader,
                 self.world_info,
                 self.tokenizer,
-                None,
+                None,  # chat_renderer is not needed for HTTP server startup
             )
         self._service_started = True
 

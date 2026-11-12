@@ -162,8 +162,7 @@ void RtpLLMOp::init(py::object model,
                     py::object propose_model,
                     py::object token_processor,
                     py::object mm_process_engine,
-                    py::object trace_config,
-                    bool       defer_service_start) {
+                    py::object trace_config) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     EngineInitParams params = initModel(model, engine_config, vit_config);
@@ -220,64 +219,21 @@ void RtpLLMOp::init(py::object model,
         }
     }
 
-    if (defer_service_start) {
-        // Build the model/KV/executor state before the SCR arrival.  Only the
-        // network listeners are deferred, so the template contains the static
-        // runtime state needed by a restored worker without accepting traffic.
-        deferred_init_params_       = std::make_unique<EngineInitParams>(std::move(params));
-        deferred_mm_process_engine_ = std::move(mm_process_engine);
-        deferred_propose_params_    = std::move(propose_params);
-        deferred_token_processor_   = std::move(token_processor);
-        prepareRPCService(*deferred_init_params_,
-                          std::move(deferred_mm_process_engine_),
-                          std::move(deferred_propose_params_),
-                          std::move(deferred_token_processor_),
-                          true,
-                          std::move(telemetry_config));
-        rpc_server_deferred_        = true;
-        RTP_LLM_LOG_INFO("RPC/HTTP listener start deferred until pre-service checkpoint barrier; engine state prepared");
-        return;
-    }
-    pybind11::gil_scoped_release release;
-    server_start_failed_  = false;
-    stop_requested_       = false;
-    deferred_init_params_ = std::make_unique<EngineInitParams>(std::move(params));
-    grpc_server_thread_   = std::thread([this,
-                                       mm_process_engine = std::move(mm_process_engine),
-                                       propose_params    = std::move(propose_params),
-                                       token_processor   = std::move(token_processor),
-                                       telemetry_config  = std::move(telemetry_config)]() mutable {
-        try {
-            initRPCServer(*deferred_init_params_,
-                          std::move(propose_params),
-                          std::move(token_processor),
-                          std::move(mm_process_engine),
-                          std::move(telemetry_config));
-        } catch (const std::exception& e) {
-            setServerStartError(e.what());
-        } catch (...) {
-            setServerStartError("unknown exception while starting RPC server");
-        }
-        // The listener thread does not otherwise hold the Python GIL.  Make
-        // moved-from pybind objects explicitly empty while holding it so their
-        // final decref cannot run on a native thread without Python state.
-        pybind11::gil_scoped_acquire acquire;
-        mm_process_engine = py::object();
-        propose_params.reset();
-        token_processor = py::object();
-    });
-    const int64_t startup_timeout_ms = getStartupTimeoutMs();
-    const auto    begin_wait_us      = autil::TimeUtility::currentTimeInMicroSeconds();
-    while (!is_server_ready_) {
-        if (server_start_failed_) {
-            std::lock_guard<std::mutex> lock(server_state_mutex_);
-            RTP_LLM_FAIL("RPC server start failed: %s", server_start_error_.c_str());
-        }
-        if (autil::TimeUtility::currentTimeInMicroSeconds() - begin_wait_us > startup_timeout_ms * 1000) {
-            RTP_LLM_FAIL("RPC server start timed out after %ld ms", startup_timeout_ms);
-        }
-        sleep(1);  // wait 1s for server ready
-    }
+    // Two-phase startup for every deployment: build the model/KV/executor state
+    // here, then start the network listeners from startRPCServer().  Normal
+    // startup calls it immediately; the SCR template path calls it after the
+    // control-plane barrier releases.  One ordering, one set of failure paths.
+    deferred_init_params_       = std::make_unique<EngineInitParams>(std::move(params));
+    deferred_mm_process_engine_ = std::move(mm_process_engine);
+    deferred_propose_params_    = std::move(propose_params);
+    deferred_token_processor_   = std::move(token_processor);
+    prepareRPCService(*deferred_init_params_,
+                      std::move(deferred_mm_process_engine_),
+                      std::move(deferred_propose_params_),
+                      std::move(deferred_token_processor_),
+                      std::move(telemetry_config));
+    rpc_server_deferred_ = true;
+    RTP_LLM_LOG_INFO("engine state prepared; RPC/HTTP listeners start from startRPCServer()");
 }
 
 void RtpLLMOp::startRPCServer() {
@@ -466,33 +422,10 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
     }
 }
 
-void RtpLLMOp::initRPCServer(const EngineInitParams&                       maga_init_params,
-                             std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                             py::object                                    token_processor,
-                             py::object                                    mm_process_engine,
-                             telemetry::TelemetryConfig                    trace_config) {
-    {
-        pybind11::gil_scoped_acquire acquire;
-        prepareRPCService(maga_init_params,
-                          std::move(mm_process_engine),
-                          std::move(propose_params),
-                          std::move(token_processor),
-                          false,
-                          std::move(trace_config));
-        // Keep all Python-owned temporaries empty before releasing the GIL;
-        // the HttpApiServer/MultimodalProcessor retain their own references.
-        mm_process_engine = py::object();
-        propose_params.reset();
-        token_processor = py::object();
-    }
-    startRPCServerInternal(maga_init_params);
-}
-
 void RtpLLMOp::prepareRPCService(const EngineInitParams&                       maga_init_params,
                                  py::object                                    mm_process_engine,
                                  std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                                  py::object                                    token_processor,
-                                 bool                                          defer_network_services,
                                  telemetry::TelemetryConfig                    trace_config) {
     std::string server_address;
     {
@@ -538,7 +471,9 @@ void RtpLLMOp::prepareRPCService(const EngineInitParams&                       m
         } else {
             model_rpc_service_.reset(new LocalRpcServiceImpl());
         }
-        model_rpc_service_->setDeferServiceStart(defer_network_services);
+        // Listeners always start in startRPCServerInternal(); the service only
+        // prepares its state here.
+        model_rpc_service_->deferServiceStart();
         grpc::Status grpc_status =
             model_rpc_service_->init(maga_init_params, std::move(propose_params), mm_process_engine);
         if (!grpc_status.ok()) {
@@ -742,8 +677,7 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("propose_model"),
              py::arg("token_processor"),
              py::arg("mm_process_engine"),
-             py::arg("trace_config") = py::none(),
-             py::arg("defer_service_start") = false)
+             py::arg("trace_config") = py::none())
         .def("gpu_cache_tensors", &RtpLLMOp::gpuCacheTensors)
         .def("start_rpc_server", &RtpLLMOp::startRPCServer)
         .def("update_runtime_endpoints", &RtpLLMOp::updateRuntimeEndpoints)

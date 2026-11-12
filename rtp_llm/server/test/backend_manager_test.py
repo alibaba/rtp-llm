@@ -5,7 +5,12 @@ from unittest.mock import MagicMock, Mock, patch
 from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import set_parallelism_config
-from rtp_llm.ops import NcclCommConfig, TaskType
+from rtp_llm.ops import (
+    NcclCommConfig,
+    RoleType,
+    SpeculativeType,
+    TaskType,
+)
 from rtp_llm.server import backend_manager
 from rtp_llm.server.backend_manager import BackendManager
 
@@ -123,24 +128,35 @@ class BackendManagerServiceStartTest(unittest.TestCase):
         )
 
         engine_config = SimpleNamespace(
-            parallelism_config=SimpleNamespace(world_size=1, local_rank=0),
-            runtime_config=object(),
+            parallelism_config=SimpleNamespace(
+                world_size=1, local_rank=0, role_type=RoleType.PDFUSION
+            ),
+            runtime_config=SimpleNamespace(
+                fifo_scheduler_config=SimpleNamespace(max_context_batch_size=1)
+            ),
             kv_cache_config=object(),
             profiling_debug_logging_config=profiling,
             moe_config=SimpleNamespace(
                 use_deepep_moe=False, use_all_gather=False
             ),
-            sp_config=object(),
+            sp_config=SimpleNamespace(type=SpeculativeType.MTP),
+            # Graph validation returns early when the master switch is off.
+            hw_kernel_config=SimpleNamespace(
+                enable_cuda_graph=False,
+                generation_prefill_capture_token_buckets=[],
+            ),
+            concurrency_config=SimpleNamespace(concurrency_limit=1),
         )
         model_config = SimpleNamespace(expert_num=0, task_type=TaskType.LANGUAGE_MODEL)
         engine = SimpleNamespace(task_type=TaskType.LANGUAGE_MODEL)
         return manager, py_config, engine_config, model_config, engine
 
-    def test_start_forwards_defer_service_start_without_changing_default(self):
-        """Normal startup still asks the engine to start its listeners immediately."""
+    def test_start_prepares_then_start_service_binds_listeners(self):
+        """Every deployment is two-phase: start() prepares, start_service() binds."""
         manager, py_config, engine_config, model_config, engine = (
             self._manager_and_config()
         )
+        engine.start_service = Mock()
         with patch(
             "rtp_llm.server.backend_manager.EngineConfig.create",
             return_value=engine_config,
@@ -160,12 +176,14 @@ class BackendManagerServiceStartTest(unittest.TestCase):
         ) as create_engine:
             manager.py_env_configs = py_config
             manager.start()
-            manager.start(defer_service_start=True)
+            engine.start_service.assert_not_called()
+            manager.start_service()
+            manager.start_service()
 
-        self.assertEqual(
-            [call.kwargs["defer_service_start"] for call in create_engine.call_args_list],
-            [False, True],
-        )
+        create_engine.assert_called_once()
+        # BackendManager forwards every call; LanguageCppEngine owns the
+        # idempotence guard.
+        self.assertEqual(engine.start_service.call_count, 2)
 
     def test_start_rejects_embedding_in_deferred_template_mode(self):
         manager, py_config, engine_config, model_config, engine = (
@@ -187,10 +205,13 @@ class BackendManagerServiceStartTest(unittest.TestCase):
             return_value=None,
         ), patch(
             "rtp_llm.server.backend_manager.ModelFactory.from_model_configs"
-        ) as create_engine:
+        ) as create_engine, patch(
+            "rtp_llm.server.backend_manager.template_phase_active",
+            return_value=True,
+        ):
             manager.py_env_configs = py_config
             with self.assertRaisesRegex(RuntimeError, "does not support embedding"):
-                manager.start(defer_service_start=True)
+                manager.start()
 
         create_engine.assert_not_called()
 

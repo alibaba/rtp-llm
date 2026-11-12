@@ -232,13 +232,8 @@ def local_rank_start(
         from rtp_llm.server.backend_manager import BackendManager
 
         backend_manager = BackendManager(py_env_configs)
-        defer_service_start = (
-            scr_manifest is not None and is_scr_template_phase_active()
-        )
-        if defer_service_start:
-            backend_manager.start(defer_service_start=True)
-        else:
-            backend_manager.start()
+        # Phase 1: build the engine and KV cache.  Listeners stay closed.
+        backend_manager.start()
         # Defer these handlers until model loading completes.
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
@@ -247,8 +242,17 @@ def local_rank_start(
         # rank-local and fail-open; the controller is intentionally not called
         # from this worker process.
         _register_scr_resources(backend_manager, py_env_configs)
-        logging.info("Backend server initialized successfully, sending ready status")
 
+        # Every deployment passes the same startup barrier point.  It is a
+        # no-op unless the SCR controller selected a template phase, in which
+        # case this rank blocks here until the dump is complete.
+        _start_scr_rank_arrival(
+            backend_manager, py_env_configs, scr_manifest=scr_manifest, world_rank=world_rank
+        )
+        # Phase 2: bind listeners only after the barrier released.
+        backend_manager.start_service()
+
+        logging.info("Backend server initialized successfully, sending ready status")
         _send_pipe_status(
             pipe_writer,
             "success",
@@ -256,16 +260,6 @@ def local_rank_start(
         )
         pipe_writer = None  # success closed it
 
-        # Each CUDA rank announces its safe point independently and blocks
-        # before entering the service loop.  A template participant must not
-        # serve requests while it is waiting for the controller-driven dump.
-        _start_scr_rank_arrival(
-            backend_manager, py_env_configs, scr_manifest=scr_manifest, world_rank=world_rank
-        )
-        if defer_service_start:
-            # Runtime identity and advertised endpoints are fixed above.
-            # CacheStore and network listeners are first created after release.
-            backend_manager.start_service()
         logging.info("Entering service loop to keep backend_manager alive")
         backend_manager.serve_forever()
 
