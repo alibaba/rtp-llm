@@ -1923,6 +1923,7 @@ class AttentionV41FP8(AttentionFP8):
             )
             # Both dense and sparse DeepGEMM FP4 scorers consume BF16 weights.
             # Round once after the same FP32 scale inside fused Q preparation.
+            q_lazy_roundtrip = False
             prepared = (
                 indexer_q_fusion.try_fused_indexer_q(
                     q.unsqueeze(1),
@@ -1953,6 +1954,17 @@ class AttentionV41FP8(AttentionFP8):
                 if fused_indexer:
                     q_fp4, q_sf = prefill_indexer.quantize_indexer_q(q)
                     weights = weights.to(torch.bfloat16)
+                elif q.shape[0] > _ROUNDTRIP_CHUNK_ROWS:
+                    # Huge prefill: keep q bf16 and fold the fake-quant
+                    # roundtrip into the selection chunks below. Even the
+                    # row-chunked roundtrip must materialize an fp32 OUTPUT
+                    # of [1048320, 8, 512] = 16 GiB, which could not
+                    # coexist with the ~171 GiB layer-2 working set (n20,
+                    # 2026-11-12: OOM requesting 16.00 GiB with 14.91 GiB
+                    # free, frame fp8_roundtrip <- _select_indices). The
+                    # roundtrip is row-local, so applying it per selection
+                    # chunk is bit-identical while q stays bf16 (8 GiB).
+                    q_lazy_roundtrip = True
                 else:
                     q = fp8_roundtrip(q)
             dense_weights = weights
@@ -2114,8 +2126,16 @@ class AttentionV41FP8(AttentionFP8):
                                 **({"bounds": bounds} if bounds is not None else {}),
                             )
                     else:
+                        # Lazy per-chunk roundtrip for huge prefills:
+                        # identical row-local math, ~1 MiB temporaries,
+                        # and no full-T fp32 q (see q_lazy_roundtrip).
+                        q_chunk = (
+                            fp8_roundtrip(q[chunk])
+                            if q_lazy_roundtrip
+                            else q[chunk]
+                        )
                         logits = torch.einsum(
-                            "thd,kd->thk", q[chunk], keys.float()
+                            "thd,kd->thk", q_chunk, keys.float()
                         ).relu_()
                         logits = (logits * weights[chunk, :, None]).sum(1)
                         ids = torch.arange(key_count, device=x.device)
