@@ -291,8 +291,8 @@ def select_strategy(
                 return SM90MegaMoEFusedSEStrategy
             raise RuntimeError(
                 "mega_sm90_se requires a decode-role SM90 shape, one shared "
-                "expert with 128x128 FP8 block scales, and a deep_gemm build "
-                "with the fused shared-expert MegaMoE API"
+                "expert with 128x128 FP32 or MXFP8 32x32 scales, and a "
+                "deep_gemm build with the fused shared-expert MegaMoE API"
             )
         if forced not in (None, "mega_sm90") and strict:
             raise RuntimeError(
