@@ -721,6 +721,44 @@ def _mark_startup_warmup_health_gate_ready(gate_file):
         raise
 
 
+RESIDENT_STORE_ENV = "RTP_LLM_RESIDENT_STORE"
+
+
+def _owns_instance_resident_store(py_env_configs: PyEnvConfigs) -> bool:
+    """prod mode: this start_server owns its resident store and stops it on a clean exit."""
+    return (
+        py_env_configs.load_config.resident_weights_config.mode == "prod"
+        and py_env_configs.role_config.role_type
+        not in (RoleType.FRONTEND, RoleType.VIT)
+    )
+
+
+def _claim_instance_resident_store(py_env_configs: PyEnvConfigs) -> str:
+    """Name the resident store this instance stops on a clean exit.
+
+    An operator-provided name is kept as is and must then be exclusive to this instance.
+    """
+    from rtp_llm.resident_weights.store import instance_store_name
+
+    name = os.environ.get(RESIDENT_STORE_ENV) or instance_store_name(
+        py_env_configs.server_config.start_port
+    )
+    os.environ[RESIDENT_STORE_ENV] = name
+    return name
+
+
+def _stop_instance_resident_store(store_name: str) -> None:
+    from rtp_llm.resident_weights import store
+
+    try:
+        store.stop_store(store_name)
+        logging.info("stopped resident weight store %s", store_name)
+    except (ConnectionRefusedError, FileNotFoundError):
+        logging.info("no resident weight store %s to stop", store_name)
+    except Exception:
+        logging.exception("failed to stop resident weight store %s", store_name)
+
+
 def main():
     py_env_configs: PyEnvConfigs = setup_args()
     _install_hot_hook_runtime("main", py_env_configs)
@@ -790,6 +828,11 @@ def start_server(py_env_configs: PyEnvConfigs):
     dash_sc_enabled = py_env_configs.role_config.role_type != RoleType.VIT
     py_env_configs.server_config.validate_port_layout(dash_sc_enabled=dash_sc_enabled)
 
+    resident_store_name = (
+        _claim_instance_resident_store(py_env_configs)
+        if _owns_instance_resident_store(py_env_configs)
+        else None
+    )
     # Impls register spawned processes right after start, so later failures still reach them in the finally cleanup.
     startup_warmup_gate_file = _setup_startup_warmup_health_gate(py_env_configs)
 
@@ -852,7 +895,10 @@ def start_server(py_env_configs: PyEnvConfigs):
         if not process_manager.shutdown_requested:
             process_manager.request_failure_shutdown()
     finally:
+        # A failure exits the process with code 1 inside; only a clean stop returns.
         process_manager.monitor_and_release_processes()
+    if resident_store_name:
+        _stop_instance_resident_store(resident_store_name)
 
 
 def _get_startup_real_warmup_pow2_lens(max_len: int):

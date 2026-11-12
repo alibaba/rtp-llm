@@ -180,6 +180,7 @@ class Gemma(Llama):
         force_cpu_load_weights: bool = False,
         loader_recycle_handles: bool = False,
         moe_pure_tp_preshard: bool = False,
+        **kwargs,
     ):
         if fmha_config.enable_open_source_fmha:
             logging.warn(
@@ -200,6 +201,9 @@ class Gemma(Llama):
             force_cpu_load_weights=force_cpu_load_weights,
             loader_recycle_handles=loader_recycle_handles,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
+            # Everything BaseModel grows later, resident_weights_config included, reaches it
+            # through here; this override exists only to set one env var first.
+            **kwargs,
         )
 
     @staticmethod
