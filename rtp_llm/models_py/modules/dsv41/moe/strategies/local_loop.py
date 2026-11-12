@@ -76,7 +76,11 @@ def _get_or_create_local_y(
     return cached
 
 
-_GROUPED_CAPTURE_GROUP = 2
+# One expert per grouped-capture iteration. Grouping two experts made the
+# W1/W3/W2 dequant destination 46 MiB; at 1M prefill the allocator reached
+# 55 MiB free but had no contiguous 46 MiB block. One expert halves every
+# grouped temporary (23 MiB) and keeps decode graph capture bounded.
+_GROUPED_CAPTURE_GROUP = 1
 
 
 def _fp4_byte_lut(device: torch.device) -> torch.Tensor:
