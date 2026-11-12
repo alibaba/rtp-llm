@@ -137,10 +137,10 @@ def load_experiment_view(directory):
                     steps[step["id"]] = step
 
     def observation_key(record):
-        identity = tuple(record.get(key) for key in ("run_id", "phase_id", "step_id"))
-        if all(isinstance(value, str) for value in identity):
-            return identity
-        return record["query_time"]
+        identity = tuple(record[key] for key in ("run_id", "phase_id", "step_id"))
+        if not all(isinstance(value, str) for value in identity):
+            raise ValueError("run_id, phase_id and step_id must be strings")
+        return identity
 
     windows, events, annotations = {}, [], {}
     processes, playback, master_queries = {}, [], []
@@ -208,8 +208,6 @@ def load_experiment_view(directory):
                         in (
                             "master/list/addresses",
                             "master/list/engines",
-                            "master/get",
-                            "master/engine/get",
                         )
                         and "result" in event
                     ):
@@ -241,7 +239,7 @@ def load_experiment_view(directory):
                 gate.get("args"), dict
             ):
                 raise ValueError("expect and args must be objects")
-            unit = gate.get("unit", "")
+            unit = gate["unit"]
             if not isinstance(unit, str):
                 warnings.append(f"gates.jsonl:{number}: unit must be a string")
                 unit = ""

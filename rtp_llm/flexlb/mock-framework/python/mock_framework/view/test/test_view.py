@@ -92,6 +92,9 @@ def completed(tmp_path):
     )
     gates = [
         {
+            "run_id": "run",
+            "phase_id": "traffic",
+            "step_id": "qps",
             "step": "qps",
             "interface": "client/query/qps",
             "query_time": "2026-10-29T00:00:10Z",
@@ -102,6 +105,9 @@ def completed(tmp_path):
             "unit": "requests/s",
         },
         {
+            "run_id": "run",
+            "phase_id": "traffic",
+            "step_id": "raw",
             "step": "raw",
             "interface": "prometheus/query",
             "query_time": "2026-10-29T00:00:11Z",
@@ -109,6 +115,7 @@ def completed(tmp_path):
             "expect": {"count": 1},
             "status": "ERROR",
             "error": "saved error",
+            "unit": "",
         },
     ]
     (source / "gates.jsonl").write_text(
@@ -123,6 +130,9 @@ def completed(tmp_path):
         {"event": "step_started", "step": "qps", "recorded_at": "2026-10-29T00:00:09Z"},
         {
             "event": "metric_window",
+            "run_id": "run",
+            "phase_id": "traffic",
+            "step_id": "qps",
             "query_time": gates[0]["query_time"],
             "start": 1793232005,
             "end": 1793232010,
@@ -804,6 +814,26 @@ def test_invalid_annotation_selection_is_reported(tmp_path, selected):
             filters={},
             steps=["kill"],
         )
+
+
+def test_gate_requires_unit_and_window_requires_step_identity(completed):
+    path = completed / "gates.jsonl"
+    gates = [json.loads(line) for line in path.read_text().splitlines()]
+    del gates[1]["unit"]
+    path.write_text("".join(json.dumps(gate) + "\n" for gate in gates))
+
+    path = completed / "events.jsonl"
+    events = [json.loads(line) for line in path.read_text().splitlines()]
+    window = next(event for event in events if event["event"] == "metric_window")
+    del window["step_id"]
+    path.write_text("".join(json.dumps(event) + "\n" for event in events))
+
+    body = load_experiment_view(completed)
+    (gate,) = body["gates"]
+    assert gate["step"] == "qps"
+    assert gate["from"] is None and gate["to"] is None
+    assert "events.jsonl:3: 'step_id'" in body["warnings"]
+    assert "gates.jsonl:2: 'unit'" in body["warnings"]
 
 
 def test_invalid_unit_metadata_does_not_hide_a_saved_gate(completed):
