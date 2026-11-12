@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...config.validation import duration, validate
+from ...config.validation import duration, expectation_operand_schema, validate
 from .. import ExecutionError
 from .step_registry import StepDefinition, to_record_value
 
@@ -110,12 +110,11 @@ class Step:
             )
             if expected is not None:
                 for op, value in expected.items():
-                    expected_type = definition.returns
-                    if op == "count":
-                        expected_type = {"type": "integer", "minimum": 0}
-                    elif op in ("gte", "lte"):
-                        expected_type = {"type": "number"}
-                    validate(value, expected_type, "expect." + op)
+                    validate(
+                        value,
+                        expectation_operand_schema(op, definition.returns),
+                        "expect." + op,
+                    )
                 gate = {
                     "step": self.id,
                     "interface": definition.name,

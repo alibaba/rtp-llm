@@ -119,6 +119,14 @@ def schema(kind):
     raise ConfigError(f"Unsupported interface type: {kind!r}")
 
 
+def expectation_operand_schema(operator, result_schema):
+    if operator == "count":
+        return {"type": "integer", "minimum": 0}
+    if operator in ("gte", "lte"):
+        return {"type": "number"}
+    return result_schema
+
+
 def compatible(source, expected):
     if source["type"] == "union":
         return all(compatible(v, expected) for v in source["variants"])

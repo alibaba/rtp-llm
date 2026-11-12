@@ -14,6 +14,7 @@ from .validation import (
     ConfigError,
     compatible,
     duration,
+    expectation_operand_schema,
     fields,
     number,
     text,
@@ -126,12 +127,9 @@ def _expectation(raw, definition, previous):
     result = {}
     output = definition.returns
     for op, value in raw.items():
-        expected = output
-        if op == "count":
-            if output["type"] != "array":
-                raise ConfigError("count requires a list result")
-            expected = {"type": "integer", "minimum": 0}
-        elif op in ("gte", "lte"):
+        if op == "count" and output["type"] != "array":
+            raise ConfigError("count requires a list result")
+        if op in ("gte", "lte"):
             variants = output.get("variants", [output])
             if not all(
                 v["type"] in ("integer", "number")
@@ -140,9 +138,9 @@ def _expectation(raw, definition, previous):
                 for v in variants
             ):
                 raise ConfigError(f"{op} requires numeric output")
-            expected = {"type": "number"}
         if isinstance(value, str) and definition.unit == "s" and op != "count":
             value = float(duration(value))
+        expected = expectation_operand_schema(op, output)
         result[op] = _argument(value, expected, previous, "expect." + op)
     if (
         {"gte", "lte"} <= result.keys()
