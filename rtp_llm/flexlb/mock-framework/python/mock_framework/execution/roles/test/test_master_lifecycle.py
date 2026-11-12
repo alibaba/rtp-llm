@@ -186,8 +186,8 @@ while True: time.sleep(1)
         records = StepTrace(output, case, launch)
         supervisor = ProcessSupervisor(records)
         group = MasterRole(
-            component=None,
-            recipe=None,
+            role_config=None,
+            launch_config=None,
             election={},
             supervisor=supervisor,
             topology=None,

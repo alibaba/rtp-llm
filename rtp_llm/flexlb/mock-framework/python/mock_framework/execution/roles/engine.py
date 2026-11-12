@@ -6,7 +6,7 @@ from itertools import zip_longest
 
 from ...config.validation import duration
 from .. import ExecutionError
-from ..processes import ProcessIdentity, launch_component
+from ..processes import ProcessIdentity, start_instance
 from . import register_ready_instance
 
 ROLES = ("prefill", "decode", "vit")
@@ -15,12 +15,12 @@ INITIAL_START_CONCURRENCY = 32
 
 class EngineRole:
     def __init__(
-        self, *, supervisor, topology, records, environment, recipes, monitoring
+        self, *, supervisor, topology, records, environment, launch_by_role, monitoring
     ):
         self.supervisor, self.topology, self.records = supervisor, topology, records
-        self.environment, self.recipes, self.monitoring = (
+        self.role_configs, self.launch_by_role, self.monitoring = (
             environment,
-            recipes,
+            launch_by_role,
             monitoring,
         )
         self.counters = {}
@@ -41,12 +41,12 @@ class EngineRole:
     async def _start_instance(self, role, index):
         identity = ProcessIdentity(role, index)
         rpc_port, control_port = self._port(), self._port()
-        child, control, endpoint = await launch_component(
+        child, control, endpoint = await start_instance(
             self.supervisor,
             self.records,
-            self.environment,
+            self.role_configs,
             identity,
-            self.recipes[role],
+            self.launch_by_role[role],
             configure=lambda _: {
                 "MOCK_BIND_HOST": "127.0.0.1",
                 "MOCK_ADVERTISE_HOST": "127.0.0.1",
@@ -117,7 +117,9 @@ class EngineRole:
                 targets=[x["rpc"] for x in selected],
             )
             if self.monitoring:
-                await self.monitoring.final_scrape([item["id"] for item in selected])
+                await self.monitoring.wait_for_final_scrape(
+                    [item["id"] for item in selected]
+                )
             for item in selected:
                 node = item["id"]
                 child = self.supervisor.child(node)
@@ -142,13 +144,13 @@ class EngineRole:
 
     async def start(self):
         counts = {
-            role: self.environment[role]["deployment"]["replicas"]
-            for role in self.recipes
+            role: self.role_configs[role]["deployment"]["replicas"]
+            for role in self.launch_by_role
             if role in ROLES
         }
         if counts:
             timeout = sum(
-                float(duration(self.recipes[role]["startup_timeout"])) * count
+                float(duration(self.launch_by_role[role]["startup_timeout"])) * count
                 for role, count in counts.items()
             )
             await self.supervisor.guard(
@@ -159,7 +161,7 @@ class EngineRole:
         async with self.lock:
             if any(
                 role not in ROLES
-                or role not in self.environment
+                or role not in self.role_configs
                 or not 1 <= count <= 1024
                 for role, count in counts.items()
             ):
@@ -200,8 +202,8 @@ class EngineRole:
                         group.create_task(worker())
             except ExceptionGroup as errors:
                 raise errors.exceptions[0] from errors
-            if self.monitoring and self.monitoring.baselined:
-                await self.monitoring.baseline(
+            if self.monitoring and self.monitoring.baseline_ready:
+                await self.monitoring.wait_for_baseline(
                     [
                         item["id"]
                         for item in self.topology.active()
@@ -211,10 +213,12 @@ class EngineRole:
             return result
 
     async def close(self):
-        processes = self.supervisor.owned_processes(*ROLES)
+        processes = self.supervisor.process_identities(*ROLES)
         # All Engine JVMs shut down concurrently, including in full-scale Cases.
-        errors = await self.supervisor.stop([process.name for process in processes], 15)
-        remaining = set(self.supervisor.owned_processes(*ROLES))
+        errors = await self.supervisor.stop(
+            [process.process_name for process in processes], 15
+        )
+        remaining = set(self.supervisor.process_identities(*ROLES))
         for process in processes:
             if process not in remaining:
                 (process.directory(self.records.directory) / "ready.json").unlink(

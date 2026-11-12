@@ -36,17 +36,19 @@ class EndpointRegistry:
         if self._publish_discovery is not None:
             self._publish_discovery(snapshot)
 
-    def register(self, name, role, control, endpoint=None):
-        if name in self._active:
-            raise ExecutionError(f"Instance identity has already been used: {name}")
+    def register(self, instance_id, role, control, endpoint=None):
+        if instance_id in self._active:
+            raise ExecutionError(
+                f"Instance identity has already been used: {instance_id}"
+            )
         if endpoint is not None:
             if (
-                endpoint.get("id", name) != name
+                endpoint.get("id", instance_id) != instance_id
                 or endpoint.get("role", role) != role
                 or endpoint.get("control") != control
             ):
                 raise ExecutionError("Instance endpoints differ from assigned identity")
-            endpoint = {**copy.deepcopy(endpoint), "id": name, "role": role}
+            endpoint = {**copy.deepcopy(endpoint), "id": instance_id, "role": role}
             if (
                 not isinstance(endpoint.get("rpc"), str)
                 or not endpoint["rpc"]
@@ -55,13 +57,13 @@ class EndpointRegistry:
                 raise ExecutionError(
                     "Instance RPC address is missing or already active"
                 )
-            self._active[name] = endpoint
+            self._active[instance_id] = endpoint
         self.publish()
 
-    def retire(self, name):
-        if name not in self._active:
-            raise ExecutionError(f"Unknown active instance: {name}")
-        self._active.pop(name, None)
+    def retire(self, instance_id):
+        if instance_id not in self._active:
+            raise ExecutionError(f"Unknown active instance: {instance_id}")
+        self._active.pop(instance_id, None)
         self.publish()
 
     def clear(self):
@@ -83,8 +85,8 @@ class RunEnvironment:
             else None
         )
         self.masters = MasterRole(
-            component=case.environment.get("master"),
-            recipe=launch["components"].get("master"),
+            role_config=case.environment.get("master"),
+            launch_config=launch["components"].get("master"),
             environment=case.environment,
             election=launch.get("zookeeper"),
             supervisor=self.supervisor,
@@ -98,13 +100,13 @@ class RunEnvironment:
             topology=self.topology,
             records=records,
             environment=case.environment,
-            recipes=launch["components"],
+            launch_by_role=launch["components"],
             monitoring=self.monitoring,
         )
         self.clients = ClientRole(
             environment=case.environment,
-            component=case.environment.get("client"),
-            recipe=launch["components"].get("client"),
+            role_config=case.environment.get("client"),
+            launch_config=launch["components"].get("client"),
             supervisor=self.supervisor,
             topology=self.topology,
             records=records,
@@ -121,14 +123,14 @@ class RunEnvironment:
         if connect is not None:
             self.masters.configure_election(connect)
             # Masters start after Engines: exclude their selected but not yet bound service ports.
-            port = int(self.masters.environment["MOCK_MASTER_PORT"])
+            port = int(self.masters.election_env["MOCK_MASTER_PORT"])
             self.engines.used_ports.update((port, port + 2))
         await self.engines.start()
         await self.masters.start()
         await self.clients.start()
         if self.monitoring:
             await self.supervisor.guard(
-                self.monitoring.baseline(), self.monitoring.startup_timeout
+                self.monitoring.wait_for_baseline(), self.monitoring.startup_timeout
             )
 
     async def close(self):
@@ -151,7 +153,9 @@ class RunEnvironment:
         # Keep producers and observers alive through Client drain and the final scrape.
         await cleanup("client final stop", drain_clients)
         if self.monitoring:
-            await cleanup("prometheus final scrape", self.monitoring.final_scrape)
+            await cleanup(
+                "prometheus final scrape", self.monitoring.wait_for_final_scrape
+            )
         await cleanup("client processes", self.clients.close)
         await cleanup("master processes", self.masters.close)
         await cleanup("engine processes", self.engines.close)
@@ -166,7 +170,7 @@ class RunEnvironment:
                 errors.append(f"discovery cleanup: {error}")
         if self.monitoring:
             try:
-                self.monitoring.finish(errors)
+                self.monitoring.write_collection_result(errors)
             except Exception as error:
                 errors.append(f"collection metadata: {error}")
         return errors

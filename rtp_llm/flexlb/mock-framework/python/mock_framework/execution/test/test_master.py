@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 from mock_framework.execution import ExecutionError
-from mock_framework.execution.roles.master import master_environment
+from mock_framework.execution.roles.master import write_master_env
 from mock_framework.execution.step.master_engine_get import (
     MasterEngineGetArgs,
     master_engine_get,
@@ -41,7 +41,7 @@ def topology():
 
 def test_binds_only_run_owned_discovery_and_preserves_business_document(tmp_path):
     config = configuration()
-    env = master_environment(config, topology(), tmp_path)
+    env = write_master_env(config, topology(), tmp_path)
     assert env["FLEXLB_CONFIG"] == config["FLEXLB_CONFIG"]
     assert "old-host" in config["MODEL_SERVICE_CONFIG"]
     route = json.loads(env["MODEL_SERVICE_CONFIG"])
@@ -67,16 +67,16 @@ def test_invalid_native_settings_fail_instead_of_starting_a_different_configurat
     config = configuration()
     change(config)
     with pytest.raises(ExecutionError):
-        master_environment(config, topology(), tmp_path)
+        write_master_env(config, topology(), tmp_path)
 
 
 def test_missing_running_role_is_rejected(tmp_path):
     with pytest.raises(ExecutionError, match="No running Engines"):
-        master_environment(configuration(), topology()[:1], tmp_path)
+        write_master_env(configuration(), topology()[:1], tmp_path)
 
 
 def test_generic_transport_probe_does_not_require_a_native_master(tmp_path):
-    assert master_environment({"a": {"b": 2}}, [], tmp_path) == {}
+    assert write_master_env({"a": {"b": 2}}, [], tmp_path) == {}
 
 
 @pytest.mark.parametrize(
@@ -522,8 +522,8 @@ def adapter_context():
         ]
     )
     masters = MasterRole(
-        component=None,
-        recipe=None,
+        role_config=None,
+        launch_config=None,
         election=None,
         supervisor=None,
         topology=endpoints,
@@ -646,9 +646,7 @@ def test_explicit_master_selection_and_empty_selection_do_not_broadcast(monkeypa
 
 
 def test_replacement_master_can_discover_roles_scaled_to_zero(tmp_path):
-    environment = master_environment(
-        configuration(), [], tmp_path, require_engines=False
-    )
+    environment = write_master_env(configuration(), [], tmp_path, require_engines=False)
     route = json.loads(environment["MODEL_SERVICE_CONFIG"])
     assert json.loads(Path(route["discovery_file"]).read_text()) == {
         "p-domain": [],

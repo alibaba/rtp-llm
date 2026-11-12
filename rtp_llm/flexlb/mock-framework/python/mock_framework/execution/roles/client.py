@@ -7,7 +7,7 @@ from typing import Annotated
 
 from ...config.validation import validate
 from .. import ExecutionError
-from ..processes import ProcessIdentity, launch_component
+from ..processes import ProcessIdentity, start_instance
 from ..step.step_registry import Bounds, schema
 from ..transport import post
 from . import register_ready_instance
@@ -31,16 +31,16 @@ class ClientRole:
     def __init__(
         self,
         *,
-        component,
-        recipe,
+        role_config,
+        launch_config,
         supervisor,
         topology,
         records,
         monitoring,
         environment=None,
     ):
-        self.component, self.recipe = component, recipe
-        self._configuration = environment
+        self.role_config, self.launch_config = role_config, launch_config
+        self._role_configs = environment
         self.supervisor, self.topology, self.records, self.monitoring = (
             supervisor,
             topology,
@@ -50,16 +50,16 @@ class ClientRole:
         self.pending, self.stop_timeout = False, 30
 
     async def start(self):
-        if self.component is None:
+        if self.role_config is None:
             return
-        for index in range(self.component["deployment"]["replicas"]):
+        for index in range(self.role_config["deployment"]["replicas"]):
             identity = ProcessIdentity("client", index)
-            _, control, endpoint = await launch_component(
+            _, control, endpoint = await start_instance(
                 self.supervisor,
                 self.records,
-                self._configuration,
+                self._role_configs,
                 identity,
-                self.recipe,
+                self.launch_config,
             )
             register_ready_instance(
                 self.topology,
@@ -150,5 +150,8 @@ class ClientRole:
         return {by_address[url]: value for url, value in result["clients"].items()}
 
     async def close(self):
-        names = [process.name for process in self.supervisor.owned_processes("client")]
-        return await self.supervisor.stop(names, 3)
+        process_names = [
+            process.process_name
+            for process in self.supervisor.process_identities("client")
+        ]
+        return await self.supervisor.stop(process_names, 3)

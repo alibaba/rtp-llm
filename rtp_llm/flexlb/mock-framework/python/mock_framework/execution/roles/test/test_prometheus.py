@@ -51,24 +51,24 @@ def test_final_scrape_detects_exited_restarted_master(tmp_path, monkeypatch):
     process = ProcessIdentity("master", 0, generation=1)
     child = SimpleNamespace(returncode=1)
     supervisor = SimpleNamespace(
-        owned_processes=lambda: (process,),
-        child=lambda name: {process.name: child}[name],
+        process_identities=lambda: (process,),
+        child=lambda name: {process.process_name: child}[name],
     )
     collector = PrometheusRole(
         supervisor,
         SimpleNamespace(directory=tmp_path),
         {"startup_timeout": "1s", "scrape_interval": "1s"},
     )
-    collector.baselined = True
+    collector.baseline_ready = True
     collector.child = SimpleNamespace(returncode=None)
     collector.targets[process.instance_id] = {}
 
     async def unexpected_scrape():
         pytest.fail("The exited process should be detected before querying Prometheus")
 
-    monkeypatch.setattr(collector, "_scrapes", unexpected_scrape)
+    monkeypatch.setattr(collector, "_fetch_scrape_status", unexpected_scrape)
     with pytest.raises(ExecutionError, match="master-0-restart-1 exited"):
-        asyncio.run(collector.final_scrape())
+        asyncio.run(collector.wait_for_final_scrape())
 
 
 @pytest.mark.skipif(

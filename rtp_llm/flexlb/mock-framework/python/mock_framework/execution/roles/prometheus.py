@@ -31,14 +31,18 @@ def _epoch(value):
 class PrometheusRole:
     JOB = "mock"
 
-    def __init__(self, supervisor, records, recipe):
-        self.supervisor, self.records, self.recipe = supervisor, records, recipe
+    def __init__(self, supervisor, records, launch_config):
+        self.supervisor, self.records, self.launch_config = (
+            supervisor,
+            records,
+            launch_config,
+        )
         self.directory = records.directory / "prometheus"
-        self.startup_timeout = float(duration(recipe["startup_timeout"]))
-        self.interval = float(duration(recipe["scrape_interval"]))
+        self.startup_timeout = float(duration(launch_config["startup_timeout"]))
+        self.interval = float(duration(launch_config["scrape_interval"]))
         self.url, self.child = None, None
-        self.targets, self.baselined = {}, False
-        self.metadata = {"job": self.JOB, "recipe": recipe, "complete": False}
+        self.targets, self.baseline_ready = {}, False
+        self.metadata = {"job": self.JOB, "recipe": launch_config, "complete": False}
 
     def _save(self):
         write_json(self.directory / "collection.json", self.metadata)
@@ -48,8 +52,8 @@ class PrometheusRole:
         write_json(self.directory / "targets.json", [])
         config = {
             "global": {
-                "scrape_interval": self.recipe["scrape_interval"],
-                "scrape_timeout": self.recipe["scrape_interval"],
+                "scrape_interval": self.launch_config["scrape_interval"],
+                "scrape_timeout": self.launch_config["scrape_interval"],
             },
             "scrape_configs": [
                 {
@@ -67,7 +71,7 @@ class PrometheusRole:
             yaml.safe_dump(config), encoding="utf-8"
         )
         command = [
-            self.recipe["binary"],
+            self.launch_config["binary"],
             "--config.file=" + str(self.directory / "prometheus.yaml"),
             "--web.listen-address=127.0.0.1:0",
             "--storage.tsdb.path=" + str(self.directory / "data"),
@@ -178,7 +182,7 @@ class PrometheusRole:
         self.metadata["targets"] = dict(self.targets)
         self._save()
 
-    async def _scrapes(self):
+    async def _fetch_scrape_status(self):
         result = await asyncio.to_thread(
             _get, self.url + "/api/v1/targets?state=active"
         )
@@ -195,16 +199,16 @@ class PrometheusRole:
         }
         return targets
 
-    async def baseline(self, nodes=None):
+    async def wait_for_baseline(self, nodes=None):
         if not self.targets:
             raise ExecutionError("Managed Prometheus has no metrics targets")
         seen = {node: set() for node in (self.targets if nodes is None else nodes)}
         while True:
-            for node, target in (await self._scrapes()).items():
+            for node, target in (await self._fetch_scrape_status()).items():
                 if node in seen and target["health"] == "up":
                     seen[node].add(target["lastScrape"])
             if all(len(times) >= 2 for times in seen.values()):
-                self.baselined = True
+                self.baseline_ready = True
                 self.metadata.setdefault("baseline_at", timestamp())
                 self._save()
                 self.records.emit(
@@ -213,8 +217,8 @@ class PrometheusRole:
                 return
             await asyncio.sleep(0.05)
 
-    async def final_scrape(self, nodes=None):
-        if not self.baselined:
+    async def wait_for_final_scrape(self, nodes=None):
+        if not self.baseline_ready:
             return  # Setup never completed; do not claim a fully collected experiment.
         selected = set(self.targets if nodes is None else nodes)
         marker = timestamp()
@@ -222,15 +226,16 @@ class PrometheusRole:
             while True:
                 if self.child.returncode is not None:
                     raise ExecutionError("Prometheus exited before final collection")
-                for process in self.supervisor.owned_processes():
+                for process in self.supervisor.process_identities():
                     if (
                         process.instance_id in self.targets
-                        and self.supervisor.child(process.name).returncode is not None
+                        and self.supervisor.child(process.process_name).returncode
+                        is not None
                     ):
                         raise ExecutionError(
-                            f"{process.name} exited before final collection"
+                            f"{process.process_name} exited before final collection"
                         )
-                targets = await self._scrapes()
+                targets = await self._fetch_scrape_status()
                 if selected <= targets.keys() and all(
                     targets[node]["health"] == "up"
                     and _epoch(targets[node]["lastScrape"]) >= _epoch(marker)
@@ -248,11 +253,13 @@ class PrometheusRole:
                     return
                 await asyncio.sleep(0.05)
 
-    def finish(self, errors):
+    def write_collection_result(self, errors):
         if not self.directory.exists():
             return
         self.metadata.update(
-            complete=self.baselined and "final_scrapes" in self.metadata and not errors,
+            complete=self.baseline_ready
+            and "final_scrapes" in self.metadata
+            and not errors,
             finished_at=timestamp(),
             errors=list(errors),
         )

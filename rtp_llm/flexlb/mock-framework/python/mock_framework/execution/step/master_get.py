@@ -13,6 +13,6 @@ class MasterGetArgs(Targets):
 @register_step("master/get", effect="read")
 async def master_get(ctx: StepContext, args: MasterGetArgs) -> list[str]:
     """List active Masters, optionally filtering their actual leadership claims."""
-    return await ctx.runtime.masters.get(
+    return await ctx.runtime.masters.list_addresses(
         args.targets, args.is_leader, remaining=lambda: ctx.timeout
     )

@@ -170,7 +170,7 @@ def test_initial_engine_start_shares_slots_across_roles(tmp_path, monkeypatch):
             topology=topology,
             records=records,
             environment={role: {"deployment": {"replicas": count}} for role in ROLES},
-            recipes={role: {"startup_timeout": "2s"} for role in ROLES},
+            launch_by_role={role: {"startup_timeout": "2s"} for role in ROLES},
             monitoring=None,
         )
         active = peak = 0
@@ -417,7 +417,7 @@ def test_allocator_exhaustion_fails_without_reusing_a_retired_listener(monkeypat
         topology=None,
         records=None,
         environment={},
-        recipes={},
+        launch_by_role={},
         monitoring=None,
     )
     owner.used_ports.add(12345)

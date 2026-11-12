@@ -8,24 +8,28 @@ from ..processes import ProcessIdentity
 
 
 class ZooKeeperRole:
-    def __init__(self, recipe, supervisor, records):
-        self.recipe, self.supervisor, self.records = recipe, supervisor, records
+    def __init__(self, launch_config, supervisor, records):
+        self.launch_config, self.supervisor, self.records = (
+            launch_config,
+            supervisor,
+            records,
+        )
 
     async def start(self):
-        if self.recipe is None:
+        if self.launch_config is None:
             return
-        recipe = self.recipe
+        launch_config = self.launch_config
         directory = self.records.directory / "zookeeper"
         directory.mkdir()
         ready = directory / "ready.json"
         identity = ProcessIdentity("zookeeper")
         await self.supervisor.spawn(
             identity,
-            recipe["command"],
-            recipe["cwd"],
+            launch_config["command"],
+            launch_config["cwd"],
             {
                 **os.environ,
-                **recipe["env"],
+                **launch_config["env"],
                 "MOCK_OUTPUT_DIR": str(directory),
                 "MOCK_READY_FILE": str(ready),
             },
@@ -42,11 +46,11 @@ class ZooKeeperRole:
             return value["connect"]
 
         connect = await self.supervisor.guard(
-            await_ready(), float(duration(recipe["startup_timeout"]))
+            await_ready(), float(duration(launch_config["startup_timeout"]))
         )
         self.records.emit(
             event="process_ready",
-            node=identity.name,
+            node=identity.process_name,
             connect=connect,
             **identity.event_fields(),
         )

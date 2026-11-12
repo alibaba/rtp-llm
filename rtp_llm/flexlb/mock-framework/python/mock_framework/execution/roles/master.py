@@ -12,13 +12,13 @@ from dataclasses import replace
 from urllib.parse import urlsplit
 
 from .. import ExecutionError
-from ..processes import ProcessIdentity, launch_component
+from ..processes import ProcessIdentity, start_instance
 from ..step_trace import write_json
 from ..transport import post
 from . import register_ready_instance
 
 
-def _environment(config, topology, directory, *, require_engines):
+def bind_discovery(config, topology, directory, *, require_engines):
     env = {}
     for key, value in config.items():
         if key.isupper():
@@ -85,8 +85,8 @@ def _environment(config, topology, directory, *, require_engines):
     return env
 
 
-def master_environment(config, topology, directory, *, require_engines=True):
-    env = _environment(config, topology, directory, require_engines=require_engines)
+def write_master_env(config, topology, directory, *, require_engines=True):
+    env = bind_discovery(config, topology, directory, require_engines=require_engines)
     write_json(directory / "native-environment.json", env)
     return env
 
@@ -94,15 +94,15 @@ def master_environment(config, topology, directory, *, require_engines=True):
 def refresh_discovery(config, topology, directory):
     if "MODEL_SERVICE_CONFIG" in config:
         # The consumer owns reload timing; only publish the current addresses here.
-        _environment(config, topology, directory, require_engines=False)
+        bind_discovery(config, topology, directory, require_engines=False)
 
 
 class MasterRole:
     def __init__(
         self,
         *,
-        component,
-        recipe,
+        role_config,
+        launch_config,
         election,
         supervisor,
         topology,
@@ -110,18 +110,22 @@ class MasterRole:
         monitoring,
         environment=None,
     ):
-        self.component, self.recipe, self.election = component, recipe, election
+        self.role_config, self.launch_config, self.election = (
+            role_config,
+            launch_config,
+            election,
+        )
         self.supervisor, self.topology = supervisor, topology
-        self._configuration = environment
+        self._role_configs = environment
         self.records, self.monitoring = records, monitoring
-        self.environment = {}
+        self.election_env = {}
         self._next = 0
         self._instances = {}
         self._lock = asyncio.Lock()
 
     def configure_election(self, connect):
         directory = self.records.directory / "zookeeper"
-        self.environment = {
+        self.election_env = {
             "HIPPO_ROLE": "mock-" + uuid.uuid4().hex,
             "FLEXLB_SYNC_CONSISTENCY_CONFIG": json.dumps(
                 {
@@ -130,29 +134,29 @@ class MasterRole:
                 }
             ),
             "MOCK_MASTER_PORT": str(
-                master_port(self.component["deployment"]["replicas"])
+                master_port(self.role_config["deployment"]["replicas"])
             ),
         }
-        write_json(directory / "master-environment.json", self.environment)
+        write_json(directory / "master-environment.json", self.election_env)
 
-    def _environment(self, index, directory):
-        env = master_environment(
-            self.component["config"],
+    def _write_env(self, index, directory):
+        env = write_master_env(
+            self.role_config["config"],
             self.topology.active(),
             directory,
-            require_engines=index < self.component["deployment"]["replicas"],
+            require_engines=index < self.role_config["deployment"]["replicas"],
         )
-        if self.environment:
+        if self.election_env:
             host = master_host(index)
-            check_master_ports(host, int(self.environment["MOCK_MASTER_PORT"]))
-            env.update(self.environment, FLEXLB_ADVERTISED_IP=host)
+            check_master_ports(host, int(self.election_env["MOCK_MASTER_PORT"]))
+            env.update(self.election_env, FLEXLB_ADVERTISED_IP=host)
             write_json(directory / "native-environment.json", env)
         return env
 
-    def _validate(self, name, index, endpoint, control):
-        if not self.environment:
+    def _validate_endpoint(self, instance_id, index, endpoint, control):
+        if not self.election_env:
             return
-        host, port = master_host(index), int(self.environment["MOCK_MASTER_PORT"])
+        host, port = master_host(index), int(self.election_env["MOCK_MASTER_PORT"])
         address = urlsplit(control)
         if (
             address.scheme != "http"
@@ -162,7 +166,7 @@ class MasterRole:
         ):
             raise ExecutionError("Master control address differs from assigned host")
         expected = {
-            "id": name,
+            "id": instance_id,
             "role": "master",
             "http": f"http://{host}:{port}",
             "rpc": f"{host}:{port + 2}",
@@ -175,50 +179,52 @@ class MasterRole:
             )
 
     def publish_discovery(self, snapshot):
-        if self.component is None:
+        if self.role_config is None:
             return
         processes = {
             process.instance_id: process
-            for process in self.supervisor.owned_processes("master")
+            for process in self.supervisor.process_identities("master")
         }
         for node in snapshot:
             if node["role"] == "master":
                 directory = processes[node["id"]].directory(self.records.directory)
-                refresh_discovery(self.component["config"], snapshot, directory)
+                refresh_discovery(self.role_config["config"], snapshot, directory)
 
-    async def _launch(self, identity, *, expected_address=None):
-        _, control, endpoint = await launch_component(
+    async def _start_instance(self, identity, *, expected_address=None):
+        _, control, endpoint = await start_instance(
             self.supervisor,
             self.records,
-            self._configuration,
+            self._role_configs,
             identity,
-            self.recipe,
-            configure=lambda directory: self._environment(identity.index, directory),
+            self.launch_config,
+            configure=lambda directory: self._write_env(identity.index, directory),
         )
-        if endpoint is None and self.environment:
+        if endpoint is None and self.election_env:
             raise ExecutionError("Native Master did not publish endpoints")
         if expected_address is not None and (
             endpoint is None or endpoint["rpc"] != expected_address
         ):
             raise ExecutionError("Restarted Master changed its service address")
         if endpoint is not None:
-            self._validate(identity.instance_id, identity.index, endpoint, control)
+            self._validate_endpoint(
+                identity.instance_id, identity.index, endpoint, control
+            )
         register_ready_instance(
             self.topology, self.monitoring, self.records, identity, control, endpoint
         )
-        if self.monitoring and self.monitoring.baselined:
-            await self.monitoring.baseline([identity.instance_id])
+        if self.monitoring and self.monitoring.baseline_ready:
+            await self.monitoring.wait_for_baseline([identity.instance_id])
         if endpoint is not None:
             self._instances[endpoint["rpc"]] = identity
         return endpoint
 
     async def start(self, count=None):
         if count is None:
-            if self.component is None:
+            if self.role_config is None:
                 return []
-            count = self.component["deployment"]["replicas"]
+            count = self.role_config["deployment"]["replicas"]
         async with self._lock:
-            if self.recipe is None or not 1 <= count <= 1024:
+            if self.launch_config is None or not 1 <= count <= 1024:
                 raise ExecutionError(
                     "master/start requires configured Masters and count in 1..1024"
                 )
@@ -226,19 +232,19 @@ class MasterRole:
             for _ in range(count):
                 index = self._next
                 self._next += 1
-                endpoint = await self._launch(ProcessIdentity("master", index))
+                endpoint = await self._start_instance(ProcessIdentity("master", index))
                 if endpoint is not None:
                     result.append(endpoint["rpc"])
             return result
 
-    def _read_targets(self, targets):
+    def _select_endpoints(self, targets):
         available = {item["rpc"]: item for item in self.topology.active("master")}
         addresses = sorted(available) if targets is None else targets
         if not addresses or set(addresses) - available.keys():
             raise ExecutionError("Master targets are empty or unknown")
         return [available[address] for address in addresses]
 
-    async def _read_state(self, master, operation, args, remaining):
+    async def _query_master(self, master, operation, args, remaining):
         return await post(
             master["control"],
             {
@@ -248,13 +254,13 @@ class MasterRole:
             },
         )
 
-    async def get(self, targets, is_leader, *, remaining):
-        masters = self._read_targets(targets)
+    async def list_addresses(self, targets, is_leader, *, remaining):
+        masters = self._select_endpoints(targets)
         if is_leader is None:
             return [master["rpc"] for master in masters]
         result = []
         for master in masters:
-            value = await self._read_state(
+            value = await self._query_master(
                 master, "master/leadership/get", {}, remaining
             )
             own = value["instances"]
@@ -266,10 +272,10 @@ class MasterRole:
                 result.append(master["rpc"])
         return result
 
-    async def get_engines(self, targets, role, *, remaining):
+    async def list_engine_addresses(self, targets, role, *, remaining):
         result = {}
-        for master in self._read_targets(targets):
-            value = await self._read_state(
+        for master in self._select_endpoints(targets):
+            value = await self._query_master(
                 master, "master/engine/get", {"role": role}, remaining
             )
             if set(value["instances"]) != {master["id"]}:
@@ -284,7 +290,7 @@ class MasterRole:
             result[master["rpc"]] = sorted(addresses)
         return result
 
-    def _selected(self, targets, *, active):
+    def _select_addresses(self, targets, *, active):
         available = {node["rpc"] for node in self.topology.active("master")}
         candidates = available if active else self._instances.keys() - available
         addresses = sorted(candidates) if targets is None else targets
@@ -303,10 +309,10 @@ class MasterRole:
         async with self._lock:
             if mode not in ("terminate", "kill"):
                 raise ExecutionError("Unknown Master stop mode")
-            addresses = self._selected(targets, active=True)
+            addresses = self._select_addresses(targets, active=True)
             selected = [self._instances[address] for address in addresses]
             if any(
-                self.supervisor.child(item.name).returncode is not None
+                self.supervisor.child(item.process_name).returncode is not None
                 for item in selected
             ):
                 raise ExecutionError("Selected Master is not running")
@@ -317,13 +323,13 @@ class MasterRole:
                 mode=mode,
             )
             if self.monitoring:
-                await self.monitoring.final_scrape(
+                await self.monitoring.wait_for_final_scrape(
                     [item.instance_id for item in selected]
                 )
             for item in selected:
-                child = self.supervisor.child(item.name)
+                child = self.supervisor.child(item.process_name)
                 errors = await self.supervisor.stop_intentionally(
-                    item.name, mode=mode, grace=self._stop_grace()
+                    item.process_name, mode=mode, grace=self._stop_grace()
                 )
                 if child.returncode is not None:
                     (item.directory(self.records.directory) / "ready.json").unlink(
@@ -333,7 +339,7 @@ class MasterRole:
                     self.records.emit(
                         event="instance_stopped",
                         node=item.instance_id,
-                        process=item.name,
+                        process=item.process_name,
                         **item.event_fields(),
                     )
                     if self.monitoring:
@@ -344,10 +350,10 @@ class MasterRole:
 
     async def restart(self, targets):
         async with self._lock:
-            addresses = self._selected(targets, active=False)
+            addresses = self._select_addresses(targets, active=False)
             for address in addresses:
                 item = self._instances[address]
-                await self._launch(
+                await self._start_instance(
                     replace(item, generation=item.generation + 1),
                     expected_address=address,
                 )
@@ -360,9 +366,9 @@ class MasterRole:
     async def close(self):
         errors = []
         # Keep peers and ZooKeeper alive until each Master has completed its shutdown.
-        for process in reversed(self.supervisor.owned_processes("master")):
+        for process in reversed(self.supervisor.process_identities("master")):
             errors.extend(
-                await self.supervisor.stop([process.name], self._stop_grace())
+                await self.supervisor.stop([process.process_name], self._stop_grace())
             )
         return errors
 

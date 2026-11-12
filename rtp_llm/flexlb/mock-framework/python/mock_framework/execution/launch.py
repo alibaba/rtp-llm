@@ -43,22 +43,22 @@ def prepare_launch(raw, case, base):
         raise ExecutionError(
             "ZooKeeper belongs in the launch.zookeeper recipe, not components"
         )
-    components = {}
-    recipes = dict(raw["components"])
+    launch_configs = {}
+    launch_by_role = dict(raw["components"])
     if "zookeeper" in raw:
-        recipes["zookeeper"] = raw["zookeeper"]
-    for role, recipe in recipes.items():
+        launch_by_role["zookeeper"] = raw["zookeeper"]
+    for role, launch_config in launch_by_role.items():
         if role != "zookeeper" and role not in case.environment:
             raise ExecutionError(
                 f"Launch recipe names an unconfigured component: {role}"
             )
         fields(
-            recipe,
+            launch_config,
             {"command", "cwd", "env", "startup_timeout"},
             {"command"},
             where="launch." + role,
         )
-        command = recipe["command"]
+        command = launch_config["command"]
         if (
             not isinstance(command, list)
             or not command
@@ -67,7 +67,7 @@ def prepare_launch(raw, case, base):
             raise ExecutionError(
                 "command must be a nonempty argv list; no shell expansion"
             )
-        env = recipe.get("env", {})
+        env = launch_config.get("env", {})
         if not isinstance(env, dict) or any(
             not isinstance(k, str) or not isinstance(v, str) for k, v in env.items()
         ):
@@ -79,9 +79,9 @@ def prepare_launch(raw, case, base):
         )
         if any(k.startswith("MOCK_") and k not in address_env for k in env):
             raise ExecutionError("MOCK_* launch variables are assigned by the runner")
-        startup = recipe.get("startup_timeout", "30s")
+        startup = launch_config.get("startup_timeout", "30s")
         duration(startup, positive=True)
-        cwd = Path(base) / text(recipe.get("cwd", "."), "launch.cwd")
+        cwd = Path(base) / text(launch_config.get("cwd", "."), "launch.cwd")
         if not cwd.is_dir():
             raise ExecutionError(f"Launch cwd is not a directory: {cwd}")
         deployment = case.environment[role]["deployment"] if role != "zookeeper" else {}
@@ -89,14 +89,14 @@ def prepare_launch(raw, case, base):
             raise ExecutionError(
                 "This local launcher does not yet enforce resources/heap; refusing to ignore them"
             )
-        components[role] = {
-            **recipe,
+        launch_configs[role] = {
+            **launch_config,
             "command": command,
             "env": env,
             "cwd": str(cwd.resolve()),
             "startup_timeout": startup,
         }
-    zookeeper = components.pop("zookeeper", None)
+    zookeeper = launch_configs.pop("zookeeper", None)
     native_master = "MODEL_SERVICE_CONFIG" in case.environment.get("master", {}).get(
         "config", {}
     )
@@ -104,16 +104,16 @@ def prepare_launch(raw, case, base):
         raise ExecutionError(
             "Native Master requires a zookeeper launch recipe; other components do not use it"
         )
-    missing = set(case.environment) - set(components)
+    missing = set(case.environment) - set(launch_configs)
     if missing:
         raise ExecutionError(f"Missing component launch recipes: {sorted(missing)}")
-    if "master" in components:
+    if "master" in launch_configs:
         validate_master_launch(
             case.environment["master"]["config"],
-            components["master"]["env"],
+            launch_configs["master"]["env"],
             local_election=zookeeper is not None,
         )
-    result = {"components": components}
+    result = {"components": launch_configs}
     if zookeeper is not None:
         result["zookeeper"] = zookeeper
     if "prometheus" in raw:
@@ -158,7 +158,7 @@ def local_launch(
             )
         return path
 
-    def component_classpath(role):
+    def java_classpath(role):
         manifest = artifact(f"java/{role}/target/dependencies.txt")
         entries = manifest.read_text(encoding="utf-8").strip().split(os.pathsep)
         dependencies = [manifest.parent / entry for entry in entries]
@@ -181,7 +181,7 @@ def local_launch(
         artifact(
             "java/zookeeper/target/classes/org/flexlb/mock/zookeeper/ZooKeeperMain.class"
         )
-        classpath = component_classpath("master")
+        classpath = java_classpath("master")
         # Expose native metrics locally.
         commands["master"] = [
             str(java),
@@ -198,7 +198,7 @@ def local_launch(
             "command": prefix
             + [
                 "-cp",
-                component_classpath("zookeeper"),
+                java_classpath("zookeeper"),
                 "org.flexlb.mock.zookeeper.ZooKeeperMain",
             ],
             "startup_timeout": "60s",

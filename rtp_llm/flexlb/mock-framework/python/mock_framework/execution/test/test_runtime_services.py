@@ -179,9 +179,9 @@ def test_cleanup_continues_in_order_after_domain_failures(tmp_path):
         runtime.supervisor.close = operation("fallback")
         finished = []
         runtime.monitoring = SimpleNamespace(
-            final_scrape=operation("scrape", raises=True),
+            wait_for_final_scrape=operation("scrape", raises=True),
             close=operation("prometheus"),
-            finish=lambda errors: finished.extend(errors),
+            write_collection_result=lambda errors: finished.extend(errors),
         )
         errors = await runtime.close()
         assert order == [

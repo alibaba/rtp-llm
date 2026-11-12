@@ -29,8 +29,8 @@ def context():
     )
     records = SimpleNamespace(emit=lambda **v: events.append(v))
     clients = ClientRole(
-        component=None,
-        recipe=None,
+        role_config=None,
+        launch_config=None,
         supervisor=None,
         topology=topology,
         records=records,
@@ -475,7 +475,9 @@ def test_teardown_collects_unstopped_playback_before_final_scrape(failed, tmp_pa
         runtime.clients.pending = True
         runtime.clients.stop_playback = collect
         runtime.monitoring = SimpleNamespace(
-            final_scrape=scrape, close=close_monitor, finish=lambda errors: None
+            wait_for_final_scrape=scrape,
+            close=close_monitor,
+            write_collection_result=lambda errors: None,
         )
         return await runtime.close()
 

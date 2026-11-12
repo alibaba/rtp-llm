@@ -441,7 +441,7 @@ def test_intentional_stop_retains_unreaped_process_for_final_cleanup(
 
         child = SimpleNamespace(returncode=None, pid=123, wait=wait)
         process = ProcessIdentity("prefill", 0)
-        p._children[process.name] = (process, child)
+        p._children[process.process_name] = (process, child)
         monkeypatch.setattr(
             "mock_framework.execution.processes.os.killpg",
             lambda *args: setattr(child, "returncode", exit_code),
@@ -452,10 +452,12 @@ def test_intentional_stop_retains_unreaped_process_for_final_cleanup(
             return await original(names, 0)
 
         p.stop = stop
-        errors = await p.stop_intentionally(process.name)
-        assert p.owned_processes("prefill") == ((process,) if exit_code is None else ())
+        errors = await p.stop_intentionally(process.process_name)
+        assert p.process_identities("prefill") == (
+            (process,) if exit_code is None else ()
+        )
         assert bool(errors) == (exit_code is None)
-        assert process.name in p._expected
+        assert process.process_name in p._expected
 
     asyncio.run(exercise())
 

@@ -16,6 +16,6 @@ async def master_engine_get(
     ctx: StepContext, args: MasterEngineGetArgs
 ) -> dict[str, list[str]]:
     """Keep each Master's discovered Engine addresses separate."""
-    return await ctx.runtime.masters.get_engines(
+    return await ctx.runtime.masters.list_engine_addresses(
         args.targets, args.role, remaining=lambda: ctx.timeout
     )
