@@ -44,6 +44,7 @@ cc_library(
         ":client",
         ":decode_publication_accounting",
         ":dtop_origin_metadata",
+        ":sdk_buffer_safety",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:cp_slot_mapper",
         ":group_policy",

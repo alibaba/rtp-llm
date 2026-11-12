@@ -1397,6 +1397,66 @@ TEST(ClientWrapperTest, BoundedSdkChunksPreserveUrisAndDestinationBytes) {
     EXPECT_EQ(unknown_calls, 0u);
     client->shutdown();
 }
+#if defined(KVCM_HAS_TRANSFER_DEADLINE)
+class DeadlineTransferClient: public kv_cache_manager::MockTransferClient {
+public:
+    using MockTransferClient::MockTransferClient;
+    using Code = kv_cache_manager::ClientErrorCode;
+    using Uris = kv_cache_manager::UriStrVec;
+    using Buffers = kv_cache_manager::BlockBuffers;
+    using Trace = std::shared_ptr<kv_cache_manager::TransferTraceInfo>;
+
+    MOCK_METHOD(Code, LoadKvCachesWithDeadline, (const Uris&, const Buffers&, int64_t, Trace), (override));
+    MOCK_METHOD((std::pair<Code, Uris>),
+                SaveKvCachesWithDeadline,
+                (const Uris&, const Buffers&, int64_t, Trace),
+                (override));
+};
+
+TEST(ClientWrapperTest, ReadAndWriteChunksForwardTheParentDeadline) {
+    using namespace kv_cache_manager;
+    for (const bool publication : {false, true}) {
+        autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", publication ? "1" : "0");
+        unsigned char byte = 7;
+        RegistSpan span{&byte, 1};
+        InitObservation observation;
+        auto destruction_count = std::make_shared<int>(0);
+        auto transfer = std::make_unique<DeadlineTransferClient>(destruction_count);
+        auto* mock = transfer.get();
+        auto client = initializeClient(false, "sdk_deadline", span, observation, destruction_count,
+                                        nullptr, nullptr, nullptr, std::move(transfer));
+        ASSERT_NE(client, nullptr);
+        UriStrVec uris(257, "uri");
+        BlockBuffers buffers(uris.size());
+        for (auto& block : buffers)
+            block.iovs.push_back({MemoryType::CPU, &byte, 1, false});
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        const auto deadline_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline.time_since_epoch()).count();
+        EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).Times(0);
+        EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).Times(0);
+        EXPECT_CALL(*mock, LoadKvCachesWithDeadline(_, _, deadline_ms, _))
+            .Times(publication ? 2 : 1)
+            .WillRepeatedly(Return(ClientErrorCode::ER_OK));
+        EXPECT_CALL(*mock, SaveKvCachesWithDeadline(_, _, deadline_ms, _))
+            .Times(publication ? 2 : 1)
+            .WillRepeatedly(Invoke([](const auto& batch, const auto&, int64_t, const auto&) {
+                return std::make_pair(ClientErrorCode::ER_OK, batch);
+            }));
+        auto completion = ClientWrapper::TransferCompletion::NOT_STARTED;
+        EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion, deadline),
+                  ClientErrorCode::ER_OK);
+        EXPECT_EQ(completion, ClientWrapper::TransferCompletion::BUFFER_SAFE);
+        const auto saved =
+            client->saveKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion, deadline);
+        EXPECT_EQ(saved.first, ClientErrorCode::ER_OK);
+        EXPECT_EQ(saved.second, uris);
+        EXPECT_EQ(completion, ClientWrapper::TransferCompletion::BUFFER_SAFE);
+        client->shutdown();
+    }
+}
+#endif
+
 TEST(ClientWrapperTest, BoundedSdkDoesNotStartAnotherChunkAfterDeadline) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     using namespace kv_cache_manager;
