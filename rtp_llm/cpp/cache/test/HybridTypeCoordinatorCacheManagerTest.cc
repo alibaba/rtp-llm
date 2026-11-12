@@ -637,12 +637,12 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, InitAndAddressLookupSmoke) {
 
     const std::vector<SingleTypeCacheManagerPtr> groups = allocator->cacheGroups();
     ASSERT_GT(groups.size(), 1u);
-    const std::vector<KVCachePoolMetricsSnapshot> snapshots = allocator->poolMetricsSnapshots();
-    ASSERT_EQ(snapshots.size(), 2u);
+    const std::vector<CachePoolMetrics> metrics_list = allocator->poolMetrics();
+    ASSERT_EQ(metrics_list.size(), 2u);
     EXPECT_NE(poolForTag(*allocator, "linear"), poolForTag(*allocator, "full1"));
-    for (const auto& snapshot : snapshots) {
-        EXPECT_EQ(snapshot.used_blocks, snapshot.total_blocks - snapshot.free_blocks);
-        EXPECT_EQ(snapshot.free_blocks, config.group(snapshot.pool_name).block_num - 1);
+    for (const auto& metrics_data : metrics_list) {
+        EXPECT_EQ(metrics_data.used_blocks, metrics_data.total_blocks - metrics_data.free_blocks);
+        EXPECT_EQ(metrics_data.free_blocks, config.group(metrics_data.pool_name).block_num - 1);
     }
 
     // Should be able to fetch address for any global layer and non-zero block id.
@@ -1897,16 +1897,16 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, DenseManagersFollowBoundTopologyOr
         ASSERT_TRUE(allocator->init());
         const auto  managers  = allocator->cacheGroups();
         const auto& pools     = allocator->groupBlockPools();
-        const auto  snapshots = allocator->poolMetricsSnapshots();
+        const auto  metrics_list = allocator->poolMetrics();
         ASSERT_EQ(managers.size(), bound_topology->groupTags().size());
         ASSERT_EQ(pools.size(), managers.size());
-        ASSERT_EQ(snapshots.size(), managers.size());
+        ASSERT_EQ(metrics_list.size(), managers.size());
         for (size_t row = 0; row < managers.size(); ++row) {
             const auto& tag = bound_topology->groupTags()[row];
             EXPECT_EQ(managers[row]->tag(), tag);
             EXPECT_EQ(managers[row]->blockPool(), pools[row]);
-            EXPECT_EQ(snapshots[row].pool_index, row);
-            EXPECT_EQ(snapshots[row].pool_name, pools[row]->poolName());
+            EXPECT_EQ(metrics_list[row].pool_index, row);
+            EXPECT_EQ(metrics_list[row].pool_name, pools[row]->poolName());
             for (const int layer_id : bound_topology->layerIdsForGroup(tag)) {
                 const auto expected = managers[row]->convertIndexToAddr(layer_id, 1);
                 const auto actual   = allocator->convertIndexToAddr(layer_id, tag, 1);

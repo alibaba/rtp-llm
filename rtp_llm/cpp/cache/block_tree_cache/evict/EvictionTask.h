@@ -5,26 +5,14 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
-#include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/EvictionMetrics.h"
 
 namespace rtp_llm {
 
-struct EvictionTimingSnapshot {
-    EvictionTimingSnapshot() = default;
-    explicit EvictionTimingSnapshot(const CandidateMeta& candidate_meta):
-        tier_enter_time_us(candidate_meta.tier_enter_time_us),
-        last_access_time_us(candidate_meta.last_access_time_us),
-        selected_time_us(currentTimeUs()) {}
-
-    int64_t tier_enter_time_us{0};
-    int64_t last_access_time_us{0};
-    int64_t selected_time_us{0};
-};
-
 struct EvictionTransferTask {
     explicit EvictionTransferTask(TransferTask task): transfer_task(std::move(task)) {}
-    EvictionTransferTask(TransferTask task, std::vector<EvictionTimingSnapshot> timing_snapshots):
-        transfer_task(std::move(task)), timings(std::move(timing_snapshots)) {}
+    EvictionTransferTask(TransferTask task, std::vector<EvictionTimingMetrics> timings):
+        transfer_task(std::move(task)), timings(std::move(timings)) {}
 
     const std::vector<TransferDescriptor>& descriptors() const {
         return transfer_task.descriptors();
@@ -35,18 +23,18 @@ struct EvictionTransferTask {
     }
 
     TransferTask                        transfer_task;
-    std::vector<EvictionTimingSnapshot> timings;
+    std::vector<EvictionTimingMetrics>  timings;
 };
 
 struct EvictionDropTask {
     TransferDescriptor                  primary_desc;
-    EvictionTimingSnapshot              primary_timing;
+    EvictionTimingMetrics               primary_timing;
     std::vector<TransferDescriptor>     cascade_descs;
-    std::vector<EvictionTimingSnapshot> cascade_timings;
+    std::vector<EvictionTimingMetrics>  cascade_timings;
     // FULL prune closure only. Every dependent descriptor targets NONE,
     // and nodes stay valid because task activation is synchronous.
     std::vector<TransferDescriptor>     dependent_prune_descs;
-    std::vector<EvictionTimingSnapshot> dependent_prune_timings;
+    std::vector<EvictionTimingMetrics>  dependent_prune_timings;
     std::vector<TreeNode*>              full_prune_nodes_bottom_up;
 
     bool hasFullPrune() const {

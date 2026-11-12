@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheLockGuard.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/FullPrefixInvariantScanner.h"
 
 #include <algorithm>
@@ -184,10 +185,11 @@ std::string formatViolationDetail(const FullViolationDetail& detail) {
     return oss.str();
 }
 
-FullPrefixInvariantScanner::FullPrefixInvariantScanner(const BlockTree& tree,
-                                                       std::mutex&      cache_mutex,
-                                                       int64_t          interval_ms):
-    tree_(tree), cache_mutex_(cache_mutex), interval_ms_(interval_ms) {}
+FullPrefixInvariantScanner::FullPrefixInvariantScanner(const BlockTree&                     tree,
+                                                       std::mutex&                          cache_mutex,
+                                                       int64_t                              interval_ms,
+                                                       const BlockTreeCacheMetricsReporter* metrics_reporter):
+    metrics_reporter_(metrics_reporter), tree_(tree), cache_mutex_(cache_mutex), interval_ms_(interval_ms) {}
 
 FullPrefixInvariantScanner::~FullPrefixInvariantScanner() {
     stop();
@@ -231,21 +233,15 @@ void FullPrefixInvariantScanner::runScanGuarded() {
     }
 }
 
-std::unique_lock<std::mutex>
-FullPrefixInvariantScanner::tryLockCacheUntil(std::chrono::steady_clock::time_point deadline) {
-    std::unique_lock<std::mutex> cache_lock(cache_mutex_, std::defer_lock);
-    while (!stopping_.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
-        if (cache_lock.try_lock()) {
-            return cache_lock;
-        }
-        // std::mutex has no timed acquisition. Sleep between attempts, without
-        // holding the cache mutex, and let stop() interrupt the retry wait.
-        std::unique_lock<std::mutex> wait_lock(wait_mutex_);
-        stop_condition_.wait_until(wait_lock,
-                                   std::min(deadline, std::chrono::steady_clock::now() + kCacheLockRetry),
-                                   [this] { return stopping_.load(std::memory_order_acquire); });
-    }
-    return cache_lock;
+CacheLockGuard FullPrefixInvariantScanner::tryLockCacheUntil(std::chrono::steady_clock::time_point deadline) {
+    return CacheLockGuard(cache_mutex_,
+                          metrics_reporter_,
+                          "invariant_scan",
+                          deadline,
+                          kCacheLockRetry,
+                          wait_mutex_,
+                          stop_condition_,
+                          [this] { return stopping_.load(std::memory_order_acquire); });
 }
 
 void FullPrefixInvariantScanner::runScan() {
