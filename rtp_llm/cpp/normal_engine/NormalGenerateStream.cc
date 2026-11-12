@@ -262,7 +262,9 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
     // Sticky: a trailing non-graph update (stop-token postprocess) must not
     // erase the fact that this request's decode actually replayed a graph.
-    if (update_info.decode_graph_replay) {
+    // The global receipt is authoritative even if a transport layer dropped
+    // the boolean on an intermediate update.
+    if (update_info.decode_graph_replay || decodeGraphReplayCount() > replay_start_count_) {
         decode_graph_replay_ = true;
     }
 

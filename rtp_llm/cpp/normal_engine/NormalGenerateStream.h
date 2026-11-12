@@ -5,6 +5,9 @@
 
 namespace rtp_llm {
 
+// Monotonic count of real CUDA/HIP decode graph replays (process-wide).
+uint64_t decodeGraphReplayCount();
+
 class NormalGenerateStream: public GenerateStream {
 public:
     NormalGenerateStream(const GenerateStream& stream): GenerateStream(stream) {
@@ -25,7 +28,7 @@ public:
                        metrics_reporter,
                        extra_reserve_token_num,
                        perf_test),
-        request_id_(query->request_id) {}
+        request_id_(query->request_id), replay_start_count_(decodeGraphReplayCount()) {}
 
     bool                             hasOutput() override;
     ErrorResult<GenerateOutputs>     nextOutput(int64_t wait_timeout_ms = 0) override;
@@ -43,7 +46,8 @@ private:
     bool                             finished_{false};
     GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status_{
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
-    bool decode_graph_replay_{false};
+    bool     decode_graph_replay_{false};
+    uint64_t replay_start_count_{0};
     std::deque<GenerateOutputs> generate_outputs_;
 };
 }  // namespace rtp_llm

@@ -30,6 +30,14 @@ using namespace torch_ext;
 namespace rtp_llm {
 
 namespace {
+std::atomic<uint64_t> g_decode_graph_replay_count{0};
+}
+
+uint64_t decodeGraphReplayCount() {
+    return g_decode_graph_replay_count.load(std::memory_order_relaxed);
+}
+
+namespace {
 int64_t expandedCaptureBlockTableWidth(const GroupBase& group, size_t physical) {
     const size_t expansion =
         group.policy.group_type == CacheGroupType::FULL ? std::max<size_t>(1, group.kernelBlocksPerKvBlock()) : 1;
@@ -1384,6 +1392,7 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs&                inpu
                 state.current_real_graph_bs,
                 state.current_real_graph_bs * num_tokens_per_bs_,
                 state.seq_len_sum);
+            g_decode_graph_replay_count.fetch_add(1, std::memory_order_relaxed);
             replayDecode(state.current_real_graph_bs);
             // Durable receipt for the API layer: one byte per real graph
             // replay, never synthesized by a flag.  The request handler
