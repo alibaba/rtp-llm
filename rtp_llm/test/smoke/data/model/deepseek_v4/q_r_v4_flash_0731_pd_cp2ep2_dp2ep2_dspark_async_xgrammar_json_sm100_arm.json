@@ -231,7 +231,7 @@
         }
       },
       "result": {
-        "response": "<think>我们分析句子：\"当前，我国社会主义事业正在</think>{\"人物\": [], \"组织\": [\"我国\"], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}</think>{\"人物\": [], \"组织\": [], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}<｜end▁of▁sentence｜>",
+        "response": "<think>我们分析句子：\"当前，我国社会主义事业正在</think>{\"人物\": [], \"组织\": [\"我国\"], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}</think>{\"人物\": [], \"组织\": [], \"地点\": [], \"其他实体\": [\"我国\", \"社会主义事业\", \"两个文明建设\"]}<｜end▁of▁sentence｜>",
         "generated_ids": [
           128821,
           1300,
@@ -294,6 +294,9 @@
           22935,
           3362,
           20584,
+          5892,
+          1760,
+          582,
           9865,
           9486,
           1760,
@@ -367,6 +370,9 @@
           22935,
           3362,
           20584,
+          5892,
+          1760,
+          582,
           9865,
           9486,
           1760,
@@ -442,6 +448,9 @@
           22935,
           3362,
           20584,
+          5892,
+          1760,
+          582,
           9865,
           9486,
           1760,
@@ -463,7 +472,7 @@
           "generate_think_token_num": 43
         },
         "reasoning_content": "我们分析句子：\"当前，我国社会主义事业正在</think>{\"人物\": [], \"组织\": [\"我国\"], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}",
-        "content": "{\"人物\": [], \"组织\": [], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}",
+        "content": "{\"人物\": [], \"组织\": [], \"地点\": [], \"其他实体\": [\"我国\", \"社会主义事业\", \"两个文明建设\"]}",
         "aux_info": null,
         "finish_reason": 0,
         "json_content": true,
@@ -582,15 +591,9 @@
             "message": {
               "role": "assistant",
               "content": "{\"answer\":\"ok\"}",
-              "name": null,
-              "reasoning_content": null,
-              "function_call": null,
-              "tool_calls": null,
-              "partial": false,
-              "tool_call_id": null
+              "partial": false
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
@@ -647,15 +650,9 @@
             "message": {
               "role": "assistant",
               "content": "{\"city\": \"Hangzhou\"}",
-              "name": null,
-              "reasoning_content": null,
-              "function_call": null,
-              "tool_calls": null,
-              "partial": false,
-              "tool_call_id": null
+              "partial": false
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
@@ -731,22 +728,16 @@
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "{\"city\":\"Hangzhou\",\"condition\":\"Partly cloudy with occasional light rain showers in the afternoon. High humidity and moderate temperatures. Winds light and variable. UV index moderate. Air quality index moderate (PM2.5 around 60). High 28°C, Low 22°C.\"}",
-              "name": null,
-              "reasoning_content": null,
-              "function_call": null,
-              "tool_calls": null,
-              "partial": false,
-              "tool_call_id": null
+              "content": "{\"city\":\"Hangzhou\",\"condition\":\"Partly Cloudy with occasional rain showers expected later in the day. High around 28°C, low near 20°C. Humidity 75%. Wind light from the east at 5-10 km/h.\"}",
+              "partial": false
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
           "prompt_tokens": 17,
-          "total_tokens": 79,
-          "completion_tokens": 62,
+          "total_tokens": 72,
+          "completion_tokens": 55,
           "completion_tokens_details": null,
           "prompt_tokens_details": null
         },
@@ -796,13 +787,9 @@
             "index": 0,
             "delta": {
               "role": "assistant",
-              "content": "{\"人物\": [], \"组织\": [\"我国\"], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}",
-              "reasoning_content": "我们分析句子：\"当前，我国社会主义事业正在",
-              "function_call": null,
-              "tool_calls": null
+              "content": "{\"人物\": [], \"组织\": [\"我国\"], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}"
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
@@ -913,13 +900,9 @@
             "index": 0,
             "delta": {
               "role": "assistant",
-              "content": "{\"人物\": [], \"组织\": [\"我国\"], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}",
-              "reasoning_content": "我们分析句子：\"当前，我国社会主义事业正在",
-              "function_call": null,
-              "tool_calls": null
+              "content": "{\"人物\": [], \"组织\": [\"我国\"], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}"
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
@@ -989,22 +972,16 @@
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "你好！很高兴见到你。有什么我可以帮你的吗？无论是聊天、解答问题，",
-              "name": null,
-              "reasoning_content": "嗯，用户发来一个简单的问候“你好",
-              "function_call": null,
-              "tool_calls": null,
-              "partial": false,
-              "tool_call_id": null
+              "content": "你好！有什么可以帮你的吗？😊",
+              "partial": false
             },
-            "finish_reason": "length",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
           "prompt_tokens": 5,
-          "total_tokens": 37,
-          "completion_tokens": 32,
+          "total_tokens": 30,
+          "completion_tokens": 25,
           "completion_tokens_details": {
             "audio_tokens": null,
             "reasoning_tokens": 10
@@ -1050,15 +1027,9 @@
             "message": {
               "role": "assistant",
               "content": "ok.",
-              "name": null,
-              "reasoning_content": null,
-              "function_call": null,
-              "tool_calls": null,
-              "partial": false,
-              "tool_call_id": null
+              "partial": false
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
@@ -1111,15 +1082,9 @@
             "message": {
               "role": "assistant",
               "content": "{\"name\":\"刘五\",\"age\":\"34岁\",\"email\":\"liuwu@example.com\"}",
-              "name": null,
-              "reasoning_content": null,
-              "function_call": null,
-              "tool_calls": null,
-              "partial": false,
-              "tool_call_id": null
+              "partial": false
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
@@ -1225,13 +1190,9 @@
             "index": 0,
             "delta": {
               "role": "assistant",
-              "content": "{\"地点\": [\"我国\"], \"人物\": [], \"组织\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}",
-              "reasoning_content": "我们分析句子：\"当前，我国社会主义事业正在",
-              "function_call": null,
-              "tool_calls": null
+              "content": "{\"地点\": [\"我国\"], \"人物\": [], \"组织\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}"
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
@@ -1302,15 +1263,9 @@
             "message": {
               "role": "assistant",
               "content": "{\"人物\": [], \"组织\": [\"我国\"], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}",
-              "name": null,
-              "reasoning_content": "我们分析句子：\"当前，我国社会主义事业正在",
-              "function_call": null,
-              "tool_calls": null,
-              "partial": false,
-              "tool_call_id": null
+              "partial": false
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
@@ -1422,15 +1377,9 @@
             "message": {
               "role": "assistant",
               "content": "{\"人物\": [], \"组织\": [\"我国\"], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}",
-              "name": null,
-              "reasoning_content": "我们分析句子：\"当前，我国社会主义事业正在",
-              "function_call": null,
-              "tool_calls": null,
-              "partial": false,
-              "tool_call_id": null
+              "partial": false
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
@@ -1542,13 +1491,9 @@
             "index": 0,
             "delta": {
               "role": "assistant",
-              "content": "{\"人物\": [], \"组织\": [\"我国\"], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}",
-              "reasoning_content": "我们分析句子：\"当前，我国社会主义事业正在",
-              "function_call": null,
-              "tool_calls": null
+              "content": "{\"人物\": [], \"组织\": [\"我国\"], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}"
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
@@ -1659,15 +1604,9 @@
             "message": {
               "role": "assistant",
               "content": "{\"人物\": [], \"组织\": [\"我国\"], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}",
-              "name": null,
-              "reasoning_content": "我们分析句子：\"当前，我国社会主义事业正在",
-              "function_call": null,
-              "tool_calls": null,
-              "partial": false,
-              "tool_call_id": null
+              "partial": false
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
@@ -1752,22 +1691,16 @@
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "{\"city\":\"北京\",\"weather\":\"晴\",\"temperature\":\"15°C\",\"humidity\":\"30%\",\"wind\":\"北风 3级\",\"update_time\":\"2025-04-07 10:00\"}",
-              "name": null,
-              "reasoning_content": null,
-              "function_call": null,
-              "tool_calls": null,
-              "partial": false,
-              "tool_call_id": null
+              "content": "{\"city\":\"北京\",\"weather\":\"晴\",\"temperature\":\"15°C\",\"humidity\":\"30%\",\"wind\":\"北风3级\",\"update_time\":\"2025-04-05 10:00\"}",
+              "partial": false
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
           "prompt_tokens": 18,
-          "total_tokens": 62,
-          "completion_tokens": 44,
+          "total_tokens": 61,
+          "completion_tokens": 43,
           "completion_tokens_details": null,
           "prompt_tokens_details": null
         },
@@ -1786,8 +1719,8 @@
           "weather": "晴",
           "temperature": "15°C",
           "humidity": "30%",
-          "wind": "北风 3级",
-          "update_time": "2025-04-07 10:00"
+          "wind": "北风3级",
+          "update_time": "2025-04-05 10:00"
         },
         "required_json_keys": [
           "city",
@@ -1841,22 +1774,16 @@
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "{\"city\": \"北京\", \"weather\": \"晴\", \"temperature\": \"15°C\", \"humidity\": \"30%\", \"wind\": \"北风3级\", \"update_time\": \"2025-04-05 14:00\"}",
-              "name": null,
-              "reasoning_content": null,
-              "function_call": null,
-              "tool_calls": null,
-              "partial": false,
-              "tool_call_id": null
+              "content": "{\n  \"city\": \"北京\",\n  \"date\": \"2025-04-09\",\n  \"weather\": \"多云转晴\",\n  \"temperature\": {\n    \"current\": 18,\n    \"high\": 22,\n    \"low\": 10\n  },\n  \"humidity\": \"45%\",\n  \"wind\": \"南风 3-4级\",\n  \"air_quality\": {\n    \"index\": 85,\n    \"level\": \"良\",\n    \"pm2.5\": 52\n  },\n  \"sunrise\": \"05:42\",\n  \"sunset\": \"18:48\",\n  \"suggestion\": \"天气舒适，适合户外活动，但早晚温差较大，建议携带外套。\"\n}",
+              "partial": false
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
           "prompt_tokens": 21,
-          "total_tokens": 75,
-          "completion_tokens": 54,
+          "total_tokens": 178,
+          "completion_tokens": 157,
           "completion_tokens_details": null,
           "prompt_tokens_details": null
         },
@@ -1872,17 +1799,28 @@
         "json_object": true,
         "expected_json": {
           "city": "北京",
-          "weather": "晴",
-          "temperature": "15°C",
-          "humidity": "30%",
-          "wind": "北风3级",
-          "update_time": "2025-04-05 14:00"
+          "date": "2025-04-09",
+          "weather": "多云转晴",
+          "temperature": {
+            "current": 18,
+            "high": 22,
+            "low": 10
+          },
+          "humidity": "45%",
+          "wind": "南风 3-4级",
+          "air_quality": {
+            "index": 85,
+            "level": "良",
+            "pm2.5": 52
+          },
+          "sunrise": "05:42",
+          "sunset": "18:48",
+          "suggestion": "天气舒适，适合户外活动，但早晚温差较大，建议携带外套。"
         },
         "required_json_keys": [
           "city",
           "humidity",
           "temperature",
-          "update_time",
           "weather",
           "wind"
         ]
@@ -1933,13 +1871,9 @@
             "index": 0,
             "delta": {
               "role": "assistant",
-              "content": "{\n  \"location\": \"北京\",\n  \"weather\": {\n    \"temperature\": \"15°C\",\n    \"condition\": \"多云\",\n    \"humidity\": \"45%\",\n    \"wind\": \"北风 3级\"\n  },\n  \"timestamp\": \"2025-04-07 10:00:00\"\n}",
-              "reasoning_content": "我们被要求查询北京的天气，并以JSON格式",
-              "function_call": null,
-              "tool_calls": null
+              "content": "{\n  \"location\": \"北京\",\n  \"weather\": {\n    \"temperature\": \"22°C\",\n    \"condition\": \"晴\",\n    \"humidity\": \"45%\",\n    \"wind\": \"北风 3级\"\n  },\n  \"timestamp\": \"2025-04-07 10:00:00\"\n}"
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
@@ -1964,8 +1898,8 @@
         "expected_json": {
           "location": "北京",
           "weather": {
-            "temperature": "15°C",
-            "condition": "多云",
+            "temperature": "22°C",
+            "condition": "晴",
             "humidity": "45%",
             "wind": "北风 3级"
           },
@@ -2053,22 +1987,16 @@
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "{\"advice\":\"天气较冷，建议穿着厚外套、毛衣等保暖衣物。\",\"city\":\"北京\",\"date\":\"2025-04-17\",\"weather\":\"晴转多云，伴有轻度霾，气温10℃~22℃，南风2-3级\"}",
-              "name": null,
-              "reasoning_content": null,
-              "function_call": null,
-              "tool_calls": null,
-              "partial": false,
-              "tool_call_id": null
+              "content": "{\"advice\": \"北京今天天气晴朗，气温适宜，建议穿着轻薄外套。\", \"city\": \"北京\", \"date\": \"2025-04-09\", \"weather\": \"晴\"}",
+              "partial": false
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
           "prompt_tokens": 18,
-          "total_tokens": 75,
-          "completion_tokens": 57,
+          "total_tokens": 62,
+          "completion_tokens": 44,
           "completion_tokens_details": null,
           "prompt_tokens_details": null
         },
@@ -2089,10 +2017,10 @@
           "weather"
         ],
         "expected_json": {
-          "advice": "天气较冷，建议穿着厚外套、毛衣等保暖衣物。",
+          "advice": "北京今天天气晴朗，气温适宜，建议穿着轻薄外套。",
           "city": "北京",
-          "date": "2025-04-17",
-          "weather": "晴转多云，伴有轻度霾，气温10℃~22℃，南风2-3级"
+          "date": "2025-04-09",
+          "weather": "晴"
         }
       }
     },
@@ -2171,22 +2099,16 @@
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "{\"advice\": \"北京当前天气晴朗，气温25°C，湿度40%，北风3级。\", \"city\": \"北京\", \"date\": \"2025-04-05\", \"weather\": \"晴\"}",
-              "name": null,
-              "reasoning_content": null,
-              "function_call": null,
-              "tool_calls": null,
-              "partial": false,
-              "tool_call_id": null
+              "content": "{\n  \"advice\": \"北京今天天气晴朗，气温适宜，适合户外活动。\",\n  \"city\": \"北京\",\n  \"date\": \"2025-04-05\",\n  \"weather\": \"晴转多云，微风，气温12°C~24°C\"\n}",
+              "partial": false
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
           "prompt_tokens": 21,
-          "total_tokens": 70,
-          "completion_tokens": 49,
+          "total_tokens": 83,
+          "completion_tokens": 62,
           "completion_tokens_details": null,
           "prompt_tokens_details": null
         },
@@ -2207,10 +2129,10 @@
           "weather"
         ],
         "expected_json": {
-          "advice": "北京当前天气晴朗，气温25°C，湿度40%，北风3级。",
+          "advice": "北京今天天气晴朗，气温适宜，适合户外活动。",
           "city": "北京",
           "date": "2025-04-05",
-          "weather": "晴"
+          "weather": "晴转多云，微风，气温12°C~24°C"
         }
       }
     },
@@ -2268,22 +2190,16 @@
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "{\"marker\":\"long-query-ok\",\"record_count\":48}",
-              "name": null,
-              "reasoning_content": null,
-              "function_call": null,
-              "tool_calls": null,
-              "partial": false,
-              "tool_call_id": null
+              "content": "{\"marker\": \"long-query-ok\", \"record_count\": 48}",
+              "partial": false
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
           "prompt_tokens": 1425,
-          "total_tokens": 1441,
-          "completion_tokens": 16,
+          "total_tokens": 1444,
+          "completion_tokens": 19,
           "completion_tokens_details": null,
           "prompt_tokens_details": null
         },
@@ -2368,15 +2284,9 @@
             "message": {
               "role": "assistant",
               "content": "{\"marker\":\"long-query-ok\",\"record_count\":48}",
-              "name": null,
-              "reasoning_content": null,
-              "function_call": null,
-              "tool_calls": null,
-              "partial": false,
-              "tool_call_id": null
+              "partial": false
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
@@ -2471,22 +2381,16 @@
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "{\"marker\": \"long-query-ok\", \"record_count\": 128}",
-              "name": null,
-              "reasoning_content": null,
-              "function_call": null,
-              "tool_calls": null,
-              "partial": false,
-              "tool_call_id": null
+              "content": "{\"marker\":\"long-query-ok\",\"record_count\":128}",
+              "partial": false
             },
-            "finish_reason": "stop",
-            "logprobs": null
+            "finish_reason": "stop"
           }
         ],
         "usage": {
           "prompt_tokens": 3745,
-          "total_tokens": 3764,
-          "completion_tokens": 19,
+          "total_tokens": 3761,
+          "completion_tokens": 16,
           "completion_tokens_details": null,
           "prompt_tokens_details": {
             "audio_tokens": null,
