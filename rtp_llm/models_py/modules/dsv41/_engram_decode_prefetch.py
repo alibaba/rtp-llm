@@ -94,6 +94,7 @@ class DecodeEngramPrefetch:
     def __init__(self, model, metadata):
         self.work = []
         self._schedule = None
+        self._verify_lookup_started = False
         self._capture_permit = self._capture_metadata = None
         asynchronous = enabled()
         capture_permit_type = None
@@ -134,7 +135,15 @@ class DecodeEngramPrefetch:
             self.close()
             raise
 
+    def start_verify_lookup(self, forked):
+        if self._schedule is not None and 1 in self._schedule.targets:
+            self._schedule.before_layer(0)
+            self._verify_lookup_started = True
+            forked()
+
     def before_layer(self, index):
+        if index == 0 and self._verify_lookup_started:
+            return
         if self._schedule is not None:
             self._schedule.before_layer(index)
 

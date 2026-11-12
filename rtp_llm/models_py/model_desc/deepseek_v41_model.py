@@ -280,10 +280,21 @@ class DeepSeekV41Model(DeepSeekV4Model):
         previous_prefetch = getattr(self.v4, "_engram_lookup_prefetch", None)
         self._engram_forward_active = True
         prefetch = None
+        verify_prefetch = None
         try:
             if self.kv_cache is not None:
                 self._prepare_engram(inputs)
                 attn = as_tagged_attention_inputs(inputs.attention_inputs)
+                forked = getattr(fmha_impl, "_cuda_graph_engram_forked", None)
+                if forked is not None and getattr(attn, "is_target_verify", False):
+                    from rtp_llm.models_py.modules.dsv41._engram_decode_prefetch import (
+                        DecodeEngramPrefetch,
+                    )
+
+                    # Hashing used only the captured history window. Fork its
+                    # L1 gather before any main-stream work reads other inputs.
+                    verify_prefetch = DecodeEngramPrefetch(self.v4, fmha_impl.metadata)
+                    verify_prefetch.start_verify_lookup(forked)
                 if (
                     not self._is_decode_role
                     and bool(attn.is_prefill)
@@ -310,11 +321,13 @@ class DeepSeekV41Model(DeepSeekV4Model):
                         )
                         # GPU lookup starts after metadata and embedding; CPU
                         # lookup can safely run during those preceding steps.
-            self.v4._engram_lookup_prefetch = prefetch
+            self.v4._engram_lookup_prefetch = verify_prefetch or prefetch
             self._prepare_image_features(inputs)
             return super().forward(inputs, fmha_impl)
         finally:
             try:
+                if verify_prefetch is not None:
+                    verify_prefetch.close()
                 if prefetch is not None:
                     prefetch.clear()
             finally:

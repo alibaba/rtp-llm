@@ -20,6 +20,9 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/cuda_graph_prepare.h"
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/kernels/attention_input_metadata.h"
+#if (TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 9)
+#include <c10/util/ScopeExit.h>
+#endif
 #endif
 #endif
 using namespace torch_ext;
@@ -2341,6 +2344,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         }
         RTP_LLM_LOG_INFO("Capture for %s %d begin.", key_type, key);
         PyModelOutputs outputs;
+#if USING_CUDA && ((TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 9))
+        EngramVerifyGraphNodes engram_nodes;
+#endif
         {
             // From this point until finish_capture_session() returns, an
             // exception cannot be treated as a recoverable eager fallback.
@@ -2351,8 +2357,39 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             cuda_graph::GraphNcclCaptureContext capture_ctx;
             CudaGraphCaptureGuard               capture_guard(&capture_ctx);
             try {
+#if USING_CUDA && ((TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 9))
+                constexpr const char* fork_attr  = "_cuda_graph_engram_forked";
+                const bool            offer_fork = is_target_verify_ && engram_window_size_ > 0
+                                        && graph_instances_[key].mem_hold_.uses_device_metadata_
+                                        && py::hasattr(attn_pyobj, fork_attr);
+                // The backend opts in at the exact point where only Engram
+                // work has been captured. An ineligible L1 keeps the existing
+                // serial input preparation even on the same backend.
+                std::shared_ptr<EngramVerifyGraphNodes> fork_nodes;
+                if (offer_fork) {
+                    fork_nodes                 = std::make_shared<EngramVerifyGraphNodes>();
+                    attn_pyobj.attr(fork_attr) = py::cpp_function(
+                        [weak = std::weak_ptr<EngramVerifyGraphNodes>(fork_nodes), stream = capture_stream_.stream()] {
+                            const auto nodes = weak.lock();
+                            RTP_LLM_CHECK_WITH_INFO(nodes && !nodes->windows
+                                                        && stream == cuda_graph::graphGetCurrentStream().stream(),
+                                                    "Engram verify fork must run once on the main capture stream");
+                            *nodes = captureEngramVerifyFork(stream);
+                        });
+                }
+                auto clear_fork = c10::make_scope_exit([&] {
+                    if (offer_fork) {
+                        attn_pyobj.attr(fork_attr) = py::none();
+                    }
+                });
+#endif
                 auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
                 outputs             = py_outputs_obj.cast<PyModelOutputs>();
+#if USING_CUDA && ((TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 9))
+                if (fork_nodes) {
+                    engram_nodes = *fork_nodes;
+                }
+#endif
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
                 throw;
@@ -2382,13 +2419,21 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         }
 #if USING_CUDA && ((TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 9))
         auto& instance = graph_instances_[key];
-        if (instance.mem_hold_.uses_device_metadata_
-            && cudaGraphBackendFlag(attn_pyobj, "cuda_graph_preparation_in_graph")) {
-            // Keep PyTorch's replay path (including generator bookkeeping).
-            // Prepend the two C++ input nodes to the captured model itself.
+        if (engram_nodes.windows) {
+            const auto& windows                    = instance.mem_hold_.py_model_inputs_.engram_token_windows;
+            instance.prepare_replay_.node          = engram_nodes.prepare;
+            instance.prepare_replay_.windows_node  = engram_nodes.windows;
+            instance.prepare_replay_.windows_dst   = windows.data_ptr();
+            instance.prepare_replay_.windows_bytes = windows.nbytes();
+            instance.metadata_replay_.node         = engram_nodes.metadata;
+        } else if (instance.mem_hold_.uses_device_metadata_
+                   && cudaGraphBackendFlag(attn_pyobj, "cuda_graph_preparation_in_graph")) {
             instance.prepare_replay_.node = addCudaGraphPrepareNode(graph.raw_cuda_graph());
             instance.metadata_replay_.node =
                 addAttentionInputMetadataNode(graph.raw_cuda_graph(), instance.prepare_replay_.node);
+        }
+        if (instance.prepare_replay_.node) {
+            // Keep PyTorch's replay path (including generator bookkeeping).
             graph.instantiate();
             instance.prepare_replay_.exec = instance.metadata_replay_.exec = graph.raw_cuda_graph_exec();
             disableCudaGraphPrepareReplay(instance.prepare_replay_);

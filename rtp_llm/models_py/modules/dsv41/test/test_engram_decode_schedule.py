@@ -123,7 +123,9 @@ class DecodeScheduleCPU(unittest.TestCase):
                     use=lambda: nullcontext(), register_lookup_event=Mock()
                 )
                 self.assertTrue(schedule._eligible(model.layers[target].engram))
-                with patch.object(torch.cuda, "Stream"), patch.object(torch.cuda, "Event"):
+                with patch.object(torch.cuda, "Stream"), patch.object(
+                    torch.cuda, "Event"
+                ):
                     state = prefetch._LookupStream(embedding, torch.device("cuda:0"))
                 embedding._external_storage.register_lookup_event.assert_called_once_with(
                     state.done
@@ -249,6 +251,36 @@ class DecodeScheduleCPU(unittest.TestCase):
                 self.assertTrue(
                     all(model.layers[i].engram._lookup_work is None for i in (1, 14))
                 )
+
+    def test_verify_forks_after_whole_l1_launch_and_keeps_l14_windows(self):
+        for supported in (True, False):
+            with self.subTest(supported=supported), ExitStack() as stack:
+                main, whole, slices = self.mock_cuda(stack)
+                model = cpu_model(6)
+                if not supported:
+                    model.layers[0].attn.tp_size = 2
+                plan = prefetch.DecodeEngramPrefetch(
+                    model, SimpleNamespace(batch_size=1, q_len_per_req=6)
+                )
+                stack.callback(plan.close)
+
+                def forked():
+                    whole.assert_called_once()
+                    main.wait_stream.assert_not_called()
+                    slices.assert_not_called()
+
+                fork = Mock(side_effect=forked)
+                plan.start_verify_lookup(fork)
+                self.assertEqual(fork.call_count, int(supported))
+                for index, layer in enumerate(model.layers):
+                    plan.before_layer(index)
+                    layer.attn.forward_decode()
+                    if index == 0 and supported:
+                        main.wait_stream.assert_called_once_with(
+                            model.layers[1].engram._decode_scheduled_stream.stream
+                        )
+                self.assertEqual(whole.call_count, int(supported))
+                self.assertEqual(slices.call_count, 6)
 
     def test_empty_and_chunked_consumer_buckets_remain_serial(self):
         for tokens in (0, 32769):
@@ -557,7 +589,9 @@ class DecodeScheduleCUDA(unittest.TestCase):
         # Small CUDA-backed views replace Fabric imports here; the service
         # integration test supplies the actual cross-host mappings.
         from rtp_llm.models_py.modules.dsv41.engram import HostEngramEmbedding
-        from rtp_llm.models_py.modules.dsv41.engram_distributed.storage import FabricEngramStorage
+        from rtp_llm.models_py.modules.dsv41.engram_distributed.storage import (
+            FabricEngramStorage,
+        )
 
         storage = FabricEngramStorage()
         storage.device = self.device.index
@@ -574,7 +608,9 @@ class DecodeScheduleCUDA(unittest.TestCase):
                 else None
             )
             module.embed_tokens = HostEngramEmbedding.from_storage(
-                storage, target, scale_group=group,
+                storage,
+                target,
+                scale_group=group,
                 scale_identity=f"external-schedule-L{target}",
             )
             if group is not None:

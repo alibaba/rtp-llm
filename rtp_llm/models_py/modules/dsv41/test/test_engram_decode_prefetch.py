@@ -25,7 +25,12 @@ class DecodePrefetchCPU(unittest.TestCase):
             with patch.dict(os.environ, {"DSV41_DECODE_ENGRAM_PREFETCH": "1"}):
                 self.assertTrue(prefetch.enabled())
 
-    def test_explicitly_disabled_does_not_touch_cuda_or_layers(self):
+    def test_disabled_lookup_without_device_tables_skips_verify_fork_and_cuda(self):
+        embedding = SimpleNamespace(_device_scale_lease=None)
+        model = SimpleNamespace(
+            layers=[SimpleNamespace(engram=SimpleNamespace(embed_tokens=embedding))]
+        )
+        forked = Mock()
         with patch.dict(
             os.environ,
             {
@@ -33,11 +38,16 @@ class DecodePrefetchCPU(unittest.TestCase):
                 "DSV41_DECODE_ENGRAM_PREFETCH": "0",
             },
             clear=True,
-        ), patch.object(torch.cuda, "current_stream") as current:
-            work = prefetch.DecodeEngramPrefetch(object(), object())
+        ), patch.object(torch.cuda, "current_stream") as current, patch.object(
+            torch.cuda, "is_current_stream_capturing"
+        ) as capturing:
+            work = prefetch.DecodeEngramPrefetch(model, object())
+            work.start_verify_lookup(forked)
             work.before_layer(0)
             work.close()
+        forked.assert_not_called()
         current.assert_not_called()
+        capturing.assert_not_called()
 
     def test_cold_capture_falls_back_without_creating_stream(self):
         module = SimpleNamespace(
@@ -90,23 +100,26 @@ class DecodePrefetchCPU(unittest.TestCase):
 
     def test_graph_owns_old_table_and_rejects_reload(self):
         model = torch.nn.Module()
-        embedding = SimpleNamespace(_uva=object(), _pinned=object())
+        lease = object()
+        embedding = SimpleNamespace(
+            _uva=object(),
+            _pinned=object(),
+            _device_scale_lease=lease,
+            _device_scale_resources=lambda: lease,
+        )
         module = SimpleNamespace(embed_tokens=embedding)
         model.layers = [SimpleNamespace(engram=module)]
-        state = prefetch._LookupStream.__new__(prefetch._LookupStream)
-        state.embedding, state.uva, state.pinned = (
-            embedding,
-            embedding._uva,
-            embedding._pinned,
-        )
+        state = prefetch._TableSnapshot(embedding)
         resources = prefetch._GraphTables(model, ((0, module, state),))
         reference = weakref.ref(state)
         resources.validate()
         original_uva = embedding._uva
-        for change in ("uva", "embedding", "module"):
+        for change in ("uva", "lease", "embedding", "module"):
             with self.subTest(change=change):
                 if change == "uva":
                     embedding._uva = object()
+                elif change == "lease":
+                    embedding._device_scale_lease = object()
                 elif change == "embedding":
                     module.embed_tokens = object()
                 else:
@@ -116,6 +129,7 @@ class DecodePrefetchCPU(unittest.TestCase):
                 ):
                     resources.validate()
                 embedding._uva = original_uva
+                embedding._device_scale_lease = lease
                 module.embed_tokens = embedding
                 model.layers[0].engram = module
         del state

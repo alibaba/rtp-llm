@@ -756,6 +756,44 @@ class EngramPrefetchTest(unittest.TestCase):
         self.assertIs(self.layer.engram_hashes, outer_hashes)
         self.assertTrue(model._engram_forward_active)
 
+    def test_verify_graph_forks_before_model_work_and_drains_on_failure(self):
+        model, inputs = self._model()
+        inputs.attention_inputs.is_target_verify = True
+        calls = []
+        fmha = SimpleNamespace(
+            metadata=object(), _cuda_graph_engram_forked=lambda: calls.append("fork")
+        )
+        plan = Mock()
+        plan.start_verify_lookup.side_effect = lambda forked: forked()
+        plan.close.side_effect = lambda: calls.append("close")
+        create = Mock(return_value=plan)
+        model._prepare_engram.side_effect = lambda _: calls.append("hash")
+        model._prepare_image_features.side_effect = lambda _: calls.append("images")
+
+        def forward(_):
+            self.assertIs(model.v4._engram_lookup_prefetch, plan)
+            calls.append("forward")
+            raise RuntimeError("metadata failed")
+
+        model.parent_forward.side_effect = forward
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "rtp_llm.models_py.modules.dsv41._engram_decode_prefetch": SimpleNamespace(
+                        DecodeEngramPrefetch=create
+                    )
+                },
+            ),
+            self.assertRaisesRegex(RuntimeError, "metadata failed"),
+        ):
+            model(inputs, fmha)
+        self.assertEqual(calls, ["hash", "fork", "images", "forward", "close"])
+        create.assert_called_once_with(model.v4, fmha.metadata)
+        self.assertIsNone(model.v4._engram_lookup_prefetch)
+        self.assertFalse(model._engram_forward_active)
+        self.assertIsNone(self.layer.engram_hashes)
+
     def test_cpu_mode_submits_before_image_prepare_and_cleans_prepare_failure(self):
         model, inputs = self._model()
         model._v4_args = SimpleNamespace(v41_config={})

@@ -372,7 +372,10 @@ def forward_layers(
         DecodeEngramPrefetch,
     )
 
-    prefetch = DecodeEngramPrefetch(v4, attn_metadata)
+    # Target verify may already have forked L1 at graph entry. Its outer
+    # forward owns the plan through both metadata preparation and these layers.
+    verify_prefetch = getattr(v4, "_engram_lookup_prefetch", None)
+    prefetch = verify_prefetch or DecodeEngramPrefetch(v4, attn_metadata)
     try:
         for layer_idx, layer in enumerate(v4.layers):
             prefetch.before_layer(layer_idx)
@@ -400,7 +403,8 @@ def forward_layers(
                 if _rt_on:
                     _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
     finally:
-        prefetch.close()
+        if verify_prefetch is None:
+            prefetch.close()
     if v4._mtp_hidden_buffer is not None:
         if capture_ids:
             # DSpARK mode: the buffer already holds this forward's aux rows

@@ -384,6 +384,100 @@ TEST_F(MtpRoundHeadPrepareTest, GraphInputNodesFollowLivePointersBatchChangesAnd
     EXPECT_EQ(cudaGraphDestroy(graph), cudaSuccess);
 }
 
+TEST_F(MtpRoundHeadPrepareTest, GraphEngramAndAttentionPrepareHaveIndependentRoots) {
+    constexpr int capacity = 7, width = 4;
+    auto          windows     = torch::empty({capacity, width}, cudaInt32());
+    auto          hashes      = torch::empty_like(windows);
+    auto          lookup      = torch::empty_like(windows);
+    auto          cu          = torch::empty({2}, cudaInt32());
+    auto          kv          = torch::empty_like(cu);
+    auto          captured_cu = torch::empty_like(cu);
+    auto          observed_cu = torch::empty_like(cu);
+    auto          side        = c10::cuda::getStreamFromPool().stream();
+    cudaEvent_t   fork, join;
+    ASSERT_EQ(cudaEventCreateWithFlags(&fork, cudaEventDisableTiming), cudaSuccess);
+    ASSERT_EQ(cudaEventCreateWithFlags(&join, cudaEventDisableTiming), cudaSuccess);
+
+    cudaGraph_t graph = nullptr;
+    ASSERT_EQ(cudaStreamBeginCapture(stream_, cudaStreamCaptureModeThreadLocal), cudaSuccess);
+    // Stand-ins for window hashing, side-stream lookup and the first model metadata consumer.
+    ASSERT_EQ(
+        cudaMemcpyAsync(hashes.data_ptr(), windows.data_ptr(), windows.nbytes(), cudaMemcpyDeviceToDevice, stream_),
+        cudaSuccess);
+    ASSERT_EQ(cudaEventRecord(fork, stream_), cudaSuccess);
+    ASSERT_EQ(cudaStreamWaitEvent(side, fork), cudaSuccess);
+    ASSERT_EQ(cudaMemcpyAsync(lookup.data_ptr(), hashes.data_ptr(), hashes.nbytes(), cudaMemcpyDeviceToDevice, side),
+              cudaSuccess);
+    ASSERT_EQ(cudaEventRecord(join, side), cudaSuccess);
+    auto nodes = captureEngramVerifyFork(stream_);
+    ASSERT_EQ(
+        cudaMemcpyAsync(observed_cu.data_ptr(), captured_cu.data_ptr(), cu.nbytes(), cudaMemcpyDeviceToDevice, stream_),
+        cudaSuccess);
+    ASSERT_EQ(cudaStreamWaitEvent(stream_, join), cudaSuccess);
+    ASSERT_EQ(cudaStreamEndCapture(stream_, &graph), cudaSuccess);
+
+    size_t root_count = 0;
+    ASSERT_EQ(cudaGraphGetRootNodes(graph, nullptr, &root_count), cudaSuccess);
+    ASSERT_EQ(root_count, 2u);
+    cudaGraphNode_t roots[2];
+    ASSERT_EQ(cudaGraphGetRootNodes(graph, roots, &root_count), cudaSuccess);
+    EXPECT_TRUE((roots[0] == nodes.windows && roots[1] == nodes.metadata)
+                || (roots[1] == nodes.windows && roots[0] == nodes.metadata));
+    // An extra prepare -> hash/lookup edge would serialize work even with two roots.
+    cudaGraphNode_t consumers[2];
+    size_t          child_count = 2;
+#if CUDART_VERSION >= 13000
+    ASSERT_EQ(cudaGraphNodeGetDependentNodes(nodes.prepare, consumers, nullptr, &child_count), cudaSuccess);
+#else
+    ASSERT_EQ(cudaGraphNodeGetDependentNodes(nodes.prepare, consumers, &child_count), cudaSuccess);
+#endif
+    ASSERT_EQ(child_count, 1u);
+    cudaMemcpy3DParms copy_params{};
+    ASSERT_EQ(cudaGraphMemcpyNodeGetParams(consumers[0], &copy_params), cudaSuccess);
+    EXPECT_EQ(copy_params.dstPtr.ptr, observed_cu.data_ptr());
+    cudaGraphExec_t exec = nullptr;
+#if CUDART_VERSION >= 12000
+    ASSERT_EQ(cudaGraphInstantiate(&exec, graph, 0), cudaSuccess);
+#else
+    ASSERT_EQ(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0), cudaSuccess);
+#endif
+    CudaGraphPrepareReplay prepare{exec, nodes.prepare, nodes.windows, windows.data_ptr(), windows.nbytes()};
+    CudaGraphPrepareReplay metadata{exec, nodes.metadata};
+    for (int live : {capacity, 2, 5, 1}) {
+        SCOPED_TRACE(live);
+        auto source = torch::arange(live * width, cudaInt32()).reshape({live, width}) + 100 * live;
+        auto length = torch::full({1}, live, cudaInt32());
+        auto params = prepareAttentionInputMetadata(length, {}, cu, kv, {});
+        CudaGraphPrepareFillParams fills;
+        fills.regions[fills.region_count++] = {
+            windows.data_ptr<int32_t>() + live * width, nullptr, (capacity - live) * width, -1};
+        FusedD2DCopyParams copies;
+        copies.add(source.data_ptr(), windows.data_ptr(), source.nbytes());
+        copies.add(cu.data_ptr(), captured_cu.data_ptr(), cu.nbytes());
+        disableCudaGraphPrepareReplay(prepare);
+        disableCudaGraphPrepareReplay(metadata);
+        ASSERT_TRUE(tryInvokeCudaGraphPrepare(fills, copies, {}, stream_, prepare));
+        invokeBuildAttentionInputMetadata(params, stream_, metadata);
+        ASSERT_EQ(cudaGraphLaunch(exec, stream_), cudaSuccess);
+        EXPECT_TRUE(torch::equal(lookup.narrow(0, 0, live), source));
+        EXPECT_TRUE(lookup.slice(0, live).eq(-1).all().item<bool>());
+        EXPECT_TRUE(torch::equal(observed_cu, torch::tensor({0, live}, cudaInt32())));
+    }
+    // An ordered fallback stages inputs before replay and disables every dynamic node.
+    disableCudaGraphPrepareReplay(prepare);
+    disableCudaGraphPrepareReplay(metadata);
+    windows.fill_(73);
+    captured_cu.fill_(41);
+    ASSERT_EQ(cudaGraphLaunch(exec, stream_), cudaSuccess);
+    EXPECT_TRUE(lookup.eq(73).all().item<bool>());
+    EXPECT_TRUE(observed_cu.eq(41).all().item<bool>());
+    ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+    EXPECT_EQ(cudaGraphExecDestroy(exec), cudaSuccess);
+    EXPECT_EQ(cudaGraphDestroy(graph), cudaSuccess);
+    EXPECT_EQ(cudaEventDestroy(fork), cudaSuccess);
+    EXPECT_EQ(cudaEventDestroy(join), cudaSuccess);
+}
+
 TEST_F(MtpRoundHeadPrepareTest, MixedReorderedStridedRowsAndChunkBoundaries) {
     constexpr int32_t mask          = -17;
     constexpr int64_t storage_width = 24;

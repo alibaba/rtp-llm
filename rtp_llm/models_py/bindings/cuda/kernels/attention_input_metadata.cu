@@ -30,16 +30,16 @@ __global__ void buildAttentionInputMetadataKernel(AttentionInputMetadataParams p
     if (params.batch_size == 0) {
         return;
     }
-    const auto* input_lengths = params.input_lengths;
-    const auto* prefix_lengths = params.prefix_lengths;
-    auto* cu_seqlens = params.cu_seqlens;
-    auto* cu_kv_seqlens = params.cu_kv_seqlens;
-    auto* padding_offset = params.padding_offset;
-    auto* sequence_lengths_plus_1 = params.sequence_lengths_plus_1;
-    const auto batch_size = params.batch_size;
-    const auto total_tokens = params.total_tokens;
-    using Reduce = cub::BlockReduce<int32_t, kMetadataThreads>;
-    using Scan   = cub::BlockScan<int2, kMetadataThreads>;
+    const auto* input_lengths           = params.input_lengths;
+    const auto* prefix_lengths          = params.prefix_lengths;
+    auto*       cu_seqlens              = params.cu_seqlens;
+    auto*       cu_kv_seqlens           = params.cu_kv_seqlens;
+    auto*       padding_offset          = params.padding_offset;
+    auto*       sequence_lengths_plus_1 = params.sequence_lengths_plus_1;
+    const auto  batch_size              = params.batch_size;
+    const auto  total_tokens            = params.total_tokens;
+    using Reduce                        = cub::BlockReduce<int32_t, kMetadataThreads>;
+    using Scan                          = cub::BlockScan<int2, kMetadataThreads>;
     __shared__ typename Reduce::TempStorage reduce_storage;
     __shared__ typename Scan::TempStorage   scan_storage;
     __shared__ int32_t                      max_input_len;
@@ -90,11 +90,11 @@ __global__ void buildAttentionInputMetadataKernel(AttentionInputMetadataParams p
 }  // namespace
 
 AttentionInputMetadataParams prepareAttentionInputMetadata(const at::Tensor& input_lengths,
-                                                          const at::Tensor& prefix_lengths,
-                                                          const at::Tensor& cu_seqlens,
-                                                          const at::Tensor& cu_kv_seqlens,
-                                                          const at::Tensor& padding_offset,
-                                                          const at::Tensor& sequence_lengths_plus_1) {
+                                                           const at::Tensor& prefix_lengths,
+                                                           const at::Tensor& cu_seqlens,
+                                                           const at::Tensor& cu_kv_seqlens,
+                                                           const at::Tensor& padding_offset,
+                                                           const at::Tensor& sequence_lengths_plus_1) {
     TORCH_CHECK(input_lengths.defined(), "input_lengths must be defined");
     TORCH_CHECK(input_lengths.is_cuda(), "input_lengths must be a CUDA tensor");
     TORCH_CHECK(input_lengths.scalar_type() == at::kInt, "input_lengths must be int32");
@@ -111,8 +111,8 @@ AttentionInputMetadataParams prepareAttentionInputMetadata(const at::Tensor& inp
     const auto total_tokens = padding_offset.defined() ? static_cast<int32_t>(padding_offset.numel()) : 0;
     TORCH_CHECK(!sequence_lengths_plus_1.defined()
                     || (sequence_lengths_plus_1.device() == input_lengths.device()
-                        && sequence_lengths_plus_1.scalar_type() == at::kInt
-                        && sequence_lengths_plus_1.is_contiguous() && sequence_lengths_plus_1.numel() == batch_size),
+                        && sequence_lengths_plus_1.scalar_type() == at::kInt && sequence_lengths_plus_1.is_contiguous()
+                        && sequence_lengths_plus_1.numel() == batch_size),
                 "sequence_lengths_plus_1 must be contiguous CUDA int32 [batch]");
     const int32_t* prefix_ptr = nullptr;
     if (prefix_lengths.defined() && prefix_lengths.numel() > 0) {
@@ -134,12 +134,12 @@ AttentionInputMetadataParams prepareAttentionInputMetadata(const at::Tensor& inp
 
 cudaGraphNode_t addAttentionInputMetadataNode(cudaGraph_t graph, cudaGraphNode_t before) {
     AttentionInputMetadataParams metadata;
-    void* arguments[] = {&metadata};
-    cudaKernelNodeParams params{};
-    params.func = reinterpret_cast<void*>(buildAttentionInputMetadataKernel);
-    params.gridDim = dim3(1);
-    params.blockDim = dim3(kMetadataThreads);
-    params.kernelParams = arguments;
+    void*                        arguments[] = {&metadata};
+    cudaKernelNodeParams         params{};
+    params.func          = reinterpret_cast<void*>(buildAttentionInputMetadataKernel);
+    params.gridDim       = dim3(1);
+    params.blockDim      = dim3(kMetadataThreads);
+    params.kernelParams  = arguments;
     cudaGraphNode_t node = nullptr;
     C10_CUDA_CHECK(cudaGraphAddKernelNode(&node, graph, nullptr, 0, &params));
 #if CUDART_VERSION >= 13000
@@ -150,19 +150,45 @@ cudaGraphNode_t addAttentionInputMetadataNode(cudaGraph_t graph, cudaGraphNode_t
     return node;
 }
 
-void invokeBuildAttentionInputMetadata(AttentionInputMetadataParams params,
-                                       cudaStream_t stream,
+EngramVerifyGraphNodes captureEngramVerifyFork(cudaStream_t stream) {
+    cudaStreamCaptureStatus status;
+    cudaGraph_t             graph = nullptr;
+#if CUDART_VERSION >= 13000
+    C10_CUDA_CHECK(cudaStreamGetCaptureInfo(stream, &status, nullptr, &graph));
+#else
+    C10_CUDA_CHECK(cudaStreamGetCaptureInfo_v2(stream, &status, nullptr, &graph, nullptr, nullptr));
+#endif
+    TORCH_CHECK(status == cudaStreamCaptureStatusActive && graph, "Engram verify fork requires active capture");
+    // Everything submitted so far reads only the static Engram windows. Stage
+    // those before the existing roots, with no edge from attention metadata.
+    EngramVerifyGraphNodes nodes;
+    nodes.windows  = addCudaGraphPrepareNode(graph);
+    nodes.prepare  = addIndependentCudaGraphPrepareNode(graph);
+    nodes.metadata = addAttentionInputMetadataNode(graph, nodes.prepare);
+    // The main stream's next work can consume live inputs. Its previously
+    // forked lookup stream keeps only the hash dependency it already had.
+#if CUDART_VERSION >= 13000
+    C10_CUDA_CHECK(
+        cudaStreamUpdateCaptureDependencies(stream, &nodes.prepare, nullptr, 1, cudaStreamAddCaptureDependencies));
+#else
+    C10_CUDA_CHECK(cudaStreamUpdateCaptureDependencies(stream, &nodes.prepare, 1, cudaStreamAddCaptureDependencies));
+#endif
+    return nodes;
+}
+
+void invokeBuildAttentionInputMetadata(AttentionInputMetadataParams  params,
+                                       cudaStream_t                  stream,
                                        const CudaGraphPrepareReplay& replay) {
     if (params.batch_size == 0) {
         return;
     }
     const c10::cuda::CUDAGuard guard(params.device);
     if (replay.exec && replay.node) {
-        void* arguments[] = {&params};
+        void*                arguments[] = {&params};
         cudaKernelNodeParams node_params{};
-        node_params.func = reinterpret_cast<void*>(buildAttentionInputMetadataKernel);
-        node_params.gridDim = dim3(1);
-        node_params.blockDim = dim3(kMetadataThreads);
+        node_params.func         = reinterpret_cast<void*>(buildAttentionInputMetadataKernel);
+        node_params.gridDim      = dim3(1);
+        node_params.blockDim     = dim3(kMetadataThreads);
         node_params.kernelParams = arguments;
         C10_CUDA_CHECK(cudaGraphExecKernelNodeSetParams(replay.exec, replay.node, &node_params));
         C10_CUDA_CHECK(cudaGraphNodeSetEnabled(replay.exec, replay.node, 1));
@@ -174,18 +200,21 @@ void invokeBuildAttentionInputMetadata(AttentionInputMetadataParams params,
 
 void invokeBuildAttentionInputMetadata(const at::Tensor& input_lengths,
                                        const at::Tensor& prefix_lengths,
-                                       at::Tensor& cu_seqlens,
-                                       at::Tensor& cu_kv_seqlens,
-                                       at::Tensor& padding_offset,
-                                       cudaStream_t stream,
+                                       at::Tensor&       cu_seqlens,
+                                       at::Tensor&       cu_kv_seqlens,
+                                       at::Tensor&       padding_offset,
+                                       cudaStream_t      stream,
                                        const at::Tensor& sequence_lengths_plus_1) {
-    auto params = prepareAttentionInputMetadata(input_lengths, prefix_lengths, cu_seqlens, cu_kv_seqlens,
-                                                padding_offset, sequence_lengths_plus_1);
+    auto params = prepareAttentionInputMetadata(
+        input_lengths, prefix_lengths, cu_seqlens, cu_kv_seqlens, padding_offset, sequence_lengths_plus_1);
     const c10::cuda::CUDAGuard guard(input_lengths.device());
     if (params.batch_size == 0) {
-        if (cu_seqlens.numel()) cu_seqlens.zero_();
-        if (cu_kv_seqlens.numel()) cu_kv_seqlens.zero_();
-        if (padding_offset.defined() && padding_offset.numel()) padding_offset.zero_();
+        if (cu_seqlens.numel())
+            cu_seqlens.zero_();
+        if (cu_kv_seqlens.numel())
+            cu_kv_seqlens.zero_();
+        if (padding_offset.defined() && padding_offset.numel())
+            padding_offset.zero_();
         return;
     }
     invokeBuildAttentionInputMetadata(params, stream);

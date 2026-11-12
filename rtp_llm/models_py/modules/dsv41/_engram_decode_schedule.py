@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention-bounded native lookup scheduling for positive decode token counts.
 
-L1 launches at L0 entry and joins before FFN. L14 partitions the flattened
-batch/query rows over eight attention pre/post windows in L10..L13. Empty
-pieces launch no kernels. Unsupported producers keep the serial lookup route.
+L1 launches at verify graph entry or L0 entry and joins before FFN. L14
+partitions the flattened batch/query rows over eight attention pre/post windows
+in L10..L13. Empty pieces launch no kernels. Unsupported producers keep the
+serial lookup route.
 """
 
 import logging

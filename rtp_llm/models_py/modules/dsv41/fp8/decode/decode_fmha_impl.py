@@ -89,6 +89,8 @@ class DSv4DecodeFmhaImplFP8:
     # preserves stream dependencies and padding of those device inputs.
     cuda_graph_uses_device_metadata = True
     cuda_graph_uses_valid_request_count = True
+    # CudaGraphRunner supplies this callback only during target-verify capture.
+    _cuda_graph_engram_forked = None
 
     @property
     def cuda_graph_preparation_in_graph(self) -> bool:

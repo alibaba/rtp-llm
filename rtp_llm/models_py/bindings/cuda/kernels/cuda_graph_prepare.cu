@@ -20,22 +20,22 @@ namespace {
 
 struct PrepareTask {
     CudaGraphPrepareFillRegion fill;
-    const char* src = nullptr;
-    size_t rows = 0;
-    size_t row_bytes = 0;
-    size_t src_stride = 0;
-    size_t dst_stride = 0;
+    const char*                src        = nullptr;
+    size_t                     rows       = 0;
+    size_t                     row_bytes  = 0;
+    size_t                     src_stride = 0;
+    size_t                     dst_stride = 0;
 };
 
 struct PrepareTasks {
-    int count = 0;
+    int         count = 0;
     PrepareTask tasks[kMaxCudaGraphPrepareFillRegions];
 };
 static_assert(sizeof(PrepareTasks) < 4096, "keep compatibility with the legacy kernel parameter limit");
 
 template<typename T>
 __device__ void prepareCopyRow(const char* src, char* dst, size_t bytes, size_t lane, size_t lanes) {
-    const size_t tid = lane * blockDim.x + threadIdx.x;
+    const size_t tid    = lane * blockDim.x + threadIdx.x;
     const size_t stride = lanes * blockDim.x;
     for (size_t i = tid; i < bytes / sizeof(T); i += stride) {
         reinterpret_cast<T*>(dst)[i] = reinterpret_cast<const T*>(src)[i];
@@ -52,11 +52,11 @@ __global__ void cudaGraphPrepareKernel(PrepareTasks params) {
     const auto& task = params.tasks[blockIdx.y];
     const auto& fill = task.fill;
     if (task.src == nullptr) {
-        const uint32_t value = (fill.value_ptr ? static_cast<uint32_t>(*fill.value_ptr)
-                                               : static_cast<uint32_t>(fill.value))
-                               + static_cast<uint32_t>(fill.value_offset);
-        for (size_t i = blockIdx.x * blockDim.x + threadIdx.x;
-             i < static_cast<size_t>(fill.count); i += gridDim.x * blockDim.x) {
+        const uint32_t value =
+            (fill.value_ptr ? static_cast<uint32_t>(*fill.value_ptr) : static_cast<uint32_t>(fill.value))
+            + static_cast<uint32_t>(fill.value_offset);
+        for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < static_cast<size_t>(fill.count);
+             i += gridDim.x * blockDim.x) {
             fill.ptr[i] = static_cast<int32_t>(value + static_cast<uint32_t>(fill.step) * static_cast<uint32_t>(i));
         }
         return;
@@ -68,12 +68,12 @@ __global__ void cudaGraphPrepareKernel(PrepareTasks params) {
     const size_t rows = fill.count ? static_cast<size_t>(fill.count) * sizeof(int32_t) / task.dst_stride : task.rows;
     const size_t row_lanes = min(rows, static_cast<size_t>(gridDim.x));
     const size_t first_row = blockIdx.x % row_lanes;
-    const size_t lane = blockIdx.x / row_lanes;
-    const size_t lanes = (gridDim.x - 1 - first_row) / row_lanes + 1;
+    const size_t lane      = blockIdx.x / row_lanes;
+    const size_t lanes     = (gridDim.x - 1 - first_row) / row_lanes + 1;
     for (size_t row = first_row; row < rows; row += row_lanes) {
         char* dst = reinterpret_cast<char*>(fill.ptr) + row * task.dst_stride;
         if (row < task.rows) {
-            const char* src = task.src + row * task.src_stride;
+            const char*     src       = task.src + row * task.src_stride;
             const uintptr_t alignment = reinterpret_cast<uintptr_t>(src) | reinterpret_cast<uintptr_t>(dst);
             if (alignment % alignof(int4) == 0) {
                 prepareCopyRow<int4>(src, dst, task.row_bytes, lane, lanes);
@@ -85,8 +85,8 @@ __global__ void cudaGraphPrepareKernel(PrepareTasks params) {
         }
         if (fill.count) {
             const size_t start = row < task.rows ? task.row_bytes / sizeof(int32_t) : 0;
-            for (size_t i = start + lane * blockDim.x + threadIdx.x;
-                 i < task.dst_stride / sizeof(int32_t); i += lanes * blockDim.x) {
+            for (size_t i = start + lane * blockDim.x + threadIdx.x; i < task.dst_stride / sizeof(int32_t);
+                 i += lanes * blockDim.x) {
                 reinterpret_cast<int32_t*>(dst)[i] = 0;
             }
         }
@@ -95,8 +95,8 @@ __global__ void cudaGraphPrepareKernel(PrepareTasks params) {
 
 struct PrepareRange {
     uintptr_t begin = 0;
-    uintptr_t end = 0;
-    bool overlaps(PrepareRange other) const {
+    uintptr_t end   = 0;
+    bool      overlaps(PrepareRange other) const {
         return begin < other.end && other.begin < end;
     }
 };
@@ -123,8 +123,8 @@ __global__ void cudaGraphPrepareFillKernel(CudaGraphPrepareFillParams params) {
         if (region.ptr == nullptr || region.count <= 0) {
             continue;
         }
-        const int32_t fill_value = (region.value_ptr != nullptr ? *region.value_ptr : region.value)
-                                 + region.value_offset;
+        const int32_t fill_value =
+            (region.value_ptr != nullptr ? *region.value_ptr : region.value) + region.value_offset;
         for (int64_t i = tid; i < region.count; i += stride) {
             region.ptr[i] = fill_value + region.step * i;
         }
@@ -172,23 +172,48 @@ __global__ void prepareFlashInferDecodeParamsKernel(const int32_t* sequence_leng
     }
 }
 
+dim3 prepareGrid(const PrepareTasks& params, size_t max_bytes) {
+    const auto blocks = std::min<size_t>(64, std::max<size_t>(8, 1 + (max_bytes - 1) / 4096));
+    return dim3(blocks, params.count);
+}
+
+#if USING_CUDA
+void updatePrepareNode(cudaGraphExec_t exec, cudaGraphNode_t node, PrepareTasks& params, size_t max_bytes) {
+    if (params.count) {
+        void*                arguments[] = {&params};
+        cudaKernelNodeParams node_params{};
+        node_params.func         = reinterpret_cast<void*>(cudaGraphPrepareKernel);
+        node_params.gridDim      = prepareGrid(params, max_bytes);
+        node_params.blockDim     = dim3(256);
+        node_params.kernelParams = arguments;
+        C10_CUDA_CHECK(cudaGraphExecKernelNodeSetParams(exec, node, &node_params));
+    }
+    C10_CUDA_CHECK(cudaGraphNodeSetEnabled(exec, node, params.count != 0));
+}
+#endif
+
 }  // namespace
 
 #if USING_CUDA
+cudaGraphNode_t addIndependentCudaGraphPrepareNode(cudaGraph_t graph) {
+    PrepareTasks         tasks;
+    void*                arguments[] = {&tasks};
+    cudaKernelNodeParams params{};
+    params.func          = reinterpret_cast<void*>(cudaGraphPrepareKernel);
+    params.gridDim       = dim3(1);
+    params.blockDim      = dim3(256);
+    params.kernelParams  = arguments;
+    cudaGraphNode_t node = nullptr;
+    C10_CUDA_CHECK(cudaGraphAddKernelNode(&node, graph, nullptr, 0, &params));
+    return node;
+}
+
 cudaGraphNode_t addCudaGraphPrepareNode(cudaGraph_t graph) {
     size_t count = 0;
     C10_CUDA_CHECK(cudaGraphGetRootNodes(graph, nullptr, &count));
     std::vector<cudaGraphNode_t> roots(count);
     C10_CUDA_CHECK(cudaGraphGetRootNodes(graph, roots.data(), &count));
-    PrepareTasks tasks;
-    void* arguments[] = {&tasks};
-    cudaKernelNodeParams params{};
-    params.func = reinterpret_cast<void*>(cudaGraphPrepareKernel);
-    params.gridDim = dim3(1);
-    params.blockDim = dim3(256);
-    params.kernelParams = arguments;
-    cudaGraphNode_t node = nullptr;
-    C10_CUDA_CHECK(cudaGraphAddKernelNode(&node, graph, nullptr, 0, &params));
+    const auto node = addIndependentCudaGraphPrepareNode(graph);
     for (auto root : roots) {
 #if CUDART_VERSION >= 13000
         C10_CUDA_CHECK(cudaGraphAddDependencies(graph, &node, &root, nullptr, 1));
@@ -202,23 +227,26 @@ cudaGraphNode_t addCudaGraphPrepareNode(cudaGraph_t graph) {
 void disableCudaGraphPrepareReplay(const CudaGraphPrepareReplay& replay) {
     if (replay.exec && replay.node) {
         C10_CUDA_CHECK(cudaGraphNodeSetEnabled(replay.exec, replay.node, 0));
+        if (replay.windows_node) {
+            C10_CUDA_CHECK(cudaGraphNodeSetEnabled(replay.exec, replay.windows_node, 0));
+        }
     }
 }
 #endif
 
 bool tryInvokeCudaGraphPrepare(const CudaGraphPrepareFillParams& fills,
-                               const FusedD2DCopyParams& copies,
-                               const FusedStridedCopyParams& strided_copies,
-                               CudaGraphPrepareStream stream,
-                               const CudaGraphPrepareReplay& replay) {
-    if (fills.region_count < 0 || fills.region_count > kMaxCudaGraphPrepareFillRegions
-        || copies.num_copies < 0 || copies.num_copies > MAX_FUSED_D2D_COPIES
-        || strided_copies.num_copies < 0 || strided_copies.num_copies > MAX_FUSED_STRIDED_COPIES) {
+                               const FusedD2DCopyParams&         copies,
+                               const FusedStridedCopyParams&     strided_copies,
+                               CudaGraphPrepareStream            stream,
+                               const CudaGraphPrepareReplay&     replay) {
+    if (fills.region_count < 0 || fills.region_count > kMaxCudaGraphPrepareFillRegions || copies.num_copies < 0
+        || copies.num_copies > MAX_FUSED_D2D_COPIES || strided_copies.num_copies < 0
+        || strided_copies.num_copies > MAX_FUSED_STRIDED_COPIES) {
         return false;
     }
     PrepareTasks params;
     PrepareRange reads[kMaxCudaGraphPrepareFillRegions], writes[kMaxCudaGraphPrepareFillRegions];
-    bool used_fill[kMaxCudaGraphPrepareFillRegions] = {};
+    bool         used_fill[kMaxCudaGraphPrepareFillRegions] = {};
     auto addCopy = [&](const void* src, void* dst, size_t rows, size_t bytes, size_t src_stride, size_t dst_stride) {
         if (!rows || !bytes) {
             return true;
@@ -227,11 +255,11 @@ bool tryInvokeCudaGraphPrepare(const CudaGraphPrepareFillParams& fills,
             return false;
         }
         const int index = params.count++;
-        auto& task = params.tasks[index];
-        task.fill.ptr = static_cast<int32_t*>(dst);
-        task.src = static_cast<const char*>(src);
-        task.rows = rows;
-        task.row_bytes = bytes;
+        auto&     task  = params.tasks[index];
+        task.fill.ptr   = static_cast<int32_t*>(dst);
+        task.src        = static_cast<const char*>(src);
+        task.rows       = rows;
+        task.row_bytes  = bytes;
         task.src_stride = src_stride;
         task.dst_stride = dst_stride;
         return prepareRange(src, rows, src_stride, bytes, reads[index])
@@ -243,8 +271,12 @@ bool tryInvokeCudaGraphPrepare(const CudaGraphPrepareFillParams& fills,
         }
     }
     for (int i = 0; i < strided_copies.num_copies; ++i) {
-        if (!addCopy(strided_copies.src[i], strided_copies.dst[i], strided_copies.num_rows[i],
-                     strided_copies.row_bytes[i], strided_copies.src_row_stride[i], strided_copies.dst_row_stride[i])) {
+        if (!addCopy(strided_copies.src[i],
+                     strided_copies.dst[i],
+                     strided_copies.num_rows[i],
+                     strided_copies.row_bytes[i],
+                     strided_copies.src_row_stride[i],
+                     strided_copies.dst_row_stride[i])) {
             return false;
         }
     }
@@ -260,14 +292,13 @@ bool tryInvokeCudaGraphPrepare(const CudaGraphPrepareFillParams& fills,
         }
         for (int j = 0; j < params.count; ++j) {
             auto& task = params.tasks[j];
-            if (task.src && task.fill.ptr == fill.ptr && task.fill.count == 0
-                && !fill.value_ptr && fill.value == 0 && fill.value_offset == 0 && fill.step == 0
-                && task.dst_stride && task.dst_stride % sizeof(int32_t) == 0
+            if (task.src && task.fill.ptr == fill.ptr && task.fill.count == 0 && !fill.value_ptr && fill.value == 0
+                && fill.value_offset == 0 && fill.step == 0 && task.dst_stride && task.dst_stride % sizeof(int32_t) == 0
                 && task.row_bytes % sizeof(int32_t) == 0 && task.row_bytes <= task.dst_stride
                 && (range.end - range.begin) % task.dst_stride == 0
                 && (range.end - range.begin) / task.dst_stride >= task.rows) {
-                task.fill = fill;
-                writes[j] = range;
+                task.fill    = fill;
+                writes[j]    = range;
                 used_fill[i] = true;
                 break;
             }
@@ -276,7 +307,7 @@ bool tryInvokeCudaGraphPrepare(const CudaGraphPrepareFillParams& fills,
             if (params.count == kMaxCudaGraphPrepareFillRegions) {
                 return false;
             }
-            writes[params.count] = range;
+            writes[params.count]              = range;
             params.tasks[params.count++].fill = fill;
         }
     }
@@ -286,7 +317,7 @@ bool tryInvokeCudaGraphPrepare(const CudaGraphPrepareFillParams& fills,
     for (int i = 0; i < params.count; ++i) {
         max_bytes = std::max(max_bytes, writes[i].end - writes[i].begin);
         PrepareRange value;
-        const auto* value_ptr = params.tasks[i].fill.value_ptr;
+        const auto*  value_ptr = params.tasks[i].fill.value_ptr;
         if (value_ptr && !prepareRange(value_ptr, 1, 0, sizeof(int32_t), value)) {
             return false;
         }
@@ -297,24 +328,40 @@ bool tryInvokeCudaGraphPrepare(const CudaGraphPrepareFillParams& fills,
             }
         }
     }
-    if (params.count) {
-        const auto blocks = std::min<size_t>(64, std::max<size_t>(8, 1 + (max_bytes - 1) / 4096));
 #if USING_CUDA
-        if (replay.exec && replay.node) {
-            void* arguments[] = {&params};
-            cudaKernelNodeParams node_params{};
-            node_params.func = reinterpret_cast<void*>(cudaGraphPrepareKernel);
-            node_params.gridDim = dim3(blocks, params.count);
-            node_params.blockDim = dim3(256);
-            node_params.kernelParams = arguments;
-            C10_CUDA_CHECK(cudaGraphExecKernelNodeSetParams(replay.exec, replay.node, &node_params));
-            C10_CUDA_CHECK(cudaGraphNodeSetEnabled(replay.exec, replay.node, 1));
-            return true;
+    if (replay.exec && replay.node) {
+        if (replay.windows_node) {
+            // Only split after validating all cross-task aliases. Both the
+            // live copy and the -1 tail fill belong before the window hash.
+            PrepareRange window_range;
+            if (!prepareRange(replay.windows_dst, 1, 0, replay.windows_bytes, window_range)) {
+                return false;
+            }
+            PrepareTasks window_tasks;
+            size_t       window_bytes = 0;
+            int          other_count  = 0;
+            for (int i = 0; i < params.count; ++i) {
+                if (writes[i].overlaps(window_range)) {
+                    if (writes[i].begin < window_range.begin || writes[i].end > window_range.end) {
+                        return false;
+                    }
+                    window_tasks.tasks[window_tasks.count++] = params.tasks[i];
+                    window_bytes                             = std::max(window_bytes, writes[i].end - writes[i].begin);
+                } else {
+                    params.tasks[other_count++] = params.tasks[i];
+                }
+            }
+            params.count = other_count;
+            updatePrepareNode(replay.exec, replay.windows_node, window_tasks, window_bytes);
         }
+        updatePrepareNode(replay.exec, replay.node, params, max_bytes);
+        return true;
+    }
 #else
-        (void)replay;
+    (void)replay;
 #endif
-        cudaGraphPrepareKernel<<<dim3(blocks, params.count), 256, 0, stream>>>(params);
+    if (params.count) {
+        cudaGraphPrepareKernel<<<prepareGrid(params, max_bytes), 256, 0, stream>>>(params);
 #if USING_ROCM
         const auto result = hipGetLastError();
         TORCH_CHECK(result == hipSuccess, "cuda graph preparation failed: ", hipGetErrorString(result));
@@ -351,18 +398,18 @@ void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, CudaGraphPrep
 #endif
 }
 
-void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
-                                         const int32_t* block_ids,
-                                         int32_t*       batch_indice,
-                                         int32_t*       page_indice,
-                                         int32_t*       decode_page_indptr,
-                                         int32_t*       paged_kv_last_page_len,
-                                         int32_t*       qo_indptr,
-                                         int32_t*       kvlen,
-                                         int32_t*       positions,
-                                         int32_t        batch_size,
-                                         int32_t        max_blocks_per_batch,
-                                         int32_t        seq_size_per_block,
+void invokePrepareFlashInferDecodeParams(const int32_t*         sequence_lengths_plus_1,
+                                         const int32_t*         block_ids,
+                                         int32_t*               batch_indice,
+                                         int32_t*               page_indice,
+                                         int32_t*               decode_page_indptr,
+                                         int32_t*               paged_kv_last_page_len,
+                                         int32_t*               qo_indptr,
+                                         int32_t*               kvlen,
+                                         int32_t*               positions,
+                                         int32_t                batch_size,
+                                         int32_t                max_blocks_per_batch,
+                                         int32_t                seq_size_per_block,
                                          CudaGraphPrepareStream stream) {
     TORCH_CHECK(sequence_lengths_plus_1 != nullptr, "sequence_lengths_plus_1 is null");
     TORCH_CHECK(block_ids != nullptr, "block_ids is null");
@@ -387,9 +434,8 @@ void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
                                                              seq_size_per_block);
 #if USING_ROCM
     const auto result = hipGetLastError();
-    TORCH_CHECK(result == hipSuccess,
-                "FlashInfer decode CUDA graph prepare kernel failed: ",
-                hipGetErrorString(result));
+    TORCH_CHECK(
+        result == hipSuccess, "FlashInfer decode CUDA graph prepare kernel failed: ", hipGetErrorString(result));
 #else
     const auto result = cudaGetLastError();
     TORCH_CHECK(

@@ -31,6 +31,15 @@ void invokeBuildAttentionInputMetadata(AttentionInputMetadataParams  params,
 
 cudaGraphNode_t addAttentionInputMetadataNode(cudaGraph_t graph, cudaGraphNode_t before);
 
+struct EngramVerifyGraphNodes {
+    cudaGraphNode_t windows  = nullptr;
+    cudaGraphNode_t metadata = nullptr;
+    cudaGraphNode_t prepare  = nullptr;
+};
+
+// Call on the main capture stream immediately after forking the Engram lookup.
+EngramVerifyGraphNodes captureEngramVerifyFork(cudaStream_t stream);
+
 void invokeBuildAttentionInputMetadata(const at::Tensor& input_lengths,
                                        const at::Tensor& prefix_lengths,
                                        at::Tensor&       cu_seqlens,
