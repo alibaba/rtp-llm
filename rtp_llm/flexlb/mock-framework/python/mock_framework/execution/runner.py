@@ -73,9 +73,7 @@ async def run_case(case, launch, directory):
         records.emit(event="setup_finished")
         for phase in case.phases:
             phase_deadline = time.monotonic() + float(duration(phase.timeout))
-            records.emit(
-                event="phase_started", phase_id=phase.id, describe=phase.describe
-            )
+            records.emit(event="phase_started", phase_id=phase.id)
             phase_status = "ERROR"
             tasks = _PhaseTasks()
             try:
