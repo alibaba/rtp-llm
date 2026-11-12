@@ -1,17 +1,24 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
+from mock_framework.config import compile_case
 from mock_framework.execution import ExecutionError
 from mock_framework.execution.evidence.request_journal import (
     playback_directories,
     read_requests,
 )
+from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.roles import client as client_runtime
+from mock_framework.execution.runner import run_case
 from mock_framework.execution.step.step_registry import StepRegistry
 from mock_framework.execution.test.helpers import FRAMEWORK
+from mock_framework.execution.test.helpers.input import write_inputs
+from mock_framework.execution.test.helpers.zookeeper import command as zookeeper_command
 
 
 def write_rows(directory, rows):
@@ -311,3 +318,268 @@ def test_zero_issued_round_can_seal_without_fabricating_terminal_events(evidence
         )
     )
     assert list(read_requests(directory)) == []
+
+
+@pytest.mark.parametrize(
+    "replicas,large_input",
+    [(2, False), (1, True), (2, True)],
+    ids=["small-two", "large-one", "large-two"],
+)
+def test_client_playback_through_real_master(tmp_path, replicas, large_input):
+    from mock_framework.execution.test.test_master import configuration
+
+    root = FRAMEWORK
+    java = str(Path(os.environ["JAVA_HOME"]) / "bin/java")
+    master_classpath = os.pathsep.join(
+        [
+            str(root / "java/master/target/classes"),
+            (root / "java/master/target/dependencies.txt").read_text().strip(),
+        ]
+    )
+    native = configuration()
+    # Match the sender's concurrency so this test measures playback, not DIRECT admission rejection.
+    native["FLEXLB_CONFIG"] = json.dumps(
+        {
+            "scheduler": {"type": "DIRECT"},
+            "dispatcher": {"type": "NON_BATCH", "maxInflightPerPrefillWorker": 16},
+            "requestLifecycle": {"request": {"timeoutMs": 5000}},
+            "grpcServer": {
+                "executorCoreSize": 4,
+                "executorMaxSize": 8,
+                "executorQueueSize": 64,
+                "shutdownQuietPeriodMs": 10,
+            },
+        }
+    )
+    engine = {
+        "engine": "rtp",
+        "config": {
+            "seq_size_per_block": 16,
+            "test_block_num": 4096,
+            "reserve_block_ratio": 0,
+            "max_seq_len": 4096,
+            "mock.compute.forward.expression": "1 + batchSize",
+        },
+    }
+    data = {
+        "id": "client_playback",
+        "describe": "Client0 coordinates native playback",
+        "environment": {
+            "master": {"config": native},
+            "prefill": engine,
+            "decode": engine,
+            "client": {"deployment": {"replicas": replicas}, "config": {}},
+        },
+        "phases": [
+            {
+                "id": "traffic",
+                "describe": "Play and collect",
+                "timeout": "35s",
+                "steps": [
+                    {
+                        "id": "start",
+                        "describe": "Start global request plan",
+                        "interface": "client/start",
+                        "args": {
+                            "masters": {"ref": "globals.masters"},
+                            "requests_file": "requests.mckidx",
+                            "qps": 4,
+                            "total_concurrency": 4,
+                            "queue_capacity": 8,
+                            "request_timeout": "5s",
+                            "drain_timeout": "5s",
+                        },
+                        "wait_after": "6s",
+                    },
+                    {
+                        "id": "stop",
+                        "describe": "Collect every Client",
+                        "interface": "client/stop",
+                    },
+                ],
+            }
+        ],
+    }
+    count = 720 if large_input else 12
+    source = tmp_path / "requests.mckidx"
+    text_length = 1024 if large_input else 3
+    write_inputs(
+        source,
+        (
+            (
+                (index + 1) * text_length,
+                0,
+                {"max_output_tokens": 3},
+                50,
+                [],
+            )
+            for index in range(count)
+        ),
+        chains=[(index * text_length + 1, 0, text_length) for index in range(count)],
+    )
+    if large_input:
+        start = data["phases"][0]["steps"][0]
+        start["args"].update(qps=24, total_concurrency=16, queue_capacity=32)
+        start["wait_after"] = "24s"
+        data["phases"][0]["timeout"] = "60s"
+    data["phases"][0]["steps"].append(
+        {
+            "id": "records",
+            "describe": "Read sealed Client evidence",
+            "interface": "client/requests",
+            "args": {"limit": 2},
+        }
+    )
+    path = tmp_path / "case.yaml"
+    path.write_text(yaml.safe_dump(data))
+    registry = StepRegistry.standard()
+    case = compile_case(path, registry)
+    components = {
+        "master": {
+            "command": [
+                java,
+                "-XX:ActiveProcessorCount=2",
+                "-cp",
+                master_classpath,
+                "org.flexlb.MasterMain",
+            ],
+            "startup_timeout": "60s",
+        },
+        "client": {
+            "command": [
+                java,
+                "-jar",
+                str(root / "java/client/target/mock-client-1.0-SNAPSHOT-all.jar"),
+            ]
+        },
+    }
+    for role in ("prefill", "decode"):
+        components[role] = {
+            "command": [
+                java,
+                "-cp",
+                str(
+                    root / "java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar"
+                ),
+                "org.flexlb.mock.engine.EngineMain",
+            ]
+        }
+    recipe = {
+        "components": components,
+        "zookeeper": {"command": zookeeper_command(root, java)},
+    }
+    if os.environ.get("PROMETHEUS_BIN"):
+        recipe["prometheus"] = {
+            "binary": os.environ["PROMETHEUS_BIN"],
+            "scrape_interval": "250ms",
+        }
+        data["phases"][0]["steps"].insert(
+            1,
+            {
+                "id": "qps",
+                "describe": "Check aggregate issued rate",
+                "interface": "client/qps",
+                "args": {"range": ["-10s" if large_input else "-6s", "0s"]},
+                "expect": (
+                    {"gte": 21.6, "lte": 26.4}
+                    if large_input
+                    else {"gte": 1.5, "lte": 3}
+                ),
+                "wait_after": "10s" if large_input else "0s",
+            },
+        )
+        data["phases"][0]["steps"].insert(
+            2,
+            {
+                "id": "success",
+                "describe": "Check aggregate terminal success rate",
+                "interface": "client/success_rate",
+                "args": {"range": ["-20s", "0s"]},
+                "expect": {"eq": 1.0},
+            },
+        )
+        path.write_text(yaml.safe_dump(data))
+        case = compile_case(path, registry)
+    elif large_input:
+        data["phases"][0]["steps"][0]["wait_after"] = "34s"
+        path.write_text(yaml.safe_dump(data))
+        case = compile_case(path, registry)
+    launch = prepare_launch(recipe, case, tmp_path)
+    output = tmp_path / "result"
+    result = asyncio.run(run_case(case, launch, output))
+    assert result["status"] == "PASS", result
+    if "prometheus" in recipe:
+        gates = [
+            json.loads(line)
+            for line in (output / "gates.jsonl").read_text().splitlines()
+        ]
+        (success,) = [
+            gate for gate in gates if gate["interface"] == "client/success_rate"
+        ]
+        assert success["actual"] == 1.0
+    summary = json.loads(
+        (output / "components/client-0/coordinator/1/result.json").read_text()
+    )
+    assert not summary["errors"] and len(summary["clients"]) == replicas
+    assert sum(v["issued"] for v in summary["clients"].values()) == count
+    assert all(
+        v["finished"] == count // replicas
+        and v["outcomes"]["success"] == count // replicas
+        and v["unsent"] == 0
+        and not v["stopped"]
+        for v in summary["clients"].values()
+    )
+    pids = [
+        json.loads(line)["pid"]
+        for line in (output / "events.jsonl").read_text().splitlines()
+        if json.loads(line).get("event") == "process_started"
+        and json.loads(line).get("node", "").startswith("client-")
+    ]
+    assert len(set(pids)) == replicas
+    manifest = json.loads(
+        (output / "components/client-0/coordinator/1/input.json").read_text()
+    )
+    assert manifest["count"] == count and manifest["path"] == str(source)
+    assert not (output / "components/client-0/coordinator/1/shards").exists()
+    for i in range(replicas):
+        plan = json.loads(
+            (output / f"components/client-{i}/playback/1/plan.json").read_text()
+        )
+        assert (
+            plan["requests_file"] == str(source)
+            and plan["sha256"] == manifest["sha256"]
+        )
+        assert (plan["first_index"], plan["stride"]) == (i, replicas)
+    assert not (output / "topology-history.json").exists()
+    topology = [
+        json.loads(path.read_text())
+        for path in sorted(output.glob("components/client-*/endpoints.json"))
+    ]
+    records = [
+        record
+        for directory in playback_directories(output, topology)
+        for record in read_requests(directory)
+    ]
+    assert len(records) == count and {record.request_id for record in records} == set(
+        range(1, count + 1)
+    )
+    assert all(
+        record.outcome == "success"
+        and record.ttft_nanos is not None
+        and record.output_tokens == 3
+        for record in records
+    )
+    assert all(
+        len(record.attempts) == 1
+        and record.attempts[0].grpc_code == "OK"
+        and record.attempts[0].response_success is True
+        for record in records
+    )
+    (queried,) = [
+        event["result"]
+        for line in (output / "events.jsonl").read_text().splitlines()
+        if (event := json.loads(line)).get("event") == "step_finished"
+        and event.get("step") == "records"
+    ]
+    assert queried["matched"] == count and queried["outcomes"]["success"] == count
+    assert len(queried["records"]) == 2 and queried["truncated"]

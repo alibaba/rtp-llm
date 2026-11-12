@@ -14,9 +14,6 @@ from mock_framework.execution.step.client_success_rate import (
 )
 from mock_framework.execution.step.engine_cache_hit_rate import engine_cache_hit_rate
 from mock_framework.execution.step.engine_prefill_tps import engine_prefill_tps
-from mock_framework.execution.step.engine_prefill_tps_with_cache import (
-    engine_prefill_tps_with_cache,
-)
 from mock_framework.execution.step.prometheus_query import (
     PrometheusQueryArgs,
     prometheus_query,
@@ -347,25 +344,6 @@ def test_success_rate_window_keeps_selected_clients_and_fixed_end(monkeypatch):
         "1002" in expression and "1001" not in expression for expression, _ in calls
     )
     assert "[20000ms]" in calls[-1][0] and "irate" not in calls[-1][0]
-
-
-@pytest.mark.parametrize(
-    "method,name",
-    [
-        (engine_prefill_tps, "rtp_llm_context_tps"),
-        (engine_prefill_tps_with_cache, "rtp_llm_context_tps_with_cache"),
-    ],
-)
-def test_prefill_throughput_reads_the_real_named_gauge(monkeypatch, method, name):
-    calls = []
-
-    async def gauge(ctx, args, role, metric_name):
-        calls.append((role, metric_name))
-        return 42
-
-    monkeypatch.setattr(metrics, "gauge", gauge)
-    assert asyncio.run(method(context(), metrics.MetricArgs())) == 42
-    assert calls == [("prefill", name)]
 
 
 def test_series_rejects_missing_points_and_nonfinite_samples(prometheus):
