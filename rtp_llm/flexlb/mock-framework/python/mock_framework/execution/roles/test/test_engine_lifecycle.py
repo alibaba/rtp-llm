@@ -166,22 +166,24 @@ def test_initial_engine_start_shares_slots_across_roles(tmp_path, monkeypatch):
 
     from mock_framework.execution.environment import EndpointRegistry
     from mock_framework.execution.processes import ProcessIdentity, ProcessSupervisor
+    from mock_framework.execution.roles import ENGINE_ROLES
     from mock_framework.execution.roles.engine import (
         INITIAL_START_CONCURRENCY,
-        ROLES,
         EngineRole,
     )
 
     async def exercise():
         records = SimpleNamespace(directory=tmp_path, emit=lambda **_: None)
-        count = INITIAL_START_CONCURRENCY // len(ROLES) + 2
+        count = INITIAL_START_CONCURRENCY // len(ENGINE_ROLES) + 2
         topology = EndpointRegistry(tmp_path)
         engine = EngineRole(
             supervisor=ProcessSupervisor(records),
             topology=topology,
             records=records,
-            environment={role: {"deployment": {"replicas": count}} for role in ROLES},
-            launch_by_role={role: {"startup_timeout": "2s"} for role in ROLES},
+            environment={
+                role: {"deployment": {"replicas": count}} for role in ENGINE_ROLES
+            },
+            launch_by_role={role: {"startup_timeout": "2s"} for role in ENGINE_ROLES},
             monitoring=None,
         )
         active = peak = 0
@@ -201,7 +203,7 @@ def test_initial_engine_start_shares_slots_across_roles(tmp_path, monkeypatch):
             await asyncio.sleep(0)
             active -= 1
             ready.append((role, index))
-            slot = ROLES.index(role) * count + index
+            slot = ENGINE_ROLES.index(role) * count + index
             control = f"http://localhost:{10000 + slot}"
             return (
                 ProcessIdentity(role, index),
@@ -218,9 +220,9 @@ def test_initial_engine_start_shares_slots_across_roles(tmp_path, monkeypatch):
         monkeypatch.setattr(engine, "_start_instance", start_instance)
         await asyncio.wait_for(engine.start(), timeout=2)
         assert peak == INITIAL_START_CONCURRENCY
-        assert set(starts[:INITIAL_START_CONCURRENCY]) == set(ROLES)
+        assert set(starts[:INITIAL_START_CONCURRENCY]) == set(ENGINE_ROLES)
         assert ready[0] != ("prefill", 0)
-        for role in ROLES:
+        for role in ENGINE_ROLES:
             assert [node["id"] for node in topology.active(role)] == [
                 f"{role}-{i}" for i in range(count)
             ]

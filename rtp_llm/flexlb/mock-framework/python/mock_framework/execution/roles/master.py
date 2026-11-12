@@ -14,7 +14,7 @@ from .. import ExecutionError
 from ..processes import ProcessIdentity, start_instance
 from ..step_trace import write_json
 from ..transport import invoke
-from . import ENGINE_ROLES, register_ready_instance
+from . import ENGINE_ROLES, register_ready_instance, retire_instance
 
 
 def _resolve_discovery(route_json, topology, *, require_engines):
@@ -335,18 +335,18 @@ class MasterRole:
                     item.process_name, mode=mode, grace=self._stop_grace()
                 )
                 if child.returncode is not None:
-                    (item.directory(self.records.directory) / "ready.json").unlink(
-                        missing_ok=True
+                    retire_instance(
+                        self.topology,
+                        self.monitoring,
+                        item.instance_id,
+                        item.directory(self.records.directory),
                     )
-                    self.topology.retire(item.instance_id)
                     self.records.emit(
                         event="instance_stopped",
                         node=item.instance_id,
                         process=item.process_name,
                         **item.event_fields(),
                     )
-                    if self.monitoring:
-                        self.monitoring.retire(item.instance_id)
                 if errors:
                     raise ExecutionError("; ".join(errors))
             return addresses

@@ -17,3 +17,10 @@ def register_ready_instance(
         )
     if monitoring:
         monitoring.register_target(identity.instance_id, endpoint)
+
+
+def retire_instance(topology, monitoring, instance_id, directory):
+    (directory / "ready.json").unlink(missing_ok=True)
+    topology.retire(instance_id)
+    if monitoring:
+        monitoring.retire(instance_id)

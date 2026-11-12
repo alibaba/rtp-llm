@@ -7,7 +7,7 @@ from itertools import zip_longest
 from ...config.validation import duration
 from .. import ExecutionError
 from ..processes import ProcessIdentity, start_instance
-from . import ENGINE_ROLES, register_ready_instance
+from . import ENGINE_ROLES, register_ready_instance, retire_instance
 
 INITIAL_START_CONCURRENCY = 32
 MAX_ENGINE_START_COUNT = 1024
@@ -125,11 +125,12 @@ class EngineRole:
                 child = self.supervisor.child(node)
                 errors = await self.supervisor.stop_intentionally(node)
                 if child.returncode is not None:
-                    ready = self.records.directory / "components" / node / "ready.json"
-                    ready.unlink(missing_ok=True)
-                    self.topology.retire(node)
-                    if self.monitoring:
-                        self.monitoring.retire(node)
+                    retire_instance(
+                        self.topology,
+                        self.monitoring,
+                        node,
+                        self.records.directory / "components" / node,
+                    )
                     self.records.emit(
                         event="instance_stopped",
                         node=node,
