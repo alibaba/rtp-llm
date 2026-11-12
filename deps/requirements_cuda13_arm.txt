@@ -37,7 +37,7 @@ nvidia-cutlass-dsl-libs-base==4.8.1
 
 # GC MoE (CuTe DSL green-context MoE). Pure Python: kernels JIT on first
 # use, so the single py3-none-any wheel also serves the other arch.
-http://artlab.alibaba-inc.com/1/pypi/rtp_llm/gc_moe/gc_moe-0.5.3+c58fd4d.cu132-py3-none-any.whl
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/gc_moe/gc_moe-0.6.1+0a3d661.cu132-py3-none-any.whl
 torch-c-dlpack-ext==0.1.5
 https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/z3_solver-4.13.0.0%2Blocal.ali-py2.py3-none-manylinux2014_aarch64.whl
 https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/arm_pkg/tile_kernels-0.1.dev0%2Bali.git36d9e45-py3-none-any.whl

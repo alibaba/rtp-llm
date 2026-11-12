@@ -836,8 +836,8 @@ fsspec==2023.10.0 \
     # via
     #   huggingface-hub
     #   torch
-gc-moe @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/gc_moe/gc_moe-0.5.3+c58fd4d.cu132-py3-none-any.whl \
-    --hash=sha256:01dfa91f27225040c023a419fd85698c514d3a217a5f88a601375b3cede1ee91
+gc-moe @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/gc_moe/gc_moe-0.6.1+0a3d661.cu132-py3-none-any.whl \
+    --hash=sha256:dea746d211c49b4ee424e7c5bba093aee90ac9b7b26f4bbebc0f8218e836029e
     # via -r deps/requirements_torch_gpu_cuda13.txt
 grpcio==1.62.0 \
     --hash=sha256:0b9179478b09ee22f4a36b40ca87ad43376acdccc816ce7c2193a9061bf35701 \
