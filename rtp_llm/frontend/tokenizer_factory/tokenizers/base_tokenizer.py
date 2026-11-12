@@ -1,4 +1,6 @@
 import functools
+import json
+from pathlib import Path
 from typing import Any, Dict, List, Union
 
 
@@ -9,9 +11,19 @@ class BaseTokenizer:
         self.init_tokenizer(tokenizer_path, self.config_json)
 
     def init_tokenizer(self, tokenizer_path: str, config_json: Dict[str, Any]):
-        from transformers import AutoTokenizer
+        from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
+        # ModelOpt/custom checkpoints can serialize Transformers 5's generic
+        # TokenizersBackend name. Read the same tokenizer.json with the fast
+        # tokenizer in Transformers 4, preserving special tokens and templates.
+        config_path = Path(tokenizer_path) / "tokenizer_config.json"
+        tokenizer_cls = AutoTokenizer
+        if config_path.is_file():
+            with config_path.open() as reader:
+                tokenizer_config = json.load(reader)
+            if tokenizer_config.get("tokenizer_class") == "TokenizersBackend":
+                tokenizer_cls = PreTrainedTokenizerFast
+        self.tokenizer = tokenizer_cls.from_pretrained(
             tokenizer_path, trust_remote_code=True, verbose=False, use_fast=True
         )
 

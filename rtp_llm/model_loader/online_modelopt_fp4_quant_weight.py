@@ -12,7 +12,9 @@ deployments:
    ``OnlineMegaMoeFp4Weight`` — BF16 → packed int8 + fp32 scale.
    ``OnlineMegaMoeFp4FromFp8Weight`` — FP8 per-block or MXFP8 1x32
    → BF16 → FP4.
-   Both run at load time so the BF16/FP8 tensor is released before
+   ``OnlineMegaMoeFp4FromNvfp4Weight`` — NVFP4 block-16 → BF16 → MXFP4,
+   streaming one selected expert at a time and preserving separate gate/up scales.
+   These run at load time so source tensors are released before
    ``MegaMoeWrapper.__init__``. Triggered by ``MOE_STRATEGY=mega_moe`` or
    ``MOE_STRATEGY=mega_moe_se`` / ``mega_moe_fused`` env var via
    ``apply_mega_moe_fp4_wrappers`` in
@@ -49,7 +51,7 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.utils.model_weight import W, identity
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, stack_
 
 FLOAT4_E2M1_MAX = 6.0
 FLOAT8_E4M3_MAX = 448.0
@@ -183,7 +185,7 @@ def quantize_moe_weight_to_fp4_ue8m0(
     weight: torch.Tensor,
     block_size: int = MEGA_MOE_FP4_BLOCK,
 ):
-    """Quantize a stacked MoE weight ``[E, N, K]`` (BF16/FP16/FP32) to NVFP4
+    """Quantize a stacked MoE weight ``[E, N, K]`` (BF16/FP16/FP32) to MXFP4
     + UE8M0 scale, matching the per-expert loop in
     ``GLM5MegaMoE.setup_weights_from_bf16``.
 
@@ -207,6 +209,61 @@ def quantize_moe_weight_to_fp4_ue8m0(
         packed[i].copy_(packed_i)
         sf[i].copy_(sf_i)
     return packed, sf
+
+
+def dequantize_nvfp4_expert(
+    packed: torch.Tensor,
+    block_scale: torch.Tensor,
+    global_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Decode one ModelOpt projection to BF16; input_scale is NOT a weight scale.
+
+    NVFP4 stores the first E2M1 value in the low nibble and uses one E4M3
+    scale per 16 logical K values, multiplied by the projection's FP32 scale_2.
+    Gate and up may have different scale_2 values and must be decoded separately.
+    """
+    if packed.dtype != torch.uint8 or packed.dim() != 2:
+        raise ValueError("NVFP4 weight must be a 2D packed uint8 tensor")
+    n, packed_k = packed.shape
+    k = packed_k * 2
+    if k % NVFP4_BLOCK_SIZE or tuple(block_scale.shape) != (n, k // NVFP4_BLOCK_SIZE):
+        raise ValueError(
+            f"NVFP4 scale shape {tuple(block_scale.shape)} does not match "
+            f"logical weight shape {(n, k)} with block size {NVFP4_BLOCK_SIZE}"
+        )
+    if block_scale.dtype != torch.float8_e4m3fn or global_scale.numel() != 1:
+        raise ValueError(
+            "NVFP4 requires E4M3 block scales and one global scale per projection"
+        )
+    values = torch.tensor(
+        [
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            6.0,
+            -0.0,
+            -0.5,
+            -1.0,
+            -1.5,
+            -2.0,
+            -3.0,
+            -4.0,
+            -6.0,
+        ],
+        device=packed.device,
+        dtype=torch.float32,
+    )
+    codes = torch.stack((packed & 0xF, packed >> 4), dim=-1).long()
+    decoded = values[codes].reshape(n, k // NVFP4_BLOCK_SIZE, NVFP4_BLOCK_SIZE)
+    scales = block_scale.to(device=packed.device, dtype=torch.float32)
+    scales = scales * global_scale.to(
+        device=packed.device, dtype=torch.float32
+    ).reshape(())
+    return (decoded * scales.unsqueeze(-1)).reshape(n, k).to(torch.bfloat16)
 
 
 def convert_fp8_moe_to_fp4_ue8m0(
@@ -444,7 +501,7 @@ class OnlineModelOptFp4MoeWeight(CompositeWeight, QuantWeight):
 
 class OnlineMegaMoeFp4Weight(CompositeWeight, QuantWeight):
     """Load-time FP4+UE8M0 quantizer for mega-MoE stacked MoE weights
-    (``moe_w1`` = gate||up, ``moe_w2`` = down) starting from BF16.
+    (``moe_w1`` = up||gate, ``moe_w2`` = down) starting from BF16.
 
     Output layout matches ``GLM5MegaMoE.setup_weights_from_bf16`` bit for bit.
     Doing the work here lets the BF16 tensor be released as soon as it lands
@@ -545,6 +602,116 @@ class OnlineMegaMoeFp4Weight(CompositeWeight, QuantWeight):
             self.kernel.name: tensor[self.kernel.name],
             self.scale.name: tensor[self.scale.name],
         }
+
+
+class OnlineMegaMoeFp4FromNvfp4Weight(OnlineMegaMoeFp4Weight):
+    """Stream checkpoint NVFP4 experts into the existing Mega MoE MXFP4 layout.
+
+    Keep only one expert's dequantized BF16 projections live. Preserve checkpoint
+    order (RTP W1 is up|gate), expert selection/EPLB ordering and existing TP split.
+    Runtime activation scales come from Mega MoE, so NVFP4 input_scale is unused.
+    """
+
+    def __init__(self, src_kernel: MoeAtomicWeight, **kwargs: Any):
+        expected_count = 2 if src_kernel.name == W.moe_w1 else 1
+        expected_process = "stack_moe_w1" if expected_count == 2 else "stack_"
+        if (
+            getattr(src_kernel, "stacked_ckpt_keys", False)
+            or len(src_kernel.weights) != expected_count
+            or getattr(src_kernel.process_fun, "__name__", None) != expected_process
+            or any(
+                not w.name.endswith(".weight") or "{expert_id}" not in w.name
+                for w in src_kernel.weights
+            )
+        ):
+            raise ValueError(
+                "NVFP4-to-MXFP4 requires separate per-expert up/gate/down checkpoint weights"
+            )
+        super().__init__(src_kernel, **kwargs)
+        self.kernel.data_type = torch.uint8
+        # Expose all checkpoint inputs to file pruning as well as prefetch.
+        # These are metadata components; conversion reads their tensors one
+        # projection at a time rather than stacking or merging global scales.
+        for suffix, dtype in (
+            (".weight_scale", torch.float8_e4m3fn),
+            (".weight_scale_2", torch.float32),
+        ):
+            source = MoeAtomicWeight(
+                name=self.name + "_nvfp4" + suffix,
+                weights=[
+                    CkptWeightInfo(w.name.removesuffix(".weight") + suffix, w.merge_fun)
+                    for w in src_kernel.weights
+                ],
+                process_fun=stack_,
+                data_type=dtype,
+                config=src_kernel.config,
+            )
+            self.sub_weights[source.name] = source
+
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
+        weights = self.kernel.get_tensor_names(layer_id, load_config)
+        return weights | {
+            name.removesuffix(".weight") + suffix
+            for name in weights
+            for suffix in (".weight_scale", ".weight_scale_2")
+        }
+
+    def _load_raw_tensor(
+        self,
+        tensor_source: TensorSource,
+        layer_id: Optional[int],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        selected = list(
+            load_config.get_selected_experts(layer_id, self.kernel.config.expert_num)
+        )
+        if not selected:
+            raise ValueError("NVFP4-to-MXFP4 requires at least one local expert")
+        packed_out = scale_out = None
+        for local_id, expert_id in enumerate(selected):
+            projections = []
+            for ckpt in self.kernel.weights:
+                name = ckpt.name.format(
+                    i=layer_id, i_1=layer_id + 1, expert_id=expert_id
+                )
+                base = name.removesuffix(".weight")
+                packed = ckpt.merge_fun(
+                    tensor_source.load_tensor(name, torch.uint8)
+                ).to(device)
+                block_scale = ckpt.merge_fun(
+                    tensor_source.load_tensor(
+                        base + ".weight_scale", torch.float8_e4m3fn
+                    )
+                ).to(device)
+                global_scale = ckpt.merge_fun(
+                    tensor_source.load_tensor(base + ".weight_scale_2", torch.float32)
+                ).to(device)
+                projections.append(
+                    dequantize_nvfp4_expert(packed, block_scale, global_scale)
+                )
+                del packed, block_scale, global_scale
+            # Process one expert using the original up/gate ordering, never the
+            # NVFP4 loader's max(gate_scale_2, up_scale_2) merge.
+            expert = self.kernel.process_fun(projections)
+            del projections
+            packed, scale = quantize_moe_weight_to_fp4_ue8m0(expert, self._block_size)
+            del expert
+            if packed_out is None:
+                packed_out = torch.empty(
+                    (len(selected), *packed.shape[1:]), dtype=torch.int8, device=device
+                )
+                scale_out = torch.empty(
+                    (len(selected), *scale.shape[1:]),
+                    dtype=torch.float32,
+                    device=device,
+                )
+            packed_out[local_id].copy_(packed[0])
+            scale_out[local_id].copy_(scale[0])
+            del packed, scale
+        return {self.kernel.name: packed_out, self.scale.name: scale_out}
 
 
 # ---------------------------------------------------------------------------
@@ -821,8 +988,8 @@ def mxfp4_quantize_linear_weight(weight: torch.Tensor):
 
 
 def wrap_moe_for_mega_moe(weight: WeightModule) -> WeightModule:
-    """If ``weight`` is a MoE atomic / per-block FP8 wrapper for moe_w1/moe_w2,
-    return a load-time FP4 quantizer that consumes BF16 or FP8 source. Otherwise
+    """If ``weight`` is a MoE atomic / FP8 / NVFP4 wrapper for moe_w1/moe_w2,
+    return a load-time MXFP4 quantizer consuming BF16, FP8 or NVFP4. Otherwise
     return the weight unchanged.
 
     This is the single entry point used by ``apply_mega_moe_fp4_wrappers`` in
@@ -830,7 +997,10 @@ def wrap_moe_for_mega_moe(weight: WeightModule) -> WeightModule:
     """
     from rtp_llm.model_loader.mxfp8_quant_weight import Mxfp8Weight
     from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
+    from rtp_llm.model_loader.per_group_fp4_quant_weight import PerGroupFp4Weight
 
+    if isinstance(weight, PerGroupFp4Weight) and weight.name in _MEGA_MOE_KERNEL_NAMES:
+        return OnlineMegaMoeFp4FromNvfp4Weight(weight.kernel)
     if isinstance(weight, Mxfp8Weight) and weight.name in _MEGA_MOE_KERNEL_NAMES:
         kernel = weight.kernel
         scale = weight.scale

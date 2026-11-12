@@ -3,6 +3,12 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "test_mega_moe_nvfp4_to_mxfp4",
+    srcs = ["test_mega_moe_nvfp4_to_mxfp4.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "test_stacked_moe_weight",
     srcs = ["test_stacked_moe_weight.py"],
     deps = py_test_deps,

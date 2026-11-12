@@ -303,6 +303,12 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
 
         layer_weights.extend(mla_layer_weights)
         layer_weights.extend(self._get_hf_ffn_layer_weight_info(layer_id))
+        # ModelOpt ignore patterns are per checkpoint layer. Keep the runtime
+        # layer available while names still contain {i}; MTP later replaces
+        # these names with the concrete checkpoint offset before quant wrapping.
+        for weight in layer_weights:
+            for component in weight.get_components():
+                component.layer_id = layer_id
         return layer_weights
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):

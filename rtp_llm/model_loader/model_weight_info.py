@@ -51,7 +51,7 @@ def _apply_mega_moe_fp4_wrappers(
     """Walk ``weight_info`` and replace MoE w1/w2 weights with mega-MoE FP4
     load-time quantizers when a MegaMoE strategy is selected.
 
-    Three cases are handled:
+    The following checkpoint formats are handled:
       - **Offline FP4 ckpt** (``quantization_config.expert_dtype == "fp4"`` or
         ModelOpt ``quantized_layers`` contains MXFP4; fallback: FP4 expert
         scale keys): replace with
@@ -67,6 +67,9 @@ def _apply_mega_moe_fp4_wrappers(
         ``Fp8BlockWiseQuantConfig``), including ``Mxfp8Weight`` with its
         1x32 UE8M0 exponent scale: replace with
         :class:`OnlineMegaMoeFp4FromFp8Weight` (FP8 → FP4).
+      - ``PerGroupFp4Weight`` (ModelOpt NVFP4): stream each selected expert
+        through NVFP4 dequantization and MXFP4 quantization, preserving each
+        projection's E4M3 block scale and FP32 global scale.
     """
     from rtp_llm.model_loader.offline_modelopt_fp4_quant_weight import (
         is_offline_mega_moe_fp4_ckpt,
@@ -82,7 +85,9 @@ def _apply_mega_moe_fp4_wrappers(
     if not is_mega_moe_strategy():
         return weight_info
 
-    is_offline = is_offline_mega_moe_fp4_ckpt(database)
+    is_offline = not isinstance(
+        quant_config, ModelOptFp4Config
+    ) and is_offline_mega_moe_fp4_ckpt(database)
     include_shared_expert = is_mega_moe_fused_strategy()
     scale_dtype = (
         PerBlockFp8Weight._get_scale_dtype(getattr(quant_config, "scale_fmt", None))

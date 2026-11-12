@@ -361,6 +361,15 @@ def is_offline_mega_moe_fp4_ckpt(database: Optional[BaseDatabase]) -> bool:
                 with open(cfg_path) as f:
                     cfg = _json.load(f)
                 qc = cfg.get("quantization_config") or {}
+                # NVFP4 has E4M3 block-16 scales AND per-tensor scale_2.
+                # Its .weight_scale suffix alone does not imply MXFP4.
+                if str(qc.get("quant_algo", "")).upper() == "NVFP4":
+                    return False
+                if (
+                    str((qc.get("quantization") or {}).get("quant_algo", "")).upper()
+                    == "NVFP4"
+                ):
+                    return False
                 if qc.get("expert_dtype") == "fp4":
                     return True
                 modelopt_quant = qc.get("quantization") or {}
@@ -376,8 +385,10 @@ def is_offline_mega_moe_fp4_ckpt(database: Optional[BaseDatabase]) -> bool:
 
     # (2) fallback: legacy ``.weight_scale`` only (not ``.scale``)
     try:
-        names = database.get_pretrain_tensor_names()
+        names = list(database.get_pretrain_tensor_names())
     except Exception:
+        return False
+    if any(".experts." in n and n.endswith(".weight_scale_2") for n in names):
         return False
     for n in names:
         if _OFFLINE_FP4_SCALE_RE.search(n):

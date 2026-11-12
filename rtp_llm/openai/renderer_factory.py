@@ -1,5 +1,6 @@
 import copy
 import logging
+import os
 from typing import Any, Optional
 
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
@@ -121,6 +122,25 @@ class ChatRendererFactory:
                 raise AttributeError(
                     f"specified MODEL_TEMPLATE_TYPE {model_template_type} not supported."
                 )
+
+        # Customized V3.2 checkpoints can use their own vocabulary and Jinja
+        # template instead of the official Python encoding protocol.
+        if (
+            params.model_type == "deepseek_v32"
+            and not os.path.isfile(
+                os.path.join(params.ckpt_path, "encoding", "encoding_dsv32.py")
+            )
+            and getattr(tokenizer, "chat_template", None)
+        ):
+            return BasicRenderer(
+                tokenizer,
+                params,
+                generate_env_config,
+                render_config,
+                ckpt_path,
+                misc_config,
+                vit_config,
+            )
 
         # renderer in _renderer_factory all have higher priority:
         # qwen needs to deal with function call, multimodal models need to add image token

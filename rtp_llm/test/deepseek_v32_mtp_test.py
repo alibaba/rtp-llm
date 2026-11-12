@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -91,6 +91,102 @@ class DeepSeekV32MtpTest(unittest.TestCase):
                 self.assertEqual(config.num_layers, 1)
                 main = DeepSeekV2._create_config(self.directory.name)
                 self.assertEqual(main.num_layers, layers)
+
+    def test_custom_45_layer_4096_hidden_checkpoint(self):
+        self.config_json.update(
+            {
+                "num_hidden_layers": 45,
+                "hidden_size": 4096,
+                "vocab_size": 131072,
+                "n_group": 1,
+                "topk_group": 1,
+                "rms_norm_eps": 1e-5,
+                "rope_theta": 100000,
+                "max_position_embeddings": 1048576,
+                "num_residual_streams": 4,
+            }
+        )
+        self.config_json["rope_scaling"].update(
+            {
+                "factor": 32,
+                "original_max_position_embeddings": 32768,
+            }
+        )
+        draft = self.config()
+        main = DeepSeekV2._create_config(self.directory.name)
+        self.assertEqual(draft.mtp_layer_offset, 45)
+        self.assertEqual(main.moe_layer_index, list(range(3, 45)))
+        for config in (main, draft):
+            self.assertEqual(config.hidden_size, 4096)
+            self.assertEqual(config.vocab_size, 131072)
+            self.assertEqual((config.moe_n_group, config.moe_topk_group), (1, 1))
+            self.assertEqual(config.layernorm_eps, 1e-5)
+            self.assertEqual(config.attn_config.rope_config.base, 100000)
+            self.assertEqual(config.attn_config.rope_config.scale, 32)
+            self.assertEqual(config.attn_config.rope_config.max_pos, 32768)
+            self.assertEqual(config.attn_config.indexer_topk, 2048)
+
+    def test_custom_tokenizers_backend_preserves_special_tokens_and_template(self):
+        from tokenizers import Tokenizer
+        from tokenizers.models import WordLevel
+        from transformers import PreTrainedTokenizerFast
+        from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import (
+            BaseTokenizer,
+        )
+
+        backend = Tokenizer(
+            WordLevel(
+                {"<_start>": 0, "<_end>": 1, "<_pad>": 2, "hello": 3},
+                unk_token="<_pad>",
+            )
+        )
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=backend,
+            bos_token="<_start>",
+            eos_token="<_end>",
+            pad_token="<_pad>",
+        )
+        tokenizer.chat_template = "<_user>{{ messages[0]['content'] }}<_bot>"
+        tokenizer.save_pretrained(self.directory.name)
+        path = Path(self.directory.name, "tokenizer_config.json")
+        metadata = json.loads(path.read_text())
+        metadata["tokenizer_class"] = "TokenizersBackend"
+        path.write_text(json.dumps(metadata))
+        actual = BaseTokenizer(self.directory.name)
+        self.assertEqual(
+            (actual.bos_token_id, actual.eos_token_id, actual.pad_token_id), (0, 1, 2)
+        )
+        self.assertEqual(
+            actual.apply_chat_template(
+                [{"role": "user", "content": "hello"}], tokenize=False
+            ),
+            "<_user>hello<_bot>",
+        )
+
+    def test_custom_template_fallback_preserves_official_renderer(self):
+        import rtp_llm.openai.renderer_factory as factory
+
+        params = SimpleNamespace(
+            model_type="deepseek_v32", ckpt_path=self.directory.name
+        )
+        tokenizer = SimpleNamespace(chat_template="custom jinja")
+        render_config = SimpleNamespace(model_template_type=None)
+        official = MagicMock()
+        with patch.object(factory, "BasicRenderer") as basic, patch.object(
+            factory, "ensure_renderer_registered"
+        ), patch.dict(factory._renderer_factory, {"deepseek_v32": official}):
+            result = factory.ChatRendererFactory.get_renderer(
+                tokenizer, params, None, render_config
+            )
+            self.assertIs(result, basic.return_value)
+            official.assert_not_called()
+            encoding = Path(self.directory.name, "encoding")
+            encoding.mkdir()
+            (encoding / "encoding_dsv32.py").touch()
+            result = factory.ChatRendererFactory.get_renderer(
+                tokenizer, params, None, render_config
+            )
+            self.assertIs(result, official.return_value)
 
     def test_extracted_checkpoint_uses_tensor_layout_not_layer_count(self):
         self.config_json["num_hidden_layers"] = 1

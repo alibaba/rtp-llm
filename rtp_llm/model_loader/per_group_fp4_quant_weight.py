@@ -1,4 +1,5 @@
 import copy
+import fnmatch
 import functools
 from typing import Any, Dict, List, Union
 
@@ -139,6 +140,29 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
         # V4 names dispatch to V4-specific subclass (V4PerGroupFp4Weight) —
         # exclude from base so the registry "exactly one match" check passes.
         if is_v4_weight(src_weight_info):
+            return False
+        excluded = []
+        layer_id = getattr(src_weight_info, "layer_id", None)
+        for ckpt in getattr(src_weight_info, "weights", ()):
+            name = ckpt.name
+            if layer_id is not None:
+                name = name.format(
+                    i=layer_id, i_1=layer_id + 1, expert_id="{expert_id}"
+                )
+            module = name.removesuffix(W_SUFFIX)
+            excluded.append(
+                any(
+                    fnmatch.fnmatchcase(candidate, pattern)
+                    for pattern in quant_config.exclude_modules
+                    for candidate in (name, module)
+                )
+            )
+        if any(excluded):
+            if not all(excluded):
+                raise ValueError(
+                    "Cannot merge quantized and excluded ModelOpt modules: "
+                    f"{src_weight_info.weights}"
+                )
             return False
         return True
 
