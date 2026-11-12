@@ -190,6 +190,19 @@ public:
         return local_server_->ExecuteFunction(context, request, response);
     }
 
+    // AWI adaptation-evaluator RPCs. Without these forwards the generated
+    // Service base returns UNIMPLEMENTED even though LocalRpcServer defines
+    // the handlers.
+    grpc::Status AwiBarrier(grpc::ServerContext* context, const AwiBarrierRequestPB* request, EmptyPB* response) override {
+        return local_server_->AwiBarrier(context, request, response);
+    }
+
+    grpc::Status AwiObservations(grpc::ServerContext*            context,
+                                 const AwiObservationsRequestPB* request,
+                                 AwiObservationsResponsePB*      response) override {
+        return local_server_->AwiObservations(context, request, response);
+    }
+
 protected:
     std::function<void()>           external_begin_shutdown_ = [] {};
     std::function<size_t()>         external_onflight_       = [] { return size_t(0); };
