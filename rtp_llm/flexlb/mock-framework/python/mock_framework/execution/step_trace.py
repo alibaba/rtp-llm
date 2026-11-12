@@ -70,8 +70,8 @@ class StepTrace:
         }
 
     @contextmanager
-    def step(self, phase_id, step_id, action):
-        token = _step_identity.set((self, phase_id, step_id, action))
+    def step(self, phase_id, step_id, interface):
+        token = _step_identity.set((self, phase_id, step_id, interface))
         try:
             yield
         finally:
@@ -80,10 +80,8 @@ class StepTrace:
     def emit(self, stream="events", **event):
         identity = _step_identity.get()
         if identity is not None and identity[0] is self:
-            for key, value in zip(("phase_id", "step_id", "action"), identity[1:]):
+            for key, value in zip(("phase_id", "step_id", "interface"), identity[1:]):
                 event.setdefault(key, value)
-        if "phase" in event:
-            event.setdefault("phase_id", event["phase"])
         self._seq += 1
         event.update(run_id=self.run_id, seq=self._seq)
         event.setdefault("recorded_at", timestamp())

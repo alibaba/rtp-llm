@@ -86,7 +86,7 @@ class Step:
             await self._run(context)
 
     async def _run(self, context):
-        results, phase_id = context.results, context.phase_id
+        results = context.results
         started = time.monotonic()
         definition = self.definition
         runtime, records = context.runtime, context.records
@@ -94,9 +94,6 @@ class Step:
         stage = "arguments"
         records.emit(
             event="step_started",
-            phase=phase_id,
-            step=self.id,
-            interface=definition.name,
             describe=self.describe,
             query_time=context.query_time,
         )
@@ -116,8 +113,6 @@ class Step:
                         "expect." + op,
                     )
                 gate = {
-                    "step": self.id,
-                    "interface": definition.name,
                     "unit": definition.unit,
                     "args": args,
                     "query_time": context.query_time,
@@ -142,15 +137,12 @@ class Step:
             wait = float(duration(self.wait_after))
             if wait > 0:
                 stage = "wait_after"
-                records.emit(
-                    event="wait_started", step=self.id, duration=self.wait_after
-                )
+                records.emit(event="wait_started", duration=self.wait_after)
                 budget = context.timeout
                 await runtime.supervisor.guard(asyncio.sleep(wait), budget)
             results[self.id] = actual
             records.emit(
                 event="step_finished",
-                step=self.id,
                 status="PASS",
                 args=args,
                 result=actual,
@@ -167,7 +159,6 @@ class Step:
                 records.emit("gates", **gate)
             records.emit(
                 event="step_finished",
-                step=self.id,
                 status=status,
                 error=str(error) or type(error).__name__,
                 error_stage=stage,

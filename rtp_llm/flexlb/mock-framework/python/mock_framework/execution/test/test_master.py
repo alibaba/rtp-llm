@@ -471,7 +471,7 @@ def test_real_master_routes_to_isolated_rtp_processes(
         for name in ["prefill-0", "decode-0"] + [f"master-{i}" for i in range(replicas)]
     }
     observations = {
-        event["step"]: event["result"]
+        event["step_id"]: event["result"]
         for event in events
         if event["event"] == "step_finished" and event["status"] == "PASS"
     }

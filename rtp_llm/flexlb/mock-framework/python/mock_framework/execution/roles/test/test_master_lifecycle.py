@@ -83,7 +83,7 @@ def test_stop_selection_and_replacement_preserve_identity_and_artifacts(tmp_path
     result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "PASS", result
     completed = {
-        v["step"]: v["result"] for v in logs(output) if v["event"] == "step_finished"
+        v["step_id"]: v["result"] for v in logs(output) if v["event"] == "step_finished"
     }
     assert completed == {
         "one": ["127.0.0.1:12000"],
@@ -154,7 +154,7 @@ def test_partial_stop_failure_aborts_and_keeps_completed_operations(
     output = tmp_path / "run"
     result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "ERROR" and "injected stop failure" in result["error"]
-    assert not any(v.get("step") == "never" for v in logs(output))
+    assert not any(v.get("step_id") == "never" for v in logs(output))
     assert len([v for v in logs(output) if v["event"] == "process_stopped"]) == 2
     assert_reaped(output)
 
@@ -429,7 +429,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
     result = asyncio.run(run_case(case, prepare_launch(recipe, case, tmp_path), output))
     assert result["status"] == "PASS", result
     values = {
-        v["step"]: v["result"] for v in logs(output) if v["event"] == "step_finished"
+        v["step_id"]: v["result"] for v in logs(output) if v["event"] == "step_finished"
     }
     assert values["leader"] != values["survivor"] != values["replacement"]
     assert (
@@ -510,7 +510,7 @@ def test_kill_and_restore_keep_addresses_and_preserve_each_launch_artifact(tmp_p
     result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "PASS", result
     values = {
-        v["step"]: v["result"] for v in logs(output) if v["event"] == "step_finished"
+        v["step_id"]: v["result"] for v in logs(output) if v["event"] == "step_finished"
     }
     assert all(
         values[key] == ["127.0.0.1:12000"]
@@ -619,7 +619,7 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(
     result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "PASS", result
     values = {
-        item["step"]: item["result"]
+        item["step_id"]: item["result"]
         for item in logs(output)
         if item["event"] == "step_finished"
     }
@@ -674,7 +674,7 @@ def test_restart_does_not_hide_unexpected_exit_of_new_process(tmp_path):
         result["status"] == "ERROR"
         and "master-0-restart-1 exited unexpectedly with code 19" in result["error"]
     )
-    assert not any(item.get("step") == "never" for item in logs(output))
+    assert not any(item.get("step_id") == "never" for item in logs(output))
     assert_reaped(output)
 
 

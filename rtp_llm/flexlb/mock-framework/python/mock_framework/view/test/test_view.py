@@ -95,7 +95,6 @@ def completed(tmp_path):
             "run_id": "run",
             "phase_id": "traffic",
             "step_id": "qps",
-            "step": "qps",
             "interface": "client/query/qps",
             "query_time": "2026-10-29T00:00:10Z",
             "args": {"range": ["-4s", "0s"]},
@@ -108,7 +107,6 @@ def completed(tmp_path):
             "run_id": "run",
             "phase_id": "traffic",
             "step_id": "raw",
-            "step": "raw",
             "interface": "prometheus/query",
             "query_time": "2026-10-29T00:00:11Z",
             "args": {"promql": "rate(x[1h])"},
@@ -124,10 +122,14 @@ def completed(tmp_path):
     events = [
         {
             "event": "phase_started",
-            "phase": "traffic",
+            "phase_id": "traffic",
             "recorded_at": "2026-10-29T00:00:02Z",
         },
-        {"event": "step_started", "step": "qps", "recorded_at": "2026-10-29T00:00:09Z"},
+        {
+            "event": "step_started",
+            "step_id": "qps",
+            "recorded_at": "2026-10-29T00:00:09Z",
+        },
         {
             "event": "metric_window",
             "run_id": "run",
@@ -140,7 +142,8 @@ def completed(tmp_path):
         },
         {
             "event": "step_finished",
-            "step": "qps",
+            "step_id": "qps",
+            "interface": "client/query/qps",
             "status": "FAIL",
             "recorded_at": "2026-10-29T00:00:12Z",
         },
@@ -358,7 +361,7 @@ def test_missing_optional_artifact_preserves_saved_verdict(completed, name):
 def test_damaged_optional_artifact_and_partial_journal_are_reported(completed):
     (completed / "git-state.json").write_text("{broken")
     with (completed / "gates.jsonl").open("a") as stream:
-        stream.write('{"step":\n')
+        stream.write('{"step_id":\n')
         stream.write(json.dumps({"status": "PASS"}) + "\n")
     with (completed / "events.jsonl").open("a") as stream:
         stream.write(
@@ -663,7 +666,7 @@ def test_gate_annotations_include_saved_conditions_values_and_errors(completed):
 
 def test_gate_annotation_formats_range_count_ratio_and_structured_results():
     gate = {
-        "step": "qps",
+        "step_id": "qps",
         "interface": "client/query/qps",
         "status": "PASS",
         "unit": "requests/s",
@@ -700,7 +703,7 @@ def test_annotation_html_escapes_saved_values_and_preserves_line_breaks(monkeypa
         "unused",
         [
             {
-                "step": "qps",
+                "step_id": "qps",
                 "time": 10,
                 "timeEnd": 20,
                 "text": "门禁 · FAIL\n实际：<img src=x onerror=alert(1)>",
@@ -719,7 +722,7 @@ def test_annotations_merge_steps_and_gates_without_filtering_execution_records(
 ):
     body = load_experiment_view(completed)
     assert len(body["events"]) == 5
-    assert [event["step"] for event in body["annotations"]] == ["qps", "raw"]
+    assert [event["step_id"] for event in body["annotations"]] == ["qps", "raw"]
     assert body["annotations"][0]["timeEnd"] == body["gates"][0]["to"]
     assert "实际：1 requests/s" in body["annotations"][0]["text"]
     with (completed / "events.jsonl").open("a") as stream:
@@ -727,7 +730,7 @@ def test_annotations_merge_steps_and_gates_without_filtering_execution_records(
             json.dumps(
                 {
                     "event": "step_started",
-                    "step": "stop",
+                    "step_id": "stop",
                     "recorded_at": "2026-10-29T00:00:15Z",
                 }
             )
@@ -737,7 +740,8 @@ def test_annotations_merge_steps_and_gates_without_filtering_execution_records(
             json.dumps(
                 {
                     "event": "step_finished",
-                    "step": "stop",
+                    "step_id": "stop",
+                    "interface": "client/stop/playback",
                     "status": "PASS",
                     "recorded_at": "2026-10-29T00:00:16Z",
                 }
@@ -745,7 +749,7 @@ def test_annotations_merge_steps_and_gates_without_filtering_execution_records(
             + "\n"
         )
     stop = load_experiment_view(completed)["annotations"][-1]
-    assert stop == {"step": "stop", "time": 1793232015000, "text": "stop · PASS"}
+    assert stop == {"step_id": "stop", "time": 1793232015000, "text": "stop · PASS"}
 
 
 def test_annotation_defaults_can_include_steps_not_reached_by_a_failed_case(
@@ -756,7 +760,7 @@ def test_annotation_defaults_can_include_steps_not_reached_by_a_failed_case(
     write(completed / "configuration.json", configuration)
     body = load_experiment_view(completed)
     assert "not_reached" in body["annotation_steps"]
-    assert all(event["step"] != "not_reached" for event in body["annotations"])
+    assert all(event["step_id"] != "not_reached" for event in body["annotations"])
     selected = provision(
         tmp_path / "grafana",
         {"title": "HA", "panels": [], "annotation_steps": ["not_reached"]},
@@ -830,7 +834,7 @@ def test_gate_requires_unit_and_window_requires_step_identity(completed):
 
     body = load_experiment_view(completed)
     (gate,) = body["gates"]
-    assert gate["step"] == "qps"
+    assert gate["step_id"] == "qps"
     assert gate["from"] is None and gate["to"] is None
     assert "events.jsonl:3: 'step_id'" in body["warnings"]
     assert "gates.jsonl:2: 'unit'" in body["warnings"]
@@ -1044,11 +1048,25 @@ def test_view_distinguishes_role_process_evidence_from_missing_roles(completed):
     configuration["case"]["environment"] = {"master": {}, "prefill": {}}
     write(path, configuration)
     rows = [
-        {"event": "process_started", "node": "master-0", "pid": 42},
-        {"event": "process_stopped", "node": "master-0", "code": 137},
+        {
+            "event": "process_started",
+            "node": "master-0",
+            "role": "master",
+            "instance_id": "master-0",
+            "pid": 42,
+        },
+        {
+            "event": "process_stopped",
+            "node": "master-0",
+            "role": "master",
+            "instance_id": "master-0",
+            "code": 137,
+        },
         {
             "event": "process_ready",
             "node": "master-0-restart-1",
+            "role": "master",
+            "instance_id": "master-0",
             "url": "http://127.0.0.1:1234",
         },
         {"event": "client_result", "result": {"clients": {}, "errors": []}},

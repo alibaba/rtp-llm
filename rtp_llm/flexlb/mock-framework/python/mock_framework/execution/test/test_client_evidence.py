@@ -623,7 +623,7 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
         event["result"]
         for line in (output / "events.jsonl").read_text().splitlines()
         if (event := json.loads(line)).get("event") == "step_finished"
-        and event.get("step") == "records"
+        and event.get("step_id") == "records"
     ]
     assert queried["matched"] == count and queried["outcomes"]["success"] == count
     assert len(queried["records"]) == 2 and queried["truncated"]

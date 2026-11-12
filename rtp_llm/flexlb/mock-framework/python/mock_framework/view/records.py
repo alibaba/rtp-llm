@@ -58,7 +58,7 @@ def gate_text(gate):
             if "count" in gate["expect"] and isinstance(value, (list, dict, str))
             else display(value)
         )
-    text = f"门禁 {gate['step']} · {gate['interface']} · {gate['status']}\n预期：{expected}\n实际：{actual}"
+    text = f"门禁 {gate['step_id']} · {gate['interface']} · {gate['status']}\n预期：{expected}\n实际：{actual}"
     if gate.get("error"):
         text += "\n错误：" + str(gate["error"])
     return text
@@ -150,11 +150,8 @@ def load_experiment_view(directory):
             kind = event["event"]
             if kind in ("process_started", "process_ready", "process_stopped"):
                 node = event["node"]
-                role = event.get("role", node.split("-", 1)[0])
+                role, instance_id = event["role"], event["instance_id"]
                 if role in role_names:
-                    instance_id = event.get(
-                        "instance_id", node.split("-restart-", 1)[0]
-                    )
                     process = processes.setdefault(
                         instance_id, {"role": role, "id": instance_id, "attempts": {}}
                     )
@@ -187,7 +184,9 @@ def load_experiment_view(directory):
                 "step_started",
                 "step_finished",
             ):
-                name = event.get("step", event.get("phase"))
+                name = (
+                    event["phase_id"] if kind.startswith("phase_") else event["step_id"]
+                )
                 events.append(
                     {
                         "time": milliseconds(event["recorded_at"]),
@@ -197,12 +196,12 @@ def load_experiment_view(directory):
                 )
                 if kind == "step_started":
                     annotations[name] = {
-                        "step": name,
+                        "step_id": name,
                         "time": milliseconds(event["recorded_at"]),
                         "text": steps.get(name, {}).get("describe", name),
                     }
                 elif kind == "step_finished" and name in annotations:
-                    interface = steps.get(name, {}).get("interface")
+                    interface = event["interface"]
                     if (
                         interface
                         in (
@@ -213,7 +212,7 @@ def load_experiment_view(directory):
                     ):
                         master_queries.append(
                             {
-                                "step": name,
+                                "step_id": name,
                                 "time": event["recorded_at"],
                                 "result": event["result"],
                             }
@@ -231,8 +230,10 @@ def load_experiment_view(directory):
     for number, gate in lines("gates.jsonl"):
         try:
             point = milliseconds(gate["query_time"])
-            if not all(isinstance(gate.get(key), str) for key in ("step", "interface")):
-                raise ValueError("step and interface must be strings")
+            if not all(
+                isinstance(gate.get(key), str) for key in ("step_id", "interface")
+            ):
+                raise ValueError("step_id and interface must be strings")
             if gate.get("status") not in ("PASS", "FAIL", "ERROR", "CANCELLED"):
                 raise ValueError("invalid gate status")
             if not isinstance(gate.get("expect"), dict) or not isinstance(
@@ -247,7 +248,9 @@ def load_experiment_view(directory):
             gates.append(
                 {
                     **gate,
-                    "title": steps.get(gate["step"], {}).get("describe", gate["step"]),
+                    "title": steps.get(gate["step_id"], {}).get(
+                        "describe", gate["step_id"]
+                    ),
                     "point": point,
                     "unit": unit,
                     "from": a,
@@ -261,8 +264,8 @@ def load_experiment_view(directory):
                     "text": gate_text(gates[-1]),
                 }
             )
-            annotations[gate["step"]] = {
-                "step": gate["step"],
+            annotations[gate["step_id"]] = {
+                "step_id": gate["step_id"],
                 "time": a if a is not None else point,
                 "timeEnd": b,
                 "text": gate_text(gates[-1]),

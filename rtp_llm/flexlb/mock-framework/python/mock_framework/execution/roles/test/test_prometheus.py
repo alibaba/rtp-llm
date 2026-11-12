@@ -331,10 +331,16 @@ def test_real_prometheus_ingestion_semantic_queries_and_recorded_gates(tmp_path,
             json.loads(line)
             for line in (output / "events.jsonl").read_text().splitlines()
         ]
+        ready = next(
+            event
+            for event in events
+            if event["event"] == "process_ready" and event["node"] == "prometheus"
+        )
+        assert ready["role"] == ready["instance_id"] == "prometheus"
         raw = next(
             e["result"]
             for e in events
-            if e.get("step") == "targets" and e["event"] == "step_finished"
+            if e.get("step_id") == "targets" and e["event"] == "step_finished"
         )
         assert raw["samples"][0]["value"] == 2
     elif mode == "gate_fail":

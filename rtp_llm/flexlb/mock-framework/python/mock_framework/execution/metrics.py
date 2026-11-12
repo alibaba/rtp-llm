@@ -148,7 +148,7 @@ async def series_query(ctx, expression, start, end, step):
         query_time=ctx.query_time,
         start=start,
         end=end,
-        step=step,
+        interval_seconds=step,
         promql=expression,
     )
     return values

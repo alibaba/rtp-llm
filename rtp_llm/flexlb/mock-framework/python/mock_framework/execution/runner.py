@@ -73,7 +73,9 @@ async def run_case(case, launch, directory):
         records.emit(event="setup_finished")
         for phase in case.phases:
             phase_deadline = time.monotonic() + float(duration(phase.timeout))
-            records.emit(event="phase_started", phase=phase.id, describe=phase.describe)
+            records.emit(
+                event="phase_started", phase_id=phase.id, describe=phase.describe
+            )
             phase_status = "ERROR"
             tasks = _PhaseTasks()
             try:
@@ -110,7 +112,7 @@ async def run_case(case, launch, directory):
             finally:
                 await tasks.close()
                 records.emit(
-                    event="phase_finished", phase=phase.id, status=phase_status
+                    event="phase_finished", phase_id=phase.id, status=phase_status
                 )
         result["status"] = "PASS"
     except GateFailure as error:

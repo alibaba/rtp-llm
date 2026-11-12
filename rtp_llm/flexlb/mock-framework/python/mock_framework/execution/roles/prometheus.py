@@ -190,8 +190,9 @@ class PrometheusRole:
         ]
         self.metadata["command"] = command
         self._save()
+        identity = ProcessIdentity("prometheus")
         self.child = await self.supervisor.spawn(
-            ProcessIdentity("prometheus"),
+            identity,
             command,
             str(self.directory),
             dict(os.environ),
@@ -232,7 +233,10 @@ class PrometheusRole:
                     self.metadata.update(url=self.url, build=value["data"])
                     self._save()
                     self.records.emit(
-                        event="process_ready", node="prometheus", url=self.url
+                        event="process_ready",
+                        node=identity.process_name,
+                        url=self.url,
+                        **identity.event_fields(),
                     )
                     return
             except (OSError, ValueError):

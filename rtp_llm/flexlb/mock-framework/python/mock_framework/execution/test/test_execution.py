@@ -350,17 +350,17 @@ def test_wait_after_preserves_refs_and_also_runs_on_last_step(setup, tmp_path):
     log = events(out)
     for name in ("read", "write"):
         waiting = next(
-            e for e in log if e["event"] == "wait_started" and e["step"] == name
+            e for e in log if e["event"] == "wait_started" and e["step_id"] == name
         )
         finished = next(
-            e for e in log if e["event"] == "step_finished" and e["step"] == name
+            e for e in log if e["event"] == "step_finished" and e["step_id"] == name
         )
         assert finished["result"] == 2
         assert (
             datetime.fromisoformat(finished["recorded_at"])
             - datetime.fromisoformat(waiting["recorded_at"])
         ).total_seconds() >= 0.035
-    assert [e["event"] for e in log if e.get("step") == "read"] == [
+    assert [e["event"] for e in log if e.get("step_id") == "read"] == [
         "step_started",
         "wait_started",
         "step_finished",
@@ -596,14 +596,17 @@ def test_trace_correlates_steps_and_gates_across_streams(setup, tmp_path):
     records = events + gates
     assert {item["run_id"] for item in records} == {result["run_id"]}
     assert sorted(item["seq"] for item in records) == list(range(1, len(records) + 1))
+    assert all(not {"phase", "step", "action"} & item.keys() for item in records)
     starts = {
-        (event["phase_id"], event["step_id"], event["action"]): event["seq"]
+        (event["phase_id"], event["step_id"], event["interface"]): event["seq"]
         for event in events
         if event["event"] == "step_started"
     }
     assert gates
     for gate in gates:
-        assert starts[gate["phase_id"], gate["step_id"], gate["action"]] < gate["seq"]
+        assert (
+            starts[gate["phase_id"], gate["step_id"], gate["interface"]] < gate["seq"]
+        )
 
 
 def test_compiler_rejects_reference_to_background_result(setup):

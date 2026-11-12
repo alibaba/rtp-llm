@@ -242,7 +242,7 @@ def annotations(url, password, events, cancelled):
         body = {
             "time": event["time"],
             "text": escape(event["text"]).replace("\n", "<br/>"),
-            "tags": ["experiment", "step:" + event["step"]],
+            "tags": ["experiment", "step:" + event["step_id"]],
         }
         if event.get("timeEnd") is not None:
             body["timeEnd"] = event["timeEnd"]
