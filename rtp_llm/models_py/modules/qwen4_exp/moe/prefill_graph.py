@@ -7,6 +7,7 @@ Capture errors fail the process; no rank-local collective fallback is attempted.
 """
 
 import logging
+import os
 import time
 
 import torch
@@ -50,11 +51,14 @@ class QwenMegaPrefillGraph:
         self.admission = admission
         self.graphs = {}
         self.stream_id = None
+        self.max_rows = int(os.environ.get("QWEN_MOE_MEGA_GRAPH_MAX_ROWS", "4096"))
+        if not 1 <= self.max_rows <= 8192:
+            raise ValueError("QWEN_MOE_MEGA_GRAPH_MAX_ROWS must be in [1, 8192]")
 
     def supports(self, x):
         return (
             not torch.cuda.is_current_stream_capturing()
-            and x.shape[0] <= 4096
+            and x.shape[0] <= self.max_rows
             and self.admission.admit((x.device.index, x.dtype, tuple(x.shape)))
         )
 

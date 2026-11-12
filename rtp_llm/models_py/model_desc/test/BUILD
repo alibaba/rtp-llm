@@ -3,6 +3,14 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "qwen4_segmented_prefill_test",
+    srcs = ["qwen4_segmented_prefill_test.py"],
+    data = ["//rtp_llm/models_py:qwen4_segmented_prefill_source"],
+    deps = ["//rtp_llm:torch"],
+    tags = ["cpu"],
+)
+
+py_test(
     name = "qwen_gdn_graph_replay_test_rocm",
     srcs = ["qwen_gdn_graph_replay_test.py"],
     main = "qwen_gdn_graph_replay_test.py",

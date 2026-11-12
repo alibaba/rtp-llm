@@ -566,6 +566,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
     # Timeline range name for the attention block; per-layer value is chosen in
     # __init__. The class default keeps __new__-constructed layers (tests) working.
     _attn_profile_range = "qwen4.attn"
+    _prefill_segments = None
 
     def __init__(
         self,
@@ -646,6 +647,33 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             self._attn_profile_range = "qwen4.qsa"
         else:
             self._attn_profile_range = "qwen4.attn"
+
+        if os.environ.get("QWEN_PREFILL_SEGMENT_GRAPH", "0") == "1":
+            from rtp_llm.models_py.modules.qwen4_exp.segmented_prefill import (
+                SegmentAdmission,
+                StaticPrefillSegment,
+            )
+
+            mega = getattr(self.mlp, "_sm90_mega_moe", None)
+            if not (
+                mega is not None
+                and parallelism_config.tp_size == 8
+                and parallelism_config.ep_size == 8
+                and parallelism_config.dp_size == 1
+                and isinstance(self.attn_hyper_connection, GatedResidual)
+                and isinstance(self.mlp_hyper_connection, GatedResidual)
+                and not bool(getattr(config, "is_mtp", False))
+            ):
+                raise ValueError(
+                    "Segment graphs require target SM90 MegaMoE TP8/EP8/DP1"
+                )
+            if layer_idx == 0:
+                config._qwen_prefill_segment_admission = SegmentAdmission()
+            admission = config._qwen_prefill_segment_admission
+            self._prefill_segments = (
+                StaticPrefillSegment(layer_idx, "hc_attn", admission),
+                StaticPrefillSegment(layer_idx, "hc_moe", admission, mega),
+            )
 
     def _attention_quant_config(self, config, weights):
         if getattr(config, "_qwen4_nvfp4_source", False):
@@ -768,17 +796,29 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
         qsa_runtime: Optional[Qwen4ExpQSARuntimeContext] = None,
         pending_injection=None,
     ) -> tuple:
+        segments = self._prefill_segments
+        use_segments = (
+            segments is not None
+            and attention_inputs is not None
+            and bool(attention_inputs.is_prefill)
+            and not bool(getattr(attention_inputs, "is_target_verify", False))
+            and not bool(getattr(attention_inputs, "is_cuda_graph", False))
+            and self.mlp._sm90_mega_moe.min_tokens
+            <= hyper_states.shape[0]
+            <= self.mlp._sm90_mega_moe.buffer.num_max_tokens_per_rank * 8
+            and segments[0].admission.supports(hyper_states)
+        )
         with record_function_range("qwen4.hc.attn"):
-            if pending_injection is not None:
-                previous_output, previous_gate = pending_injection
-                hidden_states, hyper_states, inject_weights = (
-                    self.attn_hyper_connection.forward_with_injection(
-                        hyper_states, previous_output, previous_gate
-                    )
+            hc_inputs = (hyper_states,) + (
+                tuple(pending_injection) if pending_injection is not None else ()
+            )
+            if use_segments:
+                hidden_states, hyper_states, inject_weights = segments[0].run(
+                    self._prefill_attn_hc, *hc_inputs
                 )
             else:
-                hidden_states, hyper_states, inject_weights = (
-                    self.attn_hyper_connection(hyper_states)
+                hidden_states, hyper_states, inject_weights = self._prefill_attn_hc(
+                    *hc_inputs
                 )
         attn_kwargs = dict(
             hidden_states=hidden_states,
@@ -791,6 +831,24 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             attn_kwargs["qsa_runtime"] = qsa_runtime
         with record_function_range(self._attn_profile_range):
             hidden_states = self.self_attn(**attn_kwargs)
+        if use_segments:
+            return segments[1].run(
+                self._prefill_hc_moe, hyper_states, hidden_states, inject_weights
+            )
+        return self._prefill_hc_moe(
+            hyper_states, hidden_states, inject_weights, use_moe_graph=True
+        )
+
+    def _prefill_attn_hc(self, hyper_states, *pending_injection):
+        if pending_injection:
+            return self.attn_hyper_connection.forward_with_injection(
+                hyper_states, *pending_injection
+            )
+        return self.attn_hyper_connection(hyper_states)
+
+    def _prefill_hc_moe(
+        self, hyper_states, hidden_states, inject_weights, use_moe_graph=False
+    ):
         with record_function_range("qwen4.hc.mlp"):
             if isinstance(self.mlp_hyper_connection, GatedResidual):
                 hidden_states, hyper_states, inject_weights = (
@@ -806,7 +864,14 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
                     hyper_states
                 )
         with record_function_range("qwen4.moe"):
-            hidden_states = self.mlp(hidden_states)
+            # The encompassing segment owns this capture, including HC, norm,
+            # FP8 quantization, projections, routing and the final TP reduction.
+            # Avoid nesting the existing MoE-only graph in this segment.
+            hidden_states = (
+                self.mlp(hidden_states)
+                if use_moe_graph
+                else self.mlp._forward_impl(hidden_states)
+            )
         return hyper_states, hidden_states, inject_weights
 
 
@@ -1576,7 +1641,9 @@ class Qwen4ExpModel(Qwen35Model):
             ple_input_ids = self._ple_input_ids(inputs)
         pending_injection = None
         hc_defer_sm90 = os.environ.get("RTP_LLM_QWEN4_HC_DEFER_SM90", "0") == "1"
-        hc_fusion_extended = os.environ.get("RTP_LLM_QWEN4_HC_FUSION_EXTENDED", "0") == "1"
+        hc_fusion_extended = (
+            os.environ.get("RTP_LLM_QWEN4_HC_FUSION_EXTENDED", "0") == "1"
+        )
         hc_defer_shape = (
             hyper_states.ndim == 2
             and hyper_states.shape[1] == 10240

@@ -1,5 +1,11 @@
 load("@arch_config//:arch_select.bzl", "requirement")
 
+filegroup(
+    name = "qwen4_segmented_prefill_source",
+    srcs = ["modules/qwen4_exp/segmented_prefill.py"],
+    visibility = ["//rtp_llm/models_py/model_desc/test:__pkg__"],
+)
+
 py_library(
     name = "utils",
     srcs = glob([
