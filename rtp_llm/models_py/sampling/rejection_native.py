@@ -290,7 +290,7 @@ class _CompactPlan:
             _compact_rejection_kernel,
         )
 
-        device, stream, forced, capacity, rows, vocab, has_cap, dense_vocab = key
+        device, stream, forced, capacity, rows, vocab, has_cap, dense_vocab, has_logz = key
         self.key = key
         self.buffers = []
 
@@ -299,7 +299,8 @@ class _CompactPlan:
             self.buffers.append(tensor)
             return tensor
 
-        self.addresses = empty((11 + 2 * capacity,), torch.int64)[:11]
+        prefix = 12 if has_logz else 11
+        self.addresses = empty((prefix + 2 * capacity,), torch.int64)[:prefix]
         kernel, descriptor = _stage(
             _compact_rejection_kernel,
             dict(
@@ -312,6 +313,7 @@ class _CompactPlan:
                 DENSE_VOCAB=dense_vocab,
                 HAS_CAP=has_cap,
                 FORCED=forced,
+                HAS_LOGZ=has_logz,
             ),
             grid_factor=1,
         )

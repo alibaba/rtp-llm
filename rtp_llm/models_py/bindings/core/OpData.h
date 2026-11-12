@@ -359,6 +359,7 @@ struct GreedyOutput {
     torch::Tensor deferred_dense_fallback = {};
     torch::Tensor deferred_fallback_rows  = {};
     torch::Tensor prepared_rejection_rng  = {};
+    torch::Tensor deferred_log_normalizer = {};
 };
 
 struct BeamSearchParams {
@@ -447,6 +448,7 @@ struct RejectionSamplingParams {
     // submission writes its address prefix before asynchronous H2D transfer;
     // never share/reuse it across concurrent rejection calls.
     torch::Tensor prepared_rejection_rng = {};
+    torch::Tensor target_log_normalizer_d = {};
 };
 
 struct MappingDraft2TargetParams {

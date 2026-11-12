@@ -291,7 +291,8 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                                    target_sampler_output.verify_candidate_ids,
                                    target_sampler_output.verify_dense_fallback,
                                    target_sampler_output.verify_fallback_rows,
-                                   target_sampler_output.prepared_rejection_rng});
+                                   target_sampler_output.prepared_rejection_rng,
+                                   target_sampler_output.verify_log_normalizer});
         } else if (mtpFusionEnabled() && draft_sampler_output.draft_point_mass && all_greedy && !has_forced_accept) {
             greedy_finalized = tryMtpGreedyFinalize(draft_token_ids_d_t, target_token_ids_d_t,
                                                    output_token_ids_d, output_accepted_token_num_d,

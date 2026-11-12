@@ -164,6 +164,7 @@ import torch
                                                          sampled.deferred_dense_fallback.reshape({batch, rows, -1}) :
                                                          torch::Tensor();
                     reject.target_fallback_rows_d  = sampled.deferred_fallback_rows;
+                    reject.target_log_normalizer_d = sampled.deferred_log_normalizer;
                     reject.prepared_rejection_rng  = sampled.prepared_rejection_rng;
 #else
                     (void)sampled;

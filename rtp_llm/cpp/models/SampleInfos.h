@@ -114,6 +114,7 @@ public:
     torch::Tensor verify_fallback_rows    = {};
     torch::Tensor prepared_rejection_rng  = {};
     torch::Tensor verify_do_sample        = {};
+    torch::Tensor verify_log_normalizer   = {};
 };
 
 struct MergedOutput {

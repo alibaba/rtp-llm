@@ -462,7 +462,7 @@ struct DeferredKernel {
     }
 };
 
-using DeferredKernelKey = std::tuple<int, uint64_t, bool, int64_t, int64_t, int64_t, bool, int64_t>;
+using DeferredKernelKey = std::tuple<int, uint64_t, bool, int64_t, int64_t, int64_t, bool, int64_t, bool>;
 
 struct DeferredKernelPlan {
     pybind11::weakref           owner;
@@ -525,9 +525,15 @@ bool trySubmitDeferredKernels(const RejectionSamplingParams& params,
             || flags.scalar_type() != torch::kInt32 || !flags.is_contiguous()
             || flags.numel() != ids.size(0) * ids.size(1))
             return false;
+        const auto& normalizer = params.target_log_normalizer_d;
+        if (normalizer.defined()
+            && (!normalizer.is_cuda() || normalizer.device() != ids.device()
+                || normalizer.scalar_type() != torch::kFloat32 || !normalizer.is_contiguous()
+                || normalizer.numel() != ids.size(0) * ids.size(1)))
+            return false;
         dense_vocab = dense.size(2);
     }
-    const DeferredKernelKey      key = std::tuple_cat(*layout, std::make_tuple(dense_vocab));
+    const DeferredKernelKey      key = std::tuple_cat(*layout, std::make_tuple(dense_vocab, compact && params.target_log_normalizer_d.defined()));
     std::unique_lock<std::mutex> guard(deferredGraphMutex(), std::try_to_lock);
     if (!guard.owns_lock())
         return false;
@@ -553,10 +559,12 @@ bool trySubmitDeferredKernels(const RejectionSamplingParams& params,
         params.target_logits_d, params.draft_token_ids_d, seeds, positions, params.do_sample_d};
     if (params.acceptance_cap.defined())
         inputs.push_back(params.acceptance_cap);
-    const std::vector<torch::Tensor> extra  = compact ? std::vector<torch::Tensor>{params.target_candidate_ids_d,
+    std::vector<torch::Tensor> extra  = compact ? std::vector<torch::Tensor>{params.target_candidate_ids_d,
                                                                                    params.target_dense_fallback_d,
                                                                                    params.target_fallback_rows_d} :
                                                         std::vector<torch::Tensor>{};
+    if (compact && params.target_log_normalizer_d.defined())
+        extra.push_back(params.target_log_normalizer_d);
     const auto                       stream = uploadDeferredInputs(
         plan->addresses, inputs, params.output_token_ids_d, params.output_accepted_token_num_d, extra);
     for (auto& kernel : plan->kernels)
@@ -776,7 +784,9 @@ static GreedyOutput tryCompactDeferredSampling(const GreedyParams& params, float
         && std::all_of(requested_p, requested_p + batch_size, [compact_p, normalize_p](float value) {
                return normalize_p(value) == compact_p;
            })) {
-        auto compact = torch_ext::deferred_compact_topk_topp(params.logits, 1024, compact_p, temperature);
+        torch::Tensor log_normalizer;
+        auto compact = torch_ext::deferred_compact_topk_topp(
+            params.logits, 1024, compact_p, temperature, &log_normalizer);
         if (std::get<0>(compact).defined()) {
             torch::Tensor prepared_rng;
             if (params.deferred_rejection_rows > 0) {
@@ -790,7 +800,7 @@ static GreedyOutput tryCompactDeferredSampling(const GreedyParams& params, float
                 prepared_rng = reserveSamplingSeedOffsets(params.deferred_rejection_generators,
                                                           requests,
                                                           std::max<int64_t>(32, ((rows + 3) / 4) * 4),
-                                                          11);
+                                                          log_normalizer.defined() ? 12 : 11);
             }
             return GreedyOutput{torch::Tensor(),
                                 true,
@@ -798,7 +808,8 @@ static GreedyOutput tryCompactDeferredSampling(const GreedyParams& params, float
                                 std::get<1>(compact),
                                 params.logits,
                                 std::get<2>(compact),
-                                prepared_rng};
+                                prepared_rng,
+                                log_normalizer};
         }
     }
     return {};
@@ -1287,7 +1298,7 @@ void rejectionSampling(const RejectionSamplingParams& params) {
         const int64_t rows       = params.target_logits_d.size(1);
         // The compact producer may already have reserved RNG while filtering
         // ran on the GPU. Native and fallback dispatch consume the same packet.
-        const int64_t prefix  = params.target_candidate_ids_d.defined() ? 11 : 8;
+        const int64_t prefix  = params.target_candidate_ids_d.defined() ? (params.target_log_normalizer_d.defined() ? 12 : 11) : 8;
         auto          state_h = params.prepared_rejection_rng;
         if (state_h.defined()) {
             TORCH_CHECK(state_h.device().is_cpu() && state_h.scalar_type() == torch::kInt64 && state_h.dim() == 2

@@ -699,7 +699,7 @@ public:
                                                           + uint64_t(batch_idx) * args.stride_output_value_batch :
                                                       nullptr;
         if constexpr (!FILTER_FINITE) {
-            if ((args.topk == 4096 || args.topk == 1025) && threshold_bits == NEG_INF_BITS) {
+            if ((args.topk == 4096 || args.topk == 1024 || args.topk == 1025) && threshold_bits == NEG_INF_BITS) {
                 select_sparse_row(args,
                                   batch_idx,
                                   end_vocab_idx,
