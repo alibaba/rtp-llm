@@ -1017,16 +1017,22 @@ void NormalEngine::recordAwiStepObservations(const std::list<GenerateStreamPtr>&
                 prefill_event.end_ns         = time_info.first_token_time_us * 1000;
                 awi.recordEvent(std::move(prefill_event));
 
-                const int64_t memory_reuse = stream->prefillMemoryReuseLen();
-                if (memory_reuse > 0) {
-                    AwiEvent reuse_event;
-                    reuse_event.type           = "reuse";
-                    reuse_event.request_id     = request_id;
-                    reuse_event.awi_request_id = generate_input->request_info.request_id;
-                    reuse_event.input_tokens   = stream->inputLength();
-                    reuse_event.hit_tokens     = memory_reuse;
-                    awi.recordEvent(std::move(reuse_event));
-                }
+                // Contract `reuse` event: report the admission-time memory KV
+                // prefix match — the same accounting as aux_info.reuse_len
+                // (frontend cached_tokens). prefillMemoryReuseLen() is never
+                // populated on this path (setPrefillReuseLength has no callers
+                // in this deployment), so the previous >0-gated emitter could
+                // never fire. Emit for EVERY prefilled request: a measured
+                // hit_tokens=0 for independent-prefix benchmarks must be
+                // distinguishable from a dead hook.
+                const int64_t memory_reuse = stream->initialReuseLength();
+                AwiEvent      reuse_event;
+                reuse_event.type           = "reuse";
+                reuse_event.request_id     = request_id;
+                reuse_event.awi_request_id = generate_input->request_info.request_id;
+                reuse_event.input_tokens   = stream->inputLength();
+                reuse_event.hit_tokens     = memory_reuse;
+                awi.recordEvent(std::move(reuse_event));
             }
             // First output token belongs to prefill: decode steps are 1..N-1.
             const int generated = stream->seqLength() - stream->inputLength();
