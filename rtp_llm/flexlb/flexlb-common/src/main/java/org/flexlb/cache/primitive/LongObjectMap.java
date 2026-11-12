@@ -1,11 +1,12 @@
 package org.flexlb.cache.primitive;
 
-import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.HashCommon;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
+
 import java.util.Objects;
+import java.util.function.Function;
 import java.util.function.LongFunction;
 import java.util.function.UnaryOperator;
-import java.util.function.Function;
 
 /** Primitive index with guarded reads so resize never exposes a partial table. */
 public final class LongObjectMap<V> {

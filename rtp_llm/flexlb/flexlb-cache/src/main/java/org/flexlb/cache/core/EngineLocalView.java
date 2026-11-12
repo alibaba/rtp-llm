@@ -3,6 +3,7 @@ package org.flexlb.cache.core;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.cache.primitive.LongKeySet;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.WorkerRegistryConfig;
@@ -11,7 +12,6 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
 import java.util.Collections;
-import org.flexlb.cache.primitive.LongKeySet;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
