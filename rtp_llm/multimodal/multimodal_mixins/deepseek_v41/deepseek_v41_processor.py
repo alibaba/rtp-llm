@@ -62,8 +62,8 @@ def load_image_source(
 ):
     """Load original bytes in the backend, retaining the V4.1 HTTP contract.
 
-    HTTP retries share one deadline and never cache a mutable URL across
-    requests. Local/data inputs use the standard loader. No image conversion
+    HTTP inputs reuse cached source bytes by URL; on a miss, retries share
+    one deadline. Local/data inputs use the standard loader. No image conversion
     occurs here; content inspection and ViT must consume the same source.
     """
     from rtp_llm.multimodal.multimodal_util import (
@@ -72,6 +72,7 @@ def load_image_source(
         _record_download_time,
         get_bytes_io_from_url,
         request_get,
+        url_data_cache_,
     )
 
     max_bytes = 10 * 1024 * 1024
@@ -90,6 +91,23 @@ def load_image_source(
             deadline=deadline,
             cancellation_event=cancellation_event,
         )
+    cached = url_data_cache_.check_cache(url)
+    if cached is not None:
+        try:
+            _check_download(deadline, cancellation_event)
+        except TimeoutError as error:
+            raise FtRuntimeException(
+                ExceptionType.MM_DOWNLOAD_FAILED,
+                "Temporary multimodal download failure",
+            ) from error
+        source = cached.getvalue()
+        if len(source) > max_bytes:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS, "Multimodal file size is too large"
+            )
+        vit_media.download_cache_hit()
+        return BytesIO(source)
+
     for attempt in range(3):
         started = time.monotonic()
         status = None
@@ -117,7 +135,9 @@ def load_image_source(
                     content.write(chunk)
                 _check_download(deadline, cancellation_event)
                 content.seek(0)
-                return content
+            # A caller may close or mutate its stream; retain a private cache buffer.
+            url_data_cache_.insert_cache(url, content)
+            return BytesIO(content.getvalue())
         except (
             requests.RequestException,
             ReadTimeoutError,

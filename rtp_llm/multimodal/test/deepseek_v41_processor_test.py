@@ -136,6 +136,14 @@ class V41BackendProcessorParityTest(unittest.TestCase):
 
 
 class V41ImageDownloadTimingTest(unittest.TestCase):
+    def setUp(self):
+        from rtp_llm.multimodal import multimodal_util
+
+        self.cache = multimodal_util.MMDataCache(cache_size=2)
+        cache_patch = patch.object(multimodal_util, "url_data_cache_", self.cache)
+        cache_patch.start()
+        self.addCleanup(cache_patch.stop)
+
     def run_loader(
         self,
         statuses,
@@ -185,23 +193,54 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
             side_effect=chunk_error,
         ), collect_download_timing() as timing:
             try:
-                result = [
-                    load_image_source(
+                result = []
+                for _ in range(repeats):
+                    with load_image_source(
                         "https://example.invalid/image.png",
                         deadline=deadline,
                         cancellation_event=cancellation_event,
-                    ).getvalue()
-                    for _ in range(repeats)
-                ]
+                    ) as image:
+                        result.append(image.read())
             except FtRuntimeException as error:
                 result = error
         return result, timing.elapsed_ms, get.call_count
 
-    def test_actual_attempts_exclude_backoff_and_never_cache_mutable_http_urls(self):
-        result, elapsed_ms, requests = self.run_loader([503, 200, 200], repeats=2)
+    def test_http_cache_hit_skips_download_and_backoff_is_not_timed(self):
+        result, elapsed_ms, requests = self.run_loader([503, 200], repeats=3)
+        self.assertEqual(result, [b"image"] * 3)
+        self.assertEqual(requests, 2)
+        self.assertEqual(elapsed_ms, 250.0)
+
+    def test_disabled_url_cache_downloads_each_time(self):
+        self.cache.resize_cache(0)
+        result, elapsed_ms, requests = self.run_loader([200, 200], repeats=2)
         self.assertEqual(result, [b"image", b"image"])
-        self.assertEqual(requests, 3)
-        self.assertEqual(elapsed_ms, 375.0)
+        self.assertEqual(requests, 2)
+        self.assertEqual(elapsed_ms, 250.0)
+
+    def test_cached_bytes_respect_current_size_limit_deadline_and_cancellation(self):
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+            load_image_source,
+        )
+
+        url = "https://example.invalid/image.png"
+        self.cache.insert_cache(url, io.BytesIO(b"x" * 1025))
+        cancelled = threading.Event()
+        cancelled.set()
+        with patch("rtp_llm.multimodal.multimodal_util.request_get") as get:
+            with self.assertRaises(FtRuntimeException) as size_error:
+                load_image_source(url, max_file_size_kb=1)
+            self.assertEqual(
+                size_error.exception.exception_type, ExceptionType.INVALID_PARAMS
+            )
+            with self.assertRaises(FtRuntimeException) as timeout:
+                load_image_source(url, deadline=0)
+            self.assertEqual(
+                timeout.exception.exception_type, ExceptionType.MM_DOWNLOAD_FAILED
+            )
+            with self.assertRaises(CancelledError):
+                load_image_source(url, cancellation_event=cancelled)
+            get.assert_not_called()
 
     def test_exhausted_attempts_are_timed_and_preserve_download_error(self):
         result, elapsed_ms, requests = self.run_loader([503, 503, 503])
