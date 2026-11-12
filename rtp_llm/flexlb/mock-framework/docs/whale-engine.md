@@ -60,12 +60,15 @@ P/D/V 的资源候选绑定同一个 CI 镜像，按实际节点架构选择资�
 
 ## CP 与 block size
 
-使用支持显式 Prefill CP 的 Frontend。Frontend 和 Mock Prefill 的 `SEQ_SIZE_PER_BLOCK` 都填 **CP 前的基础块大小**，`PREFILL_CP_SIZE` 填相同值，Frontend 额外设 `PREFILL_CP_KV_CACHE_SHARDED=1`。两端按基础块滚动哈希，每组取最后一个 key，Master 的路由跨度为基础块大小 × CP。Mock P/D 的 `CACHE_KEY_HASH_SEED` 与 Frontend 生效值对齐。
+使用支持显式 Prefill CP 的 Frontend。默认让 Frontend 和 Mock Prefill 的 `SEQ_SIZE_PER_BLOCK`（**CP 前的基础块大小**）及 `PREFILL_CP_SIZE` 分别对齐，Frontend 额外设 `PREFILL_CP_KV_CACHE_SHARDED=1`。两端按基础块滚动哈希，每组取最后一个 key，Master 的路由跨度为基础块大小 × CP。Mock P/D 的 `CACHE_KEY_HASH_SEED` 与 Frontend 生效值对齐。
 
 | 示例              | Frontend 和 Mock Prefill 的基础块 / CP | Master 路由跨度        |
 | ----------------- | -------------------------------------- | ---------------------- |
 | DeepSeek V4.1 CP4 | `128 / 4`                              | 512 token，取 K4、K8…  |
 | GLM-5.3 CP8       | `64 / 8`                               | 512 token，取 K8、K16… |
+
+- **纯文本 + `LOCAL_SYNC`。** 只测缓存路由和容量时，Frontend 可保留 `64 × CP8`，Mock Prefill 可设 `SEQ_SIZE_PER_BLOCK=512`、`PREFILL_CP_SIZE=1`。使用相同 token 和 hash seed 时，两边每 512 token 产生相同的路由 key。Mock 的 `CacheStatus.block_size` 仍为 512，块数相同时上报的 Device 总 token 容量也相同。WorkerStatus 的 `tp_size` 会从 8 变为 1，CP 相关的 Prefill 调度和耗时公式也会随之变化。
+- **多模态或 KVCM。** Frontend 配 `64 × CP8` 时，Mock Prefill 也配 `64 × CP8`。多模态 hash 按基础块边界混入媒体标识，KVCM 注册则分别上报基础块大小和 CP。
 
 Mock 的基础块默认 64，Prefill CP 默认 1。CP 大于 1 时，`CP_FORCE_SINGLE_PREFILL` 默认开启，设为 `0` 可同轮接纳多个 Prefill。Mock Decode 固定 CP1，基础块按目标 Decode 填写。
 
@@ -73,21 +76,36 @@ Mock 的 WorkerStatus 上报 Prefill TP 为 CP size、Decode TP 为 1、DP 为 1
 
 ## KV 容量
 
-P/D 按每实例的**逻辑 block**配置。先用该角色的每块 token 数换算目标 token 容量，再填块数。CP 只改变每块代表的 token 数，填写的块数保持原值。
+### 1. 取 Real 单实例的 token 容量
 
-| 参数                      | 单位与含义                                                                                  |
-| ------------------------- | ------------------------------------------------------------------------------------------- |
-| `TEST_BLOCK_NUM`          | 必填，至少 2。Device block 数，含一个 null block。可用 Device 容量为 `TEST_BLOCK_NUM - 1`。 |
-| `MOCK_CACHE_TOTAL_BLOCKS` | 统一缓存能保留的 block 数，不含 null block。默认等于可用 Device 容量，至少为该值。          |
-| `RESERVE_BLOCK_RATIO`     | 首次分配预留的 Device 百分比，默认 5。按可用 Device block 数向下取整。                      |
-| `REUSE_CACHE`             | 默认 `false`。启用前缀复用时，角色和请求都要允许复用，且 Device 前缀索引已开启。            |
-| `ENABLE_DEVICE_CACHE`     | 默认 `true`。控制本地前缀查找和发布。设为 `false` 时，请求执行仍会分配 KV block。           |
-| `ENABLE_REMOTE_CACHE`     | 默认 `false`。Mock 启动时校验此值，设为 `true` 会拒绝启动。                                 |
-| `ENABLE_MEMORY_CACHE`     | 默认 `false`。Mock 启动时校验此值，设为 `true` 会拒绝启动。                                 |
+分别选一个目标 Prefill 和 Decode 实例，读取各自 `/worker_status` 返回的 `total_kv_cache`。这个值是按完整序列口径统计的 KV token 总容量，已计入实际启用的 CP。直接用它作为目标容量，无需再乘 CP 或 TP，也无需把各 rank 或各副本相加。对齐 Device 容量时，确认取值的统计范围只包含 Device。
 
-这三个 `ENABLE_*` 参数使用默认值时可省略。模拟本地前缀复用时，显式设置 `REUSE_CACHE=true`。需要扩大统一缓存容量时，调整 `MOCK_CACHE_TOTAL_BLOCKS`。
+### 2. 换算 Mock 的 Device 块数
 
-例如 P 为 CP4、基础块为 128，配置 `TEST_BLOCK_NUM=1025`、`MOCK_CACHE_TOTAL_BLOCKS=4096`。Device 可用 1024 块，即 524,288 token，统一缓存最多保留 4096 块，即 2,097,152 token。缓存命中也要取得 Device 驻留额度才可进入计算。
+用 **Mock 对应角色的逻辑块大小**作除数。先用目标 token 数除以每块 token 数，向上取整得到可用 Device 块数，再加 1 填入 `TEST_BLOCK_NUM`。加的 1 是保留的 null block，`TEST_BLOCK_NUM` 至少为 2。
+
+| Mock 角色 | 每个逻辑块的 token 数                  |
+| --------- | -------------------------------------- |
+| Prefill   | `SEQ_SIZE_PER_BLOCK × PREFILL_CP_SIZE` |
+| Decode    | `SEQ_SIZE_PER_BLOCK`（固定 CP1）       |
+
+对齐同一目标 token 容量时，修改 Mock 的基础块大小或 Prefill CP 后，要重新计算 `TEST_BLOCK_NUM`。
+
+例如 Real 单个 Prefill 实例的 Device 容量为 **524,288 token**，Mock Prefill 配 CP4、基础块 128。每个逻辑块是 `128 × 4 = 512` token，可用 Device 块数是 `524,288 ÷ 512 = 1024`，所以填 `TEST_BLOCK_NUM=1025`。
+
+### 3. 按需配置缓存保留和复用
+
+`MOCK_CACHE_TOTAL_BLOCKS` 默认等于可用 Device 块数，单位也是逻辑块。这个值不含 null block，至少等于 `TEST_BLOCK_NUM - 1`。沿用上面的 CP4 例子，省略它时统一缓存最多保留 1024 块。若要模拟保留 4096 块（2,097,152 token），填 `MOCK_CACHE_TOTAL_BLOCKS=4096`。缓存命中后仍要取得 Device 驻留额度才能进入计算。
+
+| 参数                  | 含义                                                                                        |
+| --------------------- | ------------------------------------------------------------------------------------------- |
+| `RESERVE_BLOCK_RATIO` | 首次分配预留的 Device 百分比，默认 5。按可用 Device 块数向下取整。                          |
+| `REUSE_CACHE`         | 默认 `false`。要模拟本地前缀复用，设为 `true`，同时确保请求允许复用且 Device 前缀索引开启。 |
+| `ENABLE_DEVICE_CACHE` | 默认 `true`，控制本地前缀查找和发布。设为 `false` 时，请求执行仍会分配 KV block。           |
+| `ENABLE_REMOTE_CACHE` | 默认 `false`，设为 `true` 会拒绝启动。                                                      |
+| `ENABLE_MEMORY_CACHE` | 默认 `false`，设为 `true` 会拒绝启动。                                                      |
+
+这三个 `ENABLE_*` 参数使用默认值时可省略。
 
 ## 性能模拟
 
