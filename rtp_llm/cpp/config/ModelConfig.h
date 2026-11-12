@@ -19,6 +19,8 @@ namespace rtp_llm {
 
 using LayerKVCacheSpecDescs = std::vector<std::vector<KVCacheSpecDesc>>;
 
+int64_t resolveMtpInputHiddenSize(int64_t hidden_size, int64_t hc_mult);
+
 enum TaskType {
     DENSE_EMBEDDING    = 0,
     ALL_EMBEDDING      = 1,
@@ -102,8 +104,9 @@ public:
     int64_t              scoring_func    = 0;
     std::vector<int64_t> moe_layer_index = {};
 
+    // Hyper-connection residual multiplier. Default 1 (no expansion).
+    int64_t hc_mult = 1;
     // DeepSeek-V4 specific.
-    int64_t hc_mult           = 1;
     int64_t hc_sinkhorn_iters = 0;
     double  hc_eps            = 1e-6;
     double  swiglu_limit      = 0.0;
@@ -159,6 +162,7 @@ public:
     void             set_activation_type(std::string activation_type_str);
     void             set_data_type(std::string data_type_str);
     bool             isGatedActivation() const;
+    int64_t          getMtpInputHiddenSize() const;
     AttentionConfigs getAttentionConfigs(int64_t tp_size) const;
     bool             isKvCacheQuant() const;
     std::string      to_string() const;

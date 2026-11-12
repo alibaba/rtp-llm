@@ -803,7 +803,10 @@ TEST_F(MtpComputeTest, SharedAdvanceReusesHiddenStates) {
         EXPECT_EQ(toVec<int32_t>(input.sequence_lengths), (std::vector<int32_t>{9, 11}));
         EXPECT_EQ(toVec<int32_t>(input.combo_position_ids), (std::vector<int32_t>{8, 10}));
         EXPECT_TRUE(input.sequence_lengths.is_cuda());
-        EXPECT_TRUE(input.combo_position_ids.is_pinned());
+        EXPECT_EQ(input.combo_position_ids.is_cuda(), device_input);
+        if (!device_input) {
+            EXPECT_TRUE(input.combo_position_ids.is_pinned());
+        }
         EXPECT_EQ(input.last_hidden_states.data_ptr(), hidden_buffer.data_ptr());
         EXPECT_TRUE(torch::equal(input.last_hidden_states, torch::ones_like(hidden_buffer)));
         EXPECT_EQ(toVec<int32_t>(original_lengths), (std::vector<int32_t>{8, 10}));

@@ -1,0 +1,425 @@
+import json
+import math
+import os
+import unittest
+from unittest.mock import patch
+
+import torch
+import torch.nn.functional as F
+
+from rtp_llm.models_py.kernels.cuda.qwen4_ple.conv import try_ple_conv
+from rtp_llm.models_py.kernels.cuda.qwen4_ple.gate import try_ple_gate
+from rtp_llm.models_py.modules.hybrid.gated_residual import grouped_rms_norm
+from rtp_llm.models_py.modules.qwen4_exp.test.support.ple_gate import (
+    PLESourceBf16Fixture,
+)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+class PleSourceBf16BatchRouteTest(PLESourceBf16Fixture, unittest.TestCase):
+    """The real BF16 producer contract."""
+
+    def tensor_formula_reference(self, layer, hidden, embeddings, initial):
+        # Existing GPU grouped_rms_norm helper plus unfused BF16 tensor formula.
+        # This is neither a CPU nor an FP64 oracle, and it is not the old fused gate.
+        state = initial
+        stage = {
+            k: []
+            for k in (
+                "key",
+                "value",
+                "gated",
+                "normed",
+                "conv",
+                "silu",
+                "inner",
+                "outer",
+                "states",
+            )
+        }
+        for start in range(0, hidden.shape[1], 128):
+            h = hidden[:, start : start + 128]
+            page = embeddings[:, start : start + 128].contiguous()
+            key = F.linear(page, layer.key_proj)
+            value = F.linear(page, layer.value_proj)
+            kn = grouped_rms_norm(key, layer.norm_key, 2560, 1e-6).unflatten(
+                -1, (4, 2560)
+            )
+            qn = grouped_rms_norm(h, layer.norm_query, 2560, 1e-6).unflatten(
+                -1, (4, 2560)
+            )
+            gate = (kn * qn).sum(-1, keepdim=True) / math.sqrt(2560)
+            gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
+            gated = (torch.sigmoid(gate) * value.unsqueeze(-2)).flatten(-2)
+            normed = grouped_rms_norm(gated, layer.norm_conv, 2560, 1e-6)
+            history = (
+                F.pad(normed.transpose(1, 2), (9, 0)).transpose(1, 2)
+                if state is None
+                else torch.cat((state, normed), 1)
+            )
+            conv_bf16 = F.conv1d(
+                history.transpose(1, 2),
+                layer.conv_weight,
+                groups=10240,
+                dilation=3,
+            )
+            self.assertEqual(conv_bf16.dtype, torch.bfloat16)
+            silu_bf16 = F.silu(conv_bf16)
+            self.assertEqual(silu_bf16.dtype, torch.bfloat16)
+            inner_bf16 = gated + silu_bf16.transpose(1, 2)
+            outer_bf16 = h + inner_bf16
+            state = history[:, -9:]
+            for name, tensor in (
+                ("key", key),
+                ("value", value),
+                ("gated", gated),
+                ("normed", normed),
+                ("conv", conv_bf16),
+                ("silu", silu_bf16),
+                ("inner", inner_bf16),
+                ("outer", outer_bf16),
+                ("states", state),
+            ):
+                stage[name].append(tensor)
+        return stage
+
+    def old_serial_reference(self, layer, hidden, embeddings, initial, tokens):
+        """Capture the actual feature=0 production page route, not a reimplementation."""
+        stage = {k: [] for k in ("key", "value", "gated", "normed", "conv", "silu")}
+        linear, conv1d, silu = F.linear, F.conv1d, F.silu
+        gate_call = try_ple_gate
+        projection_calls = []
+
+        def record_linear(page, weight, *args, **kwargs):
+            which = "key" if len(projection_calls) % 2 == 0 else "value"
+            actual = linear(page, weight, *args, **kwargs)
+            stage[which].append(actual)
+            projection_calls.append(which)
+            return actual
+
+        def record_gate(*args, **kwargs):
+            self.assertEqual(args[0].shape, (1, 128, 10240))
+            actual = gate_call(*args, **kwargs)
+            self.assertIsNotNone(actual)
+            stage["gated"].append(actual[0])
+            stage["normed"].append(actual[1])
+            return actual
+
+        def record_conv(*args, **kwargs):
+            actual = conv1d(*args, **kwargs)
+            self.assertEqual(actual.dtype, torch.bfloat16)
+            stage["conv"].append(actual)
+            return actual
+
+        def record_silu(*args, **kwargs):
+            actual = silu(*args, **kwargs)
+            self.assertEqual(actual.dtype, torch.bfloat16)
+            stage["silu"].append(actual)
+            return actual
+
+        with (
+            patch.dict(os.environ, {"RTP_QWEN4_BF16_PLE_BATCH": "0"}),
+            patch("torch.nn.functional.linear", side_effect=record_linear),
+            patch(
+                "rtp_llm.models_py.kernels.cuda.qwen4_ple.gate.try_ple_gate",
+                side_effect=record_gate,
+            ),
+            patch("torch.nn.functional.conv1d", side_effect=record_conv),
+            patch("torch.nn.functional.silu", side_effect=record_silu),
+        ):
+            inner, states = layer.prefill_page_snapshots(
+                hidden,
+                tokens,
+                128,
+                initial,
+                embeddings=embeddings,
+                add_residual=False,
+            )
+        self.assertEqual(projection_calls, ["key", "value"] * 64)
+        self.assertEqual(len(stage["gated"]), 64)
+        self.assertEqual(len(stage["conv"]), 64)
+        self.assertEqual(len(stage["silu"]), 64)
+        with patch.dict(os.environ, {"RTP_QWEN4_BF16_PLE_BATCH": "0"}):
+            outer, outer_states = layer.prefill_page_snapshots(
+                hidden,
+                tokens,
+                128,
+                initial,
+                embeddings=embeddings,
+                add_residual=True,
+            )
+        self.assert_exact(outer, hidden + inner)
+        for state, outer_state in zip(states, outer_states):
+            self.assert_exact(state, outer_state)
+        stage.update(inner=[inner], outer=[outer], states=states)
+        return stage
+
+    def stage_tensor(self, stage, name):
+        return torch.cat(
+            stage[name], 2 if name in ("conv", "silu") else 0 if name == "states" else 1
+        )
+
+    def tensor_formula_diagnostics(self, actual, formula, names):
+        result = {}
+        for name in names:
+            left, right = self.stage_tensor(actual, name), self.stage_tensor(
+                formula, name
+            )
+            delta = (left.float() - right.float()).abs()
+            result[name] = {
+                "mismatched": int(torch.count_nonzero(left != right).item()),
+                "numel": left.numel(),
+                "max_abs_fp32_diagnostic": float(delta.max().item()),
+                "max_rel_fp32_diagnostic": float(
+                    (delta / right.float().abs().clamp_min(1e-30)).max().item()
+                ),
+            }
+        return result
+
+    def assert_exact(self, actual, expected):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def assert_page_cache(self, snapshots, expected, prefix, context):
+        # The model-private caller writes BF16 PLE state and int64 n-gram context.
+        # These are distinct from the attention group's FP8 KV payload/scales.
+        count = len(snapshots)
+        pages = prefix // 128 + torch.arange(count, device="cuda")
+        physical = 2 + (torch.arange(count, device="cuda") * 17) % 67
+        table = torch.zeros((1, 129), device="cuda", dtype=torch.int32)
+        table[0, pages] = physical.to(torch.int32)
+        blocks = table[0, pages].long()
+        actual_pool = torch.full(
+            (73, 9, 10240), -3, device="cuda", dtype=torch.bfloat16
+        )
+        expected_pool = actual_pool.clone()
+        actual_pool.index_copy_(0, blocks, torch.cat(snapshots, 0))
+        expected_pool.index_copy_(0, physical, torch.cat(expected, 0))
+        self.assert_exact(actual_pool, expected_pool)
+        actual_context = torch.full((73, 2), -19, device="cuda", dtype=torch.int64)
+        expected_context = actual_context.clone()
+        values = torch.stack(
+            [context[0, end : end + 2] for end in range(128, 8193, 128)]
+        )
+        actual_context.index_copy_(0, blocks, values)
+        expected_context.index_copy_(0, physical, values)
+        self.assert_exact(actual_context, expected_context)
+        self.assertEqual(
+            int(torch.count_nonzero((actual_pool + 3).abs().sum((1, 2))).item()), count
+        )
+
+    def test_real_bf16_two_chunks_all_stages_and_every_page(self):
+        layer = self.layer()
+        initial = None
+        context_ids = torch.tensor([[7, 11]], device="cuda", dtype=torch.int64)
+        linear, gate_call, conv_call = F.linear, try_ple_gate, try_ple_conv
+        for chunk in range(2):
+            torch.manual_seed(81421 + chunk)
+            hidden = torch.randn(1, 8192, 10240, device="cuda", dtype=torch.bfloat16)
+            embeddings = torch.randn(1, 8192, 2560, device="cuda", dtype=torch.bfloat16)
+            tokens = torch.cat(
+                (context_ids, torch.arange(8192, device="cuda").reshape(1, -1)), 1
+            )
+            formula = self.tensor_formula_reference(layer, hidden, embeddings, initial)
+            old = self.old_serial_reference(layer, hidden, embeddings, initial, tokens)
+            old_diagnostics = self.tensor_formula_diagnostics(
+                old,
+                formula,
+                (
+                    "key",
+                    "value",
+                    "gated",
+                    "normed",
+                    "conv",
+                    "silu",
+                    "inner",
+                    "outer",
+                    "states",
+                ),
+            )
+            self.assertEqual(old_diagnostics["key"]["mismatched"], 0)
+            self.assertEqual(old_diagnostics["value"]["mismatched"], 0)
+            if chunk == 0:
+                # Reproduce A's oracle discrepancy on the unchanged OLD fused page route.
+                self.assertGreater(old_diagnostics["gated"]["mismatched"], 0)
+            before = [
+                x.clone()
+                for x in (
+                    hidden,
+                    embeddings,
+                    layer.key_proj,
+                    layer.value_proj,
+                    layer.conv_weight,
+                )
+            ]
+            initial_before = None if initial is None else initial.clone()
+            calls, candidate = [], {}
+
+            def checked_linear(page, weight, *args, **kwargs):
+                index = len(calls)
+                which = "key" if index % 2 == 0 else "value"
+                self.assertEqual(tuple(page.shape), (1, 128, 2560))
+                self.assertEqual(
+                    page.stride(),
+                    embeddings[:, (index // 2) * 128 : (index // 2 + 1) * 128]
+                    .contiguous()
+                    .stride(),
+                )
+                self.assertTrue(page.is_contiguous())
+                self.assertEqual(
+                    weight.data_ptr(),
+                    (layer.key_proj if which == "key" else layer.value_proj).data_ptr(),
+                )
+                actual = linear(page, weight, *args, **kwargs)
+                self.assert_exact(actual, old[which][index // 2])
+                calls.append(which)
+                return actual
+
+            def checked_gate(*args, **kwargs):
+                self.assertEqual(args[0].shape, (1, 8192, 10240))
+                actual = gate_call(*args, **kwargs)
+                self.assertIsNotNone(actual)
+                for name, tensor in zip(("gated", "normed"), actual):
+                    self.assert_exact(tensor, self.stage_tensor(old, name))
+                    candidate[name] = [tensor]
+                return actual
+
+            def checked_conv(gated, normed, state, weight, dilation, *, residual=None):
+                self.assertEqual(dilation, 3)
+                self.assertEqual(weight.shape, (10240, 1, 4))
+                inner = conv_call(gated, normed, state, weight, dilation)
+                self.assert_exact(inner, self.stage_tensor(old, "inner"))
+                candidate["inner"] = [inner]
+                actual = conv_call(
+                    gated, normed, state, weight, dilation, residual=residual
+                )
+                self.assert_exact(
+                    actual,
+                    self.stage_tensor(
+                        old, "outer" if residual is not None else "inner"
+                    ),
+                )
+                return actual
+
+            with (
+                patch.dict(os.environ, {"RTP_QWEN4_BF16_PLE_BATCH": "1"}),
+                patch("torch.nn.functional.linear", side_effect=checked_linear),
+                patch(
+                    "rtp_llm.models_py.kernels.cuda.qwen4_ple.gate.try_ple_gate",
+                    side_effect=checked_gate,
+                ),
+                patch(
+                    "rtp_llm.models_py.kernels.cuda.qwen4_ple.conv.try_ple_conv",
+                    side_effect=checked_conv,
+                ),
+            ):
+                output, snapshots = layer.prefill_page_snapshots(
+                    hidden,
+                    tokens,
+                    128,
+                    initial,
+                    embeddings=embeddings,
+                    add_residual=True,
+                )
+            self.assertEqual(calls, ["key", "value"] * 64)
+            self.assertEqual(len(snapshots), 64)
+            self.assert_exact(output, self.stage_tensor(old, "outer"))
+            for actual, expected in zip(snapshots, old["states"]):
+                self.assertEqual(actual.shape, (1, 9, 10240))
+                self.assert_exact(actual, expected)
+            candidate.update(outer=[output], states=snapshots)
+            names = ("gated", "normed", "inner", "outer", "states")
+            new_diagnostics = self.tensor_formula_diagnostics(candidate, formula, names)
+            self.assertEqual(
+                new_diagnostics, {name: old_diagnostics[name] for name in names}
+            )
+            print(
+                "PLE_BF16_BATCH_ORACLE_DIAGNOSTIC="
+                + json.dumps(
+                    {
+                        "chunk": chunk,
+                        "prefix_tokens": chunk * 8192,
+                        "formula_contract": "existing GPU grouped_rms_norm helper + BF16 tensor gate/native conv formula; not CPU/FP64",
+                        "acceptance_oracle": "feature=0 actual OLD serial page route, same fused try_ple_gate and native conv",
+                        "old_vs_formula": old_diagnostics,
+                        "candidate_vs_formula": new_diagnostics,
+                        "candidate_vs_old": "BITEXACT all projections/gated/normed/inner/outer/all page states",
+                    },
+                    sort_keys=True,
+                )
+            )
+            for actual, expected in zip(
+                (
+                    hidden,
+                    embeddings,
+                    layer.key_proj,
+                    layer.value_proj,
+                    layer.conv_weight,
+                ),
+                before,
+            ):
+                self.assert_exact(actual, expected)
+                self.assertNotEqual(
+                    output.untyped_storage().data_ptr(),
+                    actual.untyped_storage().data_ptr(),
+                )
+            if initial is not None:
+                self.assert_exact(initial, initial_before)
+                self.assertNotEqual(
+                    output.untyped_storage().data_ptr(),
+                    initial.untyped_storage().data_ptr(),
+                )
+            self.assert_page_cache(snapshots, old["states"], chunk * 8192, tokens)
+            initial = snapshots[-1].clone()
+            context_ids = tokens[:, -2:].clone()
+            del formula, old, candidate, before, output, snapshots, hidden, embeddings
+
+    def test_default_off_tail_and_graph_fallback(self):
+        layer = self.layer()
+        for length in (127, 128, 129, 257, 8191, 8193):
+            hidden = torch.randn(1, length, 10240, device="cuda", dtype=torch.bfloat16)
+            embedding = torch.randn(
+                1, length, 2560, device="cuda", dtype=torch.bfloat16
+            )
+            for value in ("0", "1"):
+                with (
+                    patch.dict(os.environ, {"RTP_QWEN4_BF16_PLE_BATCH": value}),
+                    patch("torch.nn.functional.linear") as linear,
+                ):
+                    self.assertIsNone(
+                        layer._try_bf16_prefill_page_snapshots(
+                            hidden, embedding, 128, None, False
+                        )
+                    )
+                    linear.assert_not_called()
+            if length <= 257:
+                tokens = torch.zeros((1, length + 2), device="cuda", dtype=torch.int64)
+                with patch.dict(os.environ, {"RTP_QWEN4_BF16_PLE_BATCH": "0"}):
+                    expected, expected_states = layer.prefill_page_snapshots(
+                        hidden, tokens, 128, embeddings=embedding, add_residual=True
+                    )
+                with patch.dict(os.environ, {"RTP_QWEN4_BF16_PLE_BATCH": "1"}):
+                    actual, states = layer.prefill_page_snapshots(
+                        hidden, tokens, 128, embeddings=embedding, add_residual=True
+                    )
+                self.assert_exact(actual, expected)
+                self.assertEqual(len(states), len(expected_states))
+                for state, expected_state in zip(states, expected_states):
+                    self.assert_exact(state, expected_state)
+        hidden = torch.empty((1, 8192, 10240), device="cuda", dtype=torch.bfloat16)
+        embedding = torch.empty((1, 8192, 2560), device="cuda", dtype=torch.bfloat16)
+        for enabled, capture in (("0", False), ("1", True)):
+            with (
+                patch.dict(os.environ, {"RTP_QWEN4_BF16_PLE_BATCH": enabled}),
+                patch("torch.cuda.is_current_stream_capturing", return_value=capture),
+                patch("torch.nn.functional.linear") as linear,
+            ):
+                self.assertIsNone(
+                    layer._try_bf16_prefill_page_snapshots(
+                        hidden, embedding, 128, None, False
+                    )
+                )
+                linear.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

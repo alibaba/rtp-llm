@@ -4,6 +4,7 @@
 #include <utility>
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/multimodal_processor/test/FakeMultimodalProcessor.h"
 
@@ -12,6 +13,16 @@ using namespace std;
 namespace rtp_llm {
 
 class MultimodalProcessorTest: public DeviceTestBase {};
+
+TEST_F(MultimodalProcessorTest, SemanticIdsFollowFeatureSlicesAndValidateBounds) {
+    auto features = torch::zeros({5, 4});
+    auto ids      = torch::tensor({10, 21, 21, 21, 11}, torch::kInt32);
+    EXPECT_TRUE(torch::equal(sliceMultimodalExtraInput(ids, features, 2, 4), ids.slice(0, 2, 4)));
+    EXPECT_EQ(sliceMultimodalExtraInput(ids, features, 5, 5).numel(), 0);
+    EXPECT_THROW(sliceMultimodalExtraInput(ids, features, -1, 4), std::exception);
+    EXPECT_THROW(sliceMultimodalExtraInput(ids, features, 4, 2), std::exception);
+    EXPECT_THROW(sliceMultimodalExtraInput(ids, features, 2, 6), std::exception);
+}
 
 namespace {
 class PreparedV41Processor: public FakeMultimodalProcessor {

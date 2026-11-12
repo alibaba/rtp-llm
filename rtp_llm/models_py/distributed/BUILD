@@ -9,13 +9,19 @@ py_library(
     name = "collective_torch",
     srcs = [
         "collective_torch.py",
+        "collective_utils.py",
+        "canonical_p2p.py",
         "flashinfer_all_reduce.py",
+        "flashinfer_ipc_all_reduce.py",
+        "all_reduce.py",
         "rocm_rccl.py",
         "symm_mem.py",
     ],
     deps = [
         ":rank_layout",
         "//rtp_llm:torch",
+        "//rtp_llm:collective_config",
+        "//rtp_llm/models_py/triton_kernels:peer_all_reduce",
     ],
     visibility = ["//visibility:public"],
 )
@@ -53,5 +59,12 @@ py_library(
     deps = [
         "//rtp_llm:torch",
     ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "cpu_status",
+    srcs = ["cpu_status.py"],
+    deps = ["//rtp_llm:torch"],
     visibility = ["//visibility:public"],
 )

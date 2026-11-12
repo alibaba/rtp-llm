@@ -1,4 +1,5 @@
 import importlib.metadata
+import importlib.util
 import logging
 import os
 import platform
@@ -187,6 +188,13 @@ def resolve_scope(
             ):
                 # Old PPU snapshots contain metadata without the required .hgbin.
                 parts += ("ppu-hgbin-v1",)
+            if item.name == "flashinfer":
+                # Bundled headers enter generated ninja files by absolute path.
+                # Fork snapshots when staging moves them out of Bazel runfiles;
+                # old rules must not survive under the new stable package path.
+                spec = importlib.util.find_spec("flashinfer_cubin")
+                origin = spec.origin if spec is not None else "online-cubins"
+                parts += (sha256(str(origin).encode()).hexdigest()[:16],)
             if item.name == "deep_gemm":
                 try:
                     identity = deep_gemm_build_scope(torch_scope)

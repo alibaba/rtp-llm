@@ -281,8 +281,8 @@ class Qwen3NextPPAuxCaptureTest(unittest.TestCase):
         ), patch.object(
             qn, "RMSResNorm", side_effect=lambda *args, **kwargs: Norm()
         ), patch.object(
-            qn,
-            "Qwen3NextDecoderLayer",
+            qn.Qwen3NextModel,
+            "_decoder_layer_cls",
             side_effect=lambda config, parallelism, weights, idx, *args, **kwargs: Decoder(
                 idx
             ),

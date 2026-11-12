@@ -73,14 +73,16 @@ public:
                                             GptModelInputs&     model_input,
                                             TensorHolder&       host_holder);
 
-    // Device-state target-verify gather. Returns true only when every stream
-    // has CUDA accept_len/tokens/next_seq_len/propose_tokens; otherwise leaves
-    // model_input untouched so the caller can use the legacy mixed path.
+    // Device-state target-verify gather. Fresh rows may use idle host state;
+    // steady rows retain their published device tokens, lengths and positions.
     bool gatherMtpDecodeModelInputFromDeviceState(const StreamGroups& stream_groups,
                                                   GptModelInputs&     model_input,
                                                   TensorHolder&       host_holder) const;
 
-    void expandTargetVerifyPositionIds(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
+    void expandTargetVerifyPositionIds(const StreamGroups&  stream_groups,
+                                       GptModelInputs&      model_input,
+                                       const torch::Tensor& authoritative_prefix_lengths = torch::Tensor(),
+                                       size_t               query_len                    = 0) const;
 
     void updateDecodeDraftModelInput(GptModelInputs&        model_input,
                                      const GptModelOutputs& model_output,

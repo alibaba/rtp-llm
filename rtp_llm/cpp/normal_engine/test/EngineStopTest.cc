@@ -47,6 +47,24 @@ private:
 class EngineStopTest: public DeviceTestBase, public ::testing::WithParamInterface<int> {
 protected:
     void checkStopWaitsForDispatch(int max_new_tokens);
+
+    std::shared_ptr<NormalEngine> createConfiguredEngine(const CustomConfig&                    config,
+                                                         std::function<void(EngineInitParams&)> configure) {
+        ModelConfig   model_config;
+        RuntimeConfig runtime_config;
+        KVCacheConfig cache_config;
+        auto          params = createEngineInitParams(config, model_config, runtime_config, cache_config);
+        configure(params);
+        NormalExecutor::test_model_factory = [vocab = model_config.vocab_size](const GptModelInitParams&) {
+            return std::make_unique<MockModel>(vocab);
+        };
+        struct FactoryResetGuard {
+            ~FactoryResetGuard() {
+                NormalExecutor::test_model_factory = nullptr;
+            }
+        } guard;
+        return std::make_shared<NormalEngine>(params, nullptr);
+    }
 };
 
 struct FinishState {
@@ -191,6 +209,31 @@ TEST_P(EngineStopTest, StopWaitsForInFlightDecodeDispatch) {
 
 TEST_P(EngineStopTest, StopWaitsForInFlightPrefillOnlyDispatch) {
     checkStopWaitsForDispatch(0);
+}
+
+TEST_P(EngineStopTest, SchedulerStopErrorStillReleasesExecutor) {
+    auto engine = createConfiguredEngine({}, [](EngineInitParams& params) {
+        params.runtime_config.use_batch_decode_scheduler = true;
+        // Keep the empty scheduler nonblocking so this exercises cleanup, not its idle timeout.
+        params.runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 0;
+    });
+    EXPECT_TRUE(absl::IsUnimplemented(engine->stop()));
+    EXPECT_EQ(engine->executor_, nullptr);
+}
+
+TEST_P(EngineStopTest, SystemPromptsDoNotConsumeProfilingWindow) {
+    CustomConfig config;
+    config.multi_task_prompt_tokens = {{"one", {1, 2}}, {"two", {3, 4}}, {"three", {5, 6}}};
+    config.reuse_cache              = true;
+    auto engine                     = createConfiguredEngine(config, [](EngineInitParams& params) {
+        params.profiling_debug_logging_config.gen_timeline_sync   = true;
+        params.profiling_debug_logging_config.timeline_start_step = 1000;
+    });
+    ASSERT_TRUE(engine->stop().ok());
+    EXPECT_TRUE(engine->step_profiler_.enabled());
+    EXPECT_EQ(engine->step_profiler_.waited_steps_, 0);
+    EXPECT_EQ(engine->step_profiler_.profiled_steps_, 0);
+    EXPECT_EQ(engine->step_profiler_.profiler_, nullptr);
 }
 
 INSTANTIATE_TEST_SUITE_P(SerialAndParallel, EngineStopTest, ::testing::Values(0, 2));

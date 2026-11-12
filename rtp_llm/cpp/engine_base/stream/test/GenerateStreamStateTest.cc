@@ -2,6 +2,9 @@
 #include "gtest/gtest.h"
 #include "gmock/gmock.h"
 
+#include <chrono>
+#include <future>
+
 #include "kmonitor/client/MetricsReporter.h"
 #include "kmonitor/client/core/MetricsData.h"
 
@@ -442,6 +445,52 @@ TEST_F(GenerateStreamStateTest, testPrefillFallbackDecodeGrowsBlocksAfterContext
 
     ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
     EXPECT_EQ(stream->curBlocksNum(), 2u);
+}
+
+TEST_F(GenerateStreamStateTest, testNormalAsyncHostCommitPrecedesPageBoundaryReservation) {
+    auto stream = createStream({1, 2});
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    ASSERT_EQ(stream->curBlocksNum(), 1u);
+    stream->setIsContextStream(false);
+    stream->incPendingAsyncBookkeeping();
+    EXPECT_TRUE(stream->needsAsyncBookkeepingJoinForKvReservation());
+
+    std::promise<void> scheduling_started;
+    auto               scheduling_ready = scheduling_started.get_future();
+    auto               scheduling       = std::async(std::launch::async, [stream, &scheduling_started] {
+        scheduling_started.set_value();
+        return stream->moveToNext();
+    });
+    scheduling_ready.get();
+    EXPECT_EQ(scheduling.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+
+    // The previous dispatch worker commits a token across the two-token page.
+    // This happens before dropping its resource claim, as in NormalExecutor.
+    stream->setSeqLength(3);
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    ASSERT_EQ(scheduling.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(scheduling.get(), StreamState::RUNNING);
+    EXPECT_EQ(stream->curBlocksNum(), 2u);
+}
+
+TEST_F(GenerateStreamStateTest, testNormalAsyncPublishedLengthReservesBeforeHostCommit) {
+    auto stream = createStream({1, 2});
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    ASSERT_EQ(stream->curBlocksNum(), 1u);
+    stream->setIsContextStream(false);
+
+    GenerateStream::NormalAsyncDeviceState state;
+    state.last_real_seq_len = 2;
+    state.next_real_seq_len = 3;
+    stream->setNormalAsyncDeviceState(std::move(state));
+    stream->incPendingAsyncBookkeeping();
+    EXPECT_FALSE(stream->needsAsyncBookkeepingJoinForKvReservation());
+    EXPECT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    EXPECT_EQ(stream->seqLength(), 2u);
+    EXPECT_EQ(stream->curBlocksNum(), 2u);
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
 }
 
 TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeModelAndReleasesOnce) {

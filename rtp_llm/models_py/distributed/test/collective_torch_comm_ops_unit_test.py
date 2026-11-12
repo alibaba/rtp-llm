@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.models_py.distributed import collective_torch as collective
 
 
@@ -135,9 +136,12 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
         )
 
         broadcast = self._registered_callbacks(config, process_group)[0]
-        with patch.object(
-            torch.distributed, "get_global_rank", return_value=0
-        ) as get_global_rank, patch.object(torch.cuda, "current_device", return_value=0):
+        with (
+            patch.object(
+                torch.distributed, "get_global_rank", return_value=0
+            ) as get_global_rank,
+            patch.object(torch.cuda, "current_device", return_value=0),
+        ):
             broadcast([], 0, collective._CPP_PARALLEL_MODE_DP)
 
         get_global_rank.assert_called_once_with(process_group, 0)
@@ -150,20 +154,14 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
 
         with (
             patch.object(collective, "_get_rocm_rccl", return_value=None),
-            patch.object(
-                collective, "_get_flashinfer_allreduce"
-            ) as flashinfer,
+            patch.object(collective, "_get_all_reduce_module") as flashinfer,
             patch.object(collective, "_get_symm_mem") as symm_mem,
             patch.object(collective, "_get_group", return_value=object()),
-            patch.object(
-                torch.distributed, "all_reduce", side_effect=reduce_in_place
-            ),
+            patch.object(torch.distributed, "all_reduce", side_effect=reduce_in_place),
         ):
-            flashinfer.return_value.get_flashinfer_allreduce.return_value = None
+            flashinfer.return_value.get_all_reduce.return_value = None
             symm_mem.return_value.get_symm_mem_communicator.return_value = None
-            result = collective.all_reduce(
-                tensor, collective.Group.TP, inplace=False
-            )
+            result = collective.all_reduce(tensor, collective.Group.TP, inplace=False)
 
         self.assertIsNot(result, tensor)
         torch.testing.assert_close(tensor, torch.tensor([1.0, 2.0]))
@@ -174,24 +172,20 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
         capture = MagicMock()
         capture.ensure_capture_comm_ready.return_value = None
         capture.should_use_capture_collectives.return_value = True
-        capture.capture_all_reduce.side_effect = lambda target, _group: target.add_(
-            10
-        )
+        capture.capture_all_reduce.side_effect = lambda target, _group: target.add_(10)
 
         with (
             patch.object(collective, "_get_rocm_rccl", return_value=capture),
             patch.object(collective, "_get_group", return_value=object()),
         ):
-            result = collective.all_reduce(
-                tensor, collective.Group.TP, inplace=False
-            )
+            result = collective.all_reduce(tensor, collective.Group.TP, inplace=False)
 
         self.assertIsNot(result, tensor)
         torch.testing.assert_close(tensor, torch.tensor([1.0, 2.0]))
         torch.testing.assert_close(result, torch.tensor([11.0, 12.0]))
 
-    def test_tp_locality_controls_uds_and_flashinfer(self):
-        # Include the reported TP3 layout and a supported FlashInfer TP2 layout.
+    def test_tp_locality_controls_uds_and_collective_policy(self):
+        # Include TP3 and TP2 groups that cross node boundaries inside PP stages.
         # The middle PP stages cross nodes even though TP <= local world size.
         for world_size, pp_size, tp_size, local_size, local_ranks in (
             (12, 4, 3, 4, {0, 1, 2, 9, 10, 11}),
@@ -216,7 +210,9 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
                         register_comm_ops=MagicMock(),
                         init_cpu_tp_broadcaster=MagicMock(),
                     )
-                    flashinfer = MagicMock()
+                    module = MagicMock()
+                    module.get_canonical_p2p.return_value = None
+                    policy = CollectiveConfig("nccl")
                     group = object()
                     with (
                         patch.dict(sys.modules, {"librtp_compute_ops": compute_ops}),
@@ -229,12 +225,12 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
                         patch.object(torch.distributed, "get_rank", return_value=rank),
                         patch.object(
                             collective,
-                            "_get_flashinfer_allreduce",
-                            return_value=flashinfer,
+                            "_get_all_reduce_module",
+                            return_value=module,
                         ),
                     ):
                         collective._register_process_groups_to_cpp()
-                        collective._init_flashinfer_allreduce(config)
+                        collective._init_all_reduce(config, policy)
 
                     compute_ops.register_comm_ops.assert_called_once()
                     if rank in local_ranks:
@@ -245,13 +241,14 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
                         compute_ops.init_cpu_tp_broadcaster.assert_not_called()
 
                     if tp_size > 1:
-                        flashinfer.init_flashinfer_allreduce.assert_called_once_with(
+                        module.init_all_reduce.assert_called_once_with(
                             group,
                             torch.device("cuda", config.local_rank),
-                            single_node=rank in local_ranks,
+                            config,
+                            policy,
                         )
                     else:
-                        flashinfer.init_flashinfer_allreduce.assert_not_called()
+                        module.init_all_reduce.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -2021,7 +2021,11 @@ class MMProcessEngineGreenNetTest(TestCase):
         _, entry = engine._async_cache.try_acquire(key)
         try:
             engine._run_async_compute([inp], key, entry, 1, time.monotonic() + 0.1)
-            with self.assertRaises(concurrent.futures.TimeoutError):
+            # Both waits share the deadline; either can report it first.
+            # Their TimeoutError classes are distinct on Python 3.10.
+            with self.assertRaises(
+                (concurrent.futures.TimeoutError, asyncio.TimeoutError)
+            ):
                 entry.wait(timeout=1)
             self.assertIsNone(engine._embedding_cache.peek(key))
         finally:

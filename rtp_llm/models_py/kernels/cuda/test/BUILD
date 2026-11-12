@@ -1,3 +1,5 @@
+load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
+
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 
 py_test_deps = [
@@ -112,4 +114,10 @@ cuda13_sm100_py_test(
     name = "fused_silu_mul_token_quant_batched_test",
     srcs = ["fused_silu_mul_token_quant_batched_test.py"],
     deps = py_test_deps,
+)
+
+models_py_test(
+    name = "qwen4_mtp_norm_test",
+    src = "qwen4_mtp_norm_test.py",
+    gpu = "RTX_5000_PRO_CU13",
 )

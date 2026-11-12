@@ -403,6 +403,7 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
          cache_manager_,
          std::nullopt,
          params.model_config_.hc_mult});
+    model_init_params.owns_py_model    = !warm_up_;
     model_init_params.metrics_reporter = metrics_reporter_;
 
     if (!params.py_model.is_none()) {

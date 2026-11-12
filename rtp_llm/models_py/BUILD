@@ -1,4 +1,5 @@
-load("@arch_config//:arch_select.bzl", "requirement")
+load("@arch_config//:arch_select.bzl", "requirement", "triton_deps")
+load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch")
 
 py_library(
     name = "utils",
@@ -52,10 +53,18 @@ requirement(["flash-mla-legacy"])
 requirement(rtp_kernel)
 requirement(flashattn)
 
-
 filegroup(
     name = "cutlass_moe_config",
     srcs = glob(["kernels/cuda/fp8_kernel/cutlass_groupgemm/*"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "kernel_layout_sources",
+    srcs = [
+        "kernels/__init__.py",
+        "kernels/cuda/fp8_input_quant.py",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -109,12 +118,71 @@ _DSV4_PPU_KERNELS = [
     "kernels/ppu/jit/**/*.py", "kernels/ppu/runtime.py",
 ]
 
+cc_library(
+    name = "marlin_nvfp4_kernels",
+    srcs = [
+        "kernels/cuda/marlin_nvfp4/marlin_kernels/schema.cpp",
+        "kernels/cuda/marlin_nvfp4/marlin_kernels/libtorch_stable/moe/marlin_moe_wna16/ops.cu",
+        "kernels/cuda/marlin_nvfp4/marlin_kernels/libtorch_stable/moe/marlin_moe_wna16/sm80_kernel_bfloat16_fe2m1f_bfloat16.cu",
+        "kernels/cuda/marlin_nvfp4/marlin_kernels/libtorch_stable/quantization/marlin/gptq_marlin_repack.cu",
+    ],
+    hdrs = glob([
+        "kernels/cuda/marlin_nvfp4/marlin_kernels/**/*.h",
+        "kernels/cuda/marlin_nvfp4/marlin_kernels/**/*.hpp",
+        "kernels/cuda/marlin_nvfp4/marlin_kernels/**/*.cuh",
+    ]),
+    includes = ["kernels/cuda/marlin_nvfp4/marlin_kernels"],
+    # Keep the JIT's compilation semantics and emit both supported cubins,
+    # independently of the engine's selected GPU architecture.
+    copts = cuda_default_copts_without_arch() + [
+        "-O3",
+        "-std=c++17",
+        "-DUSE_CUDA",
+        # Match the runtime admission's minimum stable Torch ABI (2.10).
+        "-DTORCH_TARGET_VERSION=0x020a000000000000",
+        "-D__CUDA_NO_HALF_OPERATORS__",
+        "-D__CUDA_NO_HALF_CONVERSIONS__",
+        "-D__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "-D__CUDA_NO_HALF2_OPERATORS__",
+        "-nvcc_options=expt-relaxed-constexpr",
+        "-nvcc_options=static-global-template-stub=false",
+        "-nvcc_options=ftz=false",
+        "--cuda-gpu-arch=sm_90",
+        "--cuda-gpu-arch=sm_120",
+    ],
+    alwayslink = True,
+    target_compatible_with = select({
+        "//:using_cuda13_x86": [],
+        "//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = select({
+        "//:using_cuda13_x86": ["@torch_2.11_py310_cuda//:torch"],
+        "//:using_cuda13_arm": ["@torch_2.11_py310_cuda-aarch64//:torch"],
+        "//conditions:default": [],
+    }) + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+)
+
+cc_binary(
+    name = "marlin_nvfp4",
+    linkopts = [
+        "-Wl,--as-needed",
+        "-Wl,-rpath='$$ORIGIN/../../torch/lib'",
+    ],
+    linkshared = True,
+    deps = [":marlin_nvfp4_kernels"],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "modules",
     srcs = glob([
         "modules/*.py",
         "modules/**/*.py",
-    ], exclude = _DSV4_PPU_MODULES) + select({
+    ], exclude = _DSV4_PPU_MODULES + ["modules/qwen4_exp/test/**"]) + select({
         "@//:using_ppu": glob(_DSV4_PPU_MODULES),
         "//conditions:default": [],
     }),
@@ -135,6 +203,7 @@ py_library(
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:moriep_wrapper",
         "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/models_py/distributed:cpu_status",
         "//rtp_llm/models_py/distributed:rank_layout",
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
@@ -180,7 +249,6 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
-
 # Export sitecustomize.py for test targets to fix nvidia-cutlass-dsl import
 exports_files(["modules/factory/sitecustomize.py"])
 
@@ -193,7 +261,6 @@ exports_files(
     ],
     visibility = ["//rtp_llm/models_py/modules/dsv4/ppu/test:__pkg__"],
 )
-
 
 py_library(
     name = "modules_cuda",
@@ -259,10 +326,21 @@ py_library(
     srcs = glob([
         "kernels/*.py",
         "kernels/**/*.py",
-    ], exclude = _DSV4_PPU_KERNELS) + select({
+    ], exclude = _DSV4_PPU_KERNELS + ["kernels/**/test/**"]) + select({
         "@//:using_ppu": glob(_DSV4_PPU_KERNELS),
         "//conditions:default": [],
     }),
+    data = [
+        "//rtp_llm/libs:marlin_nvfp4",
+        "kernels/cuda/marlin_nvfp4/marlin_kernels/LICENSE",
+    ] + glob(["kernels/cuda/qsa/*.cu", "kernels/cuda/qsa/*.cuh"]),
+    deps = [
+        ":utils",
+        "//rtp_llm:torch",
+        "//rtp_llm/models_py/triton_kernels:common",
+        "//rtp_llm/models_py/triton_kernels:fla",
+    ] + triton_deps(["triton"]),
+    visibility = ["//rtp_llm/models_py:__subpackages__"],
 )
 
 py_library(
@@ -295,6 +373,7 @@ py_library(
     srcs = glob([
         "model_desc/*.py",
         "model_desc/cuda_graph/*.py",
+        "model_desc/qwen4_exp_runtime/*.py",
         "speculative/*.py",
     ]) + select({
         "@//:using_ppu": glob(["model_desc/deepseek_v4_ppu/**/*.py"]),

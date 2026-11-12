@@ -37,6 +37,7 @@ cc_library(
         "pipeline/PPTransport.cc",
     ],
     deps = [
+        "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
         ":pipeline_types",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache:cache_config",

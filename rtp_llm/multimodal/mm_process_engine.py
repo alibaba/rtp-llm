@@ -131,7 +131,33 @@ def _feature_hashes_from_result(result: Any) -> List[torch.Tensor]:
     """Build one sidecar hash tensor for every validated embedding tensor."""
     _validate_embedding_result(result)
     embeddings = maybe_tensor_to_list(result[0], ndim_threshold=2)
-    return [get_multimodal_feature_hash(embedding) for embedding in embeddings]
+    hashes = [get_multimodal_feature_hash(embedding) for embedding in embeddings]
+    extra = maybe_tensor_to_list(result[2], ndim_threshold=1) if len(result) > 2 else []
+    if (
+        extra
+        and len(extra) == len(embeddings)
+        and all(
+            isinstance(ids, torch.Tensor)
+            and ids.dtype == torch.int32
+            and ids.ndim == 1
+            and ids.numel() == embedding.shape[0]
+            for ids, embedding in zip(extra, embeddings)
+        )
+    ):
+        import hashlib
+
+        # Equal media embeddings with different vocabulary IDs or positions
+        # must not share language-model KV state (e.g. PLE and MRoPE).
+        identity = hashlib.sha256()
+        for tensor in [*extra, *maybe_tensor_to_list(result[1], ndim_threshold=2)]:
+            if tensor.device.type != "cpu":
+                raise ValueError(
+                    "semantic IDs and media coordinates must be produced on CPU"
+                )
+            identity.update(tensor.contiguous().numpy().tobytes())
+        salt = int.from_bytes(identity.digest()[:4], "little", signed=True)
+        hashes = [(value.to(torch.int64) ^ salt).to(torch.int32) for value in hashes]
+    return hashes
 
 
 def _worker_initializer(

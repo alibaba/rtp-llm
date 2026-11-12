@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
@@ -103,7 +104,7 @@ public:
         resource_context_.cache_manager = std::move(previous_cache_manager_);
     }
 
-    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&) = delete;
+    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&)            = delete;
     ScopedWarmUpCacheManagerBinding& operator=(const ScopedWarmUpCacheManagerBinding&) = delete;
 
 private:
@@ -205,8 +206,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         }
     };
     std::unique_ptr<NormalEngine, decltype(cleanup_on_failure)> construction_guard(this, cleanup_on_failure);
-    resource_context_.defer_grammar_to_pp_tail =
-        parallelism_config.pp_size > 1 && parallelism_config.pp_rank == 0;
+    resource_context_.defer_grammar_to_pp_tail = parallelism_config.pp_size > 1 && parallelism_config.pp_rank == 0;
     if (params.py_model && !params.py_model.is_none()) {
         py::gil_scoped_acquire gil;
         if (py::hasattr(params.py_model, "custom_output_handler")) {
@@ -308,7 +308,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     releaseHostMemoryCache();
 
     initScheduler();
-    step_profiler_.configureFromConfig(profiling_debug_logging_config);
     (void)startLoop();
     (void)construction_guard.release();
 }
@@ -323,8 +322,11 @@ void NormalEngine::initExecutor(const EngineInitParams& params) {
             [this]() { step_profiler_.finishStep(); },
             propose_params_.get()));
     } else if (sp_config.type != SP_TYPE_NONE) {
-        executor_.reset(new MtpExecutor(
-            params, propose_params_, resource_context_.cache_manager, kv_cache_group_num_));
+        auto mtp_executor = std::make_unique<MtpExecutor>(
+            params, propose_params_, resource_context_.cache_manager, kv_cache_group_num_);
+        mtp_executor->setModelForwardCallbacks([this]() { step_profiler_.startStep(); },
+                                               [this]() { step_profiler_.finishStep(); });
+        executor_ = std::move(mtp_executor);
     } else {
         executor_.reset(new NormalExecutor(
             params,
@@ -413,7 +415,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
     RuntimeConfig stream_runtime_config                            = runtime_config;
     stream_runtime_config.fifo_scheduler_config.prefill_chunk_size = 0;
 
-    auto stream = std::make_shared<NormalGenerateStream>(generate_input,
+    auto       stream       = std::make_shared<NormalGenerateStream>(generate_input,
                                                          model_config_,
                                                          stream_runtime_config,
                                                          resource_context_,
@@ -610,7 +612,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     auto fake_input = makeFakeInput(static_cast<size_t>(token_heavy_seq_len));
     fake_input->generate_config->num_return_sequences =
         use_global_budget_warmup ? 1 : runtime_config.fifo_scheduler_config.max_context_batch_size;
-    fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
+    fake_input->generate_config->calculate_loss = int(runtime_config.warm_up_with_loss);
     if (!use_global_budget_warmup) {
         const bool generation_prefill_cuda_graph_requested =
             shouldCreateGenerationPrefillCudaGraph(params.hw_kernel_config,
@@ -697,9 +699,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         max_consumed = memory_tracker->maxConsumedBytes();
         token_heavy_result.value().reset();
 
-        const int64_t block_size       = model_config_.attn_config.tokens_per_block;
-        const int64_t row_count =
-            std::min(token_budget, runtime_config.fifo_scheduler_config.max_context_batch_size);
+        const int64_t block_size = model_config_.attn_config.tokens_per_block;
+        const int64_t row_count  = std::min(token_budget, runtime_config.fifo_scheduler_config.max_context_batch_size);
         const int64_t row_heavy_tokens = std::min(token_budget, token_heavy_seq_len);
         const int64_t row_heavy_reuse  = (token_heavy_seq_len - row_heavy_tokens) / block_size * block_size;
         auto          row_heavy_input  = makeFakeInput(static_cast<size_t>(row_heavy_reuse + row_heavy_tokens));
@@ -707,8 +708,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 
         // Conservatively combine multiple rows with a full chunk per row and a long prefix.
         // Run once without splitting by the scheduler's global token budget.
-        auto row_heavy_result = runPrefillWarmupShape(
-            row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), 0);
+        auto row_heavy_result =
+            runPrefillWarmupShape(row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), 0);
         THROW_IF_STATUSOR_ERROR(row_heavy_result);
         max_consumed = std::max(max_consumed, memory_tracker->maxConsumedBytes());
         row_heavy_result.value().reset();
@@ -851,8 +852,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
     const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config);
     if (parallelism_config.pp_size > 1) {
         PPCacheCapacityNegotiator negotiator(parallelism_config.pp_size);
-        const auto                capacity = negotiator.negotiate(
-            config, confirmed_block_num, block_tree_layout->sizing, runtime_config);
+        const auto                capacity =
+            negotiator.negotiate(config, confirmed_block_num, block_tree_layout->sizing, runtime_config);
         config.finalizeBlockNums(capacity.paged_block_num, runtime_config, &capacity.block_num_overrides);
         block_tree_layout->block_nums = capacity.block_tree;
     } else {
@@ -900,6 +901,8 @@ absl::Status NormalEngine::startLoop() {
     if (parallelism_config.tp_rank == 0) {
         THROW_IF_STATUS_ERROR(initSystemPrompt());
     }
+    // System prompts run on the constructor thread; keep Kineto on the engine loop.
+    step_profiler_.configureFromConfig(profiling_debug_logging_config);
     RTP_LLM_LOG_INFO("start normal engine loop");
     running_     = true;
     loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
@@ -913,12 +916,15 @@ absl::Status NormalEngine::stop() {
     }
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
-    RETURN_IF_STATUS_ERROR(scheduler_->stop());
+    const auto scheduler_status = scheduler_->stop();
+    // Ask rank 0 to stop at a step boundary. Receivers must finish all model
+    // collectives for inputs that rank 0 has already published before exiting.
+    CpuTpBroadcaster::instance().requestStop();
     loop_thread_->join();
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
     resource_context_.cache_manager->stopMetricsReporter();
-    return absl::OkStatus();
+    return scheduler_status;
 }
 
 void NormalEngine::loop() {
@@ -926,15 +932,25 @@ void NormalEngine::loop() {
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
-    while (running_.load()) {
-        auto status = parallelism_config.pp_size > 1 ? pp_step() : step();
-        if (!status.ok()) {
-            RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
-            THROW_IF_STATUS_ERROR(trySaveStepError());
+    auto& tp_broadcaster = CpuTpBroadcaster::instance();
+    while (parallelism_config.pp_size > 1 ? running_.load() : !tp_broadcaster.shouldStop(!running_)) {
+        try {
+            auto status = parallelism_config.pp_size > 1 ? pp_step() : step();
+            if (!status.ok()) {
+                RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
+                THROW_IF_STATUS_ERROR(trySaveStepError());
+            }
+        } catch (const CpuTpBroadcastStopped& e) {
+            running_ = false;
+            RTP_LLM_LOG_INFO("normal engine TP loop stopped: %s", e.what());
+            break;
         }
     }
-
+    running_ = false;
+    // Publish only after the last complete step, while sockets remain alive
+    // for the receivers and subsequent model teardown collectives.
     THROW_IF_STATUS_ERROR(executor_->finish());
+    tp_broadcaster.finish();
 }
 
 absl::Status NormalEngine::trySaveStepError() const {
@@ -1109,17 +1125,10 @@ absl::Status NormalEngine::step() try {
     }
 
     {
-        // NormalExecutor drives startStep/finishStep via callbacks; MtpExecutor
-        // has no callbacks yet, so bracket the propose path here on the engine
-        // loop thread (Kineto requires enable/disable on the same thread).
-        if (sp_config.type != SP_TYPE_NONE) {
-            step_profiler_.startStep();
-        }
+        // Both executors drive profiling from actual model-work callbacks,
+        // after TP input synchronization has rejected idle steps.
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(schedule_output, tps_schedule_time_us);
-        if (sp_config.type != SP_TYPE_NONE) {
-            step_profiler_.finishStep();
-        }
     }
 
     // report step metrics

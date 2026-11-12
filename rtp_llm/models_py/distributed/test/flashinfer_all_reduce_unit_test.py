@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.models_py.distributed import collective_torch as collective
 from rtp_llm.models_py.distributed import flashinfer_all_reduce as flashinfer_ar
 
@@ -50,8 +51,9 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
     def test_custom_ar_is_pinned_disabled(self):
         self.assertFalse(flashinfer_ar.enabled_by_config())
 
-    def test_collective_init_no_longer_forwards_custom_ar_config(self):
+    def test_collective_init_keeps_generic_flashinfer_disabled(self):
         communicator_module = MagicMock()
+        communicator_module.get_canonical_p2p.return_value = None
         group = object()
         config = SimpleNamespace(
             tp_size=2,
@@ -63,15 +65,19 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
             local_world_size=2,
         )
 
-        with patch.object(
-            collective, "_get_flashinfer_allreduce", return_value=communicator_module
-        ), patch.object(collective, "_get_group", return_value=group):
-            collective._init_flashinfer_allreduce(config)
+        with (
+            patch.object(
+                collective, "_get_all_reduce_module", return_value=communicator_module
+            ),
+            patch.object(collective, "_get_group", return_value=group),
+        ):
+            collective._init_all_reduce(config, CollectiveConfig())
 
-        communicator_module.init_flashinfer_allreduce.assert_called_once_with(
+        communicator_module.init_all_reduce.assert_called_once_with(
             group,
             torch.device("cuda", 0),
-            single_node=True,
+            config,
+            CollectiveConfig(),
         )
 
     def test_shape_and_dtype_eligibility(self):
@@ -125,15 +131,17 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         fast_path = MagicMock()
         fast_path.should_use.return_value = True
         reduced = torch.full_like(tensor, 2)
-        fast_path.all_reduce.return_value = reduced
-        module = SimpleNamespace(get_flashinfer_allreduce=lambda: fast_path)
+        fast_path.all_reduce_into.side_effect = lambda source, target: target.copy_(
+            reduced
+        )
+        module = SimpleNamespace(get_all_reduce=lambda: fast_path)
 
-        with patch.object(collective, "_get_flashinfer_allreduce", return_value=module):
+        with patch.object(collective, "_get_all_reduce_module", return_value=module):
             result = collective.all_reduce(tensor, collective.Group.TP)
         self.assertIs(result, tensor)
         torch.testing.assert_close(tensor, reduced)
         fast_path.should_use.assert_called_once_with(tensor)
-        fast_path.all_reduce.assert_called_once_with(tensor)
+        fast_path.all_reduce_into.assert_called_once_with(tensor, tensor)
 
     def test_collective_supports_explicit_out_of_place(self):
         tensor = torch.ones((2, 4))
@@ -142,9 +150,9 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         fast_path.should_use.return_value = True
         reduced = torch.full_like(tensor, 2)
         fast_path.all_reduce.return_value = reduced
-        module = SimpleNamespace(get_flashinfer_allreduce=lambda: fast_path)
+        module = SimpleNamespace(get_all_reduce=lambda: fast_path)
 
-        with patch.object(collective, "_get_flashinfer_allreduce", return_value=module):
+        with patch.object(collective, "_get_all_reduce_module", return_value=module):
             result = collective.all_reduce(tensor, collective.Group.TP, inplace=False)
         self.assertIs(result, reduced)
         torch.testing.assert_close(tensor, original)
@@ -153,10 +161,10 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         tensor = torch.ones((2, 4))
         fast_path = MagicMock()
         fast_path.should_use.return_value = True
-        fast_path.all_reduce.return_value = torch.full_like(tensor, 2)
-        module = SimpleNamespace(get_flashinfer_allreduce=lambda: fast_path)
+        fast_path.all_reduce_into.side_effect = lambda source, target: target.fill_(2)
+        module = SimpleNamespace(get_all_reduce=lambda: fast_path)
 
-        with patch.object(collective, "_get_flashinfer_allreduce", return_value=module):
+        with patch.object(collective, "_get_all_reduce_module", return_value=module):
             result = collective.all_reduce(tensor, collective.Group.TP, inplace=True)
         self.assertIs(result, tensor)
         torch.testing.assert_close(tensor, torch.full_like(tensor, 2))

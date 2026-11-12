@@ -3,10 +3,13 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 
-from rtp_llm.models_py.modules.base.common.norm import (
+# LayerNorm re-exports the shared implementation for the platform dispatch in
+# base/__init__.py; the noqa covers its otherwise-unused appearance here.
+from rtp_llm.models_py.modules.base.common.norm import (  # noqa: F401
     BaseAddBiasResLayerNorm,
     BaseNorm,
     BaseResNorm,
+    LayerNorm,
 )
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 

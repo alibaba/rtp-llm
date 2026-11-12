@@ -4,6 +4,8 @@ from .fp4 import (
     CudaFp4EpLowLatencyStrategy,
     CudaFp4EpNormalStrategy,
     CudaFp4NoDPStrategy,
+    CudaNvfp4CutlassStrategy,
+    CudaNvfp4MarlinStrategy,
 )
 from .fp8_fp4 import (
     CudaGroupedFp4Strategy,
@@ -36,6 +38,8 @@ from .w4a8_int4_per_channel import (
 )
 
 __all__ = [
+    "CudaNvfp4CutlassStrategy",
+    "CudaNvfp4MarlinStrategy",
     # No quantization
     "CudaNoQuantEpLowLatencyStrategy",
     "CudaNoQuantCppStrategy",

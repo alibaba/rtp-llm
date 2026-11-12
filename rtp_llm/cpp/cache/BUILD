@@ -49,6 +49,13 @@ cc_library(
 )
 
 cc_library(
+    name = "tp_cache_transfer_layout",
+    hdrs = ["LinearTpCacheLayout.h", "MhaTpCacheLayout.h", "TpCacheTransferPlan.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "kv_cache_specs",
     srcs = [
         "KVCacheSpecDesc.cc",
@@ -66,6 +73,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":block_info",
+        ":tp_cache_transfer_layout",
         ":cache_group_type",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/model_utils:model_utils",

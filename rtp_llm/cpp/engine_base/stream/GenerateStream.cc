@@ -723,12 +723,19 @@ torch::Tensor GenerateStream::generateContextPositionIds() {
     return context_position_ids_.value();
 }
 
-void GenerateStream::generateNextPositionId(int32_t* now_pos) {
+int32_t GenerateStream::generateNextPositionId(int32_t* now_pos, std::optional<int32_t> sequence_length) {
+    // Do not use value_or(seqLength()) here: value_or eagerly evaluates its
+    // argument and would reintroduce a racy read for device-authoritative MTP.
+    const int32_t effective_sequence_length = sequence_length.has_value() ? sequence_length.value() : seqLength();
     if (!context_position_ids_) {
-        return;
+        const int32_t anchor = effective_sequence_length - 1;
+        const int32_t width  = mm_position_ids_style_ == PositionIdsStyle::MROPE ? 3 : 1;
+        std::fill_n(now_pos, width, anchor);
+        return anchor;
     }
     PositionIdsGenerator::generateNextPositionId(
-        now_pos, seqLength(), mm_position_ids_style_, context_position_ids_.value());
+        now_pos, effective_sequence_length, mm_position_ids_style_, context_position_ids_.value());
+    return effective_sequence_length - 1;
 }
 
 vector<int> GenerateStream::currentExecuteTokens(int batch_idx) const {
@@ -989,12 +996,14 @@ bool GenerateStream::needsAsyncBookkeepingJoinForKvReservation() const {
     }
 
     const auto state = getMtpAsyncDeviceState();
-    // pending_async_bookkeeping_ is shared by normal decode and MTP.  Normal
-    // decode never publishes MtpAsyncDeviceState, so it must not be forced to
-    // wait on an MTP-only cache snapshot.  MTP publishes the state before it
-    // claims the async worker, making a non-zero epoch a stable mode marker.
+    // Normal decode can reserve from its published next length while the host
+    // commit is pending. Without device input there is no published length:
+    // join before allocation reads seqLength(), otherwise a page crossing can
+    // leave the next model input with the previous step's shorter block table.
+    // MTP publishes its state before claiming the worker, so a nonzero epoch
+    // distinguishes its page-table snapshot from normal decode.
     if (state.epoch == 0) {
-        return false;
+        return getNormalAsyncDeviceState().next_real_seq_len <= 0;
     }
     if (!hasMtpCacheSnapshot(state) || state.next_seq_len_upper_bound <= 0 || stream_cache_resource_ == nullptr) {
         return true;

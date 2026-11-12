@@ -487,6 +487,14 @@ py_test(
 )
 
 py_test(
+    name = "qwen4_request_admission_test",
+    srcs = ["qwen4_request_admission_test.py"],
+    env = {"GPU_COUNT": "0"},
+    visibility = ["//rtp_llm/test/qwen4_exp:__pkg__"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "draft_model_loading_test",
     srcs = ["draft_model_loading_test.py"],
     deps = [

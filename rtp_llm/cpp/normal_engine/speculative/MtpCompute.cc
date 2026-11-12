@@ -299,7 +299,7 @@ torch::Tensor makeEngramVerifyWindows(const torch::Tensor& anchor, const torch::
 
 void maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source, int64_t hidden_rows) {
     if (model_output.mtp_target_hidden_states.defined()) {
-        RTP_LLM_CHECK_WITH_INFO(hidden_rows < 0 || model_output.mtp_target_hidden_states.size(0) == hidden_rows,
+        RTP_LLM_CHECK_WITH_INFO(hidden_rows <= 0 || model_output.mtp_target_hidden_states.size(0) == hidden_rows,
                                 "MTP target hidden output rows mismatch: got %ld, expected %ld",
                                 model_output.mtp_target_hidden_states.size(0),
                                 hidden_rows);
@@ -527,7 +527,9 @@ void advanceDraftInput(GptModelInputs&      draft_input,
     draft_input.last_hidden_states = draft_hidden_states;
     draft_input.combo_tokens       = draft_token_ids.reshape({batch_size});
 
-    if (draft_input.combo_position_ids.defined()) {
+    if (draft_input.combo_position_ids.defined() && draft_input.combo_position_ids.is_cuda()) {
+        draft_input.combo_position_ids = draft_input.combo_position_ids + 1;
+    } else if (draft_input.combo_position_ids.defined()) {
         auto next_position_ids =
             torch::empty({(int64_t)(batch_size * position_id_len_factor)}, torch::kInt32).pin_memory();
         int*       next_position_ids_ptr = next_position_ids.data_ptr<int>();

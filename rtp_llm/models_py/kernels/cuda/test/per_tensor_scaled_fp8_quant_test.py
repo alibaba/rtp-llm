@@ -102,6 +102,30 @@ class PerTensorFp8QuantTest(TestCase):
                 self._run_per_tensor_fp8_quant_test(*params)
             self._run_per_tensor_fp8_static_quant_precision_test()
 
+    def test_padded_rows_preserve_quantized_bytes_and_scale(self):
+        for rows, width in itertools.product((1, 3, 8, 17, 4093), (320, 2560)):
+            x = torch.randn(rows, width, dtype=torch.bfloat16, device="cuda")
+            output = torch.empty(
+                ((rows + 15) // 16 * 16, width),
+                dtype=torch.float8_e4m3fn,
+                device="cuda",
+            )
+            scale = torch.zeros(1, dtype=torch.float32, device="cuda")
+            per_tensor_quant_fp8(x, output, scale, False)
+            expected, expected_scale = self.call_per_tensor_quant_fp8(x)
+            self.assertTrue(torch.equal(scale, expected_scale))
+            self.assertTrue(
+                torch.equal(output[:rows].view(torch.uint8), expected.view(torch.uint8))
+            )
+            self.assertEqual(output[rows:].view(torch.uint8).count_nonzero().item(), 0)
+            # Static scaling uses the same padded-output contract.
+            output.view(torch.uint8).fill_(255)
+            per_tensor_quant_fp8(x, output, expected_scale, True)
+            self.assertTrue(
+                torch.equal(output[:rows].view(torch.uint8), expected.view(torch.uint8))
+            )
+            self.assertEqual(output[rows:].view(torch.uint8).count_nonzero().item(), 0)
+
 
 if __name__ == "__main__":
     main()

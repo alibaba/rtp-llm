@@ -48,6 +48,11 @@ public:
     absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
 
+    void setModelForwardCallbacks(std::function<void()> before, std::function<void()> after) {
+        before_model_forward_ = std::move(before);
+        after_model_forward_  = std::move(after);
+    }
+
     void setTargetModel(std::unique_ptr<ModelBase> model) {
         model_ = std::move(model);
     }
@@ -91,7 +96,7 @@ public:
                                                              bool drop_broad_sync,
                                                              bool linear_attention,
                                                              bool cache_snapshot_ready = false);
-    static int selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
+    static int               selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
 
 protected:
     static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
@@ -110,7 +115,19 @@ protected:
     bool finishDSparkPrefillCachePublication(const GptModelInputs&               model_input,
                                              const std::list<GenerateStreamPtr>& streams);
 
+    bool                reduceSpeculativeTargetPrepareStatus(bool local_ok);
+    static bool         asyncPrepareAllowed(bool requested, bool target_commit_hooks);
+    static absl::Status validateSpeculativeTargetExecutionPolicy(bool target_commit_hooks, bool eplb_enabled);
+    bool                speculativeTargetTransactionsEnabled() const;
+    absl::Status        rendezvousSpeculativeTargetPhaseStatus(const absl::Status& local_status, const char* phase);
+    absl::Status        rendezvousSpeculativeTargetSamplingStatus(const absl::Status& local_status);
+    absl::Status
+    prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, size_t batch_size, bool is_fake_stream = false);
+    void                rollbackSpeculativeTargetStateOrFailStop(const char* phase);
+    void                rollbackSpeculativeTargetStateBestEffort(const char* phase) noexcept;
+
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
+    void beginProfiledWork();
 
     absl::Status prefillStep(const std::list<GenerateStreamPtr>& streams,
                              MtpMetricsCollector&                metrics_collector,
@@ -129,9 +146,12 @@ protected:
     // decodeStep helpers — extracted to keep decodeStep readable. Each helper
     // owns a single phase (prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
-    void            waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
-    void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
-    void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
+    void waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
+    void launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
+    // post_rejection=true forks with the final post-commit input, which is
+    // safe under speculative target hooks; the default pre-rejection fork
+    // keeps its historical useAsyncPrepare() gate.
+    void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input, bool post_rejection = false);
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
@@ -167,6 +187,11 @@ protected:
                                       std::shared_ptr<torch::Event>                draft_event,
                                       std::shared_ptr<RecordedBatch>               recorded_batch = nullptr);
 
+    torch::Tensor gatherPreviousTargetTokens(const StreamGroups& stream_groups,
+                                             int64_t             batch_size,
+                                             bool                use_device_state,
+                                             bool&               from_device_state);
+
     void draftModelDecode(GptModelInputs&             model_input,
                           const StreamGroups&         stream_groups,
                           std::vector<torch::Tensor>& draft_probs_list,
@@ -197,6 +222,13 @@ protected:
     bool useAsyncDeviceState() const;
 
     bool useAsyncPrepare() const;
+
+    // Opt-in gate for the post-rejection draft-prefill prepare fork. The
+    // forked input is final (post-commit), so the hooks-mode restriction of
+    // useAsyncPrepare() does not apply. Keep synchronous preparation by default
+    // until the shared speculative path is qualified; read once at first use.
+    // Enable with RTP_LLM_MTP_ASYNC_DRAFT_PREPARE_POST_REJECTION=1.
+    bool useAsyncDraftPreparePostRejection() const;
 
     // Opt-in gate to skip the broad sync at decodeStep start.
     // Device state, epoch-guarded clears, and single-slotted workers preserve
@@ -247,8 +279,8 @@ private:
     std::unique_ptr<MtpBatchStreamProcessor>                                 batch_stream_processor_;
     std::shared_ptr<KVCacheManager>                                          cache_manager_;
     std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
-    bool                                                                     enable_detail_log_       = false;
-    int                                                                      tp_rank_                 = 0;
+    bool                                                                     enable_detail_log_ = false;
+    int                                                                      tp_rank_           = 0;
     ParallelismConfig                                                        parallelism_config_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
@@ -258,7 +290,7 @@ private:
 
     // for mtp
     DataType data_type_;
-    size_t   hidden_size_;
+    size_t   mtp_input_hidden_size_;
     size_t   propose_step_;
     // Fixed-width block diffusion: one draft forward emits gamma proposals;
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
@@ -303,6 +335,10 @@ private:
 
     AsyncRunner target_verify_prepare_runner_;
     AsyncRunner draft_prefill_prepare_runner_;
+    // True between the post-rejection prepare fork and runDraftPrefillForward:
+    // the forked worker already prepared the final input, so the hooks-mode
+    // synchronous rebuild inside the forward is skipped for that call only.
+    bool draft_prefill_prepare_forked_ = false;
     // Declare the worker after its target so destruction joins the worker first.
     std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
     AsyncRunner                             spec_logits_verify_async_runner_;
@@ -311,7 +347,14 @@ private:
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.
     AsyncRunner spec_bookkeeping_runner_;
 
-    torch::Stream dspark_cache_store_sync_stream_;
-    torch::Tensor dspark_cache_store_status_;
+    torch::Stream             dspark_cache_store_sync_stream_;
+    torch::Tensor             dspark_cache_store_status_;
+    std::function<bool(bool)> dspark_cache_store_status_reducer_for_test_;
+
+    // Test seam for the host transaction control transport.
+    std::function<bool(bool)> speculative_target_status_reducer_for_test_;
+    std::function<void()>     before_model_forward_;
+    std::function<void()>     after_model_forward_;
+    bool                      profile_work_started_ = false;
 };
 }  // namespace rtp_llm

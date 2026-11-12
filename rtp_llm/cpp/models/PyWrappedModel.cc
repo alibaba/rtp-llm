@@ -24,6 +24,8 @@
 #include <c10/cuda/CUDAStream.h>
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/attention_input_metadata.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
+#include <ATen/ops/_scaled_mm.h>
 #endif
 
 using namespace std;
@@ -127,11 +129,26 @@ CudaGraphState& PyWrappedModel::selectGraphState(const torch_ext::PyAttentionInp
 
 void PyWrappedModel::cleanupAfterConstructionFailure() noexcept {
     try {
+        py::gil_scoped_acquire gil;
+        held_attn_pyobj_   = py::object();
+        py_forward_method_ = py::object();
         generation_prefill_graph_runner_.reset();
         graph_runner_.reset();
+        if (py_model_ && py::hasattr(py_model_, "close")) {
+            if (owns_py_model_) {
+                py_model_.attr("close")();
+            }
+            py_model_ = py::object();
+        } else {
+            py_model_.release();
+        }
     } catch (const std::exception& e) {
+        // A failed drain must keep its storage owner alive. Never let member
+        // destruction decrement this handle after the GIL guard has unwound.
+        py_model_.release();
         RTP_LLM_LOG_ERROR("PyWrappedModel construction cleanup failed: %s", e.what());
     } catch (...) {
+        py_model_.release();
         RTP_LLM_LOG_ERROR("PyWrappedModel construction cleanup failed with unknown exception");
     }
 }
@@ -174,6 +191,71 @@ bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
     return has_mtp_hidden_buffer_;
 }
 
+bool PyWrappedModel::hasSpeculativeTargetCommitHooks() const {
+    return has_speculative_target_commit_hooks_;
+}
+
+std::optional<bool> PyWrappedModel::reduceSpeculativeTargetPrepareStatus(bool local_ok) {
+    if (!has_speculative_target_status_reducer_) {
+        return std::nullopt;
+    }
+    py::gil_scoped_acquire gil;
+    // Native waiting releases the GIL. Do not catch errors and switch transports:
+    // the published generation may already have been consumed by the peer.
+    return py_model_.attr("reduce_speculative_target_prepare_status")(local_ok).cast<bool>();
+}
+
+std::string PyWrappedModel::prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) {
+    if (!has_speculative_target_commit_hooks_) {
+        return {};
+    }
+    py::gil_scoped_acquire gil;
+    try {
+        py_model_.attr("prepare_speculative_target_commit")(accept_len);
+        return {};
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("Speculative target commit prepare failed: %s", e.what());
+        return e.what();
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("Speculative target commit prepare failed with an unknown exception");
+        return "unknown speculative target commit prepare failure";
+    }
+}
+
+std::string PyWrappedModel::finishSpeculativeTargetCommit(bool commit) {
+    if (!has_speculative_target_commit_hooks_) {
+        return {};
+    }
+    py::gil_scoped_acquire gil;
+    try {
+        py_model_.attr("finish_speculative_target_commit")(commit);
+        return {};
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("Speculative target commit finish failed (commit=%d): %s", commit, e.what());
+        return e.what();
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("Speculative target commit finish failed with an unknown exception (commit=%d)", commit);
+        return "unknown speculative target commit finish failure";
+    }
+}
+
+std::string PyWrappedModel::finalizeSpeculativeTargetCommit() {
+    if (!has_speculative_target_commit_hooks_) {
+        return {};
+    }
+    py::gil_scoped_acquire gil;
+    try {
+        py_model_.attr("finalize_speculative_target_commit")();
+        return {};
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("Speculative target commit finalize failed: %s", e.what());
+        return e.what();
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("Speculative target commit finalize failed with an unknown exception");
+        return "unknown speculative target commit finalize failure";
+    }
+}
+
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
@@ -187,12 +269,24 @@ PyWrappedModel::~PyWrappedModel() {
         graph_runner_.reset();
         // Runners retain Python methods and graph-owned tensors. Drain and
         // destroy them before releasing the model object they reference.
-        py_model_.release();
+        if (py_model_ && py::hasattr(py_model_, "close")) {
+            if (owns_py_model_) {
+                py_model_.attr("close")();
+            }
+            py_model_ = py::object();
+        } else {
+            py_model_.release();
+        }
         RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python object instance released.");
     } catch (const py::error_already_set& e) {
+        py_model_.release();
         RTP_LLM_LOG_ERROR("Python error during PyWrappedModel destruction: %s", e.what());
     } catch (const std::exception& e) {
+        py_model_.release();
         RTP_LLM_LOG_ERROR("C++ error during PyWrappedModel destruction: %s", e.what());
+    } catch (...) {
+        py_model_.release();
+        RTP_LLM_LOG_ERROR("Unknown error during PyWrappedModel destruction");
     }
 }
 
@@ -326,6 +420,13 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.cu_kv_seqlens_device    = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.padding_offset          = torch::empty({py_attn_inputs.total_tokens}, cuda_i32);
 #if USING_CUDA
+        if (!py_attn_inputs.prefix_lengths.is_cuda()) {
+            // A CUDA input length can accompany a host prefix on MTP prefix
+            // hits. Its device mirror is a deferred H2D destination: fill it
+            // on this stream before the metadata kernel reads it.
+            fusedCopy(d2d_copies_);
+            d2d_copies_.clear();
+        }
         invokeBuildAttentionInputMetadata(py_attn_inputs.input_lengths_device,
                                           py_attn_inputs.prefix_lengths_device,
                                           py_attn_inputs.cu_seqlens_device,
@@ -517,13 +618,19 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
 }
 
 // Helper function to build BertEmbeddingInputs from GptModelInputs
-torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const GptModelInputs& inputs) {
+torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const GptModelInputs& inputs,
+                                                                        const torch::Tensor&  prepared_position_ids) {
     RTP_LLM_PROFILE_SCOPE("py_model.buildBertEmbeddingInputs");
     torch_ext::BertEmbeddingInputs bert_embedding_inputs;
 
     // Convert combo_position_ids from Buffer to torch::Tensor
     if (inputs.combo_position_ids.defined()) {
-        bert_embedding_inputs.combo_position_ids = inputs.combo_position_ids.cuda();
+        // forward() already submits this transfer on the current stream. Reuse
+        // that tensor instead of issuing a second blocking .cuda() transfer.
+        // Other callers retain the host owner until asynchronous use completes.
+        bert_embedding_inputs.combo_position_ids = prepared_position_ids.defined() ?
+                                                       prepared_position_ids :
+                                                       tensorHoldHostAndToCuda(inputs.combo_position_ids);
     }
 
     // Convert combo_tokens_type_ids from Buffer to torch::Tensor
@@ -697,6 +804,8 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
     {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(build)");
         attention_inputs = buildPyAttentionInputs(inputs);
+        // Fake/warmup streams alias reserved block zero and have no live cache rows.
+        attention_inputs.is_s_padded = inputs.warmup || inputs.is_fake_stream;
     }
     if (!inputs.warmup && inputs.pd_separation) {
         attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
@@ -845,7 +954,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         auto embedding_inputs      = buildPyEmbeddingInputs(inputs);
         auto multimodal_inputs     = buildPyMultimodalInputs(inputs);
-        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs, combo_position_ids);
         if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
             prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true);
         }
@@ -1036,6 +1145,55 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
 // --- Methods absorbed from GptModel ---
 
+torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& hidden) {
+    RTP_LLM_PROFILE_SCOPE("py_model.computeLogits");
+    const auto&   head   = *weights_.lm_head;
+    const auto&   kernel = head.kernel;
+    torch::Tensor logits;
+    {
+        RTP_LLM_PROFILE_SCOPE("py_model.computeLogits(lm_head_mm)");
+        if (kernel.scalar_type() == torch::kFloat8_e4m3fn) {
+#if USING_CUDA && defined(ENABLE_FP8)
+            TORCH_CHECK(head.scales.defined() && head.scales.numel() == 1
+                            && head.scales.scalar_type() == torch::kFloat32 && head.scales.device() == hidden.device()
+                            && kernel.device() == hidden.device(),
+                        "FP8 LM head requires its FP32 weight scale on the hidden device");
+            auto rows = hidden.to(torch::kBFloat16).contiguous();
+            if (rows.size(0) == 0) {
+                logits = torch::empty({0, kernel.size(0)}, rows.options().dtype(torch::kFloat32));
+            } else if (kernel.size(0) % 16 != 0 || kernel.size(1) % 16 != 0) {
+                auto weight = (kernel.to(torch::kFloat32) * head.scales).to(torch::kBFloat16);
+                logits      = torch::mm(rows, weight.t()).to(torch::kFloat32);
+            } else {
+                // Quantize only live rows; zero padding must not change their amax domain.
+                const auto padded_rows = ((rows.size(0) + 15) / 16) * 16;
+                auto       quantized   = torch::empty({padded_rows, rows.size(1)}, kernel.options());
+                auto       scale       = torch::zeros({1}, rows.options().dtype(torch::kFloat32));
+                per_tensor_quant_fp8(rows, quantized, scale, false);
+                logits = at::_scaled_mm(quantized, kernel.t(), scale, head.scales, {}, {}, torch::kBFloat16)
+                             .narrow(0, 0, rows.size(0))
+                             .to(torch::kFloat32);
+            }
+#else
+            TORCH_CHECK(false, "FP8 LM head requires a CUDA build with FP8 support");
+#endif
+        } else {
+            TORCH_CHECK(kernel.scalar_type() == torch::kBFloat16 || kernel.scalar_type() == torch::kHalf
+                            || kernel.scalar_type() == torch::kFloat32 || kernel.scalar_type() == torch::kFloat64,
+                        "native LM head requires floating-point weights");
+#if USING_CUDA
+            if (kernel.scalar_type() == torch::kBFloat16) {
+                logits = torch_ext::cublas_gemm_bf16_bf16_fp32(hidden.to(torch::kBFloat16), kernel);
+            } else
+#endif
+            {
+                logits = torch::mm(hidden.to(kernel.dtype()), kernel.t()).to(torch::kFloat32);
+            }
+        }
+    }
+    return logits;
+}
+
 torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input) {
     RTP_LLM_PROFILE_SCOPE("py_model.tpSyncEmbeddingOrLogits");
     const auto tp_size     = device_props_.tp_size;
@@ -1125,18 +1283,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
 
         printTorchTensorData(last_hidden, "last_hidden");
 
-        torch::Tensor logits;
-        {
-            RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(lm_head_mm)");
-#if USING_CUDA
-            if (lm_head->kernel.dtype() == torch::kBFloat16) {
-                logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
-            } else
-#endif
-            {
-                logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
-            }
-        }
+        auto logits = computeLogits(last_hidden);
 
         GptModelOutputs outputs;
         // Internal warmup/system-prefix requests have no selected token and do not score.
@@ -1205,18 +1352,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     printTorchTensorData(hidden, "last_hidden");
 
     torch::Tensor last_hidden = hidden;
-    torch::Tensor logits;
-    {
-        RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(lm_head_mm)");
-#if USING_CUDA
-        if (lm_head->kernel.dtype() == torch::kBFloat16) {
-            logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
-        } else
-#endif
-        {
-            logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
-        }
-    }
+    auto          logits      = computeLogits(last_hidden);
     printTorchTensorData(logits, "logits");
     if (device_props_.tp_size > 1) {
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(tp_sync_logits)");

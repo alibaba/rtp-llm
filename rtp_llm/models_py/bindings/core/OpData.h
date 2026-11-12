@@ -401,6 +401,13 @@ struct RejectionSamplingParams {
     bool draft_probs_point_mass = false;
 };
 
+struct RejectionSamplingLaunchConfig {
+    int batch_size;
+    int num_speculative_tokens;
+    int target_vocab_size;
+    int target_token_stride;
+};
+
 struct MappingDraft2TargetParams {
     torch::Tensor tokens;
     torch::Tensor d2t_map;

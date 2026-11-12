@@ -56,6 +56,10 @@ public:
         return pollStreamOutput(nullptr, "request", writer, stream);
     }
 
+    void setModelType(const std::string& model_type) {
+        maga_init_params_.model_config_.model_type = model_type;
+    }
+
     ErrorInfo prepare(const GenerateInputPB& input, std::shared_ptr<GenerateInput>& output) {
         return prepareInput(input, output);
     }
@@ -876,6 +880,23 @@ TEST(LocalRpcServerTest, AllocatorDumpAggregationRejectsMismatchedIds) {
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::DATA_LOSS);
     EXPECT_EQ(response.results_size(), 0);
+}
+
+TEST(LocalRpcServerTest, AllowsQwen4MediaPastAdmission) {
+    for (const auto& model_type : {"qwen4_exp", "qwen4_exp_mtp"}) {
+        TestLocalRpcServer server;
+        server.setModelType(model_type);
+        GenerateInputPB input;
+        input.add_token_ids(1);
+        input.mutable_generate_config()->set_max_new_tokens(1);
+        input.add_multimodal_inputs();
+        std::shared_ptr<GenerateInput> output;
+        const auto                     result = server.prepare(input, output);
+        ASSERT_TRUE(result.ok()) << result.ToString();
+        ASSERT_NE(output, nullptr);
+        ASSERT_TRUE(output->multimodal_inputs.has_value());
+        EXPECT_EQ(output->multimodal_inputs->size(), 1);
+    }
 }
 
 TEST(LocalRpcServerTest, PrepareInputReturnsInvalidParamsMappedToInvalidArgument) {
