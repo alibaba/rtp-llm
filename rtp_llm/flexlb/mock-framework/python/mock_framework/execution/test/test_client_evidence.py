@@ -214,10 +214,10 @@ def test_stop_uses_rpc_summary_while_request_query_requires_files(
     ctx.records.directory = tmp_path
     ctx.runtime.clients.pending = True
 
-    async def post(*args):
+    async def invoke(*args):
         return {"clients": {"http://c:1": state(), "http://c:2": state()}, "errors": []}
 
-    monkeypatch.setattr(client_runtime, "post", post)
+    monkeypatch.setattr(client_runtime, "invoke", invoke)
     result = asyncio.run(
         StepRegistry.standard().get("client/stop/playback").invoke(ctx, {})
     )

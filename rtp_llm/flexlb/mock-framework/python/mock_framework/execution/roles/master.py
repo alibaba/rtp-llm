@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 from .. import ExecutionError
 from ..processes import ProcessIdentity, start_instance
 from ..step_trace import write_json
-from ..transport import post
+from ..transport import invoke
 from . import ENGINE_ROLES, register_ready_instance
 
 
@@ -257,24 +257,14 @@ class MasterRole:
             raise ExecutionError("Master targets are empty or unknown")
         return [available[address] for address in addresses]
 
-    async def _query_master(self, master, operation, args, remaining):
-        return await post(
-            master["control"],
-            {
-                "interface": operation,
-                "args": args,
-                "timeout_ms": max(1, int(remaining() * 1000)),
-            },
-        )
-
     async def list_addresses(self, targets, is_leader, *, remaining):
         masters = self._select_endpoints(targets)
         if is_leader is None:
             return [master["rpc"] for master in masters]
         result = []
         for master in masters:
-            value = await self._query_master(
-                master, "master/leadership/get", {}, remaining
+            value = await invoke(
+                master["control"], "master/leadership/get", {}, remaining()
             )
             own = value["instances"]
             if own not in ([], [{"id": master["id"]}]):
@@ -288,8 +278,8 @@ class MasterRole:
     async def list_engine_addresses(self, targets, role, *, remaining):
         result = {}
         for master in self._select_endpoints(targets):
-            value = await self._query_master(
-                master, "master/engine/get", {"role": role}, remaining
+            value = await invoke(
+                master["control"], "master/engine/get", {"role": role}, remaining()
             )
             if set(value["instances"]) != {master["id"]}:
                 raise ExecutionError("Master returned another instance observation")

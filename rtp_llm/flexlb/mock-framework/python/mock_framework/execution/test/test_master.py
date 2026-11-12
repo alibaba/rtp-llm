@@ -376,7 +376,7 @@ def test_real_master_routes_to_isolated_rtp_processes(
                 result["tokens"] == 3 and 0 < result["ttft_ns"] <= result["elapsed_ns"]
             )
             if replicas == 2:
-                from mock_framework.execution.transport import post
+                from mock_framework.execution.transport import invoke
 
                 nodes = {
                     f"master-{i}": json.loads(
@@ -388,13 +388,8 @@ def test_real_master_routes_to_isolated_rtp_processes(
                 async def claims():
                     result = []
                     for node in nodes.values():
-                        value = await post(
-                            node["control"],
-                            {
-                                "interface": "master/leadership/get",
-                                "args": {},
-                                "timeout_ms": 3000,
-                            },
+                        value = await invoke(
+                            node["control"], "master/leadership/get", {}, 3
                         )
                         result.extend(item["id"] for item in value["instances"])
                     return result
@@ -571,11 +566,11 @@ def test_adapter_keeps_per_master_observations(
 
     calls = []
 
-    async def post(url, payload):
+    async def invoke(url, operation, args, timeout):
         calls.append(url)
         return responses[len(calls) - 1]
 
-    monkeypatch.setattr(master, "post", post)
+    monkeypatch.setattr(master, "invoke", invoke)
     args = (
         MasterListAddressesArgs(is_leader=True)
         if operation == "get"
@@ -608,10 +603,10 @@ def test_adapter_rejects_wrong_identity_and_invalid_or_duplicate_engine(
 
     from mock_framework.execution.roles import master
 
-    async def post(url, payload):
+    async def invoke(url, operation, args, timeout):
         return response
 
-    monkeypatch.setattr(master, "post", post)
+    monkeypatch.setattr(master, "invoke", invoke)
     args = (
         MasterListAddressesArgs(["m0:1"], is_leader=True)
         if operation == "get"
@@ -632,11 +627,11 @@ def test_explicit_master_selection_and_empty_selection_do_not_broadcast(monkeypa
 
     calls = []
 
-    async def post(url, payload):
+    async def invoke(url, operation, args, timeout):
         calls.append(url)
         return {"instances": []}
 
-    monkeypatch.setattr(master, "post", post)
+    monkeypatch.setattr(master, "invoke", invoke)
     assert (
         asyncio.run(
             master_list_addresses(
@@ -745,11 +740,11 @@ def test_standby_query_preserves_actual_master_claims(monkeypatch, leaders, expe
 
     claims = dict(zip(["http://m0", "http://m1"], leaders))
 
-    async def post(url, payload):
+    async def invoke(url, operation, args, timeout):
         identity = "master-0" if url == "http://m0" else "master-1"
         return {"instances": [{"id": identity}] if claims[url] else []}
 
-    monkeypatch.setattr(master, "post", post)
+    monkeypatch.setattr(master, "invoke", invoke)
     assert (
         asyncio.run(
             master_list_addresses(
@@ -773,7 +768,7 @@ def test_master_get_without_leadership_filter_lists_selected_active_masters(
     async def unexpected_read(*args):
         raise AssertionError("An unfiltered listing does not query leadership")
 
-    monkeypatch.setattr(master, "post", unexpected_read)
+    monkeypatch.setattr(master, "invoke", unexpected_read)
     assert (
         asyncio.run(
             master_list_addresses(adapter_context(), MasterListAddressesArgs(targets))

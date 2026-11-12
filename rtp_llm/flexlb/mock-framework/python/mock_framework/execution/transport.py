@@ -7,7 +7,12 @@ from urllib.parse import urlsplit
 from . import ExecutionError
 
 
-async def post(url, payload):
+async def invoke(url, operation, args, timeout):
+    payload = {
+        "interface": operation,
+        "args": args,
+        "timeout_ms": max(1, int(timeout * 1000)),
+    }
     address = urlsplit(url)
     if (
         address.scheme != "http"

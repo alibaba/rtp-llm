@@ -7,7 +7,7 @@ from typing import Annotated
 from ...config.validation import Bounds, schema, validate
 from .. import ExecutionError
 from ..processes import ProcessIdentity, start_instance
-from ..transport import post
+from ..transport import invoke
 from . import register_ready_instance
 
 
@@ -77,12 +77,7 @@ class ClientRole:
         return nodes[0]["control"]
 
     async def _control(self, operation, args, timeout):
-        envelope = {
-            "interface": operation,
-            "args": args,
-            "timeout_ms": max(1, int(timeout * 1000)),
-        }
-        return await post(self._coordinator(), envelope)
+        return await invoke(self._coordinator(), operation, args, timeout)
 
     async def start_playback(self, body, timeout):
         clients = self.topology.active("client")

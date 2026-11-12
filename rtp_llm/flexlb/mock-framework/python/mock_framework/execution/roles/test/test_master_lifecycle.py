@@ -16,7 +16,7 @@ from mock_framework.execution.runner import run_case
 from mock_framework.execution.step.step_registry import StepRegistry, register_step
 from mock_framework.execution.test.helpers import FRAMEWORK
 from mock_framework.execution.test.helpers.zookeeper import command as zookeeper_command
-from mock_framework.execution.transport import post
+from mock_framework.execution.transport import invoke
 
 
 def step(name, interface, **values):
@@ -238,14 +238,7 @@ async def progress(ctx, args: Empty) -> int:
     successes = 0
     for node in ctx.runtime.topology.active():
         if node["role"] == "client":
-            value = await post(
-                node["control"],
-                {
-                    "interface": "worker/state",
-                    "args": {"sequence": 1},
-                    "timeout_ms": 1000,
-                },
-            )
+            value = await invoke(node["control"], "worker/state", {"sequence": 1}, 1)
             successes += value["outcomes"]["success"]
     return successes
 

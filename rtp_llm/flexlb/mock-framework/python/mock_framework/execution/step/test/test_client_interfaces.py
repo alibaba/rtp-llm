@@ -59,11 +59,11 @@ def args():
 def test_start_requires_collecting_previous_playback(monkeypatch):
     calls = []
 
-    async def post(url, body):
+    async def invoke(url, operation, args, timeout):
         calls.append(url)
         return {"accepted": True}
 
-    monkeypatch.setattr(client_runtime, "post", post)
+    monkeypatch.setattr(client_runtime, "invoke", invoke)
     ctx = context()
     start = StepRegistry.standard().get("client/start/playback")
     assert asyncio.run(start.invoke(ctx, args()))
@@ -73,10 +73,10 @@ def test_start_requires_collecting_previous_playback(monkeypatch):
 
 
 def test_unknown_start_response_is_still_cleaned_up(monkeypatch):
-    async def post(*a):
+    async def invoke(*a):
         raise OSError("connection lost")
 
-    monkeypatch.setattr(client_runtime, "post", post)
+    monkeypatch.setattr(client_runtime, "invoke", invoke)
     ctx = context()
     with pytest.raises(OSError):
         asyncio.run(
@@ -103,11 +103,11 @@ def state():
 def test_stop_collects_all_original_clients_without_task_id(monkeypatch, tmp_path):
     calls = []
 
-    async def post(url, body):
-        calls.append(body)
+    async def invoke(url, operation, args, timeout):
+        calls.append((url, operation, args, timeout))
         return {"clients": {"http://c:1": state(), "http://c:2": state()}, "errors": []}
 
-    monkeypatch.setattr(client_runtime, "post", post)
+    monkeypatch.setattr(client_runtime, "invoke", invoke)
     ctx = context()
     ctx.runtime.clients.pending = True
     ctx.records.directory = tmp_path
@@ -115,7 +115,8 @@ def test_stop_collects_all_original_clients_without_task_id(monkeypatch, tmp_pat
         StepRegistry.standard().get("client/stop/playback").invoke(ctx, {})
     )
     assert set(result) == {"c:1", "c:2"} and not ctx.runtime.clients.pending
-    assert calls[0]["args"] == {} and ctx.events[0]["event"] == "client_result"
+    assert calls == [("http://c:1", "client/stop", {}, ctx.timeout)]
+    assert ctx.events[0]["event"] == "client_result"
 
 
 @pytest.mark.parametrize("bad", ["missing", "overflow", "unfinished", "writer"])
@@ -130,10 +131,10 @@ def test_stop_does_not_hide_missing_workers_or_execution_errors(monkeypatch, bad
     if bad == "writer":
         value["clients"]["http://c:2"]["errors"] = ["Client evidence write failed"]
 
-    async def post(*a):
+    async def invoke(*a):
         return value
 
-    monkeypatch.setattr(client_runtime, "post", post)
+    monkeypatch.setattr(client_runtime, "invoke", invoke)
     with pytest.raises(ExecutionError):
         asyncio.run(
             StepRegistry.standard().get("client/stop/playback").invoke(context(), {})
@@ -213,11 +214,11 @@ def test_master_selection_is_forwarded_without_freezing_default_discovery(
 ):
     calls = []
 
-    async def post(url, body):
-        calls.append(body["args"])
+    async def invoke(url, operation, args, timeout):
+        calls.append(args)
         return {"accepted": True}
 
-    monkeypatch.setattr(client_runtime, "post", post)
+    monkeypatch.setattr(client_runtime, "invoke", invoke)
     ctx = context()
     ctx.nodes.append({"id": "master-1", "role": "master", "rpc": "master:2"})
     values = args()
@@ -233,10 +234,10 @@ def test_master_selection_is_forwarded_without_freezing_default_discovery(
 
 
 def test_unknown_master_selection_is_rejected_before_start(monkeypatch):
-    async def post(*args):
+    async def invoke(*args):
         raise AssertionError("must not contact Client")
 
-    monkeypatch.setattr(client_runtime, "post", post)
+    monkeypatch.setattr(client_runtime, "invoke", invoke)
     ctx = context()
     with pytest.raises(ExecutionError, match="Unknown Master"):
         asyncio.run(
