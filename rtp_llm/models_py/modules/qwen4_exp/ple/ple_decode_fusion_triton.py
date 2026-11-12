@@ -42,6 +42,7 @@ def _ple_decode_gate_conv(
     Weight,
     Output,
     NextHistory,
+    ReadBlocks,
     H: tl.constexpr,
     WIDTH: tl.constexpr,
     EPS: tl.constexpr,
@@ -50,6 +51,7 @@ def _ple_decode_gate_conv(
     HIDDEN_STRIDE: tl.constexpr,
     HISTORY_BATCH_STRIDE: tl.constexpr,
     HISTORY_ROW_STRIDE: tl.constexpr,
+    POOL_ROWS: tl.constexpr,
     ADD_RESIDUAL: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -63,7 +65,11 @@ def _ple_decode_gate_conv(
     )
 
     # Kernel size 4 and dilation 3 select history rows 0, 3 and 6.
-    previous = History + batch * HISTORY_BATCH_STRIDE + hc_col
+    source_row = batch
+    if POOL_ROWS:
+        block = tl.load(ReadBlocks + batch)
+        source_row = tl.where((block >= 0) & (block < POOL_ROWS), block, 0)
+    previous = History + source_row * HISTORY_BATCH_STRIDE + hc_col
     next_row = NextHistory + batch * 9 * WIDTH + hc_col
     weight = Weight + hc_col * 4
     acc = tl.full((BLOCK,), 0, tl.float32)
@@ -101,23 +107,24 @@ def _ple_decode_conv_roll(
     history = History + row * 9 * WIDTH + col
     weight = Weight + col * 4
     offset = row * WIDTH + col
-    acc = tl.full((BLOCK,), 0, tl.float32)
-    for tap in tl.static_range(3):
-        value = tl.load(history + 3 * tap * WIDTH, valid, other=0).to(tl.float32)
-        filt = tl.load(weight + tap, valid, other=0).to(tl.float32)
-        acc = tl.fma(value, filt, acc)
     normed = tl.load(Normed + offset, valid, other=0)
+    gated = tl.load(Gated + offset, valid, other=0)
+    acc = tl.full((BLOCK,), 0, tl.float32)
+    oldest = tl.load(history, valid, other=0)
+    filt = tl.load(weight, valid, other=0).to(tl.float32)
+    acc = tl.fma(oldest.to(tl.float32), filt, acc)
+    # Each lane reads one history row and writes it back one row earlier.
+    # Reuse the old values from rows 3 and 6 for convolution in the same pass.
+    for pos in tl.static_range(1, 9):
+        prev = tl.load(history + pos * WIDTH, valid, other=0)
+        if pos % 3 == 0:
+            filt = tl.load(weight + pos // 3, valid, other=0).to(tl.float32)
+            acc = tl.fma(prev.to(tl.float32), filt, acc)
+        tl.store(history + (pos - 1) * WIDTH, prev, valid)
     filt = tl.load(weight + 3, valid, other=0).to(tl.float32)
     acc = tl.fma(normed.to(tl.float32), filt, acc)
-    gated = tl.load(Gated + offset, valid, other=0)
     out = _decode_output(gated, acc, Hidden + offset, valid, ADD_RESIDUAL)
     tl.store(Output + offset, out, valid)
-
-    # The CTA owns all nine history rows for its channel tile. Read the
-    # convolution taps first, then roll old rows in ascending order.
-    for pos in tl.static_range(8):
-        prev = tl.load(history + (pos + 1) * WIDTH, valid, other=0)
-        tl.store(history + pos * WIDTH, prev, valid)
     tl.store(history + 8 * WIDTH, normed, valid)
 
 
@@ -126,6 +133,7 @@ def try_ple_decode_fusion(
     *,
     add_residual=False,
     reuse_history=False,
+    history_read_blocks=None,
 ):
     """Return the output and rolled history, optionally reusing a private input."""
     width, hidden_size, state_len = 10240, 2560, 9
@@ -144,6 +152,20 @@ def try_ple_decode_fusion(
     batch = hidden.shape[0]
     if batch > 1 and not hidden.is_contiguous():
         return None
+    pool_rows = 0
+    if history_read_blocks is not None:
+        if not (
+            batch < 16
+            and not reuse_history
+            and history.ndim == 3
+            and history.shape[0] > 0
+            and history_read_blocks.shape == (batch,)
+            and history_read_blocks.device == hidden.device
+            and history_read_blocks.dtype == torch.int64
+            and history_read_blocks.is_contiguous()
+        ):
+            return None
+        pool_rows = history.shape[0]
     tensors = (
         (hidden, (batch, 1, width)),
         (key, (batch, 1, width)),
@@ -151,7 +173,7 @@ def try_ple_decode_fusion(
         (norm_key, (width,)),
         (norm_query, (width,)),
         (norm_conv, (width,)),
-        (history, (batch, state_len, width)),
+        (history, (pool_rows or batch, state_len, width)),
         (weight, (width, 1, 4)),
     )
     if not weight.is_contiguous() or not all(
@@ -165,16 +187,15 @@ def try_ple_decode_fusion(
         return None
 
     output = torch.empty_like(hidden, memory_format=torch.contiguous_format)
-    # At larger batches the gate's full-width reduction and the memory-bound
-    # roll favor different tiles. Use the existing gate with a 512-channel
-    # convolution CTA, as in vLLM's decode layout.
+    # Use separate tiling for the gate reduction and the history copy.
     if reuse_history and batch >= 16 and history.is_contiguous():
         gates = try_ple_gate(key, value, hidden, norm_key, norm_query, norm_conv, eps)
         if gates is not None:
             block = 512
             _ple_decode_conv_roll[(batch, triton.cdiv(width, block))](
                 *gates, hidden, history, weight, output,
-                WIDTH=width, BLOCK=block, ADD_RESIDUAL=add_residual, num_warps=8,
+                WIDTH=width, BLOCK=block, ADD_RESIDUAL=add_residual,
+                num_warps=8 if batch < 32 else 4,
             )
             return output, history
 
@@ -190,6 +211,7 @@ def try_ple_decode_fusion(
         weight,
         output,
         next_history,
+        history_read_blocks,
         H=hidden_size,
         WIDTH=width,
         EPS=eps,
@@ -198,6 +220,7 @@ def try_ple_decode_fusion(
         HIDDEN_STRIDE=hidden.stride(0),
         HISTORY_BATCH_STRIDE=history.stride(0),
         HISTORY_ROW_STRIDE=history.stride(1),
+        POOL_ROWS=pool_rows,
         ADD_RESIDUAL=add_residual,
         BLOCK=triton.next_power_of_2(hidden_size),
         num_warps=4,

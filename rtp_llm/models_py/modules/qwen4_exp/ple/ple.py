@@ -1049,6 +1049,7 @@ class Qwen4ExpPLELayer(nn.Module):
         embeddings: Optional[torch.Tensor] = None,
         add_residual: bool = False,
         reuse_conv_buffer: bool = False,
+        conv_read_blocks: Optional[torch.Tensor] = None,
     ) -> tuple:
         """One decode token: PLE output plus the rolled conv buffer.
 
@@ -1060,6 +1061,8 @@ class Qwen4ExpPLELayer(nn.Module):
         outer addition of ``hyper_state`` after the PLE output is rounded.
         Set ``reuse_conv_buffer`` only for a disposable history buffer. The
         qualified fused path may write the rolled history into that buffer.
+        With validated ``conv_read_blocks`` from the decode plan,
+        ``conv_buffer`` is the read-only history pool and the result is private.
         """
         key, value = self._project_key_value(
             hyper_state, token_history_step, embeddings, decode=True
@@ -1079,10 +1082,13 @@ class Qwen4ExpPLELayer(nn.Module):
                 self.norm_eps,
                 self.conv_dilation,
                 add_residual=add_residual,
-                reuse_history=reuse_conv_buffer,
+                reuse_history=reuse_conv_buffer and conv_read_blocks is None,
+                history_read_blocks=conv_read_blocks,
             )
             if fused is not None:
                 return fused
+        if conv_read_blocks is not None:
+            conv_buffer = conv_buffer.index_select(0, conv_read_blocks)
         gated_value, gated_value_normed = self._gate_projected_values(
             key, value, hyper_state
         )

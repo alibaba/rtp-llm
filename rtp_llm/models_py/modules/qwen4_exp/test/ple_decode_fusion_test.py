@@ -145,10 +145,11 @@ class PLEDecodeFusionTest(unittest.TestCase):
                 )
             return hidden + output, state
 
-        def actual(hidden, history, embeddings, *, reuse=False):
+        def actual(hidden, history, embeddings, *, reuse=False, read_blocks=None):
             return layer.decode_step(
                 hidden, None, history, embeddings=embeddings, add_residual=True,
                 reuse_conv_buffer=reuse,
+                conv_read_blocks=read_blocks,
             )
 
         fused = ple_decode_fusion_triton.try_ple_decode_fusion
@@ -178,6 +179,38 @@ class PLEDecodeFusionTest(unittest.TestCase):
                     self.assertIs(result[1], scratch)
                     self.assert_exact(result, expected)
                 self.assert_exact((history,), (before,))
+
+        for small_batch in (1, 4, 8, 15):
+            with self.subTest(paged_batch=small_batch):
+                pool = torch.randn(19, 9, 10240, **kw)
+                read = torch.arange(small_batch, device=pool.device) // 2
+                small_hidden = torch.randn(small_batch, 1, 10240, **kw)
+                small_embeddings = torch.randn(small_batch, 1, 2560, **kw)
+                torch.cuda.synchronize()
+                with patch.object(
+                    ple_decode_fusion_triton, "try_ple_decode_fusion",
+                    side_effect=require_fusion,
+                ):
+                    actual(small_hidden, pool, small_embeddings, read_blocks=read)
+                graph = torch.cuda.CUDAGraph()
+                torch.cuda.synchronize()
+                with torch.cuda.graph(graph):
+                    paged = actual(small_hidden, pool, small_embeddings, read_blocks=read)
+                for _ in range(2):
+                    read.add_(5).remainder_(pool.shape[0])
+                    pool.normal_()
+                    saved = pool.clone()
+                    expected = reference(small_hidden, pool.index_select(0, read), small_embeddings)
+                    graph.replay()
+                    self.assert_exact(paged, expected)
+                    self.assert_exact((pool,), (saved,))
+                with patch.object(
+                    ple_decode_fusion_triton, "try_ple_decode_fusion", return_value=None
+                ):
+                    self.assert_exact(
+                        actual(small_hidden, pool, small_embeddings, read_blocks=read),
+                        expected,
+                    )
 
         pool = torch.randn(2 * batch + 1, 9, 10240, **kw)
         read_ids = torch.arange(batch, device=pool.device) // 2

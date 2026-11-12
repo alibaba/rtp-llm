@@ -750,11 +750,18 @@ class PLEExecution:
                 page_size,
                 graph_mode=graph_capture,
             )
+            conv_read_blocks = None
             if decode_plan is not None:
                 state_read_blocks, state_write_blocks, ctx_write_blocks, history = (
                     decode_plan
                 )
-                conv_buffer = state_pool.index_select(0, state_read_blocks)
+                if batch < 16:
+                    # The fused small-batch kernel reads the old pages into
+                    # its own tiles and returns a private rolled history.
+                    conv_buffer = state_pool
+                    conv_read_blocks = state_read_blocks
+                else:
+                    conv_buffer = state_pool.index_select(0, state_read_blocks)
             else:
                 conv_buffer, history, state_write_blocks, ctx_write_blocks = (
                     self._read_decode_cache(
@@ -773,9 +780,8 @@ class PLEExecution:
                 history,
                 conv_buffer,
                 add_residual=True,
-                # Both cache-read paths return a private index_select buffer.
-                # The persistent pool is still updated only below.
-                reuse_conv_buffer=True,
+                reuse_conv_buffer=conv_read_blocks is None,
+                conv_read_blocks=conv_read_blocks,
                 embeddings=PLELookupResult(
                     ple.ple_embedding._reduce_rows(local_rows[0])
                     if local_rows is not None and local_rows[0] is not None
