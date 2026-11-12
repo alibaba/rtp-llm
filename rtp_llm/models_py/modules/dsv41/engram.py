@@ -24,6 +24,7 @@ import logging
 import math
 import mmap
 import os
+import queue
 import re
 import shutil
 import threading
@@ -1468,6 +1469,15 @@ def _timed_cpu_hash(state, windows, image_token, num_threads, timing):
             timing["hash_finished_ns"] = time.perf_counter_ns()
 
 
+class _EngramChunkError:
+    """Queue item marking a worker failure in chunked staging mode."""
+
+    __slots__ = ("exc",)
+
+    def __init__(self, exc):
+        self.exc = exc
+
+
 class _EngramCPULookupSlot:
     """Fixed host storage; request outputs belong to their allocation stream."""
 
@@ -1609,6 +1619,96 @@ class _EngramCPULookupSlot:
             if stage_event is not self.copied:
                 stage_event.record(self.stream)
             self.copied.record(self.stream)
+
+    def chunk_span(self):
+        """Worker chunk rows for chunked staging.
+
+        Must divide ``_ENGRAM_CHUNK_ROWS`` so worker chunk boundaries never
+        straddle a forward slice boundary (the consumer copies whole queue
+        items into one slice and releases each pinned buffer with a single
+        event record). Degrades to the gcd only for exotic capacities that
+        do not divide the forward chunking.
+        """
+        span = min(self.capacity, _ENGRAM_CHUNK_ROWS)
+        if _ENGRAM_CHUNK_ROWS % span:
+            span = math.gcd(span, _ENGRAM_CHUNK_ROWS)
+        return span
+
+    def _wait_stage_event(self, work, stage):
+        """Wait for the consumer's H2D from a pinned buffer to retire.
+
+        Polls instead of synchronize() so an abandoned work whose consumer
+        will never record the event cannot wedge the single lookup worker
+        (and with it _drain/reap for every later request).
+        """
+        event = self.stage_events[stage]
+        while not event.query():
+            if work is not None and work.abandoned:
+                return False
+            time.sleep(0.002)
+        return True
+
+    def run_chunked(self, hashes, work):
+        """Host-gather only; the consumer stages device slices on demand.
+
+        Chunked twin of :meth:`run` for requests whose monolithic device
+        output cannot exist: a 1,048,320-token prefill output is
+        [1048320, 40960] bf16 = 79.98 GiB (n13, 2026-11-11: fatal GPU OOM
+        with 54.95 GiB free, 1.5 s into the first 1M forward, while the
+        FP4-resident MoE had already cut allocated from 175.72 to
+        128.28 GiB). The Engram policy permits transient row staging, so
+        this fills the pinned double buffers and hands (begin, end, stage)
+        items to work.chunk_queue; the consumer issues the H2D copies on
+        its own stream and records stage_events as the buffer-release
+        protocol, bounding device peak to one forward slice.
+        """
+        from rtp_llm.models_py.modules.dsv41.engram_cpu import lookup_host_rows_cpu
+
+        try:
+            with torch.inference_mode(), torch.cuda.device(self.device):
+                timing = (
+                    {"started_ns": time.perf_counter_ns()}
+                    if self.collect_timing
+                    else None
+                )
+                ids = hashes.result()[:, self.hash_index].contiguous()
+                if work is not None and work.abandoned:
+                    return None
+                lookup = lookup_host_rows_cpu
+                if getattr(self, "packed", False):
+                    from rtp_llm.models_py.modules.dsv41.engram_cpu import (
+                        lookup_host_rows_cpu_packed,
+                    )
+
+                    lookup = lookup_host_rows_cpu_packed
+                count = ids.shape[0]
+                span = self.chunk_span()
+                for chunk, begin in enumerate(range(0, count, span)):
+                    end = min(begin + span, count)
+                    stage = chunk % len(self.hosts)
+                    if not self._wait_stage_event(work, stage):
+                        return None
+                    if work is not None and work.abandoned:
+                        return None
+                    host = self.hosts[stage][: end - begin]
+                    if timing is not None and begin == 0:
+                        timing["lookup_started_ns"] = time.perf_counter_ns()
+                    lookup(
+                        self.embedding.weight,
+                        self.embedding.scales,
+                        ids[begin:end],
+                        host,
+                        num_threads=self.num_threads,
+                    )
+                    if timing is not None:
+                        timing["lookup_finished_ns"] = time.perf_counter_ns()
+                    work.chunk_queue.put((begin, end, stage))
+                if timing is not None:
+                    self.last_timing = timing
+                return None
+        except BaseException as exc:  # surface to the consumer, then to reap()
+            work.chunk_queue.put(_EngramChunkError(exc))
+            raise
 
     def close(self):
         self.stream.synchronize()
@@ -1764,11 +1864,23 @@ class _EngramCPULookupWork:
         self.signature = (ids.shape, ids.stride(), ids.storage_offset(), ids.dtype)
         self.version = _tensor_version(ids)
         self.consumed = False
+        # Chunked staging mode (count > slot.capacity): no monolithic device
+        # output; the worker only fills pinned host buffers and the consumer
+        # materializes per-slice device chunks. See _EngramCPULookupSlot.
+        # run_chunked for the 79.98 GiB n13 OOM this bounds.
+        self.chunked = False
+        self.chunk_queue = None
 
     def submit(self, executor, hashes, count, submitted_ns):
         if getattr(self.slot, "collect_timing", False):
             self.timing = {"submitted_ns": submitted_ns}
             self.slot.last_timing = self.timing
+        if count > self.slot.capacity:
+            self.chunked = True
+            self.chunk_queue = queue.Queue()
+            self.allocation_stream = torch.cuda.current_stream(self.slot.device)
+            self.future = executor.submit(self.slot.run_chunked, hashes, self)
+            return
         output, self.allocation_stream = self.slot.allocate_output(count)
         if self.runtime is None:
             self.future = executor.submit(self.slot.run, hashes, output, submitted_ns)
@@ -1797,6 +1909,8 @@ class _EngramCPULookupWork:
         ):
             self.clear()
             return None
+        if self.chunked:
+            return self._consume_chunked(hidden)
         started = time.perf_counter_ns() if self.slot.collect_timing else None
         current = torch.cuda.current_stream(hidden.device)
         polls = 0
@@ -1840,6 +1954,53 @@ class _EngramCPULookupWork:
         self.ids = self.future = None
         return rows
 
+    def _consume_chunked(self, hidden):
+        """Wait for the first staged chunk, then hand over the row source.
+
+        The first-chunk wait keeps the monolithic path's GPU-deadline
+        fallback semantics (abandon + fallback while the GPU is provably
+        idle and no copy was committed). Once the source stages its first
+        slice the work is committed, exactly like the first-copy commitment
+        in run(). The Future is intentionally retained: the worker keeps
+        gathering ahead of the consumer, so reap()/_drain() stay the owners
+        of its terminal error.
+        """
+        started = time.perf_counter_ns() if self.slot.collect_timing else None
+        current = torch.cuda.current_stream(hidden.device)
+        polls = 0
+        if self.runtime is not None and self.slot.deadline_enabled:
+            first = None
+            while first is None:
+                try:
+                    first = self.chunk_queue.get(timeout=0.001)
+                except queue.Empty:
+                    polls += 1
+                    if current.query() and self._abandon_before_copy():
+                        if self.timing is not None:
+                            self.timing.update(
+                                outcome="gpu_deadline_fallback",
+                                consumer_wait_started_ns=started,
+                                consumer_wait_finished_ns=time.perf_counter_ns(),
+                                consumer_stream_queries=polls,
+                            )
+                        self.clear()
+                        return None
+        else:
+            first = self.chunk_queue.get()
+        if isinstance(first, _EngramChunkError):
+            self.clear()
+            raise first.exc
+        if self.timing is not None:
+            self.timing.update(
+                outcome="consumed_chunked",
+                consumer_wait_started_ns=started,
+                consumer_wait_finished_ns=time.perf_counter_ns(),
+                consumer_stream_queries=polls,
+            )
+            self.slot.last_timing = self.timing
+        self.consumed = True
+        return _EngramChunkedRowSource(self, first)
+
     def clear(self):
         self.ids = None
         if self.runtime is not None and self.future is not None:
@@ -1862,6 +2023,75 @@ class _EngramCPULookupWork:
                     self.slot.copied.synchronize()
         finally:
             self.ids = self.future = None
+
+
+class _EngramChunkedRowSource:
+    """Consumer-side device staging of a chunked CPU-lookup work.
+
+    Supports the same ``rows[begin:end]`` interface the monolithic output
+    tensor provides, but each slice materializes a fresh device tensor
+    copied from the pinned host buffers on the consumer's stream (peak
+    device cost: one slice, <=2.5 GiB at 32K rows), and dropping the slice
+    returns its memory to that same stream in stream order. Buffer release
+    reuses the slot's stage events, recorded here after each H2D issue
+    instead of inside the worker's _copy. Slices must be requested in
+    ascending contiguous order — Engram.forward's chunk loop guarantees
+    this — and worker chunk boundaries never straddle a slice because
+    chunk_span() divides _ENGRAM_CHUNK_ROWS.
+    """
+
+    def __init__(self, work, first):
+        self.work = work
+        self.slot = work.slot
+        self.device = work.slot.device
+        self._pending = [first]
+        self._expected = 0
+
+    def _next_item(self):
+        while not self._pending:
+            item = self.work.chunk_queue.get()
+            if isinstance(item, _EngramChunkError):
+                raise item.exc
+            self._pending.append(item)
+        return self._pending.pop(0)
+
+    def __getitem__(self, key):
+        if not isinstance(key, slice):
+            raise TypeError("chunked engram rows only support slicing")
+        begin, end = key.start or 0, key.stop
+        if end is None or begin != self._expected or end <= begin:
+            raise ValueError(
+                "chunked engram rows must be consumed in ascending "
+                f"contiguous slices: expected begin={self._expected}, "
+                f"got [{begin}:{end})"
+            )
+        self._expected = end
+        dev = torch.empty(
+            (end - begin, self.slot.width),
+            dtype=self.slot.dtype,
+            device=self.device,
+        )
+        current = torch.cuda.current_stream(self.device)
+        filled = begin
+        with self.work.lock:
+            if self.work.abandoned:
+                raise RuntimeError("chunked engram lookup was abandoned")
+            while filled < end:
+                item_begin, item_end, stage = self._next_item()
+                if item_begin != filled or item_end > end:
+                    raise RuntimeError(
+                        "chunked engram staging is misaligned: worker chunk "
+                        f"[{item_begin}:{item_end}) vs slice [{begin}:{end})"
+                    )
+                host = self.slot.hosts[stage][: item_end - item_begin]
+                at = filled - begin
+                dev[at : at + (item_end - item_begin)].copy_(host, non_blocking=True)
+                # Release the pinned buffer once this H2D read retires; the
+                # worker polls this event before refilling the buffer.
+                self.slot.stage_events[stage].record(current)
+                filled = item_end
+            self.work.copy_submitted = True
+        return dev
 
 
 class EngramCPULookupPrefetch:
@@ -1899,7 +2129,10 @@ class EngramCPULookupPrefetch:
         )
         self.hashes.engram_timing = timing
         try:
-            for layer_id, slot in self.runtime.slots.items():
+            # Ascending layer order: chunked workers block on their consumer
+            # releasing pinned buffers, and the single-thread executor must
+            # therefore serve layers in the order forwards will consume them.
+            for layer_id, slot in sorted(self.runtime.slots.items()):
                 layer = model.v4.layers[layer_id]
                 ids = layer.engram_hashes
                 if not (
