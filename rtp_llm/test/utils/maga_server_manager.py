@@ -144,6 +144,9 @@ class MagaServerManager(object):
         ptuning_path: Optional[str] = None,
         log_to_file: bool = True,
         timeout: int = 1600,
+        *,
+        wait_ready: bool = True,
+        server_module: str = "rtp_llm.start_server",
     ):
         if model_path is None:
             model_path = os.environ.get("CHECKPOINT_PATH")
@@ -228,7 +231,7 @@ class MagaServerManager(object):
             current_env.get("CUDA_VISIBLE_DEVICES", "<not set>"),
         )
         p = subprocess.Popen(
-            ["/opt/conda310/bin/python", "-m", "rtp_llm.start_server"] + parsed_args,
+            ["/opt/conda310/bin/python", "-m", server_module] + parsed_args,
             env=current_env,
             stdout=self._file_stream,
             stderr=self._file_stream,
@@ -245,6 +248,9 @@ class MagaServerManager(object):
             )
             self.stop_server()
             return False
+
+        if not wait_ready:
+            return True
 
         return self.wait_sever_done(timeout)
 

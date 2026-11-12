@@ -49,6 +49,19 @@ py_library(
 )
 
 py_test(
+    name = "maga_server_manager_test",
+    srcs = ["maga_server_manager_test.py"],
+    env = {"GPU_COUNT": "0"},
+    deps = [
+        ":maga_server_manager",
+        ":test_util",
+        "//rtp_llm:psutil",
+        "//rtp_llm:requests",
+        "//rtp_llm:sdk",
+    ],
+)
+
+py_test(
     name = "port_util_test",
     srcs = ["port_util_test.py"],
     deps = [
