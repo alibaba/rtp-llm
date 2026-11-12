@@ -171,13 +171,14 @@ class PrometheusRole:
                 "__metrics_path__": address.path or "/metrics",
             },
         }
-        write_json(self.directory / "targets.json", list(self.targets.values()))
-        self.metadata["targets"] = dict(self.targets)
-        self._save()
+        self._write_targets()
 
     def retire(self, node):
         self.targets.pop(node)
         self.metadata.get("final_scrapes", {}).pop(node, None)
+        self._write_targets()
+
+    def _write_targets(self):
         write_json(self.directory / "targets.json", list(self.targets.values()))
         self.metadata["targets"] = dict(self.targets)
         self._save()

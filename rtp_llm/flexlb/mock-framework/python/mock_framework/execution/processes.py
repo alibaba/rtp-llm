@@ -62,20 +62,17 @@ class ProcessSupervisor:
         return tuple(
             identity
             for identity, _ in self._children.values()
-            if identity is not None and (not roles or identity.role in roles)
+            if not roles or identity.role in roles
         )
 
     def fail(self, message):
         if not self.closing and not self.failure.done():
             self.failure.set_result(message)
 
-    async def _monitor(self, process_name, child, describe):
+    async def _monitor(self, process_name, child):
         code = await child.wait()
         if process_name not in self._expected:
-            detail = "" if describe is None else "; " + describe()
-            self.fail(
-                f"Component {process_name} exited unexpectedly with code {code}{detail}"
-            )
+            self.fail(f"Component {process_name} exited unexpectedly with code {code}")
 
     async def guard(self, operation, timeout):
         task = asyncio.create_task(operation)
@@ -92,16 +89,22 @@ class ProcessSupervisor:
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-    def _process_event(self, event, process_name, identity, **fields):
-        if identity is not None:
-            fields.update(identity.event_fields())
-        self.records.emit(event=event, node=process_name, **fields)
+    def _process_event(self, event, identity, **fields):
+        self.records.emit(
+            event=event, node=identity.process_name, **identity.event_fields(), **fields
+        )
 
     async def spawn(
-        self, process, command, cwd, env, directory, *, describe=None, zero_exit=False
+        self,
+        identity: ProcessIdentity,
+        command,
+        cwd,
+        env,
+        directory,
+        *,
+        zero_exit=False,
     ):
-        identity = process if isinstance(process, ProcessIdentity) else None
-        process_name = process if identity is None else identity.process_name
+        process_name = identity.process_name
         if process_name in self._children or process_name in self._expected:
             raise ExecutionError(
                 f"Process identity has already been used: {process_name}"
@@ -112,11 +115,9 @@ class ProcessSupervisor:
             if zero_exit:
                 self._zero_exit.add(process_name)
             self._monitors.append(
-                asyncio.create_task(self._monitor(process_name, child, describe))
+                asyncio.create_task(self._monitor(process_name, child))
             )
-            self._process_event(
-                "process_started", process_name, identity, pid=child.pid
-            )
+            self._process_event("process_started", identity, pid=child.pid)
 
         with (directory / "stdout.log").open("wb") as out, (
             directory / "stderr.log"
@@ -147,9 +148,9 @@ class ProcessSupervisor:
             )
         if mode not in ("terminate", "kill"):
             raise ExecutionError(f"Unknown intentional stop mode: {mode}")
-        self._expected.add(process_name)
         if mode == "terminate":
             return await self.stop([process_name], grace)
+        self._expected.add(process_name)
         errors = []
         try:
             os.killpg(child.pid, signal.SIGKILL)
@@ -167,7 +168,7 @@ class ProcessSupervisor:
                     f"{process_name}: unexpected exit status during kill: {child.returncode}"
                 )
             del self._children[process_name]
-            self._record_stop(process_name, identity, child.returncode, errors)
+            self._record_stop(identity, child.returncode, errors)
         return errors
 
     async def stop(self, process_names, grace):
@@ -213,7 +214,7 @@ class ProcessSupervisor:
                 errors.append(
                     f"{process_name}: did not stop within the grace period; SIGKILL was required"
                 )
-            if process_name in self._expected and child.returncode not in (
+            if child.returncode not in (
                 0,
                 -signal.SIGTERM,
                 128 + signal.SIGTERM,
@@ -227,14 +228,14 @@ class ProcessSupervisor:
                 )
             if child.returncode is not None:
                 del self._children[process_name]
-            self._record_stop(process_name, identity, child.returncode, errors)
+            self._record_stop(identity, child.returncode, errors)
         return errors
 
-    def _record_stop(self, process_name, identity, code, errors):
+    def _record_stop(self, identity, code, errors):
         try:
-            self._process_event("process_stopped", process_name, identity, code=code)
+            self._process_event("process_stopped", identity, code=code)
         except OSError as error:
-            errors.append(f"{process_name}: record process_stopped: {error}")
+            errors.append(f"{identity.process_name}: record process_stopped: {error}")
 
     async def close(self):
         self.closing = True

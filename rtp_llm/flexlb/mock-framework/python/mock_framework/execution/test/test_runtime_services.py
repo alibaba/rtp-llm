@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from mock_framework.execution import ExecutionError
 from mock_framework.execution.environment import EndpointRegistry, RunEnvironment
-from mock_framework.execution.processes import ProcessSupervisor
+from mock_framework.execution.processes import ProcessIdentity, ProcessSupervisor
 
 
 def test_topology_readers_and_publishers_cannot_mutate_current_instances(tmp_path):
@@ -162,7 +162,7 @@ def test_cancelled_spawn_remains_owned_until_final_cleanup(tmp_path, monkeypatch
         monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
         task = asyncio.create_task(
             supervisor.spawn(
-                "peer",
+                ProcessIdentity("peer"),
                 [sys.executable, "-c", "import time; time.sleep(30)"],
                 str(tmp_path),
                 dict(os.environ),
@@ -241,7 +241,7 @@ def test_exit_before_cleanup_is_not_reclassified_as_normal_stop(tmp_path):
     async def exercise():
         supervisor = ProcessSupervisor(SimpleNamespace(emit=lambda **event: None))
         child = await supervisor.spawn(
-            "peer",
+            ProcessIdentity("peer"),
             [sys.executable, "-c", "pass"],
             str(tmp_path),
             dict(os.environ),

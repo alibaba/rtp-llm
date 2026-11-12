@@ -184,7 +184,7 @@ check_for_plugin_updates = false
         }
         env["GF_SECURITY_ADMIN_PASSWORD"] = password
         await supervisor.spawn(
-            "grafana",
+            ProcessIdentity("grafana"),
             [
                 str(grafana),
                 "server",
