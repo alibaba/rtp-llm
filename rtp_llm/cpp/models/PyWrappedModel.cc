@@ -1399,7 +1399,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             // forward has returned.  Doing it here (rather than at the start
             // of the first decode) means captureDecode() cannot re-enter an
             // active Python model call, and the full-context prefill scratch
-            // has already been released.
+            // has already been released.  initCapture()/captureDecode() call
+            // into the Python model, so the GIL must be held here just as it
+            // is during startup capture.
+            py::gil_scoped_acquire capture_gil;
             graph_runner_->finishDeferredDecodeInit();
         }
 
