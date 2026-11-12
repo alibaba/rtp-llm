@@ -557,10 +557,10 @@ public:
         bool finish_attempted{false};
     };
 
-    bool write(const StorageRequest& request, WriteCompletion done = {}) {
+    bool write(const StorageRequest& request, WriteCompletion done = {}, WritePinFilter retain_pins = {}) {
         bool source_may_be_touched = false;
         try {
-            return writeTransaction(request, source_may_be_touched, std::move(done));
+            return writeTransaction(request, source_may_be_touched, std::move(done), std::move(retain_pins));
         } catch (...) {
             rethrowPayloadFailure(source_may_be_touched);
         }
@@ -581,7 +581,8 @@ public:
         }
     }
 
-    bool writeTransaction(const StorageRequest& request, bool& source_may_be_touched, WriteCompletion done) {
+    bool writeTransaction(const StorageRequest& request, bool& source_may_be_touched, WriteCompletion done,
+                          WritePinFilter retain_pins) {
         if (!backend_.remoteCacheEnabled()) {
             reportRemoteCacheSkipped("write");
             return false;
@@ -636,6 +637,8 @@ public:
                                     "KVCM write mask/location mismatch: keys=%zu locations=%zu",
                                     key_indices.size(),
                                     write_location.locations.size());
+            if (retain_pins)
+                retain_pins(key_indices);
             if (write_location.locations.empty()) {
                 if (!write_location.write_session_id.empty()) {
                     // The server can create an empty, short-lived session when
@@ -1987,8 +1990,9 @@ void KVCMStorageBackend::writeImpl(const StorageRequest& request) {
     impl_->write(request);
 }
 
-bool KVCMStorageBackend::startWriteImpl(const StorageRequest& request, WriteCompletion done) {
-    return impl_->write(request, std::move(done));
+bool KVCMStorageBackend::startWriteImpl(const StorageRequest& request, WriteCompletion done,
+                                      WritePinFilter retain_pins) {
+    return impl_->write(request, std::move(done), std::move(retain_pins));
 }
 
 void KVCMStorageBackend::shutdownImpl() noexcept {
