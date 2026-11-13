@@ -1,0 +1,16 @@
+package org.flexlb.master;
+
+import lombok.Getter;
+import lombok.Setter;
+
+/**
+ * Leadership snapshot response.
+ */
+@Getter
+@Setter
+public class SyncLBStatusResp {
+
+    private boolean success;
+    private String msg;
+    private String lbStatus;
+}

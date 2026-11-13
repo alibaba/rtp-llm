@@ -2,7 +2,7 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -186,7 +186,7 @@ class DecodeDoneLogLineTest {
             // 20260903 exec_ms caliber: decode_done_ms − decode_start_ms
             // WALL-SPAN, symmetric with the prefill batch's done−start
             // semantics (the former summed-booked-step-durations stream
-            // caliber is retired). In-row self-consistency is exact — the
+            // caliber is closed). In-row self-consistency is exact — the
             // strongest possible contract (decodeModel() runs sleep_scale=0.1
             // so the wall span of e.g. 2 booked 2ms steps is a few ms,
             // covered by the [beforeMs, afterMs] window assertions above).

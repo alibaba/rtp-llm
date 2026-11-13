@@ -1,0 +1,35 @@
+package org.flexlb.api.config;
+
+import io.netty.channel.ChannelOption;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.InternalRuntimeSettings;
+import org.springframework.boot.web.embedded.netty.NettyServerCustomizer;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import reactor.netty.resources.LoopResources;
+
+/**
+ * Configures HTTP event loops and socket options from startup settings. Spring disposes the shared
+ * loop resources when the application context closes.
+ */
+@Configuration
+public class NettyServerConfig {
+
+    @Bean(destroyMethod = "dispose")
+    public LoopResources loopResources(ConfigService configService) {
+        InternalRuntimeSettings runtime = configService.loadBalanceConfig().getInternalRuntime();
+        int processors = Runtime.getRuntime().availableProcessors();
+        int selectCount = processors * runtime.getNettySelectThreadMultiplier();
+        int workerCount = processors * runtime.getNettyWorkerThreadMultiplier();
+        return LoopResources.create("reactor-netty-server", selectCount, workerCount, true);
+    }
+
+    @Bean
+    public NettyServerCustomizer nettyServerMetricsCustomizer(LoopResources loopResources) {
+        return httpServer ->
+                httpServer
+                        .runOn(loopResources)
+                        .option(ChannelOption.SO_REUSEADDR, true)
+                        .option(ChannelOption.TCP_NODELAY, true);
+    }
+}

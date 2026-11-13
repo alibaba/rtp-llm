@@ -1,10 +1,10 @@
 package org.flexlb.cache;
 
-import org.flexlb.dao.master.CacheStatus;
-import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
-import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.KvCacheGroupMode;
+import org.flexlb.config.service.RoleType;
+import org.flexlb.worker.cache.CacheStatus;
+import org.flexlb.worker.cache.KvCacheGroupMode;
+import org.flexlb.worker.status.WorkerStatus;
+import org.flexlb.worker.status.WorkerStatusResponse;
 
 import java.util.Map;
 
@@ -60,7 +60,7 @@ public final class WorkerStatusTestSupport {
         workerStatus.lock.lock();
         try {
             WorkerStatus.StatusObservation observation =
-                    org.flexlb.dao.master.WorkerStatusTestSupport.freezeStatusResponse(
+                    org.flexlb.worker.status.WorkerStatusTestSupport.freezeStatusResponse(
                             workerStatus, response);
             WorkerStatus.PreparedStatus prepared = workerStatus.prepareStatus(observation);
             workerStatus.publishPreparedStatus(prepared);

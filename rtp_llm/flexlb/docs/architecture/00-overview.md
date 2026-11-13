@@ -12,7 +12,7 @@ FlexLB 是面向 AI 模型推理负载（RTP-LLM）的高性能智能负载均�
 | 文档                                                                        | 内容                                                                                          |
 | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | [01-routing-and-balancing](01-routing-and-balancing.md)                     | Router / LoadBalancer 模式、角色多阶段路由与 group 链、回滚机制、四种策略算法                 |
-| [02-queue-scheduling](02-queue-scheduling.md)                               | PriorityScheduler / WorkerBatcher / RouteService、请求生命周期与取消                          |
+| [02-queue-scheduling](02-queue-scheduling.md)                               | RequestAdmissionService / QueuedRequestScheduler、请求生命周期与取消                          |
 | [03-resource-management](03-resource-management.md)                         | EndpointRegistry、worker 可用性与本地资源预留                                                 |
 | [04-worker-sync-and-cache](04-worker-sync-and-cache.md)                     | Worker 状态 gRPC 同步、本地乐观预测、KV cache 三种匹配源（LOCAL_SYNC / KVCM / LOCAL_STANDBY） |
 | [05-lifecycle-and-consistency](05-lifecycle-and-consistency.md)             | 生命周期 Hook 与 /hook/\* 端点、ZooKeeper LeaderSelector 主选举、slave 转发                   |
@@ -34,57 +34,70 @@ FlexLB 是面向 AI 模型推理负载（RTP-LLM）的高性能智能负载均�
 
 ## 模块划分
 
-多模块 Maven 工程：
+七个独立 Maven 业务模块，源码根包与模块一一对应。
 
-| 模块              | 职责                                                                                                                                              |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **flexlb-api**    | Web 层：`HttpLoadBalanceServer`（调度）、`FlexlbControlServer`（控制）、`HealthCheckServer`、`AppStateHookServer`（生命周期 hook）；主端口 7001   |
-| **flexlb-common** | 共享模型（`WorkerStatus`、`Request`/`Response`、`RoleType`、`BalanceContext`）、`FlexlbConfig`/`ConfigService`、`FlexMonitor` 指标抽象            |
-| **flexlb-grpc**   | 引擎 gRPC 客户端（worker status / cache status）+ KVCM meta-service 客户端（`KvcmGrpcClient`、leader 解析、健康探测）                             |
-| **flexlb-sync**   | 核心：路由与策略、排队调度、动态资源管理、worker 状态同步、主选举、生命周期 Hook、监控上报                                                        |
-| **flexlb-cache**  | KV cache 匹配：LOCAL_SYNC 两级索引（`KvCacheManager`/`GlobalCacheIndex`/`EngineLocalView`）、KVCM provider、Local Standby 兜底索引、failover 编排 |
+| Maven 模块 / Java 根包       | 职责                                                       |
+| ---------------------------- | ---------------------------------------------------------- |
+| `flexlb-api` / `api`         | FlexLB 应用入口、装配、对外服务及调度协议。                |
+| `flexlb-config` / `config`   | 配置定义、来源、解析、合并与校验。                         |
+| `flexlb-balance` / `balance` | 调度、队列、路由选择、请求生命周期及清理。                 |
+| `flexlb-worker` / `worker`   | Worker 身份与状态、Endpoint 账本、状态同步及 Engine 通信。 |
+| `flexlb-cache` / `cache`     | 缓存匹配、索引、反馈和 KVCM 集成。                         |
+| `flexlb-master` / `master`   | 主节点选举、主地址查询和变更通知。                         |
+| `flexlb-util` / `util`       | 公共组件、连接、服务发现、常量及通用定义。                 |
 
-flexlb-sync 内部包结构（`org.flexlb`）：
-
+```text
+org.flexlb/
+├── api/                  应用入口与装配
+│   ├── server/           FlexLB 对外服务、转发与拦截器
+│   ├── config/           应用装配配置
+│   ├── protocol/         生成的调度协议
+│   └── log/、metrics/    应用日志控制与运行指标
+├── config/               总配置与 ConfigService
+│   ├── scheduler/        调度、队列、抢占与请求超时
+│   ├── routing/          选路策略
+│   ├── worker/           Worker 管理参数
+│   ├── cache/            缓存匹配与 KVCM 参数
+│   ├── monitoring/       指标、日志与追踪
+│   ├── master/           主节点选举参数
+│   ├── service/          模型服务、角色、地址和分组
+│   └── loading/          加载、合并和校验
+│       └── source/、parser/
+├── balance/
+│   ├── schedule/         RequestScheduler、请求登记、生命周期与清理
+│   ├── queue/            排序队列与容量等待
+│   ├── strategy/         角色选择与路由组合
+│   ├── request/          路由使用的外部查询
+│   └── requestlog/、trace/、metrics/
+├── worker/               Worker 公共身份
+│   ├── endpoint/         Worker 请求记录与资源
+│   ├── rpc/              调用 Worker 远程接口及生成协议
+│   ├── status/           获取、更新状态及同步指标
+│   └── cache/            Worker 缓存状态与更新信息
+├── cache/
+│   └── match/、localsync/、localstandby/、kvcm/、hash/、metrics/
+├── master/               主节点选举与变更通知
+└── util/
+    └── discovery/、network/、formula/、log/、metrics/
 ```
-balance/
-├── scheduler/      DefaultRouter / PriorityScheduler / WorkerBatcher / Dispatcher
-├── endpoint/       EndpointRegistry / PrefillEndpoint / DecodeEndpoint / 本地预留账本
-├── strategy/       LoadBalanceStrategy + Prefill / Decode / Random 策略
-└── resource/       PrefillResourceMeasure / DecodeResourceMeasure / ResourceMeasureFactory
-consistency/        LBStatusConsistencyService / ZookeeperMasterElectService
-sync/
-├── synchronizer/   MasterEngineSynchronizer（20ms 定时）/ AbstractEngineStatusSynchronizer（线程池）
-├── runner/         EngineSyncRunner / GrpcWorkerStatusRunner / GrpcCacheStatusCheckRunner
-├── schedule/       ExpirationCleaner（worker/任务过期清理）
-└── status/         EngineWorkerStatus / ModelWorkerStatus
-service/
-├── grace/          GracefulOnlineService / GracefulShutdownService / ActiveRequestCounter / strategy/ 各 Hooker
-├── grpc/           EngineGrpcService
-├── monitor/        EngineHealthReporter / BatchSchedulerReporter / PrioritySchedulerReporter / FlexlbLogManager
-└── RouteService
-```
+
+生产依赖只向下：`api → balance → cache → worker → master → config → util`；
+各模块可直接依赖其所需的更底层模块，底层不依赖上层。Worker 消费请求、路由、缓存及
+指标的窄接口；balance/cache 提供实现，api 完成装配。接口回调不要求反向 Maven 依赖。
+服务发现只依赖通用地址与发现配置，不引用 Worker 或请求状态。
+
+Engine 协议由 `flexlb-worker` 生成，调度协议由 `flexlb-api` 生成，KVCM 协议由
+`flexlb-cache` 生成；wire package、字段号及 RPC 方法保持兼容。
+`flexlb-mock-engine` 是随 reactor 验证的测试工具，不属于上述七个业务模块。
 
 ## 请求主链路
 
-```
-gRPC FlexlbService.Schedule (FlexlbGrpcServer, HTTP 端口 + 100)
-    ↓ ActiveRequestCounter.acquire()（在途请求计数）
-    ↓ 若启用一致性且本机非 master → 转发给 master（master 不可达则降级本地路由）
-    ↓ 校验客户端提供的 block_cache_keys 与 cache_key_block_size
-RouteService.route()
-    ├─ scheduler.type=DIRECT：当前调用链执行 DefaultRouter.route()
-    └─ scheduler.type=QUEUE：PriorityScheduler.submit()
-           ├─ ordering.type=FIFO：普通路由后提交到 Prefill WorkerBatcher
-           └─ ordering.type=PRIORITY：PriorityAdmissionScheduler 做优先级准入/抢占
-    ↓
-DefaultRouter：按非空角色 map 固定顺序路由 PDFUSION → DECODE → PREFILL → VIT，
-               首个成功角色的 worker group 约束后续角色的候选（group 亲和链）
-    ↓
-LoadBalancer 策略选 worker（读 EngineWorkerStatus 共享状态 + CacheAwareService 匹配）
-    ↓ 选中即 WorkerStatus.putLocalTask()：本地乐观记账（队列时间 / KV token 预扣）
-后阶段失败 → DefaultRouter.rollBackRoutingFailure() 逐个 LoadBalancer.rollBack() 撤销记账
-```
+Schedule 经一致性转发和入口校验后提交 RequestAdmissionService。
+DIRECT 立即执行选址；QUEUE 按 FIFO 或 PRIORITY 从全局队列逐个选择请求。
+RequestRouteSelector 组合角色，策略在 Endpoint 中登记容量；后续角色失败时完整回滚。
+Prefill 按 compute tokens 和配置上限选址，可用缓存优先；Decode 保留 KV 容量检查。
+完整路由提交后立即返回给前端，前端向选中的节点发送请求。
+QUEUE 没有合适节点时等待容量变化。完成、取消和下线按精确请求及 Endpoint 代际清理资源。
 
 ## 核心不变量
 

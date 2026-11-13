@@ -2,7 +2,7 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -321,7 +321,9 @@ class PythonCompatControlApiTest {
     @Test
     void maxPrefillConcurrencyLanesRunInParallel() throws Exception {
         // sleep_scale=1.0, formula "200" -> each prefill batch takes ~200ms.
-        startCluster(model("200", 1.0), 1, 1);
+        var performance = model("200", 1.0);
+        performance.setOverrideFixedPrefillMs(200.0);
+        startCluster(performance, 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
 
@@ -374,7 +376,9 @@ class PythonCompatControlApiTest {
     @Test
     void setQueueDepthRejectsWhenFull() throws Exception {
         // 200ms prefill keeps the first request pending long enough to hit the limit.
-        startCluster(model("200", 1.0), 1, 1);
+        var performance = model("200", 1.0);
+        performance.setOverrideFixedPrefillMs(200.0);
+        startCluster(performance, 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
 
         httpPost("/set_queue_depth", "{\"engine\":\"prefill-0\",\"queue_depth\":1}");

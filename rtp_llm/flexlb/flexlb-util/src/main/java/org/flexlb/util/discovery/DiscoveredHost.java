@@ -1,0 +1,216 @@
+package org.flexlb.util.discovery;
+
+import lombok.Getter;
+
+/**
+ * DiscoveredHost - Worker node host information
+ * Unified host information representation for service discovery and worker management
+ *
+ * @author saichen.sm
+ * @since 2025/4/24
+ */
+@Getter
+public class DiscoveredHost {
+
+    /**
+     * Host IP address
+     */
+    private final String ip;
+
+    /**
+     * HTTP port
+     */
+    private final int httpPort;
+
+    /**
+     * gRPC port (typically httpPort + 1)
+     */
+    private final int grpcPort;
+
+    /**
+     * C++ HTTP service port
+     */
+    private final int httpServerPort;
+
+    /**
+     * Per-engine gRPC port for worker control RPCs.
+     */
+    private final int workerStatusPort;
+
+    /**
+     * Logical engine index behind the shared frontend.
+     */
+    private final int engineIndex;
+
+    /**
+     * Expected number of logical engines for this physical frontend.
+     */
+    private final int multiEngineNum;
+
+    private final String physicalIpPort;
+    private final String logicalIpPort;
+
+    /**
+     * Data center/site information
+     */
+    private final String site;
+
+    /**
+     * Worker group name
+     */
+    private final String group;
+
+    /**
+     * Deployment name reported by service discovery.
+     */
+    private final String deploymentName;
+
+    /**
+     * Full constructor
+     *
+     * @param ip             Host IP address
+     * @param httpPort       HTTP port
+     * @param grpcPort       gRPC port
+     * @param httpServerPort C++ HTTP service port
+     * @param site           Data center/site information
+     * @param group          Worker group name
+     */
+    public DiscoveredHost(
+            String ip, int httpPort, int grpcPort, int httpServerPort, String site, String group) {
+        this(ip, httpPort, grpcPort, httpServerPort, grpcPort, site, group, "");
+    }
+
+    public DiscoveredHost(
+            String ip,
+            int httpPort,
+            int grpcPort,
+            int httpServerPort,
+            String site,
+            String group,
+            String deploymentName) {
+        this(ip, httpPort, grpcPort, httpServerPort, grpcPort, site, group, deploymentName);
+    }
+
+    public DiscoveredHost(
+            String ip,
+            int httpPort,
+            int grpcPort,
+            int httpServerPort,
+            int workerStatusPort,
+            String site,
+            String group,
+            String deploymentName) {
+        this(
+                ip,
+                httpPort,
+                grpcPort,
+                httpServerPort,
+                workerStatusPort,
+                site,
+                group,
+                deploymentName,
+                0,
+                1);
+    }
+
+    public DiscoveredHost(
+            String ip,
+            int httpPort,
+            int grpcPort,
+            int httpServerPort,
+            int workerStatusPort,
+            String site,
+            String group,
+            String deploymentName,
+            int engineIndex,
+            int multiEngineNum) {
+        this.ip = ip;
+        this.httpPort = httpPort;
+        this.grpcPort = grpcPort;
+        this.httpServerPort = httpServerPort;
+        this.workerStatusPort = workerStatusPort;
+        this.engineIndex = engineIndex;
+        this.multiEngineNum = multiEngineNum;
+        this.physicalIpPort = ip == null ? null : ip + ":" + httpPort;
+        this.logicalIpPort = physicalIpPort == null ? null : physicalIpPort + "@" + engineIndex;
+        this.site = site != null ? site : "";
+        this.group = group != null ? group : "";
+        this.deploymentName = deploymentName != null ? deploymentName : "";
+    }
+
+    /**
+     * Simplified constructor (for service discovery scenarios)
+     *
+     * @param ip   Host IP address
+     * @param port Main port
+     * @param site Data center/site information
+     */
+    public DiscoveredHost(String ip, int port, String site) {
+        this(ip, port, port + 1, port + 5, site, "");
+    }
+
+    /**
+     * Minimal constructor (for basic service discovery scenarios)
+     *
+     * @param ip   Host IP address
+     * @param port Main port
+     */
+    public DiscoveredHost(String ip, int port) {
+        this(ip, port, "");
+    }
+
+    /**
+     * Get the physical frontend address.
+     *
+     * @return physical address in {@code ip:port} format, without an engine index
+     */
+    public String getIpPort() {
+        return physicalIpPort;
+    }
+
+    /**
+     * Returns the physical frontend address in {@code ip:port} format.
+     */
+    public String getPhysicalIpPort() {
+        return physicalIpPort;
+    }
+
+    /**
+     * Returns the logical worker identity in {@code ip:port@engineIndex} format. The index
+     * identifies one independently routable engine behind the physical frontend.
+     */
+    public String getLogicalIpPort() {
+        return logicalIpPort;
+    }
+
+    /**
+     * Get main port (typically HTTP port)
+     *
+     * @return Main port number
+     */
+    public int getPort() {
+        return httpPort;
+    }
+
+    /**
+     * Create DiscoveredHost instance
+     *
+     * @param ip   Host IP address
+     * @param port Host port
+     * @return DiscoveredHost instance
+     */
+    public static DiscoveredHost of(String ip, int port) {
+        return new DiscoveredHost(ip, port);
+    }
+
+    /**
+     * Create a discovered host while preserving the site reported by the discovery service.
+     */
+    public static DiscoveredHost of(String ip, int port, String site) {
+        return new DiscoveredHost(ip, port, site);
+    }
+
+    public static DiscoveredHost of(String ip, int port, String site, String deploymentName) {
+        return new DiscoveredHost(ip, port, port + 1, port + 5, site, "", deploymentName);
+    }
+}

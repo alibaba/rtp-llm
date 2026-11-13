@@ -1,0 +1,74 @@
+{
+  "3000": {
+    "minQpsRatio": 0.98,
+    "p50Ms": 0.6,
+    "avgMs": 0.8,
+    "p99Ms": 2.0,
+    "cpuAvgPercent": 300,
+    "cpuPeakPercent": 600,
+    "rssPeakBytes": 7516192768
+  },
+  "10000": {
+    "minQpsRatio": 0.98,
+    "p50Ms": 0.6,
+    "avgMs": 0.8,
+    "p99Ms": 2.0,
+    "cpuAvgPercent": 800,
+    "cpuPeakPercent": 1600,
+    "rssPeakBytes": 7516192768
+  },
+  "pressure": {
+    "DIRECT": {
+      "3000": {
+        "minQpsRatio": 0.9,
+        "p50Ms": 0.6,
+        "avgMs": 0.8,
+        "p99Ms": 2.0,
+        "cpuAvgPercent": 600,
+        "cpuPeakPercent": 1200,
+        "rssPeakBytes": 7516192768,
+        "minRejectionRatio": 0.5,
+        "minSuccessQps": 450,
+        "maxSuccessQps": 950
+      },
+      "10000": {
+        "minQpsRatio": 0.9,
+        "p50Ms": 0.6,
+        "avgMs": 0.8,
+        "p99Ms": 2.0,
+        "cpuAvgPercent": 1500,
+        "cpuPeakPercent": 3000,
+        "rssPeakBytes": 7516192768,
+        "minRejectionRatio": 0.5,
+        "minSuccessQps": 450,
+        "maxSuccessQps": 950
+      }
+    },
+    "QUEUE": {
+      "3000": {
+        "minQpsRatio": 0.9,
+        "p50Ms": 275,
+        "avgMs": 275,
+        "p99Ms": 500,
+        "cpuAvgPercent": 600,
+        "cpuPeakPercent": 1200,
+        "rssPeakBytes": 7516192768,
+        "minRejectionRatio": 0.5,
+        "minSuccessQps": 450,
+        "maxSuccessQps": 950
+      },
+      "10000": {
+        "minQpsRatio": 0.9,
+        "p50Ms": 275,
+        "avgMs": 275,
+        "p99Ms": 500,
+        "cpuAvgPercent": 1500,
+        "cpuPeakPercent": 3000,
+        "rssPeakBytes": 7516192768,
+        "minRejectionRatio": 0.5,
+        "minSuccessQps": 450,
+        "maxSuccessQps": 950
+      }
+    }
+  }
+}

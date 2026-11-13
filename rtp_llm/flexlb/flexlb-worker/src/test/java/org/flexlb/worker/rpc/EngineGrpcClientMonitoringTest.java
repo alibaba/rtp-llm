@@ -1,0 +1,209 @@
+package org.flexlb.worker.rpc;
+
+import io.grpc.ManagedChannel;
+import io.grpc.Server;
+import io.grpc.Status;
+import io.grpc.inprocess.InProcessChannelBuilder;
+import io.grpc.inprocess.InProcessServerBuilder;
+import io.grpc.stub.StreamObserver;
+import io.netty.channel.EventLoopGroup;
+import org.flexlb.util.metrics.FlexMetricTags;
+import org.flexlb.util.metrics.FlexMetricType;
+import org.flexlb.util.metrics.FlexMonitor;
+import org.flexlb.util.metrics.FlexPriorityType;
+import org.flexlb.util.metrics.GrpcReporter;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.RpcServiceGrpc;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.flexlb.util.metrics.MetricConstant.GRPC_CALL_COUNT;
+import static org.flexlb.util.metrics.MetricConstant.GRPC_CALL_DURATION;
+import static org.flexlb.util.metrics.MetricConstant.GRPC_CONNECTION_DURATION;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+
+/**
+ * Verifies that monitoring failures do not interrupt RPC retries or client cleanup.
+ */
+class EngineGrpcClientMonitoringTest {
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void monitoringFailureDoesNotPreventConnectionRetry(boolean monitorError) throws Exception {
+        FlexMonitor monitor = failingMonitor(monitorError);
+        AtomicInteger attempts = new AtomicInteger();
+        var expected =
+                EngineRpcService.WorkerStatusPB.newBuilder()
+                        .setAlive(true)
+                        .setStatusVersion(7L)
+                        .build();
+        var service = statusService(attempts, expected, null);
+        try (var fixture = new Fixture(monitor, service)) {
+            var result =
+                    fixture.client.getWorkerStatusAsync(
+                            "127.0.0.1",
+                            8081,
+                            EngineRpcService.StatusVersionPB.getDefaultInstance(),
+                            5000L);
+            assertEquals(
+                    expected,
+                    assertDoesNotThrow(
+                            () -> result.get(2, TimeUnit.SECONDS),
+                            "connection metrics must not block retry or completion"));
+            assertEquals(2, attempts.get());
+            verify(monitor)
+                    .report(eq(GRPC_CONNECTION_DURATION), any(FlexMetricTags.class), anyDouble());
+            verify(monitor).report(eq(GRPC_CALL_COUNT), any(FlexMetricTags.class), eq(1.0));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void monitoringFailurePreservesRetryFailure(boolean monitorError) throws Exception {
+        AtomicInteger attempts = new AtomicInteger();
+        var service =
+                statusService(
+                        attempts,
+                        null,
+                        Status.PERMISSION_DENIED.withDescription("engine rejected request"));
+        try (var fixture = new Fixture(failingMonitor(monitorError), service)) {
+            var result =
+                    fixture.client.getWorkerStatusAsync(
+                            "127.0.0.1",
+                            8081,
+                            EngineRpcService.StatusVersionPB.getDefaultInstance(),
+                            5000L);
+            ExecutionException failure =
+                    assertThrows(ExecutionException.class, () -> result.get(2, TimeUnit.SECONDS));
+            assertEquals(
+                    Status.Code.PERMISSION_DENIED,
+                    Status.fromThrowable(failure.getCause()).getCode());
+            assertEquals(2, attempts.get());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void registrationAndChannelMetricsCannotInterruptCallers(boolean monitorError) {
+        FlexMonitor monitor = failingMonitor(monitorError);
+        doThrow(monitorFailure(monitorError))
+                .when(monitor)
+                .register(anyString(), any(FlexMetricType.class));
+        doThrow(monitorFailure(monitorError))
+                .when(monitor)
+                .register(anyString(), any(FlexMetricType.class), any(FlexPriorityType.class));
+        GrpcReporter reporter = new GrpcReporter(monitor);
+        assertDoesNotThrow(reporter::init);
+        verify(monitor).register(anyString(), any(FlexMetricType.class));
+        verify(monitor, times(8))
+                .register(anyString(), any(FlexMetricType.class), any(FlexPriorityType.class));
+        assertDoesNotThrow(() -> reporter.reportChannelPoolSize(3));
+    }
+
+    @Test
+    void oneFailedMetricDoesNotSkipRemainingCallMetrics() {
+        FlexMonitor monitor = mock(FlexMonitor.class);
+        doThrow(new IllegalStateException("metric backend unavailable"))
+                .when(monitor)
+                .report(eq(GRPC_CALL_DURATION), any(FlexMetricTags.class), anyDouble());
+        assertDoesNotThrow(
+                () -> new GrpcReporter(monitor).reportCallMetrics("EnqueueBatch", 10L, false));
+        verify(monitor).report(eq(GRPC_CALL_COUNT), any(FlexMetricTags.class), eq(1.0));
+    }
+
+    private static FlexMonitor failingMonitor(boolean monitorError) {
+        FlexMonitor monitor = mock(FlexMonitor.class);
+        doThrow(monitorFailure(monitorError)).when(monitor).report(anyString(), any(), anyDouble());
+        return monitor;
+    }
+
+    private static Throwable monitorFailure(boolean monitorError) {
+        return monitorError
+                ? new AssertionError("metric backend failure")
+                : new IllegalStateException("metric backend failure");
+    }
+
+    private static RpcServiceGrpc.RpcServiceImplBase statusService(
+            AtomicInteger attempts, EngineRpcService.WorkerStatusPB response, Status retryFailure) {
+        return new RpcServiceGrpc.RpcServiceImplBase() {
+            @Override
+            public void getWorkerStatus(
+                    EngineRpcService.StatusVersionPB request,
+                    StreamObserver<EngineRpcService.WorkerStatusPB> observer) {
+                if (attempts.incrementAndGet() == 1) {
+                    observer.onError(
+                            Status.UNAVAILABLE
+                                    .withCause(new java.net.SocketException("Connection reset"))
+                                    .asRuntimeException());
+                } else if (retryFailure != null) {
+                    observer.onError(retryFailure.asRuntimeException());
+                } else {
+                    observer.onNext(response);
+                    observer.onCompleted();
+                }
+            }
+        };
+    }
+
+    /**
+     * Owns an in-process RPC server and client and closes both after each monitoring scenario.
+     */
+    private static final class Fixture implements AutoCloseable {
+        private final Server server;
+        private final EngineGrpcClient client;
+
+        private Fixture(FlexMonitor monitor, RpcServiceGrpc.RpcServiceImplBase service)
+                throws Exception {
+            String serverName = InProcessServerBuilder.generateName();
+            server =
+                    InProcessServerBuilder.forName(serverName)
+                            .directExecutor()
+                            .addService(service)
+                            .build()
+                            .start();
+            client =
+                    new EngineGrpcClient(
+                            mock(EngineAddressResolver.class),
+                            mock(ThreadPoolExecutor.class),
+                            mock(EventLoopGroup.class),
+                            new GrpcReporter(monitor),
+                            20,
+                            org.mockito.Mockito.mock(
+                                    org.flexlb.config.cache.CacheMatchConfiguration.class)) {
+                        @Override
+                        protected ManagedChannel createChannel(String channelKey) {
+                            return InProcessChannelBuilder.forName(serverName)
+                                    .propagateCauseWithStatus(true)
+                                    .directExecutor()
+                                    .build();
+                        }
+                    };
+        }
+
+        @Override
+        public void close() throws Exception {
+            try {
+                client.shutdownChannelPool();
+            } finally {
+                server.shutdownNow();
+                server.awaitTermination(2, TimeUnit.SECONDS);
+            }
+        }
+    }
+}

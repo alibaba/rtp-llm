@@ -1,0 +1,18 @@
+package org.flexlb.config.scheduler;
+
+import lombok.Getter;
+import lombok.Setter;
+
+/**
+ * Delivery of preemption instructions for Engine-owned Decode requests.
+ */
+@Getter
+@Setter
+public final class EngineCancellationConfig {
+    private Mode mode = Mode.RPC;
+
+    public enum Mode {
+        RPC,
+        RETURN
+    }
+}

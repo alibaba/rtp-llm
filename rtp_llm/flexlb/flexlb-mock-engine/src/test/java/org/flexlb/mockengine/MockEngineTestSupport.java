@@ -3,7 +3,7 @@ package org.flexlb.mockengine;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Preconditions;
 import io.grpc.stub.StreamObserver;
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.io.IOException;
@@ -39,7 +39,7 @@ final class MockEngineTestSupport {
     private MockEngineTestSupport() {}
 
     static boolean isReserved(
-            org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot snapshot, long requestId) {
+            org.flexlb.worker.endpoint.DecodeResources.ResourceSnapshot snapshot, long requestId) {
         var request = snapshot.requests().get(String.valueOf(requestId));
         return request != null && !request.phase().isEngineConfirmed();
     }

@@ -1,0 +1,57 @@
+package org.flexlb.worker.rpc;
+
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
+
+/**
+ * 在 Protobuf 边界统一读取请求 ID，业务层始终使用字符串，不生成或映射新的 ID。
+ */
+public final class RequestId {
+    private RequestId() {}
+
+    /**
+     * 读取 Worker Status 的请求 ID，优先使用字符串字段。
+     */
+    public static String parse(EngineRpcService.TaskInfoPBOrBuilder message) {
+        return preferString(message.getRequestIdStr(), message.getRequestId());
+    }
+
+    /**
+     * 将引擎消息中的 int64 请求 ID 转为字符串。
+     */
+    public static String parse(EngineRpcService.GenerateInputPBOrBuilder message) {
+        return Long.toString(message.getRequestId());
+    }
+
+    /**
+     * 将引擎消息中的 int64 请求 ID 转为字符串。
+     */
+    public static String parse(EngineRpcService.EnqueueBatchSuccessPBOrBuilder message) {
+        return Long.toString(message.getRequestId());
+    }
+
+    /**
+     * 将引擎消息中的 int64 请求 ID 转为字符串。
+     */
+    public static String parse(EngineRpcService.EnqueueBatchErrorPBOrBuilder message) {
+        return Long.toString(message.getRequestId());
+    }
+
+    /**
+     * Encode an Engine cancellation ID without allowing a different spelling to cancel another Master ID.
+     */
+    public static long toEngineRequestId(String requestId) {
+        long engineRequestId = Long.parseLong(requestId);
+        if (!Long.toString(engineRequestId).equals(requestId)) {
+            throw new IllegalArgumentException(
+                    "Engine request_id must be a canonical int64 decimal string");
+        }
+        return engineRequestId;
+    }
+
+    private static String preferString(String stringRequestId, long numericId) {
+        if (!stringRequestId.isBlank()) {
+            return stringRequestId;
+        }
+        return Long.toString(numericId);
+    }
+}

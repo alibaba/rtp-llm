@@ -1,15 +1,14 @@
 # FlexLB - Intelligent Load Balancer for AI Model Inference
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Java](https://img.shields.io/badge/Java-8+-red.svg)](https://www.oracle.com/java/)
+[![Java](https://img.shields.io/badge/Java-21-red.svg)](https://www.oracle.com/java/)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-2.7.1-brightgreen.svg)](https://spring.io/projects/spring-boot)
 
-FlexLB is a high-performance, intelligent load balancer specifically designed for AI model inference workloads. It provides advanced load balancing strategies, request batching, caching mechanisms, and automatic failover to optimize the performance and reliability of AI service deployments.
+FlexLB is a high-performance, intelligent load balancer specifically designed for AI model inference workloads. It provides compute-token routing, caching mechanisms, and automatic failover to optimize the performance and reliability of AI service deployments.
 
 ## Features
 
 - **Smart Load Balancing**: Multiple strategies including cost-based routing, shortest TTFT, and cache affinity
-- **Request Batching**: Intelligent batching of inference requests to improve throughput
 - **Advanced Caching**: KV cache management for improved performance
 - **Health Monitoring**: Real-time worker health checking and automatic failover
 - **Reactive Architecture**: Built on Spring WebFlux for high concurrency
@@ -19,18 +18,24 @@ FlexLB is a high-performance, intelligent load balancer specifically designed fo
 
 ## Architecture
 
-FlexLB consists of four main modules:
+FlexLB has seven independent business modules:
 
-- **flexlb-api**: Web layer providing HTTP endpoints and reactive web services
-- **flexlb-common**: Shared utilities, data models, exception handling, and common configurations
-- **flexlb-grpc**: gRPC client implementation for model service communication
-- **flexlb-sync**: Core load balancing logic, scheduling strategies, and worker status synchronization
+- **flexlb-api**: Application entry, service endpoints and wiring
+- **flexlb-config**: Configuration loading and validation
+- **flexlb-balance**: Request scheduling, queues and route selection
+- **flexlb-worker**: Worker state, endpoint resources, synchronization and Engine communication
+- **flexlb-cache**: Cache matching, indexes and KVCM integration
+- **flexlb-master**: Leader election and leader change notifications
+- **flexlb-util**: Shared components, connections, discovery and common definitions
+
+The reactor also verifies the Mock Engine test tool. See [architecture](docs/architecture/00-overview.md)
+for package ownership and dependency direction.
 
 ## Quick Start
 
 ### Prerequisites
 
-- Java 8 or higher
+- Java 21
 - Maven 3.6+ (optional, project includes Maven Wrapper)
 - ZooKeeper (optional, for master election)
 
@@ -157,41 +162,33 @@ delivery, routing, worker synchronization, and observability; file paths are not
 The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fields,
 `null`, scalar coercion, numeric enums, and trailing JSON fail startup.
 
-| Setting                                             | Schema 3 behavior                                                                                                                                                                                                                                                      |
-| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dispatcher.maxInflightPerPrefillWorker`            | Positive integer, default 2 in every mode. BATCH counts batches; NON_BATCH / DIRECT count requests.                                                                                                                                                                    |
-| `dispatcher.fetchAttachTimeoutMs`                   | Positive integer, default 3000 ms. BATCH sends this as Engine `fetch_attach_timeout_ms`, limiting the wait for `FetchResponse` attachment. Engine caps it by the remaining request timeout when present. Once attached, this timer does not limit generation duration. |
-| Prefill ownership                                   | Work remains tracked until authoritative completion, safe rollback or retirement. PDFUSION has no distinct Prefill-completion signal, so its ownership lasts through request termination.                                                                              |
-| `requestLifecycle.request.timeoutMs`                | Required positive integer; maximum request inactivity in milliseconds, renewed by matching Engine request status. No default.                                                                                                                                          |
-| `workerRegistry.health.cleanupIntervalMs`           | Positive integer, default 3000 ms; scan interval for retiring workers whose status exceeds `statusStaleAfterMs`.                                                                                                                                                       |
-| `requestLifecycle.decision.lifetime`                | Finite number ≥ 1, default 2.0. At delivery, remaining Prefill time (including waiting) × lifetime + 10000 ms sets the deadline. Only observed running predecessors consume elapsed time; unstarted work keeps its full estimate. Independent of request age.          |
-| `scheduler.queueTimeoutMs`                          | QUEUE only, positive, default 3600000 ms; actual queue TTL. DIRECT has no queue timer and rejects this field.                                                                                                                                                          |
-| Removed capacity controls                           | `scheduler.capacity` and delivered-not-accepted count limits are removed. Per-Prefill concurrency uses the single dispatcher limit; lifetimes bound waiting. The old `maxUncachedTokens` field is rejected.                                                            |
-| Removed routing controls                            | Prefill candidate randomization/LRU and outlier filters, legacy Decode decay controls/outlier filters, and output-estimate truncation are rejected.                                                                                                                    |
-| `router.roles.decode.costEstimator.expression`      | Default `kvcache_used_ratio`; smallest cost wins within the same availability tier. Using `max_running_size` requires a positive `availability.maxEngineRequests`.                                                                                                     |
-| Transport timeout                                   | `flexlb.engine-grpc.enqueue-timeout-ms`, default 5000; outside the scheduling JSON.                                                                                                                                                                                    |
-| `scheduler.ordering.preemption.timeoutMs`           | Default 1000 ms, positive; Engine-owned Decode preemption only. Starts after the Cancel ACK phase and bounds the wait for the Engine terminal. ACK timeout stays internal, 50 ms.                                                                                      |
-| `scheduler.ordering.preemption.allowedVictimStages` | PRIORITY defaults to all three stages: `PREFILL_QUEUED`, `DECODE_RESERVED`, `DECODE_ENGINE_OWNED`, including when `preemption` is omitted. An explicit non-empty list replaces the defaults.                                                                           |
+| Setting                                             | Schema 3 behavior                                                                                                                                                                         |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Prefill ownership                                   | Work remains tracked until authoritative completion, safe rollback or retirement. PDFUSION has no distinct Prefill-completion signal, so its ownership lasts through request termination. |
+| `requestLifecycle.request.timeoutMs`                | Required positive integer; maximum request inactivity in milliseconds, renewed by matching Engine request status. No default.                                                             |
+| `workerRegistry.health.cleanupIntervalMs`           | Positive integer, default 3000 ms; scan interval for retiring workers whose status exceeds `statusStaleAfterMs`.                                                                          |
+| `scheduler.queueTimeoutMs`                          | QUEUE only, positive, default 3600000 ms; actual queue TTL. DIRECT has no queue timer and rejects this field.                                                                             |
+| Removed routing controls                            | Prefill candidate randomization/LRU and outlier filters, legacy Decode decay controls/outlier filters, and output-estimate truncation are rejected.                                       |
+| `router.roles.decode.costEstimator.expression`      | Default `kvcache_used_ratio`; smallest cost wins within the same availability tier. Using `max_running_size` requires a positive `availability.maxEngineRequests`.                        |
+| `scheduler.ordering.preemption.timeoutMs`           | Default 1000 ms, positive; Engine-owned Decode preemption only. Starts after the Cancel ACK phase and bounds the wait for the Engine terminal. ACK timeout stays internal, 50 ms.         |
+| `scheduler.ordering.preemption.allowedVictimStages` | PRIORITY supports `DECODE_ENGINE_OWNED`, including when `preemption` is omitted. An explicit non-empty list replaces the defaults.                                                        |
 
-The request timeout below is an explicit workload value; decision lifetime 2.0 is the default:
+The request timeout below is an explicit workload value:
 
 ```bash
 export FLEXLB_CONFIG='{
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "scheduler": {
     "type": "QUEUE",
     "queueTimeoutMs": 3600000,
-    "ordering": {"type": "FIFO"},
-    "decision": {"type": "FIXED_WINDOW", "maxRequests": 8, "maxCollectionWaitMs": 300}
+    "ordering": {"type": "FIFO"}
   },
-  "dispatcher": {"type": "BATCH", "maxInflightPerPrefillWorker": 2, "fetchAttachTimeoutMs": 3000},
   "requestLifecycle": {
-    "request": {"timeoutMs": 60000},
-    "decision": {"lifetime": 2.0}
+    "request": {"timeoutMs": 60000}
   },
   "router": {
     "roles": {
-      "prefill": {},
+      "prefill": {"maxComputeTokens": 1048576},
       "decode": {
         "costEstimator": {"expression": "kvcache_used_ratio"},
         "availability": {"maxKvUsagePercent": 90, "maxEngineRequests": 128}
@@ -206,7 +203,7 @@ Omit `router.roles.decode.costEstimator` to balance by KV usage ratio. Set its
 
 ```json
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "requestLifecycle": { "request": { "timeoutMs": 60000 } },
   "router": {
     "roles": {
@@ -312,58 +309,20 @@ The quiet period starts when shutting down; each Schedule arrival restarts it.
 After it elapses, gRPC waits for accepted RPCs to finish before serving resources
 are destroyed. Normal idle serving does not start an exit timer.
 
-### Scheduler, ordering, decision, and dispatcher
+### Single-request scheduling
 
-Under `QUEUE`, ordering, decision formation, and delivery are three independent
-axes:
+QUEUE considers one request at a time, using FIFO or PRIORITY ordering. It selects workers,
+registers capacity and returns the complete route immediately. When no worker has enough
+capacity, the request waits in the global queue for a capacity notification.
+DIRECT performs the same selection immediately and reports capacity failures to its caller.
 
-| Scheduler | Queue ordering | Decision       | Dispatcher  | Behavior                                                |
-| --------- | -------------- | -------------- | ----------- | ------------------------------------------------------- |
-| `DIRECT`  | not applicable | not applicable | `NON_BATCH` | Route immediately; the frontend sends the request       |
-| `QUEUE`   | `FIFO`         | `SINGLE`       | `NON_BATCH` | Form singleton decisions; frontend sends                |
-| `QUEUE`   | `FIFO`         | `SINGLE`       | `BATCH`     | Master sends singleton `EnqueueBatch` calls             |
-| `QUEUE`   | `FIFO`         | `FIXED_WINDOW` | `NON_BATCH` | Form bounded groups; frontend sends each routed request |
-| `QUEUE`   | `FIFO`         | `FIXED_WINDOW` | `BATCH`     | Form bounded groups; Master sends `EnqueueBatch`        |
+Prefill work is the input tokens that require computation after cache reuse.
+Each worker is limited by router.roles.prefill.maxComputeTokens (default 1048576).
+With cacheAffinity configured, prefer cache hits within cacheAffinity.maxComputeTokens;
+when omitted, that cap inherits the worker limit. Full candidates are skipped.
+No collection window, future batch simulation, learned timing or batch RPC is involved.
 
-`PRIORITY` can replace `FIFO` in all four QUEUE combinations. `DIRECT + BATCH`
-is invalid and DIRECT cannot configure `decision`. `FIFO`/`PRIORITY` choose which
-request is considered first, `SINGLE`/`FIXED_WINDOW` choose how many requests form
-one decision group, and `NON_BATCH`/`BATCH` choose whether the frontend or Master
-sends them.
-
-`FIXED_WINDOW` uses `maxRequests` (positive integer, default 8),
-`maxCollectionWaitMs` (default 300 ms), and optional `maxPredictedExecutionMs`.
-Reaching the predicted-time cap dispatches the group; an indivisible singleton may
-exceed it. A zero collection window can still group already-waiting requests.
-`SINGLE` has no collection parameters. Omitting `scheduler.decision` selects
-`FIXED_WINDOW`.
-
-Configuration examples:
-
-- [QUEUE + PRIORITY + NON_BATCH](docs/config-examples/flexlb-queue-priority-non-batch.json)
-- [QUEUE + PRIORITY + BATCH](docs/config-examples/flexlb-queue-priority-batch.json)
-
-DIRECT uses `dispatcher.maxInflightPerPrefillWorker` as its per-worker request limit. Example:
-
-```bash
-export FLEXLB_CONFIG='{
-  "schemaVersion": 3,
-  "scheduler": {"type": "DIRECT"},
-  "dispatcher": {"type": "NON_BATCH", "maxInflightPerPrefillWorker": 2},
-  "requestLifecycle": {
-    "request": {"timeoutMs": 60000},
-    "decision": {"lifetime": 2.0}
-  }
-}'
-```
-
-PREFILL and PDFUSION use fixed BEST_ONLY selection. With `cacheAffinity` configured,
-a cache leader is preferred when its reusable prefix meets `minPrefixHitPercent`
-and projected TTFT stays within `maxExtraTtftMs` of the best candidate; otherwise
-the best projected TTFT wins. Equal cache hits preserve the best-TTFT candidate.
-The prefix percentage uses predictor-effective reusable tokens; the final cache block
-remains compute work. Omit `cacheAffinity` to disable that preference.
-The projection uses a frozen snapshot of current work and cannot predict future arrivals.
+Configuration example: [QUEUE + PRIORITY](docs/config-examples/flexlb-queue-priority.json).
 
 Decode freezes each route attempt's request identity, priority, complete prompt-plus-output
 demand, capacity limits and admission mode before selecting workers. DIRECT requires
@@ -452,7 +411,7 @@ Other `UNAVAILABLE` or `DEADLINE_EXCEEDED` failures can happen after admission.
 These failures are returned directly without cancellation or local replay.
 Business errors and cancelled or expired callers also do not trigger local
 execution. Unresolved forwards that may already be owned by the Master retain
-`BATCH_SLO_EXPIRED` (8511) as a terminal response to prevent frontend replay;
+`SCHEDULING_DEADLINE_EXCEEDED` (8511) as a terminal response to prevent frontend replay;
 this code does not prove that the failure was a timeout. Local scheduling
 exceptions use 8511 for typed timeouts and `DISPATCH_FAILED` (8510) otherwise;
 caller cancellation uses `REQUEST_CANCELLED` (8504).
@@ -464,11 +423,8 @@ own request. This does not provide cross-node deduplication for frontend retries
 ## Configuration reference
 
 - **FlexLB behavior**: one strict JSON document in `FLEXLB_CONFIG`.
-- **Prefill execution formula**:
-  `router.roles.prefill.executionTimeEstimator.expression` when estimator type is
-  `FORMULA`. The default expression is
-  `sum(computeTokens) + 0.3*sum(hitCacheTokens)`, returning predicted milliseconds.
-- **Prefill concurrency**: `dispatcher.maxInflightPerPrefillWorker`.
+- **Prefill work**: input tokens minus reusable cache tokens; no execution-time model.
+- **Prefill capacity**: `router.roles.prefill.maxComputeTokens`.
 - **Routing parameters**: Prefill execution-time estimation/cache affinity and Decode
   cost formulas/admission thresholds under `router.roles`.
 - **Traffic group selection**: `router.groupSelector` inside the same document.
@@ -490,3 +446,44 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 ## License
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+
+## Checked routing performance
+
+The normal Maven `test` phase runs the 750P/750D Schedule RPC performance matrix
+in `flexlb-api`, with separate 8 GiB JVMs for DIRECT and QUEUE. After channel readiness and 64 low-rate priming requests, independent cases run
+3,000 and 10,000 QPS, with 10 seconds of warmup and 10 seconds of measurement per
+rate. The fixture uses 1,024 input tokens, eight configured output tokens,
+real loopback gRPC and production routing, with simulated worker completion.
+
+Run this check on B300 inside `luoli_gpu` with JDK 21. RSS sampling requires Linux
+`/proc/self/status`. CPU 100% represents one logical processor. Process CPU and RSS
+include the Master, colocated load client, and simulated completion worker.
+
+`flexlb-api/src/test/resources/route-performance-limits.json` defines the required
+QPS ratio, client RPC p50/average/p99 latency, average/peak process CPU, and peak
+RSS. Missing resource samples, RPC errors, incomplete server completions, or failure
+to select all 750 workers of either role fail the test. JSON measurements are saved
+under `flexlb-api/target/route-performance/`, with Surefire reports for all twelve capacity/mode/rate cases. A failed case does not prevent the remaining cases from running.
+
+`tools/run_queue_performance.sh` runs this same matrix without the ordinary UT suite.
+
+### Capacity pressure matrix
+
+The same automatic test phase covers PREFILL_LIMITED and DECODE_LIMITED for both
+DIRECT and QUEUE at 3,000 and 10,000 offered QPS. All scenarios retain 750 workers
+per role. Prefill pressure limits each worker to 1,024 compute tokens for 1,024-token
+requests. Decode pressure limits each worker to one admitted request. Simulated
+completion is delayed by 1,000 ms, producing a nominal bottleneck of 750 requests/s.
+The other role retains its ordinary capacity. QUEUE has a 250 ms scheduling timeout.
+
+Pressure limits live under `pressure` in the limits JSON. DIRECT retains the normal
+RT limits. QUEUE checks p50/average RT at 275 ms and p99 at 500 ms. Both require at
+least 90% of offered QPS to receive a response, at least 50% expected capacity
+rejections/timeouts, and 450–950 successful requests/s. CPU average limits are 600%
+at 3k and 1,500% at 10k, with peak limits twice those values and the same 7 GiB RSS
+limit. Unexpected protocol/transport errors fail the test.
+
+The cases also check actual worker registration bounds, occupancy of the finite
+role, empty P/D resource ledgers after completion, and admission of a fresh low-rate
+request batch after the overload. Expected rejections and successful throughput are
+reported separately, so rejecting all requests cannot satisfy the pressure check.

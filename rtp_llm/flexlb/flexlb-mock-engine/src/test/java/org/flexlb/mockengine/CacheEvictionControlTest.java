@@ -2,7 +2,7 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -411,7 +411,9 @@ class CacheEvictionControlTest {
         controlServer.start();
     }
 
-    /** GenerateInputPB carrying explicit block_cache_keys (uniqueKey metadata). */
+    /**
+     * GenerateInputPB carrying explicit block_cache_keys (uniqueKey metadata).
+     */
     private static EngineRpcService.GenerateInputPB inputWithBlockKeys(
             long requestId, int inputTokens, int decodePort, List<Long> blockKeys) {
         String uniqueKey;
@@ -440,7 +442,9 @@ class CacheEvictionControlTest {
         return input.build();
     }
 
-    /** gRPC getCacheStatus with needCacheKeys — the master-facing sync surface. */
+    /**
+     * gRPC getCacheStatus with needCacheKeys — the master-facing sync surface.
+     */
     private static EngineRpcService.CacheStatusPB cacheStatus(
             JavaMockEngineCluster.FastRpcService service) {
         return unary(
@@ -452,7 +456,9 @@ class CacheEvictionControlTest {
                                 observer));
     }
 
-    /** Poll until the engine's cache_keys count reaches expected (admits are async). */
+    /**
+     * Poll until the engine's cache_keys count reaches expected (admits are async).
+     */
     private void awaitEngineCacheKeys(String engineName, int expected, long timeoutMs)
             throws Exception {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);

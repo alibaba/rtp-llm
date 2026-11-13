@@ -2,10 +2,10 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.balance.scheduler.CancelReason;
-import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.engine.grpc.EngineGrpcClient.CancelReply;
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.balance.schedule.CancelReason;
+import org.flexlb.worker.rpc.EngineGrpcClient;
+import org.flexlb.worker.rpc.EngineGrpcClient.CancelReply;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -606,7 +606,9 @@ class HttpMockCancelIntegrationTest {
                 "clearing the injection must restore the normal cancel path");
     }
 
-    /** Arms/disarms a cancel fault injection on prefill-0 via POST /inject. */
+    /**
+     * Arms/disarms a cancel fault injection on prefill-0 via POST /inject.
+     */
     private void inject(String type, boolean enabled) throws Exception {
         HttpResponse<String> response =
                 HttpClient.newHttpClient()

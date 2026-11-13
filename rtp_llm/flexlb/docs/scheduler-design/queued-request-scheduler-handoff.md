@@ -1,5 +1,173 @@
 # QueuedRequestScheduler 最终交接与实施记录
 
+## 2026-11-13：从决策输入重新核对调度状态
+
+本节基于目录迁移后的当前实现：`balance/schedule/QueuedRequestScheduler`、
+`SchedulingRequests`、`AbstractRequestScheduler`、`DefaultDecodePreemption`，以及
+`balance/queue` 与 `worker/endpoint/CapacityNotifier`。下文区分源码事实、已有行为测试
+和待验证的精简建议；后面的旧记录不能作为当前状态清单。
+本轮修改目录开发规范并纠正 Scheduler 类说明，没有实施下列生命周期或索引重构。
+
+### 决策最少需要知道什么
+
+| 要做的决定                 | 最少输入                                                                                | 当前提供者                                                          |
+| -------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| 是否接收并保留一次排队登记 | Scheduler 是否停止；请求是否仍 OPEN、未取消、Future 未完成；本次登记是否仍有效          | Scheduler、RequestContext、registered                               |
+| 下一次先选谁               | 优先级、原始 FIFO 序号、是否有未扫描/已唤醒条目                                         | SchedulingQueue                                                     |
+| 能否开始新的选址任务       | 已提交但未收尾的选址任务数、并发上限；本条目是否已有任务或仍在等待                      | SchedulingRequests、CapacityWaitQueue                               |
+| 能否选择并提交 Worker      | 请求输入、group、截止时间、当前选址编号、Endpoint 当前资源和代际                        | Context、RequestRouteSelector、Endpoint；资源账本不复制到 Scheduler |
+| 失败后重试还是继续等       | RETRY/BLOCKED/结束结果；等待哪个 role/group；选择期间是否已有容量变化；是否等待抢占名额 | 选址结果、CapacityNotifier、两类等待索引                            |
+| 能否结束或关闭             | 旧选址是否已返回并完成回滚；抢占结果是否已采用或释放；执行线程是否已退出                | 未结束任务记录、planner executor、抢占结果处理完成通知              |
+
+因此，`SchedulingQueue + registered` 足以描述排队集合及其查找关系，但不能推出
+取消后仍未返回的异步任务。一次请求的排队、选址尝试、远端资源和本地任务退出也不是同一个状态。
+
+### 按实际流程看状态交接
+
+1. `enqueue` 在 Scheduler 锁内先登记精确 entry，再入队；恢复请求保留原始序号。
+   `registered` 与队列正常情况下包含相同 entry，登记先于入队也使入队异常后的请求仍可关闭。
+2. driver 按可用名额扫描队列；在投递 executor **之前**记录选址任务，避免任务已被接纳但尚未运行时重复投递。
+   扫描不把条目移出队列，选址中的条目仍是排序成员。
+3. planner 通过 Context 开始精确尝试，Selector 取得资源，基类负责提交或回滚。
+   成功/拒绝/关闭移除登记；BLOCKED 登记容量等待；RETRY 发布重试资格。
+4. 抢占可在选址任务退出前启动，因而同一 entry 的 deciding 与 preemption 可同时存在。
+   原选址任务先收尾，再订阅结果；结果处理后才释放抢占名额及关闭等待通知。
+5. 取消移除登记和等待索引，但不提前返还旧任务名额。旧 entry 的回调不能删除同 Context 的替代登记。
+6. 关闭先停止接纳并排空登记，等待 planner 退出，再等待抢占**结果处理**完成，最后关闭抢占组件。
+
+### 请求登记与未结束任务：每份状态的原因
+
+| 状态                          | 设置和清除                                                            | 根本原因、可否推导及判断                                                                                                                                                                                        |
+| ----------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `registered: Context → entry` | enqueue 登记；remove 精确删除；关闭清空                               | 按 Context 找当前排队 entry，取消时无需扫描 N 个队列成员；精确 value 防止旧回调删新登记。它主要是同一排队集合的 O(1) 查找索引，不是另一套请求生命周期。可让队列承担查找与原子登记后删除外部索引，不能直接拿掉。 |
+| `work: entry → Work`          | 投递选址或启动抢占前建立；两种工作都收尾后删除                        | 保留登记移除后仍可能交回资源的任务。按 entry 而非 Context 区分旧任务和替代登记。必要的是未结束工作事实，Map 和 Work 对象只是当前表示方式。                                                                      |
+| `Work.deciding`               | startDecisions 设置；finishDecision 清除                              | 表示已占用选址名额且结果尚未处理完，包含 executor 排队、选址、响应或回滚；不等于 Context.selectionId 非零，也不等于 executor 正在用 CPU。                                                                       |
+| `Work.preemption`             | tryStartPreemption 创建；finishPreemption 取出并清除；锁外完成 Future | 非空表示尚未处理完的抢占结果；Future 同时供 close 等待。上游返回的 Future 已完成时，晚到资源可能仍在回滚，不能用上游 Future 代替它。Future 对象可被总任务计数与条件等待替换，但不能删除等待清理结束的保证。     |
+| `decisions`                   | startDecisions 加；finishDecision 减                                  | 由 work 中 deciding 条目数派生的 O(1) 计数。不是新业务事实；可改为扫描 work。设并发上限 P，work 中最多约 2P 个 entry，扫描成本是 O(P)，不是 O(N)。未测量前不能声称缓存计数一定更快。                            |
+| `preemptions`                 | tryStartPreemption 加；finishPreemption 减                            | 同样是 work 中 preemption 非空数量的缓存；用途为抢占并发限制。不能用 work.size，因为一个 entry 可同时占两种名额。                                                                                               |
+| `waitingRequestCount`         | 按需计算，不单独存储                                                  | registered.size 减去仍登记且有 work 的条目数；重叠任务只扣一次，取消的旧任务不扣替代登记。此处已避免再维护一个 waiting 计数。                                                                                   |
+| `preemptionQuotaWaiters`      | 名额不足时加入；取得名额、移除请求或名额释放唤醒时删除                | 等待本地抢占名额的第二种唤醒条件。Worker 容量不变时也必须重试，因此不能只等 CapacityNotifier。它可与容量等待同时存在，表达 OR；可把事实放 entry 字段，但无集合索引时名额释放须扫描 N 个登记。                   |
+
+Work 的空间随未结束工作数变化，当前 Work 只含一个布尔值和一个完成通知，
+没有必要再为普通选址结果增加持久 DTO。把这两个字段放进 GlobalQueueEntry 可以少一次
+Work 分配，却会让所有排队 entry 都携带执行状态，且关闭时仍需要查找取消后的任务；
+只有比较实际排队规模、P、分配和清理路径后才能选择，搬字段本身没有减少独立事实。
+
+### 排序与容量等待：哪些是性能索引，哪些保存独立事件
+
+| 状态                                                     | 根本原因与维护位置                                                                                                                                                              |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `entry.context` / `routingGroup`                         | Context 引用提供精确身份；group 是 enqueue 时按请求输入和配置求出的路由约束，供重复选址与抢占恢复沿用。group 可重算，但删除缓存还需确认重试期间是否允许重新解释配置。           |
+| `entry.sequence` / Context.placementSequence             | 队列排序编号与移除路由后恢复位置的编号。entry 会被替换，Context 保留编号跨越这次替换；不是可以无条件合并的同生命周期副本。                                                      |
+| `entry.removed`、`previous/next`                         | 队列维护物理成员关系和双向链表，支持取消 O(1) 摘除、忽略旧 entry；不表示请求已结束。若改用 Context 查找索引推导 removed，队列会反向依赖 Scheduler，不能仅为了少一个字段这样做。 |
+| `buckets.head/tail`、`order`                             | FIFO/优先级排序本体；常规加入和删除不扫描全队列。恢复原序号可能扫描一个 bucket。                                                                                                |
+| `buckets.nextToScan`、`pendingPriorities`                | 保存有界向前扫描位置及哪些优先级还有未扫描条目。否则每次空闲名额出现都从高优先级队头重扫已阻塞请求。                                                                            |
+| `readyRetries`                                           | 容量或抢占名额唤醒的请求可能位于扫描游标之后，需单独纳入有界扫描并与新请求统一排序；不是第二套成员登记。                                                                        |
+| `size`、`priorityCounts`、`nextSequence`                 | 前两项是队列成员的计数缓存，用于 O(1) 长度与诊断；nextSequence 产生新的 FIFO 身份。计数可重算，序号产生器不能由当前最大值代替，否则队列空后可能重复使用旧编号。                 |
+| `CapacityWaitQueue.domains`                              | role/group 到等待组的查找索引；物理通知带 endpoint，等待时归并为 role/group，下一次仍重新选址，不把唤醒源当成资源预留。                                                         |
+| `Domain.entries`                                         | 同一容量条件下的等待成员，按全局 queue.order 排序。避免一次通知唤醒全部积压请求。                                                                                               |
+| `membership`                                             | entry 到等待组的反向索引；精确取消和重新等待时 O(1) 定位，不必扫描所有组。                                                                                                      |
+| `ready`                                                  | 已获得检查机会且没有在途试探的等待组，按组内首个 entry 排序；是可运行条件的索引，不重复承担请求登记。                                                                           |
+| `Domain.retry`                                           | 本组已放行、尚未确认结果的一个试探请求；在排到 planner 之前就需占住机会，因此不能从 work.deciding 推出。成功或取消允许下一个尝试，仍阻塞则停止这一轮。                          |
+| `Domain.available`                                       | 有无尚未消费的容量变化机会；试探中又到达通知时必须记住，即使该组暂时不能加入 ready。它不是 ready.contains(domain) 的同义布尔值。                                                |
+| `CapacityNotifier.sequence/lastChanged/forgottenThrough` | 分别保存全局通知版本、role/group 最近版本、清理旧历史后的版本下界；park 比较选址前的版本，防止“通知先到、等待后登记”丢唤醒。下界防止历史删除后被误认作没有变化。                |
+
+这些索引可以改成每次扫描 registered 并计算资格，但代价不只是 Map 数量变化：
+会把通知 O(1) 定位和有界扫描变为 O(N) 查找，且仍需保留扫描轮次、一个组的试探请求、
+试探期间新到事件等事实。本轮没有测量吞吐或分配，不把现有索引收益写成性能实测结论。
+
+### Scheduler 自身控制与临时结果
+
+| 状态                                                                  | 根本原因与判断                                                                                                                                                                                                       |
+| --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `closed`                                                              | 停止接纳和启动工作的跨线程事实；队列为空不能推出关闭。代码只 get/set，没有 CAS，AtomicBoolean 包装可简化为 volatile boolean，关闭事实仍须保留。                                                                      |
+| `started`                                                             | 持锁保证 driver 只启动一次；与 closed 不同，允许尚未 start 就 stop。也可从 Thread 状态判断，但不比一个明确布尔值更直观。                                                                                             |
+| `notifications`                                                       | 通知版本。driver 在扫描前后比较，防止扫描期间的阻塞消耗 unpark permit 后睡过头；与 Worker 容量版本不同，入队、完成和停止也会改变它。                                                                                 |
+| `planningThread`                                                      | 标记当前线程属于本 Scheduler 的 planner，阻止关闭时等待自己。不是请求状态；不能根据线程名称判断归属。                                                                                                                |
+| `schedulerThread` / `planners`                                        | 分别执行全局有界扫描和可能阻塞的选址，保留 join/awaitTermination 的真实退出条件；不能用 registered 为空替代。                                                                                                        |
+| `capacityListener`                                                    | 向全局容量通知器登记并在 stop 时解除的精确监听实例；是需释放的外部关联，不是请求状态。                                                                                                                               |
+| `priorityOrdering` / `plannerCount` / `scanBudgetMultiplier` / `lock` | 启动时固定的排序、并发、扫描预算和同步约束；依赖引用不作为另一套动态请求状态计算。                                                                                                                                   |
+| `observedCapacity` / `plan` / `retry` / `operation`                   | 一次调用的采样版本、实际选择结果、收尾决定和 Context 尝试身份；有真实跨步骤用途，但不应复制到长期请求账本。                                                                                                          |
+| `preemptionContinuation`                                              | 推迟抢占结果订阅，直到原选址任务归还名额；否则立即完成的 Future 可能先发布重试，driver 在旧任务仍 busy 时消费掉重试资格。延迟交接有原因，但把 Runnable 放进 RequestResult 混合了数据与调度行为，是后续协议收拢候选。 |
+| `queueSchedulingCheck` / `scheduleAt` 时间返回值                      | queueSchedulingCheck 永远是 MAX；scheduleAt 只返回 now 或 MAX，当前没有真正的“未来检查时刻”。这是可删的表示层复杂度，不是必要调度事实。                                                                              |
+| `closed && !hasWork` 分支                                             | 此分支返回 MAX；closed 为真时下方 ready 也必为 false，同样返回 MAX。分支冗余，不能反推关闭时无需等待未结束任务。hasWork 若无其他生产调用，应随分支一起清理而不是只为 UT 留接口。                                     |
+| `drainOnClose` 的两个集合并集                                         | 正常时 queue 与 registered 等价；自定义队列入队/移除部分失败后可能不一致，关闭仍需收齐条目。只有先定义并验证队列原子失败契约，才能去掉兜底并集。                                                                     |
+
+### 具体反例与已有测试证据
+
+- A 正在选址，用户取消 A 并移除登记，B 到来：A 未返回前不能释放选址名额，
+  否则持续取消会积累超过 P 个未清理任务。
+  `GlobalQueueProgressTest.cancelledPlannerKeepsItsSlotUntilItsResourcesAreClosed` 覆盖该行为。
+- A 的原登记已移除，同 Context 建立新 entry；旧 A 的回调到达：只能结束旧 Work，
+  不能删除或扣减新登记。`SchedulingRequestsTest.oldCallbacksCannotRemoveOrDiscountAReplacementRegistration` 覆盖身份边界。
+- 抢占名额先释放，B 随后才登记容量等待：需要保留 B 的名额唤醒订阅直到原选址结果处理完，
+  再移除容量等待并发布重试；物理容量版本未必变化。
+  `GlobalQueueProgressTest.preemptionSlotReleaseCannotBeLostBeforeCapacityParking` 覆盖两种时序。
+- 上游抢占 Future 已完成，晚到预留正在回滚：close 不能提前返回。
+  `GlobalQueueProgressTest.closeWaitsForLatePreemptionReservationReleaseAfterItsFutureCompletes` 覆盖该边界。
+- 容量事件在选址与 park 之间到达、或者在本组 retry 中到达，分别由
+  `CapacityWaitQueueTest.edgeDuringPlanningRequiresRetryInsteadOfSleeping` 和
+  `aNewEdgeDuringAnActiveRetryIsNotLost` 覆盖。
+- 这些是读过源码且纳入本轮全量运行的现有测试；没有新增竞态复现或性能基准。
+
+### 精简取舍与实施顺序
+
+1. 可先删无效的未来检查时间表达及冗余关闭分支；它们不承载新事实。
+2. 保留“当前登记”和“未结束工作”两个生命周期集合。不要先把 Work 改成一个互斥枚举，
+   决策与抢占存在短暂重叠。先比较 O(P) 推导两个计数与 O(1) 缓存的成本，再决定计数是否保留。
+3. 默认 DefaultDecodePreemption 只发取消并返回已完成的 BLOCKED/CLOSED Future，
+   没有直接移交预留；但 DecodePreemption 是可替换接口，现有异步/成功移交测试表达扩展契约。
+   可以研究已完成结果的同步处理路径来减少默认路径的闭包、Future 和再次投递，
+   同时保留异步结果晚到释放与关闭等待；不能因默认实现同步就删除整个异步协议。
+4. 然后评估将条目查找与队列成员修改收进同一个队列入口，减少 registered 的双处维护。
+   必须同时迁移自定义 SchedulingQueue，先固定入队和移除失败后的精确成员契约。
+5. 容量与抢占名额等待均保留事件事实，若统一表示则在一个持锁入口同时登记 OR 唤醒条件，
+   替换并删除现有两处登记/清理协议；不再叠加第三套 wait 状态。
+
+根本判断：需要保留的不是所有现有 Map 和中间类，而是精确身份、未结束副作用、
+排序资格和未消费事件。先减少独立事实来源与交接，再用规模和测量决定索引，
+不能以“测试通过”证明所有现有存储都必要，也不能以“只剩两个集合”证明实现更简单。
+
+### 本轮全量验证（顶层 Maven 目录调整前）
+
+在独立副本执行 `./mvnw clean test -fn`，完成全部模块及当前默认绑定的 route-performance
+门禁；共享 telemetry fixture 随副本提供，未修改测试阈值或通过条件。
+共执行 2543 项：6 项 assertion failure、2 项 error、3 项跳过。
+普通 UT 的 2 项断言失败与 2 项 Mockito UnnecessaryStubbing 错误与迁移前记录一致；
+API 普通 UT 224 项无失败，mock-engine 307 项无失败。
+
+额外 4 项路由性能用例全部因 macOS 不存在 `/proc/self/status` 而无法取得进程资源样本；
+其中 10k QPS 两项同时未通过 client p99 门槛，QUEUE 为 5.156083 ms，DIRECT 为 7.006625 ms。
+四组请求均无 RPC 错误且完成吞吐接近目标，但这不等于性能门禁通过，也不能据此断言延迟失败
+来自环境或目录迁移。完整日志位于 `/tmp/flexlb-scheduler-audit-full-ut.log`。
+全 reactor Spotless、修改类成员顺序和两个开发 skill 的结构验证均通过。
+顶层目录后续调整须重新编译和全量运行，不能沿用本段结果作为新布局的验证。
+
+### 七个 Maven 模块和最新目录的验证
+
+最新布局为 api、config、balance、worker、cache、master、util 七个独立业务模块；
+Mock Engine 保留为 reactor 中的测试工具。Worker 按 endpoint/rpc/status/cache 组织，
+配置按业务用途和 loading 流程组织，公共通信组件归 util.network。
+源码根包与模块一一对应，源码引用与 Maven 依赖均未发现跨模块环。
+
+完整普通 UT 在隔离副本执行，共 2539 项，2 项断言失败、2 项 Mockito 错误、3 项跳过；
+失败用例与迁移前一致，Mock Engine 的 307 项测试通过。随后删除指标测试中未被调用的
+`observation.role()` stub，两项参数化测试单独复验均通过，原有指标断言不变。
+剩余普通 UT 断言失败为 DecodeCapacityPreemptionTest 的容量竞争用例和
+EncoderStrategyTest 的分组变更用例。
+
+路由性能矩阵 12 项全部执行，11 项 assertion failure、1 项端口占用 error；其中包括
+macOS 缺少 `/proc/self/status`、延迟门槛及容量压力错误分类问题。选路性能 2 项均未通过
+分配量门槛：750 个 Worker 的稳态分配约 51043 bytes/op，高于单 Worker 的约 7816 bytes/op。
+不能据此宣称性能通过，也未修改任何阈值。
+
+默认 `./mvnw test` 已取消对 performance-regression 标签的排除，选路性能与原有路由矩阵
+均纳入默认验证。最终全 reactor Spotless 和成员排序通过，修改后的开发 skill 结构验证通过。
+完整 UT、选路性能和 Mockito 补验日志分别为 `/tmp/flexlb-final-layout-ut.log`、
+`/tmp/flexlb-final-layout-selection-perf.log`、`/tmp/flexlb-mockito-fixed.log`；路由矩阵日志为
+`/tmp/flexlb-modules-full-ut-first.log`。默认性能标签变更后尚未重新跑整套矩阵，不能将上述分次
+结果写成一轮全绿的默认 Maven 构建。
+
 ## 2026-11-10 全目录重复校验核对
 
 范围为整个 FlexLB 目录，包括各模块生产代码、测试、夹具、工具和示例；排除生成目录、构建产物和缓存。
@@ -141,7 +309,7 @@ RequestRecord 是没有 equals/hashCode 覆写的 final 类，集合仍按记录
 Endpoint 的原失败成员原子提交测试改为验证未选中成员既不被校验也不被出队；请求失败处理仍由队列层完成。
 
 验证：先在旧流程上运行新增 UT，确认正常前缀发布前已进入失败成员通知；改造后相关 195 个专项用例通过。
-最终 `./mvnw -pl flexlb-sync -am test` 完整通过，sync 2663 个用例无失败、无错误、无跳过；
+最终 `./mvnw -pl flexlb-balance -am test` 完整通过，sync 2663 个用例无失败、无错误、无跳过；
 依赖模块也通过（grpc 有 1 个原有跳过用例）。成员排序和整个 Maven reactor 的 Spotless 检查通过。
 共用测试夹具中已失效的 telemetry 字段引用已迁移到实际 reporter 字段。
 
@@ -173,7 +341,7 @@ Endpoint 的原失败成员原子提交测试改为验证未选中成员既不�
 DeliveryDispatcher −6、QueuedRequestScheduler −6、ExpirationTimer −6、RequestCloseQueue −4、RouteResult +5；
 AbstractRequestScheduler 修改一处重复判断，物理行数不变。测试净增 61 行，其中普通测试 +55、共享 testFixtures +6。
 
-`./mvnw -pl flexlb-sync -am test`：common 453、cache 201、sync 2658，共 **3312** 个用例，零失败、零错误、零跳过。
+`./mvnw -pl flexlb-balance -am test`：common 453、cache 201、sync 2658，共 **3312** 个用例，零失败、零错误、零跳过。
 日志 `/tmp/scheduler-deep-full.log`。旧实现的两个停止任务残留失败见 `/tmp/scheduler-deep-stop-before.log`，
 改后定向测试见 `/tmp/scheduler-deep-focused.log`。完整 reactor Spotless、所有本轮修改 Java 文件的成员顺序检查通过。
 `./mvnw test -DskipTests` 完整 reactor 编译通过，包含 API 与 mock-engine 的测试源码（`/tmp/scheduler-deep-reactor.log`）；不将编译计作这些模块的行为测试。
@@ -351,7 +519,7 @@ AbstractRequestScheduler 修改一处重复判断，物理行数不变。测试�
 `PrefillDeliveryScheduler` 221 → 217，合计 **净减少 47 行**，没有新增或迁移的生产文件。
 统计基线为本轮修改前保存的源码快照，未使用包含历史改动的 HEAD 差异。
 
-验证：`./mvnw -pl flexlb-sync -am test` 共 3311 个用例通过，零失败、零错误、零跳过
+验证：`./mvnw -pl flexlb-balance -am test` 共 3311 个用例通过，零失败、零错误、零跳过
 （`/tmp/prefill-cleanup-full.log`）。最后通过完整 reactor 编译及 RequestExecutionQueueTest 的
 19 个定向用例（`/tmp/prefill-cleanup-reactor.log`）；完整 reactor Spotless、修改文件的成员顺序
 及 diff 空白检查通过。未提交或推送。
@@ -393,7 +561,7 @@ AbstractRequestScheduler 修改一处重复判断，物理行数不变。测试�
 
 本次最终验证：
 
-- `./mvnw -pl flexlb-sync -am test`：common 453、cache 201、sync 2657，共 **3311** 个用例，
+- `./mvnw -pl flexlb-balance -am test`：common 453、cache 201、sync 2657，共 **3311** 个用例，
   零失败、零错误、零跳过。日志 `/tmp/prefill-sync-verified.log`。
 - `./mvnw test -DskipTests`：完整 Maven reactor 的生产代码和测试代码编译通过，包含 API 和 mock-engine；
   不将这条命令算作这两个模块的行为测试。日志 `/tmp/prefill-reactor-compile.log`。
@@ -453,7 +621,7 @@ AbstractRequestScheduler 修改一处重复判断，物理行数不变。测试�
 
 ### 3. 函数落点：固定顺序和连续前缀
 
-以下路径均相对 `flexlb-sync/src/main/java/org/flexlb/balance/`。
+以下路径均相对 `flexlb-balance/src/main/java/org/flexlb/balance/`。
 
 #### 3.1 `endpoint/OrderedPrefillRequestQueue.add/remove`
 
@@ -854,7 +1022,7 @@ endpoint→request 索引。若无法保持精确 endpoint 身份就保留现状
    权威复现日志：`/tmp/queued-final-red-corrected.log`。第一版夹具失败不作为竞态证据。
 2. 修改后第一批 7 个测试类共 204 用例通过，包含新用例，以及真实旁路、撤路、通知失败与资源
    身份测试；日志 `/tmp/queued-final-green.log`。
-3. 隔离工作区执行 `./mvnw -pl flexlb-sync -am test -q`，退出 0：common 453、cache 201、sync 2693，
+3. 隔离工作区执行 `./mvnw -pl flexlb-balance -am test -q`，退出 0：common 453、cache 201、sync 2693，
    合计 3347 用例，失败、错误、跳过均为 0。日志 `/tmp/queued-final-regression.log`。
    隔离目录为基线同级的 work，避免其他并行构建干扰。该次不是 API/mock-engine 的全量行为测试。
 4. 完整回归后还简化了等价的结束原因条件，并移除撤路前置条件已保证的空值判断与重复锁；
@@ -898,7 +1066,7 @@ Queue 中部分后续逻辑移至基类，已计入上表，不能把 -23 当作
 状态保存什么，以及资源和异步任务由谁继续处理。不要只换一批抽象名称，也不要把大类拆成多个文件后宣称精简。
 应删除隐式传参、重复判断和重复协调；必要的资源身份检查、取消处理和并发交接必须保留。
 
-主要源码：[QueuedRequestScheduler.java](../../flexlb-sync/src/main/java/org/flexlb/balance/scheduler/QueuedRequestScheduler.java)。
+主要源码：[QueuedRequestScheduler.java](../../flexlb-balance/src/main/java/org/flexlb/balance/schedule/QueuedRequestScheduler.java)。
 以下问题区分“已确认的实现/可读性问题”和“需要验证的行为选择”；没有把可读性问题直接认定为生产故障。
 
 ## 实际流程

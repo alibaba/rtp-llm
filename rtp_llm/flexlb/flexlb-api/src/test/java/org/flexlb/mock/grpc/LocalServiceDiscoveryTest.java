@@ -1,6 +1,6 @@
 package org.flexlb.mock.grpc;
 
-import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.util.discovery.DiscoveredHost;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -44,12 +44,12 @@ class LocalServiceDiscoveryTest {
 
         LocalServiceDiscovery discovery = new LocalServiceDiscovery(file);
 
-        List<WorkerHost> prefill = discovery.getHosts(PREFILL_DOMAIN);
+        List<DiscoveredHost> prefill = discovery.getHosts(PREFILL_DOMAIN);
         assertEquals(2, prefill.size());
         assertEquals("127.0.0.1:55150", prefill.get(0).getIpPort());
         assertEquals("127.0.0.1:55151", prefill.get(1).getIpPort());
 
-        List<WorkerHost> decode = discovery.getHosts(DECODE_DOMAIN);
+        List<DiscoveredHost> decode = discovery.getHosts(DECODE_DOMAIN);
         assertEquals(1, decode.size());
         assertEquals("127.0.0.1:55160", decode.get(0).getIpPort());
 
@@ -78,7 +78,7 @@ class LocalServiceDiscoveryTest {
 
         Files.delete(file);
 
-        List<WorkerHost> hosts = discovery.getHosts(PREFILL_DOMAIN);
+        List<DiscoveredHost> hosts = discovery.getHosts(PREFILL_DOMAIN);
         assertEquals(
                 1,
                 hosts.size(),
@@ -96,7 +96,7 @@ class LocalServiceDiscoveryTest {
         // A partial write window caught mid-rename: truncated JSON.
         writeAtomically(file, "{\"" + PREFILL_DOMAIN + "\": [\"127.0.0.1:55150\", \"127.0.0.");
 
-        List<WorkerHost> hosts = discovery.getHosts(PREFILL_DOMAIN);
+        List<DiscoveredHost> hosts = discovery.getHosts(PREFILL_DOMAIN);
         assertEquals(1, hosts.size(), "corrupted JSON must fall back to the last good snapshot");
         assertEquals("127.0.0.1:55150", hosts.get(0).getIpPort());
     }
@@ -113,7 +113,7 @@ class LocalServiceDiscoveryTest {
         writeAtomically(
                 file, "{\"" + PREFILL_DOMAIN + "\": [\"127.0.0.1:55150\", \"not-a-host\"]}");
 
-        List<WorkerHost> hosts = discovery.getHosts(PREFILL_DOMAIN);
+        List<DiscoveredHost> hosts = discovery.getHosts(PREFILL_DOMAIN);
         assertEquals(
                 1, hosts.size(), "a snapshot with any invalid entry must be rejected entirely");
         assertEquals("127.0.0.1:55150", hosts.get(0).getIpPort());
@@ -138,7 +138,7 @@ class LocalServiceDiscoveryTest {
                         + "\": [\"127.0.0.1:55160\"]"
                         + "}");
 
-        List<WorkerHost> hosts = discovery.getHosts(PREFILL_DOMAIN);
+        List<DiscoveredHost> hosts = discovery.getHosts(PREFILL_DOMAIN);
         assertEquals(3, hosts.size(), "hot update must be visible on the next getHosts call");
         assertEquals("127.0.0.1:55152", hosts.get(2).getIpPort());
         assertEquals(1, discovery.getHosts(DECODE_DOMAIN).size());

@@ -1,131 +1,98 @@
 # Resource Management
 
-## 术语与记录
+## 请求记录和容量
 
-Worker 是远端推理实例，WorkerStatus 保存它的身份、代际与引擎状态。
-Endpoint 是 Master 内对应某一代 Worker 的本地对象，维护请求记录、队列和容量。
-RoleSelection 保存单个角色的选择事实和精确登记；RouteResult 聚合这些角色并保留同一次尝试的精确身份。Endpoint 引用本身不阻止下线。
+WorkerStatus 保存远端实例的身份、代际和状态；Endpoint 保存这一代实例的本地请求记录和容量。
+EndpointRegistry 按角色和地址管理实例。RoleSelection 保存单个角色的选择和精确登记，
+RequestResult 组合本次选择的全部角色。旧代际回调不能修改同地址新实例的请求。
 
-EndpointRegistry 按角色和逻辑地址维护 Endpoint。选路快照提供候选；
-selectEndpoint 检查可用性；tryRegisterSelection 在每个 Endpoint 的状态锁内验证评分版本并登记影响。
-Prefill 预测输入携带 `SelectionVersion`，保存 Endpoint generation、资源版本和调度输入版本；
-登记比较这些事实版本及 evaluator，不依赖预测物化缓存对象的引用相等。策略仍保留本轮候选缓存，
-单个登记冲突只刷新该 Endpoint 的预测并与其余已缓存评分重新比较，不重新查询全量 cache 匹配。
-PrefillEndpoint 在状态锁内维护请求状态版本和调度输入版本。预测缓存保存捕获时的版本，
-在同一把锁内比较版本并取得缓存来源，昂贵的预测物化在锁外执行。
-队列长度和队列版本直接从队列读取，不再另存包含版本与队列统计的 `Progress` 快照。
-仅用于投影计算的合成输入没有可登记的 Endpoint 身份，不能用于取得资源。
-入队和发送再次检查可用性，独立的发送容量通过派发许可检查。
-旧 Endpoint 引用不能修改同地址新代际的请求。
+Registry 按角色缓存不可变、按地址排序的 Endpoint 列表。节点发布和撤出统一更新对应角色的列表，
+选址读取现成列表，不在每个请求上复制或排序。Prefill 策略直接使用 PrefillEndpoint，
+不再包装额外的路由目录项；旧列表只用于候选遍历，登记时仍校验当前节点和代际。
+Endpoint 查询统一为 `endpoints(role, group)` 和 `getEndpoint(role, address)`：前者按角色返回类型化列表，
+group 为 null 时包含全部分组；后者只查当前地址映射。角色策略负责读取容量快照，并在登记前检查接纳状态及代际。
+监控直接遍历同一列表，不再构造统计专用的节点 Map。
 
-请求上报与 Endpoint 下线使用独立入口。WorkerRequestEventType 只描述请求的活跃、
-资源分配确认、完成、失败和抢占取消，由 onWorkerRequestEvent 更新请求执行事实。
-Endpoint 下线通过 onEndpointRetired 传入具体实例、路由和 Decode 预留，核对当前关联后
-处理资源释放及请求去向，不更新请求活跃时间，也不表示 Worker 已接受或完成请求。
-准入期间的结束原因保存在同一份 pendingEnd；未交付路由完整回滚后可撤销该退役原因并重选，
-取消、超时等其它已接受原因继续保留。
+PrefillEndpoint.SelectionSnapshot 只包含 generationId、resourceVersion、computeTokens 和 maxComputeTokens。
+策略读取快照比较工作量，tryRegisterSelection 在 Endpoint 状态锁内检查代际、版本和剩余容量，
+登记后立即计入工作量。冲突时重新选择，容量不足时尝试其他候选；没有候选则等待容量变化。
 
-## Endpoint 状态互斥
+选择过程中取得的各角色资源由同一次尝试负责。完整路由提交前仍需检查取消和节点可用性；
+失败时回滚全部已取得资源。完整路由与返回状态一起提交，不保留等待派发的路由。
+回滚失败的记录留给异步清理，避免资源失去清理入口。
 
-每个 Endpoint 使用一把 ReentrantLock 保护本地请求、批次、容量和退休状态。
-准入检查和记录修改在同一临界区内完成；不同 Endpoint 可以并行操作。
-所有新增交接统一使用 `WorkerEndpoint.acceptsNewRequests()`：WorkerStatus 可调度且 Endpoint
-仍接受请求才允许入队、预留容量或提交派发。任一条件关闭都拒绝新增交接，已有请求的状态反馈、
-回滚和资源释放仍可执行。
-未交付路由失效时，Scheduler 先通过 shouldRetryRouteFailure 选择重试策略。
-需要重试的失败统一记录在 RequestContext 的 routeFailure 中；失败角色不决定清理范围。
-Context 使用原有 placement 凭据取得整条路由的撤回权，与最终交付提交互斥；
-BATCH 的投递登记与开始发送在同一个临界区完成。
-基类直接协调释放 Prefill/PDFUSION、Decode、Encoder 实际取得的全部资源；VIT 只清除选择引用。
-删除精确 Decode 登记时一并清除其临时派发额度，旧许可和旧提交随后只能匹配旧记录，
-不再等待批次准备完成通知，也不会释放同 ID 新登记的额度。
-准入回滚、路由撤回和请求终止共用基类的 `releaseRouteResources`，Dispatcher 不再实现各 role 的组合清理。
-清理成功后，未过期请求通过 `scheduleRequest` 恢复调度，不再进行第二次重试决策：Endpoint 不可调度的排队请求保留原序号、优先级和截止时间重新入队。
-准备错误保留原来的失败发布与异步清理；清理失败禁止重试。正常的派发容量等待不撤销路由。
-正在抢占/取消协议中的请求沿用原有协议收尾，不能跳过远端执行状态确认直接重试。
-已交付、正在发送或发送结果不确定的请求不能直接撤回重发；只有精确匹配的 NOT_SENT 结果可以证明未发送。
-失效 Endpoint 通知由排队调度器合并处理，在调度锁外查找受影响路由并发起撤回。
-同步操作由调用线程加锁执行，不创建操作队列、Future 或切换执行线程。
-业务方法直接使用 lock/try/finally/unlock 展示临界区，不通过回调包装加锁。
-状态锁及要求调用者持锁的内部方法仅在 Endpoint 包内可见。
-Scheduler、Dispatcher 通过 Endpoint 的队列版本检查、条件删除和派发提交方法完成原子操作。
-Scheduler 自己的等待决策、容量订阅和停止归属由独立的等待锁保护；
-监听注册与移除不持有 Endpoint 锁，停止完成后的等待决策不能重新挂载监听。
-监听增删只更新本地监听集合，与等待、停止状态一起在等待锁内完成；容量探测和 Endpoint
-版本核对在等待锁外执行。
-先订阅容量变化，再检查队列和资源事实，避免在订阅过程中丢失容量唤醒。
-调度唤醒等异步工作继续使用现有执行器和 CAS 标志，避免重复提交。
-现有请求生命周期和 Worker 状态同步事务仍有各自的并发保护。
-RPC、耗时预测和请求完成通知在锁外执行。
-Prefill 的阻塞原因探测在锁外执行，捕获队列前核对版本，版本变化则重新探测。
-Encoder 直接提交不持有 Context 监视器等待 Endpoint；提交后仍由请求状态校验拒绝取消的路由，
-并回滚晚到的资源记录。
-Encoder 在锁内捕获引擎任务快照和本地未确认请求的工作量，在锁外遍历不可变引擎任务；
-退休时在锁内移交请求表，在锁外生成通知。
-Encoder 状态对账只遍历本地跟踪请求，在锁内更新记录并发布对应状态 CAS，锁外复制通知列表。
-Prefill 和 Decode 退休在锁内捕获清理所需记录并清空记账，排序、不可变复制和日志在锁外执行。
-Decode 在锁内捕获同一版本的优先级计数，在锁外构造准入摘要，缓存发布前重新核对版本。
-心跳反馈列表的不可变复制也在锁外完成。
-状态对账需要重新预测批次时，先捕获成员，预测完成后再核对成员和下线状态，
-防止把已删除请求写回。
+P/D/E 共用 WorkerEndpoint 的 RegistrationStatus、Registration<T> 和 RequestRegistration 契约，
+各角色保留自己的具体登记与 SelectionSnapshot。P/E 共用本地 REGISTERED/COMMITTED 阶段；
+Decode 的 UNCONFIRMED/CONFIRMED 表示 Worker 是否已确认执行，与本地提交阶段不同。
+RoleSelection 通过 SelectionRollback 调用统一的 rollbackSelection，各 Endpoint 自行核对身份和阶段，
+旧登记或重复回滚不能影响同 ID 的新记录。正常完成或远端清理后的释放使用 releaseRequest。
 
-下线在同一把状态锁保护下停止接收请求、清空记录，然后在锁外通知请求生命周期。
-较早完成的准入由下线统一清理，较晚的准入直接拒绝。
-不再需要 GenerationPin 或选路引用计数。
+## 状态更新和关闭
 
-Selector 在私有局部作用域中收集已登记的 RoleSelection，并协调组合失败回滚；没有跨类共享的可变 Builder。
-选点完成、入队和直接提交边界统一通过 validateEndpoints 检查全部角色，
-包括没有容量预留的 VIT。选点中的版本/代际变化由 Strategy 局部处理；
-已选组合在发布前失效统一返回 RETRY，释放未交付登记后重选；结果只保留兼容响应所需的失败原因，不再嵌套旧选择结果。
-未交付的预留先完整回滚，DIRECT 在选点和提交之间共用一次重新决策额度，
-QUEUE 则重新规划，不把下线当作容量不足等待。普通容量不足继续按容量策略处理，
-参数错误、取消、超时和已交付请求仍按原有生命周期处理。
-尚未交付且已完整回滚的准入，不因该次 Endpoint 下线通知而终止请求。
-客户端携带 selectedVit 时仍须匹配绑定的代际；过期绑定返回 VIT_ROUTE_STALE，
-不能静默换到没有该次 VIT 结果的节点。
+每个 Endpoint 使用一把 ReentrantLock 保护本地请求和容量。
+WorkerEndpoint 统一检查代际、加锁和发布状态；角色实现 updateStatusLocked。
+请求事件、容量通知和网络操作在锁外执行。
+
+Registry 对所有已登记 Endpoint 调用统一的 `evictExpiredRequests`，不按角色分派或转换类型。
+Prefill、Decode 和 Encoder 各自负责其本地记录的 TTL 与精确身份复核；没有请求登记的 VIT 默认不做清理。
+EncoderStrategy 直接读取 router.roles.encoder.maxRequests，筛选候选和 Endpoint 登记使用同一上限。
+DIRECT 和 QUEUE 都遵守此上限；Scheduler 只根据容量不足结果决定拒绝或等待，不持有 Encoder 容量参数。
+只有调度器已不再保留的记录才可清理：先在锁内捕获候选，锁外查询保留状态，再持锁复核后移除。
+Encoder 在接纳和每次 ACTIVE 上报时更新记录时间；清理查询期间发生替换或新上报时，旧候选不能删除新记录。
+
+WorkerEndpoint.acceptsNewRequests() 同时检查节点健康和本地接纳状态。
+stopAcceptingRequests() 停止新增登记；closeAsync() 清理这一代记录并返回共享的完成结果。
+Registry 等待精确代际关闭后清理注册与缓存。已有请求的状态反馈、回滚和释放仍可执行。
+单节点下线统一调用 Registry.closeWorker，Registry 自动启动清理并返回只读完成结果，
+调用方不再携带清理对象或另行启动后续操作。WorkerStatus 锁内停止接纳并撤出路由，
+异步任务等待原状态事务解锁后，依次等待 Endpoint 关闭、清理缓存并删除精确状态。
+等待节点接纳锁和执行清理时不持有 Registry 全局锁，其他节点仍可发现、发布和接纳请求。
+定期扫描先关闭不可用节点的接纳，再启动清理；状态锁或接纳锁忙碌的节点留待后续扫描，
+不阻塞同一轮对其他节点的处理。
+整体关闭仍分别等待正在发布的节点和已登记的下线任务；清理失败通过完成结果及整体关闭报告。
+Decode 关闭先清除本地请求记录，再逐个通知请求和容量变化。普通通知异常记录日志并继续，
+不阻止 Registry 收尾；本地资源清理失败仍通过关闭 Future 报告，Registry 不将其视为清理完成。
 
 ## Prefill
 
-PrefillEndpoint.RequestRecord 保存不可变排队输入、SELECTED/WAITING/RESERVED/COMMITTED 阶段、预计剩余耗时、
-阶段计时起点和所属批次。每个请求一条记录，等待队列是这些请求的有序索引。
-SELECTED 已计入投影但尚不可派发；发布时同一记录进入 WAITING。Direct 在选择时登记为 RESERVED。
-组合完成时由 RouteResult 构造器绑定已有记录，禁止将同一记录绑定到第二个执行身份；未绑定记录下线时直接清除，由选择尝试检查失败并撤销其他角色。
-入队和 DIRECT 发布只接受选择时的精确记录，不创建缺失记录。
+PrefillEndpoint.RequestRegistration 保存 requestId、computeTokens、绑定的完整路由和 REGISTERED/COMMITTED 状态。
+登记时预留 compute tokens，完整路由绑定后提交；完成、回滚或清理时移除精确记录并扣减工作量。
+本地请求按登记值计数，不根据经过时间衰减，也不学习执行耗时。
 
-PrefillEndpoint.BatchRecord 是 Endpoint 内部的已提交批次记录，保存批次 ID、成员、原始预测输入、
-剩余耗时与执行结果。组批候选不创建账本记录，也不占批次槽位。
-提交时在同一 Endpoint 锁内检查最新容量、成员身份、队列连续前缀和请求期限，然后创建完整批次；
-出队返回已登记的工作，或当时的容量不足、选择失效原因；调用方不重新查询容量推断失败原因。
-竞争失败的候选释放临时派发凭据，成员仍留在等待队列。最后一个成员结束后释放批次名额。
-不存在空批次预留、未提交批次回滚或 committed 双态。
-
-直接调度使用请求记录，批次调度使用批次记录，不再继承只保存 owner 的 Reservation 基类。
-回滚和释放核对具体记录或请求身份，旧回调不能删除同 ID 的新请求。
-等待请求退出统一使用 releaseQueuedRequest；请求结束使用 releaseRequest。两者都完整删除对应的
-本地记录及队列、批次和容量关联，并在确有删除后于锁外发布一次容量变化。前者只接纳仍在
-等待队列的请求，避免晚到的队列清理释放已提交交付；超时与准备失败的结果由 Scheduler 决定。
+上报的未知运行请求按 inputLength 减有效 prefixLength 统计 compute tokens。
+缺少输入长度或任务明细时保守占满配置容量。已知本地请求不会再次计入未知工作量。
+可用容量增加后通知全局等待队列；Endpoint 内不保存等待派发队列或批次记录。
 
 ## Decode
 
-DecodeEndpoint 维护每个请求的本地预留、引擎确认、释放和抢占状态。
-DecodeResources.RequestReservation 是不可变的预留标识：
-Endpoint 代际 ID、请求 ID、预留编号。容量和任务阶段仍保存在 Endpoint 中。
+DecodeEndpoint 保存本地请求记录，并按完整 worker 上报统计引擎占用。
+tryRegisterSelection 在同一次持锁期间核对选址快照、请求名额和 KV 容量，成功即预留；
+后续路由提交不再领取临时派发许可。调用方持有原始 DecodeEndpoint.RequestRegistration 对象，
+释放时比较对象身份，旧回调不能释放同 ID 的新记录，不再维护预留编号。
 
-tryRegisterSelection 检查评分版本、容量并登记；登记即参与后续 P/D 选择。
-提交阶段不再首次预留 Decode。排队请求替换和引擎抢占完成时，Endpoint 直接将新登记置为可排队状态，
-在锁外通知容量变化；Scheduler 只检查精确登记仍可用并接收，不再执行 markQueued 转移。
-排队预留保护 KV 容量；发送前通过 EngineDispatchPermit 检查引擎并发和 KV 限制。
-引擎状态到达后对账；发布结果不确定时保留相关容量，直到取得完成或取消证据。
+本地请求只维护一个 confirmed 标志。未确认时，同时预留请求名额和 KV；
+首次出现在 worker 活跃请求上报中即确认分配，两项本地预留同时移除，由 worker 容量上报负责。
+运行阶段直接取自 worker，不在本地重复维护。未知引擎请求计入容量，不创建本地记录。
+选址与接纳共用一份 CapacityUsage；监控直接统计计数，不复制请求表。
+只有抢占和容量不足归因读取请求明细，优先级归因直接遍历明细，不另建优先级数组快照。
+确认未发送或远端已清理后，调用统一的 releaseRequest；仅发出取消不能释放。
+未确认请求释放时扣除本地请求名额及 KV 预留，并在锁外通知调度。
+已确认请求清理时只删除本地关联，请求数和 KV 容量均等待 worker 上报更新，不另存已释放 ID 或提前修正上报。
+引擎实际可用 KV 以 worker 上报为准，不把 inputLength 当作取消释放的物理 KV。
+
+Endpoint 不保存 A 与等待请求 B 的抢占关系，也不替 B 保留 A 释放的容量。
+B 超时不影响 A 的普通取消和清理；A 释放容量后，所有等待请求按正常调度规则竞争。
 
 请求 Context 中的结清标志保存准确 route 的清理观察，供结束和归档使用；它不参与 Endpoint 容量记账。
 远端允许释放的证据与本地记录已经移除是不同事实。Endpoint 中查不到 requestId，不能单独证明某次旧尝试已经结清。
-结束流程先处理停止、deadline 和已就绪的完成通知，再释放资源；依赖本轮释放才就绪的抢占通知紧接着完成。
+结束流程先处理停止、deadline 和已就绪的完成通知，再释放资源。
 成功路径不再回到清理循环顶部推进通知，也不推迟已经具备条件的本地完成。
 保留最多三次实际失败尝试，等待远端证据时退出，由后续事件推进。准确资源身份保证重复释放不重复改变容量或发布通知。
 
 ## Encoder 与监控
 
-EncoderEndpoint 保存尚未完成的请求、是否已被引擎观察到及预计未命中编码长度。
+EncoderEndpoint 在选址时通过 tryRegisterSelection 记录精确 RequestRegistration，立即计入并发和未命中工作量。
+commitSelection 将完整路由关联到同一登记，不再次扣减容量；是否已关联路由决定 REGISTERED/COMMITTED 阶段。
 提交和下线使用同一把状态锁，完成、取消或下线后清除对应记录。
 登记接收请求侧计算好的未命中 token 数，不从请求 Context 读取输入长度与缓存命中参数。
 

@@ -1,6 +1,6 @@
 package org.flexlb.cache.hash;
 
-import org.flexlb.dao.loadbalance.TokenIds;
+import org.flexlb.util.TokenIds;
 
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;

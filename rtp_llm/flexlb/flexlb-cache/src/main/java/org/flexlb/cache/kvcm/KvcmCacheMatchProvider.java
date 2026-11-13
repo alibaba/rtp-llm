@@ -1,0 +1,43 @@
+package org.flexlb.cache.kvcm;
+
+import org.flexlb.cache.CacheMatchSource;
+import org.flexlb.cache.HostCacheMatch;
+import org.flexlb.cache.match.CacheMatchProvider;
+import org.flexlb.config.service.RoleType;
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Adapts the KVCM gRPC client to the cache metadata abstraction.
+ */
+@Component
+public class KvcmCacheMatchProvider implements CacheMatchProvider {
+
+    private final KvcmGrpcClient kvcmGrpcClient;
+
+    public KvcmCacheMatchProvider(KvcmGrpcClient kvcmGrpcClient) {
+        this.kvcmGrpcClient = kvcmGrpcClient;
+    }
+
+    @Override
+    public CacheMatchSource source() {
+        return CacheMatchSource.KVCM;
+    }
+
+    /**
+     * Returns KVCM matches without rewriting their keys. KVCM {@code host_ip_port} values follow
+     * the logical {@code ip:port@engineIndex} identity reported by the Subscriber.
+     */
+    @Override
+    public Map<String, HostCacheMatch> findMatchingEngines(
+            String requestId,
+            List<Long> blockCacheKeys,
+            long blockSize,
+            RoleType roleType,
+            String group) {
+        return kvcmGrpcClient.findMatchingEngines(
+                requestId, blockCacheKeys, blockSize, roleType, group);
+    }
+}

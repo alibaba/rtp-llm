@@ -56,7 +56,9 @@ final class MockControlServer {
     private final EventLoopGroup bossGroup;
     private final EventLoopGroup workerGroup;
 
-    /** Runtime scale-out/in backend for /add_engine + /remove_engine; null disables them. */
+    /**
+     * Runtime scale-out/in backend for /add_engine + /remove_engine; null disables them.
+     */
     private final DynamicEngineManager engineManager;
 
     MockControlServer(
@@ -150,7 +152,9 @@ final class MockControlServer {
         }
     }
 
-    /** Services sorted by gRPC port for deterministic output (Python lists engines in creation order). */
+    /**
+     * Services sorted by gRPC port for deterministic output (Python lists engines in creation order).
+     */
     private List<JavaMockEngineCluster.FastRpcService> orderedServices() {
         List<JavaMockEngineCluster.FastRpcService> ordered = new ArrayList<>(services.values());
         ordered.sort(
@@ -337,7 +341,9 @@ final class MockControlServer {
         throw new ApiException(400, "request must contain 'engine' or 'port'");
     }
 
-    /** Read a JSON array of integers into a Long list (status_suppress_rids). */
+    /**
+     * Read a JSON array of integers into a Long list (status_suppress_rids).
+     */
     private static List<Long> readLongList(JsonNode node) {
         List<Long> values = new ArrayList<>();
         if (node != null && node.isArray()) {
@@ -847,7 +853,9 @@ final class MockControlServer {
         }
     }
 
-    /** Dual-addressed lookup of an outcome this control plane already detached. */
+    /**
+     * Dual-addressed lookup of an outcome this control plane already detached.
+     */
     private DynamicEngineManager.RemovedEngine detachedRemoval(JsonNode body) {
         if (engineManager == null) {
             return null;
@@ -861,7 +869,9 @@ final class MockControlServer {
                 : null;
     }
 
-    /** One body for the caller that drove a teardown and for one that joined it. */
+    /**
+     * One body for the caller that drove a teardown and for one that joined it.
+     */
     private static Map<String, Object> removalResponse(DynamicEngineManager.RemovedEngine removed) {
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("status", "ok");

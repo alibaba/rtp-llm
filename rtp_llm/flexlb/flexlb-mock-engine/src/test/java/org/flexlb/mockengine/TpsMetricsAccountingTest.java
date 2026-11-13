@@ -2,7 +2,7 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -31,12 +31,16 @@ class TpsMetricsAccountingTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BASE_PORT = 62900;
 
-    /** {@code metric_name{engine_name=...,role=...,grpc_port="N",...} value} */
+    /**
+     * {@code metric_name{engine_name=...,role=...,grpc_port="N",...} value}
+     */
     private static final Pattern PER_ENGINE_METRIC_PATTERN =
             Pattern.compile(
                     "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"\\}\\s+(\\d+)");
 
-    /** {@code metric_name{role="..."} value} */
+    /**
+     * {@code metric_name{role="..."} value}
+     */
     private static final Pattern ROLE_METRIC_PATTERN =
             Pattern.compile("(\\w+)\\{role=\"(\\w+)\"\\}\\s+(\\d+)");
 

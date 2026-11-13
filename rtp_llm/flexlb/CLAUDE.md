@@ -33,61 +33,29 @@ New HTTP endpoints in `HttpLoadBalanceServer`:
 - `POST /rtp_llm/update_log_level`: Debug log level control
 - `GET /rtp_llm/queue_snapshot`: Get queue snapshot
 
-### flexlb-common
+### Business module boundaries
 
-Shared utilities, data models, exception handling, and common configurations used across all modules.
+Seven business modules own matching Java root packages. See
+[architecture](docs/architecture/00-overview.md) for the directory tree and dependency graph.
 
-Key classes:
+| Maven 模块 / Java 根包       | 职责                                                       |
+| ---------------------------- | ---------------------------------------------------------- |
+| `flexlb-api` / `api`         | FlexLB 应用入口、装配、对外服务及调度协议。                |
+| `flexlb-config` / `config`   | 配置定义、来源、解析、合并与校验。                         |
+| `flexlb-balance` / `balance` | 调度、队列、路由选择、请求生命周期及清理。                 |
+| `flexlb-worker` / `worker`   | Worker 身份与状态、Endpoint 账本、状态同步及 Engine 通信。 |
+| `flexlb-cache` / `cache`     | 缓存匹配、索引、反馈和 KVCM 集成。                         |
+| `flexlb-master` / `master`   | 主节点选举、主地址查询和变更通知。                         |
+| `flexlb-util` / `util`       | 公共组件、连接、服务发现、常量及通用定义。                 |
 
-- `ServerStatus`: Worker node status representation
-- `Request`/`Response`: API request/response models
-- `RoleType`: Enum defining worker roles (PREFILL, DECODE, PDFUSION, VIT, FRONTEND)
-- `RoutingConfig`: Role-specific Prefill/Decode selection configuration
-- `ConfigService`: Strict schema-v3 configuration loader and validator
+生产依赖只向下：`api → balance → cache → worker → master → config → util`；
+各模块可直接依赖其所需的更底层模块，底层不依赖上层。Worker 消费请求、路由、缓存及
+指标的窄接口；balance/cache 提供实现，api 完成装配。接口回调不要求反向 Maven 依赖。
+服务发现只依赖通用地址与发现配置，不引用 Worker 或请求状态。
 
-Role-derived routing policy lives in `RoutingConfig.PrefillConfig` and
-`RoutingConfig.DecodeConfig`. Their selection pipelines read role-specific availability
-thresholds directly, evaluate coherent endpoint snapshots, and leave authoritative capacity
-acquisition to endpoint admission or dispatch.
-`RoleType` remains an identity enum and does not own mutable routing policy.
-
-### flexlb-grpc
-
-gRPC client implementation for model service communication. Contains protocol buffer definitions and generated stubs for communicating with backend AI worker nodes.
-
-### flexlb-sync
-
-Core load balancing logic, scheduling strategies, and worker status synchronization. This is the heart of the load balancing system.
-
-Key concepts:
-
-- **Routing**: `RequestRouteSelector` composes the Prefill and Decode cost selectors and the VIT random selector for multi-role requests
-- **Queue-based scheduling**: `RequestScheduler` contract + `QueuedRequestScheduler` ordered placement owner + per-generation `PrefillEndpoint` resource handoff
-- **Resource measurement**: Endpoint resource views used by routing strategies
-- **Worker synchronization**: Periodic gRPC-based status sync (`GrpcWorkerStatusRunner`)
-- **Master election**: ZooKeeper-based leader election (`ZookeeperMasterElectService`)
-- **Graceful lifecycle**: `ApplicationLifecycle` owns the fixed online, health, and shutdown workflow
-
-Queue scheduling components:
-
-- `RequestScheduler`: Replaceable scheduling timing, request/endpoint change notifications, and stopping scheduling
-- `AbstractRequestScheduler`: Shared wiring only: binds RequestLifecycle and retains its repository and Decode admission capacity; subclasses implement scheduling
-- `DirectRequestScheduler`: Chooses when to select an immediate route; DeliveryDispatcher prepares and commits its resources
-- `QueuedRequestScheduler`: Owns scheduling timing, bounded planning and capacity waits; replaceable queues supply ordering, and GroupPlanner supplies batching rules
-- `RequestRepository`: Shared registration, exact active/terminal identities, queries, and archival; no request protocol
-- `PlacementConfiguration`: Constructs the fixed-mode scheduler at startup
-- `RequestContext`: Private per-request lifecycle, exact admission/route/preemption identities, deadlines, cancellation, and response selection
-- `RequestLifecycle`: Admission handles, cancellation, deadlines, resource handoff, and request settlement. `ApplicationLifecycle` owns service shutdown order; each execution component drains and closes its own work
-- `PrefillEndpoint`: Owns the Prefill generation, queue access, capacity revalidation, and committed resource handoff
-- `GroupPlanner`: Stateless SINGLE/FIXED_WINDOW decisions shared by live grouping and route projection
-- `Delivery`: Owns one preparation-to-dispatch operation; its `Member` is the exact identity used by request delivery facts. RequestContext stores send outcomes and release evidence; DeliveryDispatcher owns resource preparation, atomic commit calls and remote cleanup retries
-
-Capacity management components:
-
-- Prefill and Decode selection pipelines evaluate immutable full-fleet snapshots.
-- Endpoint admission and dispatch own exact capacity, one-shot permits, and capacity-change signals.
-
-See flexlb-sync/CLAUDE.md for detailed module-specific guidance.
+Engine 协议由 `flexlb-worker` 生成，调度协议由 `flexlb-api` 生成，KVCM 协议由
+`flexlb-cache` 生成；wire package、字段号及 RPC 方法保持兼容。
+`flexlb-mock-engine` 是随 reactor 验证的测试工具，不属于上述七个业务模块。
 
 ### flexlb-cache
 
@@ -134,17 +102,17 @@ java -jar flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar \
 ### Testing
 
 ```bash
-# Run all functional tests (performance regressions are excluded)
+# Run all tests, including performance regressions
 ./mvnw test
 
 # Run FlexLB Sync performance regressions in a dedicated Maven invocation
-./mvnw -Psync-performance-regression -pl flexlb-sync -am test
+./mvnw -Psync-performance-regression -pl flexlb-balance -am test
 
 # Run the FlexLB API end-to-end performance regression separately
 ./mvnw -Papi-performance-regression -pl flexlb-api -am test
 
 # Run tests for specific module
-./mvnw test -pl flexlb-sync
+./mvnw test -pl flexlb-balance
 
 # Run specific test class
 ./mvnw test -Dtest=RequestRouteSelectorTest
@@ -166,8 +134,8 @@ java -jar flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar \
 ### Build Specific Module
 
 ```bash
-# Build only flexlb-sync
-./mvnw clean package -pl flexlb-sync -DskipTests
+# Build only flexlb-balance
+./mvnw clean package -pl flexlb-balance -DskipTests
 
 # Build module with dependencies
 ./mvnw clean package -pl flexlb-api -am -DskipTests
@@ -247,7 +215,7 @@ During routing, the system queries matching cache blocks to prefer workers with 
 `ApplicationLifecycle` owns the fixed online/offline state machine. It starts
 and stops consistency registration, exposes health state, waits for the active
 request counter to remain quiet, and reports each phase through
-`EngineHealthReporter`. There is no dynamic hook registry.
+`ServiceMetricsReporter`. There is no dynamic hook registry.
 
 ### Master Election and Consistency
 

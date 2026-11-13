@@ -1,6 +1,6 @@
 package org.flexlb.mock;
 
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 
 /**
  * Mock prefill worker — a gRPC server that simulates a prefill engine

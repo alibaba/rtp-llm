@@ -22,7 +22,7 @@
 | 请求                | `Request`、`requestId`               | 一次业务请求。仅有 request ID 不足以识别所有阶段、重试及资源记录。              |
 | 请求上下文          | `RequestContext`、`requestContext`   | 保存请求生命周期中的事实，并在请求锁内校验和修改状态；不是选址结果。            |
 | 请求阶段            | `RequestPhase`、`requestPhase`       | 同一业务请求的处理阶段；当前为 `ENCODER`、`GENERATION`，不是运行/完成状态。     |
-| 请求状态            | `RequestState`                       | 请求的可查询状态；不要把 worker 状态或某个 RPC 结果当成整个请求状态。           |
+| 请求状态            | `RequestResult`                      | 请求的可查询状态；不要把 worker 状态或某个 RPC 结果当成整个请求状态。           |
 | Worker              | `Worker`、`worker`                   | 承担模型服务的工作节点或实例。不要与 master 的调度线程混用。                    |
 | 引擎                | `Engine`、`engine`                   | Worker 侧执行推理、上报状态并接受请求的执行系统；本地预留不代表引擎已经执行。   |
 | Worker 端点         | `WorkerEndpoint`、`endpoint`         | master 侧管理某个 worker 的对象，含角色相关的请求和资源操作；不只是 IP 字符串。 |
@@ -38,28 +38,28 @@
 | 批次编号            | `batchId`                            | 标识协议中的交付批次；不是 request ID、抢占编号或资源预留编号。                 |
 | 逻辑地址 / 物理地址 | `logicalAddress` / `physicalAddress` | 内部逻辑 worker 身份与实际连接地址分开；内部索引标记不能直接当作网络拨号地址。  |
 
-身份字段必须写明粒度和比较方式。当前 `RoutingContext` 通过对象身份区分路由过程，
-不能用相同字段值或相同 request ID 替代；资源预留则需要核对 worker 代际、请求和预留编号。
+身份字段必须写明粒度和比较方式。当前选址身份由请求对象和 RequestContext 分配的尝试编号共同确定，
+旧编号不能完成新的选址；资源预留还需要核对 worker 代际、请求和预留编号。
 
 ## 调度、选址与路由
 
-| 中文               | 统一英文 / 命名示例                | 在 FlexLB 中的含义与边界                                                                |
-| ------------------ | ---------------------------------- | --------------------------------------------------------------------------------------- |
-| 调度               | `Scheduling`、`Scheduler`          | 决定请求何时处理、按什么顺序处理，以及何时等待或重试。                                  |
-| 选址 / 选择 Worker | `Selection`、`select`              | 从候选 worker 中选择目标。若同时登记资源，应使用 `selectAndRegister` 等名称明确副作用。 |
-| 路由               | `Routing`、`Route`                 | 为请求确定角色与 worker 的组合，并处理相关路由流程；不直接等于发送成功。                |
-| 单角色选择结果     | `RoleSelection`                    | 一个角色选中的 endpoint、固定元数据及对应资源登记。                                     |
-| 完整路由结果       | `RouteResult`                      | 一个请求的角色选择组合；与一个 role 的结果分开。                                        |
-| 路由处理结果       | `RoutingResult`                    | 表达某一步成功、阻塞、需要重试、拒绝或关闭；成功值可能是单角色结果或完整路由。          |
-| 路由上下文         | `RoutingContext`、`routingContext` | 识别请求当前的一次路由处理，并关联需要移除的旧路由；不是 `RouteResult`。                |
-| 路由阶段           | `RoutingPhase`、`routingPhase`     | 当前正在选址、结束选址、移除旧路由或完成移除；不是引擎执行阶段。                        |
-| 路由发布           | `publishRoute`                     | 将选好的路由提交到后续队列或处理流程；仅选中 worker 不代表发布成功。                    |
-| 调度队列           | `SchedulingQueue`                  | 保存待调度请求及其顺序。                                                                |
-| 容量等待队列       | `CapacityWaitQueue`                | 保存因容量条件不满足而等待的请求，并根据容量变化安排重新检查。                          |
-| Worker 请求队列    | `PrefillRequestQueue` 等           | 保存已经关联到具体 worker、等待后续处理的请求；与全局调度队列分开。                     |
-| 重试               | `retry`                            | 重新执行明确的一段流程；名称或邻近代码说明是重新选址、重新发布还是其他步骤。            |
-| 重新入队           | `requeue` / `scheduleRequest`      | 将仍有效的请求交回调度；不等同于立即选址或重新发送。                                    |
-| 回滚               | `rollback`                         | 撤销未成功完成的本地登记或准备工作；发送结果未知时不能当作从未发送而回滚。              |
+| 中文               | 统一英文 / 命名示例               | 在 FlexLB 中的含义与边界                                                                |
+| ------------------ | --------------------------------- | --------------------------------------------------------------------------------------- |
+| 调度               | `Scheduling`、`Scheduler`         | 决定请求何时处理、按什么顺序处理，以及何时等待或重试。                                  |
+| 选址 / 选择 Worker | `Selection`、`select`             | 从候选 worker 中选择目标。若同时登记资源，应使用 `selectAndRegister` 等名称明确副作用。 |
+| 路由               | `Routing`、`Route`                | 为请求确定角色与 worker 的组合，并处理相关路由流程；不直接等于发送成功。                |
+| 单角色选择结果     | `RoleSelection`                   | 一个角色选中的 endpoint、固定元数据及对应资源登记。                                     |
+| 完整路由结果       | `RequestResult`                   | 一个请求的角色选择组合；与一个 role 的结果分开。                                        |
+| 路由处理结果       | `RoutingResult`                   | 仅表达角色策略的成功、阻塞、重试、拒绝或关闭；请求级决策直接返回 RequestResult。        |
+| 选址凭据           | `RequestContext.SelectionAttempt` | 只读的请求引用和尝试编号；状态归 RequestContext，凭据不管理执行或资源。                 |
+| 路由阶段           | `RoutingPhase`、`routingPhase`    | 当前正在选址、结束选址、移除旧路由或完成移除；不是引擎执行阶段。                        |
+| 路由发布           | `publishRoute`                    | 将选好的路由提交到后续队列或处理流程；仅选中 worker 不代表发布成功。                    |
+| 调度队列           | `SchedulingQueue`                 | 保存待调度请求及其顺序。                                                                |
+| 容量等待队列       | `CapacityWaitQueue`               | 保存因容量条件不满足而等待的请求，并根据容量变化安排重新检查。                          |
+| Worker 请求队列    | `PrefillRequestQueue` 等          | 保存已经关联到具体 worker、等待后续处理的请求；与全局调度队列分开。                     |
+| 重试               | `retry`                           | 重新执行明确的一段流程；名称或邻近代码说明是重新选址、重新发布还是其他步骤。            |
+| 重新入队           | `requeue` / `scheduleRequest`     | 将仍有效的请求交回调度；不等同于立即选址或重新发送。                                    |
+| 回滚               | `rollback`                        | 撤销未成功完成的本地登记或准备工作；发送结果未知时不能当作从未发送而回滚。              |
 
 `DIRECT` / `QUEUE` 是调度模式；`NON_BATCH` / `BATCH` 是交付模式。
 FIFO / PRIORITY 表达排队顺序。这些概念不能互换，也不能仅从是否有 batch 推断调度策略。
@@ -108,6 +108,12 @@ FIFO / PRIORITY 表达排队顺序。这些概念不能互换，也不能仅从�
 | 上报不活跃超时      | `inactivityTimeout`                               | 在规定时间内没有匹配的引擎请求反馈；不能称为“确认引擎已经停止”。                   |
 | 停止接收 / 关闭     | `stopAccepting` / `shutdown`                      | 停止接纳新请求与等待已有工作、释放组件资源分开，名称应对应实际范围。               |
 
+Endpoint 的两阶段关闭统一使用 `stopAcceptingRequests()` 和 `closeAsync()`：前者停止接纳及
+对应 WorkerStatus 的更新，后者安排资源清理并返回完成结果。Registry 的后续清理用
+`WorkerCleanup`，角色清理移出的请求用 `RemovedRequests`，通知调度器的关闭事件用
+`EndpointClosed`；不再用 `Retirement` 混称这些不同对象。已停止接纳不等于已清理完成。
+已有诊断阶段、配置键和序列化字段中的旧名称属于兼容边界，不能因内部改名直接改变。
+
 抢占的策划、登记入口和执行编排属于抢占组件；请求状态的原子校验属于 `RequestContext`。
 不要因为调度器首先发起调用，就把所有抢占方法放进 scheduler。
 
@@ -116,10 +122,10 @@ FIFO / PRIORITY 表达排队顺序。这些概念不能互换，也不能仅从�
 当前代码中的以下状态不是同一套枚举：
 
 - `RequestPhase.ENCODER / GENERATION`：业务阶段。
-- `ContextResult.Phase.OPEN / ENDING / CLOSED`：请求生命周期。
+- `RequestContext.Phase.OPEN / ENDING / CLOSED`：请求生命周期。
 - `RoutingPhase`：选址和移除旧路由的处理阶段。
 - `RouteState`：没有路由、可执行路由、仅为清理保留的路由。
-- `SendState`：交付发送情况。
+- 路由提交后直接完成调度响应，不另设 `SendState` 或发送完成回报。
 - `PreemptionCancelPhase`：抢占取消协议的进度。
 
 `OPEN` 不表示 worker 正在运行；`ENDING` 不表示资源已经全部释放；Future 已完成也不表示
@@ -153,16 +159,16 @@ FIFO / PRIORITY 表达排队顺序。这些概念不能互换，也不能仅从�
 
 ## 旧词的处理方式
 
-| 旧词或宽泛名称                       | 新增代码的选择原则                                                                                                                                                                            |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Placement*`                         | 按职责使用 `RoutingPhase`、`RoutingContext`、`RoutingResult`、`CapacityNotifier`、`CapacityKey`、`CapacityWaitQueue`、`SchedulingQueue`、`SchedulerConfiguration`；不是统一替换成同一个前缀。 |
-| 抢占中的 `Victim*` / `victim`        | 使用 `Preemption*`、待抢占请求或待抢占资源预留的具体名称。外部字段先处理兼容。                                                                                                                |
-| 抢占中的 `Eviction` / `tryReclaim`   | 抢占流程使用 `Preemption` / `tryPreempt`；真实的缓存淘汰和资源回收保留其具体含义。                                                                                                            |
-| `tryClaim`                           | 说明登记什么；抢占登记使用 `tryRegisterPreemption`。不把请求状态互斥误称为已经释放资源。                                                                                                      |
-| `withdrawal`                         | 新业务接口优先使用“移除旧路由”或“抢占路由”的具体动作；旧内部协议枚举需按语义迁移，不自动全局替换。                                                                                            |
-| `Operation` / `Attempt`              | 不作为不知道对象内容时的默认名称；先判断保存的是上下文、结果、登记还是具体编号。实际表达尝试次数时仍可用 `attemptCount`。                                                                     |
-| `ownership` / `settlement` / `proof` | 必须具体说明哪个请求、哪份预留、哪个释放确认；不能用这些词同时概括执行状态、容量占用和请求关联。                                                                                              |
-| `advanceRequest`                     | 说明触发事件和实际动作；若方法混合多套状态决策，先梳理职责，不以更长的泛化名字掩盖复杂度。                                                                                                    |
+| 旧词或宽泛名称                       | 新增代码的选择原则                                                                                                                                                                                             |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Placement*`                         | 按职责使用 `RoutingPhase`、`RequestContext.SelectionAttempt`、`RoutingResult`、`CapacityNotifier`、`CapacityKey`、`CapacityWaitQueue`、`SchedulingQueue`、`SchedulerConfiguration`；不是统一替换成同一个前缀。 |
+| 抢占中的 `Victim*` / `victim`        | 使用 `Preemption*`、待抢占请求或待抢占资源预留的具体名称。外部字段先处理兼容。                                                                                                                                 |
+| 抢占中的 `Eviction` / `tryReclaim`   | 抢占流程使用 `Preemption` / `tryPreempt`；真实的缓存淘汰和资源回收保留其具体含义。                                                                                                                             |
+| `tryClaim`                           | 说明登记什么；抢占登记使用 `tryRegisterPreemption`。不把请求状态互斥误称为已经释放资源。                                                                                                                       |
+| `withdrawal`                         | 新业务接口优先使用“移除旧路由”或“抢占路由”的具体动作；旧内部协议枚举需按语义迁移，不自动全局替换。                                                                                                             |
+| `Operation` / `Attempt`              | 不作为不知道对象内容时的默认名称；先判断保存的是上下文、结果、登记还是具体编号。实际表达尝试次数时仍可用 `attemptCount`。                                                                                      |
+| `ownership` / `settlement` / `proof` | 必须具体说明哪个请求、哪份预留、哪个释放确认；不能用这些词同时概括执行状态、容量占用和请求关联。                                                                                                               |
+| `advanceRequest`                     | 说明触发事件和实际动作；若方法混合多套状态决策，先梳理职责，不以更长的泛化名字掩盖复杂度。                                                                                                                     |
 
 ## 审核时的五个问题
 
@@ -172,8 +178,8 @@ FIFO / PRIORITY 表达排队顺序。这些概念不能互换，也不能仅从�
 4. 同义概念是否出现多套命名，或同一个词是否被用于不同事实？
 5. 旧名清理是否覆盖当前改动的调用方和测试，并保留必要的外部兼容？
 
-实现入口可从 [调度目录](../../../flexlb-sync/src/main/java/org/flexlb/balance/scheduler)、
-[抢占目录](../../../flexlb-sync/src/main/java/org/flexlb/balance/preemption)、
-[资源目录](../../../flexlb-sync/src/main/java/org/flexlb/balance/endpoint) 查找；
+实现入口可从 [调度目录](../../../flexlb-balance/src/main/java/org/flexlb/balance/request)、
+[抢占目录](../../../flexlb-balance/src/main/java/org/flexlb/balance/request)、
+[资源目录](../../../flexlb-balance/src/main/java/org/flexlb/worker/endpoint) 查找；
 跨组件行为参见 [现有架构说明](../../../docs/architecture/00-overview.md)，与代码不一致时核对实现及测试，
 不要沿用过期类图或术语。

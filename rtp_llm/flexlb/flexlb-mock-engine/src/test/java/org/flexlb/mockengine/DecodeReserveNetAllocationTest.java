@@ -1,6 +1,6 @@
 package org.flexlb.mockengine;
 
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -203,7 +203,9 @@ class DecodeReserveNetAllocationTest {
 
     // ─────────────── helpers ───────────────
 
-    /** EnqueueBatch input carrying BOTH the block keys and the decode role_addr. */
+    /**
+     * EnqueueBatch input carrying BOTH the block keys and the decode role_addr.
+     */
     private static EngineRpcService.GenerateInputPB reserveInput(
             long requestId, int inputTokens, List<Long> blockKeys, int decodePort) {
         EngineRpcService.GenerateInputPB base =
@@ -290,7 +292,9 @@ class DecodeReserveNetAllocationTest {
         return (MockLruBlockCache) field.get(service);
     }
 
-    /** Waits until the engine reports {@code expected} running decode streams. */
+    /**
+     * Waits until the engine reports {@code expected} running decode streams.
+     */
     private static void awaitRunningDecode(
             JavaMockEngineCluster.FastRpcService service, int expected) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);

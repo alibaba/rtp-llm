@@ -22,7 +22,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * the engine; timeout falls back to abrupt removal and reports {@code drained=false}.
  */
 final class DynamicEngineManager {
-    /** Detached-engine outcomes kept for a concurrent remove that resolved late. */
+    /**
+     * Detached-engine outcomes kept for a concurrent remove that resolved late.
+     */
     private static final int MAX_DETACHED_REMOVALS = 64;
 
     private final JavaMockEngineCluster.Config config;
@@ -34,16 +36,24 @@ final class DynamicEngineManager {
     private final ScheduledExecutorService scheduler;
     private final JavaMockEngineCluster.ClusterStats stats;
 
-    /** Null when the cluster runs without --discovery-file (add/remove still work, file not maintained). */
+    /**
+     * Null when the cluster runs without --discovery-file (add/remove still work, file not maintained).
+     */
     private final DiscoveryFileStore discoveryFileStore;
 
-    /** Cluster-shared engine_events.jsonl writer (null = event stream disabled); wired onto every dynamically added engine. */
+    /**
+     * Cluster-shared engine_events.jsonl writer (null = event stream disabled); wired onto every dynamically added engine.
+     */
     private final JavaMockEngineCluster.EngineEventLog engineEventLog;
 
-    /** Cluster-single mutation lock: serializes add/remove including the file rewrite. */
+    /**
+     * Cluster-single mutation lock: serializes add/remove including the file rewrite.
+     */
     private final Object mutationLock = new Object();
 
-    /** Monotonic id for dynamically added engine names, appended to the role index. */
+    /**
+     * Monotonic id for dynamically added engine names, appended to the role index.
+     */
     private final AtomicInteger dynamicId = new AtomicInteger();
 
     /**
@@ -256,14 +266,18 @@ final class DynamicEngineManager {
         }
     }
 
-    /** Replayable outcome for a port this control plane already detached. */
+    /**
+     * Replayable outcome for a port this control plane already detached.
+     */
     RemovedEngine detachedRemovalByPort(int port) {
         synchronized (mutationLock) {
             return detachedRemovals.get(port);
         }
     }
 
-    /** Replayable outcome for an engine name this control plane already detached. */
+    /**
+     * Replayable outcome for an engine name this control plane already detached.
+     */
     RemovedEngine detachedRemovalByEngine(String engineName) {
         synchronized (mutationLock) {
             for (RemovedEngine removal : detachedRemovals.values()) {
@@ -466,7 +480,9 @@ final class DynamicEngineManager {
         return grpcPort;
     }
 
-    /** Role-indexed name that is unique among currently hosted engines (e.g. "prefill-3"). */
+    /**
+     * Role-indexed name that is unique among currently hosted engines (e.g. "prefill-3").
+     */
     private String nextEngineName(String roleName) {
         int maxIndex = -1;
         String prefix = roleName + "-";

@@ -3,7 +3,7 @@ package org.flexlb.mockengine;
 import io.grpc.Server;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -259,7 +259,9 @@ class KvTotalReportAlignmentTest {
                                 EngineRpcService.CacheVersionPB.newBuilder().build(), observer));
     }
 
-    /** The master's KV gate math on the reported pair: used = total - available. */
+    /**
+     * The master's KV gate math on the reported pair: used = total - available.
+     */
     private static double usedRatio(long total, long available) {
         return total <= 0 ? 1.0 : (double) (total - available) / total;
     }

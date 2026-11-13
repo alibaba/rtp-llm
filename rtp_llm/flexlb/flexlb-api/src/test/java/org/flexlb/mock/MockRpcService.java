@@ -1,8 +1,8 @@
 package org.flexlb.mock;
 
 import io.grpc.stub.StreamObserver;
-import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.RpcServiceGrpc;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,23 +41,31 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
 
     // ==================== Call records (thread-safe, for assertions) ====================
 
-    /** All EnqueueBatch requests received, in arrival order. */
+    /**
+     * All EnqueueBatch requests received, in arrival order.
+     */
     final CopyOnWriteArrayList<EngineRpcService.EnqueueBatchRequestPB> enqueuedRequests =
             new CopyOnWriteArrayList<>();
 
-    /** Counter for GetWorkerStatus calls. */
+    /**
+     * Counter for GetWorkerStatus calls.
+     */
     final AtomicLong workerStatusCallCount = new AtomicLong(0);
 
     // ==================== Behavior (volatile, hot-swappable) ====================
 
     private volatile MockWorkerBehavior behavior = MockWorkerBehavior.builder().build();
 
-    /** Optional execution bridge for tests that exercise repeated delivery and status polling. */
+    /**
+     * Optional execution bridge for tests that exercise repeated delivery and status polling.
+     */
     public void onAcceptedBatch(Consumer<EngineRpcService.EnqueueBatchRequestPB> listener) {
         acceptedBatchListener = listener;
     }
 
-    /** Publish authoritative, versioned completion facts through GetWorkerStatus. */
+    /**
+     * Publish authoritative, versioned completion facts through GetWorkerStatus.
+     */
     public void completeBatch(EngineRpcService.EnqueueBatchRequestPB batch) {
         synchronized (finishedTasks) {
             for (var slot : batch.getDpSlotsList()) {
@@ -88,7 +96,9 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
 
     // ==================== Accessors for test assertions ====================
 
-    /** Release a payload after a test has retained the evidence it needs. */
+    /**
+     * Release a payload after a test has retained the evidence it needs.
+     */
     public void removeRecordedBatch(EngineRpcService.EnqueueBatchRequestPB batch) {
         enqueuedRequests.remove(batch);
     }
@@ -101,7 +111,9 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         return workerStatusCallCount.get();
     }
 
-    /** Clear all call records (useful between test cases sharing a worker). */
+    /**
+     * Clear all call records (useful between test cases sharing a worker).
+     */
     public void resetRecords() {
         enqueuedRequests.clear();
         workerStatusCallCount.set(0);

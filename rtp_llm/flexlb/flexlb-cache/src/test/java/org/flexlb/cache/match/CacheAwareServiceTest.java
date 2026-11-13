@@ -1,14 +1,14 @@
 package org.flexlb.cache.match;
 
-import org.flexlb.cache.domain.CacheMatchQuery;
-import org.flexlb.cache.domain.CacheMatchResult;
-import org.flexlb.cache.domain.CacheMatchSource;
-import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
-import org.flexlb.cache.telemetry.CacheMetricsReporter;
-import org.flexlb.dao.cache.HostCacheMatch;
-import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
+import org.flexlb.cache.CacheMatchQuery;
+import org.flexlb.cache.CacheMatchResult;
+import org.flexlb.cache.CacheMatchSource;
+import org.flexlb.cache.HostCacheMatch;
+import org.flexlb.cache.localstandby.LocalStandbyComparisonService;
+import org.flexlb.cache.metrics.CacheMetricsReporter;
+import org.flexlb.config.service.RoleType;
+import org.flexlb.worker.cache.WorkerCacheUpdateResult;
+import org.flexlb.worker.status.WorkerStatus;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;

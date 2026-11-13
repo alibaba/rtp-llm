@@ -1,7 +1,7 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -109,9 +109,10 @@ class CancelTerminalBatchIdTest {
 
         // Re-cancel of the same id hits the priority-cancel terminal record armed by
         // the tracked branch (the engine keeps its one-shot cancel semantics).
-        JavaMockEngineCluster.CancelResult terminalRecord = prefill.cancelRequest(requestId);
+        JavaMockEngineCluster.CancelResult requestRecordForArchive =
+                prefill.cancelRequest(requestId);
         assertTrue(
-                terminalRecord.found() && terminalRecord.alreadyFinished(),
+                requestRecordForArchive.found() && requestRecordForArchive.alreadyFinished(),
                 "terminal record re-cancel must report found + already-finished");
         assertEquals(
                 1L,

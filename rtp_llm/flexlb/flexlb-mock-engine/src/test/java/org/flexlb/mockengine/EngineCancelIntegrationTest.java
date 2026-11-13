@@ -1,10 +1,10 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.balance.scheduler.CancelReason;
-import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.engine.grpc.EngineGrpcClient.CancelReply;
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.balance.schedule.CancelReason;
+import org.flexlb.worker.rpc.EngineGrpcClient;
+import org.flexlb.worker.rpc.EngineGrpcClient.CancelReply;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -461,7 +461,9 @@ class EngineCancelIntegrationTest {
         // the request stays tracked through the 500ms hang assertion below,
         // yet short enough that the post-clear cancel settles inside the
         // 10s awaitAllInflightZero window.
-        startCluster(model("3000"), 1, 1);
+        var performance = model("3000");
+        performance.setOverrideFixedPrefillMs(3000.0);
+        startCluster(performance, 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         EngineGrpcClient channel = MockEngineClients.inProcess(services);
 
@@ -516,7 +518,9 @@ class EngineCancelIntegrationTest {
 
     @Test
     void cancelErrorInjectionFailsTheFutureAndInstallsNoFence() throws Exception {
-        startCluster(model("3000"), 1, 1);
+        var performance = model("3000");
+        performance.setOverrideFixedPrefillMs(3000.0);
+        startCluster(performance, 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         EngineGrpcClient channel = MockEngineClients.inProcess(services);
 
@@ -577,7 +581,9 @@ class EngineCancelIntegrationTest {
 
     @Test
     void cancelUnexpectedStatusInjectionFailsTheFutureWithoutTerminalJudgment() throws Exception {
-        startCluster(model("3000"), 1, 1);
+        var performance = model("3000");
+        performance.setOverrideFixedPrefillMs(3000.0);
+        startCluster(performance, 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         EngineGrpcClient channel = MockEngineClients.inProcess(services);
 

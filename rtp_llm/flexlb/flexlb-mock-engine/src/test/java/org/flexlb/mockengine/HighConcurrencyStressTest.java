@@ -2,7 +2,7 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -63,7 +63,8 @@ class HighConcurrencyStressTest {
 
     @Test
     void highConcurrencyStressNoLeakNoErrors() throws Exception {
-        MockPerformanceModel model = model("10"); // 10ms prefill for fast completion
+        MockPerformanceModel model = model("10");
+        model.setOverrideFixedPrefillMs(10.0);
         startCluster(model, 2, 4);
 
         int totalRequests = 500;

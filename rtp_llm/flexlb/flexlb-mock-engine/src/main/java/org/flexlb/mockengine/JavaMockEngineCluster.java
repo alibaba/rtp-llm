@@ -10,11 +10,11 @@ import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
-import org.flexlb.balance.scheduler.CancelReason;
-import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.engine.grpc.RoleTypeProtoConverter;
-import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.balance.schedule.CancelReason;
+import org.flexlb.config.service.RoleType;
+import org.flexlb.worker.rpc.RoleTypeProtoConverter;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.RpcServiceGrpc;
 
 import java.io.IOException;
 import java.io.PrintWriter;
@@ -63,7 +63,9 @@ import static com.google.common.base.Preconditions.checkArgument;
 public final class JavaMockEngineCluster {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
-    /** Default PREFILL pool token capacity per engine (Python --prefill/--decode-total-kv-tokens default). */
+    /**
+     * Default PREFILL pool token capacity per engine (Python --prefill/--decode-total-kv-tokens default).
+     */
     static final long DEFAULT_TOTAL_KV_TOKENS = 6_291_456L;
 
     /**
@@ -105,10 +107,14 @@ public final class JavaMockEngineCluster {
     static final long DEFAULT_DECODE_ALLOCATE_RETRY_INTERVAL_MS = 1L;
     static final long DEFAULT_DECODE_ALLOCATE_RETRY_TIMEOUT_MS = 100L;
 
-    /** Default decode available_concurrency reported to the master (CONCURRENCY_LIMIT-aligned, previously 132). */
+    /**
+     * Default decode available_concurrency reported to the master (CONCURRENCY_LIMIT-aligned, previously 132).
+     */
     static final int DEFAULT_DECODE_MAX_CONCURRENCY = 128;
 
-    /** CLI flag for unique per-engine loopback advertisement IPs (default on). */
+    /**
+     * CLI flag for unique per-engine loopback advertisement IPs (default on).
+     */
     static final String UNIQUE_ENGINE_IPS_FLAG = "--unique-engine-ips";
 
     /**
@@ -662,7 +668,9 @@ public final class JavaMockEngineCluster {
         }
     }
 
-    /** Parses a strict true/false CLI value for {@code flag}. */
+    /**
+     * Parses a strict true/false CLI value for {@code flag}.
+     */
     static boolean parseBooleanFlag(String value, String flag) {
         checkArgument(
                 "true".equalsIgnoreCase(value) || "false".equalsIgnoreCase(value),
@@ -741,13 +749,19 @@ public final class JavaMockEngineCluster {
      * injected faults update the same task and cache accounting.
      */
     static final class FastRpcService extends RpcServiceGrpc.RpcServiceImplBase {
-        /** Bound for the per-engine request_lifecycle map (Python _prune_lifecycle cap). */
+        /**
+         * Bound for the per-engine request_lifecycle map (Python _prune_lifecycle cap).
+         */
         private static final int LIFECYCLE_CAP = 10_000;
 
-        /** Bound for the cancelled_rids history exposed in the Python snapshot schema. */
+        /**
+         * Bound for the cancelled_rids history exposed in the Python snapshot schema.
+         */
         private static final int CANCELLED_RID_CAP = 10_000;
 
-        /** Window of recent execution times used for prefill_ms/decode_ms avg+p99 (Python keeps 100). */
+        /**
+         * Window of recent execution times used for prefill_ms/decode_ms avg+p99 (Python keeps 100).
+         */
         private static final int RECENT_TIME_CAP = 100;
 
         /** Grace between a crash_after trigger and the gRPC port kill: the
@@ -768,7 +782,9 @@ public final class JavaMockEngineCluster {
          */
         static final int DEFAULT_COMPLETION_RETAIN_WINDOW = readCompletionRetainWindow();
 
-        /** Safety-net TTL for cancelled markers never consumed by a completion callback. */
+        /**
+         * Safety-net TTL for cancelled markers never consumed by a completion callback.
+         */
         private static final long CANCELLED_MARKER_TTL_SECONDS = 600;
 
         /**
@@ -814,10 +830,14 @@ public final class JavaMockEngineCluster {
         private final MockLruBlockCache cache;
         private final ClusterStats stats;
 
-        /** Reported token capacity (per-role; pool is ceil(total/spb) blocks). */
+        /**
+         * Reported token capacity (per-role; pool is ceil(total/spb) blocks).
+         */
         private final long totalKvTokens;
 
-        /** Blocks per cache block (spb) — the pool's token<->block conversion factor. */
+        /**
+         * Blocks per cache block (spb) — the pool's token<->block conversion factor.
+         */
         private final int seqSizePerBlock;
 
         private final int decodeMaxConcurrency;
@@ -992,7 +1012,9 @@ public final class JavaMockEngineCluster {
         // running batch size changes mid-flight; both are ms per request).
         private final LinkedHashMap<Long, DecodeStream> decodeRunning = new LinkedHashMap<>();
 
-        /** True while a step tick is pending on the shared scheduler (decodeQueueLock-guarded); at most one per engine. */
+        /**
+         * True while a step tick is pending on the shared scheduler (decodeQueueLock-guarded); at most one per engine.
+         */
         private boolean decodeStepScheduled = false;
 
         /** Duration of the currently pending step, locked in when the step was
@@ -1050,7 +1072,9 @@ public final class JavaMockEngineCluster {
         private final Map<Long, FastRpcService> downstreamDecodeOwners = new ConcurrentHashMap<>();
         private final Map<Long, FastRpcService> upstreamPrefillOwners = new ConcurrentHashMap<>();
 
-        /** rid -> insertion time (System.nanoTime); consumed by completion callbacks. */
+        /**
+         * rid -> insertion time (System.nanoTime); consumed by completion callbacks.
+         */
         private final Map<Long, Long> cancelledRequests = new ConcurrentHashMap<>();
 
         /** Decode-side KV reservation ownership (P-enqueue pre-alignment,
@@ -1063,7 +1087,8 @@ public final class JavaMockEngineCluster {
          *  running stream's lease, owned by the decode lifecycle) or RELEASED
          *  by cancel / prefill-completion alreadyCancelled / a rejected
          *  hand-off. Absent entry = no live reservation (idempotent release). */
-        private final Map<Long, FastRpcService> decodeReservationOwners = new ConcurrentHashMap<>();
+        private final Map<Long, FastRpcService> decodeRegistrationOwners =
+                new ConcurrentHashMap<>();
 
         private volatile FaultInjectionConfig faultConfig = FaultInjectionConfig.builder().build();
 
@@ -1156,7 +1181,9 @@ public final class JavaMockEngineCluster {
         private volatile long decodeAllocateRetryTimeoutMs =
                 DEFAULT_DECODE_ALLOCATE_RETRY_TIMEOUT_MS;
 
-        /** Test/default constructor: derives engine name from role+port, default KV capacity. */
+        /**
+         * Test/default constructor: derives engine name from role+port, default KV capacity.
+         */
         FastRpcService(
                 String roleName,
                 EngineRpcService.RoleTypePB roleType,
@@ -1469,7 +1496,7 @@ public final class JavaMockEngineCluster {
                                         continue;
                                     }
                                     if (decodeEngine != null) {
-                                        decodeReservationOwners.put(requestId, decodeEngine);
+                                        decodeRegistrationOwners.put(requestId, decodeEngine);
                                     }
                                     shapes.add(shape);
                                     responseQueues.computeIfAbsent(
@@ -1794,7 +1821,7 @@ public final class JavaMockEngineCluster {
                     return;
                 }
                 if (decodeEngine != null) {
-                    decodeReservationOwners.put(requestId, decodeEngine);
+                    decodeRegistrationOwners.put(requestId, decodeEngine);
                 }
                 if (!admitDirectPrefill(shape)) {
                     // Backpressure: direct waiting-queue cap hit — reject so the
@@ -2158,7 +2185,9 @@ public final class JavaMockEngineCluster {
             this.responsePollTimeoutMs = responsePollTimeoutMs;
         }
 
-        /** Wire the cluster-shared engine_events.jsonl writer (null disables). */
+        /**
+         * Wire the cluster-shared engine_events.jsonl writer (null disables).
+         */
         void setEngineEventLog(EngineEventLog engineEventLog) {
             this.engineEventLog = engineEventLog;
         }
@@ -2196,7 +2225,9 @@ public final class JavaMockEngineCluster {
             return null;
         }
 
-        /** Ordinary no-fetch cleanup shares the same exact P-to-D ownership graph. */
+        /**
+         * Ordinary no-fetch cleanup shares the same exact P-to-D ownership graph.
+         */
         void cleanUpRequest(long requestId, CancelReason reason) {
             if (roleType != EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL) {
                 throw new UnsupportedOperationException(
@@ -2450,7 +2481,9 @@ public final class JavaMockEngineCluster {
             return false;
         }
 
-        /** Current cache version (gRPC getCacheStatus / /cache_evict echo). */
+        /**
+         * Current cache version (gRPC getCacheStatus / /cache_evict echo).
+         */
         long getCacheVersion() {
             return cacheVersion.get();
         }
@@ -2714,10 +2747,10 @@ public final class JavaMockEngineCluster {
             // the D-side TTL/restart, but the mock's crash tests keep engines
             // serving afterwards and a stranded reservation would poison
             // subsequent pool assertions.
-            for (Map.Entry<Long, FastRpcService> entry : decodeReservationOwners.entrySet()) {
+            for (Map.Entry<Long, FastRpcService> entry : decodeRegistrationOwners.entrySet()) {
                 entry.getValue().releaseBlockLease(entry.getKey());
             }
-            decodeReservationOwners.clear();
+            decodeRegistrationOwners.clear();
             // Admission gauges: nothing is queued or running on a dead process.
             pendingRequests.set(0);
             waitingPrefillRequests.set(0);
@@ -2829,7 +2862,9 @@ public final class JavaMockEngineCluster {
             return waitingPrefillRequests.get();
         }
 
-        /** Pool availability (free + pure-LRU) clamped to total, minus pressure. */
+        /**
+         * Pool availability (free + pure-LRU) clamped to total, minus pressure.
+         */
         long getAvailableKvTokens() {
             return availableKvTokens();
         }
@@ -2911,17 +2946,23 @@ public final class JavaMockEngineCluster {
             statusVersion.incrementAndGet();
         }
 
-        /** Current D-side ALLOCATE retry budget (times) — /set_perf partial-POST default. */
+        /**
+         * Current D-side ALLOCATE retry budget (times) — /set_perf partial-POST default.
+         */
         int getDecodeAllocateRetryTimes() {
             return decodeAllocateRetryTimes;
         }
 
-        /** Current D-side ALLOCATE retry spacing (ms) — /set_perf partial-POST default. */
+        /**
+         * Current D-side ALLOCATE retry spacing (ms) — /set_perf partial-POST default.
+         */
         long getDecodeAllocateRetryIntervalMs() {
             return decodeAllocateRetryIntervalMs;
         }
 
-        /** Current D-side ALLOCATE retry window (ms) — /set_perf partial-POST default. */
+        /**
+         * Current D-side ALLOCATE retry window (ms) — /set_perf partial-POST default.
+         */
         long getDecodeAllocateRetryTimeoutMs() {
             return decodeAllocateRetryTimeoutMs;
         }
@@ -3064,7 +3105,9 @@ public final class JavaMockEngineCluster {
             return snap;
         }
 
-        /** Snapshot of the bounded request lifecycle map with string keys (Python /requests). */
+        /**
+         * Snapshot of the bounded request lifecycle map with string keys (Python /requests).
+         */
         Map<String, Map<String, Object>> getRequestLifecycleSnapshot() {
             Map<String, Map<String, Object>> result = new LinkedHashMap<>();
             synchronized (requestLifecycles) {
@@ -3213,7 +3256,9 @@ public final class JavaMockEngineCluster {
                     .build();
         }
 
-        /** Map a status_fake_task phase string to the TaskPhase enum (default RUNNING). */
+        /**
+         * Map a status_fake_task phase string to the TaskPhase enum (default RUNNING).
+         */
         private static EngineRpcService.TaskPhase parseFakeTaskPhase(String phase) {
             if (phase == null) {
                 return EngineRpcService.TaskPhase.TASK_PHASE_RUNNING;
@@ -3532,7 +3577,9 @@ public final class JavaMockEngineCluster {
             }
         }
 
-        /** Cancel path: return the lease's blocks to the pool without LRU handover. */
+        /**
+         * Cancel path: return the lease's blocks to the pool without LRU handover.
+         */
         private void releaseBlockLease(long requestId) {
             MockLruBlockCache.BlockLease lease = activeBlockLeases.remove(requestId);
             if (lease != null) {
@@ -3567,7 +3614,7 @@ public final class JavaMockEngineCluster {
                 // re-charging the pool (the outer get() guard skips the claim).
                 // Production-aligned failure semantics (20260903): a run-start
                 // admission failure is a REQUEST TERMINAL FAILURE — the former
-                // second-chance un-pooled degradation is retired. Fix #5:
+                // second-chance un-pooled degradation is closed. Fix #5:
                 // decode-side reuse deduction (own-LRU re-match at run start,
                 // net demand, referenced reuse).
                 if (activeBlockLeases.get(candidateId) == null) {
@@ -3828,7 +3875,9 @@ public final class JavaMockEngineCluster {
             releaseBlockLease(requestId);
         }
 
-        /** Preserve the exact EnqueueBatch identity on typed Prefill terminals. */
+        /**
+         * Preserve the exact EnqueueBatch identity on typed Prefill terminals.
+         */
         private long positiveLifecycleBatchId(long requestId) {
             synchronized (requestLifecycles) {
                 Map<String, Object> lifecycle = requestLifecycles.get(requestId);
@@ -3943,7 +3992,9 @@ public final class JavaMockEngineCluster {
             }
         }
 
-        /** Stamp the execution-start epoch-ms (prefill batch start / decode slot admission). */
+        /**
+         * Stamp the execution-start epoch-ms (prefill batch start / decode slot admission).
+         */
         private void recordEventStart(long requestId) {
             if (engineEventLog == null) {
                 return;
@@ -4031,7 +4082,7 @@ public final class JavaMockEngineCluster {
                     // Production-aligned failure semantics (20260903): a growth
                     // failure is a REQUEST TERMINAL FAILURE (production
                     // incrKVBlock LACK_MEM terminates the request) — the former
-                    // stall-and-continue degradation is retired.
+                    // stall-and-continue degradation is closed.
                     MockLruBlockCache.AllocationFailure growthFailure =
                             growDecodeLeaseLocked(
                                     stream.shape.input().getRequestId(),
@@ -4101,7 +4152,7 @@ public final class JavaMockEngineCluster {
                 long requestId, int totalTokensSoFar) {
             MockLruBlockCache.BlockLease lease = activeBlockLeases.get(requestId);
             if (lease == null) {
-                // Defensive: with the un-pooled degradation retired every
+                // Defensive: with the un-pooled degradation closed every
                 // running stream holds a lease (immediate admission, top-up and
                 // reservation-consumption all provision one). A missing lease
                 // here is a bookkeeping bug — keep the stream running rather
@@ -4283,7 +4334,7 @@ public final class JavaMockEngineCluster {
          * exec_ms is the decode_done_ms − decode_start_ms WALL-SPAN (20260903
          * caliber change, symmetric with the prefill batch's done−start
          * semantics — the former summed-booked-step-durations stream caliber
-         * retired; under the step-boundary admission model wall-span ≈ Σstep
+         * closed; under the step-boundary admission model wall-span ≈ Σstep
          * durations, the only error being the ≤1-step admission quantization
          * plus scheduler jitter). batch_size is the terminal-step running batch
          * (claimed under decodeQueueLock, includes this stream); kv_used_tokens
@@ -4338,7 +4389,7 @@ public final class JavaMockEngineCluster {
          * never became running streams.
          */
         private void releaseReservedDecode(long requestId) {
-            FastRpcService decode = decodeReservationOwners.remove(requestId);
+            FastRpcService decode = decodeRegistrationOwners.remove(requestId);
             if (decode != null) {
                 decode.releaseBlockLease(requestId);
             }
@@ -4659,7 +4710,9 @@ public final class JavaMockEngineCluster {
             return true;
         }
 
-        /** Regroup is ON when at least one budget dimension is configured. */
+        /**
+         * Regroup is ON when at least one budget dimension is configured.
+         */
         private boolean prefillRegroupEnabled() {
             return performance.maxBatchTokens() > 0 || performance.maxBatchRequests() > 0;
         }
@@ -4834,7 +4887,9 @@ public final class JavaMockEngineCluster {
             return shape.inputLen();
         }
 
-        /** Shapes view of a member list (pricing/ledger helper). */
+        /**
+         * Shapes view of a member list (pricing/ledger helper).
+         */
         private static List<MockPerformanceModel.RequestShape> shapesOf(List<BatchMember> members) {
             List<MockPerformanceModel.RequestShape> shapes = new ArrayList<>(members.size());
             for (BatchMember member : members) {
@@ -5336,7 +5391,7 @@ public final class JavaMockEngineCluster {
                     // activeBlockLeases and adopted it without re-charging the D
                     // pool. Drop the P-side bookkeeping; release paths from here
                     // on are the decode engine's own cancel/terminal flows.
-                    decodeReservationOwners.remove(input.getRequestId());
+                    decodeRegistrationOwners.remove(input.getRequestId());
                 }
                 return accepted;
             }
@@ -5365,7 +5420,9 @@ public final class JavaMockEngineCluster {
             return null;
         }
 
-        /** Legacy (regroup OFF) wrapper: a verbatim master batch as members. */
+        /**
+         * Legacy (regroup OFF) wrapper: a verbatim master batch as members.
+         */
         private static List<BatchMember> legacyMembers(
                 List<MockPerformanceModel.RequestShape> shapes, long batchId, int dpRank) {
             List<BatchMember> members = new ArrayList<>(shapes.size());
@@ -5586,7 +5643,7 @@ public final class JavaMockEngineCluster {
                     // failure semantics (20260903): admission failure is a
                     // REQUEST TERMINAL FAILURE (production first-block ALLOCATE
                     // rejection / LACK_MEM) — the former un-pooled degradation
-                    // path is retired. kvAdmissionFails keeps counting the event
+                    // path is closed. kvAdmissionFails keeps counting the event
                     // (D-side admission-rejection accounting).
                     // Fix #5: the decode engine re-matches the request's keys
                     // against its OWN LRU here — net demand
@@ -5691,7 +5748,9 @@ public final class JavaMockEngineCluster {
             return true;
         }
 
-        /** Stamp the engine-side arrival epoch-ms for engine_events.jsonl (first arrival wins). */
+        /**
+         * Stamp the engine-side arrival epoch-ms for engine_events.jsonl (first arrival wins).
+         */
         private void recordEventArrival(long requestId) {
             if (engineEventLog == null) {
                 return;
@@ -5699,14 +5758,18 @@ public final class JavaMockEngineCluster {
             eventArrivalMs.putIfAbsent(requestId, System.currentTimeMillis());
         }
 
-        /** Snapshot size of the decode pending queue (for waitingQueryLen reporting). */
+        /**
+         * Snapshot size of the decode pending queue (for waitingQueryLen reporting).
+         */
         private int decodePendingQueueSize() {
             synchronized (decodeQueueLock) {
                 return decodePendingQueue.size();
             }
         }
 
-        /** Snapshot size of the prefill pending queue in BATCHES (cap accounting unit). */
+        /**
+         * Snapshot size of the prefill pending queue in BATCHES (cap accounting unit).
+         */
         private int prefillPendingQueueSize() {
             synchronized (prefillQueueLock) {
                 return prefillPendingQueue.size();
@@ -5761,22 +5824,30 @@ public final class JavaMockEngineCluster {
                             - faultConfig.getKvPressureTokens());
         }
 
-        /** Tokens available per the pool (free + pure-LRU blocks count) — LRU included. */
+        /**
+         * Tokens available per the pool (free + pure-LRU blocks count) — LRU included.
+         */
         private long poolAvailableKvTokens() {
             return (long) cache.availableBlocks() * seqSizePerBlock;
         }
 
-        /** Master-facing used tokens (occupied + pressure, clamped to total). */
+        /**
+         * Master-facing used tokens (occupied + pressure, clamped to total).
+         */
         private long usedKvTokens() {
             return Math.min(totalKvTokens, occupiedKvTokens() + faultConfig.getKvPressureTokens());
         }
 
-        /** Tokens pinned by in-flight requests: (held + referenced key blocks) x spb. */
+        /**
+         * Tokens pinned by in-flight requests: (held + referenced key blocks) x spb.
+         */
         private long occupiedKvTokens() {
             return (long) (cache.heldBlocks() + cache.referencedKeyBlocks()) * seqSizePerBlock;
         }
 
-        /** Snapshot size of the direct (NON_BATCH) prefill park queue. */
+        /**
+         * Snapshot size of the direct (NON_BATCH) prefill park queue.
+         */
         private int directPrefillQueueSize() {
             synchronized (prefillQueueLock) {
                 return directPrefillQueue.size();
@@ -5853,10 +5924,14 @@ public final class JavaMockEngineCluster {
              * which drives the per-step KV block growth (production incrMalloc). */
             final int totalSteps;
 
-            /** Σ actual step durations (the per-step exec caliber). */
+            /**
+             * Σ actual step durations (the per-step exec caliber).
+             */
             double accumulatedExecMs;
 
-            /** Set under decodeQueueLock when this step's terminal ownership is claimed (cancel may win it first). */
+            /**
+             * Set under decodeQueueLock when this step's terminal ownership is claimed (cancel may win it first).
+             */
             boolean owned;
 
             /**
@@ -5956,11 +6031,17 @@ public final class JavaMockEngineCluster {
      * state machine is touched.
      */
     enum CancelFaultKind {
-        /** cancel_no_respond: the RPC hangs — no response ever (mirrors statusNoRespond). */
+        /**
+         * cancel_no_respond: the RPC hangs — no response ever (mirrors statusNoRespond).
+         */
         NO_RESPOND,
-        /** cancel_error: transport-layer failure (gRPC INTERNAL / HTTP 500). */
+        /**
+         * cancel_error: transport-layer failure (gRPC INTERNAL / HTTP 500).
+         */
         ERROR,
-        /** cancel_unexpected_status: ack status outside the contract (UNSPECIFIED). */
+        /**
+         * cancel_unexpected_status: ack status outside the contract (UNSPECIFIED).
+         */
         UNEXPECTED_STATUS
     }
 
@@ -6161,7 +6242,9 @@ public final class JavaMockEngineCluster {
             writer.close();
         }
 
-        /** Opens (appending) the events file; null/blank path → null (disabled). */
+        /**
+         * Opens (appending) the events file; null/blank path → null (disabled).
+         */
         static EngineEventLog open(String path) {
             if (path == null || path.isBlank()) {
                 return null;
@@ -6185,7 +6268,9 @@ public final class JavaMockEngineCluster {
             }
         }
 
-        /** Appends one serialized row (synchronized: all engines share one file). */
+        /**
+         * Appends one serialized row (synchronized: all engines share one file).
+         */
         synchronized void write(ObjectNode row) {
             writer.println(row.toString());
         }
@@ -6221,7 +6306,9 @@ public final class JavaMockEngineCluster {
         String performanceFile;
         String masterConfigFile;
 
-        /** Legacy uniform token-capacity knob — applies to BOTH per-role pools when set. */
+        /**
+         * Legacy uniform token-capacity knob — applies to BOTH per-role pools when set.
+         */
         long totalKvTokens = DEFAULT_TOTAL_KV_TOKENS;
 
         /**

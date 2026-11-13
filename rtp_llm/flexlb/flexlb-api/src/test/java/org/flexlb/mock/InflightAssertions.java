@@ -1,7 +1,7 @@
 package org.flexlb.mock;
 
-import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.worker.endpoint.DecodeEndpoint;
+import org.flexlb.worker.endpoint.PrefillEndpoint;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -21,10 +21,18 @@ public final class InflightAssertions {
                 "Inflight resources not released within "
                         + timeoutMs
                         + "ms"
-                        + " (prefill batches="
-                        + (prefillEp != null ? prefillEp.stats().batchCount() : "null")
+                        + " (prefill requests="
+                        + (prefillEp != null ? prefillEp.stats().locallyOwnedRequests() : "null")
                         + ", decode inflight="
-                        + (decodeEp != null ? decodeEp.resourceSnapshot().reservedCount() : "null")
+                        + (decodeEp != null
+                                ? decodeEp.resourceSnapshot().requests().values().stream()
+                                        .filter(
+                                                snapshotRequest ->
+                                                        !snapshotRequest
+                                                                .phase()
+                                                                .isEngineConfirmed())
+                                        .count()
+                                : "null")
                         + ")");
     }
 
@@ -41,8 +49,17 @@ public final class InflightAssertions {
             PrefillEndpoint prefillEp, DecodeEndpoint decodeEp, long timeoutMs, long pollMs) {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
-            boolean prefillOk = prefillEp == null || prefillEp.stats().batchCount() == 0;
-            boolean decodeOk = decodeEp == null || decodeEp.resourceSnapshot().reservedCount() == 0;
+            boolean prefillOk = prefillEp == null || prefillEp.stats().locallyOwnedRequests() == 0;
+            boolean decodeOk =
+                    decodeEp == null
+                            || decodeEp.resourceSnapshot().requests().values().stream()
+                                            .filter(
+                                                    snapshotRequest ->
+                                                            !snapshotRequest
+                                                                    .phase()
+                                                                    .isEngineConfirmed())
+                                            .count()
+                                    == 0;
             if (prefillOk && decodeOk) {
                 return true;
             }

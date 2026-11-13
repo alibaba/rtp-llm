@@ -1,9 +1,9 @@
 package org.flexlb.cache;
 
-import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.KvcmCacheMatchingConfig;
-import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.config.cache.CacheMatchConfiguration;
+import org.flexlb.config.cache.KvcmCacheMatchingConfig;
+import org.flexlb.config.service.ModelMetaConfig;
 
 import java.util.function.Consumer;
 

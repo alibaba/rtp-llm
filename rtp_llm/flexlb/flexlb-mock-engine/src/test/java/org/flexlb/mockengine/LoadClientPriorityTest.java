@@ -2,8 +2,8 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
+import org.flexlb.api.protocol.FlexlbScheduleProtocol;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 

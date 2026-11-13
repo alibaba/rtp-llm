@@ -49,11 +49,13 @@
   </properties>
 
   <modules>
-    <module>flexlb-api</module>
-    <module>flexlb-sync</module>
-    <module>flexlb-common</module>
-    <module>flexlb-grpc</module>
+    <module>flexlb-util</module>
+    <module>flexlb-config</module>
+    <module>flexlb-master</module>
+    <module>flexlb-worker</module>
     <module>flexlb-cache</module>
+    <module>flexlb-balance</module>
+    <module>flexlb-api</module>
     <module>flexlb-mock-engine</module>
   </modules>
 
@@ -98,6 +100,17 @@
 
   <dependencyManagement>
     <dependencies>
+      <dependency>
+        <groupId>org.flexlb</groupId>
+        <artifactId>flexlb-config</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.flexlb</groupId>
+        <artifactId>flexlb-master</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+
       <!-- 自定义管理 micrometer 的版本 -->
       <!-- 主要是为了版本高可能有一些特性的修复 -->
       <dependency>
@@ -155,7 +168,7 @@
       </dependency>
       <dependency>
         <groupId>org.flexlb</groupId>
-        <artifactId>flexlb-common</artifactId>
+        <artifactId>flexlb-util</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
@@ -165,12 +178,12 @@
       </dependency>
       <dependency>
         <groupId>org.flexlb</groupId>
-        <artifactId>flexlb-sync</artifactId>
+        <artifactId>flexlb-balance</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
         <groupId>org.flexlb</groupId>
-        <artifactId>flexlb-grpc</artifactId>
+        <artifactId>flexlb-worker</artifactId>
         <version>${project.version}</version>
       </dependency>
 
@@ -260,6 +273,36 @@
 
   <build>
     <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <executions>
+          <execution>
+            <id>test-fixtures</id>
+            <phase>generate-test-sources</phase>
+            <goals>
+              <goal>add-test-source</goal>
+            </goals>
+            <configuration>
+              <sources>
+                <source>${project.basedir}/src/testFixtures/java</source>
+              </sources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <executions>
+          <execution>
+            <goals>
+              <goal>test-jar</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
@@ -355,18 +398,6 @@
           </dependency>
         </dependencies>
       </plugin>
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-surefire-plugin</artifactId>
-        <executions>
-          <execution>
-            <id>default-test</id>
-            <configuration>
-              <excludedGroups>performance-regression</excludedGroups>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
     </plugins>
     <pluginManagement>
       <plugins>
@@ -413,14 +444,6 @@
                             --add-opens java.instrument/sun.instrument=ALL-UNNAMED
                         </argLine>
           </configuration>
-          <executions>
-            <execution>
-              <id>default-test</id>
-              <configuration>
-                <excludedGroups>performance-regression</excludedGroups>
-              </configuration>
-            </execution>
-          </executions>
         </plugin>
       </plugins>
     </pluginManagement>
@@ -477,19 +500,9 @@
                 <configuration combine.self="override">
                   <includes>
                     <include
-                    >**/MasterBatchEndToEndPerformanceTest.java</include>
-                    <include
                     >**/TransientCapacityQueueContractTest.java</include>
                   </includes>
                   <groups>performance-regression</groups>
-                  <!--
-                                      The real-payload E2E burst serializes more than 50 million
-                                      token ids in one fresh fork. Fix the heap size so the gate
-                                      measures gRPC/scheduling throughput instead of JVM heap
-                                      expansion; production JVM settings are unaffected.
-                                      Larger fleet runs retain more RPC payloads for assertions
-                                      and can set -Dflexlb.perf.heap=8g without relaxing SLOs.
-                                    -->
                   <argLine>
                                         -Xms${flexlb.perf.heap} -Xmx${flexlb.perf.heap}
                                         ${flexlb.perf.jvm-args}

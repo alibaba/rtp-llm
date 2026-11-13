@@ -1,7 +1,7 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -234,7 +234,9 @@ class ProductionCaliberDecodeTest {
 
     // ──────────── helpers ────────────
 
-    /** Load a model whose "decode" section is {@code extra} over the base. */
+    /**
+     * Load a model whose "decode" section is {@code extra} over the base.
+     */
     private MockPerformanceModel model(Map<String, Object> decodeExtra) throws IOException {
         Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
         Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");

@@ -257,7 +257,9 @@ class UniformRampUpTest {
                 List.of());
     }
 
-    /** Due times in seconds relative to the first send (sorted). */
+    /**
+     * Due times in seconds relative to the first send (sorted).
+     */
     private List<Double> readRelativeDues(Path outDir) throws IOException {
         List<Double> dues = new ArrayList<>();
         for (JsonNode row : readPerRequest(outDir)) {

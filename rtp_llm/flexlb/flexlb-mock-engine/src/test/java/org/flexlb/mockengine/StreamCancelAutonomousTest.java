@@ -10,8 +10,8 @@ import io.grpc.Server;
 import io.grpc.Status;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
-import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.RpcServiceGrpc;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -39,7 +39,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * separate master cancellation.
  */
 class StreamCancelAutonomousTest {
-    /** Fresh range above the 62000-63900 blocks used by the existing suites. */
+    /**
+     * Fresh range above the 62000-63900 blocks used by the existing suites.
+     */
     private static final AtomicInteger PORT_ALLOCATOR = new AtomicInteger(64000);
 
     @TempDir Path tempDir;
@@ -56,7 +58,9 @@ class StreamCancelAutonomousTest {
 
     private int basePort;
 
-    /** Actual decode port — with 0 prefill engines the decode takes basePort+0. */
+    /**
+     * Actual decode port — with 0 prefill engines the decode takes basePort+0.
+     */
     private int decodePortValue;
 
     @AfterEach
@@ -540,14 +544,18 @@ class StreamCancelAutonomousTest {
         return (List<Long>) service.getSnapshot().get("cancelled_rids");
     }
 
-    /** Per-RPC counter from the public snapshot surface (rpc_counts map). */
+    /**
+     * Per-RPC counter from the public snapshot surface (rpc_counts map).
+     */
     private static int rpcCount(JavaMockEngineCluster.FastRpcService service, String rpc) {
         @SuppressWarnings("unchecked")
         Map<String, Object> counts = (Map<String, Object>) service.getSnapshot().get("rpc_counts");
         return ((Number) counts.get(rpc)).intValue();
     }
 
-    /** Typed CANCELLED terminals for {@code rid} visible in the next WorkerStatus poll. */
+    /**
+     * Typed CANCELLED terminals for {@code rid} visible in the next WorkerStatus poll.
+     */
     private static long countCancelTerminals(
             JavaMockEngineCluster.FastRpcService service, long rid) {
         return MockEngineTestSupport.workerStatus(service, 0).getFinishedTaskListList().stream()
@@ -617,7 +625,9 @@ class StreamCancelAutonomousTest {
             return open(port, RpcServiceGrpc.getFetchResponseMethod(), request);
         }
 
-        /** Simulate the client dying: cancel exactly this call mid-flight. */
+        /**
+         * Simulate the client dying: cancel exactly this call mid-flight.
+         */
         void breakStream() {
             call.cancel("client stream gone", null);
         }

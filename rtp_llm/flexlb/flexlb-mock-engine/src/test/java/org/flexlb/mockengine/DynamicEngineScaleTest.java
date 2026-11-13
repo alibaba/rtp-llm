@@ -8,8 +8,8 @@ import io.grpc.Server;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
-import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.RpcServiceGrpc;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -424,7 +424,9 @@ class DynamicEngineScaleTest {
 
     @Test
     void addedEngineServesFullRequestPipeline() throws Exception {
-        int basePort = startCluster(model("10", 1.0), 1, 1);
+        var performance = model("10", 1.0);
+        performance.setOverrideFixedPrefillMs(10.0);
+        int basePort = startCluster(performance, 1, 1);
 
         // Prefill leg: dynamically added prefill engine accepts enqueueBatch and
         // drives the requests to finished via the completion scheduler.
@@ -732,7 +734,9 @@ class DynamicEngineScaleTest {
     //  gRPC / discovery-file helpers
     // ════════════════════════════════════════════════════════════════
 
-    /** Real gRPC round-trip against the engine on {@code port}. */
+    /**
+     * Real gRPC round-trip against the engine on {@code port}.
+     */
     private EngineRpcService.WorkerStatusPB grpcWorkerStatus(int port) {
         ManagedChannel channel =
                 ManagedChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().build();
@@ -748,7 +752,9 @@ class DynamicEngineScaleTest {
         }
     }
 
-    /** Wait until the port refuses TCP connections (listener closed by remove). */
+    /**
+     * Wait until the port refuses TCP connections (listener closed by remove).
+     */
     private static void awaitPortRefused(int port) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (System.nanoTime() < deadline) {
@@ -774,7 +780,9 @@ class DynamicEngineScaleTest {
         return hosts;
     }
 
-    /** All live engines of {@code role} as ip:httpPort strings ordered by gRPC port. */
+    /**
+     * All live engines of {@code role} as ip:httpPort strings ordered by gRPC port.
+     */
     private List<String> expectedAddresses(String role) {
         return services.values().stream()
                 .filter(service -> role.equals(service.getRoleName()))

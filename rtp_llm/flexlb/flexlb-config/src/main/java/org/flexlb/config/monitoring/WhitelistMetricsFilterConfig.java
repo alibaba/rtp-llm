@@ -1,0 +1,168 @@
+package org.flexlb.config.monitoring;
+
+import io.micrometer.core.instrument.Meter;
+import io.micrometer.core.instrument.config.MeterFilter;
+import io.micrometer.core.instrument.config.MeterFilterReply;
+import lombok.extern.slf4j.Slf4j;
+import org.flexlb.util.metrics.MicrometerFlexMonitor;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+import javax.annotation.PostConstruct;
+import java.util.AbstractSet;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.stream.Collectors;
+
+/**
+ * Filters {@code flexlb.} metrics using configured Prometheus-name prefixes at registration and
+ * reporting. Counter names also match their {@code _total} exposition form; a blank whitelist denies
+ * FlexLB metrics while unrelated JVM and process metrics remain allowed.
+ */
+@Slf4j
+@Configuration
+@ConditionalOnClass(name = "io.micrometer.core.instrument.MeterRegistry")
+public class WhitelistMetricsFilterConfig {
+    private static final String METRIC_PREFIX = "flexlb.";
+    private static final String PROM_PREFIX = "flexlb_";
+    private static final String COUNTER_SUFFIX = "_total";
+
+    /**
+     * Default whitelist preset: the six core link latency metrics
+     * (prometheus form; the counter exposition {@code _total} suffix is
+     * matched as well). These are the metrics retained when no
+     * {@code flexlb.monitor.metric-whitelist} property is set, keeping the
+     * default exposition minimal:
+     * <ul>
+     *   <li>Client-to-gRPC-server: network delay (network transfer)</li>
+     *   <li>gRPC server processing: server entry to RequestContext start</li>
+     *   <li>Master decision: route+submit time (decision start to route publication)</li>
+     * </ul>
+     */
+    public static final String DEFAULT_METRIC_WHITELIST =
+            "flexlb_app_request_network_delay_ms,"
+                    + "flexlb_app_grpc_server_process_ms,"
+                    + "flexlb_app_flexlb_route_submit_time_ms";
+
+    private final PrefixAllowSet allowedMetrics;
+
+    public WhitelistMetricsFilterConfig(
+            @Value("${flexlb.monitor.metric-whitelist:" + DEFAULT_METRIC_WHITELIST + "}")
+                    String metricWhitelist) {
+        this.allowedMetrics = new PrefixAllowSet(parseWhitelist(metricWhitelist));
+        if (this.allowedMetrics.isEmpty()) {
+            log.warn(
+                    "flexlb.monitor.metric-whitelist is empty/blank: denying every "
+                            + "flexlb.* metric (fail-safe; configure a comma-separated prefix "
+                            + "list via --flexlb.monitor.metric-whitelist)");
+        }
+    }
+
+    /**
+     * Defensive MeterRegistry filter: allows all non-flexlb metrics, and only
+     * allows flexlb metrics whose prometheus-form name matches the whitelist.
+     */
+    @Bean
+    public MeterFilter whitelistMetricsFilter() {
+        return new MeterFilter() {
+            @Override
+            public MeterFilterReply accept(Meter.Id id) {
+                String name = id.getName();
+                if (!name.startsWith(METRIC_PREFIX)) {
+                    return MeterFilterReply.NEUTRAL;
+                }
+                return allowedMetrics.contains(name.substring(METRIC_PREFIX.length()))
+                        ? MeterFilterReply.NEUTRAL
+                        : MeterFilterReply.DENY;
+            }
+        };
+    }
+
+    /**
+     * Sets the early-return allowlist on {@link MicrometerFlexMonitor}. The
+     * set is a prefix-aware view: {@code contains} applies
+     * {@link #matches(List, String)} instead of exact equality, keeping the
+     * early-return layer semantics aligned with the {@link MeterFilter}.
+     */
+    @PostConstruct
+    public void init() {
+        MicrometerFlexMonitor.setAllowedMetrics(allowedMetrics);
+    }
+
+    /**
+     * Splits the comma-separated property into trimmed non-empty entries.
+     */
+    static List<String> parseWhitelist(String property) {
+        if (property == null) {
+            return List.of();
+        }
+        return Arrays.stream(property.split(","))
+                .map(String::trim)
+                .filter(entry -> !entry.isEmpty())
+                .collect(Collectors.toUnmodifiableList());
+    }
+
+    /**
+     * Prefix-or-full-name match on the prometheus form of an <b>unprefixed</b>
+     * micrometer meter name (e.g. {@code app.cache.hit.ratio} →
+     * {@code flexlb_app_cache_hit_ratio}). The counter exposition form
+     * ({@code ..._total}) is tried as well so whitelist entries written for
+     * the prometheus endpoint match the underlying counter meter.
+     */
+    static boolean matches(List<String> whitelist, String unprefixedMeterName) {
+        String promName = PROM_PREFIX + unprefixedMeterName.replace('.', '_');
+        String counterName = promName + COUNTER_SUFFIX;
+        for (String entry : whitelist) {
+            if (promName.startsWith(entry) || counterName.startsWith(entry)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * {@link Set} view over the whitelist entries whose {@code contains} is
+     * the prefix-or-full-name match on the (unprefixed) micrometer name —
+     * {@code MicrometerFlexMonitor}'s exact-match allowlist check becomes
+     * prefix-aware without touching that class. Iteration/size expose the
+     * raw entries (log messages print the entry count). Match decisions are
+     * cached by metric name for the lifetime of this immutable whitelist.
+     */
+    static final class PrefixAllowSet extends AbstractSet<String> {
+        private final List<String> entries;
+        private final ConcurrentMap<String, Boolean> matchesByName = new ConcurrentHashMap<>();
+
+        PrefixAllowSet(List<String> entries) {
+            this.entries = List.copyOf(entries);
+        }
+
+        @Override
+        public boolean contains(Object o) {
+            if (!(o instanceof String name) || entries.isEmpty()) {
+                return false;
+            }
+            Boolean cached = matchesByName.get(name);
+            return cached != null ? cached : matchesByName.computeIfAbsent(name, this::matchesName);
+        }
+
+        @Override
+        public Iterator<String> iterator() {
+            return entries.iterator();
+        }
+
+        @Override
+        public int size() {
+            return entries.size();
+        }
+
+        private boolean matchesName(String name) {
+            return matches(entries, name);
+        }
+    }
+}

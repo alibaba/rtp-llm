@@ -1,0 +1,265 @@
+package org.flexlb.util.formula;
+
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static org.flexlb.util.formula.ArithmeticFormulaAst.ConstantNode;
+import static org.flexlb.util.formula.ArithmeticFormulaAst.Function;
+import static org.flexlb.util.formula.ArithmeticFormulaAst.Node;
+import static org.flexlb.util.formula.ArithmeticFormulaAst.VariableNode;
+import static org.flexlb.util.formula.ArithmeticFormulaAst.binary;
+import static org.flexlb.util.formula.ArithmeticFormulaAst.evaluate;
+import static org.flexlb.util.formula.ArithmeticFormulaAst.function;
+import static org.flexlb.util.formula.ArithmeticFormulaAst.unary;
+
+/**
+ * Parses scalar arithmetic expressions and validates variable bindings.
+ */
+final class ArithmeticFormulaParser {
+    private final String input;
+    private final Map<String, ConstantNode> parameters = new LinkedHashMap<>();
+    private final Map<String, Integer> variables;
+    private final Set<String> referencedVariables = new HashSet<>();
+
+    private final int variableCount;
+
+    private int pos;
+
+    ArithmeticFormulaParser(String input, Map<String, Integer> variables) {
+        this.input = input;
+        this.variables = variables;
+        int count = 0;
+        for (int index : this.variables.values()) {
+            checkArgument(
+                    index >= 0 && index != Integer.MAX_VALUE,
+                    "Variable index is outside its domain: %s",
+                    index);
+            count = Math.max(count, index + 1);
+        }
+        this.variableCount = count;
+    }
+
+    Node parse() {
+        Node result = parseExpression();
+        expectEnd();
+        return result;
+    }
+
+    Set<String> referencedVariables() {
+        return Set.copyOf(referencedVariables);
+    }
+
+    private void expectEnd() {
+        skipWs();
+        if (hasNext()) {
+            throw error("Unexpected token");
+        }
+    }
+
+    private void skipWs() {
+        while (hasNext() && Character.isWhitespace(peek())) {
+            pos++;
+        }
+    }
+
+    private boolean hasNext() {
+        return pos < input.length();
+    }
+
+    private char peek() {
+        return input.charAt(pos);
+    }
+
+    private IllegalArgumentException error(String msg) {
+        return new IllegalArgumentException(msg + " at pos " + pos + " in: " + input);
+    }
+
+    // expression → term (('+' | '-') term)*
+    private Node parseExpression() {
+        Node node = parseTerm();
+        while (true) {
+            skipWs();
+            if (match('+')) {
+                node = binary('+', node, parseTerm());
+            } else if (match('-')) {
+                node = binary('-', node, parseTerm());
+            } else {
+                return node;
+            }
+        }
+    }
+
+    // term → factor (('*' | '/') factor)*
+    private Node parseTerm() {
+        Node node = parseFactor();
+        while (true) {
+            skipWs();
+            if (match('*')) {
+                node = binary('*', node, parseFactor());
+            } else if (match('/')) {
+                node = binary('/', node, parseFactor());
+            } else {
+                return node;
+            }
+        }
+    }
+
+    // factor → unary ('^' factor)*    right-associative
+    private Node parseFactor() {
+        Node node = parseUnary();
+        skipWs();
+        return match('^') ? binary('^', node, parseFactor()) : node;
+    }
+
+    // unary → ('+' | '-') unary | primary
+    private Node parseUnary() {
+        skipWs();
+        if (match('+')) {
+            return unary('+', parseUnary());
+        }
+        if (match('-')) {
+            return unary('-', parseUnary());
+        }
+        return parsePrimary();
+    }
+
+    // ---- helpers ----
+
+    private boolean match(char expected) {
+        if (hasNext() && peek() == expected) {
+            pos++;
+            return true;
+        }
+        return false;
+    }
+
+    // primary → '(' expression ')' | function_call | param_call | number | variable
+    private Node parsePrimary() {
+        skipWs();
+        if (match('(')) {
+            Node node = parseExpression();
+            skipWs();
+            if (!match(')')) {
+                throw error("Expected ')'");
+            }
+            return node;
+        }
+        if (hasNext() && Character.isLetter(peek())) {
+            String name = parseIdentifier();
+            skipWs();
+            if (match('(')) {
+                if (name.equals("param")) {
+                    return parseParamCall();
+                }
+                return parseFuncCall(name);
+            }
+            if (name.equals("param")) {
+                throw error("'param' must be used as param(name, initialValue)");
+            }
+
+            Integer idx = variables.get(name);
+            if (idx == null) {
+                throw error("Unknown variable: " + name);
+            }
+            referencedVariables.add(name);
+            return new VariableNode(idx);
+        }
+        if (hasNext() && (Character.isDigit(peek()) || peek() == '.')) {
+            return parseNumber();
+        }
+        throw error("Expected number, variable, or '('");
+    }
+
+    private String parseIdentifier() {
+        int start = pos;
+        while (hasNext() && (Character.isLetterOrDigit(peek()) || peek() == '_')) {
+            pos++;
+        }
+        return input.substring(start, pos);
+    }
+
+    // Parameters become constants while their initializer variable references are retained.
+    private Node parseParamCall() {
+        skipWs();
+        if (!hasNext() || !(Character.isLetter(peek()) || peek() == '_')) {
+            throw error("Expected parameter name in param()");
+        }
+        String paramName = parseIdentifier();
+        skipWs();
+        if (!match(',')) {
+            throw error("Expected ',' after parameter name in param()");
+        }
+        skipWs();
+        Node initialValueNode = parseExpression();
+        double initialValue = evaluate(initialValueNode, new double[variableCount]);
+        skipWs();
+        if (!match(')')) {
+            throw error("Expected ')' after param() arguments");
+        }
+        ConstantNode existing = parameters.get(paramName);
+        if (existing != null) {
+            if (existing.value() != initialValue) {
+                throw error(
+                        "Inconsistent initial value for parameter '"
+                                + paramName
+                                + "': "
+                                + existing.value()
+                                + " vs "
+                                + initialValue);
+            }
+            return existing;
+        }
+        ConstantNode node = new ConstantNode(initialValue);
+        parameters.put(paramName, node);
+        return node;
+    }
+
+    private Node parseFuncCall(String name) {
+        Function function = Function.named(name);
+        if (function == null) throw error("Unknown function: " + name);
+        skipWs();
+        Node arg0 = parseExpression();
+        if (function.arity == 2) {
+            skipWs();
+            if (!match(',')) {
+                throw error("Expected ',' in binary function '" + name + "'");
+            }
+            skipWs();
+            Node arg1 = parseExpression();
+            skipWs();
+            if (!match(')')) {
+                throw error("Expected ')' after function arguments");
+            }
+            return function(function, arg0, arg1);
+        }
+        skipWs();
+        if (!match(')')) {
+            throw error("Expected ')' after function argument");
+        }
+        return function(function, arg0, null);
+    }
+
+    private Node parseNumber() {
+        int start = pos;
+        while (hasNext() && (Character.isDigit(peek()) || peek() == '.')) {
+            pos++;
+        }
+        if (hasNext() && (peek() == 'e' || peek() == 'E')) {
+            pos++;
+            if (hasNext() && (peek() == '+' || peek() == '-')) {
+                pos++;
+            }
+            while (hasNext() && Character.isDigit(peek())) {
+                pos++;
+            }
+        }
+        try {
+            return new ConstantNode(Double.parseDouble(input.substring(start, pos)));
+        } catch (NumberFormatException e) {
+            throw error("Invalid number");
+        }
+    }
+}

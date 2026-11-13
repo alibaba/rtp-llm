@@ -1,11 +1,11 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.balance.scheduler.CancelReason;
-import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.engine.grpc.EngineGrpcClient.CancelReply;
-import org.flexlb.engine.grpc.EngineRpcService.CancelRequestPB;
-import org.flexlb.engine.grpc.EngineRpcService.RequestCancelReasonPB;
+import org.flexlb.balance.schedule.CancelReason;
+import org.flexlb.worker.rpc.EngineGrpcClient;
+import org.flexlb.worker.rpc.EngineGrpcClient.CancelReply;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.CancelRequestPB;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.RequestCancelReasonPB;
 
 import java.net.URI;
 import java.net.http.HttpClient;

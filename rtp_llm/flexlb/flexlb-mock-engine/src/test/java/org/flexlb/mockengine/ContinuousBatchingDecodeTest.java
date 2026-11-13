@@ -1,7 +1,7 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -371,7 +371,9 @@ class ContinuousBatchingDecodeTest {
 
     // ──────────── Model / service helpers ────────────
 
-    /** Curve [[1,100],[2,200]] with sleep_scale 1.0 and no jitter. */
+    /**
+     * Curve [[1,100],[2,200]] with sleep_scale 1.0 and no jitter.
+     */
     private MockPerformanceModel twoPointCurveModel() throws Exception {
         return model(List.of(List.of(1, 100.0), List.of(2, 200.0)));
     }

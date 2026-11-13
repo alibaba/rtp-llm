@@ -2,7 +2,7 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -44,12 +44,16 @@ class BlockPoolMetricsObservabilityTest {
     private static final int SPB = 1024;
     private static final int BASE_PORT = 63900;
 
-    /** {@code metric_name{engine_name=...,role=...,grpc_port="N",...} value} */
+    /**
+     * {@code metric_name{engine_name=...,role=...,grpc_port="N",...} value}
+     */
     private static final Pattern PER_ENGINE_METRIC_PATTERN =
             Pattern.compile(
                     "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"\\}\\s+(\\d+)");
 
-    /** {@code metric_name{role="..."} value} */
+    /**
+     * {@code metric_name{role="..."} value}
+     */
     private static final Pattern ROLE_METRIC_PATTERN =
             Pattern.compile("(\\w+)\\{role=\"(\\w+)\"\\}\\s+(\\d+)");
 
@@ -312,7 +316,7 @@ class BlockPoolMetricsObservabilityTest {
     /**
      * Decode KV admission failure is a REQUEST TERMINAL FAILURE
      * (production-aligned, 20260903 — the former un-pooled degradation is
-     * retired): an oversized decode request (11 blocks vs a 10-block pool,
+     * closed): an oversized decode request (11 blocks vs a 10-block pool,
      * cold LRU so the net demand alone overflows) cannot provision its lease
      * at hand-off admission. scheduleDecodeCompletion ACCEPTS and TERMINATES
      * the request: the typed terminal carries the master-surface error 8211
@@ -692,7 +696,9 @@ class BlockPoolMetricsObservabilityTest {
         return MockEngineTestSupport.controlPort(controlServer);
     }
 
-    /** Shape carrying hash-channel block keys AND a real output length. */
+    /**
+     * Shape carrying hash-channel block keys AND a real output length.
+     */
     private static MockPerformanceModel.RequestShape shapeWithKeys(
             MockPerformanceModel model,
             long requestId,
@@ -766,7 +772,9 @@ class BlockPoolMetricsObservabilityTest {
                 .build();
     }
 
-    /** Parse the engine_events.jsonl rows (blank lines skipped). */
+    /**
+     * Parse the engine_events.jsonl rows (blank lines skipped).
+     */
     private static List<JsonNode> readEventRows(Path eventsFile) throws IOException {
         List<JsonNode> rows = new ArrayList<>();
         for (String line : Files.readAllLines(eventsFile, StandardCharsets.UTF_8)) {

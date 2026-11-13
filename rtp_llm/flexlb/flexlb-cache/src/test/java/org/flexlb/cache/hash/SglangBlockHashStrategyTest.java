@@ -1,6 +1,6 @@
 package org.flexlb.cache.hash;
 
-import org.flexlb.dao.loadbalance.TokenIds;
+import org.flexlb.util.TokenIds;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;

@@ -74,11 +74,15 @@ See [AGENTS.md](AGENTS.md) for the full, authoritative list of build and test co
 
 ```
 flexlb/
-├── flexlb-api/          # Web layer and HTTP endpoints
-├── flexlb-common/       # Shared utilities and models
-├── flexlb-grpc/         # gRPC client implementation
-├── flexlb-sync/         # Core load balancing logic
-├── docs/                # Documentation
+├── flexlb-api/          # Application entry and service endpoints
+├── flexlb-config/       # Configuration loading and validation
+├── flexlb-balance/      # Scheduling, queues and routing
+├── flexlb-worker/       # Worker state, resources and Engine communication
+├── flexlb-cache/        # Cache matching and indexes
+├── flexlb-master/       # Leader election
+├── flexlb-util/         # Shared components and definitions
+├── flexlb-mock-engine/  # Test tool
+├── docs/
 └── README.md
 ```
 

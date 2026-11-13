@@ -1,13 +1,13 @@
 package org.flexlb.mock.grpc;
 
-import org.flexlb.balance.scheduler.RequestContext;
+import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.route.RoleType;
+import org.flexlb.config.service.RoleType;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
+import org.flexlb.worker.endpoint.Response;
+import org.flexlb.worker.status.ServerStatus;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -75,9 +75,8 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
                         inv -> {
                             RequestContext ctx = inv.getArgument(0);
                             // A retry must not consume another request's turn in this fixture.
-                            boolean useB = Long.parseLong(ctx.data().getRequestId()) % 2 == 0;
-                            return routeResult(
-                                    ctx, buildRouteResponse(ctx.data().getRequestId(), useB));
+                            boolean useB = Long.parseLong(ctx.getRequestId()) % 2 == 0;
+                            return routeResult(ctx, buildRouteResponse(ctx.getRequestId(), useB));
                         });
 
         // 3. Submit 4 requests — should alternate A, B, A, B
@@ -100,34 +99,19 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
                             + resp.getErrorMessage());
         }
 
-        // 5. Verify: worker A received at least 1 EnqueueBatch
-        int countA = mockPrefillWorker.getEnqueueCount();
-        assertTrue(
-                countA >= 1,
-                "Worker A should have received at least 1 EnqueueBatch, got " + countA);
-
-        // 6. Verify: worker B received at least 1 EnqueueBatch
-        int countB = workerB.getEnqueueCount();
-        assertTrue(
-                countB >= 1,
-                "Worker B should have received at least 1 EnqueueBatch, got " + countB);
-
-        // 7. Verify: total EnqueueBatch count matches number of submitted requests
-        int totalCount = countA + countB;
-        assertTrue(
-                totalCount >= requestIds.length,
-                "Total EnqueueBatch count ("
-                        + totalCount
-                        + ") should be >= "
-                        + requestIds.length
-                        + " submitted requests");
-
-        // 8. Verify: decode worker received no enqueue (PD-separated — decode
-        //    only gets requests after prefill completes, which mock doesn't simulate)
-        assertEquals(
-                0,
-                mockDecodeWorker.getEnqueueCount(),
-                "Decode worker should not have received any enqueue request");
+        for (int i = 0; i < requestIds.length; i++) {
+            var selected =
+                    futures[i].join().getServerStatus().stream()
+                            .filter(worker -> worker.getRole() == RoleType.PREFILL)
+                            .findFirst()
+                            .orElseThrow();
+            assertEquals(
+                    requestIds[i] % 2 == 0 ? workerBHttpPort : prefillHttpPort,
+                    selected.getHttpPort());
+        }
+        assertEquals(0, mockPrefillWorker.getEnqueueCount());
+        assertEquals(0, workerB.getEnqueueCount());
+        assertEquals(0, mockDecodeWorker.getEnqueueCount());
     }
 
     // ==================== Helper: build routing response ====================

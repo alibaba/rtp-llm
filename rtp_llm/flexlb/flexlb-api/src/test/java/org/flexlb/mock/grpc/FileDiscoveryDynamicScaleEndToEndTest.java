@@ -2,22 +2,22 @@ package org.flexlb.mock.grpc;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.tuple.Pair;
-import org.flexlb.balance.RoutingResult;
-import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestRouteSelector;
+import org.flexlb.balance.schedule.RequestContext;
+import org.flexlb.balance.strategy.RequestRouteSelector;
+import org.flexlb.balance.strategy.RoutingResult;
 import org.flexlb.cache.match.CacheAwareService;
-import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
-import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.route.Endpoint;
-import org.flexlb.dao.route.RoleType;
+import org.flexlb.config.service.ModelMetaConfig;
+import org.flexlb.config.service.RoleType;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
-import org.flexlb.service.address.WorkerAddressService;
-import org.flexlb.service.grpc.WorkerStatusRpcClient;
-import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.util.discovery.DiscoveryEndpoint;
+import org.flexlb.worker.cache.DynamicCacheIntervalService;
+import org.flexlb.worker.endpoint.Response;
+import org.flexlb.worker.rpc.WorkerStatusRpcClient;
+import org.flexlb.worker.status.ServerStatus;
+import org.flexlb.worker.status.ServiceMetricsReporter;
+import org.flexlb.worker.status.WorkerAddressService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -73,7 +73,7 @@ import static org.mockito.Mockito.when;
  * </ol>
  *
  * <p>The only mocked master-side pieces are the metrics reporter
- * ({@link EngineHealthReporter}) and the cache-aware manager — neither
+ * ({@link ServiceMetricsReporter}) and the cache-aware manager — neither
  * participates in the discovery/registration decision path.
  */
 class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
@@ -82,10 +82,14 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     private static final String DECODE_DOMAIN = "mock.decode.hosts.address";
     private static final String MODEL_NAME = "mock-model";
 
-    /** Master SYNC_STATUS_INTERVAL default — the production re-pull cadence. */
+    /**
+     * Master SYNC_STATUS_INTERVAL default — the production re-pull cadence.
+     */
     private static final long SYNC_INTERVAL_MS = 20L;
 
     private static final long CONVERGENCE_CAP_MS = 10_000L;
+
+    private final java.util.Map<String, Integer> selectedCounts = new java.util.HashMap<>();
 
     @TempDir Path tempDir;
     private MockPrefillWorker workerB;
@@ -94,7 +98,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     private LocalServiceDiscovery fileServiceDiscovery;
     private WorkerAddressService workerAddressService;
     private WorkerStatusRpcClient workerStatusRpcClient;
-    private EngineHealthReporter healthReporter;
+    private ServiceMetricsReporter healthReporter;
     private ScheduledExecutorService syncScheduler;
     private ExecutorService statusCheckExecutor;
 
@@ -119,8 +123,14 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                             RequestContext ctx = inv.getArgument(0);
                             List<String> candidates =
                                     new ArrayList<>(
-                                            endpointRegistry.endpointAddressSnapshot(
-                                                    RoleType.PREFILL));
+                                            endpointRegistry
+                                                    .endpoints(RoleType.PREFILL, null)
+                                                    .stream()
+                                                    .map(
+                                                            org.flexlb.worker.endpoint
+                                                                            .WorkerEndpoint
+                                                                    ::ipPort)
+                                                    .toList());
                             if (candidates.isEmpty()) {
                                 Response empty = new Response();
                                 empty.setSuccess(false);
@@ -130,16 +140,18 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                             String chosen =
                                     candidates.get(
                                             routerCounter.getAndIncrement() % candidates.size());
-                            var worker = endpointRegistry.get(RoleType.PREFILL, chosen).getStatus();
+                            var worker =
+                                    endpointRegistry
+                                            .getEndpoint(RoleType.PREFILL, chosen)
+                                            .getStatus();
                             String ip = worker.getIp();
                             int httpPort = worker.getPort();
-                            // routeResult() pins the exact worker generations. The scheduler
-                            // reserves Decode capacity before publishing the Prefill queue entry;
-                            // the batcher later acquires a permit against that exact reservation.
+                            // Register resources against the selected worker generations
+                            // before returning the route.
                             return routeResult(
                                     ctx,
                                     routeResponse(
-                                            Long.parseLong(ctx.data().getRequestId()),
+                                            Long.parseLong(ctx.getRequestId()),
                                             ip,
                                             httpPort,
                                             httpPort + 1));
@@ -151,8 +163,6 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     void setUpFileDiscoveryPipeline() throws Exception {
         // Second initial prefill worker (B), started by the base helper.
         workerB = addPrefillWorker(MockWorkerBehavior.builder().build());
-        completeAcceptedBatches(mockPrefillWorker);
-        completeAcceptedBatches(workerB);
 
         // Initial discovery file: A + B on the prefill domain, base decode worker.
         discoveryFile = tempDir.resolve("discovery-" + System.nanoTime() + ".json");
@@ -164,10 +174,10 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         // Model topology: upstream builds ModelMetaConfig from the
         // MODEL_SERVICE_CONFIG env; mocking it keeps this test hermetic while
         // still resolving the domain → address mapping the sync loop consumes.
-        Endpoint prefillEndpoint = new Endpoint();
+        DiscoveryEndpoint prefillEndpoint = new DiscoveryEndpoint();
         prefillEndpoint.setAddress(PREFILL_DOMAIN);
         prefillEndpoint.setProtocol("http");
-        Endpoint decodeEndpoint = new Endpoint();
+        DiscoveryEndpoint decodeEndpoint = new DiscoveryEndpoint();
         decodeEndpoint.setAddress(DECODE_DOMAIN);
         decodeEndpoint.setProtocol("http");
         ModelMetaConfig modelMetaConfig = mock(ModelMetaConfig.class);
@@ -177,7 +187,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                 .thenReturn(List.of(Pair.of("mock", decodeEndpoint)));
 
         // Real master discovery wiring (metrics reporter mocked — not on the decision path).
-        healthReporter = mock(EngineHealthReporter.class);
+        healthReporter = mock(ServiceMetricsReporter.class);
         workerAddressService =
                 new WorkerAddressService(
                         healthReporter, modelMetaConfig, fileServiceDiscovery, configService);
@@ -200,7 +210,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         });
 
         Runnable prefillSyncRunner =
-                org.flexlb.sync.synchronizer.WorkerSyncTestSupport.runner(
+                org.flexlb.worker.status.WorkerSyncTestSupport.runner(
                         MODEL_NAME,
                         // Share the fixture's directory so discovery retires and
                         // republishes the exact generations used by routing.
@@ -220,7 +230,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         statusCheckExecutor);
 
         Runnable decodeSyncRunner =
-                org.flexlb.sync.synchronizer.WorkerSyncTestSupport.runner(
+                org.flexlb.worker.status.WorkerSyncTestSupport.runner(
                         MODEL_NAME,
                         engineWorkerStatus,
                         workerAddressService,
@@ -303,8 +313,9 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         mockPrefillWorker.getWorkerStatusCallCount() > 0
                                 && workerB.getWorkerStatusCallCount() > 0
                                 && mockDecodeWorker.getWorkerStatusCallCount() > 0
-                                && endpointRegistry
-                                        .endpointAddressSnapshot(RoleType.DECODE)
+                                && endpointRegistry.endpoints(RoleType.DECODE, null).stream()
+                                        .map(org.flexlb.worker.endpoint.WorkerEndpoint::ipPort)
+                                        .toList()
                                         .contains(decodeIpPort + "@0")
                                 && prefillAddressesRoutable(prefillIpPort, workerIpPort(workerB)),
                 "discovery loop should poll both initial workers and publish "
@@ -314,10 +325,12 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         drainRequests(6);
         awaitUntil(
                 3_000,
-                () -> mockPrefillWorker.getEnqueueCount() >= 1 && workerB.getEnqueueCount() >= 1,
+                () ->
+                        selectedCounts.getOrDefault(workerIpPort(mockPrefillWorker), 0) >= 1
+                                && selectedCounts.getOrDefault(workerIpPort(workerB), 0) >= 1,
                 "requests should be distributed across the two initial workers");
-        int countABeforeRemoval = mockPrefillWorker.getEnqueueCount();
-        int countBBeforeAdd = workerB.getEnqueueCount();
+        int countABeforeRemoval = selectedCounts.getOrDefault(workerIpPort(mockPrefillWorker), 0);
+        int countBBeforeAdd = selectedCounts.getOrDefault(workerIpPort(workerB), 0);
         assertTrue(
                 countABeforeRemoval >= 1 && countBBeforeAdd >= 1,
                 "both initial workers must have received requests");
@@ -325,7 +338,6 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         // ─── Phase 2: start C (NOT registered) → add to file → it must converge ───
         workerC = new MockPrefillWorker(MockWorkerBehavior.builder().build());
         workerC.start(0);
-        completeAcceptedBatches(workerC);
         String cIpPort = workerIpPort(workerC);
         writeDiscoveryFileAtomic(List.of(prefillIpPort, workerIpPort(workerB), cIpPort));
 
@@ -335,7 +347,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CONVERGENCE_CAP_MS);
         while (System.nanoTime() < deadline) {
             drainRequests(3);
-            if (workerC.getEnqueueCount() > 0) {
+            if (selectedCounts.getOrDefault(workerIpPort(workerC), 0) > 0) {
                 cReceived.set(true);
                 addConvergenceMs = elapsedMs(addStartMs);
                 break;
@@ -348,7 +360,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         + " ms "
                         + "of appearing in the discovery file");
         assertNotNull(
-                endpointRegistry.get(RoleType.PREFILL, cIpPort + "@0"),
+                endpointRegistry.getEndpoint(RoleType.PREFILL, cIpPort + "@0"),
                 "worker C must be registered in the EndpointRegistry after discovery");
 
         // ─── Phase 3: remove A from the file → A must stop receiving new requests ───
@@ -357,24 +369,24 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         long removeStartMs = System.nanoTime();
         awaitUntil(
                 CONVERGENCE_CAP_MS,
-                () -> endpointRegistry.get(RoleType.PREFILL, prefillIpPort + "@0") == null,
+                () -> endpointRegistry.getEndpoint(RoleType.PREFILL, prefillIpPort + "@0") == null,
                 "worker A should be evicted from the EndpointRegistry after removal from the file");
         long removeConvergenceMs = elapsedMs(removeStartMs);
 
         // EndpointRegistry no longer offers A, so the round-robin router cannot pick it.
-        int countAAtRemoval = mockPrefillWorker.getEnqueueCount();
-        int countBAtRemoval = workerB.getEnqueueCount();
-        int countCAtRemoval = workerC.getEnqueueCount();
+        int countAAtRemoval = selectedCounts.getOrDefault(workerIpPort(mockPrefillWorker), 0);
+        int countBAtRemoval = selectedCounts.getOrDefault(workerIpPort(workerB), 0);
+        int countCAtRemoval = selectedCounts.getOrDefault(workerIpPort(workerC), 0);
         drainRequests(9);
         assertEquals(
                 countAAtRemoval,
-                mockPrefillWorker.getEnqueueCount(),
+                selectedCounts.getOrDefault(workerIpPort(mockPrefillWorker), 0),
                 "removed worker A must not receive any new requests");
         assertTrue(
-                workerB.getEnqueueCount() > countBAtRemoval,
+                selectedCounts.getOrDefault(workerIpPort(workerB), 0) > countBAtRemoval,
                 "worker B must keep serving after A's removal");
         assertTrue(
-                workerC.getEnqueueCount() > countCAtRemoval,
+                selectedCounts.getOrDefault(workerIpPort(workerC), 0) > countCAtRemoval,
                 "worker C must keep serving after A's removal");
 
         System.out.printf(
@@ -442,16 +454,9 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     //  Helpers
     // ════════════════════════════════════════════════════════════════
 
-    private void completeAcceptedBatches(MockPrefillWorker worker) {
-        worker.getRpcService()
-                .onAcceptedBatch(
-                        batch -> {
-                            worker.getRpcService().completeBatch(batch);
-                            mockDecodeWorker.getRpcService().completeBatch(batch);
-                        });
-    }
-
-    /** Submit {@code count} requests and wait for every ACK to complete successfully. */
+    /**
+     * Submit {@code count} requests and wait for every ACK to complete successfully.
+     */
     private void drainRequests(int count) throws Exception {
         List<CompletableFuture<Response>> futures = new ArrayList<>(count);
         long firstId = requestIdCounter.getAndAdd(count);
@@ -460,6 +465,11 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         }
         for (int i = 0; i < count; i++) {
             Response response = futures.get(i).get(5, TimeUnit.SECONDS);
+            for (var worker : response.getServerStatus()) {
+                if (worker.getRole() == RoleType.PREFILL)
+                    selectedCounts.merge(
+                            worker.getServerIp() + ":" + worker.getHttpPort(), 1, Integer::sum);
+            }
             assertTrue(
                     response.isSuccess(),
                     "request " + (firstId + i) + " should succeed, code=" + response.getCode());
@@ -471,11 +481,14 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
      * router consumes — the placement path's true readiness signal, not
      * merely "the sync loop contacted the worker once". The poll-count
      * precondition in the caller guarantees the preinitialized placeholder
-     * generations have already been retired, so a live address can only
+     * generations have already been closed, so a live address can only
      * come from a discovery-driven publication.
      */
     private boolean prefillAddressesRoutable(String... ipPorts) {
-        List<String> routable = endpointRegistry.endpointAddressSnapshot(RoleType.PREFILL);
+        List<String> routable =
+                endpointRegistry.endpoints(RoleType.PREFILL, null).stream()
+                        .map(org.flexlb.worker.endpoint.WorkerEndpoint::ipPort)
+                        .toList();
         for (String ipPort : ipPorts) {
             if (!routable.contains(ipPort + "@0")) {
                 return false;

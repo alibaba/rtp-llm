@@ -2,11 +2,7 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.balance.prediction.PrefillTimeFormula;
-import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.RoutingConfig.EstimatorType;
-import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.service.config.merger.FlexlbConfigMerger;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -129,28 +125,6 @@ final class MockPerformanceModel {
      * data/config/master_fixed_window.json inject this same expression)
      * always win over this fallback.
      */
-    private static final String DSV4_PREFILL_FIT_EXPRESSION =
-            "max(196, -68.612174288157 + 0.993068319341 * (max(0, 287.3980926717 + 2.30134977837751 * batchSize + "
-                    + "0.158123254797307 * sum(hitCacheTokens / 1024.) + 0.575522710053703 * sum(computeTokens / 1024.) + "
-                    + "0.0517623430739831 * sum(computeTokens / 1024. * computeTokens / 1024.) + 0.0395308136993267 * "
-                    + "sum(hitCacheTokens / 1024. * computeTokens / 1024.) + 0.0104363634681015 * sum(hitCacheTokens / 1024. * "
-                    + "hitCacheTokens / 1024.) + 0.575522710053703 * max(sum(computeTokens / 1024.) - 16, 0) + 2.82077211814514 "
-                    + "* max(sum(computeTokens / 1024.) - 32, 0) - 0.0254671429192862 * max(sum(computeTokens / 1024.) - 64, 0) "
-                    + "+ 2.15779213792494 * max(sum(computeTokens / 1024.) - 96, 0) + 0.247806025472364 * "
-                    + "max(sum(hitCacheTokens / 1024.) - 32, 0) - 0.444522654549492 * max(sum(hitCacheTokens / 1024.) - 64, 0) "
-                    + "- 0.427317020061895 * max(sum(hitCacheTokens / 1024.) - 128, 0) + 0.347029077528455 * "
-                    + "max(sum(hitCacheTokens / 1024.) - 256, 0) - 0.298742307762735 * max(sum(hitCacheTokens / 1024.) - 384, "
-                    + "0) + 2.30134977837751 * max(batchSize - 8, 0) - 3.54884859699154 * max(batchSize - 16, 0) - "
-                    + "11.3438560779984 * max(batchSize - 24, 0) + 0.879751992138183 * sum(max(computeTokens / 1024. - 2, 0)) + "
-                    + "0.636364578079591 * sum(max(computeTokens / 1024. - 4, 0)) - 0.0513345988517118 * sum(max(computeTokens "
-                    + "/ 1024. - 8, 0)) - 0.332584389129357 * sum(max(hitCacheTokens / 1024. - 2, 0)) + 0.305819761192588 * "
-                    + "sum(max(hitCacheTokens / 1024. - 4, 0)) - 0.287610979974721 * sum(max(hitCacheTokens / 1024. - 8, 0)) + "
-                    + "0.191310200712013 * sum(max(hitCacheTokens / 1024. - 12, 0)) + 0.0130251644478961 * max(batchSize - 8, "
-                    + "0) * sum(hitCacheTokens / 1024.) + 0.00981382840761646 * max(batchSize - 16, 0) * sum(hitCacheTokens / "
-                    + "1024.) - 0.0299132587297009 * max(batchSize - 24, 0) * sum(hitCacheTokens / 1024.) + 0.0447455122487382 "
-                    + "* max(batchSize - 8, 0) * sum(computeTokens / 1024.) + 0.0104635312001851 * max(batchSize - 16, 0) * "
-                    + "sum(computeTokens / 1024.) + 0.0542737877321807 * max(batchSize - 24, 0) * sum(computeTokens / 1024.))))";
-
     private volatile int blockSize;
 
     private final double sleepScale;
@@ -179,7 +153,6 @@ final class MockPerformanceModel {
     private final int maxBatchTokens;
     private final int maxBatchRequests;
 
-    private final PrefillTimeFormula prefillFormula;
     // Decode step-latency sources, exactly one active per model:
     //   - explicit step_ms_by_batch curve (decodePoints non-empty; legacy
     //     declared channel, kept for suites that price steps themselves), or
@@ -237,7 +210,6 @@ final class MockPerformanceModel {
             int directBatchSizeMax,
             int maxBatchTokens,
             int maxBatchRequests,
-            PrefillTimeFormula prefillFormula,
             List<DecodePoint> decodePoints,
             double stepBaseMs,
             double stepPerRunningMs,
@@ -255,7 +227,6 @@ final class MockPerformanceModel {
         this.directBatchSizeMax = Math.max(1, directBatchSizeMax);
         this.maxBatchTokens = maxBatchTokens;
         this.maxBatchRequests = maxBatchRequests;
-        this.prefillFormula = prefillFormula;
         this.decodePoints = decodePoints;
         this.stepBaseMs = stepBaseMs;
         this.stepPerRunningMs = stepPerRunningMs;
@@ -285,9 +256,6 @@ final class MockPerformanceModel {
         int directBatchSizeMax = prefill.path("direct_batch_size_max").asInt(32);
         int maxBatchTokens = prefill.path("max_batch_tokens").asInt(DEFAULT_MAX_BATCH_TOKENS);
         int maxBatchRequests = prefill.path("max_batch_requests").asInt(DEFAULT_MAX_BATCH_REQUESTS);
-
-        PrefillTimeFormula formula =
-                PrefillTimeFormula.parse(loadPrefillExpression(masterConfigFile));
 
         JsonNode decode = performance.path("decode");
         // per_token_ms is REMOVED (task #69, wrong-version-deleted-clean rule):
@@ -357,7 +325,6 @@ final class MockPerformanceModel {
                 directBatchSizeMax,
                 maxBatchTokens,
                 maxBatchRequests,
-                formula,
                 List.copyOf(points),
                 stepBaseMs,
                 stepPerRunningMs,
@@ -421,21 +388,9 @@ final class MockPerformanceModel {
             // wins over the formula (priority: runtime > JSON > formula).
             latency = configuredFixedPrefillMs;
         } else {
-            // The only prefill source: the expression resolved in
-            // loadPrefillExpression (explicit FORMULA or the production fit).
-            double[] batchVars = new double[5];
-            batchVars[0] = requests.size();
-            List<double[]> itemVars = new ArrayList<>(requests.size());
-            for (RequestShape request : requests) {
-                double[] vars = new double[5];
-                vars[0] = requests.size();
-                vars[1] = request.inputLen;
-                vars[2] = request.hitTokens;
-                vars[3] = Math.max(0, request.inputLen - request.hitTokens);
-                vars[4] = request.hitTokens > 0 ? 1 : 0;
-                itemVars.add(vars);
-            }
-            latency = prefillFormula.evaluate(batchVars, itemVars);
+            latency = 0.0;
+            for (var request : requests)
+                latency += Math.max(0L, request.inputLen - request.hitTokens);
         }
         long result = scaledMs(latency * prefillScale);
         // Clamp on the final (post-scale) value: min_ms is the actual-sleep floor.
@@ -446,7 +401,9 @@ final class MockPerformanceModel {
         this.overrideFixedPrefillMs = ms;
     }
 
-    /** Python /set_perf {@code decode_scale}: replace the decode latency scale. */
+    /**
+     * Python /set_perf {@code decode_scale}: replace the decode latency scale.
+     */
     void setOverrideDecodeScale(Double scale) {
         this.overrideDecodeScale = scale;
     }
@@ -460,7 +417,9 @@ final class MockPerformanceModel {
         this.overrideMaxWaitingPrefillBatches = cap;
     }
 
-    /** Python launcher {@code --block-size}: override the block size from the perf config. */
+    /**
+     * Python launcher {@code --block-size}: override the block size from the perf config.
+     */
     void setBlockSize(int blockSize) {
         this.blockSize = blockSize;
     }
@@ -522,7 +481,9 @@ final class MockPerformanceModel {
         return (int) Math.ceil(outputLen / tokensPerStep);
     }
 
-    /** Tokens produced per running stream per decode step (MTP acceptance fold). */
+    /**
+     * Tokens produced per running stream per decode step (MTP acceptance fold).
+     */
     double tokensPerStep() {
         return tokensPerStep;
     }
@@ -557,46 +518,8 @@ final class MockPerformanceModel {
     }
 
     /**
-     * Resolve the prefill duration formula — exactly one source, never a
-     * silent hard-coded fallback:
-     * <ol>
-     *   <li>an explicit FORMULA estimator in the master config's FLEXLB_CONFIG
-     *       (blank expression = misconfiguration, fail fast);</li>
-     *   <li>otherwise {@link #DSV4_PREFILL_FIT_EXPRESSION} — the production
-     *       DSv4 fit the mock keeps as its own built-in default, and the
-     *       static approximation for a LEARNING estimator the mock cannot
-     *       replay.</li>
-     * </ol>
-     * This keeps mock execution time and master routing predictions on the
-     * same expression; the legacy silent fixed_ms / 300 ms fallbacks are gone
-     * (an explicit performance-JSON "prefill.fixed_ms" declaration still
-     * wins over the formula — see prefillMs).
+     * Effective decode scale (runtime /set_perf override > JSON config).
      */
-    private static String loadPrefillExpression(String masterConfigFile) throws IOException {
-        JsonNode root = MAPPER.readTree(Path.of(masterConfigFile).toFile());
-        JsonNode envs = root.path("zone_process_setting").path("process_info").path("envs");
-        for (JsonNode item : envs) {
-            if (item.isArray()
-                    && item.size() >= 2
-                    && "FLEXLB_CONFIG".equals(item.get(0).asText())) {
-                FlexlbConfig config = FlexlbConfigMerger.mergeWithDefaults(item.get(1).asText());
-                var estimator =
-                        config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator();
-                if (estimator != null && estimator.getType() == EstimatorType.FORMULA) {
-                    String expression = estimator.getExpression();
-                    checkState(
-                            expression != null && !expression.isBlank(),
-                            "Master config %s: router.roles.prefill.executionTimeEstimator is FORMULA with a blank expression — set the expression explicitly or omit the estimator to use the FlexLB formula default",
-                            masterConfigFile);
-                    return expression;
-                }
-                break; // LEARNING estimator: fall through to the production-fit default
-            }
-        }
-        return DSV4_PREFILL_FIT_EXPRESSION;
-    }
-
-    /** Effective decode scale (runtime /set_perf override > JSON config). */
     private double effectiveDecodeScale() {
         return overrideDecodeScale != null ? overrideDecodeScale : decodeScale;
     }

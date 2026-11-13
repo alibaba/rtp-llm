@@ -3,15 +3,15 @@
 FlexLB 的上线由同机 HTTP hook 驱动；下线由 HTTP hook 或 Spring 容器关闭事件驱动。
 高可用由 ZooKeeper LeaderSelector 主选举与 follower 请求转发实现。
 
-主要代码：`flexlb-api/src/main/java/org/flexlb/service/grace/ApplicationLifecycle.java`、
-`flexlb-common/.../listener/ApplicationWarmupState.java`，`flexlb-api/.../AppStateHookServer.java`、
-`HealthCheckServer.java`、`FlexlbGrpcServer.java`，以及 `flexlb-sync/.../consistency/`。
+主要代码：`flexlb-api/src/main/java/org/flexlb/api/ApplicationLifecycle.java`、
+`flexlb-util/src/main/java/org/flexlb/util/ApplicationWarmupState.java`，`flexlb-api/src/main/java/org/flexlb/api/server/AppStateHookServer.java`、
+`HealthCheckServer.java`、`api/server/FlexlbGrpcServer.java`，以及 `flexlb-master/.../master/`。
 
 ## 生命周期 Hook
 
 ### 预热状态
 
-`flexlb-common` 中的 `ApplicationWarmupState` 是独立 Spring Bean，使用 volatile 字段
+`flexlb-util` 中的 `ApplicationWarmupState` 是独立 Spring Bean，使用 volatile 字段
 共享预热状态。`ApplicationLifecycle` 通过 `setWarmupFinished()` 更新状态，
 KVCM 客户端通过 `isWarmupFinished()` 读取状态。该状态类不依赖 gRPC 服务、调度器
 或生命周期编排器。

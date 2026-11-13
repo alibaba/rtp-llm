@@ -3,7 +3,7 @@ package org.flexlb.mockengine;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.stub.StreamObserver;
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -866,7 +866,9 @@ class StatusFaultInjectionTest {
                 "{\"port\":" + enginePort + "}");
     }
 
-    /** Poll until the finished list reaches {@code expectedCount} (or timeout). */
+    /**
+     * Poll until the finished list reaches {@code expectedCount} (or timeout).
+     */
     private static EngineRpcService.WorkerStatusPB awaitFinished(
             JavaMockEngineCluster.FastRpcService service,
             long sinceVersion,
@@ -882,7 +884,9 @@ class StatusFaultInjectionTest {
         return last;
     }
 
-    /** First finished-task entry matching {@code rid} (null if absent). */
+    /**
+     * First finished-task entry matching {@code rid} (null if absent).
+     */
     private static EngineRpcService.TaskInfoPB findByRid(
             EngineRpcService.WorkerStatusPB status, long rid) {
         for (EngineRpcService.TaskInfoPB task : status.getFinishedTaskListList()) {
@@ -911,7 +915,9 @@ class StatusFaultInjectionTest {
         return -1L;
     }
 
-    /** Drive generateStreamCall without blocking on its stream (decode zombie test). */
+    /**
+     * Drive generateStreamCall without blocking on its stream (decode zombie test).
+     */
     private static void fireAndForgetGenerate(
             JavaMockEngineCluster.FastRpcService service,
             EngineRpcService.GenerateInputPB request) {

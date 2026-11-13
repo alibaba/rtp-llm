@@ -486,7 +486,7 @@ HA_TIER1_MASTER_B_HTTP_PORT = int(
 #   * FlexlbGrpcForwarder.sameHost() compares bare IPs — same-IP instances
 #     would self-block every forward as SELF_TARGET.
 # Activation additionally needs the production-side prerequisites
-# (an FLEXLB_ADVERTISED_IP consumer in flexlb-sync + a per-address gRPC
+# (an FLEXLB_ADVERTISED_IP consumer in flexlb-balance + a per-address gRPC
 # bind instead of NettyServerBuilder.forPort) which are NOT yet in the
 # code; the harness injects the env/ports per this contract so the layout
 # lights up the moment those land.  Tier-2 forwarding itself is covered by
@@ -666,20 +666,20 @@ class MasterSpec:
 
 
 # ---------------------------------------------------------------------------
-# ZK helper (Tier-2/3) — cross-agent contract with flexlb-sync (Mark)
+# ZK helper (Tier-2/3) — cross-agent contract with flexlb-master (Mark)
 # ---------------------------------------------------------------------------
 
 # Contract constants — the SINGLE definition point the harness and the
-# flexlb-sync test launcher are aligned on (org.flexlb.consistency.
-# ZkTestingServerLauncher on the flexlb-sync src/test classpath).
-# Field-tested contract (flexlb-sync owner, delivered 2026-09-02):
+# flexlb-master test launcher are aligned on (org.flexlb.master.
+# ZkTestingServerLauncher on the flexlb-master src/test classpath).
+# Field-tested contract (flexlb-master owner, delivered 2026-09-02):
 #   * boot sequence (from the maven root):
-#       ./mvnw -q -pl flexlb-sync -am test-compile
-#       ./mvnw -q -pl flexlb-sync dependency:build-classpath \
+#       ./mvnw -q -pl flexlb-master -am test-compile
+#       ./mvnw -q -pl flexlb-master dependency:build-classpath \
 #               -Dmdep.outputFile=<ABS>/test-classpath.txt \
 #               -Dmdep.includeScope=test
-#       java -cp "flexlb-sync/target/test-classes:<deps>" \
-#            org.flexlb.consistency.ZkTestingServerLauncher --port 0
+#       java -cp "flexlb-master/target/test-classes:<deps>" \
+#            org.flexlb.master.ZkTestingServerLauncher --port 0
 #     -Dmdep.outputFile MUST be an absolute path (a relative one resolves
 #     against the module basedir and creates nested directories);
 #     build-classpath must NOT carry -am (every reactor module would write
@@ -693,12 +693,12 @@ class MasterSpec:
 #   * macOS caveat: 127.0.0.2 silently drops (SYN retransits 20s+) on
 #     macOS — the Tier-2/3 same-port/distinct-IP layout only works on
 #     Linux loopback (full 127/8 routed); run the ZK-tier cases remotely.
-ZK_LAUNCHER_CLASS = "org.flexlb.consistency.ZkTestingServerLauncher"
+ZK_LAUNCHER_CLASS = "org.flexlb.master.ZkTestingServerLauncher"
 ZK_READY_PREFIX = "ZK_READY"
 ZK_STOPPED_PREFIX = "ZK_STOPPED"
 # Full-argv escape hatch: when set, the harness shlex-splits it verbatim
 # and uses it as the ZK helper command line (the exact mvnw classpath
-# assembly stays swappable until the flexlb-sync owner's final report).
+# assembly stays swappable until the flexlb-master owner's final report).
 ZK_LAUNCH_CMD_ENV = "FLEXLB_FT_ZK_LAUNCH_CMD"
 # How long the harness waits for the ZK_READY line before failing closed.
 ZK_READY_TIMEOUT_S = float(os.environ.get("FLEXLB_FT_ZK_READY_TIMEOUT_S", "120"))
@@ -707,12 +707,12 @@ ZK_READY_TIMEOUT_S = float(os.environ.get("FLEXLB_FT_ZK_READY_TIMEOUT_S", "120")
 class ZkHelperOps:
     """Lifecycle glue for the ZK helper JVM.
 
-    Default launch: resolve the flexlb-sync TEST classpath once per run-dir
-    via ``mvnw -pl flexlb-sync -am dependency:build-classpath`` (cached in
+    Default launch: resolve the flexlb-master TEST classpath once per run-dir
+    via ``mvnw -pl flexlb-master -am dependency:build-classpath`` (cached in
     <run_dir>/zk_classpath.txt), then
-    ``java -cp test-classes:classes:<deps> org.flexlb.consistency.ZkTestingServerLauncher``.
+    ``java -cp test-classes:classes:<deps> org.flexlb.master.ZkTestingServerLauncher``.
     Override the whole command through FLEXLB_FT_ZK_LAUNCH_CMD if the
-    flexlb-sync assembly differs.
+    flexlb-master assembly differs.
     """
 
     @staticmethod
@@ -751,15 +751,15 @@ class ZkHelperOps:
 
     @staticmethod
     def _ensure_test_classpath(java_bin: str, run_dir: Path) -> str:
-        """flexlb-sync TEST-scope dependency classpath via mvnw (cached).
+        """flexlb-master TEST-scope dependency classpath via mvnw (cached).
 
-        Field-tested two-step boot (flexlb-sync owner contract):
-          1. ``-pl flexlb-sync -am test-compile`` — compiles the launcher
+        Field-tested two-step boot (flexlb-master owner contract):
+          1. ``-pl flexlb-master -am test-compile`` — compiles the launcher
              itself (src/test) plus reactor deps;
-          2. ``-pl flexlb-sync dependency:build-classpath`` (NO -am:
+          2. ``-pl flexlb-master dependency:build-classpath`` (NO -am:
              with it every reactor module writes its own outputFile)
              with an ABSOLUTE -Dmdep.outputFile and includeScope=test
-             (curator-test is test-scoped in flexlb-sync/pom.xml).
+             (curator-test is test-scoped in flexlb-master/pom.xml).
         Cached per run-dir so repeated env builds reuse one resolution.
         """
         cp_file = run_dir / "zk_classpath.txt"
@@ -771,22 +771,22 @@ class ZkHelperOps:
         if (java_home / "bin" / "java").exists():
             env.setdefault("JAVA_HOME", str(java_home))
         ZkHelperOps._mvnw(
-            ["-pl", "flexlb-sync", "-am", "test-compile"],
+            ["-pl", "flexlb-master", "-am", "test-compile"],
             env,
             timeout_s=900,
-            what="mvnw test-compile (flexlb-sync)",
+            what="mvnw test-compile (flexlb-master)",
         )
         ZkHelperOps._mvnw(
             [
                 "-pl",
-                "flexlb-sync",
+                "flexlb-master",
                 "dependency:build-classpath",
                 f"-Dmdep.outputFile={cp_file}",  # absolute (run_dir is abs)
                 "-Dmdep.includeScope=test",
             ],
             env,
             timeout_s=600,
-            what="mvnw dependency:build-classpath (flexlb-sync)",
+            what="mvnw dependency:build-classpath (flexlb-master)",
         )
         if not cp_file.is_file() or cp_file.stat().st_size == 0:
             raise RuntimeError(
@@ -797,7 +797,7 @@ class ZkHelperOps:
     @staticmethod
     def default_launch_argv(java_bin: str, run_dir: Path) -> list[str]:
         deps = ZkHelperOps._ensure_test_classpath(java_bin, run_dir)
-        sync_target = FLEXLB_DIR / "flexlb-sync" / "target"
+        sync_target = FLEXLB_DIR / "flexlb-master" / "target"
         cp = os.pathsep.join(
             [
                 str(sync_target / "test-classes"),
@@ -853,7 +853,7 @@ class EnvSpec:
     # discovery file and poll it independently (brief p1).
     masters: list = field(default_factory=list)  # list[MasterSpec]
     # Tier-2/3 only: non-None starts the ZK helper JVM (Mark's contract —
-    # org.flexlb.consistency.ZkTestingServerLauncher, "ZK_READY
+    # org.flexlb.master.ZkTestingServerLauncher, "ZK_READY
     # <connectString>" on stdout) BEFORE the masters and injects
     # FLEXLB_CONFIG.consistency (type=ZOOKEEPER, connectString=<helper
     # connectString>, session/connection timeout from this dict's zkTimeoutMs)
@@ -997,7 +997,7 @@ DSV4_PREFILL_EXPRESSION = (
 
 
 # scheduler.ordering.preemption.allowedVictimStages enum values
-# (flexlb-common VictimStage.java; see _build_preemption_cfg).
+# (flexlb-util VictimStage.java; see _build_preemption_cfg).
 VICTIM_STAGES = ("DECODE_RESERVED", "DECODE_ENGINE_OWNED")
 
 

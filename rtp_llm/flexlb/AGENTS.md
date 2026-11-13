@@ -55,9 +55,9 @@ FlexLB is a high-performance, intelligent load balancer for AI model inference w
 (part of RTP-LLM). Multi-module Maven project on Java 21 / Spring Boot 2.7.18 (WebFlux
 reactive architecture).
 
-Modules: `flexlb-api` (web layer), `flexlb-common` (shared models/config), `flexlb-grpc`
-(gRPC stubs), `flexlb-sync` (core load balancing logic), `flexlb-cache` (KV cache
-management).
+Modules: `flexlb-api`, `flexlb-config`, `flexlb-balance`, `flexlb-worker`,
+`flexlb-cache`, `flexlb-master`, `flexlb-util`. Source roots match these seven business
+modules. `flexlb-mock-engine` is a separate test tool verified by the reactor.
 
 ## Architecture Docs
 
@@ -83,7 +83,7 @@ management).
 ./mvnw clean package -DskipTests
 
 # Build a specific module
-./mvnw clean package -pl flexlb-sync -DskipTests
+./mvnw clean package -pl flexlb-balance -DskipTests
 
 # Build a module with its dependencies
 ./mvnw clean package -pl flexlb-api -am -DskipTests
@@ -95,7 +95,7 @@ management).
 ./mvnw test
 
 # Run tests for a specific module
-./mvnw test -pl flexlb-sync -am
+./mvnw test -pl flexlb-balance -am
 
 # Run a single test class
 ./mvnw test -Dtest=DefaultRouterTest

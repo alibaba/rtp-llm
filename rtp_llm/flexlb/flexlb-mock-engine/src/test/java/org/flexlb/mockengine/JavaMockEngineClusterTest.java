@@ -1,7 +1,7 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -58,7 +58,9 @@ class JavaMockEngineClusterTest {
     @Test
     void ackIsImmediateWhileQueuedBatchTransitionsFromWaitingToRunningToFinished()
             throws Exception {
-        JavaMockEngineCluster.FastRpcService service = service(model("180", 1.0));
+        var performance = model("180", 1.0);
+        performance.setOverrideFixedPrefillMs(180.0);
+        JavaMockEngineCluster.FastRpcService service = service(performance);
 
         EngineRpcService.EnqueueBatchResponsePB firstAck =
                 enqueue(service, batch(11, slot(0, input(1L, 100), input(2L, 200))));

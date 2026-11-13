@@ -1,13 +1,13 @@
 package org.flexlb.mock.grpc;
 
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockWorkerBehavior;
-import org.flexlb.service.grpc.WorkerStatusRpcClient;
+import org.flexlb.worker.endpoint.PrefillEndpoint;
+import org.flexlb.worker.endpoint.Response;
+import org.flexlb.worker.rpc.WorkerStatusRpcClient;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
+import org.flexlb.worker.status.WorkerStatus;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -48,10 +48,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *       observation and projects endpoint-owned reconciliation facts</li>
  * </ul>
  *
- * <p>Note: In production, {@link org.flexlb.sync.runner.GrpcWorkerStatusRunner} performs
+ * <p>Note: In production, {@link org.flexlb.worker.status.GrpcWorkerStatusRunner} performs
  * this flow periodically. The test calls the gRPC method directly to test the link
  * without requiring the full sync runner infrastructure (WorkerAddressService,
- * statusCheckExecutor, EngineHealthReporter, etc.).
+ * statusCheckExecutor, ServiceMetricsReporter, etc.).
  */
 class WorkerStatusSyncTest extends FlexLBMockTestBase {
     private static final long SYNC_TIMEOUT_MS = 5000;
@@ -64,13 +64,6 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
     @Override
     protected FlexlbConfig createConfig() {
         return super.createConfig();
-    }
-
-    @Test
-    void nonNumericRoutingIdDoesNotInventAnEngineInputId() {
-        var context = createRequestContext("request-a");
-        assertEquals("request-a", context.data().getRequestId());
-        assertEquals(0, context.data().getGenerateInputSize());
     }
 
     @Test
@@ -162,7 +155,7 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
 
     /**
      * Apply the gRPC worker status response to the in-memory WorkerStatus and
-     * PrefillEndpoint, simulating what {@link org.flexlb.sync.runner.GrpcWorkerStatusRunner}
+     * PrefillEndpoint, simulating what {@link org.flexlb.worker.status.GrpcWorkerStatusRunner}
      * does in production:
      * <ol>
      *   <li>Convert {@code WorkerStatusPB} directly to an immutable observation</li>

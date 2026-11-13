@@ -2,8 +2,8 @@ package org.flexlb.mockengine;
 
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
-import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
-import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
+import org.flexlb.api.protocol.FlexlbScheduleProtocol;
+import org.flexlb.api.protocol.FlexlbServiceGrpc;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
@@ -28,7 +28,9 @@ import static org.mockito.Mockito.withSettings;
  * load-client path.
  */
 class JavaLoadClientLegacyFallbackTest {
-    /** Loopback ports with no listener: connects fail fast (RST). */
+    /**
+     * Loopback ports with no listener: connects fail fast (RST).
+     */
     private static final String UNREACHABLE_MASTER = "127.0.0.1:1";
 
     private static final String UNREACHABLE_ENGINE = "127.0.0.1:2";

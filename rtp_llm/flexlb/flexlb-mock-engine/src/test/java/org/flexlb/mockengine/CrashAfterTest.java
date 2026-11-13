@@ -9,8 +9,8 @@ import io.grpc.netty.NettyServerBuilder;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
-import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.RpcServiceGrpc;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -405,7 +405,9 @@ class CrashAfterTest {
         assertEquals(0, service.getInflightCount(), "inflight must drain to zero");
     }
 
-    /** True when the port refuses a REAL gRPC call (UNAVAILABLE / refused). */
+    /**
+     * True when the port refuses a REAL gRPC call (UNAVAILABLE / refused).
+     */
     private static boolean portRefusesGrpc(int port) {
         ManagedChannel channel =
                 ManagedChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().build();
@@ -422,7 +424,9 @@ class CrashAfterTest {
         }
     }
 
-    /** True when the port serves a REAL gRPC call. */
+    /**
+     * True when the port serves a REAL gRPC call.
+     */
     private static boolean portServesGrpc(int port) {
         ManagedChannel channel =
                 ManagedChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().build();

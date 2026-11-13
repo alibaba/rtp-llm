@@ -23,18 +23,46 @@
   <dependencies>
     <dependency>
       <groupId>org.flexlb</groupId>
-      <artifactId>flexlb-sync</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.flexlb</groupId>
-      <artifactId>flexlb-common</artifactId>
+      <artifactId>flexlb-cache</artifactId>
       <version>${project.version}</version>
       <type>test-jar</type>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.flexlb</groupId>
-      <artifactId>flexlb-sync</artifactId>
+      <artifactId>flexlb-worker</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.flexlb</groupId>
+      <artifactId>flexlb-master</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.flexlb</groupId>
+      <artifactId>flexlb-config</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.flexlb</groupId>
+      <artifactId>flexlb-balance</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.flexlb</groupId>
+      <artifactId>flexlb-util</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.flexlb</groupId>
+      <artifactId>flexlb-balance</artifactId>
       <version>${project.version}</version>
       <type>test-jar</type>
       <scope>test</scope>
@@ -94,6 +122,13 @@
   </profiles>
 
   <build>
+    <extensions>
+      <extension>
+        <groupId>kr.motd.maven</groupId>
+        <artifactId>os-maven-plugin</artifactId>
+        <version>1.7.1</version>
+      </extension>
+    </extensions>
     <resources>
       <resource>
         <directory>src/main/resources</directory>
@@ -107,6 +142,46 @@
       </testResource>
     </testResources>
     <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>default-test</id>
+            <configuration>
+              <excludes>
+                <exclude>**/*RoutePerformanceTest.java</exclude>
+              </excludes>
+            </configuration>
+          </execution>
+          <execution>
+            <id>route-performance</id>
+            <phase>test</phase>
+            <goals>
+              <goal>test</goal>
+            </goals>
+            <configuration>
+              <includes>
+                <include>**/*RoutePerformanceTest.java</include>
+              </includes>
+              <groups>route-performance</groups>
+              <excludedGroups />
+              <reuseForks>false</reuseForks>
+              <argLine>                            --add-modules ALL-SYSTEM
+                            --add-opens java.base/java.lang=ALL-UNNAMED
+                            --add-opens java.base/java.lang.invoke=ALL-UNNAMED
+                            --add-opens java.base/java.util=ALL-UNNAMED
+                            --add-opens java.base/java.util.concurrent=ALL-UNNAMED
+                            --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED
+                            --add-opens java.base/java.nio=ALL-UNNAMED
+                            --add-opens java.base/sun.nio.ch=ALL-UNNAMED
+                            --add-opens java.instrument/sun.instrument=ALL-UNNAMED -Xms8g -Xmx8g</argLine>
+              <reportsDirectory
+              >${project.build.directory}/surefire-reports/route-performance</reportsDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
       <plugin>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
@@ -123,6 +198,28 @@
       <plugin>
         <artifactId>maven-antrun-plugin</artifactId>
         <executions>
+          <execution>
+            <id>prepare-schedule-proto</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>run</goal>
+            </goals>
+            <configuration>
+              <target>
+                <mkdir dir="${project.build.directory}/proto-java" />
+                <copy
+                  file="${project.basedir}/../../cpp/model_rpc/proto/flexlb_schedule_service.proto"
+                  tofile="${project.build.directory}/proto-java/flexlb_schedule_service.proto"
+                  overwrite="true"
+                />
+                <replace
+                  file="${project.build.directory}/proto-java/flexlb_schedule_service.proto"
+                  token="org.flexlb.schedule.grpc"
+                  value="org.flexlb.api.protocol"
+                />
+              </target>
+            </configuration>
+          </execution>
           <execution>
             <phase>package</phase>
             <configuration>
@@ -150,6 +247,28 @@
             </configuration>
             <goals>
               <goal>run</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.xolstice.maven.plugins</groupId>
+        <artifactId>protobuf-maven-plugin</artifactId>
+        <version>0.6.1</version>
+        <configuration>
+          <protocArtifact
+          >com.google.protobuf:protoc:${protoc.version}:exe:${os.detected.classifier}</protocArtifact>
+          <pluginId>grpc-java</pluginId>
+          <pluginArtifact
+          >io.grpc:protoc-gen-grpc-java:${grpc.version}:exe:${os.detected.classifier}</pluginArtifact>
+          <protoSourceRoot
+          >${project.build.directory}/proto-java</protoSourceRoot>
+        </configuration>
+        <executions>
+          <execution>
+            <goals>
+              <goal>compile</goal>
+              <goal>compile-custom</goal>
             </goals>
           </execution>
         </executions>

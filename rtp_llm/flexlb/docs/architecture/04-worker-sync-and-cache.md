@@ -4,24 +4,21 @@ worker 健康与容量信息由后台线程高频异步同步；KV cache 元数�
 本分支（feature/flexlb-kvcm）支持三种 cache 匹配源：LOCAL_SYNC（本地全量索引）、
 KVCM（外部 KV Cache Manager）、LOCAL_STANDBY（KVCM 的本地兜底）。
 
-主要代码：`flexlb-sync/src/main/java/org/flexlb/sync/`、`service/grpc/`，
-`flexlb-cache/src/main/java/org/flexlb/cache/`，`flexlb-grpc/.../KvcmGrpcClient.java`。
+主要代码：`flexlb-worker/src/main/java/org/flexlb/worker/status/`，
+`flexlb-cache/src/main/java/org/flexlb/cache/`、`cache/kvcm/KvcmGrpcClient.java`。
 
 ## Worker 状态同步
 
 每份有效响应统一通过 Endpoint 的 `applyWorkerStatus` 完整校准请求和资源，随后发布
 Worker 快照及游标；同版本响应也执行完整更新，版本倒退仍被拒绝。
+`WorkerEndpoint` 统一负责代际检查、Endpoint 加锁、异常时停止接纳和快照发布；
+各角色只在 `updateStatusLocked` 中更新本地请求与容量事实。请求事件通过父类统一构造和发送，
+各角色保留自己的请求身份检查、事件类型及容量通知条件；发送仍由 Runner 在锁外触发。
 Runner 统一调用 Registry 的 `updateEndpoint`：查找 Endpoint，不存在则创建，随后统一更新；
 新建 Endpoint 更新成功后再注册为可路由节点。返回的请求通知在 WorkerStatus 锁外发布。
 完成任务按本地请求记录去重，`latestFinishedTaskVersion` 保留为后续 RPC 获取增量完成记录的游标。
-请求通知与批次反馈在锁外执行，Step 指标和完成指标分别按原有标识及游标去重。
-Prefill 上报在一次 Endpoint 持锁期间更新请求、批次和容量事实，不调用预测器。
-请求层逐个处理完成结果和更新执行阶段，同时按批次收集本次上报涉及的成员引用。
-批次层只汇总这些成员的状态和完成结果，判断批次执行阶段、整批完成与学习资格，
-再准备剩余成员的估算输入；汇总结束后统一清理完成请求、释放容量。
-批次开始执行前收到部分成员结束上报时，保存剩余成员的不可变预测输入并使工作快照失效；
-WorkSnapshot 读取者在锁外计算并缓存耗时。未变化的批次复用估算，运行时间根据累计执行时间扣减。
-旧快照的计算结果只保存在原快照及其批次估算缓存中，不回写请求记录或覆盖新状态的投影视图。
+请求通知和指标在锁外执行。Prefill 在一次持锁更新中处理完成请求和未知运行工作量，
+按请求释放 compute tokens；不保存批次阶段、执行时间预测或学习样本。
 
 ### 请求 ID 协议
 
@@ -44,11 +41,6 @@ Engine 的生成、取消、结果拉取和 KV 传输协议仍使用现有 int64
 相关转换仅发生在对接这些 Engine RPC 的边界，不用于 Master 内部请求标识。
 `GenerateInputPB`、`EnqueueBatchSuccessPB` 和 `EnqueueBatchErrorPB` 的 ID 仍是 int64，
 对应的读取重载直接转换该字段；字段未设置时按 PB 默认值返回字符串 `"0"`。
-BATCH Generation 的 Schedule 入口在入队前检查 `generate_input` 是有效的 GenerateInputPB，
-并要求字符串 request_id 与该 PB 的 int64 ID 的规范十进制写法完全一致；`"007"`、非数字、
-越界或不一致的 ID 返回 INVALID_REQUEST。大于 JS 精确整数范围的 ID
-通过字符串与支持 int64 的 protobuf 编码传输，不转换为浮点数。
-NON_BATCH 的仅路由请求和 ENCODER 请求仍保留原始字符串，不需要 Engine 生成 payload。
 对当前 Engine 的取消 RPC 单独要求规范 int64 字符串，拒绝 `"007"` 被归一化后误取消 ID `"7"`。
 
 ### 调度拓扑
@@ -91,7 +83,7 @@ Python VIPServer 同样保留最近一次非空域名缓存，持续空结果不
 
 `EngineAddressResolver` 向唯一的 pooled `EngineGrpcClient` 发布结构化 `WorkerHost`，保留业务
 gRPC 端口和 worker status 端口。客户端按 `ip:实际RPC端口:serviceType` 复用 channel：
-`GetWorkerStatus` / `GetCacheStatus` 使用 `worker_status_port + i`，`EnqueueBatch` / `Cancel`
+`GetWorkerStatus` / `GetCacheStatus` 使用 `worker_status_port + i`，`Cancel`
 使用共享 frontend gRPC 端口。多引擎的业务 channel 去重，状态 channel 按 engine 端口独立创建。
 KVCM 开启时不创建 `GetCacheStatus` channel。该规则对所有 discovery provider 一致；worker IP
 完全退出发现集合后关闭其 channel。endpoint 配置不热更新，端口变更依赖进程重启。
@@ -151,7 +143,7 @@ PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 完成上报按请求与 endpoint generation 归属交给调度器清理。Decode RETURN 抢占的 incoming
 在引擎确认或首次 Finished 上报后清除本地可回滚记录，victim 的声明与 KV hold 继续等待其完成证据。
 
-`EngineHealthReporter` 使用任务里的引擎时间戳上报 received→waiting、waiting→running
+`ServiceMetricsReporter` 使用任务里的引擎时间戳上报 received→waiting、waiting→running
 及执行时间；时间戳 `0` 表示未知并跳过，但合法耗时 `0` 可以上报。
 阶段耗时取 WorkerStatus 携带的引擎时间戳，不使用 Master 首次探测到状态的时间。
 即使轮询跳过中间阶段，完成任务包含完整时间戳时仍能计算该阶段耗时。
@@ -193,7 +185,7 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   KVCM address/namespace/port/discovery 定位信息；
   `CacheMatchConfiguration` 推导不变量 **`localSyncEnabled = !kvcmEnabled`、
   `localStandbyEnabled = kvcmEnabled`**。
-- `KvcmGrpcClient`（flexlb-grpc）：向 KVCM **leader** 发 `GetHostCacheState`
+- `KvcmGrpcClient`（flexlb-cache）：向 KVCM **leader** 发 `GetHostCacheState`
   （namespace = `deploymentName_blockSize`，QueryType 按 worker `kvCacheGroupMode` 映射
   QT_PREFIX_MATCH / QT_PREFIX_MATCH_WITH_MAMBA），响应 `HostCacheMatch{host_ip_port, local,
 global}`；`global` 是 local、P2P 与远端 pool 来源联合后的前缀命中块数，已包含 `local`。

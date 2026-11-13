@@ -1,11 +1,11 @@
 package org.flexlb.cache.match;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.cache.domain.CacheMatchSource;
-import org.flexlb.cache.telemetry.CacheMetricsReporter;
-import org.flexlb.config.CacheMatchConfiguration;
-import org.flexlb.dao.kvcm.KvcmHealthSnapshot;
-import org.flexlb.engine.grpc.client.KvcmGrpcClient;
+import org.flexlb.cache.CacheMatchSource;
+import org.flexlb.cache.kvcm.KvcmGrpcClient;
+import org.flexlb.cache.kvcm.KvcmHealthSnapshot;
+import org.flexlb.cache.metrics.CacheMetricsReporter;
+import org.flexlb.config.cache.CacheMatchConfiguration;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.atomic.AtomicBoolean;

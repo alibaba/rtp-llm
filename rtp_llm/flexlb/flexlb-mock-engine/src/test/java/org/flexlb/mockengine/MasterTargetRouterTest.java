@@ -2,8 +2,8 @@ package org.flexlb.mockengine;
 
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
-import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
-import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
+import org.flexlb.api.protocol.FlexlbScheduleProtocol;
+import org.flexlb.api.protocol.FlexlbServiceGrpc;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;

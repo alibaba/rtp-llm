@@ -11,13 +11,14 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
-import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.engine.grpc.RoleTypeProtoConverter;
-import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
-import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
+import org.flexlb.api.protocol.FlexlbScheduleProtocol;
+import org.flexlb.api.protocol.FlexlbServiceGrpc;
+import org.flexlb.balance.schedule.RequestResult;
+import org.flexlb.config.service.RoleType;
 import org.flexlb.util.PriorityNormalizer;
+import org.flexlb.worker.rpc.RoleTypeProtoConverter;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.RpcServiceGrpc;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
@@ -609,7 +610,9 @@ public final class JavaLoadClient {
         return out;
     }
 
-    /** Loads fallback gRPC addresses from the mock cluster's endpoint records. */
+    /**
+     * Loads fallback gRPC addresses from the mock cluster's endpoint records.
+     */
     void loadFallbackEndpoints(String path) throws IOException {
         JsonNode data = MAPPER.readTree(Path.of(path).toFile());
         if (fallbackPrefillAddrs.isEmpty()) {
@@ -1017,7 +1020,9 @@ public final class JavaLoadClient {
         }
     }
 
-    /** Builds the Prometheus text-format payload (parity with Python _push_metrics). */
+    /**
+     * Builds the Prometheus text-format payload (parity with Python _push_metrics).
+     */
     String buildPushMetricsBody() {
         List<String> lines = new ArrayList<>();
         int inflight = inflightCount.get();
@@ -1103,7 +1108,9 @@ public final class JavaLoadClient {
         return String.join("\n", lines) + "\n";
     }
 
-    /** Nearest-rank percentile (parity with Python LoadClient._percentile). */
+    /**
+     * Nearest-rank percentile (parity with Python LoadClient._percentile).
+     */
     static double percentileNearestRank(List<Double> values, double p) {
         if (values.isEmpty()) {
             return 0.0;
@@ -1436,7 +1443,7 @@ public final class JavaLoadClient {
                 // HA mode: a stream-read failure is an ENGINE-side problem,
                 // not a master connection failure — never falls back (brief
                 // p7 defect-8: the legacy any-failure parity behavior is
-                // retired for the HA mode only).
+                // closed for the HA mode only).
                 if (router == null && config.enableFallback && !fallbackPrefillAddrs.isEmpty()) {
                     attemptFallback(record, result, startedNanos, "fetch=" + e);
                 } else {
@@ -1984,13 +1991,19 @@ public final class JavaLoadClient {
          *  restore the old "leave the field unset on the wire" behavior. */
         final int priority;
 
-        /** Single-priority override: > 0 pins every request to that level. */
+        /**
+         * Single-priority override: > 0 pins every request to that level.
+         */
         final int forcePriority;
 
-        /** Arrival process: "replay" (trace ts pacing) or "uniform" (fixed interval). */
+        /**
+         * Arrival process: "replay" (trace ts pacing) or "uniform" (fixed interval).
+         */
         final String sendMode;
 
-        /** Total target QPS across all shards; required > 0 in uniform mode. */
+        /**
+         * Total target QPS across all shards; required > 0 in uniform mode.
+         */
         final double sendModeQps;
 
         /** Uniform-mode traffic ramp-up: per-shard QPS climbs linearly from 0
@@ -2304,7 +2317,9 @@ public final class JavaLoadClient {
             System.out.println("=====================================");
         }
 
-        /** True when GRPC_TARGETS carries >= 2 addresses (HA sticky+failover mode). */
+        /**
+         * True when GRPC_TARGETS carries >= 2 addresses (HA sticky+failover mode).
+         */
         boolean isMultiTarget() {
             return grpcTargets.size() >= 2;
         }
@@ -2338,6 +2353,9 @@ public final class JavaLoadClient {
         }
     }
 
+    /**
+     * Retains the input payload and timing metadata read from one load-test trace record.
+     */
     static final class TraceRecord {
         final long requestId;
         final String sourceRid;
@@ -2348,7 +2366,9 @@ public final class JavaLoadClient {
         final List<Long> blockKeys;
         final List<Integer> tokenIds;
 
-        /** Auto-TPM QoS priority in [1, 100]; 0 means unset. */
+        /**
+         * Auto-TPM QoS priority in [1, 100]; 0 means unset.
+         */
         final int priority;
 
         TraceRecord(
@@ -2373,6 +2393,9 @@ public final class JavaLoadClient {
         }
     }
 
+    /**
+     * Collects one load-test request result and its scheduling and generation timings.
+     */
     static final class RequestResult {
         String rid = "";
         String traceId = "";
@@ -2383,7 +2406,9 @@ public final class JavaLoadClient {
         String status = "unknown";
         double scheduleMs;
 
-        /** Absolute epoch-ms when the schedule RPC returned (send_start + schedule_ms); 0 on the direct fallback path (no master schedule hop). */
+        /**
+         * Absolute epoch-ms when the schedule RPC returned (send_start + schedule_ms); 0 on the direct fallback path (no master schedule hop).
+         */
         double schedDoneEpochMs;
 
         double ttftMs;
@@ -2414,7 +2439,9 @@ public final class JavaLoadClient {
         double sendStartEpochMs;
         double pacingLagMs;
 
-        /** Auto-TPM QoS priority carried by the schedule request; 0 means unset. */
+        /**
+         * Auto-TPM QoS priority carried by the schedule request; 0 means unset.
+         */
         int priority;
 
         /** True for rows synthesized by the collector (deadline timeout /

@@ -1,8 +1,8 @@
 package org.flexlb.cache.match;
 
-import org.flexlb.cache.domain.CacheMatchSource;
-import org.flexlb.dao.cache.HostCacheMatch;
-import org.flexlb.dao.route.RoleType;
+import org.flexlb.cache.CacheMatchSource;
+import org.flexlb.cache.HostCacheMatch;
+import org.flexlb.config.service.RoleType;
 
 import java.util.List;
 import java.util.Map;

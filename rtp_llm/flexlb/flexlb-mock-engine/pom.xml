@@ -17,22 +17,62 @@
   <dependencies>
     <dependency>
       <groupId>org.flexlb</groupId>
-      <artifactId>flexlb-grpc</artifactId>
+      <artifactId>flexlb-api</artifactId>
+      <version>${project.version}</version>
     </dependency>
     <dependency>
       <groupId>org.flexlb</groupId>
-      <artifactId>flexlb-sync</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.flexlb</groupId>
-      <artifactId>flexlb-common</artifactId>
+      <artifactId>flexlb-api</artifactId>
       <version>${project.version}</version>
       <type>test-jar</type>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.flexlb</groupId>
-      <artifactId>flexlb-sync</artifactId>
+      <artifactId>flexlb-cache</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.flexlb</groupId>
+      <artifactId>flexlb-worker</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.flexlb</groupId>
+      <artifactId>flexlb-master</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.flexlb</groupId>
+      <artifactId>flexlb-config</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.flexlb</groupId>
+      <artifactId>flexlb-worker</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.flexlb</groupId>
+      <artifactId>flexlb-balance</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.flexlb</groupId>
+      <artifactId>flexlb-util</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.flexlb</groupId>
+      <artifactId>flexlb-balance</artifactId>
       <version>${project.version}</version>
       <type>test-jar</type>
       <scope>test</scope>

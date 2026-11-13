@@ -1,0 +1,35 @@
+package org.flexlb.worker.status;
+
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonValue;
+import lombok.Getter;
+
+/**
+ * Distinguishes reported task execution phases independently of the worker role.
+ */
+@Getter
+public enum TaskPhase {
+    PENDING("pending"),
+    RECEIVED("received"),
+    KV_ALLOCATED("kv_allocated"),
+    RUNNING("running");
+
+    @JsonValue private final String value;
+
+    TaskPhase(String value) {
+        this.value = value;
+    }
+
+    @JsonCreator
+    public static TaskPhase fromValue(String value) {
+        if (value == null) {
+            return null;
+        }
+        for (TaskPhase phase : values()) {
+            if (phase.value.equalsIgnoreCase(value)) {
+                return phase;
+            }
+        }
+        return null;
+    }
+}

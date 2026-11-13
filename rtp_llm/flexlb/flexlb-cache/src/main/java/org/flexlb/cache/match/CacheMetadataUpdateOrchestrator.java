@@ -1,13 +1,13 @@
 package org.flexlb.cache.match;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.match.localstandby.LocalStandbyCacheMatchProvider;
-import org.flexlb.cache.match.localsync.LocalSyncCacheMatchProvider;
-import org.flexlb.config.CacheMatchConfiguration;
-import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.cache.localstandby.LocalStandbyCacheMatchProvider;
+import org.flexlb.cache.localsync.LocalSyncCacheMatchProvider;
+import org.flexlb.config.cache.CacheMatchConfiguration;
+import org.flexlb.worker.cache.WorkerCacheUpdateResult;
+import org.flexlb.worker.endpoint.Request;
+import org.flexlb.worker.status.ServerStatus;
+import org.flexlb.worker.status.WorkerStatus;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
