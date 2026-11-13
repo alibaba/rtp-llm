@@ -96,6 +96,14 @@ public:
     // single resident snapshot the contract requires.
     bool        markResidentEmitted();
 
+    // Default operation stamp from the container environment (the adapter's
+    // AWI_OPERATION_ID). Events recorded while no barrier operation is armed
+    // carry this id, so an operation-scoped observations fetch
+    // (/awi/observations?operation_id=ID) sees the whole container run —
+    // including smoke-phase reuse hits, which precede any barrier arm. An
+    // explicitly armed barrier operation still takes precedence.
+    void        setDefaultOperationId(std::string operation_id);
+
     // Startup facts injected once by the Python layer (build identity, weight
     // placement derived from real allocations, measured network fetch count).
     void        setBuildInfo(std::string internal_sha, std::string public_sha);
@@ -152,6 +160,7 @@ private:
     int                      rank_{-1};
     bool                     has_armed_{false};
     AwiOperation             armed_;
+    std::string              default_operation_id_;
     std::string              internal_sha_;
     std::string              public_sha_;
     std::string              weights_json_;

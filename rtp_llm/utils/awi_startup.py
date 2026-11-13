@@ -173,6 +173,14 @@ def publish_startup_facts(py_env_configs=None, engine=None) -> None:
             os.environ.get("AWI_BUILD_INTERNAL_SHA", ""),
             os.environ.get("AWI_BUILD_PUBLIC_SHA", ""),
         )
+        # Container-level operation attribution: the evaluator adapter injects
+        # AWI_OPERATION_ID and fetches /awi/observations?operation_id=<id>
+        # before any barrier is armed (smoke phase). Stamp every event with it
+        # by default so those fetches observe the run's events (an explicitly
+        # armed barrier operation still takes precedence per event).
+        awi_operation_id = os.environ.get("AWI_OPERATION_ID", "")
+        if awi_operation_id and hasattr(awi, "set_default_operation_id"):
+            awi.set_default_operation_id(awi_operation_id)
         if py_env_configs is not None:
             awi.set_configuration_json(build_configuration_json(py_env_configs, engine))
         awi.set_startup_network_fetches(startup_network_fetches())

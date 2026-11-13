@@ -22,8 +22,15 @@ void AwiCollector::recordEvent(AwiEvent event) {
     if (event.rank < 0) {
         event.rank = rank_;
     }
-    if (event.operation_id.empty() && has_armed_) {
-        event.operation_id = armed_.operation_id;
+    if (event.operation_id.empty()) {
+        if (has_armed_) {
+            event.operation_id = armed_.operation_id;
+        } else {
+            // No armed barrier: attribute to the container-level operation
+            // (AWI_OPERATION_ID) so operation-scoped fetches observe
+            // smoke-phase events; empty default keeps legacy behavior.
+            event.operation_id = default_operation_id_;
+        }
     }
     events_.push_back(std::move(event));
     while (events_.size() > kMaxEvents) {
@@ -95,6 +102,11 @@ void AwiCollector::clearOperation() {
     std::lock_guard<std::mutex> lock(mu_);
     has_armed_ = false;
     armed_     = AwiOperation{};
+}
+
+void AwiCollector::setDefaultOperationId(std::string operation_id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    default_operation_id_ = std::move(operation_id);
 }
 
 void AwiCollector::setBuildInfo(std::string internal_sha, std::string public_sha) {

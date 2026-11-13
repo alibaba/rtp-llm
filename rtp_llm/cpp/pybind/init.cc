@@ -55,6 +55,10 @@ void registerAwiObservationHooks(py::module& m) {
             [](std::string json) { AwiCollector::instance().setWeightsJson(std::move(json)); });
     awi.def("set_startup_network_fetches",
             [](int64_t count) { AwiCollector::instance().setStartupNetworkFetches(count); });
+    awi.def("set_default_operation_id",
+            [](std::string operation_id) {
+                AwiCollector::instance().setDefaultOperationId(std::move(operation_id));
+            });
 }
 
 PYBIND11_MODULE(libth_transformer, m) {
