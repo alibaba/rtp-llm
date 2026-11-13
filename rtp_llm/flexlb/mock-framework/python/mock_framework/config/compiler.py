@@ -289,10 +289,8 @@ _RESOURCE = re.compile(r"^[1-9]\d*(?:\.\d+)?(?:KiB|MiB|GiB|TiB|[kmgtKMGT]i?|B)?$
 _ROLES = {"master", "client", "prefill", "decode", "vit"}
 
 
-def expand_config(raw):
+def _expand_config(raw):
     """Expand this mapping's dotted keys only; native JSON payloads stay native."""
-    if not isinstance(raw, dict):
-        raise ConfigError("config: expected mapping")
     result = {}
     leaves = set()
 
@@ -384,7 +382,7 @@ def compile_environment(raw, *, directory=None):
         native = _load_role_config(component.get("config", {}), role, directory)
         if role == "master":
             validate_master_config(native)
-        result[role] = {"deployment": deployment, "config": expand_config(native)}
+        result[role] = {"deployment": deployment, "config": _expand_config(native)}
         if "engine" in component:
             result[role]["engine"] = component["engine"]
     return result

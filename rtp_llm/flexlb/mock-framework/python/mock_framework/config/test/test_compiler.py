@@ -4,7 +4,7 @@ from typing import Annotated
 
 import pytest
 from mock_framework.config import ConfigError, compile_case
-from mock_framework.config.compiler import expand_config
+from mock_framework.config.compiler import _expand_config
 from mock_framework.config.validation import Bounds, schema
 from mock_framework.execution.step.step import Reference, Step
 from mock_framework.execution.step.step_registry import StepRegistry, register_step
@@ -134,13 +134,13 @@ def test_function_registration_defines_contract_without_compiler_changes(
 )
 def test_config_collisions(raw):
     with pytest.raises(ConfigError):
-        expand_config(raw)
+        _expand_config(raw)
 
 
 def test_mock_nested_and_dotted_input_share_one_namespace():
     nested = {"mock": {"compute": {"forward": {"expression": "1"}, "cp": {"size": 4}}}}
     mixed = {"mock.compute": {"forward.expression": "1"}, "mock.compute.cp.size": 4}
-    assert expand_config(nested) == expand_config(mixed)
+    assert _expand_config(nested) == _expand_config(mixed)
     for raw in (
         {
             "mock.compute": {"forward": {"expression": "1"}},
@@ -152,11 +152,11 @@ def test_mock_nested_and_dotted_input_share_one_namespace():
         },
     ):
         with pytest.raises(ConfigError, match="collision"):
-            expand_config(raw)
+            _expand_config(raw)
 
 
 def test_native_payload_and_duplicate_keys(case_data, compile_data):
-    assert expand_config({"raw_json": {"original.key": "untouched"}}) == {
+    assert _expand_config({"raw_json": {"original.key": "untouched"}}) == {
         "raw_json": {"original.key": "untouched"}
     }
     case_data["environment"]["master"]["config"][
