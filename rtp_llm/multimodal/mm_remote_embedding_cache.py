@@ -1,22 +1,39 @@
-"""Bounded shared KVCM tier for whole multimodal embedding results.
+"""Bounded shared KVCM tier, populated only by detached CPU cache evictions.
 
-Only detached CPU eviction snapshots are uploaded. Local eviction never
-removes a shared object: KVMeta V1 has no read lease for online reclamation.
+Remote identity binds actual image bytes to an immutable model namespace.
+The local GPU/CPU scheduler and asynchronous eviction policy remain unchanged.
 """
 
+import base64
+import binascii
 import concurrent.futures
+import hashlib
+import json
 import logging
+import os
+import re
 import threading
 import time
 from collections import Counter
+from contextlib import contextmanager
+from pathlib import Path
 
 import torch
 
+from rtp_llm.metrics import kmonitor
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.kvcm.tensor_object import (
     pack_object,
     plan_object,
     unpack_object,
 )
+from rtp_llm.multimodal.mm_preprocess_result import (
+    ImageSourceIdentity,
+    is_http_image_input,
+)
+
+# Python 3.10 keeps future wait timeouts separate from built-in IO timeouts.
+_TIMEOUT_ERRORS = (TimeoutError, concurrent.futures.TimeoutError)
 
 
 class MMRemoteEmbeddingCache:
@@ -28,35 +45,543 @@ class MMRemoteEmbeddingCache:
         max_inflight_bytes,
         max_pending=8,
         read_timeout_ms=200,
-        cuda_device=None
+        cuda_device=None,
+        client_factory=None,
+        namespace="",
+        model_identity=None,
+        gdr_enabled=None,
+        audit_enabled=None,
     ):
         if min(max_object_bytes, max_inflight_bytes, max_pending, read_timeout_ms) <= 0:
             raise ValueError("remote embedding cache limits must be positive")
-        self.client = client
+        if client_factory is not None and (
+            not isinstance(namespace, str) or not namespace.strip()
+        ):
+            raise ValueError(
+                "MM_REMOTE_CACHE_NAMESPACE must identify immutable model/preprocess revisions"
+            )
+        self._client = client
+        self._factory = client_factory
+        self._client_lock = threading.Lock()
+        self._client_users = {}
         self.max_object_bytes = max_object_bytes
         self.max_inflight_bytes = max_inflight_bytes
         self.max_pending = max_pending
         self.read_timeout_ms = read_timeout_ms
         self.cuda_device = cuda_device
+        self._namespace = namespace
+        self._model_identity = model_identity or {}
+        if gdr_enabled is None:
+            gdr_enabled = os.environ.get("MM_REMOTE_CACHE_GDR_ENABLE") == "1"
+        self._transport_mode = "gdr" if gdr_enabled else "staging"
         self._executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="mm-remote-cache"
         )
         self._lock = threading.Lock()
+        self._stats_lock = threading.Lock()
+        self._stats = Counter()
+        self._audit_enabled = (
+            os.environ.get("MM_EMB_REMOTE_AUDIT") == "1"
+            if audit_enabled is None
+            else audit_enabled
+        )
         self._closed = False
         self._bytes = self._tasks = 0
-        self._stats = Counter()
         self._pending_writes = set()
+        self._instance = getattr(client, "instance_id", None)
+        try:
+            self._proc_start_ticks = (
+                Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()[19]
+            )
+        except (OSError, IndexError):
+            self._proc_start_ticks = None
+
+    @classmethod
+    def from_configs(
+        cls, model_config, vit_config, *, kv_cache_config=None, device=None
+    ):
+        from rtp_llm.multimodal.kvcm import RtpKvMetaObjectClient
+
+        namespace = vit_config.mm_remote_cache_namespace
+        if not isinstance(namespace, str) or not namespace.strip():
+            raise ValueError(
+                "MM_REMOTE_CACHE_NAMESPACE must identify immutable model/preprocess revisions"
+            )
+        identity = {
+            "model_type": model_config.model_type,
+            "dtype": str(model_config.compute_dtype),
+            "configs": {},
+            "input_limits": [
+                vit_config.mm_image_max_file_size_kb,
+                vit_config.mm_video_max_file_size_kb,
+            ],
+        }
+        for name in (
+            "config.json",
+            "preprocessor_config.json",
+            "processor_config.json",
+        ):
+            path = Path(model_config.ckpt_path) / name
+            if path.is_file():
+                identity["configs"][name] = hashlib.sha256(
+                    path.read_bytes()
+                ).hexdigest()
+
+        def raw_factory(**registration):
+            kwargs = dict(
+                max_object_bytes=vit_config.mm_remote_cache_max_object_bytes,
+                call_timeout_ms=vit_config.mm_remote_cache_read_timeout_ms,
+                get_timeout_ms=vit_config.mm_remote_cache_read_timeout_ms,
+                put_timeout_ms=vit_config.mm_remote_cache_write_timeout_ms,
+            )
+            if kv_cache_config is not None:
+                return RtpKvMetaObjectClient.from_kv_cache_config(
+                    kv_cache_config, **kwargs, **registration
+                )
+            return RtpKvMetaObjectClient.from_env(**kwargs, **registration)
+
+        def factory():
+            if gdr_enabled:
+                from rtp_llm.multimodal.kvcm.registered_transport import (
+                    RegisteredObjectTransport,
+                )
+
+                return RegisteredObjectTransport(
+                    raw_factory,
+                    max_object_bytes=vit_config.mm_remote_cache_max_object_bytes,
+                    device=device,
+                )
+            return raw_factory()
+
+        # PACE seals the external GPU registration snapshot at client init.
+        # Initialize before readiness, outside a request's read deadline, and
+        # keep this registered client for the serving process lifetime. A
+        # request timeout must not unregister/recreate the arena after sealing.
+        gdr_enabled = vit_config.mm_remote_cache_gdr_enable
+        if gdr_enabled is None:
+            gdr_enabled = os.environ.get("MM_REMOTE_CACHE_GDR_ENABLE") == "1"
+        client = cls._create_client(factory, "gdr") if gdr_enabled else None
+        return cls(
+            client,
+            client_factory=None if gdr_enabled else factory,
+            namespace=namespace,
+            model_identity=identity,
+            max_object_bytes=vit_config.mm_remote_cache_max_object_bytes,
+            max_inflight_bytes=vit_config.mm_remote_cache_max_inflight_bytes,
+            max_pending=vit_config.mm_remote_cache_max_pending,
+            read_timeout_ms=vit_config.mm_remote_cache_read_timeout_ms,
+            cuda_device=device,
+            gdr_enabled=gdr_enabled,
+            audit_enabled=vit_config.mm_remote_cache_audit,
+        )
+
+    def normalize_cpp_url_input(self, item):
+        # QueryConverter's GenerateInput URL path passes torch::empty(1), not
+        # image data. The verified Qwen3/VL2/V4.1 IMAGE preprocessors ignore this
+        # field and consume url. Never inspect the uninitialized scalar value.
+        from rtp_llm.utils.base_model_datatypes import MMUrlType
+
+        tensor = item.tensor
+        model_type = self._model_identity.get("model_type")
+        is_v41 = model_type in ("deepseek_v41", "deepseek_v41_dspark")
+        inline_url = item.url.startswith("data:image/") or (
+            is_v41 and item.url.startswith("data:application/octet-stream;base64,")
+        )
+        if (
+            (model_type in ("qwen3_vl", "qwen3_vl_moe", "deepseek_vl_v2") or is_v41)
+            and item.mm_type == MMUrlType.IMAGE
+            and inline_url
+            and tensor is not None
+            and tensor.device.type == "cpu"
+            and tensor.dtype == torch.float32
+            and tuple(tensor.shape) == (1,)
+        ):
+            item.tensor = torch.empty(0, dtype=torch.float32)
+            self.record(
+                "input_normalized",
+                reason="cpp_url_tensor_placeholder",
+                mm_type=int(item.mm_type),
+                tensor_shape=[1],
+                tensor_dtype="torch.float32",
+                tensor_device="cpu",
+            )
+
+    def key(self, mm_inputs, *, trace_id=None, source_identity=None):
+        def bypass(reason, **fields):
+            self._report_skip("key", reason)
+            self.record("cache_bypass", trace_id=trace_id, reason=reason, **fields)
+            return None
+
+        # Old work items can group multiple media; until their partitioning is
+        # represented in the schema, use the encoder for those groups.
+        if len(mm_inputs) != 1:
+            return bypass("grouped_inputs", input_count=len(mm_inputs))
+        item = mm_inputs[0]
+        from rtp_llm.utils.base_model_datatypes import MMUrlType
+
+        if item.mm_type != MMUrlType.IMAGE:
+            return bypass("unsupported_media_type", mm_type=int(item.mm_type))
+        # The V4.1 renderer wraps immutable image bytes as octet-stream.
+        # IMAGE remains the type gate; the MIME label is not part of identity.
+        match = re.match(
+            r"^data:(?:image/[^;,]+|application/octet-stream);base64,", item.url
+        )
+        if item.tensor is not None and item.tensor.numel():
+            return bypass(
+                "nonempty_tensor",
+                tensor_shape=list(item.tensor.shape),
+                tensor_dtype=str(item.tensor.dtype),
+                tensor_device=str(item.tensor.device),
+            )
+        identity_source = "inline_image_bytes"
+        if match is not None:
+            try:
+                media = base64.b64decode(item.url[match.end() :], validate=True)
+            except (binascii.Error, ValueError):
+                return bypass("invalid_inline_base64")
+            if not media:
+                return bypass("empty_inline_image")
+            identity = ImageSourceIdentity.from_bytes(media)
+            if source_identity is not None and source_identity != identity:
+                return bypass("source_identity_mismatch")
+        elif is_http_image_input(mm_inputs) and isinstance(
+            source_identity, ImageSourceIdentity
+        ):
+            # Only the trusted CPU preprocessor can supply this sidecar. The
+            # public request/RPC contains no digest field. URL strings, headers
+            # and signed query parameters are never accepted as content identity.
+            identity = source_identity
+            identity_source = "downloaded_image_bytes"
+        else:
+            return bypass("non_inline_image")
+        limits = self._model_identity.get("input_limits", [])
+        if limits and limits[0] > 0 and identity.nbytes > limits[0] * 1024:
+            return bypass(
+                "inline_image_too_large" if match else "downloaded_image_too_large",
+                media_nbytes=identity.nbytes,
+            )
+        config = item.mm_preprocess_config
+        fields = (
+            "width",
+            "height",
+            "min_pixels",
+            "max_pixels",
+            "fps",
+            "min_frames",
+            "max_frames",
+            "crop_positions",
+            "max_long_side_pixel",
+        )
+        preprocessing = {name: getattr(config, name, None) for name in fields}
+        media_sha256 = identity.sha256
+        material = dict(
+            schema="rtp-mm-result-v2",
+            namespace=self._namespace,
+            model=self._model_identity,
+            mm_type=int(item.mm_type),
+            media_sha256=media_sha256,
+            preprocessing=preprocessing,
+        )
+        encoded = json.dumps(
+            material, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode()
+        key = "mm-v2:" + hashlib.sha256(encoded).hexdigest()
+        self.record(
+            "cache_admitted",
+            key=key,
+            trace_id=trace_id,
+            identity_source=identity_source,
+            media_sha256=media_sha256,
+            media_nbytes=identity.nbytes,
+        )
+        return key
+
+    def record(self, event, *, key=None, trace_id=None, **fields):
+        with self._stats_lock:
+            self._stats[event] += 1
+            count = self._stats[event]
+        if not self._audit_enabled:
+            return
+        payload = dict(
+            event=event,
+            key=key,
+            trace_id=trace_id,
+            timestamp_ns=time.time_ns(),
+            pid=os.getpid(),
+            proc_start_ticks=self._proc_start_ticks,
+            instance=self._instance,
+            count=count,
+            transport=self._transport_mode,
+            **fields,
+        )
+        try:
+            logging.info("MM_EMB_REMOTE_JSON %s", json.dumps(payload, sort_keys=True))
+        except Exception:
+            pass  # Optional evidence logging must not change cache behavior.
+
+    def _audit_payload(self, buffer):
+        # The codec always validates its integrity digest. A second full-buffer
+        # digest is useful only for explicitly enabled cross-process evidence.
+        if not self._audit_enabled:
+            return {}
+        return {
+            "payload_sha256": hashlib.sha256(memoryview(buffer.numpy())).hexdigest()
+        }
+
+    def _benchmark(self, event, key, trace_id, **fields):
+        if os.environ.get("MM_EMB_BENCHMARK_TIMING") == "1":
+            try:
+                logging.info(
+                    "MM_EMB_BENCHMARK_JSON %s",
+                    json.dumps(
+                        dict(
+                            event=event,
+                            key=key,
+                            trace_id=trace_id,
+                            pid=os.getpid(),
+                            timestamp_ns=time.time_ns(),
+                            synchronized=False,
+                            **fields,
+                        ),
+                        sort_keys=True,
+                    ),
+                )
+            except Exception:
+                pass  # Never prevent IO-task/client release in a finally block.
+
+    @staticmethod
+    def _report_metric(metric, value, tags):
+        try:
+            kmonitor.report(metric, value, tags)
+        except Exception:
+            # Monitoring must not change cache fallback or prevent budget release.
+            logging.warning("MM remote cache metric reporting failed", exc_info=True)
+
+    @classmethod
+    def _create_client(cls, factory, transport):
+        """Count actual constructor calls, including startup failures."""
+        # GDR registration precedes VitEndpointServer, which normally registers
+        # metrics. Register here as well so the one startup event is not lost.
+        # init is idempotent; monitoring failure must not change cache behavior.
+        try:
+            kmonitor.init()
+        except Exception:
+            logging.warning("MM remote cache metric registration failed", exc_info=True)
+        started = time.perf_counter()
+        outcome = "success"
+        try:
+            return factory()
+        except _TIMEOUT_ERRORS:
+            outcome = "timeout"
+            raise
+        except Exception:
+            outcome = "error"
+            raise
+        finally:
+            tags = {"transport": transport, "status": outcome}
+            cls._report_metric(
+                AccMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_QPS_METRIC, 1, tags
+            )
+            cls._report_metric(
+                AccMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_ERROR_QPS_METRIC,
+                int(outcome != "success"),
+                {"transport": transport},
+            )
+            cls._report_metric(
+                GaugeMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_RT_METRIC,
+                (time.perf_counter() - started) * 1000,
+                tags,
+            )
+
+    def report_result_accepted(self, origin, output):
+        # An accepted ViT result, not proof of RPC delivery or LLM completion.
+        # Origin is retained across local reuse; it is not the current cache tier.
+        origin = origin if origin in ("remote", "encoder") else "unknown"
+        output = "hashes" if output == "hashes" else "embeddings"
+        self._report_metric(
+            AccMetrics.VIT_REMOTE_EMB_RESULT_ACCEPTED_QPS_METRIC,
+            1,
+            {"origin": origin, "output": output},
+        )
+
+    def _report_queue_wait(self, operation, queued_at):
+        self._report_metric(
+            GaugeMetrics.VIT_REMOTE_EMB_QUEUE_WAIT_METRIC,
+            (time.perf_counter() - queued_at) * 1000,
+            {"operation": operation},
+        )
+
+    def _lookup_object_size(self, client, key, trace_id, timeout_ms):
+        outcome = "error"
+        try:
+            with self._observe_stage("read", "metadata"):
+                try:
+                    size = client.object_size(
+                        key, trace_id=trace_id, timeout_ms=timeout_ms
+                    )
+                except Exception:
+                    self._retire_client(client)
+                    raise
+                if size is None:
+                    outcome = "miss"
+                elif not 0 < size <= self.max_object_bytes:
+                    outcome = "invalid"
+                    raise ValueError("remote embedding object exceeds byte limit")
+                else:
+                    outcome = "hit"
+                return size
+        except _TIMEOUT_ERRORS:
+            outcome = "timeout"
+            raise
+        finally:
+            self._report_metric(
+                AccMetrics.VIT_REMOTE_EMB_METADATA_QPS_METRIC, 1, {"status": outcome}
+            )
+
+    def _report_operation(self, operation, started, outcome, nbytes=0):
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        if operation == "read":
+            qps = AccMetrics.VIT_REMOTE_EMB_READ_QPS_METRIC
+            error_qps = AccMetrics.VIT_REMOTE_EMB_READ_ERROR_QPS_METRIC
+            rt = GaugeMetrics.VIT_REMOTE_EMB_READ_RT_METRIC
+        else:
+            qps = AccMetrics.VIT_REMOTE_EMB_WRITE_QPS_METRIC
+            error_qps = AccMetrics.VIT_REMOTE_EMB_WRITE_ERROR_QPS_METRIC
+            rt = GaugeMetrics.VIT_REMOTE_EMB_WRITE_RT_METRIC
+        tags = {"status": outcome}
+        self._report_metric(qps, 1, tags)
+        self._report_metric(rt, elapsed_ms, tags)
+        # Emit zero for successful calls/misses so a healthy stream has an
+        # explicit zero error series. No request IDs, keys or error text as tags.
+        self._report_metric(error_qps, int(outcome in ("error", "timeout")), {})
+        tags = {"operation": operation}
+        accepted_bytes = nbytes if outcome in ("hit", "success") else 0
+        self._report_metric(
+            AccMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_PER_SECOND_METRIC,
+            accepted_bytes,
+            tags,
+        )
+        if accepted_bytes:
+            self._report_metric(
+                GaugeMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_METRIC, accepted_bytes, tags
+            )
+            if elapsed_ms > 0:
+                self._report_metric(
+                    GaugeMetrics.VIT_REMOTE_EMB_EFFECTIVE_SPEED_METRIC,
+                    accepted_bytes * 1000 / elapsed_ms / (1024 * 1024),
+                    tags,
+                )
+
+    @contextmanager
+    def _observe_stage(self, operation, stage, nbytes=0):
+        """Observe completed SDK work independently of a caller's deadline.
+
+        Stage values are fixed at call sites. Object bytes count fully successful
+        SDK calls, including late reads and deduplicated saves. This is logical
+        API volume, not actual IO bytes; partial failures are unknown.
+        """
+        started = time.perf_counter()
+        outcome = "success"
+        try:
+            yield
+        except _TIMEOUT_ERRORS:
+            outcome = "timeout"
+            raise
+        except Exception:
+            outcome = "error"
+            raise
+        finally:
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            tags = {"operation": operation, "stage": stage}
+            outcome_tags = dict(tags, status=outcome)
+            self._report_metric(
+                AccMetrics.VIT_REMOTE_EMB_STAGE_QPS_METRIC, 1, outcome_tags
+            )
+            self._report_metric(
+                GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC, elapsed_ms, outcome_tags
+            )
+            self._report_metric(
+                AccMetrics.VIT_REMOTE_EMB_STAGE_ERROR_QPS_METRIC,
+                int(outcome != "success"),
+                tags,
+            )
+            if stage == "transfer":
+                tags = {"operation": operation}
+                completed_bytes = nbytes if outcome == "success" else 0
+                self._report_metric(
+                    AccMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_PER_SECOND_METRIC,
+                    completed_bytes,
+                    tags,
+                )
+                if completed_bytes:
+                    self._report_metric(
+                        GaugeMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_METRIC,
+                        completed_bytes,
+                        tags,
+                    )
+                    if elapsed_ms > 0:
+                        self._report_metric(
+                            GaugeMetrics.VIT_REMOTE_EMB_SDK_EFFECTIVE_SPEED_METRIC,
+                            completed_bytes * 1000 / elapsed_ms / (1024 * 1024),
+                            tags,
+                        )
+
+    def _report_skip(self, operation, reason):
+        self._report_metric(
+            AccMetrics.VIT_REMOTE_EMB_SKIP_QPS_METRIC,
+            1,
+            {"operation": operation, "reason": reason},
+        )
+
+    def _get_client(self):
+        with self._client_lock:
+            if self._closed:
+                raise RuntimeError("remote embedding cache is closed")
+            if self._client is None:
+                if self._factory is None:
+                    raise RuntimeError("remote embedding client is unavailable")
+                self._client = self._create_client(self._factory, self._transport_mode)
+                self._instance = self._client.instance_id
+            client = self._client
+            state = self._client_users.setdefault(id(client), [client, 0, False])
+            state[1] += 1
+            return client
+
+    @staticmethod
+    def _close_client(client):
+        try:
+            client.close()
+        except Exception:
+            logging.warning("MM remote cache client cleanup failed", exc_info=True)
+
+    def _retire_client(self, client):
+        # Detach a failed generation immediately, but do not close a shared
+        # client while another admitted metadata/transfer operation uses it.
+        # Waiting for that operation here could occupy both IO pool workers.
+        if self._factory is None:
+            return
+        with self._client_lock:
+            if self._client is client:
+                self._client = None
+            state = self._client_users.get(id(client))
+            if state is not None:
+                state[2] = True
+
+    def _release_client(self, client):
+        closing = None
+        with self._client_lock:
+            state = self._client_users[id(client)]
+            state[1] -= 1
+            if state[1] == 0:
+                self._client_users.pop(id(client))
+                if state[2]:
+                    closing = client
+        if closing is not None:
+            self._close_client(closing)
 
     def _count(self, name):
-        with self._lock:
+        with self._stats_lock:
             self._stats[name] += 1
-            count = self._stats[name]
-        if name.endswith("error") and count & (count - 1) == 0:
-            logging.warning(
-                "ViT remote cache %s count=%d; falling back to local computation/cache",
-                name,
-                count,
-            )
 
     def _reserve(self, nbytes):
         with self._lock:
@@ -65,7 +590,7 @@ class MMRemoteEmbeddingCache:
                 or self._tasks >= self.max_pending
                 or self._bytes + nbytes > self.max_inflight_bytes
             ):
-                self._stats["admission_skip"] += 1
+                self._count("admission_skip")
                 return False
             self._tasks += 1
             self._bytes += nbytes
@@ -76,41 +601,46 @@ class MMRemoteEmbeddingCache:
             self._tasks -= 1
             self._bytes -= nbytes
 
-    def submit_eviction(self, key, entry):
-        """Called after CPU storage detachment; never copies or does network I/O."""
-        if entry.pool_owners or entry.result is None or entry.error is not None:
+    def bind_entry(self, entry, key, trace_id):
+        if entry is not None and key is not None:
+            entry.remote_cache_context = dict(key=key, trace_id=trace_id)
+
+    def submit_result(self, key, result, *, trace_id=None, producer_events=()):
+        """Snapshot an accepted encoder result, then upload owned bytes.
+
+        Admission precedes allocation. Snapshotting happens on the caller while
+        it owns the tensors; queued IO never retains model buffers or cache pool
+        slots. CPU residency and eviction are unrelated to remote writeback.
+        """
+        if key is None:
             return
         try:
-            plan = plan_object(
-                entry.result,
-                devices=entry.original_devices,
-                max_bytes=self.max_object_bytes,
-            )
-            if any(t.device.type != "cpu" for t in plan.tensors):
-                return
+            plan = plan_object(result, max_bytes=self.max_object_bytes)
         except (ValueError, TypeError, RecursionError):
             self._count("encode_skip")
+            self._report_skip("write", "unsupported_payload")
             return
-        # Snapshot + pack buffer + worst-case contiguous temporary. Account
-        # conservatively before retaining the source past this callback.
         cost = 3 * plan.nbytes
         with self._lock:
-            if key in self._pending_writes:
-                return
-            self._pending_writes.add(key)
+            duplicate = key in self._pending_writes
+            if not duplicate:
+                self._pending_writes.add(key)
+        if duplicate:
+            self._report_skip("write", "duplicate_pending")
+            return
         if not self._reserve(cost):
+            self._report_skip("write", "admission")
             with self._lock:
                 self._pending_writes.discard(key)
             return
-
-        def write():
-            try:
-                self.client.save_one(key, pack_object(plan))
-                self._count("write_success")
-            except Exception:
-                # The same key may be owned by another writer. Never remove
-                # or automatically repeat an ambiguous mutation.
-                self._count("write_error")
+        started = time.perf_counter()
+        self.record(
+            "encoder_result_admitted",
+            key=key,
+            trace_id=trace_id,
+            nbytes=plan.nbytes,
+            tensors=plan.header["tensors"],
+        )
 
         def done(_):
             with self._lock:
@@ -118,71 +648,210 @@ class MMRemoteEmbeddingCache:
             self._release(cost)
 
         try:
+            with self._observe_stage("write", "pack"):
+                for event in producer_events or ():
+                    event.synchronize()
+                buffer = pack_object(plan)
+        except Exception as error:
+            self.record(
+                "write_error",
+                key=key,
+                trace_id=trace_id,
+                error_type=type(error).__name__,
+            )
+            self._report_operation("write", started, "error", plan.nbytes)
+            done(None)
+            return
+        # The worker owns only the snapshot and small metadata, not tensors.
+        nbytes, tensors = plan.nbytes, plan.header["tensors"]
+
+        def write():
+            client = None
+            queue_ms = (time.perf_counter() - queued_at) * 1000
+            self._report_queue_wait("write", queued_at)
+            api_ms = None
+            outcome = "error"
+            try:
+                with self._observe_stage("write", "client_acquire"):
+                    client = self._get_client()
+                api_started = time.perf_counter()
+                with self._observe_stage("write", "transfer", buffer.numel()):
+                    try:
+                        client.save_one(key, buffer, trace_id=trace_id)
+                    except Exception:
+                        self._retire_client(client)
+                        raise
+                api_ms = (time.perf_counter() - api_started) * 1000
+                outcome = "success"
+                self._count("write_success")
+                self.record(
+                    "store_success",
+                    key=key,
+                    trace_id=trace_id,
+                    write_source="encoder_result",
+                    **self._audit_payload(buffer),
+                    nbytes=buffer.numel(),
+                    tensors=tensors,
+                )
+            except Exception as error:
+                outcome = "timeout" if isinstance(error, _TIMEOUT_ERRORS) else "error"
+                self.record(
+                    "write_error",
+                    key=key,
+                    trace_id=trace_id,
+                    error_type=type(error).__name__,
+                )
+            finally:
+                self._report_operation("write", started, outcome, nbytes)
+                self._benchmark(
+                    "remote_store_timing",
+                    key,
+                    trace_id,
+                    wall_ms=(time.perf_counter() - started) * 1000,
+                    queue_ms=queue_ms,
+                    sdk_api_ms=api_ms,
+                    status=outcome,
+                    scope="snapshot_queue_client_acquire_sdk_save_and_validation",
+                )
+                if client is not None:
+                    self._release_client(client)
+
+        queued_at = time.perf_counter()
+        try:
             future = self._executor.submit(write)
         except RuntimeError:
+            self._report_skip("write", "executor_closed")
             done(None)
             return
         future.add_done_callback(done)
 
-    def load(self, key, *, timeout_ms=None):
+    def load(self, key, *, timeout_ms=None, trace_id=None):
+        if key is None:
+            return None
         timeout_ms = min(self.read_timeout_ms, timeout_ms or self.read_timeout_ms)
         deadline = time.monotonic() + timeout_ms / 1000
-        # Admission also bounds metadata probes. Grow the reservation only
-        # after Get has supplied a validated exact size, before allocation.
+        started = time.perf_counter()
+        timing = {}
+        payload_nbytes = 0
+        outcome = "error"
         if not self._reserve(0):
+            self._report_skip("read", "admission")
             return None
         cost = 0
         future = None
-        try:
-            size = self.client.object_size(key, timeout_ms=timeout_ms)
-            if size is None:
-                self._count("miss")
-                return None
-            if not 0 < size <= self.max_object_bytes:
-                raise ValueError("remote embedding object exceeds byte limit")
-            with self._lock:
-                if self._bytes + 3 * size > self.max_inflight_bytes:
-                    self._stats["admission_skip"] += 1
+
+        def read():
+            nonlocal cost
+            self._report_queue_wait("read", queued_at)
+            client = None
+            try:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("remote embedding queue deadline expired")
+                with self._observe_stage("read", "client_acquire"):
+                    client = self._get_client()
+                remaining_ms = int((deadline - time.monotonic()) * 1000)
+                if remaining_ms <= 0:
+                    raise TimeoutError("remote embedding lookup deadline expired")
+                api_started = time.perf_counter()
+                size = self._lookup_object_size(client, key, trace_id, remaining_ms)
+                if size is None:
+                    timing["outcome"] = "miss"
+                    timing["sdk_api_ms"] = (time.perf_counter() - api_started) * 1000
                     return None
-                cost = 3 * size
-                self._bytes += cost
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                self._count("read_timeout")
-                return None
-
-            def read():
+                with self._lock:
+                    budget_exceeded = self._bytes + 3 * size > self.max_inflight_bytes
+                    if not budget_exceeded:
+                        cost = 3 * size
+                        self._bytes += cost
+                if budget_exceeded:
+                    self._count("admission_skip")
+                    timing["outcome"] = "admission_skip"
+                    self._report_skip("read", "payload_budget")
+                    return None
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("remote embedding transfer deadline expired")
                 buffer = torch.empty(size, dtype=torch.uint8)
-                self.client.load_one(key, buffer)
+                with self._observe_stage("read", "transfer", size):
+                    try:
+                        client.load_one(key, buffer, trace_id=trace_id)
+                    except Exception:
+                        self._retire_client(client)
+                        raise
+                timing["sdk_api_ms"] = (time.perf_counter() - api_started) * 1000
                 return buffer
+            finally:
+                if client is not None:
+                    # Close may join native workers even after our last call.
+                    # It stays in this admitted IO task, never the request
+                    # thread; its task/byte budget remains held until done.
+                    self._release_client(client)
 
+        queued_at = time.perf_counter()
+        try:
             future = self._executor.submit(read)
-            buffer = future.result(timeout=remaining)
-            value = unpack_object(
-                buffer, max_bytes=self.max_object_bytes, cuda_device=self.cuda_device
-            )
-            if not isinstance(value, (list, tuple)) or len(value) not in (2, 3):
-                raise ValueError("remote object is not a multimodal result")
+            buffer = future.result(timeout=max(0, deadline - time.monotonic()))
+            if buffer is None:
+                outcome = timing["outcome"]
+                if outcome == "miss":
+                    self._count("miss")
+                    self.record("load_miss", key=key, trace_id=trace_id)
+                return None
+            with self._observe_stage("read", "restore"):
+                value = unpack_object(
+                    buffer,
+                    max_bytes=self.max_object_bytes,
+                    cuda_device=self.cuda_device,
+                )
+                if not isinstance(value, (list, tuple)) or len(value) not in (2, 3):
+                    raise ValueError("remote object is not a multimodal result")
+                plan = plan_object(value, max_bytes=self.max_object_bytes)
             self._count("hit")
+            outcome = "hit"
+            payload_nbytes = buffer.numel()
+            self.record(
+                "load_hit",
+                key=key,
+                trace_id=trace_id,
+                **self._audit_payload(buffer),
+                nbytes=buffer.numel(),
+                tensors=plan.header["tensors"],
+            )
             return value
-        except concurrent.futures.TimeoutError:
+        except _TIMEOUT_ERRORS:
+            outcome = "timeout"
             self._count("read_timeout")
             if future is not None:
                 future.cancel()
+            self.record(
+                "read_error", key=key, trace_id=trace_id, error_type="TimeoutError"
+            )
             return None
-        except Exception:
-            self._count("read_error")
+        except Exception as error:
+            self.record(
+                "read_error",
+                key=key,
+                trace_id=trace_id,
+                error_type=type(error).__name__,
+            )
             return None
         finally:
+            self._report_operation("read", started, outcome, payload_nbytes)
+            self._benchmark(
+                "remote_load_timing",
+                key,
+                trace_id,
+                wall_ms=(time.perf_counter() - started) * 1000,
+                sdk_api_ms=timing.get("sdk_api_ms"),
+                status=outcome,
+                scope="caller_queue_client_acquire_sdk_load_unpack_and_validation",
+            )
             if future is None or future.done():
                 self._release(cost)
             else:
-                # Keep accounting and destination alive until the actual SDK
-                # call returns, even after the requesting thread has timed out.
                 future.add_done_callback(lambda _: self._release(cost))
 
     def stats(self):
-        with self._lock:
+        with self._lock, self._stats_lock:
             return dict(
                 self._stats, inflight_bytes=self._bytes, inflight_tasks=self._tasks
             )
@@ -193,4 +862,12 @@ class MMRemoteEmbeddingCache:
                 return
             self._closed = True
         self._executor.shutdown(wait=True, cancel_futures=True)
-        self.client.close()
+        with self._client_lock:
+            client, self._client = self._client, None
+            if client is not None:
+                state = self._client_users.get(id(client))
+                if state is not None:
+                    state[2] = True
+                    client = None
+        if client is not None:
+            self._close_client(client)

@@ -165,6 +165,8 @@ class MMWorkItem:
         self.preprocess_result: Optional[Any] = None
         self.media_traces = ()
         self.capture_inspection_sources = False
+        self.source_identity = None
+        self.defer_remote_lookup = False
         self.inspection_sources: Optional[List[bytes]] = None
         self.inspection_request = None
         self.inspection_future = None
@@ -181,6 +183,12 @@ class MMWorkItem:
         self.cache_key: Optional[str] = None
         self.cache_entry: Optional[MMEmbeddingCacheEntry] = None
         self.cache_state: Optional[str] = None
+        self.remote_cache = None
+        self.remote_cache_key = None
+        self.remote_trace_id = None
+        self._remote_write_attempted = False
+        self._remote_producer_events = None
+        self._cache_failed = False
         self.defer_cache_complete = defer_cache_complete
         # Only cache-free async producers defer hashes to get_embedding_result.
         # None distinguishes uncaptured producing streams from CPU-only output.
@@ -247,9 +255,35 @@ class MMWorkItem:
                 self.embedding_producer_streams = _current_cuda_streams(result)
         elif self.feature_hashes is None:
             self.feature_hashes = _feature_hashes_from_result(result)
+        if self.remote_cache is not None and self._remote_producer_events is None:
+            # Capture completion on the producing thread, before inspection may
+            # defer publication to a different thread/stream.
+            self._remote_producer_events = []
+            with cuda_graph_gate.operation():
+                for stream in _current_cuda_streams(result):
+                    event = torch.cuda.Event()
+                    event.record(stream)
+                    self._remote_producer_events.append(event)
+        if self.defer_cache_complete and not force:
+            return
         if (
-            (self.defer_cache_complete and not force)
-            or self.embedding_cache is None
+            not self._cache_failed
+            and not self._remote_write_attempted
+            and self.remote_cache is not None
+            and self.remote_cache_key is not None
+            and getattr(self, "cache_source", "encoder") == "encoder"
+            and not self.waiting_for_cache
+        ):
+            self._remote_write_attempted = True
+            self.remaining_timeout_s()
+            self.remote_cache.submit_result(
+                self.remote_cache_key,
+                result,
+                trace_id=self.remote_trace_id,
+                producer_events=self._remote_producer_events,
+            )
+        if (
+            self.embedding_cache is None
             or self.cache_key is None
             or self.cache_entry is None
         ):
@@ -281,6 +315,7 @@ class MMWorkItem:
                 raise
 
     def fail_cache(self, error: Exception) -> None:
+        self._cache_failed = True
         if (
             self.embedding_cache is None
             or self.cache_key is None

@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 import os
 
@@ -103,11 +104,93 @@ def _rdma_port(value):
     return parsed
 
 
+# One public JSON entry point; runtime code keeps the existing VitConfig fields.
+_EMBEDDING_CACHE_FIELDS = {
+    "local": {
+        "gpu_max_bytes": ("mm_cache_gpu_max_bytes", int, 0),
+        "cpu_max_bytes": ("mm_cache_cpu_max_bytes", int, 0),
+        "hash_max_bytes": ("mm_hash_key_cache_max_bytes", int, 0),
+        "async_publish": ("mm_cache_async_publish", bool, None),
+    },
+    "remote": {
+        "enable": ("mm_remote_cache_enable", bool, None),
+        "namespace": ("mm_remote_cache_namespace", str, None),
+        "gdr_enable": ("mm_remote_cache_gdr_enable", bool, None),
+        "audit": ("mm_remote_cache_audit", bool, None),
+        "read_timeout_ms": ("mm_remote_cache_read_timeout_ms", int, 1),
+        "write_timeout_ms": ("mm_remote_cache_write_timeout_ms", int, 1),
+        "max_object_bytes": ("mm_remote_cache_max_object_bytes", int, 1),
+        "max_inflight_bytes": ("mm_remote_cache_max_inflight_bytes", int, 1),
+        "max_pending": ("mm_remote_cache_max_pending", int, 1),
+    },
+}
+
+
+def parse_embedding_cache_config(value):
+    """Validate before binding; reject typos and bool-as-int silently disabling caches."""
+
+    def unique_object(pairs):
+        result = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError(f"duplicate key: {key}")
+            result[key] = item
+        return result
+
+    try:
+        config = json.loads(value, object_pairs_hook=unique_object)
+        if not isinstance(config, dict):
+            raise ValueError("expected an object with local/remote sections")
+        fields = {}
+        for section, values in config.items():
+            if section not in _EMBEDDING_CACHE_FIELDS or not isinstance(values, dict):
+                raise ValueError(f"unknown or invalid section: {section}")
+            for key, item in values.items():
+                if key not in _EMBEDDING_CACHE_FIELDS[section]:
+                    raise ValueError(f"unknown option: {section}.{key}")
+                field, kind, minimum = _EMBEDDING_CACHE_FIELDS[section][key]
+                if type(item) is not kind:
+                    raise ValueError(f"{section}.{key} must be {kind.__name__}")
+                if minimum is not None and item < minimum:
+                    raise ValueError(f"{section}.{key} must be >= {minimum}")
+                if kind is str and not item.strip():
+                    raise ValueError(f"{section}.{key} must not be blank")
+                fields[field] = item
+        return fields
+    except (ValueError, TypeError) as error:
+        raise argparse.ArgumentTypeError(
+            f"invalid embedding cache JSON: {error}"
+        ) from error
+
+
+def apply_embedding_cache_config(vit_config, fields):
+    # Called after legacy bindings. JSON is authoritative for supplied keys;
+    # omitted keys retain the existing defaults/legacy settings.
+    values = dict(vars(vit_config))
+    values.update(fields or {})
+    if (
+        values.get("mm_remote_cache_enable")
+        and not values.get("mm_remote_cache_namespace", "").strip()
+    ):
+        raise ValueError(
+            "remote.namespace must identify immutable model/preprocess revisions"
+        )
+    for key, value in (fields or {}).items():
+        setattr(vit_config, key, value)
+
+
 def init_vit_group_args(parser, vit_config):
     ##############################################################################################################
     # Vit Configuration
     ##############################################################################################################
     vit_group = parser.add_argument_group("Vit Configuration")
+    vit_group.add_argument(
+        "--mm_embedding_cache_config",
+        env_name="MM_EMBEDDING_CACHE_CONFIG",
+        type=parse_embedding_cache_config,
+        default=None,
+        help="Embedding cache JSON with local/remote sections; supplied keys override legacy options",
+    )
     vit_group.add_argument(
         "--vit_separation",
         env_name="VIT_SEPARATION",
@@ -183,6 +266,22 @@ def init_vit_group_args(parser, vit_config):
         type=int,
         default=10,
         help="多模态开启的Cache的大小",
+    )
+    vit_group.add_argument(
+        "--mm_remote_cache_namespace",
+        env_name="MM_REMOTE_CACHE_NAMESPACE",
+        bind_to=(vit_config, "mm_remote_cache_namespace"),
+        type=str,
+        default="",
+        help="Required immutable model-weight and preprocessing revision namespace",
+    )
+    vit_group.add_argument(
+        "--mm_remote_cache_write_timeout_ms",
+        env_name="MM_REMOTE_CACHE_WRITE_TIMEOUT_MS",
+        bind_to=(vit_config, "mm_remote_cache_write_timeout_ms"),
+        type=int,
+        default=1000,
+        help="Native write timeout; failed cache writes do not fail inference",
     )
     vit_group.add_argument(
         "--url_cache_item_num",

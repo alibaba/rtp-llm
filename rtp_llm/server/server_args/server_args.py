@@ -64,7 +64,10 @@ from rtp_llm.server.server_args.server_group_args import init_server_group_args
 from rtp_llm.server.server_args.speculative_decoding_group_args import (
     init_speculative_decoding_group_args,
 )
-from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
+from rtp_llm.server.server_args.vit_group_args import (
+    apply_embedding_cache_config,
+    init_vit_group_args,
+)
 from rtp_llm.utils.backend_registry import ensure_backend_entrypoint_loaded
 
 _T = TypeVar("_T")
@@ -569,6 +572,12 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
 
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args(args)
+    try:
+        apply_embedding_cache_config(
+            py_env_configs.vit_config, parsed_args.mm_embedding_cache_config
+        )
+    except ValueError as error:
+        parser.error(str(error))
     py_env_configs.ft_disable_custom_ar_override = parsed_args.ft_disable_custom_ar
     py_env_configs.server_config.validate_allocator_dump_config()
     kv_cache_config = py_env_configs.kv_cache_config
