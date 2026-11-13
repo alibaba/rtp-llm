@@ -829,6 +829,12 @@ class Qwen4ExpModel(Qwen35Model):
             for layer in self.layers:
                 install_target_graph_all_reduce(layer.self_attn, layer.mlp, dispatch)
 
+        from rtp_llm.models_py.modules.qwen4_exp.moe.reduce_gate import (
+            prepare_model_reduce,
+        )
+
+        self._moe_reduce_gate = prepare_model_reduce(self, config, parallelism_config)
+
     def _ple_coordinator(self) -> PLETransactionCoordinator:
         coordinator = self.__dict__.get("_ple_transaction_coordinator")
         if coordinator is None:
@@ -913,6 +919,9 @@ class Qwen4ExpModel(Qwen35Model):
         target_reduce = self.__dict__.get("_target_reduce")
         if target_reduce is not None:
             target_reduce.close()
+        moe_reduce_gate = self.__dict__.get("_moe_reduce_gate")
+        if moe_reduce_gate is not None:
+            moe_reduce_gate.close()
         self._closed = True
 
     def initialize(self, init_resource) -> bool:
