@@ -6,6 +6,7 @@
 #include <mutex>
 #include <memory>
 #include <map>
+#include <tuple>
 #include <stdexcept>
 #include <thread>
 #include <unistd.h>
@@ -293,29 +294,6 @@ DecodeRpcServer::prefillPeerPartitions(const std::vector<std::string>& peer_addr
         partitions.emplace(peer_addresses.at({partition.decode_ip, partition.decode_port}), partition);
     }
     return partitions;
-}
-
-std::vector<BlockInfo> DecodeRpcServer::linearLoadSegments(const std::vector<size_t>& segment_bytes,
-                                                           const BlockInfo&           block,
-                                                           const AsymmetricTPContext& partition) {
-    std::vector<BlockInfo> segments;
-    segments.reserve(segment_bytes.size());
-    size_t offset = 0;
-    for (const auto size : segment_bytes) {
-        RTP_LLM_CHECK_WITH_INFO(size > 0 && offset + size <= block.size_bytes
-                                    && size % partition.local_partition_count == 0,
-                                "invalid LINEAR destination segment offset=%zu size=%zu block=%zu",
-                                offset,
-                                size,
-                                block.size_bytes);
-        BlockInfo part  = block;
-        part.size_bytes = size / partition.local_partition_count;
-        part.addr       = static_cast<char*>(block.addr) + offset + part.size_bytes * partition.local_partition_id;
-        segments.push_back(part);
-        offset += size;
-    }
-    RTP_LLM_CHECK_WITH_INFO(offset == block.size_bytes, "LINEAR destination segments do not cover block");
-    return segments;
 }
 
 size_t DecodeRpcServer::keyBlocksPerLogicalBlock(const CacheGroupPolicy& policy,
@@ -1312,16 +1290,17 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             throw std::invalid_argument(message);
         }
     };
-    auto stageTpPart = [&](std::vector<BlockInfo> parts, const CacheConfig& cfg, const std::string& tag, int peer_idx) {
-        if (!typed_tp) {
+    auto stageTpPart = [&](std::vector<BlockInfo> parts,
+                           const CacheConfig&     cfg,
+                           const std::string&     tag,
+                           int                    peer_idx,
+                           bool                   reassemble) {
+        if (!reassemble) {
             return parts;
         }
         const auto& group  = cfg.topology().group(tag);
         const auto& spec   = group.spec;
         const auto& layout = spec->tp_transfer;
-        if (!layout.needsReassembly(group.localKvHeadNum())) {
-            return parts;
-        }
         requireTypedTp(parts.size() == (spec->scale_block_size_bytes() == 0 ? 1u : 2u),
                        "typed TP payload/scale parts do not match the cache layout");
         for (size_t index = 0; index < parts.size(); ++index) {
@@ -1426,20 +1405,12 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         }
         return cpMapperForGroup(cfg, tag).layoutForGroup(cfg, tag).slice != CpBlockSliceMode::NONE;
     };
-    auto shouldLoadGroupFromPeer = [&](const CacheConfig& cfg,
-                                       CacheGroupType     group_type,
-                                       const std::string& tag,
-                                       int                peer_idx,
-                                       bool               page_level_rr) {
-        if (typed_tp) {
-            const auto& group = cfg.topology().group(tag);
-            return tpCachePeerOwnsPayload(
-                group.spec->tp_transfer.mode, group.localKvHeadNum(), transfer_topology, static_cast<size_t>(peer_idx));
-        }
+    auto legacyGroupOwnsPayload = [&](const CacheConfig& cfg,
+                                      CacheGroupType     group_type,
+                                      const std::string& tag,
+                                      int                peer_idx,
+                                      bool               page_level_rr) {
         const auto* linear_spec = dynamic_cast<const LinearKVCacheSpec*>(cfg.topology().group(tag).spec.get());
-        if (linear_spec && linear_spec->usesHeadShardedTransfer()) {
-            return head_partitions.count(load_context.peer_addrs[peer_idx]) != 0;
-        }
         if (!page_level_rr) {
             if (has_linear_groups && !use_stage_routing) {
                 const auto& sources = linear_spec != nullptr ? head_partitions : legacy_partitions;
@@ -1481,12 +1452,17 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         return cpMapperForGroup(cfg, tag).sliceBlockForPeer(cfg, tag, std::move(parts), static_cast<size_t>(peer_idx));
     };
     // Geometry and block tables are request-local, independent of layer and source peer.
-    using GroupLoadPlans = std::map<std::string, std::vector<CacheStoreBlockPair>>;
+    using PartitionKey = std::tuple<size_t, size_t, size_t, size_t>;
+    struct GroupLoadPlan {
+        std::vector<CacheStoreBlockPair>            blocks;
+        std::map<PartitionKey, TpCacheTransferPlan> segments;
+    };
+    using GroupLoadPlans = std::map<std::string, GroupLoadPlan>;
     std::map<const CacheConfig*, GroupLoadPlans> group_load_plans;
     auto                                         groupLoadPlan = [&](const CacheConfig& cfg,
                              bool               cfg_use_hybrid,
                              const std::string& tag,
-                             size_t             local_block_num) -> const std::vector<CacheStoreBlockPair>& {
+                             size_t             local_block_num) -> GroupLoadPlan& {
         auto [entry, inserted] = group_load_plans[&cfg].try_emplace(tag);
         if (!inserted) {
             return entry->second;
@@ -1494,15 +1470,16 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         const auto& group = cfg.topology().group(tag);
         const bool  sharded_full = decode_page_rr && group.policy.group_type == CacheGroupType::FULL
                                   && group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN;
-        entry->second = buildGroupLoadPlan(group.policy,
-                                           local_block_num,
-                                           load_context.cache_keys.size(),
-                                           static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0)),
-                                           cfg_use_hybrid,
-                                           group.seqSizePerBlock(),
-                                           cfg.seq_size_per_block,
-                                           sharded_full ? decode_cp_mapper->cpRank() : 0,
-                                           sharded_full ? decode_cp_mapper->cpSize() : 1);
+        entry->second.blocks =
+            buildGroupLoadPlan(group.policy,
+                               local_block_num,
+                               load_context.cache_keys.size(),
+                               static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0)),
+                               cfg_use_hybrid,
+                               group.seqSizePerBlock(),
+                               cfg.seq_size_per_block,
+                               sharded_full ? decode_cp_mapper->cpRank() : 0,
+                               sharded_full ? decode_cp_mapper->cpSize() : 1);
         return entry->second;
     };
     /** Both routing modes share the tagged block plan and completion accounting.
@@ -1523,6 +1500,16 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         const auto  legacy_partition_it = legacy_partitions.find(peer_addr);
         const auto* legacy_partition =
             legacy_partition_it != legacy_partitions.end() ? &legacy_partition_it->second : nullptr;
+        const auto peerRoute = [&](const AsymmetricTPContext* partition) {
+            return TpCacheTransferRoute{
+                true,
+                static_cast<size_t>(partition ? partition->local_partition_count : slice.local_piece_count),
+                static_cast<size_t>(partition ? partition->local_partition_id : slice.local_piece_id),
+                static_cast<size_t>(partition ? partition->remote_partition_count : slice.peer_piece_count),
+                static_cast<size_t>(partition ? partition->remote_partition_id : slice.peer_piece_id)};
+        };
+        auto head_route       = peerRoute(head_partition);
+        head_route.selected   = head_partition != nullptr;
         using SourcePartition = std::pair<int, int>;
         std::map<SourcePartition, std::vector<std::shared_ptr<RequestBlockBuffer>>> load_batches;
         RTP_LLM_LOG_DEBUG("load context request id is %d", load_context.request_id);
@@ -1545,20 +1532,27 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                 const auto& group               = cfg.topology().group(tag);
                 const auto  group_type          = cfg_use_hybrid ? group.policy.group_type : CacheGroupType::FULL;
                 const auto* linear_spec         = dynamic_cast<const LinearKVCacheSpec*>(group.spec.get());
-                const bool head_sharded_linear = linear_spec != nullptr && linear_spec->usesHeadShardedTransfer();
-                const auto& load_plan           = groupLoadPlan(cfg, cfg_use_hybrid, tag, block_num);
+                const auto& transfer_layout     = group.spec->tp_transfer;
+                const bool  head_sharded_linear = transfer_layout.mode == TpCacheTransferMode::LINEAR_QKV;
+                auto&       load_plan           = groupLoadPlan(cfg, cfg_use_hybrid, tag, block_num);
                 const auto  cache_keys_per_physical_block =
                     cacheKeysPerPhysicalBlock(group.seqSizePerBlock(), cfg.seq_size_per_block);
 
-                if (!shouldLoadGroupFromPeer(cfg, group_type, tag, peer_idx, page_level_rr)) {
+                auto fallback     = peerRoute(linear_spec != nullptr ? head_partition : legacy_partition);
+                fallback.selected = typed_tp || head_sharded_linear
+                                    || legacyGroupOwnsPayload(cfg, group_type, tag, peer_idx, page_level_rr);
+                const auto transfer = transfer_layout.route(group.localKvHeadNum(),
+                                                            transfer_topology,
+                                                            static_cast<size_t>(peer_idx),
+                                                            typed_tp,
+                                                            fallback,
+                                                            head_route);
+                if (!transfer.selected) {
                     continue;
                 }
-                const auto*           group_partition = linear_spec != nullptr ? head_partition : legacy_partition;
-                const SourcePartition source_partition =
-                    group_partition != nullptr ?
-                        SourcePartition{group_partition->remote_partition_count, group_partition->remote_partition_id} :
-                        SourcePartition{slice.peer_piece_count, slice.peer_piece_id};
-                for (const auto& plan_pair : load_plan) {
+                const SourcePartition source_partition{transfer.remote_partition_count, transfer.remote_partition_id};
+                const TpCacheTransferPlan* segment_plan = nullptr;
+                for (const auto& plan_pair : load_plan.blocks) {
                     const size_t block_pos       = static_cast<size_t>(plan_pair.offset_index);
                     const size_t cache_key_index = static_cast<size_t>(plan_pair.key_index);
                     if (!shouldLoadBlockFromPeer(
@@ -1580,18 +1574,13 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                         parts = cache_manager->convertIndexToBuffer(pool_layer_id, tag, block_id);
                     } else {
                         parts = cache_manager->convertIndexToBuffer(
-                            pool_layer_id,
-                            tag,
-                            block_id,
-                            group_partition != nullptr ? group_partition->local_partition_count :
-                                                         slice.local_piece_count,
-                            group_partition != nullptr ? group_partition->local_partition_id : slice.local_piece_id);
+                            pool_layer_id, tag, block_id, transfer.local_partition_count, transfer.local_partition_id);
                     }
 
                     if (linear_spec == nullptr) {
                         parts = sliceCpDestinationForPeer(std::move(parts), cfg, tag, peer_idx, page_level_rr);
                     }
-                    parts            = stageTpPart(std::move(parts), cfg, tag, peer_idx);
+                    parts            = stageTpPart(std::move(parts), cfg, tag, peer_idx, transfer.reassemble);
                     auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                         RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null block addr for key=%s", key.c_str());
                         RTP_LLM_CHECK_WITH_INFO(block.size_bytes > 0, "zero block size for key=%s", key.c_str());
@@ -1618,13 +1607,30 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                             key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
                     };
 
-                    if (head_sharded_linear && !typed_tp) {
+                    if (transfer.segmented) {
                         RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 && parts[0].addr != nullptr,
                                                 "LINEAR state needs one contiguous cache block");
-                        const auto segments =
-                            linearLoadSegments(linear_spec->transferSegmentBytes(), parts[0], *head_partition);
-                        for (size_t segment = 0; segment < segments.size(); ++segment) {
-                            addBufBlock(makeLinearCacheSegmentKey(segment, cache_key), segments[segment]);
+                        if (segment_plan == nullptr) {
+                            const PartitionKey key{transfer.local_partition_count,
+                                                   transfer.local_partition_id,
+                                                   transfer.remote_partition_count,
+                                                   transfer.remote_partition_id};
+                            auto [entry, inserted] = load_plan.segments.try_emplace(key);
+                            if (inserted) {
+                                entry->second = transfer_layout.plan(
+                                    group.spec->k_block_size_bytes(), group.spec->v_block_size_bytes(), transfer);
+                                entry->second.validateSlices();
+                            }
+                            segment_plan = &entry->second;
+                        }
+                        RTP_LLM_CHECK_WITH_INFO(segment_plan->destination_bytes == parts[0].size_bytes,
+                                                "LINEAR transfer plan does not match its destination block");
+                        for (size_t segment = 0; segment < segment_plan->slices.size(); ++segment) {
+                            const auto& slice = segment_plan->slices[segment];
+                            auto        block = parts[0];
+                            block.addr        = static_cast<char*>(block.addr) + slice.destination_offset;
+                            block.size_bytes  = slice.bytes;
+                            addBufBlock(makeLinearCacheSegmentKey(segment, cache_key), block);
                         }
                     } else if (use_kv_key_prefix) {
                         RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,

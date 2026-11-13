@@ -532,49 +532,6 @@ TEST(DecodeRpcServerTest, ReplicatedLinearHeadsUseAttentionTpRatherThanPeerCount
     EXPECT_EQ(partition.remote_partition_id, 1);
 }
 
-TEST(DecodeRpcServerTest, LinearTransferMergesEachStateSegmentIndependently) {
-    std::vector<uint8_t> destination(20, 0);
-    BlockInfo            block;
-    block.addr       = destination.data();
-    block.size_bytes = destination.size();
-    const std::vector<std::vector<uint8_t>> sources{{1, 2, 3, 4, 11, 12, 21, 22, 31, 32},
-                                                    {5, 6, 7, 8, 13, 14, 23, 24, 33, 34}};
-
-    for (int peer = 0; peer < 2; ++peer) {
-        const AsymmetricTPContext partition{"peer", 0, /*local_count=*/2, peer, /*remote_count=*/1, 0};
-        const auto                segments = DecodeRpcServer::linearLoadSegments({8, 4, 4, 4}, block, partition);
-        ASSERT_EQ(segments.size(), 4u);
-        size_t source_offset = 0;
-        for (const auto& segment : segments) {
-            std::memcpy(segment.addr, sources[peer].data() + source_offset, segment.size_bytes);
-            source_offset += segment.size_bytes;
-        }
-    }
-
-    EXPECT_EQ(destination,
-              (std::vector<uint8_t>{1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 21, 22, 23, 24, 31, 32, 33, 34}));
-}
-
-TEST(DecodeRpcServerTest, LinearTransferSplitsEachSourceSegmentIndependently) {
-    const std::vector<uint8_t> source{1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 21, 22, 23, 24, 31, 32, 33, 34};
-    std::vector<uint8_t>       destination(10, 0);
-    BlockInfo                  block;
-    block.addr       = destination.data();
-    block.size_bytes = destination.size();
-    const AsymmetricTPContext partition{"peer", 0, /*local_count=*/1, 0, /*remote_count=*/2, /*remote_id=*/1};
-    const auto                segments = DecodeRpcServer::linearLoadSegments({4, 2, 2, 2}, block, partition);
-    ASSERT_EQ(segments.size(), 4u);
-
-    size_t source_offset = 0;
-    for (const auto& segment : segments) {
-        std::memcpy(segment.addr,
-                    source.data() + source_offset + segment.size_bytes * partition.remote_partition_id,
-                    segment.size_bytes);
-        source_offset += segment.size_bytes * partition.remote_partition_count;
-    }
-    EXPECT_EQ(destination, (std::vector<uint8_t>{5, 6, 7, 8, 13, 14, 23, 24, 33, 34}));
-}
-
 TEST(DecodeRpcServerTest, CompletedHandoffSkipsKeysWithoutRankLocalLoads) {
     // Both ranks have completed their own three loads in a six-block request.
     // The result is a global prefix length, rather than a local transfer count.

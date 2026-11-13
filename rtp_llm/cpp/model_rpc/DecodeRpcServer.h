@@ -142,9 +142,6 @@ private:
                                                                             int  attention_rank,
                                                                             bool use_mla       = false,
                                                                             bool replicated_kv = false);
-    static std::vector<BlockInfo>                     linearLoadSegments(const std::vector<size_t>& segment_bytes,
-                                                                         const BlockInfo&           block,
-                                                                         const AsymmetricTPContext& partition);
     // Projects the producer's buildCacheStorePlan onto one group's decode block
     // table: key_index indexes the global cache keys, offset_index the group-local
     // BlockIds::blocks(). Derived from group policy plus block geometry only, never
