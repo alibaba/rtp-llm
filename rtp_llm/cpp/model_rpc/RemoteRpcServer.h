@@ -10,15 +10,7 @@ class RemoteRpcServer: public LocalRpcServer {
 public:
     RemoteRpcServer() {}
     virtual ~RemoteRpcServer() {}
-    grpc::Status init(const EngineInitParams&                                maga_init_params,
-                      std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                      py::object                                             mm_process_engine);
-
-    void deferServiceStart() override {
-        LocalRpcServer::deferServiceStart();
-        defer_cache_store_ = true;
-    }
-    void startDeferredServices() override;
+    void startServices() override;
 
     auto& resource() {
         return resource_;
@@ -33,8 +25,6 @@ protected:
     std::string                 process_id_;
     RemoteServerResource        resource_;
     std::atomic<size_t>         loading_cache_requests_{0};
-    std::shared_ptr<CacheStore> cache_store_;
-    bool                        defer_cache_store_{false};
 };
 
 }  // namespace rtp_llm

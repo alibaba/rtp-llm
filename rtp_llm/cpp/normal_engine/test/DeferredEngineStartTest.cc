@@ -37,19 +37,18 @@ TEST_F(DeferredEngineStartTest, RpcReleaseStartsLeaderAndFollowerWithoutBroadcas
         auto engine = prepareEngine();
         LocalRpcServer server;
         server.engine_ = engine;
-        server.deferServiceStart();
         // Only RPC role selection varies here; the mock engine uses one GPU.
         server.maga_init_params_.parallelism_config.tp_rank = tp_rank;
         if (tp_rank != 0) {
             server.maga_init_params_.runtime_config.worker_grpc_addrs = {"127.0.0.1:1"};
         }
         ASSERT_EQ(engine->loop_thread_, nullptr);
-        ASSERT_NO_THROW(server.startDeferredServices());
+        ASSERT_NO_THROW(server.startServices());
         EXPECT_TRUE(engine->running_.load());
         auto first_thread = engine->loop_thread_;
         ASSERT_NE(first_thread, nullptr);
         EXPECT_EQ(server.tp_broadcaster_, nullptr);
-        ASSERT_NO_THROW(server.startDeferredServices());
+        ASSERT_NO_THROW(server.startServices());
         EXPECT_EQ(engine->loop_thread_, first_thread);
     }
 }

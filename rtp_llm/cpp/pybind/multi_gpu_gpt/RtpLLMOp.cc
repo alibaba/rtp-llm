@@ -501,9 +501,8 @@ void RtpLLMOp::startRPCServerInternal(const EngineInitParams& maga_init_params) 
         pybind11::gil_scoped_acquire acquire;
         model_rpc_port = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
     }
-    // Remote PD cache-store listeners are also deferred in template mode,
-    // independently of whether this process exposes the model RPC port.
-    model_rpc_service_->startDeferredServices();
+    // Start workers and transports even on ranks without a model RPC port.
+    model_rpc_service_->startServices();
     if (model_rpc_port < 0) {
         is_server_ready_ = true;
         return;
