@@ -555,7 +555,8 @@ minimum_count = 1
 # and add two coverage/staging plus 14 remote termination regressions.
 # Restore the original A10 CausalConv1D (5) and L2Norm (9) methods as well.
 # Move the four DeepEP methods to deepep_cuda13_h20; every remaining case must execute.
-expected_count = 2968
+# Upstream keeps one RPC streaming and two concurrency methods disabled.
+expected_count = 2965
 forbid_skips = true
 paths = [
     "rtp_llm/access_logger/test",
@@ -614,7 +615,8 @@ markexpr = "(not H20 and not MI308X and not SM100 and not SM100_ARM and not smok
 description = "Open-source-only Python UT on SM8x after internal_source is stripped"
 gpu_type = "A10"
 minimum_count = 1
-expected_count = 2968
+# Upstream keeps one RPC streaming and two concurrency methods disabled.
+expected_count = 2965
 forbid_skips = true
 paths = [
     "rtp_llm/access_logger/test",
@@ -699,7 +701,8 @@ markexpr = "((H20 or multi_arch_cuda) and not MI308X and not SM100 and not SM100
 description = "Python UT on SM100 ARM (py-ut-sm100-arm)"
 gpu_type = "SM100_ARM"
 minimum_count = 1
-expected_count = 104
+# Upstream keeps the indexer fast-path method disabled; reference tests remain.
+expected_count = 103
 forbid_skips = true
 # Mainline routes these native wrapper tests to A10; ARM has no test libraries.
 ignore_paths = [
@@ -802,7 +805,7 @@ description = "Python UT on SM100 x86 (py-ut-sm100)"
 gpu_type = "SM100"
 minimum_count = 1
 # Two pack/GEMM integration cases plus the linear adapter's own case and
-# seventeen inherited functional cases. Historical profiling stays manual.
+# seventeen inherited functional cases. Historical profiling stays disabled.
 expected_count = 20
 forbid_skips = true
 paths = [

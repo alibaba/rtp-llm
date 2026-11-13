@@ -1337,14 +1337,14 @@ class BuildPackagingContractTest(TestCase):
         self.assertIn("not SM100_ARM", profiles["py_ut_sm100"]["markexpr"])
 
         for name, expected_count in {
-            "py_ut_sm8x": 2968,
-            "py_ut_oss_sm8x": 2968,
+            "py_ut_sm8x": 2965,
+            "py_ut_oss_sm8x": 2965,
             "py_ut_sm9x": 526,
             "py_ut_sm100": 20,
             "py_ut_sm120": 118,
             "py_ut_l20": 86,
             "py_ut_oss_l20": 84,
-            "py_ut_sm100_arm": 104,
+            "py_ut_sm100_arm": 103,
             "py_ut_amd": 413,
             "py_ut_frontend": 71,
         }.items():
@@ -1382,7 +1382,7 @@ class BuildPackagingContractTest(TestCase):
             ]
             self.assertEqual(internal_profiles["py_ut_gb200"].get("minimum_count"), 1)
             self.assertEqual(
-                internal_profiles["py_ut_gb200"].get("expected_count"), 104
+                internal_profiles["py_ut_gb200"].get("expected_count"), 103
             )
             self.assertTrue(internal_profiles["py_ut_gb200"].get("forbid_skips"))
             self.assertEqual(
@@ -1776,43 +1776,135 @@ class BuildPackagingContractTest(TestCase):
         self.assertNotIn("TODO: fix q_out mismatch", fused_quant_text)
         self.assertIn("torch.nn.functional.silu(gates)", fused_quant_text)
 
-    def test_sm9x_profile_and_plot_cases_are_manual_perf_tests(self):
-        expected_methods = {
-            "rtp_llm/models_py/modules/factory/linear/impl/cuda/test/fp8_linear_test.py": {
-                "test_profile_cuda_fp8_deepgemm_linear"
+    def test_upstream_disabled_methods_preserve_skip_and_native_routing(self):
+        # Frozen official main: a007ff21dae90d7ff508f31a5e979e4c4a1e28d5.
+        expected_skips = {
+            "rtp_llm/cpp/model_rpc/test/model_rpc_client_test.py": {
+                "ModelRpcClientTest.test_generate_stream": "need fix",
+            },
+            "rtp_llm/models_py/modules/dsv4/decode/test/indexer_decode_test.py": {
+                "TestIndexerDecodeOp.test_fast_path_topk_iou": (
+                    "fast-path WIP: paged FP8 (data || scale) packed layout needs "
+                    "end-to-end validation against deep_gemm. Reference path is the "
+                    "source of truth for now; integration into deepseek_v4_model.py "
+                    "will toggle the env flag once the fast-path layout is verified."
+                ),
             },
             "rtp_llm/models_py/triton_kernels/common/test/silu_mul_masked_test.py": {
-                "test_silu_mul_masked_fp8_beam_search_skew_performance",
-                "test_profile_fp8_silu_mul_masked",
-                "test_profile_bf16_silu_mul_masked",
-                "test_plot_silu_mul_masked_fp8_latency_vs_num_local_experts",
-                "test_plot_silu_mul_masked_fp8_latency_vs_expected_m",
-                "test_plot_silu_mul_masked_fp8_latency_vs_moe_intermediate_size",
-                "test_plot_silu_mul_masked_bf16_latency_vs_num_local_experts",
-                "test_plot_silu_mul_masked_bf16_latency_vs_expected_m",
-                "test_plot_silu_mul_masked_bf16_latency_vs_moe_intermediate_size",
+                "SiluMulMaskedTest.test_plot_silu_mul_masked_bf16_latency_vs_expected_m": (
+                    "Skip plot bf16 silu mul masked latency vs expected m test"
+                ),
+                "SiluMulMaskedTest.test_plot_silu_mul_masked_bf16_latency_vs_moe_intermediate_size": (
+                    "Skip plot bf16 silu mul masked latency vs moe intermediate size "
+                    "test"
+                ),
+                "SiluMulMaskedTest.test_plot_silu_mul_masked_bf16_latency_vs_num_local_experts": (
+                    "Skip plot bf16 silu mul masked latency vs num local experts test"
+                ),
+                "SiluMulMaskedTest.test_plot_silu_mul_masked_fp8_latency_vs_expected_m": (
+                    "Skip plot fp8 silu mul masked latency vs expected m test"
+                ),
+                "SiluMulMaskedTest.test_plot_silu_mul_masked_fp8_latency_vs_moe_intermediate_size": (
+                    "Skip plot fp8 silu mul masked latency vs moe intermediate size "
+                    "test"
+                ),
+                "SiluMulMaskedTest.test_plot_silu_mul_masked_fp8_latency_vs_num_local_experts": (
+                    "Skip plot fp8 silu mul masked latency vs num local experts test"
+                ),
+                "SiluMulMaskedTest.test_profile_bf16_silu_mul_masked": (
+                    "Skip profile bf16 silu mul masked test"
+                ),
+                "SiluMulMaskedTest.test_profile_fp8_silu_mul_masked": (
+                    "Skip profile fp8 silu mul masked test"
+                ),
+            },
+            "rtp_llm/test/concurrency_limit_test.py": {
+                "ConcurrencyLimitTest.test_exception": (
+                    "Temporarily disabled test case"
+                ),
+                "ConcurrencyLimitTest.test_simple": (
+                    "Temporarily disabled test case"
+                ),
+            },
+            "rtp_llm/models_py/modules/factory/linear/impl/cuda/test/fp8_linear_test.py": {
+                "CudaFp8LinearTestBase.test_profile_cuda_fp8_deepgemm_linear": (
+                    "Skip profiling tests"
+                ),
             },
         }
-        for relative_path, method_names in expected_methods.items():
+        routed_nodeids = {
+            "rtp_llm/cpp/model_rpc/test/model_rpc_client_test.py"
+            "::ModelRpcClientTest::test_generate_stream",
+            "rtp_llm/models_py/modules/dsv4/decode/test/indexer_decode_test.py"
+            "::TestIndexerDecodeOp::test_fast_path_topk_iou",
+            "rtp_llm/test/concurrency_limit_test.py"
+            "::ConcurrencyLimitTest::test_exception",
+            "rtp_llm/test/concurrency_limit_test.py"
+            "::ConcurrencyLimitTest::test_simple",
+        }
+        conftest_tree = ast.parse((PROJECT_ROOT / "conftest.py").read_text())
+        routed_inventory = next(
+            node.value
+            for node in conftest_tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == "_UPSTREAM_DISABLED_TEST_NODEIDS"
+                for target in node.targets
+            )
+        )
+        self.assertEqual(ast.literal_eval(routed_inventory), routed_nodeids)
+        self.assertEqual(sum(map(len, expected_skips.values())), 13)
+        for relative_path, expected_methods in expected_skips.items():
             tree = ast.parse((PROJECT_ROOT / relative_path).read_text())
             methods = {
-                node.name: node
-                for node in ast.walk(tree)
-                if isinstance(node, ast.FunctionDef) and node.name in method_names
+                f"{cls.name}.{node.name}": node
+                for cls in tree.body
+                if isinstance(cls, ast.ClassDef)
+                for node in cls.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             }
-            self.assertEqual(methods.keys(), method_names)
-            for method_name, method in methods.items():
-                decorator_names = {
-                    child.attr
+            self.assertTrue(expected_methods.keys() <= methods.keys(), relative_path)
+            for symbol, reason in expected_methods.items():
+                method = methods[symbol]
+                skips = [
+                    decorator
                     for decorator in method.decorator_list
-                    for child in ast.walk(decorator)
-                    if isinstance(child, ast.Attribute)
-                }
-                self.assertTrue(
-                    {"manual", "perf"}.issubset(decorator_names),
-                    f"{relative_path}:{method_name}",
-                )
-                self.assertNotIn("skip", decorator_names)
+                    if isinstance(decorator, ast.Call)
+                    and ast.unparse(decorator.func) == "unittest.skip"
+                ]
+                self.assertEqual(len(skips), 1, f"{relative_path}:{symbol}")
+                self.assertEqual(ast.literal_eval(skips[0].args[0]), reason)
+                nodeid = relative_path + "::" + symbol.replace(".", "::")
+                if nodeid not in routed_nodeids:
+                    self.assertTrue(
+                        {"pytest.mark.manual", "pytest.mark.perf"}
+                        <= {ast.unparse(node) for node in method.decorator_list},
+                        nodeid,
+                    )
+
+        # This existing manual benchmark is outside the nine disabled methods.
+        silu_tree = ast.parse(
+            (
+                PROJECT_ROOT
+                / "rtp_llm/models_py/triton_kernels/common/test/silu_mul_masked_test.py"
+            ).read_text()
+        )
+        beam_method = next(
+            node
+            for node in ast.walk(silu_tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "test_silu_mul_masked_fp8_beam_search_skew_performance"
+        )
+        beam_decorators = {ast.unparse(node) for node in beam_method.decorator_list}
+        self.assertTrue({"pytest.mark.manual", "pytest.mark.perf"} <= beam_decorators)
+        self.assertFalse(
+            any(
+                isinstance(node, ast.Call)
+                and ast.unparse(node.func) == "unittest.skip"
+                for node in beam_method.decorator_list
+            )
+        )
 
     def test_cpp_disabled_inventory_matches_upstream_main(self):
         """C++ remains GTest-owned, including its default-disabled inventory."""
@@ -2012,7 +2104,7 @@ class BuildPackagingContractTest(TestCase):
                 self.assertIn('"gpu_count": "1"', target, filename)
 
             unconditional_skips = [
-                decorator
+                node.name
                 for node in ast.walk(tree)
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                 for decorator in node.decorator_list
@@ -2020,7 +2112,12 @@ class BuildPackagingContractTest(TestCase):
                 and isinstance(decorator.func, ast.Attribute)
                 and decorator.func.attr == "skip"
             ]
-            self.assertEqual(unconditional_skips, [], filename)
+            expected_skips = (
+                ["test_fast_path_topk_iou"]
+                if filename == "indexer_decode_test.py"
+                else []
+            )
+            self.assertEqual(unconditional_skips, expected_skips, filename)
 
         self.assertEqual(sum(expected_cases.values()), 48)
 
