@@ -291,6 +291,7 @@ py_library(
         ":Pillow",
         ":pillow-heif",
         ":pillow-avif-plugin",
+        ":mm_download_domains",
         ":nest_asyncio",
         ":matplotlib",
         ":torchvision",
@@ -396,6 +397,12 @@ py_library(
     name = "release_version",
     srcs = ["release_version.py"],
     visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "mm_download_domains",
+    srcs = ["config/mm_download_domains.py"],
+    deps = [":config_exceptions", ":requests"],
 )
 
 py_library(

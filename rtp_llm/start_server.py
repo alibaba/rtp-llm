@@ -28,6 +28,7 @@ CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.config.log_config import setup_logging
+from rtp_llm.config.mm_download_domains import blocked_download_domains
 from rtp_llm.config.oss_download import export_oss_internal_region_allowlist
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
@@ -690,6 +691,7 @@ def main():
 
 def start_server(py_env_configs: PyEnvConfigs):
     logging.info(f"[PROCESS_START]Start server")
+    blocked_download_domains()  # Validate the inherited policy before spawning workers.
     export_oss_internal_region_allowlist(
         py_env_configs.vit_config.oss_internal_region_allowlist
     )
