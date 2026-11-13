@@ -362,6 +362,11 @@ TEST(DecodeRpcServerTest, MultiRankHandoffUsesMinimumPrefix) {
     EXPECT_EQ(DecodeRpcServer::minLoadedCacheBlockCount({}), 0u);
 }
 
+TEST(DecodeRpcServerTest, LoadKvCacheFailureRoundTripsAcrossTheDecodePrefillWire) {
+    EXPECT_EQ(transErrorCodeToRPC(ErrorCode::LOAD_KV_CACHE_FAILED), ErrorCodePB::LOAD_KV_CACHE_FAILED);
+    EXPECT_EQ(transRPCErrorCode(ErrorCodePB::LOAD_KV_CACHE_FAILED), ErrorCode::LOAD_KV_CACHE_FAILED);
+}
+
 TEST(DecodeRpcServerTest, EmptyRemoteLoadTopologyFailsBeforePartitionArithmetic) {
     EXPECT_EQ(DecodeRpcServer::validateRemoteLoadTopology(/*worker_size=*/0, /*peer_size=*/1).code(),
               ErrorCode::LOAD_KV_CACHE_FAILED);
@@ -448,11 +453,11 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string                                   request_key = "request";
-    const std::vector<std::string>                      peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType>                     cache_keys  = {101, 102};
-    GroupBlockIds                                       group_block_ids;
-    const auto                                          load_context = makeLoadContext(request_key,
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101, 102};
+    GroupBlockIds                   group_block_ids;
+    const auto                      load_context = makeLoadContext(request_key,
                                               peer_addrs,
                                               cache_keys,
                                               std::move(group_block_ids),
@@ -477,11 +482,11 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string                                   request_key = "request";
-    const std::vector<std::string>                      peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType>                     cache_keys  = {101};
-    GroupBlockIds                                       group_block_ids;
-    const auto                                          load_context = makeLoadContext(request_key,
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101};
+    GroupBlockIds                   group_block_ids;
+    const auto                      load_context = makeLoadContext(request_key,
                                               peer_addrs,
                                               cache_keys,
                                               std::move(group_block_ids),
@@ -1412,8 +1417,8 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
             resource_released       = stream->stream_cache_resource_->isResourceReleased();
             blocks_after_completion = stream->stream_cache_resource_->curBlocksNum();
             EXPECT_EQ(stream->outputTokenLen(), 0);
-            const auto timing       = stream->getTimeInfo();
-            executed                = timing.running_started || timing.first_token_committed || timing.generation_done;
+            const auto timing = stream->getTimeInfo();
+            executed          = timing.running_started || timing.first_token_committed || timing.generation_done;
             RpcMetricsCollector metrics;
             context.collectBasicMetrics(metrics);
             error_qps = metrics.error_qps;
@@ -1922,6 +1927,38 @@ protected:
     std::shared_ptr<RoutingCacheStore> store_;
     DecodeRpcServer                    server_;
 };
+
+TEST_F(DecodeRpcLoadRoutingTest, SingleDecodeWorkerLoadsAsymmetricPeersWithoutLoopbackRpc) {
+    // Each of the eight prefill peers owns one head of the decode cache.
+    ASSERT_TRUE(initReceiver(false, makeMhaCacheConfig(4, 4, 8, 4, 8, DataType::TYPE_FP16)));
+    server_.resource_.workers = {"self"};
+    // Any fallback to the pooled loopback channel fails instead of hiding a regression.
+    server_.resource_.grpc_workers = {"127.0.0.1:1"};
+
+    std::vector<std::string> peers;
+    for (int rank = 0; rank < 8; ++rank) {
+        peers.push_back("127.0.0." + std::to_string(rank + 1) + ":10000:10001");
+    }
+    auto ids = std::make_shared<BlockIds>();
+    ids->assign(BlockIndicesType{2});
+    GroupBlockIds groups{{{"default", 0}}, {ids}};
+
+    grpc::ServerContext          context;
+    DecodeRpcContext             rpc{nullptr};
+    kmonitor::MetricsReporterPtr reporter;
+    auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+    DecodeGenerateContext        generate(rpc, 5000, &context, reporter, meta);
+    generate.peer_addrs = peers;
+    DecodeRpcServer::LoadKVCacheContext load(42, "local-load", peers, {101}, groups, 0, 5000, 1, 0, &context, 1);
+
+    const auto result = server_.loadCacheAsyncForTp(generate, load);
+    ASSERT_TRUE(result.ok()) << result.error_info.ToString();
+    EXPECT_EQ(store_->calls.size(), peers.size());
+    EXPECT_EQ(result.loaded_cache_block_count, 1u);
+    EXPECT_TRUE(server_.resource_.rpc_pool.connection_pool_.empty());
+    EXPECT_EQ(generate.stat_info.load_cache_min_rt_us, generate.stat_info.load_cache_max_rt_us);
+    EXPECT_EQ(generate.stat_info.load_cache_polling_cost_us, 0);
+}
 
 TEST_F(DecodeRpcLoadRoutingTest, SingletonFullStageKeepsWholeModelTransferKeys) {
     auto config                            = makeMhaCacheConfig(2, 4, 1, 4, 8, DataType::TYPE_FP16);
