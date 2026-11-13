@@ -6,6 +6,8 @@ py_test(
     deps = [
         "//rtp_llm/models_py:new_loader_core",
         "//rtp_llm:new_loader_policy",
+        # safetensors.save_file imports NumPy when serializing CPU tensors.
+        "//rtp_llm:numpy",
         "//rtp_llm:safetensors",
         "//rtp_llm:torch",
     ],
