@@ -715,10 +715,28 @@ void FIFOScheduler::applyAwiBarrierGate() {
     // A single-request operation is trivially resident once its context has
     // been prefilled.  Waiting for the output-horizon block to be allocated
     // before the first decode is circular: that block is allocated by the
-    // first decode.  Release the hold for the single-request case; multi-
-    // request capacity still waits for every member to be resident.
+    // first decode.  Record the allocator-derived residency before releasing
+    // the hold so the resident telemetry event still has real block counts.
     if (runtime.barrierRequestCount() <= 1) {
-        RTP_LLM_LOG_INFO("awi barrier gate releasing single-request held decode");
+        auto observe_single = [&](const GenerateStreamPtr& stream) {
+            if (!stream || !runtime.isBarrierRequest(stream->streamId())) {
+                return;
+            }
+            const int64_t kv_tokens = static_cast<int64_t>(stream->curBlocksNum()) * stream->seqSizePerBlock();
+            const int64_t materialized = std::min<int64_t>(kv_tokens, stream->seqLength());
+            RTP_LLM_LOG_INFO("awi barrier single stream=%ld input=%d seq=%d cur_blocks=%zu block=%d kv=%ld materialized=%ld",
+                             stream->streamId(), stream->inputLength(), stream->seqLength(),
+                             stream->curBlocksNum(), stream->seqSizePerBlock(), kv_tokens, materialized);
+            runtime.observeResidentAndCheckReady(
+                stream->streamId(), stream->inputLength(), materialized, kv_tokens);
+        };
+        for (const auto& stream : awi_held_decode_streams_) {
+            observe_single(stream);
+        }
+        for (const auto& stream : running_streams_) {
+            observe_single(stream);
+        }
+        RTP_LLM_LOG_INFO("awi barrier gate releasing single-request held decode ready=%d", runtime.barrierReady());
         restoreAwiHeldDecodes();
         return;
     }
