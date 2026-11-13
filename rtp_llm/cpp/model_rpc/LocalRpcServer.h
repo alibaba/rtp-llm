@@ -44,6 +44,8 @@ public:
     grpc::Status
     GetCacheStatus(grpc::ServerContext* context, const ::CacheVersionPB* request, ::CacheStatusPB* response);
 
+    grpc::Status
+    GetMultimodalLengths(grpc::ServerContext* context, const GenerateInputPB* request, MultimodalLengthsPB* response);
     virtual grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
                                             const GenerateInputPB*                 request,
                                             grpc::ServerWriter<GenerateOutputsPB>* writer);
@@ -157,6 +159,7 @@ protected:
 protected:
     std::shared_ptr<EngineBase>           engine_;
     std::shared_ptr<MultimodalProcessor>  mm_processor_;
+    std::shared_ptr<GenerateInput::PrepareMultimodalBatch> mm_batch_preparer_;
     EngineInitParams                      maga_init_params_;
     /** Proposer ownership is stage-local; speculative configuration is global. */
     ProposeModelEngineInitParams*         propose_maga_init_params_{nullptr};

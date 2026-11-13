@@ -173,6 +173,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         }
     }
 
+    processor_eos_token_id_ = processor_eos_token_id;
     auto processors_result = LogitsProcessorFactory::createLogitsProcessors(generate_input_,
                                                                             init_batch_size,
                                                                             maxBatchSize(),
@@ -328,6 +329,133 @@ int GenerateStream::estimatePeakNeedBlocks(int remaining_tokens) const {
 std::shared_ptr<GenerateInput> GenerateStream::generateInput() const {
     return generate_input_;
 }
+bool GenerateStream::hasPendingMultimodal() const {
+    return generate_input_->multimodal_token_layout && generate_input_->multimodal_token_layout->length_only;
+}
+
+std::shared_ptr<GenerateInput> GenerateStream::beginLateMultimodal() {
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        checkTimeoutWithoutLock();
+        if (!hasPendingMultimodal() || hasErrorWithoutLock()) {
+            return nullptr;
+        }
+    }
+    // No stream/scheduler lock is held during CPU preprocessing, ViT or safety inspection.
+    // Prepare into a private copy; cancellation must not observe half-installed tensors.
+    return std::make_shared<GenerateInput>(*generate_input_);
+}
+
+void GenerateStream::prepareLateMultimodalBatch(const std::vector<std::shared_ptr<GenerateStream>>& streams) {
+    prepareLateMultimodalBatchDeferred(streams)();
+}
+
+std::function<void()>
+GenerateStream::prepareLateMultimodalBatchDeferred(const std::vector<std::shared_ptr<GenerateStream>>& streams) {
+    std::vector<std::function<void()>> completions;
+    // Each DP backend has its own processor/queue. Never merge different owners.
+    std::vector<std::shared_ptr<GenerateInput::PrepareMultimodalBatch>> owners;
+    std::vector<std::vector<std::shared_ptr<GenerateStream>>>           groups;
+    for (const auto& stream : streams) {
+        const auto& owner = stream->generateInput()->prepare_multimodal_batch;
+        if (!owner) {
+            if (auto prepared = stream->beginLateMultimodal()) {
+                auto result = ErrorInfo(ErrorCode::INVALID_PARAMS, "missing multimodal preparation callback");
+                try {
+                    if (prepared->prepare_multimodal) {
+                        result = prepared->prepare_multimodal(prepared);
+                    }
+                } catch (const std::exception& error) {
+                    result = ErrorInfo(ErrorCode::MM_PROCESS_ERROR, error.what());
+                }
+                completions.emplace_back([stream, prepared, result] { stream->finishLateMultimodal(prepared, result); });
+            }
+            continue;
+        }
+        auto it = std::find(owners.begin(), owners.end(), owner);
+        if (it == owners.end()) {
+            owners.push_back(owner);
+            groups.push_back({stream});
+        } else {
+            groups[std::distance(owners.begin(), it)].push_back(stream);
+        }
+    }
+    for (size_t group = 0; group < groups.size(); ++group) {
+        std::vector<std::shared_ptr<GenerateStream>> active;
+        std::vector<std::shared_ptr<GenerateInput>>  prepared;
+        for (const auto& stream : groups[group]) {
+            if (auto input = stream->beginLateMultimodal()) {
+                active.push_back(stream);
+                prepared.push_back(std::move(input));
+            }
+        }
+        if (prepared.empty()) {
+            continue;
+        }
+        try {
+            auto results = (*owners[group])(prepared);
+            if (results.size() != active.size()) {
+                throw std::runtime_error("local multimodal batch returned the wrong result count");
+            }
+            for (size_t i = 0; i < active.size(); ++i) {
+                completions.emplace_back([stream = active[i], input = prepared[i], result = results[i]] {
+                    stream->finishLateMultimodal(input, result);
+                });
+            }
+        } catch (const std::exception& error) {
+            for (const auto& stream : active) {
+                completions.emplace_back([stream, message = std::string(error.what())] {
+                    stream->reportError(ErrorCode::MM_PROCESS_ERROR, message);
+                });
+            }
+        }
+    }
+    return [completions = std::move(completions)] {
+        for (const auto& complete : completions) {
+            complete();
+        }
+    };
+}
+
+void GenerateStream::finishLateMultimodal(const std::shared_ptr<GenerateInput>& prepared, const ErrorInfo& result) {
+    try {
+        if (!result.ok()) {
+            reportError(result.code(), result.ToString());
+            return;
+        }
+        if (prepared->inputLength() != inputLength() || !prepared->multimodal_features) {
+            reportError(ErrorCode::MM_WRONG_FORMAT_ERROR, "late multimodal preparation changed admitted length");
+            return;
+        }
+        // Penalty/grammar state must see the same input identities as the eager path,
+        // never the zero placeholders used only for admission.
+        auto processors = LogitsProcessorFactory::createLogitsProcessors(
+            prepared, complete_token_ids_->batchSize(), maxBatchSize(), processor_eos_token_id_, nullptr, true, output_vocab_size_ > 0);
+        if (!processors.ok()) {
+            reportError(processors.status().code(), processors.status().ToString());
+            return;
+        }
+        std::lock_guard<std::mutex> lock(*mutex_);
+        checkTimeoutWithoutLock();
+        if (hasErrorWithoutLock()) {
+            return;
+        }
+        // Install actual feature identities BEFORE any KV lookup/allocation, across all beam rows.
+        auto ids = complete_token_ids_->completeTokenIds();
+        for (int row = 0; row < complete_token_ids_->batchSize(); ++row) {
+            ids[row].narrow(0, 0, prepared->inputLength()).copy_(prepared->input_ids);
+        }
+        prepared->multimodal_token_layout->length_only = false;
+        prepared->prepare_multimodal                   = {};
+        prepared->prepare_multimodal_batch.reset();
+        prepared->multimodal_prepared_late = true;
+        *generate_input_                   = *prepared;
+        sampling_state_.logits_processors  = std::move(processors.value());
+    } catch (const std::exception& error) {
+        reportError(ErrorCode::MM_PROCESS_ERROR, error.what());
+    }
+}
+
 std::shared_ptr<GenerateConfig>& GenerateStream::generateConfig() const {
     return generate_input_->generate_config;
 }

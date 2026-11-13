@@ -75,8 +75,12 @@ class Qwen4MultimodalTest(unittest.TestCase):
         config._attn_implementation = "sdpa"
         torch.manual_seed(17)
         adapter = Qwen4ExpImageEmbedding.__new__(Qwen4ExpImageEmbedding)
-        with patch.object(vit, "default_attn_impl", "sdpa"):
-            adapter.visual = vit.Qwen3_5MoeVisionModel(config).eval().to(device)
+        config.vit_attention_backend = "sdpa"
+        adapter.visual = vit.Qwen3_5MoeVisionModel(config).eval().to(device)
+        # The vision linears allocate empty parameters for checkpoint loading.
+        with torch.no_grad():
+            for parameter in adapter.visual.parameters():
+                parameter.normal_(std=0.02)
         adapter.mm_processor = self.processor()
         adapter.text_embedding = torch.randn(256, 32)
         image = Qwen4VisualInput(torch.randn(16, 12), torch.tensor([[1, 4, 4]]))

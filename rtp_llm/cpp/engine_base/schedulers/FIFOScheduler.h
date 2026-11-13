@@ -97,6 +97,7 @@ private:
     void admitWaitingStreams(std::list<GenerateStreamPtr>&       waiting_streams,
                              const std::list<GenerateStreamPtr>& already_admitted_streams);
 
+    std::vector<GenerateStreamPtr> selectMultimodalCandidates() const;
     void cancelGroups(StreamGroupQueue& group_queue);
     void evaluateWaitingGroupQueue();
     void evaluateLoadingCacheGroupQueue();

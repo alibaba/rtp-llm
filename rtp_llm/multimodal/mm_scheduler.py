@@ -164,6 +164,7 @@ class _EmbeddingChunk:
         "work_estimate",
         "enqueued_at",
         "queue_wait_reported",
+        "preparation_reserved",
     )
 
     def __init__(
@@ -179,6 +180,7 @@ class _EmbeddingChunk:
         self.work_estimate = work_estimate
         self.enqueued_at: Optional[float] = None
         self.queue_wait_reported = False
+        self.preparation_reserved = False
 
 
 # Fallback for hand-built work items without a positive request timeout.
@@ -270,6 +272,11 @@ class MMScheduler:
         # Orders submit's (stopped-check + enqueue) against close's set-stopped
         # so a submission can't slip in after close has drained the queue.
         self._lock = threading.Lock()
+        # Share bounded queue capacity between ready items and GPU preparation.
+        self._preparation = threading.Condition(self._lock)
+        self._preparation_limit = min(max_queue_size, max_batch_size)
+        self._preparation_admitted = 0
+        self._preparing = 0
 
         # Startup handshake: the executor binds the device before signaling ready,
         # so a bad device fails construction fast instead of stranding every
@@ -518,6 +525,36 @@ class MMScheduler:
         request.remaining_chunks = len(chunks)
         request.next_chunk_index = 1
 
+    def _check_queue_capacity(self) -> None:
+        if self._stopped.is_set():
+            raise RuntimeError("MMScheduler is closed, request rejected")
+        if self._waiting.qsize() + self._preparing >= self._max_queue_size:
+            kmonitor.report(AccMetrics.VIT_EMBEDDING_OVERLOAD_QPS_METRIC, 1)
+            raise MMSchedulerOverloadError(
+                f"MMScheduler queue full (max_queue_size={self._max_queue_size}), request rejected"
+            )
+
+    def _reserve_preparation(self, chunk: _EmbeddingChunk, deadline: float) -> None:
+        with self._preparation:
+            self._check_queue_capacity()
+            while self._preparation_admitted >= self._preparation_limit:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise MMSchedulerTimeoutError(
+                        "MMScheduler timed out waiting for input preparation"
+                    )
+                self._preparation.wait(timeout=remaining)
+                self._check_queue_capacity()
+            self._preparation_admitted += 1
+            self._preparing += 1
+            chunk.preparation_reserved = True
+
+    def _release_preparation_locked(self, chunk: _EmbeddingChunk) -> None:
+        if chunk.preparation_reserved:
+            chunk.preparation_reserved = False
+            self._preparation_admitted -= 1
+            self._preparation.notify_all()
+
     def submit_and_wait(
         self, work_items: List[MMWorkItem], deadline: Optional[float] = None
     ) -> None:
@@ -542,17 +579,46 @@ class MMScheduler:
 
         submit_ms = current_time_ms()
 
-        # Lock only the stopped-check + enqueue so it is atomic w.r.t. close();
-        # the blocking wait below stays outside the lock.
-        with self._lock:
-            if self._stopped.is_set():
-                raise RuntimeError("MMScheduler is closed, request rejected")
-            if self._waiting.qsize() >= self._max_queue_size:
-                kmonitor.report(AccMetrics.VIT_EMBEDDING_OVERLOAD_QPS_METRIC, 1)
-                raise MMSchedulerOverloadError(
-                    f"MMScheduler queue full (max_queue_size={self._max_queue_size}), request rejected"
+        prepare = getattr(self._mm_part, "prepare_embedding_inputs", None)
+        chunk = req.chunks[0]
+        if prepare is not None and len(req.chunks) == 1:
+            cutoff = time.monotonic() + timeout_s
+            self._reserve_preparation(chunk, cutoff)
+            try:
+                prepared = prepare(
+                    [item.preprocess_result for item in work_items],
+                    [item.mm_type for item in work_items],
                 )
-            self._enqueue_chunk(req.chunks[0])
+                if len(prepared) != len(work_items):
+                    raise OutputCountMismatchError(
+                        "prepare_embedding_inputs returned the wrong item count"
+                    )
+                with self._preparation:
+                    if self._stopped.is_set():
+                        raise RuntimeError(
+                            "MMScheduler closed during input preparation"
+                        )
+                    timeout_s = cutoff - time.monotonic()
+                    if timeout_s <= 0:
+                        raise MMSchedulerTimeoutError(
+                            "MMScheduler timed out during input preparation"
+                        )
+                    for item, data in zip(work_items, prepared):
+                        item.preprocess_result = data
+                    self._enqueue_chunk(chunk)
+            except BaseException:
+                with self._preparation:
+                    self._release_preparation_locked(chunk)
+                raise
+            finally:
+                with self._preparation:
+                    self._preparing -= 1
+                    self._preparation.notify_all()
+                prepared = data = item = None
+        else:
+            with self._lock:
+                self._check_queue_capacity()
+                self._enqueue_chunk(chunk)
 
         try:
             # Blocks until the executor resolves the future; re-raises the
@@ -651,7 +717,10 @@ class MMScheduler:
         """
         source_type = "RuntimeError"
         source_message = "MMScheduler closed before request completed"
-        for req in (chunk.request for chunk in batch):
+        for chunk in batch:
+            with self._preparation:
+                self._release_preparation_locked(chunk)
+            req = chunk.request
             # done() skips already-resolved/cancelled requests; the try guards the
             # TOCTOU where a caller cancels a still-PENDING request concurrently.
             if not req.future.done():
@@ -742,7 +811,10 @@ class MMScheduler:
         queued = [self._pending] if self._pending else []
         self._pending = None
         queued.extend(self._drain(self._waiting))
-        for req in (chunk.request for chunk in queued):
+        for chunk in queued:
+            with self._preparation:
+                self._release_preparation_locked(chunk)
+            req = chunk.request
             # Guard set_exception: a caller may cancel concurrently (its submit
             # timing out); a dropped delivery is then fine.
             try:
@@ -777,6 +849,8 @@ class MMScheduler:
                 self._report_queue_depth()
             if not first.request.cancelled.is_set():
                 break
+            with self._preparation:
+                self._release_preparation_locked(first)
             first.request.chunks = []
             first.request.work_items = []
         batch = [first]
@@ -797,6 +871,8 @@ class MMScheduler:
                 continue
             self._report_queue_depth()
             if chunk.request.cancelled.is_set():
+                with self._preparation:
+                    self._release_preparation_locked(chunk)
                 chunk.request.chunks = []
                 chunk.request.work_items = []
                 continue  # caller already timed out; don't spend budget on it
@@ -827,6 +903,7 @@ class MMScheduler:
                 return None
             claimed = []
             for chunk in batch:
+                self._release_preparation_locked(chunk)
                 req = chunk.request
                 if req.cancelled.is_set() or req.future.done():
                     req.chunks = []
@@ -931,8 +1008,9 @@ class MMScheduler:
         # its Futures are already RUNNING and the executor join below treats that
         # batch as in flight. The executor drains queued requests in its finally,
         # so close must not touch _pending / _waiting while it is alive.
-        with self._lock:
+        with self._preparation:
             self._stopped.set()
+            self._preparation.notify_all()
         self._executor.join(timeout=timeout)
         if self._executor.is_alive():
             # A forward is still stuck past the join timeout. The executor's finally

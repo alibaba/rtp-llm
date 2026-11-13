@@ -336,6 +336,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     }
     if (input->has_multimodal_token_layout()) {
         MultimodalTokenLayout layout;
+        layout.length_only = input->multimodal_token_layout().length_only();
         for (const auto& span : input->multimodal_token_layout().spans()) {
             layout.spans.emplace_back(span.offset(), span.length());
         }

@@ -7,6 +7,7 @@ import os
 import signal
 import threading
 import time
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -1508,6 +1509,104 @@ class MMProcessEngine:
         """Core implementation for multimodal embedding processing."""
         result, _ = self._mm_embedding_impl(mm_inputs, request_id=request_id)
         return result
+
+    def token_lengths(self, mm_inputs: List[MultimodalInput]) -> List[int]:
+        """Metadata only: no embedding submission, forward, or cache promotion."""
+        if self._greennet_enabled():
+            raise NotImplementedError(
+                "late local ViT does not carry GreenNet request metadata"
+            )
+        validate = getattr(self.mm_part, "validate_inputs", None)
+        if validate is not None:
+            validate(mm_inputs)
+        length_fn = getattr(self.mm_part, "token_length", None)
+        if length_fn is None:
+            raise NotImplementedError("adapter has no metadata-only length provider")
+        lengths = [length_fn(item, self.vit_config) for item in mm_inputs]
+        if any(type(n) is not int or not 0 < n < (1 << 31) for n in lengths):
+            raise ValueError("invalid metadata-only multimodal length")
+        return lengths
+
+    def mm_embedding_batch_cpp(
+        self, requests: List[List[MultimodalInput]], request_ids: List[int]
+    ):
+        """Local, bounded prefill cohort; one result/error tuple per request.
+
+        Reserve all accepted jobs before waiting, then let the existing
+        executor feed concurrent callers through GreenNet and MMScheduler.
+        """
+        if len(requests) != len(request_ids):
+            raise ValueError("multimodal batch request/id counts differ")
+        results = [None] * len(requests)
+        jobs = []
+
+        def failure(error):
+            return (
+                None,
+                int(getattr(error, "exception_type", 0)),
+                str(getattr(error, "message", str(error))),
+            )
+
+        for index, (mm_inputs, request_id) in enumerate(zip(requests, request_ids)):
+            accepted, _ = self._try_reserve_async_slots(1)
+            if not accepted:
+                results[index] = failure(
+                    FtRuntimeException(
+                        ExceptionType.CONCURRENCY_LIMIT_ERROR,
+                        "ViT local batch exceeds async admission capacity",
+                    )
+                )
+                continue
+            if self._stopped:
+                self._release_async_slots()
+                results[index] = failure(RuntimeError("MMProcessEngine is stopped"))
+                continue
+            jobs.append((index, mm_inputs, request_id))
+
+        futures = []
+        for index, mm_inputs, request_id in jobs:
+            try:
+                future = self._async_compute_executor.submit(
+                    self._run_local_batch_request,
+                    mm_inputs,
+                    request_id,
+                )
+
+                def done(completed):
+                    if completed.cancelled():
+                        self._release_async_slots()
+
+                future.add_done_callback(done)
+                futures.append((index, future))
+            except Exception as error:
+                self._release_async_slots()
+                results[index] = failure(error)
+
+        # All submissions precede the first wait. Keep each logical request's
+        # output and error separate; never flatten a cohort into one request.
+        for index, future in futures:
+            try:
+                results[index] = (future.result(), 0, "")
+            except Exception as error:
+                results[index] = failure(error)
+        return results
+
+    def _run_local_batch_request(self, mm_inputs, request_id):
+        try:
+            context = (
+                torch.cuda.device(self.device)
+                if str(self.device).startswith("cuda")
+                else nullcontext()
+            )
+            with context, torch.inference_mode():
+                result = self._embed_with_greennet_sync(
+                    mm_inputs, request_id=request_id
+                )
+                with cuda_graph_gate.operation():
+                    result.position_ids = [pos.cpu() for pos in result.position_ids]
+                return result
+        finally:
+            self._release_async_slots()
 
     def _mm_embedding_impl(
         self,

@@ -636,6 +636,7 @@ def trans_input(input_py: GenerateInput):
     if expansion is not None:
         input_pb.token_ids.extend(expansion.token_ids)
         input_pb.multimodal_token_layout.SetInParent()
+        input_pb.multimodal_token_layout.length_only = expansion.length_only
         for offset, length in expansion.spans:
             input_pb.multimodal_token_layout.spans.add(offset=offset, length=length)
     else:
@@ -1209,6 +1210,61 @@ class ModelRpcClient(object):
             options=self._options, cleanup_interval=60  # clean up every minute
         )
         logging.info(f"addresses: {self._addresses}")
+
+    async def prepare_local_multimodal(self, input_py, mm_model_config, max_seq_len):
+        from rtp_llm.config.generate_config import RoleAddr
+        from rtp_llm.server.mm_cache_routing import multimodal_length_tokens
+        from rtp_llm.utils.base_model_datatypes import MultimodalTokenExpansion
+
+        if not input_py.mm_inputs or input_py.group_id != -1:
+            return
+        roles = input_py.generate_config.role_addrs or []
+        if any(
+            role.role in (RoleType.PREFILL, RoleType.DECODE, RoleType.VIT)
+            for role in roles
+        ):
+            return
+        addresses = self._addresses
+        for role in roles:
+            if role.role == RoleType.PDFUSION and role.ip:
+                addresses = [f"{role.ip}:{role.grpc_port}"]
+                break
+        if not addresses:
+            raise ValueError("no local multimodal DP endpoint")
+        address = addresses[input_py.request_id % len(addresses)]
+        input_py.mm_token_expansion = None
+        request = trans_input(input_py)
+        channel = await self._channel_pool.get(address)
+        try:
+            response = await RpcServiceStub(channel).GetMultimodalLengths(
+                request,
+                timeout=self._compute_grpc_timeout(input_py.generate_config.timeout_ms),
+            )
+        except grpc.RpcError as error:
+            # Default-on admission remains compatible with adapters/backends
+            # without metadata-only lengths. Real media failures still propagate.
+            if error.code() in (
+                grpc.StatusCode.UNIMPLEMENTED,
+                grpc.StatusCode.FAILED_PRECONDITION,
+            ):
+                return
+            raise
+        tokens, spans = multimodal_length_tokens(
+            list(request.token_ids),
+            mm_model_config.mm_sep_tokens,
+            mm_model_config.include_sep_tokens,
+            list(response.lengths),
+            max_seq_len,
+        )
+        input_py.mm_token_expansion = MultimodalTokenExpansion(
+            tokens, spans, length_only=True
+        )
+        host, port = address.rsplit(":", 1)
+        input_py.generate_config.role_addrs = [
+            role for role in roles if role.role != RoleType.PDFUSION
+        ] + [
+            RoleAddr(role=RoleType.PDFUSION, ip=host, http_port=0, grpc_port=int(port))
+        ]
 
     async def close(self) -> None:
         await self._channel_pool.close()

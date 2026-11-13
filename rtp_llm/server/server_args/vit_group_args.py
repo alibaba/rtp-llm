@@ -1,5 +1,6 @@
 import argparse
 import logging
+import math
 import os
 
 from rtp_llm.config.py_config_modules import (
@@ -69,6 +70,20 @@ def _positive_int(value):
     return parsed
 
 
+def _positive_finite_float(value):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"must be a positive finite number, got {value!r}"
+        )
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError(
+            f"must be a positive finite number, got {value!r}"
+        )
+    return parsed
+
+
 def _non_negative_int(value):
     """For the caps where 0 is meaningful ("unlimited"), unlike the timeouts."""
     try:
@@ -135,6 +150,46 @@ def init_vit_group_args(parser, vit_config):
         type=int,
         default=VitConfig.DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB,
         help="视频文件大小上限，单位为KB",
+    )
+    vit_group.add_argument(
+        "--mm_video_total_min_pixels",
+        env_name="MM_VIDEO_TOTAL_MIN_PIXELS",
+        bind_to=(vit_config, "mm_video_total_min_pixels"),
+        type=_non_negative_int,
+        default=0,
+        help="Qwen3-VL/Qwen3.5 total video pixel min budget (frames*height*width); 0 inherits the model",
+    )
+    vit_group.add_argument(
+        "--mm_video_total_max_pixels",
+        env_name="MM_VIDEO_TOTAL_MAX_PIXELS",
+        bind_to=(vit_config, "mm_video_total_max_pixels"),
+        type=_non_negative_int,
+        default=0,
+        help="Qwen3-VL/Qwen3.5 total video pixel max budget (frames*height*width); 0 inherits the model",
+    )
+    vit_group.add_argument(
+        "--mm_video_max_pixels_per_frame",
+        env_name="MM_VIDEO_MAX_PIXELS_PER_FRAME",
+        bind_to=(vit_config, "mm_video_max_pixels_per_frame"),
+        type=_non_negative_int,
+        default=0,
+        help="Qwen3-VL/Qwen3.5 maximum pixels per automatically resized video frame (0 disables the limit)",
+    )
+    vit_group.add_argument(
+        "--mm_video_fps",
+        env_name="MM_VIDEO_FPS",
+        bind_to=(vit_config, "mm_video_fps"),
+        type=_positive_finite_float,
+        default=2.0,
+        help="Qwen3-VL/Qwen3.5 default video sampling FPS; an explicit request fps overrides it",
+    )
+    vit_group.add_argument(
+        "--mm_video_max_frames",
+        env_name="MM_VIDEO_MAX_FRAMES",
+        bind_to=(vit_config, "mm_video_max_frames"),
+        type=_positive_int,
+        default=768,
+        help="Qwen3-VL/Qwen3.5 default maximum sampled frames; an explicit request max_frames overrides it",
     )
     vit_group.add_argument(
         "--mm_cache_item_num",

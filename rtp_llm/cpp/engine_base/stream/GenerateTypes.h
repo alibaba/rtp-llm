@@ -1,5 +1,6 @@
 #pragma once
 #include "rtp_llm/cpp/multimodal_processor/V41Input.h"
+#include <functional>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -30,6 +31,7 @@ struct RequestInfo {
 
 struct MultimodalTokenLayout {
     std::vector<std::pair<int32_t, int32_t>> spans;
+    bool                                     length_only = false;
 };
 
 class GenerateInput {
@@ -86,6 +88,11 @@ public:
         if (custom_output_token_position >= 0) {
             custom_output_token_position += prefix_length;
         }
+        if (multimodal_token_layout) {
+            for (auto& span : multimodal_token_layout->spans) {
+                span.first += prefix_length;
+            }
+        }
     }
 
 public:
@@ -104,6 +111,13 @@ public:
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
     std::optional<std::vector<torch::Tensor>>   mm_extra_input;
     std::optional<MultimodalTokenLayout>        multimodal_token_layout;
+    // Only called after bounded prefill admission; never captures an RPC context.
+    std::function<ErrorInfo(std::shared_ptr<GenerateInput>&)> prepare_multimodal;
+    // Shared by inputs owned by the same local processor. The scheduler groups
+    // only identical owners; results retain the original request ordering.
+    using PrepareMultimodalBatch = std::function<std::vector<ErrorInfo>(std::vector<std::shared_ptr<GenerateInput>>&)>;
+    std::shared_ptr<PrepareMultimodalBatch> prepare_multimodal_batch;
+    bool                                    multimodal_prepared_late = false;
 
     int     prefix_length        = 0;
     int64_t begin_time_us        = 0;

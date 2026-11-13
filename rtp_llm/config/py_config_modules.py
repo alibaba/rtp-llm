@@ -356,6 +356,13 @@ class VitConfig:
         self.mm_video_max_file_size_kb: int = (
             VitConfig.DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB
         )
+        # Qwen3-VL/Qwen3.5 total-video pixel budgets; 0 inherits the model.
+        self.mm_video_total_min_pixels: int = 0
+        self.mm_video_total_max_pixels: int = 0
+        self.mm_video_max_pixels_per_frame: int = 0
+        # Sampling defaults; explicit per-request values take precedence.
+        self.mm_video_fps: float = 2.0
+        self.mm_video_max_frames: int = 768
         self.mm_cache_item_num: int = 10
         self.mm_cache_gpu_max_bytes: int = VitConfig.DEFAULT_MM_CACHE_GPU_MAX_BYTES
         self.mm_cache_cpu_max_bytes: int = VitConfig.DEFAULT_MM_CACHE_CPU_MAX_BYTES

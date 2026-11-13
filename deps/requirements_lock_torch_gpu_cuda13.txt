@@ -653,6 +653,9 @@ filelock==3.20.0 \
 flash-attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1 \
     --hash=sha256:a45ff2133f720c0042971de1f3a1c987176d19b7305e440abeb04c33a813fad0
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
+flash-attn-4[cu13]==4.0.0b39 \
+    --hash=sha256:9c5e6f4479d81317a0d7da84d0cc33fe942f78d64c60a01bc409fc78d6aa8ea3
+    # via CUDA 13 vision dependencies
 flash-mla==1.0.0+9241ae3 \
     --hash=sha256:67bba01c854fe3b06397c297d49724e16029984a37124d05047a78ff48e7c44f
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
@@ -2732,6 +2735,9 @@ pygments==2.19.2 \
     --hash=sha256:636cb2477cec7f8952536970bc533bc43743542f70392ae026374600add5b887 \
     --hash=sha256:86540386c03d588bb81d44bc3928634ff26449851e99741617ecb9037ee5ec0b
     # via rich
+pynvvideocodec @ https://mirrors.aliyun.com/pypi/packages/3d/8b/aa04d63c7b74a1c20a7a1e8de93949a2097af02dc08a7446cfe5ee2faf67/pynvvideocodec-2.2.2-cp310-cp310-manylinux_2_28_x86_64.whl \
+    --hash=sha256:5bed2e612acb93b9e628a3793456ffeaa3c7780ff00be5546c7b87270b85a009
+    # via CUDA 13 vision dependencies
 pynvml==12.0.0 \
     --hash=sha256:299ce2451a6a17e6822d6faee750103e25b415f06f59abb8db65d30f794166f5 \
     --hash=sha256:fdff84b62a27dbe98e08e1a647eb77342bef1aebe0878bcd15e99a83fcbecb9e
@@ -2853,6 +2859,9 @@ pyyaml==6.0.2 \
     #   huggingface-hub
     #   timm
     #   transformers
+quack-kernels[cu13]==0.6.5 \
+    --hash=sha256:df1ddd31366c82eb9692fe087c671209189dcbde53c909c81a865d4ee66b158d
+    # via CUDA 13 vision dependencies
 referencing==0.37.0 \
     --hash=sha256:381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231 \
     --hash=sha256:44aefc3142c5b842538163acb373e24cce6632bd54bdb01b21ad5863489f50d8

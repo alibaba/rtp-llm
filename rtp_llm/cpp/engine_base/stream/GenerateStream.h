@@ -391,6 +391,13 @@ public:
         return reserve_step_;
     }
     StreamState moveToNext();
+    static void prepareLateMultimodalBatch(const std::vector<std::shared_ptr<GenerateStream>>& streams);
+    // Compute on private inputs; the returned completion installs results on the scheduler thread.
+    static std::function<void()>
+    prepareLateMultimodalBatchDeferred(const std::vector<std::shared_ptr<GenerateStream>>& streams);
+    std::shared_ptr<GenerateInput> beginLateMultimodal();
+    void finishLateMultimodal(const std::shared_ptr<GenerateInput>& prepared, const ErrorInfo& result);
+    bool hasPendingMultimodal() const;
 
     /** A PP stream stays inflight until dispatch has committed or discarded its returned result.
      * The release/acquire pair publishes that update before the stream can be rescheduled. */
@@ -1055,6 +1062,8 @@ protected:
 
     rtp_llm::DataType dtype_;
     size_t            hidden_size_;
+
+    int64_t processor_eos_token_id_ = -1;
 
     // just for bool test
     bool perf_test_ = false;

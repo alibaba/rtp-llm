@@ -280,6 +280,7 @@ message MultimodalTokenLayoutPB {
     reserved 1;
     // In ViT output segment order, including all segments of a video.
     repeated MultimodalTokenSpanPB spans = 2;
+    bool length_only = 3;
 }
 
 message V41ImageInputPB {
@@ -297,6 +298,11 @@ message V41RequestInputsPB {
     repeated sint32 token_types = 2;
     repeated bool image_mask = 3;
     repeated V41ImageInputPB images = 4;
+}
+
+message MultimodalLengthsPB {
+    // One integer for each complete output tensor, including video special tokens.
+    repeated int32 lengths = 1;
 }
 
 message GenerateInputPB {
@@ -1050,6 +1056,7 @@ message CancelResponsePB {
 }
 
 service RpcService {
+    rpc GetMultimodalLengths(GenerateInputPB) returns (MultimodalLengthsPB);
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc GenerateStreamCall(GenerateInputPB) returns (stream GenerateOutputsPB);

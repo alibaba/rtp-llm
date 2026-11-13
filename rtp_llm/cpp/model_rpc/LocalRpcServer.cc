@@ -295,6 +295,10 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
                                                          maga_init_params.model_config_.mm_model_config,
                                                          maga_init_params.model_config_.max_seq_len));
+        mm_batch_preparer_ = std::make_shared<GenerateInput::PrepareMultimodalBatch>(
+            [processor = mm_processor_](std::vector<std::shared_ptr<GenerateInput>>& inputs) {
+                return processor->updateMultimodalFeaturesBatch(inputs);
+            });
     } else if (mm_kind == MMProcessorKind::REMOTE) {
         mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config,
                                                           maga_init_params.model_config_.max_seq_len,
@@ -382,6 +386,45 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
     return grpc::Status::OK;
 }
 
+grpc::Status LocalRpcServer::GetMultimodalLengths(grpc::ServerContext*   context,
+                                                  const GenerateInputPB* request,
+                                                  MultimodalLengthsPB*   response) {
+    auto        local   = std::dynamic_pointer_cast<LocalMultimodalProcessor>(mm_processor_);
+    const auto& runtime = maga_init_params_.runtime_config;
+    if (!local || maga_init_params_.pd_sep_config.role_type != RoleType::PDFUSION || runtime.use_batch_decode_scheduler
+        || runtime.fifo_scheduler_config.prefill_chunk_size > 0 || maga_init_params_.parallelism_config.pp_size > 1) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                            "length-only multimodal input requires LOCAL PDFUSION scheduling");
+    }
+    try {
+        if (context && context->IsCancelled()) {
+            return grpc::Status(grpc::StatusCode::CANCELLED, "metadata request cancelled");
+        }
+        auto input = QueryConverter::transQuery(request);
+        if (!input->multimodal_inputs || input->multimodal_token_layout || input->v41_inputs || input->isGroup()) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "expected unexpanded multimodal inputs");
+        }
+        const auto lengths = local->tokenLengths(*input->multimodal_inputs);
+        if (lengths.size() != input->multimodal_inputs->size()) {
+            throw std::invalid_argument("multimodal length cardinality mismatch");
+        }
+        for (auto length : lengths) {
+            if (length <= 0) {
+                throw std::invalid_argument("multimodal length must be positive");
+            }
+            response->add_lengths(length);
+        }
+        return grpc::Status::OK;
+    } catch (const py::error_already_set& error) {
+        py::gil_scoped_acquire gil;
+        return grpc::Status(error.matches(PyExc_NotImplementedError) ? grpc::StatusCode::UNIMPLEMENTED :
+                                                                      grpc::StatusCode::INVALID_ARGUMENT,
+                            error.what());
+    } catch (const std::exception& error) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, error.what());
+    }
+}
+
 ErrorInfo LocalRpcServer::updateMultimodalFeaturesWithTrace(
     std::shared_ptr<GenerateInput>&                                     input,
     const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span,
@@ -429,6 +472,36 @@ ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB&                   
         if ((model_type == "qwen4_exp" || model_type == "qwen4_exp_mtp") && output->v41_inputs) {
             return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR,
                              "Qwen3.8-Flash-Next requires ordinary image/video media inputs");
+        }
+        if (output->multimodal_token_layout && output->multimodal_token_layout->length_only) {
+            const auto& runtime = maga_init_params_.runtime_config;
+            if (!std::dynamic_pointer_cast<LocalMultimodalProcessor>(mm_processor_)
+                || maga_init_params_.pd_sep_config.role_type != RoleType::PDFUSION || runtime.use_batch_decode_scheduler
+                || runtime.fifo_scheduler_config.prefill_chunk_size > 0
+                || maga_init_params_.parallelism_config.pp_size > 1 || output->v41_inputs || !output->multimodal_inputs
+                || output->isGroup()) {
+                return ErrorInfo(ErrorCode::INVALID_PARAMS, "unsupported length-only multimodal request");
+            }
+            if (output->input_ids.numel() >= maga_init_params_.model_config_.max_seq_len) {
+                return ErrorInfo(ErrorCode::MM_LONG_PROMPT_ERROR, "expanded multimodal input exceeds max_seq_len");
+            }
+            if (output->multimodal_token_layout->spans.size() != output->multimodal_inputs->size()
+                || output->multimodal_token_layout->spans.empty()) {
+                return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid length-only multimodal spans");
+            }
+            int64_t end = 0;
+            for (const auto& span : output->multimodal_token_layout->spans) {
+                if (span.first < end || span.second <= 0 || int64_t(span.first) + span.second > output->inputLength()) {
+                    return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid length-only multimodal span");
+                }
+                end = int64_t(span.first) + span.second;
+            }
+            auto processor             = mm_processor_;
+            output->prepare_multimodal = [processor](std::shared_ptr<GenerateInput>& prepared) {
+                return processor->updateMultimodalFeatures(prepared);
+            };
+            output->prepare_multimodal_batch = mm_batch_preparer_;
+            return ErrorInfo::OkStatus();
         }
         if (mm_processor_ != nullptr && (output->multimodal_inputs || output->v41_inputs)) {
             RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");

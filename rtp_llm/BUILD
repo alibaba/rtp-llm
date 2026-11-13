@@ -126,6 +126,8 @@ requirement([
     "xfastertransformer_devel_icx",
     "decord",
     "av",
+    "flash-attn-4",
+    "pynvvideocodec",
     # add qwen agent package
     "pydantic",
     "json5",
@@ -272,6 +274,10 @@ py_library(
         "multimodal/*.py",
         "multimodal/**/*.py",
     ]),
+    data = [
+        "multimodal/multimodal_mixins/qwen3_5_moe/FLASH_ATTENTION_LICENSE",
+        "multimodal/multimodal_mixins/qwen3_5_moe/vision_sources.json",
+    ],
     deps = [
         ":utils",
         ":Pillow",
@@ -282,7 +288,11 @@ py_library(
         ":torchvision",
         ":protobuf",
         ":pyOpenSSL",
+        ":flash-attn-4",
+        ":pynvvideocodec",
+        "//rtp_llm/models_py:utils",
     ] + select({
+        "@//:using_cuda13_arm": [":av"],
         "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cpu": [],

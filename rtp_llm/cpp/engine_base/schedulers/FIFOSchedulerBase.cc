@@ -368,6 +368,11 @@ std::unordered_set<GenerateStream*> FIFOSchedulerBase::evaluateWaitingStreams(li
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
         auto& stream = *it;
 
+        // Placeholder identities must never enter KV lookup or model execution.
+        if (stream->hasPendingMultimodal() && !stream->hasError()) {
+            ++it;
+            continue;
+        }
         const bool prefill_only = isPrefillOnly(stream);
         if (has_scheduling_type && scheduling_prefill_only != prefill_only) {
             ++it;

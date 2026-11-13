@@ -76,6 +76,7 @@ class MultimodalTokenExpansion:
     token_ids: Sequence[int]
     # (offset, length) in the expanded sequence, in ViT output segment order.
     spans: List[Tuple[int, int]]
+    length_only: bool = False
 
 
 @dataclass

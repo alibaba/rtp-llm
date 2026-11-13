@@ -69,6 +69,17 @@ _PPU_LOCK_SKIPPED = [
 
 def requirement(names):
     for name in names:
+        if name in ("flash-attn-4", "pynvvideocodec"):
+            native.py_library(
+                name = name,
+                deps = select({
+                    "@rtp_llm//:using_cuda13_x86": [requirement_gpu_cuda13(name)],
+                    "@rtp_llm//:using_cuda13_arm": [requirement_cuda13_arm(name)],
+                    "//conditions:default": [],
+                }),
+                visibility = ["//visibility:public"],
+            )
+            continue
         if name == "flash-mla-legacy":
             native.py_library(
                 name = name,
@@ -151,6 +162,9 @@ def whl_deps():
             "fast-hadamard-transform@https://pkg.flytiger-eco.com/artifactory/pypi_generic/fast_hadamard_transform/1.1.0.post2+v0.1.0.ppu2.2.0/fast_hadamard_transform-1.1.0.post2+cu130torch2.11.0alios7u2ce-cp312-cp312-linux_x86_64.whl#sha256=a310e83135c8cc717a6568ead29fd004839aa192d8ddc0f0cf99d077b6dc2294",
         ],
         "@rtp_llm//:using_cuda13_x86": [
+            "flash-attn-4[cu13]==4.0.0b39",
+            "quack-kernels[cu13]==0.6.5",
+            "pynvvideocodec @ https://mirrors.aliyun.com/pypi/packages/3d/8b/aa04d63c7b74a1c20a7a1e8de93949a2097af02dc08a7446cfe5ee2faf67/pynvvideocodec-2.2.2-cp310-cp310-manylinux_2_28_x86_64.whl",
             # torch 2.11+cu130 mirrored on OSS (artlab pytorch mirror has no cu130 yet,
             # source upstream is download.pytorch.org/whl/cu130).
             "torch==2.11.0+cu130",
@@ -176,6 +190,10 @@ def whl_deps():
             # flash_attn_3 remains deferred for torch2.11+cu130.
         ],
         "@rtp_llm//:using_cuda13_arm": [
+            "flash-attn-4[cu13]==4.0.0b39",
+            "quack-kernels[cu13]==0.6.5",
+            "pynvvideocodec @ https://mirrors.aliyun.com/pypi/packages/fb/3f/15eedb920e5852161ea51939a72e5717d946e44226f9456a7bf95f68f46f/pynvvideocodec-2.2.2-cp310-cp310-manylinux_2_28_aarch64.whl",
+            "av==16.1.0",
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
             # DeepGEMM with gated MegaMoE shared experts.

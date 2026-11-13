@@ -5,13 +5,20 @@ from dataclasses import dataclass
 import torch
 from PIL import Image, ImageOps
 
+from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.gpu_video import (
+    GpuVideoInput,
+    PreparedGpuVideo,
+    prepare_cpu_video,
+    prepare_gpu_video,
+)
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
+from rtp_llm.multimodal.qwen3_vl_video import resolve_video_size, video_timestamps
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
 @dataclass
 class Qwen4VisualInput:
-    pixels: torch.Tensor
+    pixels: torch.Tensor | GpuVideoInput | PreparedGpuVideo
     grid: torch.Tensor
     timestamps: list | None = None
 
@@ -72,7 +79,60 @@ def assemble_visual_embedding(data, features, positions, processor, text_embeddi
     return output, torch.cat(coordinates), token_ids
 
 
-def preprocess_qwen4(mm_inputs, vit_config, processor):
+def _qwen4_image_size(image_processor, config):
+    size = dict(image_processor.size)
+    if config.min_pixels > 0:
+        size["shortest_edge"] = config.min_pixels
+    if config.max_pixels > 0:
+        size["longest_edge"] = config.max_pixels
+    return size
+
+
+def qwen4_token_length(item, vit_config, processor, video_backend):
+    if item.mm_type == MMUrlType.VIDEO:
+        from rtp_llm.multimodal.qwen35_token_length import token_length
+
+        vp = processor.video_processor
+        return token_length(
+            item, vit_config, processor, vp.patch_size * vp.merge_size, video_backend
+        )
+    if item.mm_type not in (MMUrlType.DEFAULT, MMUrlType.IMAGE):
+        raise ValueError("Qwen4 supports image and video inputs")
+
+    config = item.mm_preprocess_config
+    ip = processor.image_processor
+    factor = ip.patch_size * ip.merge_size
+    if config.height > 0 and config.width > 0:
+        from rtp_llm.multimodal.multimodal_mixins.qwen2_5_vl.qwen2_5_vl_mixin import (
+            smart_resize,
+        )
+
+        height, width = smart_resize(config.height, config.width, factor=factor)
+    else:
+        from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
+
+        content = get_bytes_io_from_url(
+            item.url,
+            vit_config.download_headers,
+            max_file_size_kb=vit_config.mm_image_max_file_size_kb,
+        )
+        with Image.open(content) as image:
+            width, height = image.size
+            if image.getexif().get(274) in (5, 6, 7, 8):
+                height, width = width, height
+        if ip.do_resize:
+            size = _qwen4_image_size(ip, config)
+            height, width = smart_resize(
+                height,
+                width,
+                factor=factor,
+                min_pixels=size["shortest_edge"],
+                max_pixels=size["longest_edge"],
+            )
+    return (height // factor) * (width // factor) + 2
+
+
+def preprocess_qwen4(mm_inputs, vit_config, processor, video_backend="cpu"):
     if len(mm_inputs) != 1:
         raise ValueError("Qwen4 preprocess expects one media item")
     item = mm_inputs[0]
@@ -80,13 +140,6 @@ def preprocess_qwen4(mm_inputs, vit_config, processor):
     if item.mm_type not in (MMUrlType.DEFAULT, MMUrlType.IMAGE, MMUrlType.VIDEO):
         raise ValueError("Qwen4 supports image and video inputs")
     config = item.mm_preprocess_config
-    size = dict(
-        (processor.video_processor if video else processor.image_processor).size
-    )
-    if config.min_pixels > 0:
-        size["shortest_edge"] = config.min_pixels
-    if config.max_pixels > 0:
-        size["longest_edge"] = config.max_pixels
     content = get_bytes_io_from_url(
         item.url,
         vit_config.download_headers,
@@ -98,37 +151,24 @@ def preprocess_qwen4(mm_inputs, vit_config, processor):
     )
     timestamps = None
     if video:
-        from decord import VideoReader, cpu
-        from transformers.video_utils import VideoMetadata
-
-        reader = VideoReader(content, ctx=cpu(0), num_threads=1)
-        fps = float(reader.get_avg_fps())
-        if fps <= 0 or len(reader) == 0:
-            raise ValueError("video must have frames and a valid source FPS")
         vp = processor.video_processor
-        metadata = VideoMetadata(total_num_frames=len(reader), fps=fps)
-        desired_fps = config.fps if config.fps > 0 else vp.fps
-        minimum = config.min_frames if config.min_frames > 0 else vp.min_frames
-        maximum = config.max_frames if config.max_frames > 0 else vp.max_frames
-        count = min(
-            max(int(len(reader) / fps * desired_fps), minimum), maximum, len(reader)
+        size = resolve_video_size(
+            vp,
+            vit_config.mm_video_total_min_pixels,
+            vit_config.mm_video_total_max_pixels,
+            vit_config.mm_video_max_pixels_per_frame,
         )
-        indices = vp.sample_frames(metadata, num_frames=count).tolist()
-        frames = torch.from_numpy(reader.get_batch(indices).asnumpy()).permute(
-            0, 3, 1, 2
-        )
-        metadata.frames_indices = indices
-        result = vp(
-            videos=[frames],
-            video_metadata=[metadata],
-            do_sample_frames=False,
-            return_metadata=True,
+        prepare = prepare_gpu_video if video_backend == "nvdec" else prepare_cpu_video
+        pixels, grid = prepare(
+            content.getvalue(),
+            config,
+            vp,
+            vp.patch_size * vp.merge_size,
             size=size,
-            return_tensors="pt",
+            vit_config=vit_config,
         )
-        pixels, grid = result["pixel_values_videos"], result["video_grid_thw"]
-        timestamps = processor._calculate_timestamps(
-            indices, fps, vp.temporal_patch_size
+        timestamps = video_timestamps(
+            pixels.frame_indices, pixels.source_fps, vp.temporal_patch_size
         )
     else:
         image = ImageOps.exif_transpose(Image.open(content)).convert("RGB")
@@ -148,7 +188,9 @@ def preprocess_qwen4(mm_inputs, vit_config, processor):
             )
         else:
             result = processor.image_processor(
-                images=[image], size=size, return_tensors="pt"
+                images=[image],
+                size=_qwen4_image_size(processor.image_processor, config),
+                return_tensors="pt",
             )
         pixels, grid = result["pixel_values"], result["image_grid_thw"]
     return Qwen4VisualInput(pixels, grid, timestamps)

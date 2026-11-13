@@ -398,6 +398,9 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
             continue;
         }
 
+        if (stream->hasPendingMultimodal()) {
+            continue;
+        }
         const bool prefill_only = isPrefillOnly(stream);
         if (has_execution_mode && scheduling_prefill_only != prefill_only) {
             continue;
@@ -640,6 +643,43 @@ bool FIFOScheduler::partitionChunkContinuations() {
     return false;
 }
 
+std::vector<GenerateStreamPtr> FIFOScheduler::selectMultimodalCandidates() const {
+    std::vector<GenerateStreamPtr> candidates;
+    if (!running_streams_.empty() || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
+        || !waiting_group_queue_.empty()) {
+        return candidates;
+    }
+    // Retain one bounded prepared cohort through KV shortage, without re-running ViT.
+    for (const auto& stream : waiting_streams_) {
+        if (!stream->hasError() && stream->generateInput()->multimodal_prepared_late) {
+            return candidates;
+        }
+    }
+    ScheduleRuntime budget;
+    for (const auto& stream : waiting_streams_) {
+        if (stream->hasError()) {
+            continue;
+        }
+        if ((max_batch_tokens_without_cache_ > 0
+             && budget.admitted_prefill_token_size_without_cache >= max_batch_tokens_without_cache_)
+            || (max_inited_kv_cache_streams_ > 0
+                && budget.admitted_stream_count >= max_inited_kv_cache_streams_)
+            || !evaluateRunningBatch(budget, stream)) {
+            continue;
+        }
+        ++budget.admitted_stream_count;
+        budget.admitted_prefill_token_size_with_cache += prefillTokenCostWithCache(stream);
+        budget.admitted_prefill_max_seq_len_with_cache =
+            std::max(budget.admitted_prefill_max_seq_len_with_cache, prefillSeqLenWithCache(stream));
+        budget.admitted_prefill_sequence_count += stream->currentBatchSize();
+        budget.admitted_prefill_token_size_without_cache += prefillTokenCostWithoutCache(stream);
+        if (stream->hasPendingMultimodal()) {
+            candidates.push_back(stream);
+        }
+    }
+    return candidates;
+}
+
 absl::StatusOr<ScheduleOutput> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
     if (need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
@@ -693,6 +733,13 @@ absl::StatusOr<ScheduleOutput> FIFOScheduler::schedule() {
         }
         // RUNNING -> DONE: error / finished
         evaluateAndUpdateStreams(running_streams_);
+    }
+
+    const auto multimodal_candidates = selectMultimodalCandidates();
+    if (!multimodal_candidates.empty()) {
+        lock.unlock();
+        GenerateStream::prepareLateMultimodalBatch(multimodal_candidates);
+        lock.lock();
     }
 
     const size_t waiting_size_before_admission = waiting_streams_.size();

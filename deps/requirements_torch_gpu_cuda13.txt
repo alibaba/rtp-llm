@@ -65,3 +65,8 @@ tabulate==0.9.0
 # tensorrt 10.x cu12 series — drop for cuda13 (use TRT-LLM plugins via C++ side).
 # multimodal video decode (matches deps/requirements_base.txt on main)
 av==16.1.0 ; platform_machine == "x86_64"
+
+# CUDA 13 vision attention and video preprocessing.
+flash-attn-4[cu13]==4.0.0b39
+quack-kernels[cu13]==0.6.5
+pynvvideocodec @ https://mirrors.aliyun.com/pypi/packages/3d/8b/aa04d63c7b74a1c20a7a1e8de93949a2097af02dc08a7446cfe5ee2faf67/pynvvideocodec-2.2.2-cp310-cp310-manylinux_2_28_x86_64.whl

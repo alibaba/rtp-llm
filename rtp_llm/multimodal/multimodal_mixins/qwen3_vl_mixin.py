@@ -1,6 +1,4 @@
-import json
 import logging
-import os
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -26,6 +24,11 @@ from rtp_llm.multimodal.multimodal_mixins.qwen2_5_vl.qwen2_5_vl_mixin import (
     smart_resize,
 )
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
+from rtp_llm.multimodal.qwen3_vl_video import (
+    decode_video,
+    resize_video,
+    resolve_video_size,
+)
 from rtp_llm.multimodal.vit_metrics import (
     record_vit_preprocess_value,
     vit_preprocess_timer,
@@ -78,6 +81,7 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         vit_config: VitConfig,
         processor,
         factor: int = 32,
+        return_video_metadata: bool = False,
     ):
         assert len(mm_inputs) == 1
         mm_input = mm_inputs[0]
@@ -93,15 +97,13 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
                 )
             with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC, tags):
                 image = Image.open(image_data)
-            if (
-                mm_input.mm_preprocess_config.height != -1
-                and mm_input.mm_preprocess_config.width != -1
-            ):
-                resized_height, resized_width = smart_resize(
-                    mm_input.mm_preprocess_config.height,
-                    mm_input.mm_preprocess_config.width,
-                    factor=factor,
-                )
+            from rtp_llm.multimodal.qwen35_token_length import image_resize_plan
+
+            width, height = image.size
+            resized_height, resized_width, do_resize = image_resize_plan(
+                height, width, mm_input.mm_preprocess_config, factor
+            )
+            if not do_resize:
                 with vit_preprocess_timer(
                     GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC, tags
                 ):
@@ -111,39 +113,6 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
                     resized_width * resized_height,
                     tags,
                 )
-                do_resize = False
-            elif (
-                mm_input.mm_preprocess_config.max_pixels != -1
-                or mm_input.mm_preprocess_config.min_pixels != -1
-            ):
-                width, height = image.size
-                min_pixels = (
-                    0
-                    if mm_input.mm_preprocess_config.min_pixels == -1
-                    else mm_input.mm_preprocess_config.min_pixels
-                )
-                max_pixels = (
-                    0x7FFFFFFF
-                    if mm_input.mm_preprocess_config.max_pixels == -1
-                    else mm_input.mm_preprocess_config.max_pixels
-                )
-                resized_height, resized_width = smart_resize(
-                    height,
-                    width,
-                    factor=factor,
-                    min_pixels=min_pixels,
-                    max_pixels=max_pixels,
-                )
-                with vit_preprocess_timer(
-                    GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC, tags
-                ):
-                    image = image.resize((resized_width, resized_height))
-                record_vit_preprocess_value(
-                    GaugeMetrics.VIT_RESIZED_PIXEL_COUNT_METRIC,
-                    resized_width * resized_height,
-                    tags,
-                )
-                do_resize = False
             with vit_preprocess_timer(
                 GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC, tags
             ):
@@ -159,17 +128,40 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
                     vit_config.download_headers,
                     max_file_size_kb=vit_config.mm_video_max_file_size_kb,
                 )
-            video = Qwen3_VLImageEmbedding.load_video(
-                video_data,
-                mm_input.mm_preprocess_config,
-                vit_metrics_tags=tags,
+            size = resolve_video_size(
+                processor.video_processor,
+                vit_config.mm_video_total_min_pixels,
+                vit_config.mm_video_total_max_pixels,
+                vit_config.mm_video_max_pixels_per_frame,
+            )
+            with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC, tags):
+                video, metadata = decode_video(
+                    video_data, mm_input.mm_preprocess_config, vit_config=vit_config
+                )
+            with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC, tags):
+                video = resize_video(
+                    video,
+                    mm_input.mm_preprocess_config,
+                    processor.video_processor,
+                    size,
+                )
+            record_vit_preprocess_value(
+                GaugeMetrics.VIT_RESIZED_PIXEL_COUNT_METRIC,
+                video.shape[0] * video.shape[-2] * video.shape[-1],
+                tags,
             )
             with vit_preprocess_timer(
                 GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC, tags
             ):
                 res = processor.video_processor(
-                    video, return_tensors="pt", do_resize=True
+                    video,
+                    return_tensors="pt",
+                    do_resize=False,
+                    do_sample_frames=False,
+                    video_metadata=metadata,
                 )
+            if return_video_metadata:
+                return res["pixel_values_videos"], res["video_grid_thw"], metadata
             return res["pixel_values_videos"], res["video_grid_thw"]
         else:
             raise Exception("unknown mm url type")

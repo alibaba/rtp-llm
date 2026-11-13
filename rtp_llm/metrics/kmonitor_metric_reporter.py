@@ -24,6 +24,14 @@ def qos_priority_tag(qos_level: Any) -> str:
 
 
 class AccMetrics(Enum):
+    VIT_CUDA_GRAPH_CAPTURE_QPS_METRIC = "py_rtp_vit_cuda_graph_capture_qps"
+    VIT_CUDA_GRAPH_FALLBACK_QPS_METRIC = "py_rtp_vit_cuda_graph_fallback_qps"
+    VIT_CUDA_GRAPH_HIT_QPS_METRIC = "py_rtp_vit_cuda_graph_hit_qps"
+    VIT_CUDA_GRAPH_MISS_QPS_METRIC = "py_rtp_vit_cuda_graph_miss_qps"
+    VIT_GRAPH_EVENT_QPS_METRIC = "vit_graph_event_qps"
+    VIT_PREPROCESS_METRIC_DROPPED_QPS_METRIC = (
+        "py_rtp_vit_preprocess_metric_dropped_qps"
+    )
     CANCEL_QPS_METRIC = "py_rtp_cancal_qps_metric"
     SUCCESS_QPS_METRIC = "py_rtp_success_qps_metric"
     QPS_METRIC = "py_rtp_framework_qps"
@@ -84,6 +92,8 @@ class AccMetrics(Enum):
 
 
 class GaugeMetrics(Enum):
+    VIT_CUDA_GRAPH_PADDING_RATIO_METRIC = "py_rtp_vit_cuda_graph_padding_ratio"
+    VIT_VIDEO_FRAME_COUNT_METRIC = "py_rtp_vit_video_frame_count"
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
     RESPONSE_ITER_RT_METRIC = "py_rtp_response_iterate_rt"
     RESPONSE_ITERATE_COUNT = "py_rtp_response_iterate_count"

@@ -231,3 +231,20 @@ py_test(
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
 )
+
+[
+    py_test(
+        name = name,
+        srcs = [name + ".py"],
+        deps = ["//rtp_llm:testlib"],
+    )
+    for name in [
+        "qwen35_gpu_video_test",
+    "qwen35_late_vit_acceptance_test",
+    "qwen35_token_length_test",
+        "qwen35_vision_graph_test",
+        "qwen35_vision_kernels_test",
+        "qwen35_vit_test",
+        "qwen3_video_preprocess_test",
+    ]
+]
