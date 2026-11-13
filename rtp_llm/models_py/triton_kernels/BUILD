@@ -51,7 +51,16 @@ py_library(
 py_library(
     name = "glm53_kda",
     srcs = glob(["glm53_kda/*.py"]),
-    deps = [":autotune_cache", ":common", ":fla"],
+    deps = [
+        ":autotune_cache",
+        ":common",
+        ":fla",
+        "//rtp_llm/models_py:dsv4_forward_metadata",
+    ],
+    visibility = [
+        "//rtp_llm/models_py/triton_kernels/glm53_kda/test:__pkg__",
+        "//rtp_llm/models_py/triton_kernels/test:__pkg__",
+    ],
 )
 
 py_library(
