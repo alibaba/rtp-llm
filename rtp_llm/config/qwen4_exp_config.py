@@ -5,6 +5,7 @@ known. Target and draft build independent snapshots; pickle preserves them.
 """
 
 import json
+import os
 from copy import deepcopy
 from dataclasses import dataclass
 
@@ -23,6 +24,13 @@ def ple_eos_token_id(config):
     if eos is None:
         eos = getattr(getattr(config, "special_tokens", None), "eos_token_id", None)
     return eos
+
+
+def uses_fp8_ple_table(config):
+    return bool(
+        getattr(config, "_qwen4_full_fp8_nvfp4", False)
+        or getattr(config, "_qwen4_mxfp4_source", False)
+    )
 
 
 class Qwen4ModelConfig(ModelConfig):
@@ -211,11 +219,37 @@ def is_qwen4_precision_recipe(quant):
 
 
 def resolve_qwen4_parallelism(config, parallelism):
-    """Give loading and execution the same model-owned NVFP4 layout."""
+    """Use the same expert placement for checkpoint loading and execution."""
     resolved = deepcopy(parallelism)
     # ParallelismConfig's pickle state omits local_rank. Preserve the selected
     # device when making a model-owned copy instead of restoring rank zero.
     resolved.local_rank = parallelism.local_rank
+    if getattr(config, "_qwen4_mxfp4_source", False):
+        cp = resolved.prefill_cp_config
+        linear = config.linear_attention_config
+        tp_ep = resolved.dp_size == 1 and resolved.tp_size == resolved.world_size
+        dp_ep = resolved.tp_size == 1 and resolved.dp_size == resolved.world_size
+        if (
+            not (tp_ep or dp_ep)
+            or resolved.pp_size != 1
+            or resolved.world_size != resolved.ep_size
+            or resolved.ep_size <= 1
+            or config.expert_num % resolved.ep_size
+            or config.attn_config.head_num % resolved.tp_size
+            or linear.linear_num_key_heads % resolved.tp_size
+            or linear.linear_num_value_heads % resolved.tp_size
+            or cp.is_enabled()
+            or cp.is_prefill_enabled()
+        ):
+            raise ValueError(
+                "Qwen4 MXFP4 MegaMoE requires TP=EP or DP=EP, "
+                "evenly sharded heads and experts, and no PP/CP"
+            )
+        if not os.environ.get("QWEN4_PLE_SHARED_TABLE"):
+            raise ValueError("Qwen4 MXFP4 requires QWEN4_PLE_SHARED_TABLE")
+        resolved.ffn_tp_size = 1
+        resolved.ffn_tp_rank = 0
+        return resolved
     if not is_qwen4_precision_recipe(
         getattr(config, "quant_config", None)
     ) and not getattr(config, "_qwen4_nvfp4_source", False):
@@ -290,6 +324,12 @@ def validate_qwen4_runtime(config, parallelism):
         or (not config.is_mtp and not config.enable_qwen4_ple)
     ):
         raise RuntimeError("qwen4_exp requires complete checkpoint PLE/QSA geometry")
+    if getattr(config, "_qwen4_mxfp4_source", False):
+        if (
+            not torch.cuda.is_available()
+            or torch.cuda.get_device_capability(parallelism.local_rank)[0] != 10
+        ):
+            raise RuntimeError("Qwen4 MXFP4 requires an NVIDIA SM10x GPU")
     full_fp8 = bool(getattr(config, "_qwen4_full_fp8_nvfp4", False))
     quant = getattr(config, "quant_config", None)
     if full_fp8 and getattr(config, "tie_word_embeddings", False):

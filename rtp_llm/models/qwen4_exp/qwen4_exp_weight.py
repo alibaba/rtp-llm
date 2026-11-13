@@ -1,13 +1,20 @@
+import hashlib
+import json
+import os
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Collection, Dict, List, Optional, Union
 
 import torch
 
+from rtp_llm.config.qwen4_exp_config import uses_fp8_ple_table
+from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.qwen3_next.qwen3_next_weight import Qwen35MoeWeight
 from rtp_llm.ops import HybridAttentionType
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, stack_, stack_moe_w1
 
 # Verified against Qwen/Qwen3.8-Flash-Next model.safetensors.index.json; the
 # bring-up status and revisit list live in
@@ -57,6 +64,29 @@ _PLE_WEIGHTS = (
 _PLE_NGRAM_SHARD_KEY = "ple_embedding.ngram_embedding.shard_{s}.weight"
 
 
+@lru_cache(maxsize=1)
+def _shared_ple_table(
+    manifest_path: str, checkpoint_path: str
+) -> tuple[torch.Tensor, dict]:
+    manifest = json.loads(Path(manifest_path).read_text())
+    root = Path(checkpoint_path)
+    for field, name in (
+        ("checkpoint_index_sha256", "model.safetensors.index.json"),
+        ("checkpoint_config_sha256", "config.json"),
+    ):
+        if (
+            manifest.get(field)
+            != hashlib.sha256((root / name).read_bytes()).hexdigest()
+        ):
+            raise ValueError("Qwen4 shared PLE manifest does not match checkpoint")
+    path = manifest["path"]
+    table = torch.from_file(
+        path, shared=True, size=os.stat(path).st_size, dtype=torch.uint8
+    )
+    table.untyped_storage()._qwen4_ple_shared = True
+    return table, manifest["entries"]
+
+
 class Qwen4ExpPleNgramWeight(AtomicWeight):
     """Load only this TP rank's PLE table shards, without concatenating them.
 
@@ -81,6 +111,7 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
         *,
         scale_weight: Optional[CkptWeightInfo] = None,
         preserve_fp8: bool = False,
+        shared_ple_checkpoint: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
         if "cpu_offload" in kwargs:
@@ -89,6 +120,7 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
         self.resident_device = "cpu"
         self.scale_weight = scale_weight
         self.preserve_fp8 = preserve_fp8
+        self.shared_ple_checkpoint = shared_ple_checkpoint
         self.resident_output_devices = (
             {W.qwen4_ple_ngram_scale: "cpu"} if preserve_fp8 else {}
         )
@@ -159,12 +191,22 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
             if scale is None:
                 raise ValueError("FP8 PLE storage requires its checkpoint global scale")
             result[W.qwen4_ple_ngram_scale] = scale.to(device="cpu")
+        shared = None
+        if self.shared_ple_checkpoint is not None:
+            shared = _shared_ple_table(
+                os.environ["QWEN4_PLE_SHARED_TABLE"], self.shared_ple_checkpoint
+            )
         for shard_index in self._local_shard_range(load_config):
             ckpt_weight = self.weights[shard_index]
             tensor_name = ckpt_weight.tensor_name(layer_id)
-            shard = ckpt_weight.merge_fun(
-                tensor_source.load_tensor(tensor_name, convert_type)
-            )
+            if shared is None:
+                shard = ckpt_weight.merge_fun(
+                    tensor_source.load_tensor(tensor_name, convert_type)
+                )
+            else:
+                table, entries = shared
+                offset, length, shape = entries[tensor_name]
+                shard = table.narrow(0, offset, length).view(convert_type).view(shape)
             if not isinstance(shard, torch.Tensor):
                 raise TypeError(
                     f"qwen4_exp PLE shard {tensor_name!r} did not load as a tensor"
@@ -198,6 +240,19 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
         return tensor
 
 
+class _PackedExpertWeight(MoeAtomicWeight):
+    """Preserve checkpoint bytes and let the FP8/FP4 executor set its layout."""
+
+    supports_fastsafetensors_iteration = False
+
+    def _postprocess(self, tensor, device, load_config):
+        raw = tensor[self.name] if isinstance(tensor, dict) else tensor
+        dtype = (
+            torch.float8_e8m0fnu if self.name in (W.moe_s1, W.moe_s2) else torch.int8
+        )
+        return {self.name: raw.view(dtype)}
+
+
 class Qwen4ExpWeight(Qwen35MoeWeight):
     """Qwen3.8-Flash-Next weight loading.
 
@@ -229,6 +284,30 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
             self.model_config, "_qwen4_nvfp4_source", False
         ):
             self._align_size = 0
+
+    def _create_moe_expert_weights(self, moe_config):
+        if not getattr(self.model_config, "_qwen4_mxfp4_source", False):
+            return super()._create_moe_expert_weights(moe_config)
+        prefix = self.prefix + "layers.{i}.mlp.experts.{expert_id}."
+        specs = (
+            (W.moe_w1, ("gate", "up"), "weight", stack_moe_w1),
+            (W.moe_s1, ("gate", "up"), "weight_scale", stack_moe_w1),
+            (W.moe_w2, ("down",), "weight", stack_),
+            (W.moe_s2, ("down",), "weight_scale", stack_),
+        )
+        return [
+            _PackedExpertWeight(
+                name,
+                [
+                    CkptWeightInfo(prefix + f"{projection}_proj.{suffix}")
+                    for projection in projections
+                ],
+                process_fun=stack,
+                config=moe_config,
+                data_type=torch.uint8,
+            )
+            for name, projections, suffix, stack in specs
+        ]
 
     def _process_meta(self, meta_dict: Any, weight_keys: Collection[str]):
         for key in weight_keys:
@@ -361,6 +440,7 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
                 "qwen4_exp: PLE layers present but split_ngram_parts is not "
                 "configured; cannot map the n-gram table shards"
             )
+        preserve_fp8 = uses_fp8_ple_table(self.model_config)
         for layer_id in ple_ids:
             idx = layer_id - 1  # upstream ids are 1-based
             weights = layer_weights[idx]
@@ -389,10 +469,14 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
                             + "layers.{i}.ple.ple_embedding.ngram_embedding.weight_scale"
                         )
                         if getattr(self.model_config, "_qwen4_fp8_source", False)
+                        or preserve_fp8
                         else None
                     ),
-                    preserve_fp8=bool(
-                        getattr(self.model_config, "_qwen4_full_fp8_nvfp4", False)
+                    preserve_fp8=preserve_fp8,
+                    shared_ple_checkpoint=(
+                        self.model_config.ckpt_path
+                        if getattr(self.model_config, "_qwen4_mxfp4_source", False)
+                        else None
                     ),
                 )
             )

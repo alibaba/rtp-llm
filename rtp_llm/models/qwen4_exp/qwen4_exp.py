@@ -8,6 +8,7 @@ from rtp_llm.config.qwen4_exp_config import (
     build_qwen4_quant_config,
     freeze_runtime_config,
     resolve_qwen4_parallelism,
+    uses_fp8_ple_table,
     validate_qwen4_runtime,
 )
 from rtp_llm.model_factory_register import register_model
@@ -46,6 +47,13 @@ class Qwen4Exp(Qwen35Moe):
 
     def support_pp(self) -> bool:
         return False
+
+    def create_model_loader(self):
+        return super().create_model_loader(
+            release_safetensor_handles_per_layer=getattr(
+                self.model_config, "_qwen4_mxfp4_source", False
+            )
+        )
 
     def support_cuda_graph(self) -> bool:
         # Capability only; common graph settings decide capture.
@@ -111,12 +119,32 @@ class Qwen4Exp(Qwen35Moe):
             and source_quant.get("quant_method") == "modelopt"
             and str(source_quant.get("quant_algo", "")).upper() == "NVFP4"
         )
-        config._qwen4_fp8_source = bool(source_quant) and not config._qwen4_nvfp4_source
+        config._qwen4_mxfp4_source = bool(
+            source_quant and source_quant.get("quant_method") == "mxfp4"
+        )
+        if (
+            config._qwen4_mxfp4_source
+            and source_quant.get("ple_quant_scheme") != "fp8_pertensor"
+        ):
+            raise ValueError("Qwen4 MXFP4 requires per-tensor FP8 PLE")
+        config._qwen4_fp8_source = (
+            bool(source_quant)
+            and not config._qwen4_nvfp4_source
+            and not config._qwen4_mxfp4_source
+        )
         cls._configure_precision_recipe(config)
         return config
 
     @staticmethod
     def _configure_precision_recipe(config: ModelConfig) -> None:
+        if getattr(config, "_qwen4_mxfp4_source", False):
+            if config.quantization:
+                raise ValueError("Qwen4 MXFP4 uses the checkpoint's native precision")
+            config._qwen4_dense_storage = "source_bf16"
+            config.dense_weight_dtype = "bf16"
+            config.expert_weight_dtype = "fp4"
+            config.moe_w1_layout = "gate_up"
+            return
         if getattr(config, "_qwen4_nvfp4_source", False):
             from rtp_llm.config.quant_config import ModelOptFp4Config
 
@@ -248,9 +276,7 @@ class Qwen4Exp(Qwen35Moe):
         config._extra_weight_param_count = (
             table_params + auxiliary_bf16_params + metadata_params
         )
-        table_bytes = float(
-            table_params * (1 if getattr(config, "_qwen4_full_fp8_nvfp4", False) else 2)
-        )
+        table_bytes = float(table_params * (1 if uses_fp8_ple_table(config) else 2))
         replicated_bytes = float(auxiliary_bf16_params * 2 + metadata_params * 8)
         config._extra_weight_bytes = table_bytes + replicated_bytes
         # Size/parameter APIs describe the full checkpoint independently of

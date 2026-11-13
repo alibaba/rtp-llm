@@ -219,6 +219,9 @@ class QuantizationConfig(ABC):
 
         if quant_config is None:
             return None
+        if quant_method == "mxfp4" and config_json.get("model_type") == "qwen4_exp":
+            # Qwen4 maps packed MoE and PLE weights while dense layers stay BF16.
+            return None
         group_size = quant_config["group_size"] if "group_size" in quant_config else 0
         bits = quant_config["bits"] if "bits" in quant_config else 0
         if quant_method == "fp8":

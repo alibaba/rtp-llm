@@ -603,6 +603,7 @@ class ModelLoader:
                 results = self._load_layer_weights(id, device)
                 for name, tensor in results.items():
                     yield (id, name, tensor)
+                self._load_config.database.finish_loading_layer()
 
         for weight in self._model_weights_info.weights:
             if self._maybe_skip_weight(weight):
@@ -944,13 +945,6 @@ class ModelLoader:
             phy2log_path=phy2log_path,
         )
 
-        # dynamic expert balancer
-        from rtp_llm.eplb.ep_balancer import ExpertBalancer
-
-        model_path = self.model_config.ckpt_path
-        ep_lb_database = CkptDatabase(model_path)
-        compute_dtype = self.model_config.compute_dtype
-
         moe_layer_index = [
             layer_id
             for layer_id in weights_info.moe_layer_index_
@@ -962,11 +956,13 @@ class ModelLoader:
             and weights_info.moe_style_ != 0
             and moe_layer_index
         ):
+            from rtp_llm.eplb.ep_balancer import ExpertBalancer
+
             py_eplb = ExpertBalancer(
                 weights_info=weights_info,
-                compute_dtype=compute_dtype,
+                compute_dtype=self.model_config.compute_dtype,
                 phy2log=phy2log,
-                database=ep_lb_database,
+                database=CkptDatabase(self.model_config.ckpt_path),
                 model_config=self.model_config,
             )
         return py_eplb, phy2log

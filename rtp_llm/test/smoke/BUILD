@@ -171,6 +171,16 @@ test_suite(
     ]
 ]
 
+# Manual DP8/EP8 text smoke. Set QWEN4_M11_CHECKPOINT and QWEN4_PLE_SHARED_TABLE.
+custom_smoke_test(
+    name = "qwen4_m11_mxfp4_sm10x",
+    main = "qwen4_m11_smoke_test.py",
+    smoke_args = "--load_method scratch --act_type BF16 --tp_size 1 --dp_size 8 --ep_size 8 --world_size 8 --moe_strategy mega_moe --use_deepep_moe 0 --vit_separation 2 --max_seq_len 8192 --max_batch_tokens_size 8192 --seq_size_per_block 128 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 8192 --linear_pool_blocks 8 --enable_fp32_lm_head 0 --enable_cuda_graph 0 --warm_up 0",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual"],
+    data = ["//rtp_llm:sdk"],
+)
+
 # Frontend, a real FlexLB master, separate prefill/decode, and two ViT workers.
 # Five real requests with the same image check that FlexLB keeps sending
 # image computation to the ViT that already owns the cached embeddings.

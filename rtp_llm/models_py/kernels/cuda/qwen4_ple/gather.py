@@ -1,10 +1,37 @@
 """Fixed-shape, graph-capturable lookup into the TP-local PLE row shards."""
 
 import ctypes
+import mmap
+import weakref
 
 import torch
 import triton
 import triton.language as tl
+
+_MAX_SHARD_WIDTH = 512
+
+
+def _register_shared_fp8_table(shard: torch.Tensor, runtime: ctypes.CDLL) -> None:
+    # Views of one file mapping share its storage. Register the mapping once
+    # per process rather than copying or registering overlapping shard views.
+    storage = shard.untyped_storage()
+    if getattr(storage, "_qwen4_ple_registered", False):
+        return
+    register = runtime.cudaHostRegister
+    register.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
+    register.restype = ctypes.c_int
+    unregister = runtime.cudaHostUnregister
+    unregister.argtypes = [ctypes.c_void_p]
+    unregister.restype = ctypes.c_int
+    address = storage.data_ptr()
+    size = storage.nbytes()
+    assert address % mmap.PAGESIZE == 0
+    code = register(address, size, 3)  # Portable | Mapped
+    if code:
+        raise RuntimeError(f"Registering shared Qwen4 PLE table failed: CUDA {code}")
+    finalizer = weakref.finalize(storage, unregister, address)
+    finalizer.atexit = False
+    storage._qwen4_ple_registered = True
 
 
 @triton.jit(do_not_specialize=["N"])
@@ -64,7 +91,7 @@ def is_supported(ids: torch.Tensor, shards: list[torch.Tensor]) -> bool:
     shape = shards[0].shape
     return (
         len(shape) == 2
-        and 0 < shape[1] <= 256
+        and 0 < shape[1] <= _MAX_SHARD_WIDTH
         and all(
             (
                 (shard.is_cuda and shard.device == ids.device)
@@ -119,6 +146,8 @@ def gather_local(
         raise ValueError("PLE gather output must match ids and shard geometry")
     n = ids.numel()
     if n:
+        width = shards[0].shape[1]
+        block_width = triton.next_power_of_2(width)
         # The per-row UVA layout follows vLLM's pinned lookup. Four rows per
         # CTA won the actual-table TP2 complete-consumer 4K/12K experiment;
         # one row and explicit packed-word variants regressed and stay out.
@@ -127,11 +156,11 @@ def gather_local(
             if (
                 fp8
                 and shards[0].device.type == "cpu"
-                and shards[0].shape[1] == 160
+                and width == 160
                 and 65536 <= n <= 196608
                 and torch.cuda.get_device_capability(ids.device) == (12, 0)
             )
-            else 16
+            else min(16, 4096 // block_width)
         )
         _gather_shards[(triton.cdiv(n, rows_per_cta),)](
             ids,
@@ -141,8 +170,8 @@ def gather_local(
             N=n,
             SHARD_ROWS=shards[0].shape[0],
             TOTAL_SHARDS=total_shards,
-            D=shards[0].shape[1],
-            BD=triton.next_power_of_2(shards[0].shape[1]),
+            D=width,
+            BD=block_width,
             BR=rows_per_cta,
             BF16=shards[0].dtype == torch.bfloat16,
             FP8=fp8,
@@ -180,7 +209,7 @@ def prepare_cpu_uva_shards(
         raise ValueError("PLE CPU UVA requires equal contiguous BF16/F32/FP8 shards")
     if (
         shards[0].ndim != 2
-        or not 0 < shards[0].shape[1] <= 256
+        or not 0 < shards[0].shape[1] <= _MAX_SHARD_WIDTH
         or len(shards) != len(shard_indices)
         or len(set(shard_indices)) != len(shard_indices)
         or total_shards <= 0
@@ -202,7 +231,12 @@ def prepare_cpu_uva_shards(
     pointers = [0] * total_shards
     with torch.cuda.device(device):
         for index, shard in zip(shard_indices, shards):
-            owner = shard if shard.is_pinned() else shard.pin_memory()
+            owner = shard
+            if not shard.is_pinned():
+                if getattr(shard.untyped_storage(), "_qwen4_ple_shared", False):
+                    _register_shared_fp8_table(shard, runtime)
+                else:
+                    owner = shard.pin_memory()
             address = ctypes.c_void_p()
             code = get_pointer(ctypes.byref(address), owner.data_ptr(), 0)
             if code or address.value is None:

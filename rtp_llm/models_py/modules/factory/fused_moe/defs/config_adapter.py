@@ -113,6 +113,8 @@ class MoEConfigAdapter:
             if effective_quant_config is not None
             else None
         )
+        if getattr(model_config, "_qwen4_mxfp4_source", False):
+            self.moe_quant_method = "FP8_FP4"
         self.data_type = model_config.data_type
         self.head_num = model_config.attn_config.head_num
         self.ll_num_max_token = moe_config.ll_num_max_token

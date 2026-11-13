@@ -483,12 +483,15 @@ class BaseModel(object):
         if self.custom_module is not None:
             self.custom_module.init(self.weight)
 
-    def create_model_loader(self) -> ModelLoader:
+    def create_model_loader(
+        self, *, release_safetensor_handles_per_layer: bool = False
+    ) -> ModelLoader:
         # Create database locally, only used for model loading
         database = CkptDatabase(
             self.model_config.ckpt_path,
             self.model_config.ptuning_path,
             recycle_handles=self.loader_recycle_handles,
+            release_safetensor_handles_per_layer=release_safetensor_handles_per_layer,
         )
         lora_infos = self.model_config.lora_infos
         static_lora: bool = len(lora_infos) == 1

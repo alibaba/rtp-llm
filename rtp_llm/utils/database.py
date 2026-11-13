@@ -62,6 +62,9 @@ class BaseDatabase:
     def get_max_file_size(self) -> int:
         raise NotImplementedError
 
+    def finish_loading_layer(self) -> None:
+        pass
+
     @property
     def is_safetensor(self) -> bool:
         return False
@@ -88,8 +91,13 @@ class CkptDatabase(BaseDatabase):
         path: Optional[str],
         ptuning_path: Optional[str] = None,
         recycle_handles: bool = False,
+        *,
+        release_safetensor_handles_per_layer: bool = False,
     ) -> None:
 
+        self._release_safetensor_handles_per_layer = (
+            release_safetensor_handles_per_layer
+        )
         if path is None:
             return
 
@@ -161,6 +169,13 @@ class CkptDatabase(BaseDatabase):
         self._loaded_layer = layer
         for ckpt, max_layer in self._file_max_layer.items():
             if max_layer < layer - 1:
+                ckpt.close_safetensor_handle()
+
+    def finish_loading_layer(self) -> None:
+        if self._release_safetensor_handles_per_layer:
+            # Release private mmap pages created during CUDA copies. Tensor
+            # views that are still in use retain their own storage.
+            for ckpt in self.pretrain_file_list + self.finetune_file_list:
                 ckpt.close_safetensor_handle()
 
     @property

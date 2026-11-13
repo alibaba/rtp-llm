@@ -679,7 +679,6 @@ def main() -> str:
             decode_test_length=args.decode_test_length,
             generate_config=generate_config,
             num_measures=args.num_measures,
-            log_path=server.log_file_path or "",
         )
 
         if args.partial == 2:
@@ -693,6 +692,8 @@ def main() -> str:
             )
 
         if args.partial == 1:
+            if args.target_tpot > 0:
+                runner_kwargs["log_path"] = server.log_file_path or ""
             _run_decode(
                 server.port,
                 args.dp_size,

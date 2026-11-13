@@ -198,6 +198,12 @@ class QWenV2Tokenizer(BaseTokenizer):
         self.tokenizer.im_start_id = self.tokenizer.encode("<|im_start|>")[0]
         self.tokenizer.im_end_id = self.tokenizer.encode("<|im_end|>")[0]
 
+    def apply_chat_template(self, messages, **kwargs):
+        if type(self.tokenizer).__name__ == "Qwen4Tokenizer":
+            # The native Qwen4 encoder rejects the legacy Qwen-VL template option.
+            kwargs.pop("add_vision_id", None)
+        return super().apply_chat_template(messages, **kwargs)
+
     def _is_qwen35_config(self, config_json: Dict[str, Any], tokenizer_path: str):
         text_config = config_json.get("text_config", {})
         model_type = str(

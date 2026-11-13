@@ -182,6 +182,61 @@ py_test(
     tags = ["manual"],
 )
 
+# Pass --test_arg=--checkpoint_path=/path/to/checkpoint for these manual targets.
+# Both DP8 targets need --test_env=QWEN4_PLE_SHARED_TABLE=/path/to/manifest.json.
+# Grid batch_size is per DP rank: decode 4 * DP8 = 32 concurrent requests.
+[
+    py_test(
+        name = "qwen4_m11_mxfp4_sm10x_" + phase + "_perf",
+        main = "batch_decode_test.py",
+        srcs = ["batch_decode_test.py"],
+        timeout = "eternal",
+        deps = [
+            "//rtp_llm:pyodps",
+            "//rtp_llm:testlib",
+            ":perf_test_lib",
+        ],
+        data = ["//rtp_llm:sdk"],
+        args = [
+            "--model_type", "qwen4_exp",
+            "--partial", partial,
+            "--batch_size", batches,
+            "--input_len", "32768",
+            "--decode_test_length", "16",
+            "--max_seq_len", "32784",
+            "--max_batch_tokens_size", "32768" if phase == "prefill" else "128",
+            "--max_context_batch_size", "1",
+            "--prefill_chunk_size", "0",
+            "--tp_size", "1",
+            "--dp_size", "8",
+            "--ep_size", "8",
+            "--world_size", "8",
+            "--moe_strategy", "mega_moe",
+            "--use_deepep_moe", "0",
+            "--vit_separation", "2",
+            "--load_method", "scratch",
+            "--act_type", "BF16",
+            "--enable_fp32_lm_head", "0",
+            "--seq_size_per_block", "128",
+            "--kernel_seq_size_per_block", "128",
+            "--kv_cache_mem_mb", "8192" if phase == "prefill" else "16384",
+            "--linear_pool_blocks", "8" if phase == "prefill" else "16",
+            "--reuse_cache", "0",
+            "--enable_cuda_graph", "0" if phase == "prefill" else "1",
+            "--decode_capture_config", "4",
+            "--fake_balance_expert", "0",
+            "--warm_up", "0",
+        ],
+        env = {"GPU_COUNT": "8"},
+        exec_properties = {"gpu": "SM103_CU13", "gpu_count": "8"},
+        tags = ["manual"],
+    )
+    for phase, partial, batches in [
+        ("prefill", "2", "1"),
+        ("decode", "1", "4"),
+    ]
+]
+
 # V4-Flash CP=4 + EP=4 prefill profile sweep from 64k to 1M input.
 # Manual-only — drives batch_size=1 prefill requests through the perf
 # test framework so per-input_len timeline JSONs land in TEST_UNDECLARED_

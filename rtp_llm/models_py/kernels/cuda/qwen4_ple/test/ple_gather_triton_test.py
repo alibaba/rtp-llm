@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 import torch
 
@@ -124,6 +126,32 @@ class PLEGatherTritonTest(unittest.TestCase):
                 torch.equal(actual.view(torch.int16), expected.view(torch.int16))
             )
         graph.reset()
+
+    def test_shared_cpu_fp8_m11_shard_width(self):
+        from rtp_llm.models_py.kernels.cuda.qwen4_ple.gather import (
+            gather_local,
+            prepare_cpu_uva_shards,
+        )
+
+        device = torch.device("cuda", torch.cuda.current_device())
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ple"
+            path.write_bytes(bytes(i % 31 for i in range(4 * 512)))
+            shard = torch.from_file(
+                str(path), shared=True, size=4 * 512, dtype=torch.uint8
+            )
+        shard.untyped_storage()._qwen4_ple_shared = True
+        shard = shard.view(torch.float8_e4m3fn).view(4, 512)
+        shards, pointers = prepare_cpu_uva_shards([shard], [1], 2, device)
+        self.assertEqual(shards[0].data_ptr(), shard.data_ptr())
+        ids = torch.tensor([-1, 0, 4, 7, 8], device=device, dtype=torch.int64)
+        scale = torch.tensor([0.125], device=device)
+        expected = torch.zeros((5, 512), device=device, dtype=torch.bfloat16)
+        expected[2:4] = shard.to(torch.bfloat16)[[0, 3]].to(device) * scale.to(
+            torch.bfloat16
+        )
+        actual = gather_local(ids, shards, (1,), 2, pointers, scale=scale)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":
