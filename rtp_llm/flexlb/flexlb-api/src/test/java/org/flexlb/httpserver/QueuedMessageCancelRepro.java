@@ -1,16 +1,25 @@
 package org.flexlb.httpserver;
 
-import io.grpc.*;
-import io.grpc.netty.*;
-import io.grpc.stub.*;
-import io.netty.buffer.*;
-import io.netty.channel.*;
-import io.netty.handler.codec.http2.*;
-import java.io.*;
-import java.net.*;
+import io.grpc.ServerServiceDefinition;
+import io.grpc.netty.NettyServerBuilder;
+import io.grpc.stub.ServerCalls;
+import io.grpc.stub.StreamObserver;
+import io.netty.buffer.PooledByteBufAllocator;
+import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelOption;
+import io.netty.channel.FixedRecvByteBufAllocator;
+import io.netty.handler.codec.http2.DefaultHttp2Headers;
+import io.netty.handler.codec.http2.DefaultHttp2HeadersEncoder;
+
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.Arrays;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 public class QueuedMessageCancelRepro {
   public static void main(String[] args) throws Exception {

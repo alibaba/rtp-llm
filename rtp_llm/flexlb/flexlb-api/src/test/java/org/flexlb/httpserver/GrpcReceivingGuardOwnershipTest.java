@@ -1,13 +1,23 @@
 package org.flexlb.httpserver;
 
-import static org.junit.jupiter.api.Assertions.*;
-
-import io.grpc.*;
+import io.grpc.Context;
+import io.grpc.Metadata;
+import io.grpc.MethodDescriptor;
+import io.grpc.ServerCall;
+import io.grpc.ServerStreamTracer;
+import io.grpc.Status;
 import io.grpc.internal.SerializingExecutor;
-import io.netty.buffer.*;
-import java.util.*;
-import java.util.concurrent.*;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import org.junit.jupiter.api.Test;
+
+import java.util.ArrayDeque;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GrpcReceivingGuardOwnershipTest {
   static class Call extends ServerCall<Object, Object> {

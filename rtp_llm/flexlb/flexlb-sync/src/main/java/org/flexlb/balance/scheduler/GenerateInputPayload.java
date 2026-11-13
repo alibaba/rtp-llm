@@ -25,8 +25,7 @@ final class GenerateInputPayload {
             for (int tag; (tag = input.readTag()) != 0; tagStart = input.getTotalBytesRead()) {
                 if (tag == 16 || tag == 18) {
                     mergeMetadata(metadata, bytes, retainedStart, tagStart);
-                    if (tag == 18) { tokens.readPacked(input, bytes); }
-                    else { tokens.writer().writeInt32NoTag(input.readInt32()); }
+                    if (tag == 18) { tokens.readPacked(input, bytes); } else { tokens.writer().writeInt32NoTag(input.readInt32()); }
                     retainedStart = input.getTotalBytesRead();
                 } else if (!input.skipField(tag)) {
                     input.checkLastTagWas(0);
@@ -83,8 +82,7 @@ final class GenerateInputPayload {
             while (input.getBytesUntilLimit() > 0) { input.readInt32(); }
             input.popLimit(previousLimit);
             ByteString chunk = bytes.substring(start, input.getTotalBytesRead());
-            if (packed == null && writer == null) { packed = chunk; }
-            else { writer().writeRawBytes(chunk); }
+            if (packed == null && writer == null) { packed = chunk; } else { writer().writeRawBytes(chunk); }
         }
 
         private CodedOutputStream writer() throws IOException {

@@ -111,8 +111,7 @@ class RequestRegistryTest {
         context.setGenerateInputPb(bytes);
         var future = lifecycle.register(context);
         assertFalse(future.isDone());
-        if (batch) { assertSame(bytes, context.getGenerateInputPb()); }
-        else { assertNull(context.getGenerateInputPb()); }
+        if (batch) { assertSame(bytes, context.getGenerateInputPb()); } else { assertNull(context.getGenerateInputPb()); }
 
         lifecycle.cancelRequest(104L, 0L, CancelReason.CLIENT_CANCELLED);
         future.get(5, TimeUnit.SECONDS);

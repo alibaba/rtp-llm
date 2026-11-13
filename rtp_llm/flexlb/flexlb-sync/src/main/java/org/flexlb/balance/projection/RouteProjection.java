@@ -4,8 +4,8 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 
 import java.util.List;
-import java.util.OptionalLong;
 import java.util.OptionalDouble;
+import java.util.OptionalLong;
 
 /** Projects one incoming route against immutable, coherently captured inputs. */
 public final class RouteProjection {

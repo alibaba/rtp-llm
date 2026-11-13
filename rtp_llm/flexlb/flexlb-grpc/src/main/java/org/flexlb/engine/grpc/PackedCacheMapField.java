@@ -2,8 +2,9 @@ package org.flexlb.engine.grpc;
 
 import com.google.protobuf.MapEntry;
 import com.google.protobuf.MapField;
-import java.lang.reflect.Field;
 import org.flexlb.cache.primitive.PackedBooleanCacheMap;
+
+import java.lang.reflect.Field;
 
 /** Storage adapter for the pinned protobuf 3.25.1 runtime. */
 public final class PackedCacheMapField {
