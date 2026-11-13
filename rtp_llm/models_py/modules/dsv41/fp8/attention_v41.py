@@ -2065,6 +2065,26 @@ class AttentionV41FP8(AttentionFP8):
                         )
                         if request_bounds is not None:
                             cache[bounds_key] = request_bounds
+                # n37: the bf16 selection branch is OFF by default. Both
+                # integrated 1M runs of it hard-crashed every rank inside
+                # the first key_count>65536 layer (n35: 3-D broadcast
+                # matmul; n36: flattened 2-D mm) with identical silent
+                # deaths at identical allocator state (layer-02 begin at
+                # 124.91 GiB allocated, no OOM dump, no python traceback,
+                # no hipError), while isolated GPU microtests of BOTH
+                # forms completed at 1M keys (RUNID20261113T032646Z) - the
+                # fault is integrated-state dependent and unresolved. The
+                # default path is the n33-proven fp32 math (1M PASS,
+                # 6918s prefill window). DSV41_SEL_BF16=1 re-enables bf16
+                # for instrumented diagnosis only; it is not a deliverable
+                # speed path until the crash is root-caused.
+                sel_bf16 = os.environ.get("DSV41_SEL_BF16", "0") == "1"
+                # Hoisted fp32 copy of the indexer keys for the fp32
+                # selection branch: one keys.float() per selection call
+                # (~8 GiB transient at 1M keys, freed at loop exit;
+                # n29/n30 telemetry: 20-30 GiB margin at the selection
+                # peak, 161.78 alloc / 171.10 reserved of 191.98).
+                keys_fp32 = None
                 # Sampled phase timing for the heavy non-fused selection
                 # (n31 evidence: the keys-fp32 hoist changed nothing - the
                 # ~16 min ratio-0 layers are dominated by the per-q-chunk
@@ -2171,46 +2191,63 @@ class AttentionV41FP8(AttentionFP8):
                             else q[chunk]
                         )
                         if key_count > 65536:
-                            # bf16 MFMA slice matmuls into the fp32 logits
-                            # buffer. [awi][sel] profile (n33, layers 8/14/20):
-                            # the fp32 slice matmuls were 85-98% of heavy-layer
-                            # selection time (L20: ~860s of 874s total; topk
-                            # ~215s) - fp32 GEMM runs on the vector path, bf16
-                            # hits MFMA (>10x). Numerics: q_chunk lies on the
-                            # fp8-e4m3 grid after fp8_roundtrip (3-bit
-                            # mantissa) so the bf16 cast is LOSSLESS; keys are
-                            # natively bf16; rocBLAS accumulates in fp32 and
-                            # rounds the product once to bf16 before the
-                            # fp32-buffer assign - the same numeric class as
-                            # the CUDA fused path (quantized q/keys, bf16
-                            # logits via return_bf16). Key-axis slicing kept:
-                            # ~64 MiB bf16 product temporaries per 65536-key
-                            # slice, logits buffer ~1 GiB at chunk_rows=8.
-                            t_rows, n_heads, sel_dim = q_chunk.shape
-                            q_chunk16 = q_chunk.to(torch.bfloat16).reshape(
-                                t_rows * n_heads, sel_dim
-                            )
-                            logits = torch.empty(
-                                (t_rows, n_heads, key_count),
-                                dtype=torch.float32,
-                                device=q_chunk.device,
-                            )
-                            for k0 in range(0, key_count, 65536):
-                                k1 = min(k0 + 65536, key_count)
-                                # Flattened 2-D bf16 mm (M = t*h): rocBLAS's
-                                # best-tested MFMA path. The 3-D broadcast
-                                # bf16 matmul (batch=n_heads, M=t_rows)
-                                # hard-crashed every rank ~3 min into the
-                                # n35 1M prefill (silent rank death, no OOM
-                                # dump, no python traceback) at the first
-                                # key_count>65536 selection layers.
-                                logits[:, :, k0:k1] = torch.mm(
-                                    q_chunk16, keys[k0:k1].t()
-                                ).view(t_rows, n_heads, k1 - k0)
-                            logits.relu_()
+                            if sel_bf16:
+                                # DIAGNOSTIC ONLY (see sel_bf16 gate above):
+                                # bf16 MFMA slice matmuls, flattened 2-D mm
+                                # over [t*h, d] x [d, k_slice] into the fp32
+                                # logits buffer. NUMERICS: the q->bf16 cast
+                                # is NOT lossless in general - fp8_roundtrip
+                                # returns e4m3-grid values times an arbitrary
+                                # scale, which is not bf16-representable
+                                # (microtest RUNID20261113T032646Z:
+                                # q_on_e4m3_grid=false in all 8 cases; at 1M
+                                # keys mean rel err ~6.2e-4 vs fp32, top-512
+                                # set overlap 0.996, exact positions 0.210).
+                                # Both this 2-D form (n36) and the earlier
+                                # 3-D broadcast form (n35) hard-crashed all
+                                # ranks in the integrated 1M prefill.
+                                t_rows, n_heads, sel_dim = q_chunk.shape
+                                q_chunk16 = q_chunk.to(torch.bfloat16).reshape(
+                                    t_rows * n_heads, sel_dim
+                                )
+                                logits = torch.empty(
+                                    (t_rows, n_heads, key_count),
+                                    dtype=torch.float32,
+                                    device=q_chunk.device,
+                                )
+                                for k0 in range(0, key_count, 65536):
+                                    k1 = min(k0 + 65536, key_count)
+                                    logits[:, :, k0:k1] = torch.mm(
+                                        q_chunk16, keys[k0:k1].t()
+                                    ).view(t_rows, n_heads, k1 - k0)
+                                logits.relu_()
+                            else:
+                                # n33-proven fp32 path (1M PASS, 6918s
+                                # window): key-axis slicing over the hoisted
+                                # fp32 keys - identical einsum math as
+                                # batched matmuls into the logits buffer,
+                                # ~128 MiB product temporaries per 65536-key
+                                # slice, logits ~1 GiB at chunk_rows=8.
+                                if keys_fp32 is None:
+                                    keys_fp32 = keys.float()
+                                logits = torch.empty(
+                                    (q_chunk.shape[0], q_chunk.shape[1], key_count),
+                                    dtype=torch.float32,
+                                    device=q_chunk.device,
+                                )
+                                for k0 in range(0, key_count, 65536):
+                                    k1 = min(k0 + 65536, key_count)
+                                    logits[:, :, k0:k1] = torch.matmul(
+                                        q_chunk, keys_fp32[k0:k1].t()
+                                    )
+                                logits.relu_()
                         else:
+                            if not sel_bf16 and keys_fp32 is None:
+                                keys_fp32 = keys.float()
                             logits = torch.einsum(
-                                "thd,kd->thk", q_chunk, keys.float()
+                                "thd,kd->thk",
+                                q_chunk,
+                                keys.float() if keys_fp32 is None else keys_fp32,
                             ).relu_()
                         logits = (logits * weights[chunk, :, None]).sum(1)
                         ids = torch.arange(key_count, device=x.device)
@@ -2263,6 +2300,10 @@ class AttentionV41FP8(AttentionFP8):
                     # Same-stream consumers have been enqueued; release the
                     # score before allocating the next bounded chunk.
                     del logits, selected, target
+                # Release the hoisted fp32 keys before the next layer's
+                # working set builds up (same-stream consumers of the
+                # selection outputs are already enqueued).
+                del keys_fp32
                 if sel_profile:
                     torch.cuda.synchronize()
                     sel_total = _pc() - sel_t0
