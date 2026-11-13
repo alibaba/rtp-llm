@@ -120,4 +120,10 @@ Mock 的 WorkerStatus 上报 Prefill TP 为 CP size、Decode TP 为 1、DP 为 1
 - **投机解码。** 只在 Decode 配 `MOCK_COMPUTE_DECODE_TOKENS_PER_STEP`，默认 1。设为 `2.6` 时，每请求每轮产出 2 或 3 个 token，长期均值为 2.6。Mock 用这个值模拟接受后的产出量。
 - **EOS。** P/D 可配 `MOCK_COMPUTE_EOS_PROBABILITY`，默认 0，按 token 判断。概率在 0 和 1 之间时必填整数 `MOCK_COMPUTE_EOS_SEED`。请求的 `min_new_tokens` 和 `ignore_eos` 控制 EOS 是否生效，`max_new_tokens` 和剩余上下文限制最终长度。
 
+### Prefill 轮间开销
+
+在 Prefill zone 设置 `MOCK_ENGINE_PREFILL_OVERHEAD_MS`。Case YAML 使用 `mock.engine.prefill.overhead.ms`。取非负整数，单位 ms，默认 `0`。例如 `MOCK_ENGINE_PREFILL_OVERHEAD_MS=7` 表示一轮输出提交后，至少再等 7 ms 才能开始下一轮组批。首轮可立即开始，空闲时间已经超过该间隔时，新请求也可立即启动。
+
+等待期间到达的请求可以进入下一批。在持续有流量时，增加开销通常会延长轮次间隔，也可能增大 Batch 和 Running。实际影响取决于到达率、缓存命中和每批计算量。Forward 公式与 Forward 耗时指标的口径保持一致，额外等待体现在轮次间隔和 Wall TPS 中。校准时在相近的单 P 负载下同时比较 Batch、轮次间隔、Wall TPS 和 TTFT。
+
 完整 ENV、默认值和公式变量见 [组件配置参考](component-reference.md#engine-配置规则)。

@@ -56,7 +56,8 @@ public final class ConfigInput {
         }
         for (String name : env.keySet()) {
             // Framework startup variables are separate from these reserved business namespaces.
-            if ((name.startsWith("MOCK_COMPUTE_") || name.startsWith("MOCK_CACHE_") || name.startsWith("MOCK_VIT_") || name.startsWith("MOCK_MULTIMODAL_")) && !known.contains(name))
+            if ((name.startsWith("MOCK_COMPUTE_") || name.startsWith("MOCK_ENGINE_") || name.startsWith("MOCK_CACHE_")
+                || name.startsWith("MOCK_VIT_") || name.startsWith("MOCK_MULTIMODAL_")) && !known.contains(name))
                 throw new IllegalArgumentException("Unknown Mock environment setting: " + name);
         }
         return result;

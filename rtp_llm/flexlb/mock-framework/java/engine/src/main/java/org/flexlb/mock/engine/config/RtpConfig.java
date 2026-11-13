@@ -17,6 +17,7 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
                         boolean reuseCache, boolean deviceCache, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
                         int maxGenerateBatchSize, int maxInitedKvStreams, int maxUncachedBatchTokens, int cpSize,
                         JsonNode business, ComputeModel compute, int imageToken, long cacheKeySeed) {
+    private static final String PREFILL_OVERHEAD_MS = "mock.engine.prefill.overhead.ms";
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Map<String, String> KVCM_ENV_BINDINGS = Map.of(
         "RECO_ENABLE_VIPSERVER", "kvcm_enable_vipserver",
@@ -65,6 +66,12 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
         if (config.has("device_eviction_policy") || config.has("DEVICE_EVICTION_POLICY"))
             throw new IllegalArgumentException("Removed device_eviction_policy: Mock uses LRU");
         config = normalize(config, role);
+        if (config.has(PREFILL_OVERHEAD_MS)) {
+            if (role != Role.prefill) {
+                throw new IllegalArgumentException(PREFILL_OVERHEAD_MS + " is only supported for Prefill");
+            }
+            nativeInt(config, PREFILL_OVERHEAD_MS, 0, 0, Integer.MAX_VALUE);
+        }
         if (nativeBool(config, "enable_memory_cache", false) || nativeBool(config, "enable_remote_cache", false))
             throw new IllegalArgumentException("Mock RTP supports only local KV; remove Host and remote KV settings");
         nativeInt(config, "kv_cache_event_snapshot_interval_ms", 600000, 1, Integer.MAX_VALUE);
@@ -102,6 +109,12 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
             ConfigInput.signedLong(config, "cache_key_hash_seed", 0));
     }
 
+    public static int nativeInt(JsonNode config, String key, Integer fallback, int min, int max) {
+        var value = config.get(key);
+        if (value == null && fallback != null) return fallback;
+        return integer(value, key, min, max);
+    }
+
     public static boolean nativeBool(JsonNode config, String key, boolean fallback) {
         var value = config.get(key);
         if (value == null) return fallback;
@@ -112,12 +125,6 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
             if (Set.of("no", "false", "f", "0", "off").contains(word)) return false;
         }
         throw new IllegalArgumentException("Invalid boolean setting: " + key);
-    }
-
-    public static int nativeInt(JsonNode config, String key, Integer fallback, int min, int max) {
-        var value = config.get(key);
-        if (value == null && fallback != null) return fallback;
-        return integer(value, key, min, max);
     }
 
     public boolean forceSinglePrefill() { return cpSize > 1 && business.path("cp_force_single_prefill").asBoolean(true); }
@@ -147,7 +154,10 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
                 .put("kv_cache_event_snapshot_interval_ms",nativeInt(business,"kv_cache_event_snapshot_interval_ms",600000,Integer.MIN_VALUE,Integer.MAX_VALUE));
             result.putObject("kvcm_capabilities").put("payload_io",false).put("hbm_events",events.equals("kvcm"));
         }
-        if (role == Role.prefill) result.put("mock.scheduler.mode", groupScheduling() ? "group" : "fifo");
+        if (role == Role.prefill) {
+            result.put("mock.scheduler.mode", groupScheduling() ? "group" : "fifo")
+                .put(PREFILL_OVERHEAD_MS, prefillOverheadMs());
+        }
         result.setAll((ObjectNode) compute.effectiveSettings());
         return result;
     }
@@ -156,6 +166,10 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
 
     public boolean groupScheduling() {
         return role == Role.prefill && business.path("mock.scheduler.mode").asText("fifo").equals("group");
+    }
+
+    public int prefillOverheadMs() {
+        return nativeInt(business, PREFILL_OVERHEAD_MS, 0, 0, Integer.MAX_VALUE);
     }
 
     static ObjectNode environment(Map<String, String> env, Role role) {
@@ -184,7 +198,7 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
 
     static Set<String> mockNames() {
         var names = new HashSet<>(ComputeModel.settingNames());
-        names.addAll(Set.of("mock.scheduler.mode", "mock.cache.total.blocks"));
+        names.addAll(Set.of("mock.scheduler.mode", "mock.cache.total.blocks", PREFILL_OVERHEAD_MS));
         return Set.copyOf(names);
     }
 
