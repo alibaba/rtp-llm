@@ -60,6 +60,15 @@ requirement(rtp_kernel)
 requirement(flashattn)
 
 filegroup(
+    name = "collective_projection_gemm_rs_test_sources",
+    srcs = [
+        "modules/factory/linear/impl/cuda/bf16_comm_fusion.py",
+        "modules/factory/linear/impl/cuda/fp8_comm_fusion.py",
+    ],
+    visibility = ["//rtp_llm/models_py/modules/factory/linear/impl/cuda/test:__pkg__"],
+)
+
+filegroup(
     name = "bounded_projection_jit_test_sources",
     srcs = [
         "modules/kimi_k3/bounded_projection_jit_warmup.py",

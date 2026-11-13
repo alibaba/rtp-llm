@@ -57,7 +57,7 @@ class Fp8CollectiveProjection:
         self.deep_gemm = None
         self.push_rs = None
         if enable_rs:
-            if not decode_staging and self.world_size != 16:
+            if not decode_staging:
                 import deep_gemm
 
                 if not callable(getattr(deep_gemm, "fp8_gemm_rs_nt", None)):
@@ -223,7 +223,7 @@ class Fp8CollectiveProjection:
             or projection.bias is not None
         ):
             raise ValueError("FP8 GEMM/RS input or projection is incompatible")
-        if self.decode_staging or self.world_size == 16 or m < 512:
+        if self.decode_staging or m < 512:
             partial = projection.forward_quantized(values, scales)
             return self.reduce_scatter_bf16(partial)
         output = torch.empty(

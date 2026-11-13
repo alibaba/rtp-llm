@@ -40,7 +40,7 @@ class Bf16CollectiveProjection:
         self.deep_gemm = None
         self.rs_workspace = None
         self.output_weights = {}
-        if self.peer_access and self.world_size in (2, 4, 8):
+        if self.peer_access and self.world_size in (2, 4, 8, 16):
             import deep_gemm
 
             if not callable(getattr(deep_gemm, "bf16_gemm_rs_nn", None)):
