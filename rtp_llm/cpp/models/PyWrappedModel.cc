@@ -1138,6 +1138,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         && inputs.input_lengths.max().item<int>() > 65536) {
         // Keep the graph-private pool out of the full-context prefill window.
         // This runs before microbatch/CP dispatch so every topology observes it.
+        // Graph destruction releases Python-owned replay state and needs the GIL.
+        py::gil_scoped_acquire release_gil;
         graph_runner_->releaseCapturedDecodeGraph();
     }
     // Packed hidden-state collection is eager, not a generation-prefill graph attempt.
