@@ -137,6 +137,7 @@ class MMWorkItem:
         deadline: Optional[float] = None,
         require_cache_key: bool = False,
         region: Optional[str] = None,
+        cache_input: Optional[MultimodalInput] = None,
     ):
         self.deadline = deadline
         if not mm_inputs:
@@ -166,7 +167,6 @@ class MMWorkItem:
         self.media_traces = ()
         self.capture_inspection_sources = False
         self.source_identity = None
-        self.defer_remote_lookup = False
         self.inspection_sources: Optional[List[bytes]] = None
         self.inspection_request = None
         self.inspection_future = None
@@ -177,7 +177,8 @@ class MMWorkItem:
         self.embedding_result: Optional[Any] = None
         self.feature_hashes: Optional[List[torch.Tensor]] = None
         self.work_estimate: Optional[MMWorkEstimate] = None
-        self.need_check_cache = len(mm_inputs) == 1 and _input_has_url(mm_inputs[0])
+        cache_input = mm_inputs[0] if cache_input is None else cache_input
+        self.need_check_cache = len(mm_inputs) == 1 and _input_has_url(cache_input)
         self.embedding_cache = embedding_cache
         self.hash_key_cache = hash_key_cache
         self.cache_key: Optional[str] = None
@@ -211,7 +212,7 @@ class MMWorkItem:
                     )
         elif self.need_check_cache and self.embedding_cache is not None:
             self.cache_key, self.cache_state, self.cache_entry = _acquire_input_cache(
-                self.embedding_cache, self.mm_inputs[0], require_key=require_cache_key
+                self.embedding_cache, cache_input, require_key=require_cache_key
             )
             if self.cache_state == "complete":
                 self.embedding_result = self.cache_entry.wait()
@@ -284,6 +285,7 @@ class MMWorkItem:
                 result,
                 trace_id=self.remote_trace_id,
                 producer_events=self._remote_producer_events,
+                entry=self.cache_entry,
             )
         if (
             self.embedding_cache is None

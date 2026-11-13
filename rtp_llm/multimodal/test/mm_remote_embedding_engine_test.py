@@ -34,7 +34,7 @@ class RemoteEmbeddingEngineTest(unittest.TestCase):
         self.engine.preprocess_executor = Mock()
         self.engine.report_vit_error = Mock()
         self.engine.is_proxy_mode = False
-        self.part = Mock(supports_remote_source_identity=False)
+        self.part = Mock()
         self.engine.mm_part = self.part
         self.part.batched_embedding.side_effect = lambda data, types: [
             self.value for _ in data
@@ -107,6 +107,21 @@ class RemoteEmbeddingEngineTest(unittest.TestCase):
         )
         remote.load.assert_called_once()
 
+    def test_local_hit_records_selection_without_another_remote_lookup(self):
+        remote = self.engine._remote_embedding_cache
+        remote.load.return_value = self.value
+        items = self.inputs()
+        self.engine._compute_embeddings(self.engine._create_work_items(items))
+        local = self.engine._create_work_items(items)
+        self.engine._compute_embeddings(local)
+        remote.load.assert_called_once()
+        remote.record.assert_called_with(
+            "result_selected",
+            key=local[0].remote_cache_key,
+            trace_id=local[0].remote_trace_id,
+            source="local",
+        )
+
     def test_disabled_keeps_existing_encoder_path(self):
         self.engine._remote_embedding_cache = None
         items = self.engine._create_work_items(self.inputs())
@@ -155,7 +170,7 @@ class RemoteEmbeddingEngineTest(unittest.TestCase):
                 1,
             ),
             ("qwen3_vl", "data:image/jpeg;base64,AQID", torch.ones(1), 4),
-            ("qwen3_vl", "https://host/mutable.jpg", torch.empty(1), 1),
+            ("qwen3_vl", "https://host/mutable.jpg", torch.ones(3), 1),
             ("unverified", "data:image/jpeg;base64,AQID", torch.empty(1), 1),
         ):
             with self.subTest(model=model, mm_type=mm_type):
@@ -167,6 +182,17 @@ class RemoteEmbeddingEngineTest(unittest.TestCase):
                 forwarded = self.engine._embed_with_greennet_sync.call_args.args[0][0]
                 self.assertIs(forwarded.tensor, tensor)
                 self.assertIsNone(remote.key([forwarded]))
+
+    def test_cpp_http_image_placeholder_uses_same_key_as_url_only_input(self):
+        remote = self.real_remote("deepseek_v41")[0]
+        inputs = self.inputs()
+        inputs[0].url = "https://host/image.jpg"
+        expected = remote.key(inputs)
+        self.assertIsNotNone(expected)
+        inputs[0].tensor = torch.empty(1)
+        item = self.engine._create_work_items(inputs)[0]
+        self.assertEqual(item.remote_cache_key, expected)
+        self.assertEqual(inputs[0].tensor.numel(), 0)
 
     def test_deepseek_none_positions_remote_hit_skips_encoder(self):
         from rtp_llm.multimodal.kvcm.tensor_object import pack_object, plan_object

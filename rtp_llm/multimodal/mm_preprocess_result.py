@@ -16,12 +16,6 @@ def is_single_image_input(mm_inputs) -> bool:
     )
 
 
-def is_http_image_input(mm_inputs) -> bool:
-    return is_single_image_input(mm_inputs) and mm_inputs[0].url.startswith(
-        ("http://", "https://")
-    )
-
-
 @dataclass(frozen=True)
 class ImageSourceIdentity:
     """Digest of the exact encoded bytes decoded by a trusted CPU worker.

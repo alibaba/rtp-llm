@@ -109,7 +109,6 @@ class V41VisionAttention(Attention):
 class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
     strict_work_budget = True
     supports_inspection_sources = True
-    supports_remote_source_identity = True
 
     def __init__(
         self,
@@ -579,13 +578,9 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         results = []
         inspection_sources = []
         source_identity = None
-        capture_identity = bool(
-            (
-                getattr(vit_config, "mm_remote_cache_enable", False)
-                or os.environ.get("MM_EMB_BENCHMARK_TIMING") == "1"
-            )
-            and is_single_image_input(mm_inputs)
-        )
+        capture_identity = os.environ.get(
+            "MM_EMB_BENCHMARK_TIMING"
+        ) == "1" and is_single_image_input(mm_inputs)
         deadline = image_download_deadline(deadline)
         for media_index, media in enumerate(mm_inputs):
             with vit_media.input_scope(media_index):

@@ -84,6 +84,22 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
             )
         return result, underlying, config_type, client_type
 
+    def test_inspection_instance_uses_same_group_and_distinct_native_identity(self):
+        settings = _kv_cache_config()
+        original = RtpKvMetaObjectClientConfig.from_kv_cache_config(settings)
+        inspections = RtpKvMetaObjectClientConfig.from_kv_cache_config(
+            settings, inspection=True
+        )
+        self.assertNotEqual(inspections.instance_id, original.instance_id)
+        self.assertEqual(inspections.instance_group, original.instance_group)
+        transfer = json.loads(inspections.transfer_client_config)
+        self.assertEqual(transfer["instance_id"], inspections.instance_id)
+        self.assertEqual(transfer["instance_group"], original.instance_group)
+        self.assertEqual(
+            inspections,
+            RtpKvMetaObjectClientConfig.from_kv_cache_config(settings, inspection=True),
+        )
+
     def test_invalid_gpu_sequence_fails_before_loading_sdk(self):
         for value in ("", b"", None, iter(()), tuple(object() for _ in range(65))):
             with (

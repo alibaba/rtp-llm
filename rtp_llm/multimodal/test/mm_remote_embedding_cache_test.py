@@ -13,8 +13,16 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
-from rtp_llm.multimodal.kvcm.tensor_object import pack_object, plan_object
-from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCache
+from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+from rtp_llm.multimodal.kvcm.tensor_object import (
+    pack_object,
+    plan_object,
+    unpack_object,
+)
+from rtp_llm.multimodal.mm_embedding_cache import (
+    MMEmbeddingCache,
+    MMEmbeddingCacheEntry,
+)
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.mm_remote_embedding_cache import MMRemoteEmbeddingCache
 from rtp_llm.multimodal.multimodal_util import trans_mm_input
@@ -45,6 +53,93 @@ class RemoteCacheTest(unittest.TestCase):
             for c in reporter.call_args_list
             if c.args[0] == metric
         ]
+
+    def test_persist_verdict_fields_and_reject_invalid_remote_approval(self):
+        store = Store()
+        remote = self.remote(store)
+        original = MMEmbeddingCacheEntry()
+        verdict = GreenNetVerdict(True, 10, "provider message")
+        original.set_greennet_verdict(verdict)
+        result = (torch.ones(2, 4), None)
+        remote.submit_result("valid", result, entry=original)
+        self.assertTrue(store.saved.wait(2))
+        restored = MMEmbeddingCacheEntry()
+        torch.testing.assert_close(remote.load("valid", entry=restored)[0], result[0])
+        self.assertEqual(restored.greennet_snapshot(), (verdict, True))
+        blob = unpack_object(store.objects["valid"])
+        for field, value in (
+            ("checked", 1),
+            ("passed", False),
+            ("code", "1"),
+            ("request_scoped", 0),
+        ):
+            with self.subTest(field=field):
+                invalid = dict(blob, greennet=dict(blob["greennet"], **{field: value}))
+                store.objects["invalid"] = pack_object(plan_object(invalid))
+                fresh = MMEmbeddingCacheEntry()
+                self.assertIsNone(remote.load("invalid", entry=fresh))
+                self.assertFalse(fresh.greennet_passed)
+
+    def test_approval_is_bounded_and_scoped_to_shareable_checked_results(self):
+        tensor_store, approvals = Store(), Store()
+        remote = self.remote(
+            tensor_store, inspection_factory=lambda: approvals, max_pending=1
+        )
+        result = (torch.ones(2, 4), None)
+        tensor_store.objects["image"] = pack_object(plan_object(result))
+        entry = MMEmbeddingCacheEntry()
+        self.assertIsNotNone(remote.load("image", entry=entry))
+        entry.set_greennet_verdict(GreenNetVerdict(True), checked=False)
+        self.assertFalse(approvals.saved.is_set())
+        verdict = GreenNetVerdict(True, 1, "reinspected")
+        entry.set_greennet_verdict(verdict)
+        self.assertTrue(approvals.saved.wait(2))
+        remote.close()
+        reader = self.remote(
+            tensor_store, inspection_factory=lambda: approvals, max_pending=1
+        )
+        fresh = MMEmbeddingCacheEntry()
+        self.assertIsNotNone(reader.load("image", entry=fresh))
+        self.assertEqual(fresh.greennet_snapshot(), (verdict, True))
+        scoped = self.remote(
+            tensor_store,
+            inspection_factory=lambda: self.fail("scoped approval lookup"),
+            request_scoped_inspection=True,
+        )
+        isolated = MMEmbeddingCacheEntry()
+        self.assertIsNotNone(scoped.load("image", entry=isolated))
+        self.assertFalse(isolated.greennet_passed)
+        isolated.set_greennet_verdict(GreenNetVerdict(True))
+        approvals.objects["image"] = torch.tensor([255], dtype=torch.uint8)
+        malformed = MMEmbeddingCacheEntry()
+        self.assertIsNotNone(reader.load("image", entry=malformed))
+        self.assertFalse(malformed.greennet_passed)
+
+    def test_approval_write_failure_keeps_embedding_and_requires_next_audit(self):
+        tensors, approvals = Store(), Store()
+        remote = self.remote(tensors, inspection_factory=lambda: approvals)
+        original = (torch.ones(2, 4), None)
+        tensors.objects["key"] = pack_object(plan_object(original))
+        entry = MMEmbeddingCacheEntry()
+        restored = remote.load("key", entry=entry)
+        write_started = threading.Event()
+
+        def fail_write(*args, **kwargs):
+            write_started.set()
+            raise TimeoutError("unknown write outcome")
+
+        with patch.object(approvals, "save_one", side_effect=fail_write):
+            entry.set_greennet_verdict(GreenNetVerdict(True))
+            self.assertTrue(write_started.wait(2))
+            remote.close()
+        torch.testing.assert_close(restored[0], original[0])
+        self.assertTrue(entry.greennet_passed)
+        self.assertEqual(remote.stats()["approval_write_error"], 1)
+        self.assertFalse(approvals.objects)
+        other = self.remote(tensors, inspection_factory=lambda: approvals)
+        fresh = MMEmbeddingCacheEntry()
+        torch.testing.assert_close(other.load("key", entry=fresh)[0], original[0])
+        self.assertFalse(fresh.greennet_passed)
 
     def test_repeated_acquisition_creates_one_client(self):
         store = Store()
@@ -918,8 +1013,12 @@ class EngineRemoteCacheTest(unittest.TestCase):
         model.ckpt_path = "/nonexistent/test-model"
         interface = FakeEmbeddingLengthInterface()
         interface.inspection_verdict_is_request_scoped = request_scoped
+        store.approvals = Store()
         factory = patch(
-            "rtp_llm.multimodal.kvcm.RtpKvMetaObjectClient.from_env", return_value=store
+            "rtp_llm.multimodal.kvcm.RtpKvMetaObjectClient.from_env",
+            side_effect=lambda **kwargs: (
+                store.approvals if kwargs.get("inspection") else store
+            ),
         )
         factory.start()
         self.addCleanup(factory.stop)
@@ -977,6 +1076,33 @@ class EngineRemoteCacheTest(unittest.TestCase):
                     provider.user_ids, ["producer" if producer_checks else "follower"]
                 )
                 self.assertEqual(engine._remote_embedding_cache.stats()["hit"], 1)
+
+    def test_local_reaudit_after_unchecked_encoder_write_refreshes_remote(self):
+        from rtp_llm.multimodal.test.multimodal_process_engine_test import (
+            _StubGreenNetProvider,
+        )
+
+        store = Store()
+        engine = self.engine(store, cpu_bytes=65536)
+        item = self.input("data:image/png;base64,AQID")
+        verdict = GreenNetVerdict(True, 1, "shareable")
+        provider = _StubGreenNetProvider(verdict)
+        engine._inspection._greennet_provider = provider
+        engine.get_embedding_result([item], input_inspection_enabled=False)
+        self.assertTrue(store.saved.wait(2))
+        self.assertFalse(store.approvals.saved.is_set())
+        engine.get_embedding_result([item], hashes_only=True)
+        self.assertEqual(provider.calls, 1)
+        self.assertTrue(store.approvals.saved.wait(2))
+        reader_store = Store(store.objects)
+        reader = self.engine(reader_store)
+        reader_store.approvals.objects = store.approvals.objects
+        reader_provider = _StubGreenNetProvider(
+            GreenNetVerdict(False, 2, "unexpected audit")
+        )
+        reader._inspection._greennet_provider = reader_provider
+        reader.get_embedding_result([item], hashes_only=True)
+        self.assertEqual(reader_provider.calls, 0)
 
     def test_request_scoped_writer_or_reader_requires_fresh_verdict(self):
         from rtp_llm.config.exceptions import FtRuntimeException
@@ -1145,21 +1271,7 @@ class RemoteIdentityAndRecoveryTest(unittest.TestCase):
         return value
 
     def item(self, url="data:image/jpeg;base64,AQID"):
-        return SimpleNamespace(
-            url=url,
-            mm_type=1,
-            tensor=torch.empty(0),
-            mm_preprocess_config=SimpleNamespace(
-                width=-1,
-                height=-1,
-                min_pixels=256,
-                max_pixels=1024,
-                fps=-1,
-                min_frames=-1,
-                max_frames=-1,
-                crop_positions=[],
-            ),
-        )
+        return MultimodalInput(url, 1, torch.empty(0), MMPreprocessConfig())
 
     def save(self, remote, key="key", value=None):
         value = self.value if value is None else value
@@ -1374,17 +1486,21 @@ class RemoteIdentityAndRecoveryTest(unittest.TestCase):
         key = self.cache.key([item])
         self.assertEqual(key, self.make_cache().key([self.item()]))
         self.assertNotEqual(key, self.make_cache(namespace="new-weights").key([item]))
-        item.mm_preprocess_config.crop_positions = [0.123456789]
-        self.assertNotEqual(key, self.cache.key([item]))
-        first_crop = self.cache.key([item])
-        item.mm_preprocess_config.crop_positions = [0.123456790]
-        self.assertNotEqual(first_crop, self.cache.key([item]))
-        item.url = "data:image/jpeg;base64,AQIE"
-        self.assertNotEqual(first_crop, self.cache.key([item]))
+        import hashlib
 
-    def test_mutable_urls_tensor_inputs_and_batched_groups_bypass(self):
-        self.assertIsNone(self.cache.key([self.item("https://host/mutable.jpg")]))
-        self.assertIsNone(self.cache.key([self.item("/tmp/mutable.jpg")]))
+        self.assertEqual(
+            key.rsplit(":", 1)[1], hashlib.sha256(item.cache_key().encode()).hexdigest()
+        )
+        item.mm_preprocess_config.crop_positions = [0.25]
+        self.assertNotEqual(key, self.cache.key([item]))
+        item.mm_preprocess_config.crop_positions = []
+        item.mm_preprocess_config.mm_timeout_ms = 1234
+        self.assertEqual(key, self.cache.key([item]))
+
+    def test_remote_key_requires_one_url_image_without_tensor_data(self):
+        self.assertIsNotNone(self.cache.key([self.item("https://host/mutable.jpg")]))
+        self.assertIsNotNone(self.cache.key([self.item("/tmp/mutable.jpg")]))
+        self.assertIsNone(self.cache.key([self.item("")]))
         item = self.item()
         item.tensor = torch.ones(3)
         self.assertIsNone(self.cache.key([item]))
@@ -1392,13 +1508,11 @@ class RemoteIdentityAndRecoveryTest(unittest.TestCase):
         self.assertIsNone(self.cache.load(None))
         self.assertFalse(self.clients)
 
-    def test_inline_identity_hashes_decoded_bytes_and_reports_rejections(self):
-        self.assertEqual(
+    def test_inline_key_uses_exact_local_identity_and_reports_rejections(self):
+        self.assertNotEqual(
             self.cache.key([self.item("data:image/jpeg;base64,AQID")]),
             self.cache.key([self.item("data:image/png;base64,AQID")]),
         )
-        self.assertIsNone(self.cache.key([self.item("data:image/jpeg;base64,!")]))
-        self.assertIsNone(self.cache.key([self.item("data:image/jpeg;base64,")]))
         self.cache._audit_enabled = True
         with patch.dict(os.environ, {"MM_EMB_REMOTE_AUDIT": "1"}), self.assertLogs(
             level="INFO"
@@ -1472,7 +1586,7 @@ class VitRpcRemoteIdentityTest(unittest.TestCase):
         self.assertIsNotNone(key)
         self.assertEqual(key, self.cache.key(self.decode(url=url)))
 
-    def test_renderer_png_and_jpeg_octet_stream_keep_original_image_key(self):
+    def test_renderer_png_and_jpeg_use_forwarded_item_key(self):
         import base64
         import io
 
@@ -1543,10 +1657,10 @@ class VitRpcRemoteIdentityTest(unittest.TestCase):
                         MultimodalInputsPB.FromString(wire.SerializeToString())
                     )
                     self.assertEqual(inputs[0].tensor.numel(), 0)
-                    # Compare the same serialized preprocessing defaults.
+                    # The local cache key follows the URL after frontend serialization.
                     expected = [
                         MultimodalInput(
-                            url=original_url,
+                            url=urls[0],
                             mm_type=MMUrlType.IMAGE,
                             tensor=torch.empty(0),
                             mm_preprocess_config=inputs[0].mm_preprocess_config,
@@ -1562,7 +1676,7 @@ class VitRpcRemoteIdentityTest(unittest.TestCase):
             with self.subTest(mm_type=mm_type):
                 self.assertIsNone(self.cache.key(self.decode(url=url, mm_type=mm_type)))
 
-    def test_other_data_media_and_parameters_still_bypass(self):
+    def test_key_does_not_parse_data_url_payloads(self):
         for prefix in (
             "data:application/json;base64,",
             "data:application/pdf;base64,",
@@ -1574,13 +1688,13 @@ class VitRpcRemoteIdentityTest(unittest.TestCase):
             "data:application/octet-stream,",
         ):
             with self.subTest(prefix=prefix):
-                self.assertIsNone(self.cache.key(self.decode(url=prefix + "AQID")))
+                self.assertIsNotNone(self.cache.key(self.decode(url=prefix + "AQID")))
 
-    def test_octet_stream_base64_and_nonempty_tensor_fail_closed(self):
+    def test_key_is_independent_of_base64_validation_and_skips_real_tensor(self):
         prefix = "data:application/octet-stream;base64,"
         for payload in ("", "!", "AQI", "AQID\n", "AQ ID"):
             with self.subTest(payload=payload):
-                self.assertIsNone(self.cache.key(self.decode(url=prefix + payload)))
+                self.assertIsNotNone(self.cache.key(self.decode(url=prefix + payload)))
         expected = torch.tensor([42.0])
         inputs = self.decode(url=prefix + "AQID", tensor=expected)
         self.assertIsNone(self.cache.key(inputs))
@@ -1610,14 +1724,14 @@ class VitRpcRemoteIdentityTest(unittest.TestCase):
         self.assertIsNone(self.cache.key(inputs))
         self.assertTrue(torch.equal(inputs[0].tensor, expected))
 
-    def test_mutable_urls_and_grouped_inputs_still_bypass(self):
+    def test_url_items_can_use_remote_but_groups_bypass(self):
         for url in (
             "https://host/image.jpg",
             "/tmp/image.jpg",
             "data:image/jpeg;base64,!",
         ):
             with self.subTest(url=url):
-                self.assertIsNone(self.cache.key(self.decode(url=url)))
+                self.assertIsNotNone(self.cache.key(self.decode(url=url)))
         self.assertIsNone(self.cache.key(self.decode() + self.decode()))
 
     def test_tensor_only_rpc_stays_a_tensor_and_bypasses_remote_cache(self):
@@ -1629,7 +1743,6 @@ class VitRpcRemoteIdentityTest(unittest.TestCase):
 
 class DownloadedSourceModel(FakeEmbeddingLengthInterface):
     supports_inspection_sources = True
-    supports_remote_source_identity = True
 
     def __init__(self):
         super().__init__()
@@ -1695,8 +1808,12 @@ class DownloadedImageCacheTest(unittest.TestCase):
         model.ckpt_path = "/nonexistent/test-model"
         model.mm_related_params.preprocess_batch_size = 1
         store = Store()
+        store.approvals = Store()
         factory = patch(
-            "rtp_llm.multimodal.kvcm.RtpKvMetaObjectClient.from_env", return_value=store
+            "rtp_llm.multimodal.kvcm.RtpKvMetaObjectClient.from_env",
+            side_effect=lambda **kwargs: (
+                store.approvals if kwargs.get("inspection") else store
+            ),
         )
         factory.start()
         self.addCleanup(factory.stop)
@@ -1729,10 +1846,8 @@ class DownloadedImageCacheTest(unittest.TestCase):
         self.addCleanup(download.stop)
         return engine, store, provider, interface, download
 
-    def seed(self, engine, store, payload, value=None):
-        import base64
-
-        item = self.item("data:image/png;base64," + base64.b64encode(payload).decode())
+    def seed(self, engine, store, value=None):
+        item = self.item()
         key = engine._remote_embedding_cache.key([item])
         value = (torch.full((2, 4), 37.0), None) if value is None else value
         store.objects[key] = pack_object(plan_object(value))
@@ -1744,7 +1859,7 @@ class DownloadedImageCacheTest(unittest.TestCase):
         payload = self.image_bytes()
         engine, store, provider, model, _ = self.engine(payload, hold=True)
         item = self.item()
-        key, value = self.seed(engine, store, payload)
+        key, value = self.seed(engine, store)
         metric_patch = patch(
             "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
         )
@@ -1783,7 +1898,7 @@ class DownloadedImageCacheTest(unittest.TestCase):
 
         payload = self.image_bytes()
         engine, store, provider, model, _ = self.engine(payload, passed=False)
-        self.seed(engine, store, payload)
+        self.seed(engine, store)
         item = self.item()
         with patch(
             "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
@@ -1801,13 +1916,14 @@ class DownloadedImageCacheTest(unittest.TestCase):
         self.assertEqual(model.forward_count, 0)
         self.assertIsNone(engine._embedding_cache.peek(item.cache_key()))
         self.assertFalse(store.saved.is_set())
+        self.assertFalse(store.approvals.saved.is_set())
 
     def test_fresh_remote_hit_inspection_timeout_never_publishes(self):
         import concurrent.futures
 
         payload = self.image_bytes()
         engine, store, provider, model, _ = self.engine(payload, hold=True)
-        self.seed(engine, store, payload)
+        self.seed(engine, store)
         item = self.item()
         key = item.cache_key()
         _, entry = engine._embedding_cache.try_acquire(key)
@@ -1818,31 +1934,84 @@ class DownloadedImageCacheTest(unittest.TestCase):
         self.assertEqual(model.forward_count, 0)
         self.assertIsNone(engine._embedding_cache.peek(key))
         self.assertFalse(store.saved.is_set())
+        self.assertFalse(store.approvals.saved.is_set())
 
-    def test_same_url_new_bytes_do_not_reuse_old_identity_or_url_verdict(self):
-        from rtp_llm.config.exceptions import FtRuntimeException
+    def test_reinspection_refreshes_same_remote_key_for_next_worker(self):
+        for hashes_only in (False, True):
+            with self.subTest(hashes_only=hashes_only):
+                writer, store, provider, model, _ = self.engine(self.image_bytes())
+                key, original = self.seed(writer, store)
+                item = self.item()
+                original_object = store.objects[key]
+                if hashes_only:
+                    writer.get_embedding_result([item], hashes_only=True)
+                else:
+                    writer._embed_with_greennet_sync([item])
+                self.assertTrue(store.approvals.saved.wait(2))
+                self.assertEqual(set(store.approvals.objects), {key})
+                self.assertIs(store.objects[key], original_object)
+                self.assertEqual(len(provider.calls), 1)
+                self.assertEqual(model.forward_count, 0)
+                reader, other, inspection, vit, download = self.engine(
+                    self.image_bytes(), passed=False
+                )
+                other.objects.update(store.objects)
+                other.approvals.objects.update(store.approvals.objects)
+                result = reader.get_embedding_result([item])[0]
+                torch.testing.assert_close(result.embeddings[0], original[0])
+                self.assertFalse(inspection.calls)
+                self.assertEqual(vit.forward_count, 0)
+                download.target.load_image_source.assert_not_called()
+                self.assertFalse(other.approvals.saved.is_set())
 
-        old, new = self.image_bytes("red"), self.image_bytes("blue")
-        engine, store, provider, model, _ = self.engine(new, passed=False)
-        old_key, _ = self.seed(engine, store, old)
-        item = self.item()
-        with patch.object(engine._hash_key_cache, "greennet_passed", return_value=True):
-            verdict = engine.wait_greennet_verdict([item], request_id=904)
-            self.assertFalse(verdict.passed)
-            with self.assertRaises(FtRuntimeException):
-                engine.get_embedding_result([item], request_id=904)
-        self.assertTrue(provider.calls)
-        self.assertTrue(all(sources == [new] for _, sources in provider.calls))
-        self.assertGreaterEqual(engine._remote_embedding_cache.stats()["miss"], 1)
-        self.assertEqual(engine._remote_embedding_cache.stats().get("hit", 0), 0)
-        self.assertGreaterEqual(model.forward_count, 1)
-        self.assertEqual(list(store.objects), [old_key])
-        self.assertFalse(store.saved.is_set())
+    def test_approved_http_entry_on_fresh_worker_skips_changed_source(self):
+        for sync in (True, False):
+            with self.subTest(sync=sync):
+                engine, store, provider, model, _ = self.engine(self.image_bytes("red"))
+                item = self.item()
+                first = engine._embed_with_greennet_sync([item]).embeddings[0].clone()
+                self.assertTrue(store.saved.wait(2))
+                key = engine._remote_embedding_cache.key([item])
+                local = engine._embedding_cache.peek(item.cache_key())
+                verdict, checked = local.greennet_snapshot()
+                value = unpack_object(store.objects[key])
+                self.assertTrue(checked)
+                self.assertEqual(
+                    value["greennet"],
+                    dict(
+                        checked=True,
+                        passed=verdict.passed,
+                        code=verdict.code,
+                        message=verdict.message,
+                        request_scoped=False,
+                    ),
+                )
+                torch.testing.assert_close(value["result"][0], first)
+
+                reader, reader_store, inspection, vit, download = self.engine(
+                    self.image_bytes("blue"), passed=False
+                )
+                reader_store.objects.update(store.objects)
+                if sync:
+                    loaded = reader._embed_with_greennet_sync([item])
+                else:
+                    loaded = reader.get_embedding_result([item], request_id=904)[0]
+                download_mock = download.target.load_image_source
+                download_mock.assert_not_called()
+                self.assertFalse(inspection.calls)
+                self.assertEqual(vit.forward_count, 0)
+                self.assertEqual(
+                    reader._embedding_cache.peek(item.cache_key()).greennet_snapshot(),
+                    (verdict, True),
+                )
+                torch.testing.assert_close(loaded.embeddings[0], first)
+                self.assertEqual(model.forward_count, 1)
+                self.assertEqual(len(provider.calls), 1)
 
     def test_remote_transfer_failure_uses_already_decoded_source_and_encoder(self):
         payload = self.image_bytes()
         engine, store, provider, model, _ = self.engine(payload)
-        self.seed(engine, store, payload)
+        self.seed(engine, store)
         store.fail_read = True
         result = engine.get_embedding_result([self.item()], request_id=905)
         self.assertEqual(model.forward_count, 1)
@@ -1861,42 +2030,51 @@ class DownloadedImageCacheTest(unittest.TestCase):
         self.assertFalse(store.read_started.is_set())
         self.assertFalse(store.saved.is_set())
 
-    def test_http_and_inline_actual_bytes_share_key_but_changed_bytes_do_not(self):
-        import base64
+    def test_legacy_batch_url_rewrite_preserves_original_item_keys(self):
+        from rtp_llm.multimodal.test.multimodal_process_engine_test import (
+            _StubGreenNetProvider,
+        )
 
-        from rtp_llm.multimodal.mm_preprocess_result import ImageSourceIdentity
+        engine, store, _, model, download = self.engine(self.image_bytes())
+        model.supports_inspection_sources = False
+        provider = _StubGreenNetProvider(GreenNetVerdict(True, 1), "#rewritten")
+        engine._inspection._greennet_provider = provider
+        items = [self.item(), self.item("https://example.invalid/second.png")]
+        keys = [engine._remote_embedding_cache.key([item]) for item in items]
+        stored = (torch.full((2, 4), 37.0), None)
+        store.objects[keys[0]] = pack_object(plan_object(stored))
+        answer = engine._embed_with_greennet_sync(items)
+        self.assertTrue(store.saved.wait(2))
+        self.assertEqual(set(store.objects), set(keys))
+        self.assertEqual(model.forward_count, 1)
+        download.target.load_image_source.assert_called_once()
+        self.assertEqual(
+            download.target.load_image_source.call_args.args[0],
+            items[1].url + "#rewritten",
+        )
+        torch.testing.assert_close(answer.embeddings[0], stored[0])
+        for item in items:
+            entry = engine._embedding_cache.peek(item.cache_key())
+            self.assertEqual(entry.greennet_snapshot(), (provider._verdict, True))
 
-        payload = self.image_bytes()
-        engine, _, _, _, _ = self.engine(payload)
-        remote = engine._remote_embedding_cache
-        url = self.item()
-        identity = ImageSourceIdentity.from_bytes(payload)
-        http_key = remote.key([url], source_identity=identity)
-        inline = self.item(
-            "data:application/octet-stream;base64," + base64.b64encode(payload).decode()
-        )
-        self.assertEqual(http_key, remote.key([inline]))
-        self.assertNotEqual(
-            http_key,
-            remote.key(
-                [url],
-                source_identity=ImageSourceIdentity.from_bytes(
-                    self.image_bytes("blue")
-                ),
-            ),
-        )
-        self.assertIsNone(remote.key([url]))
-        self.assertIsNone(
-            remote.key(
-                [inline], source_identity=ImageSourceIdentity.from_bytes(b"mismatch")
-            )
-        )
-        for media_type in (2, 3, 4):
-            url.mm_type = media_type
-            self.assertIsNone(remote.key([url], source_identity=identity))
-        url.mm_type = 1
-        url.tensor = torch.ones(1)
-        self.assertIsNone(remote.key([url], source_identity=identity))
+    def test_mixed_source_batch_reuses_only_shareable_remote_approval(self):
+        engine, store, provider, model, download = self.engine(self.image_bytes())
+        first, second = self.item(), self.item("https://example.invalid/unchecked.png")
+        engine._embed_with_greennet_sync([first])
+        self.assertTrue(store.saved.wait(2))
+        engine._embedding_cache.flush()
+        engine._embedding_cache.clear()
+        engine._hash_key_cache.clear()
+        second_key = engine._remote_embedding_cache.key([second])
+        second_result = (torch.full((2, 4), 37.0), None)
+        store.objects[second_key] = pack_object(plan_object(second_result))
+        download.target.load_image_source.reset_mock()
+        provider.calls.clear()
+        result = engine._embed_with_greennet_sync([first, second])
+        self.assertEqual(model.forward_count, 1)
+        self.assertEqual(provider.calls, [([second.url], [self.image_bytes()])])
+        download.target.load_image_source.assert_called_once()
+        torch.testing.assert_close(result.embeddings[1], second_result[0])
 
 
 class GdrStartupLifetimeTest(unittest.TestCase):
@@ -2057,7 +2235,6 @@ class V41CppPlaceholderTest(unittest.TestCase):
             self.item(tensor=torch.empty(2)),
             self.item(tensor=torch.empty(1, dtype=torch.int64)),
             self.item(mm_type=2),
-            self.item(url="https://example.invalid/image.png"),
             self.item(url="data:application/pdf;base64,AQID"),
         ):
             original = item.tensor

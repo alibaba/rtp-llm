@@ -69,7 +69,7 @@ def _environment() -> dict[str, str]:
     }
 
 
-def _new_client() -> RtpKvMetaObjectClient:
+def _new_client(*, inspection=False) -> RtpKvMetaObjectClient:
     overrides = {}
     for variable, argument in (
         ("RTP_KVCM_CALL_TIMEOUT_MS", "call_timeout_ms"),
@@ -78,7 +78,9 @@ def _new_client() -> RtpKvMetaObjectClient:
     ):
         if variable in os.environ:
             overrides[argument] = int(os.environ[variable])
-    return RtpKvMetaObjectClient.from_env(environ=_environment(), **overrides)
+    return RtpKvMetaObjectClient.from_env(
+        environ=_environment(), inspection=inspection, **overrides
+    )
 
 
 def _specs(count: int = 67) -> list[dict]:
@@ -323,6 +325,23 @@ class RtpKvMetaObjectLiveIntegrationTest(TestCase):
         tensors[-1] = existing_tail
         self.client.save(keys, tensors, trace_id=self.prefix + "-retry")
         self._assert_equal(keys, tensors)
+
+    def test_reinspection_uses_same_key_in_same_group_without_replacing_embedding(self):
+        key = self._keys(1)[0]
+        tensor = torch.arange(128, dtype=torch.uint8)
+        verdict = torch.tensor([1, 2, 3], dtype=torch.uint8)
+        self.client.save_one(key, tensor)
+        with _new_client(inspection=True) as inspection:
+            try:
+                self.assertEqual(inspection.instance_group, self.client.instance_group)
+                self.assertNotEqual(inspection.instance_id, self.client.instance_id)
+                inspection.save_one(key, verdict)
+                with _new_client(inspection=True) as reader:
+                    loaded = reader.load_one(key, torch.empty_like(verdict))
+                    self.assertTrue(torch.equal(loaded, verdict))
+                self._assert_equal([key], [tensor])
+            finally:
+                inspection.remove_one(key)
 
     def test_logical_remove_idempotency_and_request_key_reuse(self):
         keys = self._keys(67)

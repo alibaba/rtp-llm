@@ -8,7 +8,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from functools import wraps
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
 import torch
 import torch.profiler
@@ -40,7 +40,6 @@ from rtp_llm.multimodal.mm_preprocess import (
     MultiprocessPreprocessExecutor,
     PreprocessExecutor,
 )
-from rtp_llm.multimodal.mm_preprocess_result import is_http_image_input
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 from rtp_llm.multimodal.mm_scheduler import (
     MMScheduler,
@@ -156,6 +155,12 @@ def _report_image_count(mm_inputs: List[MultimodalInput]) -> None:
         logging.exception("Failed to report ViT image count")
 
 
+class _RemoteLookup(NamedTuple):
+    key: Optional[str]
+    trace_id: str
+    result: Any
+
+
 class _AsyncComputeTask:
     def __init__(self, cache_key: str, entry: MMEmbeddingCacheEntry):
         self.cache_key = cache_key
@@ -217,6 +222,9 @@ class MMProcessEngine:
                 model_config,
                 vit_config,
                 kv_cache_config=kv_cache_config,
+                request_scoped_inspection=getattr(
+                    mm_part, "inspection_verdict_is_request_scoped", False
+                ),
                 device=(
                     torch.device("cuda", torch.cuda.current_device())
                     if torch.cuda.is_available()
@@ -469,6 +477,43 @@ class MMProcessEngine:
     def _begin_greennet(self, *args, **kwargs):
         return self._inspection._begin_greennet(*args, **kwargs)
 
+    def _probe_remote(
+        self, inputs, local_key, entry, timeout_ms, trace_id, *, restore_approval=True
+    ):
+        remote = self._remote_embedding_cache
+        key = remote.key(inputs, local_key=local_key, trace_id=trace_id)
+        value = remote.load(
+            key,
+            timeout_ms=max(1, int(timeout_ms)),
+            trace_id=trace_id,
+            entry=entry,
+            restore_approval=restore_approval,
+        )
+        return _RemoteLookup(key, trace_id, value)
+
+    def _begin_embedding_miss(
+        self, inputs, local_key, entry, request_id, *, deadline, **context
+    ):
+        probe = None
+        if self._remote_embedding_cache is not None:
+            probe = self._probe_remote(
+                inputs,
+                local_key,
+                entry,
+                (deadline - time.monotonic()) * 1000,
+                uuid.uuid4().hex,
+            )
+            if (
+                probe.result is not None
+                and entry.greennet_passed
+                and not self._request_scoped_inspection()
+            ):
+                return inputs, None, None, probe
+        rewritten, future, handle = self._begin_greennet(
+            inputs, entry, request_id, deadline=deadline, worker_sources=True, **context
+        )
+        return rewritten, future, handle, probe
+
     def _cancel_greennet(self, handle):
         self._inspection._cancel_greennet(handle)
 
@@ -588,6 +633,7 @@ class MMProcessEngine:
             try:
                 result, work_items = self._mm_embedding_impl(
                     rewritten,
+                    cache_inputs=mm_inputs,
                     inspection_handle=handle,
                     deadline=deadline,
                     defer_cache_complete=True,
@@ -614,7 +660,10 @@ class MMProcessEngine:
                             verdict.message or "data inspection failed",
                         )
                 for work_item in work_items:
-                    if work_item.cache_entry is not None:
+                    if (
+                        work_item.cache_entry is not None
+                        and not work_item.cache_entry.greennet_passed
+                    ):
                         work_item.cache_entry.set_greennet_verdict(
                             verdict, checked=self._greennet_enabled()
                         )
@@ -643,18 +692,20 @@ class MMProcessEngine:
             mm_inputs[0],
             require_key=self._remote_embedding_cache is not None,
         )
-        handle = None
+        handle = remote_probe = None
         try:
             if state == "miss":
-                rewritten, verdict_future, handle = self._begin_greennet(
-                    mm_inputs,
-                    entry,
-                    request_id,
-                    user_id=user_id,
-                    service_name=service_name,
-                    external_request_id=external_request_id,
-                    deadline=deadline,
-                    worker_sources=True,
+                rewritten, verdict_future, handle, remote_probe = (
+                    self._begin_embedding_miss(
+                        mm_inputs,
+                        cache_key,
+                        entry,
+                        request_id,
+                        user_id=user_id,
+                        service_name=service_name,
+                        external_request_id=external_request_id,
+                        deadline=deadline,
+                    )
                 )
             elif self._request_scoped_inspection():
                 # Reuse the tensor, never another caller's content verdict.
@@ -690,6 +741,7 @@ class MMProcessEngine:
                 inspection_handle=handle,
                 deadline=deadline,
                 cache_claim=(cache_key, entry, state),
+                remote_probe=remote_probe,
                 defer_cache_complete=state == "miss",
                 request_id=request_id,
                 external_request_id=external_request_id,
@@ -715,7 +767,10 @@ class MMProcessEngine:
                         ),
                         verdict.message or "data inspection failed",
                     )
-                entry.set_greennet_verdict(verdict, checked=self._greennet_enabled())
+                if verdict_future is not None or not entry.greennet_passed:
+                    entry.set_greennet_verdict(
+                        verdict, checked=self._greennet_enabled()
+                    )
                 raw_result = work_items[0].embedding_result
                 if raw_result is None:
                     raise RuntimeError("sync embedding did not produce a cache value")
@@ -831,7 +886,6 @@ class MMProcessEngine:
                 if _input_has_url(mm_input)
                 and (
                     self._request_scoped_inspection()
-                    or self._inspection.requires_content_inspection([mm_input])
                     or not self._hash_key_cache.greennet_passed(mm_input.cache_key())
                 )
             ]
@@ -986,6 +1040,8 @@ class MMProcessEngine:
         inspection_handle: Optional[SourceInspection] = None,
         external_request_id: str = "",
         region: Optional[str] = None,
+        remote_probe: Optional[_RemoteLookup] = None,
+        cache_inputs: Optional[List[MultimodalInput]] = None,
     ) -> Tuple[MMEmbeddingRes, List[MMWorkItem]]:
         """Internal implementation that also exposes canonical work-item values.
 
@@ -1022,6 +1078,8 @@ class MMProcessEngine:
                     work_items = self._create_work_items(
                         mm_inputs,
                         cache_claim=cache_claim,
+                        remote_probe=remote_probe,
+                        cache_inputs=cache_inputs,
                         defer_cache_complete=defer_cache_complete,
                         defer_feature_hashes=defer_feature_hashes,
                         deadline=deadline,
@@ -1100,6 +1158,8 @@ class MMProcessEngine:
         capture_inspection_sources: bool = False,
         inspection_handle: Optional[SourceInspection] = None,
         region: Optional[str] = None,
+        remote_probe: Optional[_RemoteLookup] = None,
+        cache_inputs: Optional[List[MultimodalInput]] = None,
     ) -> List[MMWorkItem]:
         """Create work items and submit preprocessing tasks."""
         self._normalize_remote_url_inputs(mm_inputs)
@@ -1128,8 +1188,14 @@ class MMProcessEngine:
         try:
             for index in range(0, len(mm_inputs), batch_size):
                 batch = mm_inputs[index : index + batch_size]
+                original_batch = (
+                    cache_inputs[index : index + batch_size]
+                    if cache_inputs is not None
+                    else batch
+                )
                 work_item = MMWorkItem(
                     batch,
+                    cache_input=original_batch[0],
                     mm_timeout_ms=self.vit_config.mm_timeout_ms,
                     embedding_cache=self._embedding_cache,
                     hash_key_cache=self._hash_key_cache,
@@ -1166,44 +1232,39 @@ class MMProcessEngine:
                 remote_cache = self._remote_embedding_cache
                 if remote_cache is not None:
                     work_item.remote_cache = remote_cache
-                    work_item.remote_trace_id = trace_id
                     work_item.remote_cache_observer = remote_cache.record
-                    work_item.remote_cache_key = None
-                    work_item.defer_remote_lookup = bool(
-                        getattr(self.mm_part, "supports_remote_source_identity", False)
-                        and (capture_inspection_sources or is_http_image_input(batch))
-                    )
-                    try:
-                        if not work_item.defer_remote_lookup:
-                            work_item.remote_cache_key = remote_cache.key(
-                                batch, trace_id=trace_id
-                            )
-                    except (ValueError, TypeError, AttributeError) as error:
-                        remote_cache.record(
-                            "cache_bypass",
+                    if work_item.cache_state != "miss":
+                        work_item.remote_trace_id = trace_id
+                        work_item.remote_cache_key = remote_cache.key(
+                            original_batch,
+                            local_key=work_item.cache_key,
                             trace_id=trace_id,
-                            reason="invalid_key_material",
-                            error_type=type(error).__name__,
                         )
-                    if work_item.cache_state == "miss":
+                    else:
+                        probe = remote_probe
+                        if probe is None:
+                            # For a legacy batch the provider already owns the verdict.
+                            probe = self._probe_remote(
+                                original_batch,
+                                work_item.cache_key,
+                                work_item.cache_entry,
+                                work_item.remaining_timeout_s() * 1000,
+                                trace_id,
+                                restore_approval=capture_inspection_sources
+                                or inspection_handle is None,
+                            )
+                        key, lookup_trace_id, result = probe
                         remote_cache.bind_entry(
-                            work_item.cache_entry, work_item.remote_cache_key, trace_id
+                            work_item.cache_entry, key, lookup_trace_id
                         )
-                if (
-                    remote_cache is not None
-                    # Remote tensors do not carry matching source bytes/verdicts.
-                    and not capture_inspection_sources
-                    and not work_item.defer_remote_lookup
-                    and not work_item.waiting_for_cache
-                    and work_item.should_preprocess
-                ):
-                    work_item.embedding_result = remote_cache.load(
-                        work_item.remote_cache_key,
-                        trace_id=trace_id,
-                        timeout_ms=max(1, int(work_item.remaining_timeout_s() * 1000)),
-                    )
-                    if work_item.embedding_result is not None:
-                        work_item.cache_source = "remote"
+                        work_item.remote_cache_key = key
+                        work_item.remote_trace_id = lookup_trace_id
+                        work_item.benchmark_trace_id = lookup_trace_id
+                        if result is not None:
+                            work_item.embedding_result = result
+                            work_item.cache_source = "remote"
+                            if work_item.cache_entry.greennet_passed:
+                                work_item.capture_inspection_sources = False
                 work_item.remaining_timeout_s()
                 self.preprocess_executor.submit(work_item)
                 if isinstance(inspection_handle, SourceInspection):
@@ -1229,7 +1290,6 @@ class MMProcessEngine:
             work_item.remaining_timeout_s()
             self.preprocess_executor.get_result(work_item)
             work_item.remaining_timeout_s()
-            self._load_preprocessed_remote(work_item)
             if work_item.embedding_result is None and not work_item.waiting_for_cache:
                 estimate = self.mm_part.estimate_work(
                     work_item.preprocess_result, work_item.mm_type
@@ -1241,50 +1301,6 @@ class MMProcessEngine:
                     scheduled.append(
                         self._scheduler.submit([work_item], deadline=deadline)
                     )
-
-    def _load_preprocessed_remote(self, work_item):
-        """Resolve content identity before GPU scheduling, never bypass inspection.
-
-        The loaded tensor stays private until the existing sync/async verdict
-        path publishes this producer. Worker inspection owns the same bytes;
-        it does not borrow a verdict from the remote object or URL hash cache.
-        """
-        if (
-            not work_item.defer_remote_lookup
-            or work_item.waiting_for_cache
-            or not work_item.should_preprocess
-        ):
-            return
-        remote = work_item.remote_cache
-        trace_id = work_item.remote_trace_id
-        if work_item.source_identity is None:
-            remote.record(
-                "cache_bypass", trace_id=trace_id, reason="source_identity_unavailable"
-            )
-            return
-        try:
-            key = remote.key(
-                work_item.mm_inputs,
-                trace_id=trace_id,
-                source_identity=work_item.source_identity,
-            )
-        except (ValueError, TypeError, AttributeError) as error:
-            remote.record(
-                "cache_bypass",
-                trace_id=trace_id,
-                reason="invalid_source_identity",
-                error_type=type(error).__name__,
-            )
-            return
-        work_item.remote_cache_key = key
-        remote.bind_entry(work_item.cache_entry, key, trace_id)
-        work_item.embedding_result = remote.load(
-            key,
-            trace_id=trace_id,
-            timeout_ms=max(1, int(work_item.remaining_timeout_s() * 1000)),
-        )
-        if work_item.embedding_result is not None:
-            work_item.cache_source = "remote"
 
     def _compute_embeddings(
         self,
@@ -2104,21 +2120,24 @@ class MMProcessEngine:
             # Worker-source adapters preserve inference URLs; legacy adapters
             # retain their rewrite contract. The verdict callback stamps the
             # entry independently of GPU completion.
-            rewritten, verdict_future, handle = self._begin_greennet(
-                mm_inputs,
-                entry,
-                request_id,
-                user_id=user_id,
-                service_name=service_name,
-                external_request_id=external_request_id,
-                deadline=deadline,
-                worker_sources=True,
+            rewritten, verdict_future, handle, remote_probe = (
+                self._begin_embedding_miss(
+                    mm_inputs,
+                    cache_key,
+                    entry,
+                    request_id,
+                    user_id=user_id,
+                    service_name=service_name,
+                    external_request_id=external_request_id,
+                    deadline=deadline,
+                )
             )
             # ViT embedding runs concurrently with inspection.
             _, work_items = self._mm_embedding_impl(
                 rewritten,
                 inspection_handle=handle,
                 cache_claim=(cache_key, entry, "miss"),
+                remote_probe=remote_probe,
                 defer_cache_complete=True,
                 request_id=request_id,
                 external_request_id=external_request_id,
@@ -2152,7 +2171,10 @@ class MMProcessEngine:
                         ),
                         verdict.message or "data inspection failed",
                     )
-                entry.set_greennet_verdict(verdict, checked=self._greennet_enabled())
+                if verdict_future is not None or not entry.greennet_passed:
+                    entry.set_greennet_verdict(
+                        verdict, checked=self._greennet_enabled()
+                    )
                 raw_result = work_items[0].embedding_result
                 if raw_result is None:
                     raise RuntimeError("async embedding did not produce a cache value")

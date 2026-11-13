@@ -14,6 +14,7 @@ or any storage mutation.
 from __future__ import annotations
 
 import copy
+import hashlib
 import ipaddress
 import json
 import os
@@ -78,6 +79,7 @@ class RtpKvMetaObjectClientConfig:
         call_timeout_ms: int | None = None,
         put_timeout_ms: int | None = None,
         get_timeout_ms: int | None = None,
+        inspection: bool = False,
     ) -> RtpKvMetaObjectClientConfig:
         """Snapshot the existing split ``RECO_*`` environment or config map."""
 
@@ -89,6 +91,7 @@ class RtpKvMetaObjectClientConfig:
             call_timeout_ms=call_timeout_ms,
             put_timeout_ms=put_timeout_ms,
             get_timeout_ms=get_timeout_ms,
+            inspection=inspection,
         )
 
     @classmethod
@@ -101,6 +104,7 @@ class RtpKvMetaObjectClientConfig:
         call_timeout_ms: int | None = None,
         put_timeout_ms: int | None = None,
         get_timeout_ms: int | None = None,
+        inspection: bool = False,
     ) -> RtpKvMetaObjectClientConfig:
         """Snapshot an already parsed RTP ``KVCacheConfig`` object."""
 
@@ -112,6 +116,7 @@ class RtpKvMetaObjectClientConfig:
             call_timeout_ms=call_timeout_ms,
             put_timeout_ms=put_timeout_ms,
             get_timeout_ms=get_timeout_ms,
+            inspection=inspection,
         )
 
 
@@ -700,6 +705,7 @@ def _derive_primary_config(
     call_timeout_ms: int | None,
     put_timeout_ms: int | None,
     get_timeout_ms: int | None,
+    inspection: bool = False,
 ) -> RtpKvMetaObjectClientConfig:
     max_object_bytes = _positive_int(
         max_object_bytes, "KVMeta max_object_bytes", DEFAULT_MAX_OBJECT_BYTES
@@ -735,6 +741,9 @@ def _derive_primary_config(
         primary, "instance_group", _MAX_INSTANCE_GROUP_BYTES
     )
     instance_id = _derive_identity(primary, "instance_id", _MAX_INSTANCE_ID_BYTES)
+    if inspection:
+        # Disjoint from every kve_ embedding instance, even for long user IDs.
+        instance_id = "kvi_" + hashlib.sha256(instance_id.encode()).hexdigest()
 
     enable_vipserver = primary.get("enable_vipserver", False)
     if type(enable_vipserver) is not bool:
@@ -882,6 +891,7 @@ def _config_from_reco_settings(
     call_timeout_ms: int | None,
     put_timeout_ms: int | None,
     get_timeout_ms: int | None,
+    inspection: bool = False,
 ) -> RtpKvMetaObjectClientConfig:
     if isinstance(settings, _ExplicitRecoSettings):
         primary = _select_primary_config(_parse_shared_config(settings.client_config))
@@ -894,4 +904,5 @@ def _config_from_reco_settings(
         call_timeout_ms=call_timeout_ms,
         put_timeout_ms=put_timeout_ms,
         get_timeout_ms=get_timeout_ms,
+        inspection=inspection,
     )
