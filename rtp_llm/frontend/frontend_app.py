@@ -500,14 +500,13 @@ class FrontendApp(object):
         """
         self._on_ready = on_ready
         self._on_prebind = on_prebind
-        # spawn 后独立初始化；仅合法且启用的 JSON 配置会创建 Trace 运行时。
-        init_telemetry("frontend", 0)
         self.frontend_server.start()
         app = self.create_app()
 
         prebind = getattr(self, "_on_prebind", None)
         if prebind is not None:
             prebind()
+        init_telemetry("frontend", 0)
 
         loop = "auto"
         if threading.current_thread() != threading.main_thread():

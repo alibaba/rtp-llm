@@ -46,6 +46,9 @@ public:
 
     // 初始化和配置相关
     bool init();
+    bool prepare();
+    bool startServices();
+    void updateRuntimeEndpoints(const RuntimeConfig& runtime_config, const std::string& pod_ip);
     bool initialized() const {
         return coordinator_manager_ != nullptr;
     }
@@ -186,9 +189,9 @@ private:
     CoordinatorCacheManagerPtr coordinator_manager_;
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
-    const KVCacheConfig                kv_cache_config_;
+    KVCacheConfig                      kv_cache_config_;
     const ParallelismConfig            parallelism_config_;
-    const RuntimeConfig                runtime_config_;
+    RuntimeConfig                      runtime_config_;
     const SpeculativeExecutionConfig   sp_config_;
     const PDSepConfig                  pd_sep_config_;
     const bool                         use_device_malloc_block_pool_;
