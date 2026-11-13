@@ -77,6 +77,11 @@ class KimiK3KDA(KdaAttention):
         # K3 keeps BF16 convolution storage and FP32 recurrent checkpoints.
         prefill.gate_lower_bound = runtime.kda_gate_lower_bound
         decode.gate_lower_bound = runtime.kda_gate_lower_bound
+        strided_fp8_forget = (
+            fa_width == 128
+            and isinstance(forget_projection, CudaFp8GEMMLinear)
+            and forget_projection.scale_ue8m0
+        )
         super().__init__(
             input_projection=input_projection,
             forget_projection=forget_projection,
@@ -89,11 +94,9 @@ class KimiK3KDA(KdaAttention):
             decode=decode,
             fp8_output_norm=fp8_output,
             strided_fp8_forget=(
-                parallelism.role_type == RoleType.DECODE
-                and fa_width == 128
-                and isinstance(forget_projection, CudaFp8GEMMLinear)
-                and forget_projection.scale_ue8m0
+                parallelism.role_type == RoleType.DECODE and strided_fp8_forget
             ),
+            strided_fp8_prefill_forget=strided_fp8_forget,
             ag_local_fp8_overlap=isinstance(input_projection, CudaFp8GEMMLinear),
         )
 

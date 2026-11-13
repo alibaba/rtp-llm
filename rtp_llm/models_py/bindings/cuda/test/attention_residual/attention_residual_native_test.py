@@ -154,6 +154,75 @@ class AttentionResidualNativeTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "num_blocks must be"):
             self._call(*operands, torch.empty_like(operands[0]), 9, -1)
 
+    def test_shared_delta_graph_preserves_both_bf16_roundings(self):
+        # Verify4/SP4 gives one local row per request in each DP group.
+        for rows in (1, 8, 16, 32):
+            for active, write in ((0, 0), (2, -1), (8, -1), (8, 8)):
+                with self.subTest(rows=rows, active=active, write=write):
+                    prefix, routed, bank, norm, projection, output_norm = (
+                        value.cuda() for value in self._fixture(rows)
+                    )
+                    shared = torch.randn_like(routed)
+                    # Three-way FP32 addition would produce 1/256, while
+                    # BF16(routed + shared), then BF16(prefix + delta) is zero.
+                    prefix[:, 0] = -1
+                    routed[:, 0] = 1
+                    shared[:, 0] = 1 / 256
+                    original_prefix, original_bank = prefix.clone(), bank.clone()
+                    output = torch.empty_like(prefix)
+                    expected = torch.empty_like(prefix)
+
+                    def run():
+                        rtp_llm_ops.attn_res(
+                            prefix,
+                            routed,
+                            bank,
+                            norm,
+                            projection,
+                            output_norm,
+                            output,
+                            active,
+                            write,
+                            1e-6,
+                            1e-5,
+                            shared_delta=shared,
+                        )
+
+                    stream = torch.cuda.Stream()
+                    stream.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(stream):
+                        for _ in range(3):
+                            run()
+                    stream.synchronize()
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, stream=stream):
+                        run()
+                    for step in range(2):
+                        shared[:, 1:] += step * 0.125
+                        reference_prefix = original_prefix.clone()
+                        reference_bank = original_bank.clone()
+                        self._call(
+                            reference_prefix,
+                            routed + shared,
+                            reference_bank,
+                            norm,
+                            projection,
+                            output_norm,
+                            expected,
+                            active,
+                            write,
+                        )
+                        prefix.copy_(original_prefix)
+                        bank.copy_(original_bank)
+                        graph.replay()
+                        torch.cuda.synchronize()
+                        torch.testing.assert_close(
+                            prefix, reference_prefix, rtol=0, atol=0
+                        )
+                        torch.testing.assert_close(bank, reference_bank, rtol=0, atol=0)
+                        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                        self.assertEqual(prefix[0, 0].item(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

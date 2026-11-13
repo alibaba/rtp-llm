@@ -168,7 +168,18 @@ class KimiK3DecoderLayer(nn.Module):
         return self.mlp(mlp_input, valid_mask, residual=hidden)
 
     def forward(
-        self, hidden, anchors, fmha, cache, attention_inputs, metadata, valid_mask
+        self,
+        hidden,
+        anchors,
+        fmha,
+        cache,
+        attention_inputs,
+        metadata,
+        valid_mask,
+        *,
+        mlp_delta=None,
+        mlp_shared_delta=None,
+        defer_mlp_residual=False,
     ):
         if self.block_size:
             previous = (self.index + self.block_size - 1) // self.block_size
@@ -193,6 +204,8 @@ class KimiK3DecoderLayer(nn.Module):
             attn_input = residual(
                 hidden,
                 anchors,
+                delta=mlp_delta,
+                shared_delta=mlp_shared_delta,
                 num_blocks=previous,
                 block_write_idx=previous if writes else -1,
                 output_norm_weight=self.attention_norm.weight,
@@ -202,19 +215,75 @@ class KimiK3DecoderLayer(nn.Module):
             attended = self.attention(
                 attn_input, fmha, cache, attention_inputs, metadata
             )
-            hidden = attended if writes else hidden + attended
+            delta = None
+            if writes:
+                hidden = attended
+            elif (
+                defer_mlp_residual
+                and metadata.is_target_verify
+                and hidden.is_cuda
+                and hidden.dtype == attended.dtype == torch.bfloat16
+                and hidden.shape == attended.shape
+                and hidden.is_contiguous()
+                and attended.is_contiguous()
+            ):
+                # AttnRes updates hidden before the MLP consumes the residual.
+                delta = attended
+            else:
+                hidden = hidden + attended
             mlp_input = self.mlp_residual(
                 hidden,
                 anchors,
+                delta=delta,
                 num_blocks=previous + int(writes),
                 output_norm_weight=self.mlp_norm.weight,
                 output_norm_eps=self.mlp_norm.variance_epsilon,
             )
         else:
-            hidden = hidden + self.attention(
+            attended = self.attention(
                 self.attention_norm(hidden), fmha, cache, attention_inputs, metadata
             )
-            mlp_input = self.mlp_norm(hidden)
+            if (
+                (
+                    not attention_inputs.is_prefill
+                    or attention_inputs.is_mtp_draft_update
+                )
+                and hidden.is_cuda
+                and hidden.dtype
+                == attended.dtype
+                == self.mlp_norm.weight.dtype
+                == torch.bfloat16
+                and hidden.shape == attended.shape
+                and hidden.is_contiguous()
+                and attended.is_contiguous()
+                and self.mlp_norm.weight.is_contiguous()
+            ):
+                from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
+                    rounded_add_rmsnorm,
+                )
+
+                hidden, mlp_input = rounded_add_rmsnorm(
+                    hidden,
+                    attended,
+                    self.mlp_norm.weight,
+                    self.mlp_norm.variance_epsilon,
+                )
+            else:
+                hidden = hidden + attended
+                mlp_input = self.mlp_norm(hidden)
+        if defer_mlp_residual:
+            if self.mlp.fuses_layer_residual:
+                routed, shared = self.mlp(mlp_input, valid_mask, defer_output_add=True)
+                return hidden, routed, shared
+            mlp_output = self.mlp(mlp_input, valid_mask)
+            if (
+                hidden.dtype == mlp_output.dtype == torch.bfloat16
+                and hidden.shape == mlp_output.shape
+                and hidden.is_contiguous()
+                and mlp_output.is_contiguous()
+            ):
+                return hidden, mlp_output, None
+            return hidden + mlp_output, None, None
         return self.apply_mlp(hidden, mlp_input, valid_mask)
 
 
@@ -515,6 +584,16 @@ class KimiK3Model(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         anchors = hidden.new_empty((local_rows, self.num_blocks, hidden.shape[-1]))
+        defer_mlp_residual = (
+            self.num_blocks > 0
+            and primary.is_target_verify
+            and hidden.is_cuda
+            and hidden.dtype == torch.bfloat16
+            and hidden.shape[-1] == 7168
+            and torch.cuda.get_device_capability(hidden.device)[0] == 10
+        )
+        mlp_delta = None
+        mlp_shared_delta = None
         for index, layer in enumerate(self.layers):
             attention_inputs = select_attention_inputs_for_layer(
                 inputs, self.kv_cache, index
@@ -525,11 +604,27 @@ class KimiK3Model(GptModelBase):
                 else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, index)
             )
             cache = self.kv_cache.get_layer_cache(index) if self.kv_cache else None
-            hidden = layer(
-                hidden, anchors, fmha, cache, attention_inputs, metadata, valid_mask
-            )
+            if defer_mlp_residual:
+                hidden, mlp_delta, mlp_shared_delta = layer(
+                    hidden,
+                    anchors,
+                    fmha,
+                    cache,
+                    attention_inputs,
+                    metadata,
+                    valid_mask,
+                    mlp_delta=mlp_delta,
+                    mlp_shared_delta=mlp_shared_delta,
+                    defer_mlp_residual=True,
+                )
+            else:
+                hidden = layer(
+                    hidden, anchors, fmha, cache, attention_inputs, metadata, valid_mask
+                )
         if self.num_blocks:
-            hidden = self.final_residual(hidden, anchors)
+            hidden = self.final_residual(
+                hidden, anchors, delta=mlp_delta, shared_delta=mlp_shared_delta
+            )
         return (
             all_gather(hidden, Group.TP)
             if gather_output and self.tp_size > 1

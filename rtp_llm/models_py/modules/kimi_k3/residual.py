@@ -40,6 +40,7 @@ class KimiK3AttentionResidual(nn.Module):
         num_blocks: int,
         block_write_idx: int = -1,
         delta: Optional[torch.Tensor] = None,
+        shared_delta: Optional[torch.Tensor] = None,
         metadata=None,
     ):
         from rtp_llm.models_py.triton_kernels.common.activation import (
@@ -57,6 +58,7 @@ class KimiK3AttentionResidual(nn.Module):
             num_blocks=num_blocks,
             block_write_idx=block_write_idx,
             delta=delta,
+            shared_delta=shared_delta,
         )
 
     def forward(
@@ -67,17 +69,22 @@ class KimiK3AttentionResidual(nn.Module):
         output_norm_weight: Optional[torch.Tensor] = None,
         output_norm_eps: Optional[float] = None,
         delta: Optional[torch.Tensor] = None,
+        shared_delta: Optional[torch.Tensor] = None,
         num_blocks: Optional[int] = None,
         block_write_idx: int = -1,
         metadata=None,
     ) -> torch.Tensor:
         if self._verify_fp8 and getattr(metadata, "is_target_verify", False):
             return self.forward_fp8(
-                prefix_sum, block_residual,
+                prefix_sum,
+                block_residual,
                 output_norm_weight=output_norm_weight,
                 output_norm_eps=output_norm_eps,
                 delta=delta,
-                num_blocks=(block_residual.shape[1] if num_blocks is None else num_blocks),
+                shared_delta=shared_delta,
+                num_blocks=(
+                    block_residual.shape[1] if num_blocks is None else num_blocks
+                ),
                 block_write_idx=block_write_idx,
             )
         if prefix_sum.ndim != 2:
@@ -103,6 +110,14 @@ class KimiK3AttentionResidual(nn.Module):
             raise ValueError(
                 "output_norm_eps is required when output RMSNorm is requested"
             )
+        if shared_delta is not None and (
+            delta is None
+            or shared_delta.shape != prefix_sum.shape
+            or shared_delta.dtype != prefix_sum.dtype
+            or shared_delta.device != prefix_sum.device
+            or not shared_delta.is_contiguous()
+        ):
+            raise ValueError("AttnRes shared delta requires matching dense MoE deltas")
         if (
             prefix_sum.is_cuda
             and prefix_sum.dtype == torch.bfloat16
@@ -115,14 +130,23 @@ class KimiK3AttentionResidual(nn.Module):
                 raise RuntimeError("Native AttnRes requires the CUDA 13 RTP build")
             output = torch.empty_like(prefix_sum)
             rtp_llm_ops.attn_res(
-                prefix_sum, delta, block_residual, self.norm_weight,
-                self.projection_weight, output_norm_weight, output,
-                active_blocks, block_write_idx, self.eps,
+                prefix_sum,
+                delta,
+                block_residual,
+                self.norm_weight,
+                self.projection_weight,
+                output_norm_weight,
+                output,
+                active_blocks,
+                block_write_idx,
+                self.eps,
                 0.0 if output_norm_eps is None else float(output_norm_eps),
+                shared_delta=shared_delta,
             )
             return output
         if delta is not None:
-            prefix_sum.add_(delta)
+            # Match MoE's BF16 routed + shared, then prefix + MoE rounding.
+            prefix_sum.add_(delta if shared_delta is None else delta + shared_delta)
         if block_write_idx >= 0:
             block_residual[:, block_write_idx].copy_(prefix_sum)
         if active_blocks == 0:

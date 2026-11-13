@@ -1,0 +1,281 @@
+"""Graph regressions for K3 residual and KDA output fusion."""
+
+import unittest
+from types import SimpleNamespace
+
+import flashinfer
+import torch
+from torch import nn
+
+from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3DecoderLayer
+from rtp_llm.models_py.modules.hybrid.kda_attention import KdaAttention
+from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
+from rtp_llm.models_py.triton_kernels.common.activation import (
+    rmsnorm_sigmoid_gate_per_token_group_quant_fp8,
+)
+from rtp_llm.models_py.triton_kernels.common.layernorm_gated import rounded_add_rmsnorm
+
+
+def capture(run):
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            run()
+    stream.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        output = run()
+    torch.cuda.current_stream().wait_stream(stream)
+    return graph, output
+
+
+class _Attention(nn.Module):
+    _fp8_collective = None
+
+    def forward(self, hidden, *args):
+        return hidden * 0.125
+
+
+class _Mlp(nn.Module):
+    def __init__(self, fused):
+        super().__init__()
+        self.fuses_layer_residual = fused
+
+    def forward(self, hidden, valid_mask, residual=None, *, defer_output_add=False):
+        routed, shared = hidden * 0.25, hidden * 0.0625
+        if defer_output_add:
+            return routed, shared
+        combined = routed + shared
+        return combined if residual is None else residual + combined
+
+
+class SharedModelingTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10:
+            raise RuntimeError("K3 shared modeling graph tests require SM100 family")
+        torch.cuda.set_device(0)
+        torch.manual_seed(319)
+
+    def random(self, *shape):
+        return torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+
+    def residual(self):
+        return KimiK3AttentionResidual(
+            self.random(7168) * 0.02, self.random(7168) * 0.02, 1e-5
+        )
+
+    def test_kda_composition_preserves_packed_qkv_stride(self):
+        class Kernel(nn.Module):
+            def __init__(self, tp):
+                super().__init__()
+                self.parallelism_config = SimpleNamespace(tp_size=1)
+                self.local_num_k_heads = self.local_num_v_heads = 96 // tp
+                self.head_k_dim = self.head_v_dim = 128
+
+            def forward(self, qkv, forget, beta, *args):
+                self.qkv_stride = qkv.stride(0)
+                return qkv[:, : self.local_num_k_heads * 128]
+
+        class Projection(nn.Module):
+            def forward(self, latent):
+                return latent
+
+            def forward_quantized(self, values, scales):
+                self.quantized = True
+                return values
+
+        class Norm(nn.Module):
+            def forward(self, output, gate):
+                return output
+
+        for is_prefill, tp, rows, packed_width in (
+            (True, 8, 32768, 6400),
+            (True, 8, 65536, 6400),
+            (True, 8, 131072, 6400),
+            *((False, 4, 4 * batch, 12544) for batch in (1, 8, 16, 32)),
+        ):
+            packed = self.random(rows, packed_width)
+            prefill, decode, projection = Kernel(tp), Kernel(tp), Projection()
+            module = KdaAttention(
+                input_projection=lambda hidden: packed,
+                forget_projection=projection,
+                output_projection=nn.Identity(),
+                fa_width=128,
+                norm=Norm(),
+                prefill=prefill,
+                decode=decode,
+                strided_fp8_forget=not is_prefill,
+                strided_fp8_prefill_forget=True,
+            )
+            inputs = SimpleNamespace(is_prefill=is_prefill, valid_token_mask=None)
+            metadata = SimpleNamespace(is_target_verify=not is_prefill)
+            graph, output = capture(lambda: module(None, None, None, inputs, metadata))
+            graph.replay()
+            self.assertTrue(projection.quantized)
+            self.assertEqual(
+                (prefill if is_prefill else decode).qkv_stride, packed_width
+            )
+            self.assertEqual(output.shape, (rows, 96 // tp * 128))
+
+    def test_rounded_add_norm_graph_at_draft_and_update_rows(self):
+        # DP-local BS 1/8/16/32: Q1/SP4 and fixed Verify4/SP4.
+        for rows in (1, 2, 4, 8, 16, 32):
+            hidden, delta, weight = (
+                self.random(rows, 7168),
+                self.random(rows, 7168),
+                self.random(7168),
+            )
+            graph, (residual, normalized) = capture(
+                lambda: rounded_add_rmsnorm(hidden, delta, weight, 1e-5)
+            )
+            for step in range(2):
+                delta.add_(step * 0.125)
+                graph.replay()
+                expected = hidden + delta
+                torch.testing.assert_close(residual, expected, rtol=0, atol=0)
+                torch.testing.assert_close(
+                    normalized,
+                    flashinfer.norm.rmsnorm(expected, weight, eps=1e-5),
+                    rtol=1e-2,
+                    atol=1e-2,
+                )
+
+    def test_fp8_attnres_shared_delta_graph_and_anchor_write(self):
+        for rows in (1, 8, 16, 32):
+            for active, write in ((0, 0), (2, -1), (8, -1), (8, 8)):
+                module = self.residual()
+                prefix, routed, shared = (self.random(rows, 7168) for _ in range(3))
+                bank = self.random(rows, 9, 7168)
+                source, original_bank = prefix.clone(), bank.clone()
+                weight = self.random(7168)
+                kwargs = dict(
+                    output_norm_weight=weight,
+                    output_norm_eps=1e-5,
+                    num_blocks=active,
+                    block_write_idx=write,
+                )
+                graph, actual = capture(
+                    lambda: module.forward_fp8(
+                        prefix, bank, delta=routed, shared_delta=shared, **kwargs
+                    )
+                )
+                for step in range(2):
+                    shared.add_(step * 0.125)
+                    expected_prefix, expected_bank = (
+                        source.clone(),
+                        original_bank.clone(),
+                    )
+                    expected = module.forward_fp8(
+                        expected_prefix, expected_bank, delta=routed + shared, **kwargs
+                    )
+                    prefix.copy_(source)
+                    bank.copy_(original_bank)
+                    graph.replay()
+                    torch.testing.assert_close(prefix, expected_prefix, rtol=0, atol=0)
+                    torch.testing.assert_close(bank, expected_bank, rtol=0, atol=0)
+                    torch.testing.assert_close(
+                        actual.values.float(), expected.values.float(), rtol=0, atol=0
+                    )
+                    torch.testing.assert_close(
+                        actual.scale_wire.T[:rows],
+                        expected.scale_wire.T[:rows],
+                        rtol=0,
+                        atol=0,
+                    )
+
+    def test_masked_norm_graph_reads_runtime_mask_and_ignores_invalid_nan(self):
+        for batch in (1, 8, 16, 32):
+            rows, heads = 4 * batch, 24
+            packed = self.random(rows, 12544)
+            gate = packed[:, 9216:12288].view(rows, heads, 128)
+            output, weight = self.random(rows, heads, 128), self.random(128)
+            valid = torch.ones(rows, device="cuda", dtype=torch.bool)
+            graph, actual = capture(
+                lambda: rmsnorm_sigmoid_gate_per_token_group_quant_fp8(
+                    output, gate, weight, 1e-5, valid_rows=valid
+                )
+            )
+            for step in (0, 1):
+                valid.copy_(torch.arange(rows, device="cuda") % 2 == step)
+                output.normal_()
+                gate.normal_()
+                output.masked_fill_(~valid[:, None, None], float("nan"))
+                gate.masked_fill_(~valid[:, None, None], float("nan"))
+                expected = rmsnorm_sigmoid_gate_per_token_group_quant_fp8(
+                    torch.where(valid[:, None, None], output, 0),
+                    torch.where(valid[:, None, None], gate, 0),
+                    weight,
+                    1e-5,
+                )
+                graph.replay()
+                torch.testing.assert_close(
+                    actual[0].float(), expected[0].float(), rtol=0, atol=0
+                )
+                torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+
+    def test_deferred_decoder_chain_materializes_final_delta_and_anchors(self):
+        layers = []
+        for index in range(3):
+            layer = KimiK3DecoderLayer.__new__(KimiK3DecoderLayer)
+            nn.Module.__init__(layer)
+            layer.index, layer.block_size = index, 2
+            layer.attention = _Attention()
+            layer.attention_residual, layer.mlp_residual = (
+                self.residual(),
+                self.residual(),
+            )
+            layer.attention_norm = SimpleNamespace(
+                weight=self.random(7168), variance_epsilon=1e-5
+            )
+            layer.mlp_norm = SimpleNamespace(
+                weight=self.random(7168), variance_epsilon=1e-5
+            )
+            layer.mlp = _Mlp(fused=index != 1)
+            layer.apply_mlp = (
+                layer._apply_fused_shared_mlp
+                if layer.mlp.fuses_layer_residual
+                else layer._apply_regular_mlp
+            )
+            layers.append(layer)
+        final = self.residual()
+        inputs = SimpleNamespace(is_prefill=False, is_mtp_draft_update=False)
+        metadata = SimpleNamespace(is_target_verify=True)
+        for rows in (1, 8, 16, 32):
+            hidden, bank = self.random(rows, 7168), self.random(rows, 2, 7168)
+            original = hidden.clone()
+            expected_bank = bank.clone()
+            expected = hidden.clone()
+            for layer in layers:
+                expected = layer(
+                    expected, expected_bank, None, None, inputs, metadata, None
+                )
+            expected = final(expected, expected_bank)
+
+            def run():
+                current, delta, shared = hidden, None, None
+                for layer in layers:
+                    current, delta, shared = layer(
+                        current,
+                        bank,
+                        None,
+                        None,
+                        inputs,
+                        metadata,
+                        None,
+                        mlp_delta=delta,
+                        mlp_shared_delta=shared,
+                        defer_mlp_residual=True,
+                    )
+                return final(current, bank, delta=delta, shared_delta=shared)
+
+            graph, actual = capture(run)
+            hidden.copy_(original)
+            graph.replay()
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            torch.testing.assert_close(bank, expected_bank, rtol=0, atol=0)
+
+
+if __name__ == "__main__":
+    unittest.main()

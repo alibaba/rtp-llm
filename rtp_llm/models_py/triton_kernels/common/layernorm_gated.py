@@ -448,3 +448,47 @@ def fused_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps):
             num_warps=8 if block >= 2048 else 4,
         )
     return q_out, kv_out
+
+
+@triton.jit
+def _rounded_add_rmsnorm_kernel(
+    Hidden,
+    Delta,
+    Weight,
+    Residual,
+    Output,
+    WIDTH: tl.constexpr,
+    EPS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    cols = tl.arange(0, BLOCK)
+    offsets = row * WIDTH + cols
+    active = cols < WIDTH
+    hidden = tl.load(Hidden + offsets, active, other=0).to(tl.float32)
+    delta = tl.load(Delta + offsets, active, other=0).to(tl.float32)
+    residual = (hidden + delta).to(Residual.dtype.element_ty)
+    tl.store(Residual + offsets, residual, active)
+    x = residual.to(tl.float32)
+    weight = tl.load(Weight + cols, active, other=0).to(tl.float32)
+    rrms = tl.rsqrt(tl.sum(x * x) / WIDTH + EPS)
+    tl.store(Output + offsets, x * rrms * weight, active)
+
+
+def rounded_add_rmsnorm(hidden, delta, weight, eps):
+    """Fuse BF16 residual addition and RMSNorm of the rounded sum."""
+    residual, output = torch.empty_like(hidden), torch.empty_like(hidden)
+    if hidden.shape[0]:
+        width = hidden.shape[1]
+        _rounded_add_rmsnorm_kernel[(hidden.shape[0],)](
+            hidden,
+            delta,
+            weight,
+            residual,
+            output,
+            width,
+            eps,
+            triton.next_power_of_2(width),
+            num_warps=8,
+        )
+    return residual, output

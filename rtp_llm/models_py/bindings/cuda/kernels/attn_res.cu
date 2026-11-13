@@ -244,7 +244,7 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
     const bf16_t* __restrict__ rms_w, bf16_t* __restrict__ output, int T,
     int block_stride_m, int block_stride_r, float rms_eps,
     const bf16_t* __restrict__ output_norm_weight, float output_norm_eps,
-    int block_write_idx) {
+    int block_write_idx, const bf16_t* __restrict__ shared_delta) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 && __CUDA_ARCH__ < 1100
   constexpr float LOG2_E = 1.4426950408889634f;
   constexpr int N_CHUNK = NC;
@@ -417,6 +417,7 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
 
     long long gci = 0;
     for (int tb = blockIdx.x; tb < TB; tb += num_ctas) {
+      const bf16_t* shared_row = shared_delta ? shared_delta + static_cast<int64_t>(tb) * H : nullptr;
       float m_running = -FLT_MAX;
       float s_running = 0.f;
   #pragma unroll
@@ -459,6 +460,10 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
                       for (int j = 0; j < 2; j++) {
                         auto delta2 = *reinterpret_cast<const __nv_bfloat162*>(
                             delta_ptr + 2 * j);
+                        if (shared_row) {
+                          delta2 = __hadd2(delta2, *reinterpret_cast<const __nv_bfloat162*>(
+                              shared_row + h_base + 2 * j));
+                        }
                         v2[j] = __hadd2(v2[j], delta2);
                       }
                       *reinterpret_cast<int2*>(layer_res + (long long)tb * H +
@@ -501,6 +506,10 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
                   for (int j = 0; j < VEC / 2; j++) {
                     auto delta2 = *reinterpret_cast<const __nv_bfloat162*>(
                         delta_ptr + 2 * j);
+                    if (shared_row) {
+                      delta2 = __hadd2(delta2, *reinterpret_cast<const __nv_bfloat162*>(
+                          shared_row + h_base + 2 * j));
+                    }
                     v2[j] = __hadd2(v2[j], delta2);
                   }
                   *reinterpret_cast<int4*>(layer_res + (long long)tb * H +
@@ -894,7 +903,8 @@ static void launch_fwd(bf16_t* block_residual, bf16_t* layer_residual,
                        float rms_eps, int num_sm, cudaStream_t stream,
                        const bf16_t* output_norm_weight = nullptr,
                        float output_norm_eps = 0.f, int block_stride_m = 0,
-                       int block_stride_r = 0, int block_write_idx = -1) {
+                       int block_stride_r = 0, int block_write_idx = -1,
+                       const bf16_t* shared_delta = nullptr) {
   constexpr size_t smem_size =
       ((size_t)(CHUNK_DEPTH * (NC + 1) + (HAS_OUTPUT_NORM ? 1 : 0)) * H *
            sizeof(bf16_t) +
@@ -925,7 +935,7 @@ static void launch_fwd(bf16_t* block_residual, bf16_t* layer_residual,
   cudaLaunchKernelEx(&config, kernel, block_residual, layer_residual, delta,
                      res_weight, rms_weight, output, T, block_stride_m,
                      block_stride_r, rms_eps, output_norm_weight,
-                     output_norm_eps, block_write_idx);
+                     output_norm_eps, block_write_idx, shared_delta);
 }
 
 }  // namespace fwd_prod_v2
@@ -939,7 +949,8 @@ void attn_res(at::Tensor& prefix,
                       std::optional<at::Tensor> output_norm_weight,
                       at::Tensor& output, int64_t num_blocks,
                       int64_t block_write_idx, double eps,
-                      double output_norm_eps) {
+                      double output_norm_eps,
+                      std::optional<at::Tensor> shared_delta) {
   TORCH_CHECK(prefix.is_cuda() && prefix.dim() == 2 && prefix.scalar_type() == at::kBFloat16,
               "AttnRes prefix must be a CUDA BF16 matrix");
   auto check_tensor = [&](const at::Tensor& tensor, const char* name) {
@@ -961,6 +972,12 @@ void attn_res(at::Tensor& prefix,
   if (delta.has_value()) {
     check_tensor(*delta, "delta");
     TORCH_CHECK(delta->sizes() == prefix.sizes(), "AttnRes delta shape mismatch");
+  }
+  if (shared_delta.has_value()) {
+    TORCH_CHECK(delta.has_value(), "AttnRes shared delta requires a routed delta");
+    check_tensor(*shared_delta, "shared_delta");
+    TORCH_CHECK(shared_delta->sizes() == prefix.sizes() && shared_delta->is_contiguous(),
+                "AttnRes shared delta must match the dense prefix shape");
   }
   if (output_norm_weight.has_value()) {
     check_tensor(*output_norm_weight, "output_norm_weight");
@@ -1019,7 +1036,8 @@ void attn_res(at::Tensor& prefix,
           static_cast<float>(output_norm_eps),
           static_cast<int>(blocks.stride(0)),
           static_cast<int>(blocks.stride(1)),
-          static_cast<int>(block_write_idx));
+          static_cast<int>(block_write_idx),
+          shared_delta.has_value() ? static_cast<bf16_t const*>(shared_delta->data_ptr()) : nullptr);
     };
     switch (num_blocks) {
       case 0:

@@ -1318,6 +1318,7 @@ def is_fp8_attn_res_supported(
 def _multi_block_attn_res_fp8_kernel(
     prefix,
     delta,
+    shared_delta,
     blocks,
     norm_weight,
     projection_weight,
@@ -1336,6 +1337,7 @@ def _multi_block_attn_res_fp8_kernel(
     eps: tl.constexpr,
     output_norm_eps: tl.constexpr,
     has_delta: tl.constexpr,
+    has_shared_delta: tl.constexpr,
     write_block: tl.constexpr,
     apply_output_norm: tl.constexpr,
     block_l: tl.constexpr,
@@ -1350,11 +1352,19 @@ def _multi_block_attn_res_fp8_kernel(
         other=0.0,
     ).to(tl.float32)
     if has_delta:
-        updated_prefix += tl.load(
+        update = tl.load(
             delta + token * stride_delta_m + hidden_offsets,
             mask=hidden_mask,
             other=0.0,
         ).to(tl.float32)
+        if has_shared_delta:
+            shared = tl.load(
+                shared_delta + token * hidden_size + hidden_offsets,
+                mask=hidden_mask,
+                other=0.0,
+            ).to(tl.float32)
+            update = (update + shared).to(prefix.dtype.element_ty).to(tl.float32)
+        updated_prefix += update
         updated_prefix = updated_prefix.to(prefix.dtype.element_ty).to(tl.float32)
         tl.store(
             prefix + token * stride_prefix_m + hidden_offsets,
@@ -1457,6 +1467,7 @@ def attn_res_fp8(
     delta: Optional[torch.Tensor] = None,
     num_blocks: Optional[int] = None,
     block_write_idx: int = -1,
+    shared_delta: Optional[torch.Tensor] = None,
 ) -> "Fp8Activation":
     from rtp_llm.models_py.distributed.collective_torch import Fp8Activation
 
@@ -1474,6 +1485,14 @@ def attn_res_fp8(
         raise ValueError("unsupported input for fused AttnRes")
     if output_norm_weight is not None and output_norm_eps is None:
         raise ValueError("output_norm_eps is required when output RMSNorm is fused")
+    if shared_delta is not None and (
+        delta is None
+        or shared_delta.shape != prefix_sum.shape
+        or shared_delta.device != prefix_sum.device
+        or shared_delta.dtype != prefix_sum.dtype
+        or not shared_delta.is_contiguous()
+    ):
+        raise ValueError("FP8 AttnRes shared delta requires matching dense MoE deltas")
 
     m, k = prefix_sum.shape
     output = Fp8Activation(
@@ -1491,6 +1510,7 @@ def attn_res_fp8(
     _multi_block_attn_res_fp8_kernel[(prefix_sum.shape[0],)](
         prefix_sum,
         delta,
+        shared_delta,
         block_residual,
         norm_weight,
         projection_weight.reshape(-1),
@@ -1509,6 +1529,7 @@ def attn_res_fp8(
         eps=float(eps),
         output_norm_eps=(0.0 if output_norm_eps is None else float(output_norm_eps)),
         has_delta=delta is not None,
+        has_shared_delta=shared_delta is not None,
         write_block=block_write_idx >= 0,
         apply_output_norm=output_norm_weight is not None,
         block_l=block_l,
@@ -1765,6 +1786,7 @@ def sigmoid_mul_per_token_group_quant_fp8(
 def _rmsnorm_sigmoid_gate_group128_kernel(
     x,
     gate,
+    valid_rows,
     weight,
     out,
     scales,
@@ -1778,12 +1800,15 @@ def _rmsnorm_sigmoid_gate_group128_kernel(
     gate_dim_stride: tl.constexpr,
     eps: tl.constexpr,
     block: tl.constexpr,
+    masked: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     columns = tl.arange(0, block)
     head = columns // 128
     dim = columns % 128
     valid = columns < heads * 128
+    if masked:
+        valid = valid & tl.load(valid_rows + row)
     a = tl.load(
         x + row * x_row_stride + head * x_head_stride + dim * x_dim_stride,
         valid,
@@ -1819,6 +1844,8 @@ def rmsnorm_sigmoid_gate_per_token_group_quant_fp8(
     gate: torch.Tensor,
     weight: torch.Tensor,
     eps: float,
+    *,
+    valid_rows: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fuse per-head RMSNorm, sigmoid gate and group128 E4M3 production.
 
@@ -1836,6 +1863,13 @@ def rmsnorm_sigmoid_gate_per_token_group_quant_fp8(
     rows, heads, _ = x.shape
     if heads <= 0:
         raise ValueError("FP8 gated RMSNorm requires at least one head")
+    if valid_rows is not None and (
+        valid_rows.shape != (rows,)
+        or valid_rows.dtype != torch.bool
+        or valid_rows.device != x.device
+        or not valid_rows.is_contiguous()
+    ):
+        raise ValueError("FP8 gated RMSNorm requires a contiguous CUDA bool row mask")
     width = heads * 128
     out = torch.empty((rows, width), device=x.device, dtype=torch.float8_e4m3fn)
     scale_wire = torch.empty(
@@ -1847,6 +1881,7 @@ def rmsnorm_sigmoid_gate_per_token_group_quant_fp8(
         _rmsnorm_sigmoid_gate_group128_kernel[(rows,)](
             x,
             gate,
+            x if valid_rows is None else valid_rows,
             weight,
             out,
             scale_wire,
@@ -1856,6 +1891,7 @@ def rmsnorm_sigmoid_gate_per_token_group_quant_fp8(
             *gate.stride(),
             eps,
             max(512, triton.next_power_of_2(width)),
+            valid_rows is not None,
         )
     return out, scale_wire.T[:rows, :]
 

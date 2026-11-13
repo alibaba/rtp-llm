@@ -106,7 +106,8 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("num_blocks"),
                   py::arg("block_write_idx"),
                   py::arg("eps"),
-                  py::arg("output_norm_eps"));
+                  py::arg("output_norm_eps"),
+                  py::arg("shared_delta") = py::none());
 #endif
 
     rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",

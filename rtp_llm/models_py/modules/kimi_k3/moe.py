@@ -478,7 +478,9 @@ class KimiK3LatentMoE(nn.Module):
         del shared_input
         return routed, shared
 
-    def forward(self, hidden, valid_mask=None, residual=None):
+    def forward(
+        self, hidden, valid_mask=None, residual=None, *, defer_output_add=False
+    ):
         routing, ids = self.router(hidden)
         routing, ids = self.mask_routes(routing, ids, valid_mask)
         routed_input = self.down(hidden)
@@ -492,12 +494,14 @@ class KimiK3LatentMoE(nn.Module):
             and self.up.weight.is_cuda
             and self.up.weight.dtype == torch.bfloat16
         )
-        if residual is not None:
+        if residual is not None or defer_output_add:
             if not self.fuses_layer_residual or not bf16_up:
                 raise ValueError("MoE residual fusion requires the BF16 Decode shared expert")
             from rtp_llm.models_py.triton_kernels.moe.output_add import add_moe_output
 
             routed_up = self.up(routed)
+            if defer_output_add:
+                return routed_up, shared
             return add_moe_output(routed_up, shared, residual)
         if bf16_up:
             # Match native K3: combine the routed projection and shared

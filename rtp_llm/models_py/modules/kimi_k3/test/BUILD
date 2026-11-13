@@ -3,6 +3,15 @@ load("@pip_gpu_cuda13_torch//:requirements.bzl", cuda13_requirement = "requireme
 load("@pip_cuda13_arm_torch//:requirements.bzl", cuda13_arm_requirement = "requirement")
 
 cuda13_sm100_py_test(
+    name = "shared_modeling_test",
+    srcs = ["shared_modeling_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:flashinfer-python",
+    ],
+)
+
+cuda13_sm100_py_test(
     name = "native_kda_checkpoint_test",
     srcs = ["native_kda_checkpoint_test.py"],
     deps = [
