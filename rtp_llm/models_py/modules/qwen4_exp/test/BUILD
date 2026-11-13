@@ -350,6 +350,14 @@ models_py_test(
 )
 
 models_py_test(
+    name = "tp_target_reduce_integration_test",
+    src = "distributed/tp_target_reduce_integration_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    gpus = 2,
+    deps = _REFERENCE_DEPS,
+)
+
+models_py_test(
     name = "prefetch_order_test",
     src = "qsa/prefetch_order_test.py",
     gpu = "L20_CU13",
@@ -566,6 +574,7 @@ test_suite(
     tests = [
         ":cpu_target_status_test",
         ":tp_registered_input_test",
+        ":tp_target_reduce_integration_test",
     ],
 )
 

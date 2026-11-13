@@ -589,6 +589,26 @@ class MixedDeviceMetadataModel(CacheStoreForwardModel):
         return super()._forward_one(inputs)
 
 
+class DeviceLengthFallbackModel(CacheStoreForwardModel):
+    def __init__(self):
+        super().__init__()
+        self.metadata = []
+        self.kv_totals = []
+
+    def _forward_one(self, inputs):
+        attn = inputs.attention_inputs
+        if isinstance(attn, dict):
+            attn = next(iter(attn.values()))
+        self.kv_totals.append(attn.context_total_kv_length)
+        self.metadata.append(
+            (
+                attn.cu_seqlens_device.cpu().tolist(),
+                attn.cu_kv_seqlens_device.cpu().tolist(),
+            )
+        )
+        return super()._forward_one(inputs)
+
+
 class DirtyGenerationPrefillCaptureModel:
     """Fail on the graph-capture body after all eager generation-prefill warmups."""
 
@@ -1109,6 +1129,32 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                     ],
                 )
                 self.assertEqual(result["records"], [])
+
+    @unittest.skipIf(torch.version.hip is not None, "CUDA device-length optimization")
+    def test_deferred_kv_total_is_exact_on_prepare_and_forward_fallback(self):
+        for phase in ("prepare", "forward"):
+            for custom_stream in (False, True):
+                with self.subTest(phase=phase, custom_stream=custom_stream):
+                    stream = (
+                        torch.cuda.Stream()
+                        if custom_stream
+                        else torch.cuda.default_stream()
+                    )
+                    model = DeviceLengthFallbackModel()
+                    with torch.cuda.stream(stream):
+                        run_scenario(
+                            model, f"cuda_lengths_host_prefix_graph_{phase}_fallback"
+                        )
+                    stream.synchronize()
+                    self.assertEqual(model.kv_totals, [904, 776, 8])
+                    self.assertEqual(
+                        model.metadata,
+                        [
+                            ([0, 1, 4, 8], [0, 129, 388, 904]),
+                            ([0, 1, 4, 8], [0, 257, 388, 776]),
+                            ([0, 1, 4, 8], [0, 1, 4, 8]),
+                        ],
+                    )
 
     def test_successful_generation_prefill_capture_does_not_reserve_request_blocks(
         self,

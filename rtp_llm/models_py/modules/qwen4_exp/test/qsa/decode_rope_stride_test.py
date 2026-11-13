@@ -138,6 +138,62 @@ class DecodeRopeStrideTest(unittest.TestCase):
                 torch.testing.assert_close(output, expected, rtol=0, atol=0)
                 self.assert_cache_equal(cache, expected_cache)
 
+    def test_multi_step_graph_refreshes_live_lengths_and_crosses_cache_pages(self):
+        from rtp_llm.models_py.model_desc.qwen4_exp_mtp import Qwen4ExpMTPModel
+
+        _, op, params, cache, qkv = self.case()
+        plus_one = params.sequence_lengths.clone() + 1
+        attention = SimpleNamespace(
+            is_cuda_graph=True,
+            is_prefill=False,
+            is_target_verify=False,
+            sequence_lengths_plus_1_device=plus_one,
+        )
+        inputs = SimpleNamespace(
+            attention_inputs={"full": attention, "side": attention}
+        )
+        impls = {"full": SimpleNamespace(rope_params=params)}
+
+        def run():
+            Qwen4ExpMTPModel.prepare_mtp_draft_graph_step(None, inputs, impls)
+            first = op.forward(qkv, cache, params)
+            plus_one.add_(1)
+            Qwen4ExpMTPModel.prepare_mtp_draft_graph_step(None, inputs, impls)
+            second = op.forward(qkv * 0.75, cache, params)
+            plus_one.sub_(1)
+            return first, second
+
+        for _ in range(2):
+            run()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = run()
+        for generation in range(4):
+            # Both sides of a 128-token page boundary, with changing physical
+            # page ownership and runtime values on the same captured addresses.
+            plus_one.copy_(
+                torch.tensor(
+                    [127, 128, 129, 255, 256, 257, 511, 512],
+                    dtype=torch.int32,
+                    device="cuda",
+                )
+                + generation
+            )
+            before = plus_one.clone()
+            params.kv_cache_offset.copy_(params.kv_cache_offset.flip(0))
+            qkv.mul_(0.875)
+            expected_cache = self.clone_cache(cache)
+            params.sequence_lengths.copy_(plus_one - 1)
+            expected_first = self.scalar_reference(params, expected_cache, qkv)
+            params.sequence_lengths.copy_(plus_one)
+            expected_second = self.scalar_reference(params, expected_cache, qkv * 0.75)
+            graph.replay()
+            torch.cuda.synchronize()
+            torch.testing.assert_close(actual[0], expected_first, rtol=0, atol=0)
+            torch.testing.assert_close(actual[1], expected_second, rtol=0, atol=0)
+            torch.testing.assert_close(plus_one, before, rtol=0, atol=0)
+            self.assert_cache_equal(cache, expected_cache)
+
     def test_mrope_preserves_explicit_three_axis_stride_even_with_base_cache(self):
         # Initialize Base's process-global trig cache before using MRoPE with
         # the same base/dimension; check_rope_cache alone also accepts it.

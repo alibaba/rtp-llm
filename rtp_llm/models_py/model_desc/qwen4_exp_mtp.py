@@ -215,6 +215,42 @@ class Qwen4ExpMTPInputProjection(nn.Module):
 class Qwen4ExpMTPModel(Qwen4ExpModel):
     """One-layer draft model with target-hidden input fusion and QSA."""
 
+    def prepare_mtp_draft_graph_step(self, inputs, fmha_impl) -> None:
+        """Record the live logical position consumed by each step's RoPE writer.
+
+        The C++ owner advances/restores the shared plus-one device lengths
+        inside the graph. QSA already reads that storage in its captured
+        forward. Decode RoPE owns a separate stable buffer: refresh it here
+        without calling its host planner. The complete page-offset table is
+        refreshed once before replay and covers every step, including page
+        crossings. All capture/warmup inputs use the reserved scratch page.
+        """
+        groups = get_attention_inputs_value(inputs)
+        values = tuple(groups.values()) if isinstance(groups, Mapping) else (groups,)
+        anchor = values[0]
+        lengths_plus_one = anchor.sequence_lengths_plus_1_device
+        if (
+            not anchor.is_cuda_graph
+            or anchor.is_prefill
+            or anchor.is_target_verify
+            or not lengths_plus_one.is_cuda
+            or any(
+                value.sequence_lengths_plus_1_device.data_ptr()
+                != lengths_plus_one.data_ptr()
+                for value in values
+            )
+        ):
+            raise RuntimeError("MTP loop Graph requires shared decode device lengths")
+        lengths = lengths_plus_one - 1
+        for impl in fmha_impl.values():
+            params = impl.rope_params
+            if (
+                not params.sequence_lengths.is_cuda
+                or params.sequence_lengths.shape != lengths.shape
+            ):
+                raise RuntimeError("MTP loop Graph RoPE length geometry changed")
+            params.sequence_lengths.copy_(lengths)
+
     def cuda_graph_draft_prefill_uses_request_lanes(self) -> bool:
         # QSA reserves speculative token lanes independently of the HC width.
         return True

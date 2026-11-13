@@ -14,6 +14,7 @@ from rtp_llm.config.server_config_setup import (
     configure_kv_cache_event_host_ip_port,
     set_parallelism_config,
     setup_and_configure_server,
+    setup_default_args,
 )
 from rtp_llm.ops import CPRotateMethod, NcclCommConfig, RoleType
 from rtp_llm.server.server_args.server_args import setup_args
@@ -29,6 +30,49 @@ _PINNED_DEVICES = {
 
 def _jit_env(**values):
     return {**_PINNED_DEVICES, "MODEL_TYPE": "fake_model", **values}
+
+
+class RtxPeerTransportTest(TestCase):
+    def configure(self, *, capability=(12, 0), peer=True, explicit=None, role=None):
+        configs = PyEnvConfigs()
+        configs.model_args.model_type = "fake_model"
+        if role is not None:
+            configs.role_config.role_type = role
+        values = _jit_env()
+        if explicit is not None:
+            values["NCCL_P2P_DISABLE"] = explicit
+        with (
+            patch.dict(os.environ, values, clear=True),
+            patch("rtp_llm.config.server_config_setup.set_parallelism_config"),
+            patch("torch.cuda.is_available", return_value=True),
+            patch("torch.cuda.get_device_name", return_value="NVIDIA RTX test"),
+            patch("torch.cuda.device_count", return_value=2),
+            patch("torch.cuda.get_device_capability", return_value=capability),
+            patch(
+                "torch.cuda.can_device_access_peer",
+                side_effect=peer if isinstance(peer, Exception) else None,
+                return_value=peer,
+            ),
+        ):
+            setup_default_args(configs)
+            return os.environ.get("NCCL_P2P_DISABLE")
+
+    def test_blackwell_direct_peers_keep_native_nccl_transport(self):
+        self.assertIsNone(self.configure())
+
+    def test_missing_peer_or_failed_probe_retains_rtx_fallback(self):
+        self.assertEqual(self.configure(peer=False), "1")
+        self.assertEqual(self.configure(peer=RuntimeError("probe failed")), "1")
+
+    def test_older_rtx_retains_existing_policy(self):
+        self.assertEqual(self.configure(capability=(8, 9)), "1")
+
+    def test_explicit_transport_setting_is_preserved(self):
+        self.assertEqual(self.configure(explicit="0", peer=False), "0")
+        self.assertEqual(self.configure(explicit="1"), "1")
+
+    def test_frontend_does_not_set_gpu_transport_policy(self):
+        self.assertIsNone(self.configure(capability=(8, 9), role=RoleType.FRONTEND))
 
 
 class ServerConfigPortLayoutTest(TestCase):

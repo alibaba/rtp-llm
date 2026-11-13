@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <limits>
 #include <optional>
@@ -194,6 +195,16 @@ public:
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           initCapture() override;
 
+    // Installed before startup capture, only for models that supply the
+    // capture-safe device metadata hook. The callback retains native head,
+    // logits communication and greedy sampling numerics.
+    void configureMtpDraftLoop(int                                                                          steps,
+                               std::function<std::pair<torch::Tensor, torch::Tensor>(const torch::Tensor&)> sample);
+    int  mtpDraftSteps() const override {
+        return mtp_draft_steps_;
+    }
+    MtpDraftGraphOutputs mtpDraftOutputs(const CudaGraphState& state) const override;
+
     bool captureSessionMayBeDirty() const override {
         return capture_session_may_be_dirty_.load(std::memory_order_acquire);
     }
@@ -204,6 +215,10 @@ public:
     static CudaGraphRunner* initializeCapture(std::unique_ptr<CudaGraphRunner> runner);
 
 private:
+    PyModelOutputs                                                               runCaptureForward(int key);
+    int                                                                          mtp_draft_steps_ = 0;
+    std::function<std::pair<torch::Tensor, torch::Tensor>(const torch::Tensor&)> mtp_draft_sample_;
+    py::object                                                                   py_mtp_draft_step_method_;
     // Common capture logic for both prefill and decode
     void captureOneGraphInstance(int key, const char* key_type);
     // Common replay and sync check logic

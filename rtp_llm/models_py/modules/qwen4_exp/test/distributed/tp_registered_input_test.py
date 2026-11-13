@@ -1,3 +1,4 @@
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -9,6 +10,85 @@ from rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce import (
     FlashInferIpcAllReduce,
 )
 from rtp_llm.models_py.modules.qwen4_exp import tp_reduce
+
+
+class TargetReducePolicyTest(unittest.TestCase):
+    def prepare(self, mode="ipc256", peers=None, config=None, parallelism=None):
+        config = config or SimpleNamespace(is_mtp=False)
+        parallelism = parallelism or SimpleNamespace(
+            role_type="DECODE", tp_size=2, dp_size=1, local_world_size=2
+        )
+        communicator = SimpleNamespace(
+            disabled=False, cpp_small_enabled=True, group=object()
+        )
+
+        def exchange(values, local_mode, group):
+            self.assertIs(group, communicator.group)
+            values[:] = peers if peers is not None else [local_mode] * 2
+
+        values = {} if mode is None else {"RTP_QWEN4_TARGET_REDUCE": mode}
+        with (
+            patch.dict(os.environ, values, clear=True),
+            patch.object(tp_reduce, "get_all_reduce", return_value=communicator),
+            patch.object(
+                tp_reduce.dist, "all_gather_object", side_effect=exchange
+            ) as vote,
+            patch.object(tp_reduce, "Qwen4TargetReduce") as constructor,
+        ):
+            result = tp_reduce.prepare_target_reduce(config, parallelism)
+            return result, vote, constructor, communicator
+
+    def test_explicit_ipc_requires_both_ranks_to_agree(self):
+        result, vote, constructor, communicator = self.prepare()
+        self.assertIs(result, constructor.return_value)
+        constructor.assert_called_once_with(communicator)
+        vote.assert_called_once()
+
+    def test_default_preserves_original_target_reduction(self):
+        result, vote, constructor, _ = self.prepare(mode=None)
+        self.assertIsNone(result)
+        self.assertEqual(vote.call_args.args[1], "legacy")
+        constructor.assert_not_called()
+
+    def test_explicit_legacy_or_rank_disagreement_keeps_original_collectives(self):
+        for mode, peers in (
+            ("legacy", None),
+            ("ipc256", ["ipc256", "legacy"]),
+            ("legacy", ["legacy", "ipc256"]),
+        ):
+            with self.subTest(mode=mode, peers=peers):
+                result, vote, constructor, _ = self.prepare(mode, peers)
+                self.assertIsNone(result)
+                vote.assert_called_once()
+                constructor.assert_not_called()
+
+    def test_invalid_rank_policy_is_rejected_before_workspace_allocation(self):
+        for peers in (["invalid", "ipc256"], ["ipc256", "invalid"]):
+            with self.subTest(peers=peers):
+                with self.assertRaisesRegex(ValueError, "every rank"):
+                    self.prepare(peers=peers)
+
+    def test_mtp_and_unsupported_topologies_do_not_exchange_or_allocate(self):
+        cases = [(SimpleNamespace(is_mtp=True), None)]
+        for key, value in (
+            ("role_type", "PREFILL"),
+            ("tp_size", 4),
+            ("dp_size", 2),
+            ("local_world_size", 1),
+        ):
+            parallelism = dict(
+                role_type="DECODE", tp_size=2, dp_size=1, local_world_size=2
+            )
+            parallelism[key] = value
+            cases.append((None, SimpleNamespace(**parallelism)))
+        for config, parallelism in cases:
+            with self.subTest(config=config, parallelism=parallelism):
+                result, vote, constructor, _ = self.prepare(
+                    config=config, parallelism=parallelism
+                )
+                self.assertIsNone(result)
+                vote.assert_not_called()
+                constructor.assert_not_called()
 
 
 class TpRegisteredInputTest(unittest.TestCase):
