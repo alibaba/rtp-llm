@@ -54,6 +54,7 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
             _hash_key_cache=MMHashKeyCache(max_bytes=65536),
             _embedding_cache=MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=4096),
             _greennet_enabled=Mock(return_value=False),
+            _request_scoped_inspection=Mock(return_value=False),
             get_embedding_result=Mock(side_effect=self.compute),
             cancel_queued_request=Mock(),
             report_vit_error=Mock(),
@@ -221,6 +222,28 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
             list(hot["entries"][0]["feature_hashes"]), self.hashes[0].tolist()
         )
         self.assertFalse(hot["entries"][0]["embedding_hit"])
+
+    async def test_request_scoped_hash_hit_checks_each_caller(self):
+        self.engine._greennet_enabled.return_value = True
+        self.engine._request_scoped_inspection.return_value = True
+        await self.client.get_vit_cache_metadata(self.address, self.keys, self.request)
+        self.assertTrue(self.engine._hash_key_cache.greennet_passed(self.keys[0]))
+
+        self.request.headers["X-DashScope-Uid"] = "second-user"
+        self.engine.get_embedding_result.side_effect = FtRuntimeException(
+            ExceptionType.UNSAFE_INPUT_CONTENT, "blocked for second user"
+        )
+        with self.assertRaises(FtRuntimeException) as raised:
+            await self.client.get_vit_cache_metadata(
+                self.address, self.keys, self.request
+            )
+        self.assertEqual(
+            raised.exception.exception_type, ExceptionType.UNSAFE_INPUT_CONTENT
+        )
+        self.assertEqual(
+            self.engine.get_embedding_result.call_args.kwargs["user_id"], "second-user"
+        )
+        self.assertIsNone(self.request.greennet_verified_vit)
 
     async def test_parsed_region_reaches_vit_for_all_media(self):
         self.request.headers["region"] = "cn-beijing"

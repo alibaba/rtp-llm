@@ -1,7 +1,8 @@
 """Bounded shared KVCM tier for whole multimodal embedding results.
 
-Only detached CPU eviction snapshots are uploaded. Local eviction never
-removes a shared object: KVMeta V1 has no read lease for online reclamation.
+Evictions from the last local tier are uploaded from detached CPU snapshots.
+Local eviction never removes a shared object: KVMeta V1 has no read lease for
+online reclamation.
 """
 
 import concurrent.futures
@@ -12,6 +13,7 @@ from collections import Counter
 
 import torch
 
+from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
 from rtp_llm.multimodal.kvcm.tensor_object import (
     pack_object,
     plan_object,
@@ -28,7 +30,8 @@ class MMRemoteEmbeddingCache:
         max_inflight_bytes,
         max_pending=8,
         read_timeout_ms=200,
-        cuda_device=None
+        cuda_device=None,
+        request_scoped_inspection=False,
     ):
         if min(max_object_bytes, max_inflight_bytes, max_pending, read_timeout_ms) <= 0:
             raise ValueError("remote embedding cache limits must be positive")
@@ -38,6 +41,7 @@ class MMRemoteEmbeddingCache:
         self.max_pending = max_pending
         self.read_timeout_ms = read_timeout_ms
         self.cuda_device = cuda_device
+        self.request_scoped_inspection = request_scoped_inspection
         self._executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="mm-remote-cache"
         )
@@ -80,10 +84,26 @@ class MMRemoteEmbeddingCache:
         """Called after CPU storage detachment; never copies or does network I/O."""
         if entry.pool_owners or entry.result is None or entry.error is not None:
             return
+        verdict, checked = entry.greennet_snapshot()
+        if checked and not verdict.passed:
+            return
+        inspection = None
+        if verdict is not None:
+            inspection = dict(
+                checked=checked,
+                passed=verdict.passed,
+                code=verdict.code,
+                message=verdict.message,
+                request_scoped=self.request_scoped_inspection,
+            )
         try:
             plan = plan_object(
-                entry.result,
-                devices=entry.original_devices,
+                {"version": 1, "result": entry.result, "greennet": inspection},
+                devices={
+                    "version": None,
+                    "result": entry.original_devices,
+                    "greennet": None,
+                },
                 max_bytes=self.max_object_bytes,
             )
             if any(t.device.type != "cpu" for t in plan.tensors):
@@ -124,7 +144,43 @@ class MMRemoteEmbeddingCache:
             return
         future.add_done_callback(done)
 
-    def load(self, key, *, timeout_ms=None):
+    @staticmethod
+    def _decode_value(value):
+        # Older workers wrote the bare result tuple/list without inspection metadata.
+        approval = None
+        if isinstance(value, dict):
+            if (
+                set(value) != {"version", "result", "greennet"}
+                or type(value["version"]) is not int
+                or value["version"] != 1
+            ):
+                raise ValueError("invalid remote embedding cache schema")
+            inspection = value["greennet"]
+            if inspection is not None:
+                if (
+                    not isinstance(inspection, dict)
+                    or set(inspection)
+                    != {"checked", "passed", "code", "message", "request_scoped"}
+                    or any(
+                        type(inspection[k]) is not bool
+                        for k in ("checked", "passed", "request_scoped")
+                    )
+                    or type(inspection["code"]) is not int
+                    or not isinstance(inspection["message"], str)
+                ):
+                    raise ValueError("invalid remote GreenNet verdict")
+                if not inspection["passed"]:
+                    raise ValueError("remote embedding has a rejected GreenNet verdict")
+                if inspection["checked"] and not inspection["request_scoped"]:
+                    approval = GreenNetVerdict(
+                        True, inspection["code"], inspection["message"]
+                    )
+            value = value["result"]
+        if not isinstance(value, (list, tuple)) or len(value) not in (2, 3):
+            raise ValueError("remote object is not a multimodal result")
+        return value, approval
+
+    def load(self, key, *, timeout_ms=None, entry=None):
         timeout_ms = min(self.read_timeout_ms, timeout_ms or self.read_timeout_ms)
         deadline = time.monotonic() + timeout_ms / 1000
         # Admission also bounds metadata probes. Grow the reservation only
@@ -161,8 +217,13 @@ class MMRemoteEmbeddingCache:
             value = unpack_object(
                 buffer, max_bytes=self.max_object_bytes, cuda_device=self.cuda_device
             )
-            if not isinstance(value, (list, tuple)) or len(value) not in (2, 3):
-                raise ValueError("remote object is not a multimodal result")
+            value, approval = self._decode_value(value)
+            if (
+                entry is not None
+                and approval is not None
+                and not self.request_scoped_inspection
+            ):
+                entry.set_greennet_verdict(approval)
             self._count("hit")
             return value
         except concurrent.futures.TimeoutError:

@@ -560,6 +560,9 @@ class MMEmbeddingCacheEntry:
         self.producer_streams: List[Any] = []
         self.pool_owners: List[_PoolReservation] = []
         self.storage_lock = threading.Lock()
+        # A follower can wait for the async producer's verdict, including a
+        # KVCM approval, instead of auditing the same in-flight URL again.
+        self.expects_greennet = False
         self._greennet_event = threading.Event()
         self._greennet_verdict: Optional[GreenNetVerdict] = None
         self._greennet_error: Optional[Exception] = None
@@ -705,6 +708,12 @@ class MMEmbeddingCacheEntry:
             self._greennet_verdict = verdict
             self._greennet_checked = checked
             self._greennet_event.set()
+
+    def greennet_snapshot(self) -> Tuple[Optional[GreenNetVerdict], bool]:
+        with self._state_lock:
+            if self._greennet_error is not None:
+                return None, False
+            return self._greennet_verdict, self._greennet_checked
 
     def set_greennet_error(self, error: Exception) -> None:
         """Wake inspection waiters without losing a typed preprocessing error."""
@@ -1168,8 +1177,10 @@ class MMEmbeddingCache:
         async_publication: bool = False,
         publish_queue_size: int = 1024,
         lifetime_metrics: Optional[_CacheLifetimeMetrics] = None,
+        on_gpu_evict: Optional[Callable[[str, MMEmbeddingCacheEntry], None]] = None,
     ):
         self._on_cpu_evict = on_cpu_evict
+        self._on_gpu_evict = on_gpu_evict
         self._validate_limits(gpu_max_bytes, cpu_max_bytes)
         self._lock = threading.Lock()
         # All residency mutations take this lock before _lock. Copies never
@@ -1320,7 +1331,9 @@ class MMEmbeddingCache:
         entry.charge_tokens = 0
         entry.tier = None
 
-    def _detach_pool_storage(self, entry: MMEmbeddingCacheEntry) -> None:
+    def _detach_pool_storage(
+        self, entry: MMEmbeddingCacheEntry, *, to_cpu: bool = False
+    ) -> None:
         """Move an evicted entry out of the pool for an outstanding waiter."""
 
         with entry.storage_lock:
@@ -1329,10 +1342,12 @@ class MMEmbeddingCache:
                 return
             try:
                 self._ready_result(entry.result, entry.ready_events)
-                current_devices = _map_tensors(
-                    entry.result, lambda tensor: tensor.device
+                # Stage GPU-only writeback directly out of the retiring pool.
+                # Outstanding readers still restore entry.original_devices.
+                devices = _map_tensors(
+                    entry.result, lambda t: torch.device("cpu") if to_cpu else t.device
                 )
-                detached = _copy_pooled_result_to_devices(entry.result, current_devices)
+                detached = _copy_pooled_result_to_devices(entry.result, devices)
                 events = self._record_ready_events(detached)
                 for owner in owners:
                     owner.add_events(events)
@@ -1353,20 +1368,26 @@ class MMEmbeddingCache:
     def _unlink_entry_locked(self, cache_key: str, eviction: bool = False):
         """Index-only removal. Caller owns transfer lock through finalization."""
         entry = self._entries.pop(cache_key)
-        was_cpu = entry.tier == "cpu"
+        tier = entry.tier
         self._uncharge_locked(cache_key, entry)
         if eviction:
             self._stats["eviction"] += 1
-        return cache_key, entry, was_cpu, eviction
+        return cache_key, entry, tier, eviction
 
     def _finish_removal(self, removal) -> None:
-        cache_key, entry, was_cpu, eviction = removal
+        cache_key, entry, tier, eviction = removal
+        callback = None
+        if eviction and entry.is_done:
+            if tier == "cpu":
+                callback = self._on_cpu_evict
+            elif tier == "gpu" and self._cpu_max_bytes == 0:
+                callback = self._on_gpu_evict
         # Copies, event waits, pool releases and remote admission must not
         # block unrelated index probes or embedding -> hash publication.
-        self._detach_pool_storage(entry)
-        if eviction and was_cpu and self._on_cpu_evict is not None and entry.is_done:
+        self._detach_pool_storage(entry, to_cpu=tier == "gpu" and callback is not None)
+        if callback is not None:
             try:
-                self._on_cpu_evict(cache_key, entry)
+                callback(cache_key, entry)
             except Exception:
                 logging.warning(
                     "Skipping failed remote cache eviction admission", exc_info=True
@@ -1439,13 +1460,8 @@ class MMEmbeddingCache:
                 or stats["pending_bytes"] > 0
             ):
                 return
-            with self._lock:
-                if not self._gpu_lru:
-                    return
-                cache_key, entry = next(iter(self._gpu_lru.items()))
-                result, events = entry.result, entry.ready_events
-                self._uncharge_locked(cache_key, entry)
-            self._store_cpu(cache_key, entry, result, events)
+            if not self._evict_gpu_lru():
+                return
 
     def _store_pooled(
         self,
@@ -1557,17 +1573,25 @@ class MMEmbeddingCache:
                 self._stats["demotion"] += 1
 
     def _make_gpu_room(self, required_bytes: int) -> None:
-        while True:
-            with self._lock:
-                if self._gpu_bytes + required_bytes <= self._gpu_max_bytes:
-                    return
-                cache_key, entry = next(iter(self._gpu_lru.items()))
-                result, events = entry.result, entry.ready_events
-                self._uncharge_locked(cache_key, entry)
-            self._store_cpu(cache_key, entry, result, events)
-            # Do not retain the previous victim's GPU allocation during the
-            # next transfer (unless a caller independently holds that value).
-            del result
+        # The caller holds _transfer_lock across all changes to residency.
+        while self._gpu_bytes + required_bytes > self._gpu_max_bytes:
+            self._evict_gpu_lru()
+
+    def _evict_gpu_lru(self) -> bool:
+        with self._lock:
+            if not self._gpu_lru:
+                return False
+            key, entry = next(iter(self._gpu_lru.items()))
+            if self._cpu_max_bytes == 0:
+                removal = self._unlink_entry_locked(key, eviction=True)
+            else:
+                self._uncharge_locked(key, entry)
+                removal = None
+        if removal is not None:
+            self._finish_removal(removal)
+        else:
+            self._store_cpu(key, entry, entry.result, entry.ready_events)
+        return True
 
     def _on_complete(
         self, cache_key: str, entry: MMEmbeddingCacheEntry, result: Any
@@ -2007,6 +2031,7 @@ class ShardedMMEmbeddingCache:
         report_metrics: bool = False,
         on_cpu_evict: Optional[Callable[[str, MMEmbeddingCacheEntry], None]] = None,
         async_publication: bool = False,
+        on_gpu_evict: Optional[Callable[[str, MMEmbeddingCacheEntry], None]] = None,
     ):
         if shards < 1:
             raise ValueError("embedding cache shards must be positive")
@@ -2021,6 +2046,7 @@ class ShardedMMEmbeddingCache:
                 cpu_bytes,
                 report_metrics=report_metrics,
                 on_cpu_evict=on_cpu_evict,
+                on_gpu_evict=on_gpu_evict,
                 async_publication=async_publication,
                 lifetime_metrics=self._lifetime_metrics,
             )
