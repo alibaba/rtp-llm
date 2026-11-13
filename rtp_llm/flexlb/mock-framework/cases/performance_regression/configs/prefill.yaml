@@ -1,0 +1,18 @@
+seq_size_per_block: 128
+max_seq_len: 1048576
+concurrency_limit: 256
+reuse_cache: true
+enable_device_cache: true
+enable_remote_cache: false
+mock.compute.forward.expression: 110.08423325235695 + 0.0032314434042004558 * sum(computeTokens)
+test_block_num: 43128
+reserve_block_ratio: 2
+image_token_id: 129264
+cache_key_hash_seed: "4923373599811257905"
+enable_memory_cache: false
+kv_cache_event_publisher_type: none
+cp_force_single_prefill: false
+max_batch_tokens_size: 102400000
+max_batch_tokens_without_cache: 262144
+prefill_cp_size: 4
+mock.cache.total.blocks: 245206

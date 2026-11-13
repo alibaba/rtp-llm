@@ -1,0 +1,495 @@
+package org.flexlb.mock.client;
+
+import static org.junit.jupiter.api.Assertions.*;
+import com.google.protobuf.ByteString;
+import io.grpc.*;
+import io.grpc.netty.NettyServerBuilder;
+import io.grpc.stub.StreamObserver;
+import java.net.*;
+import java.time.Duration;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.function.*;
+import org.flexlb.engine.grpc.EngineRpcService.*;
+import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.*;
+import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
+import org.junit.jupiter.api.Test;
+
+/**
+ * Verifies scheduling, response streaming, deadlines, and cancellation against local RPC fixtures.
+ */
+class BackendRpcClientTest {
+    @Test void choosesGenerateAndMeasuresReceivedTokenRatherThanEngineReportedTime() throws Exception {
+        try (var h = new Harness()) {
+            h.scheduleDelay = 30; h.tokenDelay = 40;
+            var call = h.client.send(request(1), Duration.ofSeconds(2));
+            assertTrue(call.firstToken().toCompletableFuture().get(2, TimeUnit.SECONDS) >= TimeUnit.MILLISECONDS.toNanos(60));
+            var result = h.result(call); assertEquals(BackendRpcClient.Outcome.success, result.outcome());
+            assertEquals(3, result.outputTokens()); assertNotNull(result.ttftNanos()); assertTrue(result.elapsedNanos() >= result.ttftNanos());
+            assertNotNull(result.tpotNanos());
+            assertTrue(result.tpotNanos() > 0 && result.tpotNanos() * 2 <= result.elapsedNanos() - result.ttftNanos());
+            var metrics = new ClientMetrics();
+            metrics.finished(result);
+            assertTrue(metrics.scrape().contains("mock_client_tpot_seconds_count{role=\"client\",} 1.0"));
+            assertEquals(1, h.generates.get()); assertEquals(0, h.fetches.get());
+            assertEquals(RoleAddrPB.RoleType.PREFILL, h.generated.get().getGenerateConfig().getRoleAddrs(0).getRole());
+        }
+    }
+
+    static FlexlbScheduleRequestPB request(long id) {
+        return FlexlbScheduleRequestPB.newBuilder().setRequestId(id).setSeqLen(3).setMaxNewTokens(3).setPriority(20)
+            .setGenerateInput(input(id).toByteString()).build();
+    }
+
+    static GenerateInputPB input(long id) {
+        return GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(List.of(1, 2, 3))
+            .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(3).setCanUsePdSeparation(true).setReturnIncremental(true)).build();
+    }
+
+    @Test void finishedOutputMayBeContextBoundedDespiteIgnoreEosOrMinimum() throws Exception {
+        for (int mode = 0; mode < 3; mode++) try (var h = new Harness()) {
+            h.output = (id, response) -> {
+                response.onNext(token(id, 1, false)); response.onNext(token(id, 2, true)); response.onCompleted();
+            };
+            var request = request(1).toBuilder(); var input = GenerateInputPB.parseFrom(request.getGenerateInput()).toBuilder();
+            input.getGenerateConfigBuilder().setIgnoreEos(mode == 0).setMinNewTokens(mode == 1 ? 3 : 0);
+            request.setGenerateInput(input.build().toByteString());
+            var result = h.result(h.client.send(request.build(), Duration.ofSeconds(2)));
+            assertEquals(BackendRpcClient.Outcome.success, result.outcome());
+        }
+    }
+
+    static GenerateOutputsPB token(long id, int count, boolean finished) {
+        return GenerateOutputsPB.newBuilder().setRequestId(id).setFlattenOutput(FlattenOutputPB.newBuilder()
+            .addFinished(finished).addAuxInfo(AuxInfoPB.newBuilder().setOutputLen(count).setStepOutputLen(1).setFirstTokenCostTimeUs(1))
+            .setOutputIds(TensorPB.newBuilder().setDataType(TensorPB.DataType.INT32).addShape(1).addShape(1).addShape(1)
+                .setInt32Data(ByteString.copyFrom(new byte[]{1, 0, 0, 0})))).build();
+    }
+
+    @Test void enqueuedRouteAlwaysFetchesAndConsumesToFinalCompletion() throws Exception {
+        try (var h = new Harness()) {
+            h.batched = true;
+            var result = h.result(h.client.send(request(2), Duration.ofSeconds(2)));
+            assertEquals(BackendRpcClient.Outcome.success, result.outcome()); assertEquals(3, result.outputTokens());
+            assertEquals(1, h.fetches.get()); assertEquals(0, h.generates.get());
+        }
+    }
+
+    @Test void scheduleRejectionHasNoTokenSampleAndDoesNotOpenAnEngineStream() throws Exception {
+        try (var h = new Harness()) {
+            h.route = r -> r.toBuilder().setSuccess(false).setCode(429).clearLifecycle().build();
+            var call = h.client.send(request(3), Duration.ofSeconds(2)); var result = h.result(call);
+            assertEquals(BackendRpcClient.Outcome.error, result.outcome()); assertEquals(429, result.errorCode()); assertNull(result.ttftNanos());
+            assertThrows(ExecutionException.class, () -> call.firstToken().toCompletableFuture().get());
+            assertEquals(0, h.generates.get()); assertEquals(0, h.fetches.get());
+        }
+    }
+
+    @Test void invalidRequestDoesNotResendGenerateInput() throws Exception {
+        try (var h = new Harness();
+             var client = new BackendRpcClient(event -> {}, 1000, 0L, 1,
+                 () -> List.of(new MasterDiscovery.Target(h.endpoint().get("rpc"), false)))) {
+            h.route = response -> FlexlbScheduleResponsePB.newBuilder().setCode(8406)
+                .setErrorMessage("missing serialized generate_input for batch dispatch").build();
+            var result = h.result(client.send(request(1), input(1), Duration.ofSeconds(2), List.of()));
+            assertEquals(BackendRpcClient.Outcome.error, result.outcome());
+            assertEquals(8406, result.errorCode());
+            assertEquals(1, h.schedules.get());
+            assertTrue(h.scheduleInputs.remove().getGenerateInput().isEmpty());
+        }
+    }
+
+    @Test void successFlagWithFailureCodeCannotPass() throws Exception {
+        try (var h = new Harness()) {
+            h.route = r -> r.toBuilder().setCode(500).build();
+            assertEquals(BackendRpcClient.Outcome.error, h.result(h.client.send(request(4), Duration.ofSeconds(2))).outcome());
+            assertEquals(0, h.generates.get());
+        }
+    }
+
+    @Test void emptyOrTruncatedStreamsFailWithoutFabricatingAFirstToken() throws Exception {
+        try (var h = new Harness()) {
+            h.output = (id, response) -> response.onCompleted();
+            var result = h.result(h.client.send(request(5), Duration.ofSeconds(2)));
+            assertNull(result.ttftNanos()); assertEquals("DATA_LOSS", result.grpcCode());
+            h.output = (id, response) -> { response.onNext(token(id, 1, false)); response.onCompleted(); };
+            result = h.result(h.client.send(request(6), Duration.ofSeconds(2)));
+            assertNotNull(result.ttftNanos()); assertEquals(BackendRpcClient.Outcome.error, result.outcome()); assertEquals(1, result.outputTokens());
+        }
+    }
+
+    @Test void malformedFrameAndFramesAfterFinishedFail() throws Exception {
+        try (var h = new Harness()) {
+            h.output = (id, response) -> { response.onNext(GenerateOutputsPB.newBuilder().setRequestId(id).build()); response.onCompleted(); };
+            assertEquals("DATA_LOSS", h.result(h.client.send(request(7), Duration.ofSeconds(2))).grpcCode());
+            h.output = (id, response) -> { response.onNext(token(id, 1, true)); response.onNext(token(id, 2, true)); response.onCompleted(); };
+            assertEquals("DATA_LOSS", h.result(h.client.send(request(8), Duration.ofSeconds(2))).grpcCode());
+        }
+    }
+
+    @Test void cancelDuringScheduleCancelsBothTheRpcAndMasterOwnershipWithoutRetry() throws Exception {
+        try (var h = new Harness()) {
+            h.scheduleDelay = 1000;
+            var call = h.client.send(request(9), Duration.ofSeconds(2)); assertTrue(h.scheduleEntered.await(2, TimeUnit.SECONDS)); call.cancel();
+            assertEquals(BackendRpcClient.Outcome.cancelled, h.result(call).outcome()); assertTrue(h.scheduleCancelled.await(2, TimeUnit.SECONDS));
+            var cancel = h.cancellations.poll(2, TimeUnit.SECONDS); assertNotNull(cancel); assertEquals(9, cancel.getRequestId());
+            assertEquals(CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED, cancel.getReason()); assertEquals(1, h.schedules.get());
+        }
+    }
+
+    @Test void timeoutBeforeFirstTokenNeverCreatesATtftSampleAndCancelsAdmission() throws Exception {
+        try (var h = new Harness()) {
+            h.scheduleDelay = 1000;
+            var result = h.result(h.client.send(request(10), Duration.ofMillis(80)));
+            assertEquals(BackendRpcClient.Outcome.timeout, result.outcome()); assertNull(result.ttftNanos());
+            var cancel = h.cancellations.poll(2, TimeUnit.SECONDS); assertNotNull(cancel);
+            assertEquals(CancelReasonPB.CANCEL_REASON_DEADLINE_EXCEEDED, cancel.getReason());
+        }
+    }
+
+    @Test void cancellingAfterFirstTokenKeepsTheObservedTtftAndCancelsEngineAndMaster() throws Exception {
+        try (var h = new Harness()) {
+            h.output = (id, response) -> response.onNext(token(id, 1, false));
+            var call = h.client.send(request(11), Duration.ofSeconds(2));
+            long ttft = call.firstToken().toCompletableFuture().get(2, TimeUnit.SECONDS); call.cancel();
+            var result = h.result(call); assertEquals(ttft, result.ttftNanos()); assertEquals(BackendRpcClient.Outcome.cancelled, result.outcome());
+            assertTrue(h.streamCancelled.await(2, TimeUnit.SECONDS));
+            assertEquals(9, Objects.requireNonNull(h.cancellations.poll(2, TimeUnit.SECONDS)).getBatchId());
+        }
+    }
+
+    @Test void nativeTrailerBusinessErrorIsPreservedWithoutATokenSample() throws Exception {
+        try (var h = new Harness()) {
+            h.output = (id, response) -> {
+                var details = new Metadata(); details.put(Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER),
+                    ErrorDetailsPB.newBuilder().setErrorCode(8429).build().toByteArray());
+                response.onError(Status.RESOURCE_EXHAUSTED.asRuntimeException(details));
+            };
+            var result = h.result(h.client.send(request(12), Duration.ofSeconds(2)));
+            assertEquals(8429, result.errorCode()); assertEquals("RESOURCE_EXHAUSTED", result.grpcCode()); assertNull(result.ttftNanos());
+        }
+    }
+
+    @Test void independentConcurrentCallsShareChannelsAndCancelOnlyTheirOwnRequest() throws Exception {
+        try (var h = new Harness()) {
+            h.output = (id, response) -> { response.onNext(token(id, 1, id != 13)); if (id != 13) response.onCompleted(); };
+            var held = h.client.send(request(13), Duration.ofSeconds(2)); held.firstToken().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            assertThrows(IllegalArgumentException.class, () -> h.client.send(request(13), Duration.ofSeconds(2)));
+            var others = new ArrayList<BackendRpcClient.Call>();
+            for (long id = 14; id < 34; id++) others.add(h.client.send(request(id), Duration.ofSeconds(2)));
+            held.cancel(); for (var call : others) assertEquals(BackendRpcClient.Outcome.success, h.result(call).outcome());
+            assertEquals(BackendRpcClient.Outcome.cancelled, h.result(held).outcome());
+        }
+    }
+
+    @Test void closeCancelsActiveCallsAndRejectsFurtherSends() throws Exception {
+        try (var h = new Harness()) {
+            h.output = (id, response) -> response.onNext(token(id, 1, false));
+            var call = h.client.send(request(34), Duration.ofSeconds(2)); call.firstToken().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            h.client.close(); assertEquals(BackendRpcClient.Outcome.cancelled, h.result(call).outcome());
+            assertNotNull(h.cancellations.poll(2, TimeUnit.SECONDS));
+            assertThrows(IllegalStateException.class, () -> h.client.send(request(35), Duration.ofSeconds(2)));
+        }
+    }
+
+    @Test void deadlineCoversSchedulingAndStreamingAndPropagatesToEngine() throws Exception {
+        try (var h = new Harness()) {
+            h.scheduleDelay = 40; h.output = (id, response) -> response.onNext(token(id, 1, false));
+            var call = h.client.send(request(37), Duration.ofMillis(180));
+            call.firstToken().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            var result = h.result(call); assertEquals(BackendRpcClient.Outcome.timeout, result.outcome());
+            assertTrue(h.engineSawDeadline.get()); assertNotNull(result.ttftNanos());
+            assertTrue(result.elapsedNanos() < TimeUnit.SECONDS.toNanos(1));
+            assertTrue(h.streamCancelled.await(2, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test void nativeChunksIgnoreFrontendCumulativeFlagAndSupportMultipleTokens() throws Exception {
+        try (var h = new Harness()) {
+            h.output = (id, response) -> {
+                for (int count = 1; count <= 3; count++) {
+                    response.onNext(token(id, count, count == 3));
+                }
+                response.onCompleted();
+            };
+            var nativeInput = input(38).toBuilder(); nativeInput.getGenerateConfigBuilder().setReturnIncremental(false);
+            var cumulative = h.result(h.client.send(request(38).toBuilder().setGenerateInput(nativeInput.build().toByteString()).build(), Duration.ofSeconds(2)));
+            assertEquals(BackendRpcClient.Outcome.success, cumulative.outcome()); assertEquals(3, cumulative.outputTokens());
+            h.output = (id, response) -> {
+                var frame = token(id, 3, true).toBuilder();
+                frame.getFlattenOutputBuilder().getOutputIdsBuilder().setShape(2, 3).setInt32Data(ByteString.copyFrom(new byte[12]));
+                response.onNext(frame.build()); response.onCompleted();
+            };
+            assertEquals(BackendRpcClient.Outcome.success, h.result(h.client.send(request(39), Duration.ofSeconds(2))).outcome());
+        }
+    }
+
+    @Test void cumulativeEngineFramesAreRejectedEvenWhenFrontendFlagIsFalse() throws Exception {
+        try (var h = new Harness()) {
+            h.output = (id, response) -> {
+                response.onNext(token(id, 1, false));
+                var second = token(id, 2, false).toBuilder();
+                second.getFlattenOutputBuilder().getOutputIdsBuilder().setShape(2, 2)
+                        .setInt32Data(ByteString.copyFrom(new byte[8]));
+                response.onNext(second.build()); response.onCompleted();
+            };
+            var nativeInput = input(43).toBuilder(); nativeInput.getGenerateConfigBuilder().setReturnIncremental(false);
+            var result = h.result(h.client.send(request(43).toBuilder()
+                    .setGenerateInput(nativeInput.build().toByteString()).build(), Duration.ofSeconds(2)));
+            assertEquals(BackendRpcClient.Outcome.error, result.outcome());
+            assertEquals("DATA_LOSS", result.grpcCode());
+        }
+    }
+
+    @Test void firstTokenCallbackMayCancelImmediatelyWithoutLosingTheObservedToken() throws Exception {
+        try (var h = new Harness()) {
+            h.output = (id, response) -> response.onNext(token(id, 1, false));
+            var call = h.client.send(request(40), Duration.ofSeconds(2)); call.firstToken().thenRun(call::cancel);
+            var result = h.result(call); assertEquals(BackendRpcClient.Outcome.cancelled, result.outcome());
+            assertEquals(1, result.outputTokens()); assertNotNull(result.ttftNanos());
+        }
+    }
+
+    @Test void inconsistentTokenShapeAndWrongLifecycleCannotBecomeSuccessfulSamples() throws Exception {
+        try (var h = new Harness()) {
+            h.output = (id, response) -> {
+                var frame = token(id, 1, true).toBuilder(); frame.getFlattenOutputBuilder().getOutputIdsBuilder().setShape(2, 2);
+                response.onNext(frame.build()); response.onCompleted();
+            };
+            var result = h.result(h.client.send(request(41), Duration.ofSeconds(2)));
+            assertEquals("DATA_LOSS", result.grpcCode()); assertNull(result.ttftNanos());
+            h.route = r -> r.toBuilder().setLifecycle(r.getLifecycle().toBuilder().setRequestId(9999)).build();
+            result = h.result(h.client.send(request(42), Duration.ofSeconds(2)));
+            assertEquals("DATA_LOSS", result.grpcCode()); assertEquals(1, h.generates.get());
+        }
+    }
+
+    @Test void rejectsInvalidInputAndUnsupportedRoutesBeforeClaimingSuccess() throws Exception {
+        try (var h = new Harness()) {
+            assertThrows(IllegalArgumentException.class, () -> h.client.send(request(36), Duration.ZERO));
+            assertThrows(IllegalArgumentException.class, () -> h.client.send(request(36).toBuilder().setSeqLen(99).build(), Duration.ofSeconds(1)));
+            h.route = r -> r.toBuilder().clearServerStatus().build();
+            assertEquals("DATA_LOSS", h.result(h.client.send(request(36), Duration.ofSeconds(1))).grpcCode());
+        }
+    }
+
+    @Test void transportFailureRetriesOnlyBackupAndCancelKeepsTheAttemptedMaster() throws Exception {
+        try (var first = new Harness(); var backup = new Harness()) {
+            first.scheduleFailure = Status.UNAVAILABLE;
+            backup.output = (id, response) -> response.onNext(token(id, 1, false));
+            var routes = new AtomicReference<>(List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")));
+            try (var client = new BackendRpcClient(routes::get)) {
+                var call = client.send(request(100), Duration.ofSeconds(3));
+                call.firstToken().toCompletableFuture().get(2, TimeUnit.SECONDS);
+                routes.set(List.of(first.endpoint().get("rpc")));
+                call.cancel();
+                assertEquals(outcome(call), "cancelled");
+                assertEquals(1, first.schedules.get()); assertEquals(1, backup.schedules.get());
+                assertEquals(0, first.generates.get()); assertEquals(1, backup.generates.get());
+                assertEquals(100, Objects.requireNonNull(backup.cancellations.poll(2, TimeUnit.SECONDS)).getRequestId());
+                assertNull(first.cancellations.poll(100, TimeUnit.MILLISECONDS));
+            }
+        }
+    }
+
+    @Test void businessRejectionDeadlineAndStreamErrorNeverRetryBackup() throws Exception {
+        try (var first = new Harness(); var backup = new Harness();
+             var client = new BackendRpcClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")))) {
+            first.route = r -> r.toBuilder().setCode(429).setSuccess(false).clearLifecycle().build();
+            assertEquals("error", outcome(client.send(request(101), Duration.ofSeconds(2))));
+            first.route = Function.identity(); first.scheduleDelay = 2000;
+            assertEquals("timeout", outcome(client.send(request(102), Duration.ofMillis(100))));
+            first.scheduleDelay = 0;
+            first.output = (id, response) -> response.onError(Status.UNAVAILABLE.asRuntimeException());
+            assertEquals("error", outcome(client.send(request(103), Duration.ofSeconds(2))));
+            assertEquals(0, backup.schedules.get()); assertEquals(0, backup.generates.get());
+        }
+    }
+
+    @Test void noHealthyMasterAndBothTransportFailuresNeverBypassScheduling() throws Exception {
+        try (var first = new Harness(); var backup = new Harness()) {
+            var routes = new AtomicReference<List<String>>(List.of());
+            try (var client = new BackendRpcClient(routes::get)) {
+                assertEquals("error", outcome(client.send(request(104), Duration.ofSeconds(2))));
+                first.scheduleFailure = Status.UNAVAILABLE; backup.scheduleFailure = Status.UNAVAILABLE;
+                routes.set(List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")));
+                assertEquals("error", outcome(client.send(request(105), Duration.ofSeconds(2))));
+                assertEquals(1, first.schedules.get()); assertEquals(1, backup.schedules.get());
+                assertEquals(0, first.generates.get()); assertEquals(0, backup.generates.get());
+            }
+        }
+    }
+
+    @Test void remoteCancelledTransportCanUseBackupWhileLocalCancellationCannot() throws Exception {
+        try (var first = new Harness(); var backup = new Harness();
+             var client = new BackendRpcClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")))) {
+            first.scheduleFailure = Status.CANCELLED;
+            assertEquals("success", outcome(client.send(request(106), Duration.ofSeconds(2))));
+            assertEquals(1, first.schedules.get()); assertEquals(1, backup.schedules.get());
+            first.scheduleFailure = null; first.scheduleDelay = 2000;
+            var call = client.send(request(107), Duration.ofSeconds(3));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (first.schedules.get() < 2 && System.nanoTime() < deadline) Thread.sleep(5);
+            assertEquals(2, first.schedules.get()); call.cancel();
+            assertEquals("cancelled", outcome(call)); assertEquals(1, backup.schedules.get());
+        }
+    }
+
+    @Test void textRoutingKeysUseTheSameModelSeedAsTheEngine() throws Exception {
+        var observed = new AtomicReference<FlexlbScheduleRequestPB>();
+        var server = ServerBuilder.forPort(0).addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {
+            @Override public void schedule(FlexlbScheduleRequestPB request, StreamObserver<FlexlbScheduleResponsePB> out) {
+                observed.set(request);
+                out.onNext(FlexlbScheduleResponsePB.newBuilder().setSuccess(false).setCode(605).setErrorMessage("probe").build());
+                out.onCompleted();
+            }
+        }).build().start();
+        long seed = 0x4453563431494631L;
+        var tokens = java.util.stream.IntStream.rangeClosed(1, 1025).boxed().toList();
+        var input = input(987).toBuilder().clearTokenIds().addAllTokenIds(tokens).build();
+        var baseKeys = new org.flexlb.mock.protocol.PromptCacheKeys(128, tokens, List.of(), seed).keys();
+        try {
+            for (int cpSize : List.of(1, 4)) {
+                try (var client = new BackendRpcClient(() -> List.of("127.0.0.1:" + server.getPort()), e -> {}, -200, seed, cpSize)) {
+                    client.send(request(987).toBuilder().setGenerateInput(input.toByteString())
+                            .setSeqLen(tokens.size()).setCacheKeyBlockSize(128).build(), Duration.ofSeconds(3))
+                        .completion().toCompletableFuture().get(4, TimeUnit.SECONDS);
+                    assertEquals(128L * cpSize, observed.get().getCacheKeyBlockSize());
+                    assertEquals(cpSize == 1 ? baseKeys : List.of(baseKeys.get(3), baseKeys.get(7)),
+                        observed.get().getBlockCacheKeysList());
+                }
+            }
+        } finally { server.shutdownNow().awaitTermination(2, TimeUnit.SECONDS); }
+    }
+
+    @Test void emptyTerminalAfterFirstTokenIsValidButEmptyNonterminalIsNot() throws Exception {
+        for (boolean finished : new boolean[]{true, false}) try (var h = new Harness()) {
+            h.output = (id, response) -> {
+                response.onNext(token(id, 1, false));
+                var last = token(id, 1, finished).toBuilder();
+                last.getFlattenOutputBuilder().setOutputIds(TensorPB.newBuilder().setDataType(TensorPB.DataType.INT32)
+                    .addShape(1).addShape(1).addShape(0));
+                last.getFlattenOutputBuilder().getAuxInfoBuilder(0).setStepOutputLen(0);
+                response.onNext(last.build()); response.onCompleted();
+            };
+            var result = h.result(h.client.send(request(1), Duration.ofSeconds(2)));
+            assertEquals(finished ? BackendRpcClient.Outcome.success : BackendRpcClient.Outcome.error, result.outcome());
+            assertEquals(1, result.outputTokens());
+        }
+    }
+
+    private static String outcome(BackendRpcClient.Call call) throws Exception {
+        return call.completion().toCompletableFuture().get(3, TimeUnit.SECONDS).outcome().name();
+    }
+
+    /**
+     * Runs configurable Master and Engine stubs and records calls for assertions.
+     */
+    static final class Harness implements AutoCloseable {
+        final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
+        final BlockingQueue<FlexlbCancelRequestPB> cancellations = new LinkedBlockingQueue<>();
+        final BlockingQueue<FlexlbScheduleRequestPB> scheduleInputs = new LinkedBlockingQueue<>();
+        final CountDownLatch scheduleEntered = new CountDownLatch(1), scheduleCancelled = new CountDownLatch(1), streamCancelled = new CountDownLatch(1);
+        final AtomicInteger generates = new AtomicInteger(), fetches = new AtomicInteger(), schedules = new AtomicInteger();
+        final Server engine, master;
+        final com.sun.net.httpserver.HttpServer heartbeat;
+
+        volatile String leader;
+
+        volatile int heartbeatStatus = 200;
+        volatile boolean requiresGenerateInput = true;
+
+        final BackendRpcClient client;
+
+        volatile Status scheduleFailure;
+
+        volatile boolean batched;
+        volatile int scheduleDelay, tokenDelay;
+
+        volatile Function<FlexlbScheduleResponsePB, FlexlbScheduleResponsePB> route = Function.identity();
+        volatile BiConsumer<Long, StreamObserver<GenerateOutputsPB>> output = (id, response) -> {
+            response.onNext(token(id, 1, false)); response.onNext(token(id, 2, false)); response.onNext(token(id, 3, true)); response.onCompleted();
+        };
+
+        final AtomicReference<GenerateInputPB> generated = new AtomicReference<>();
+        final AtomicBoolean engineSawDeadline = new AtomicBoolean();
+
+        Harness() throws Exception {
+            engine = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0)).addService(new RpcServiceGrpc.RpcServiceImplBase() {
+                @Override public void generateStreamCall(GenerateInputPB input, StreamObserver<GenerateOutputsPB> response) {
+                    generates.incrementAndGet(); generated.set(input); stream(input.getRequestId(), response);
+                }
+
+                @Override public void fetchResponse(FetchRequestPB input, StreamObserver<GenerateOutputsPB> response) {
+                    fetches.incrementAndGet(); stream(input.getRequestId(), response);
+                }
+
+                private void stream(long id, StreamObserver<GenerateOutputsPB> response) {
+                    engineSawDeadline.set(Context.current().getDeadline() != null);
+                    Context.current().addListener(c -> streamCancelled.countDown(), Runnable::run);
+                    workers.submit(() -> { try { Thread.sleep(tokenDelay); output.accept(id, response); }
+                        catch (InterruptedException cancelled) { Thread.currentThread().interrupt(); } });
+                }
+            }).build().start();
+            heartbeat = heartbeatListener();
+            leader = "127.0.0.1:" + heartbeat.getAddress().getPort();
+            heartbeat.createContext("/rtp_llm/master/info", exchange -> {
+                byte[] body = ("{\"real_master_host\":\"" + leader + "\",\"queue_length\":0,\"ready\":true"
+                    + ",\"requires_generate_input\":" + requiresGenerateInput + "}")
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(heartbeatStatus, body.length);
+                try (var output = exchange.getResponseBody()) { output.write(body); }
+            });
+            heartbeat.start();
+            master = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", heartbeat.getAddress().getPort() + 2)).addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {
+                @Override public void schedule(FlexlbScheduleRequestPB input, StreamObserver<FlexlbScheduleResponsePB> response) {
+                    scheduleInputs.add(input);
+                    schedules.incrementAndGet(); scheduleEntered.countDown();
+                    if (scheduleFailure != null) { response.onError(scheduleFailure.asRuntimeException()); return; }
+                    Context.current().addListener(c -> scheduleCancelled.countDown(), Runnable::run);
+                    workers.submit(() -> {
+                        try {
+                            Thread.sleep(scheduleDelay);
+                            var result = FlexlbScheduleResponsePB.newBuilder().setSuccess(true).setCode(200).setEnqueuedByMaster(batched)
+                                .setLifecycle(RequestLifecyclePB.newBuilder().setRequestId(input.getRequestId()).setBatchId(9))
+                                .addServerStatus(FlexlbServerStatusPB.newBuilder().setRole("PREFILL").setServerIp("127.0.0.1").setGrpcPort(engine.getPort())).build();
+                            response.onNext(route.apply(result)); response.onCompleted();
+                        } catch (InterruptedException cancelled) { Thread.currentThread().interrupt(); }
+                    });
+                }
+                @Override public void cancel(FlexlbCancelRequestPB input, StreamObserver<FlexlbCancelResponsePB> response) {
+                    cancellations.add(input); response.onNext(FlexlbCancelResponsePB.newBuilder().setFound(true).build()); response.onCompleted();
+                }
+            }).build().start();
+            client = new BackendRpcClient("127.0.0.1:" + master.getPort());
+        }
+
+        @Override public void close() throws Exception {
+            client.close(); heartbeat.stop(0); workers.shutdownNow(); engine.shutdownNow(); master.shutdownNow();
+            engine.awaitTermination(3, TimeUnit.SECONDS); master.awaitTermination(3, TimeUnit.SECONDS);
+        }
+
+        Map<String, String> endpoint() { return Map.of("role", "master", "rpc", "127.0.0.1:" + master.getPort(), "http", http()); }
+
+        String http() { return "http://127.0.0.1:" + heartbeat.getAddress().getPort(); }
+
+        BackendRpcClient.Result result(BackendRpcClient.Call call) throws Exception { return call.completion().toCompletableFuture().get(4, TimeUnit.SECONDS); }
+
+        private static com.sun.net.httpserver.HttpServer heartbeatListener() throws Exception {
+            for (int i = 0; i < 32; i++) {
+                var http = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+                int rpc = http.getAddress().getPort() + 2;
+                if (rpc <= 65535) try (var probe = new ServerSocket()) {
+                    probe.setReuseAddress(true);
+                    probe.bind(new InetSocketAddress("127.0.0.1", rpc));
+                    return http;
+                } catch (BindException occupied) { /* Try another native HTTP/gRPC pair. */ }
+                http.stop(0);
+            }
+            throw new IllegalStateException("No free test Master port pair");
+        }
+    }
+
+}

@@ -1,0 +1,114 @@
+FLEXLB_CONFIG: |-
+  {
+    "schemaVersion": 3,
+    "scheduler": {
+      "type": "QUEUE",
+      "queueTimeoutMs": 60000,
+      "ordering": {
+        "type": "PRIORITY"
+      },
+      "decision": {
+        "type": "FIXED_WINDOW",
+        "maxRequests": 128,
+        "maxCollectionWaitMs": 0,
+        "maxPredictedExecutionMs": 800
+      }
+    },
+    "dispatcher": {
+      "type": "NON_BATCH",
+      "maxInflightPerPrefillWorker": 128,
+      "fetchAttachTimeoutMs": 3000
+    },
+    "requestLifecycle": {
+      "request": {
+        "timeoutMs": 60000
+      },
+      "decision": {
+        "lifetime": 2
+      }
+    },
+    "router": {
+      "roles": {
+        "prefill": {
+          "executionTimeEstimator": {
+            "type": "FORMULA",
+            "expression": "max(150, 0.0045 * sum(computeTokens) + 0.00005 * sum(hitCacheTokens))"
+          },
+          "cacheAffinity": {
+            "maxExtraTtftMs": 10000,
+            "minPrefixHitPercent": 30
+          }
+        },
+        "decode": {
+          "availability": {
+            "maxKvUsagePercent": 90,
+            "maxEngineRequests": 128
+          },
+          "costEstimator": {
+            "expression": "1.0 * running_size / max_running_size "
+          }
+        },
+        "vit": {
+          "cacheAffinityEnabled": true
+        }
+      }
+    },
+    "workerRegistry": {
+      "health": {
+        "statusPollIntervalMs": 50,
+        "statusRpcTimeoutMs": 5000
+      },
+      "cacheStatus": {
+        "targetDiffSize": 30,
+        "minRefreshIntervalMs": 400,
+        "maxRefreshIntervalMs": 3000,
+        "fullSnapshotDebugMode": false
+      }
+    },
+    "observability": {
+      "cacheHit": {
+        "recentKeyWindow": {
+          "writeEnabled": true,
+          "durationMs": 1800000,
+          "maxKeyOccurrences": 10000000
+        },
+        "metricsEnabled": true,
+        "requestTraceLogEnabled": false
+      }
+    },
+    "grpcServer": {
+      "executorCoreSize": 64,
+      "executorMaxSize": 64,
+      "executorQueueSize": 1000,
+      "receiveBudgetBytes": 17179869184,
+      "maxReceivingRequests": 1016,
+      "maxReceivingControlRequests": 8
+    },
+    "cacheMatching": {
+      "type": "LOCAL_SYNC"
+    },
+    "engineGrpc": {
+      "kvCacheMaxInboundMessageBytes": 268435456
+    }
+  }
+MODEL_SERVICE_CONFIG: |-
+  {
+    "service_id": "aigc.text-generation.generation.engine_service",
+    "role_endpoints": [
+      {
+        "group": "group",
+        "prefill_endpoint": {
+          "address": "prefill-local",
+          "protocol": "grpc"
+        },
+        "decode_endpoint": {
+          "address": "decode-local",
+          "protocol": "grpc"
+        },
+        "vit_endpoint": {
+          "address": "vit-local",
+          "protocol": "grpc"
+        }
+      }
+    ]
+  }
