@@ -1,4 +1,5 @@
 from abc import abstractmethod
+from functools import partial
 from typing import Any, Optional, Tuple
 
 import torch
@@ -145,8 +146,12 @@ class PureTpRouterNoQuant(PureTpRouterBase):
         self,
         config: MoEConfigAdapter,
         quant_config: FusedMoEQuantConfig,
+        *,
+        batch_invariant: bool = False,
     ):
         super().__init__(config, quant_config, do_recompute_topk=False)
+        if batch_invariant:
+            self.tp_all_reduce = partial(all_reduce, batch_invariant=True)
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:

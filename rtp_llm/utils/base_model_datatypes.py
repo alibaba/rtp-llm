@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import IntEnum
 from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
@@ -161,6 +161,13 @@ class AuxInfo:
 
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""
+    raw_logprobs: Optional[List[float]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = asdict(self)
+        if self.raw_logprobs is None:
+            result.pop("raw_logprobs")
+        return result
 
 
 @dataclass

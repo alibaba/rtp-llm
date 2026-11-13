@@ -129,7 +129,7 @@ __inline__ __device__ T warpReduceMax(T val) {
 
 /* Calculate the maximum of all elements in a block */
 template<typename T>
-__inline__ __device__ T blockReduceMax(T val) {
+__inline__ __device__ T blockReduceMax(T val, T identity = static_cast<T>(-1e20f)) {
     static __shared__ T shared[32];
     int                 lane = threadIdx.x & 0x1f;  // in-warp idx
     int                 wid  = threadIdx.x >> 5;    // warp idx
@@ -143,7 +143,7 @@ __inline__ __device__ T blockReduceMax(T val) {
 
     // Modify from blockDim.x << 5 to blockDim.x / 32. to prevent
     // blockDim.x is not divided by 32
-    val = (threadIdx.x < (blockDim.x / 32.f)) ? shared[lane] : -1e20f;
+    val = (threadIdx.x < (blockDim.x / 32.f)) ? shared[lane] : identity;
     val = warpReduceMax(val);
 
     return val;

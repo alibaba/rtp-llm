@@ -95,6 +95,12 @@ public:
             std::vector<float> cum_log_probs_vec(tensor.data_ptr<float>(), tensor.data_ptr<float>() + tensor.numel());
             json.Jsonize("cum_log_probs", cum_log_probs_vec);
         }
+        if (json.GetMode() == FastJsonizableBase::Mode::TO_JSON && raw_logprobs.has_value()) {
+            auto               tensor = raw_logprobs.value().contiguous();
+            const auto*        data   = tensor.data_ptr<float>();
+            std::vector<float> scores(data, data + tensor.numel());
+            json.Jsonize("raw_logprobs", scores);
+        }
         json.Jsonize("local_reuse_len", local_reuse_len, local_reuse_len);
         json.Jsonize("remote_reuse_len", remote_reuse_len, remote_reuse_len);
         json.Jsonize("disk_reuse_len", disk_reuse_len, disk_reuse_len);

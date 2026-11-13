@@ -49,6 +49,7 @@ cc_library(
     deps = [
         ":split_softmax",
         ":host_utils",
+        "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps(),

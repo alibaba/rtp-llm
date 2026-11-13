@@ -172,6 +172,7 @@ private:
     std::unique_ptr<GraphBase> generation_prefill_graph_runner_;
     py::object                 py_model_;
     py::object                 py_forward_method_;
+    py::object                 py_batch_invariant_lm_head_;
     py::object                 held_attn_pyobj_;
     // Per-wrapper ownership, not the process-wide configuration request. Only
     // the normal main-generation wrapper can own this secondary runner.
@@ -360,6 +361,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
     py_model_             = py_instance;
+    if (params.hw_kernel_config.batch_invariant) {
+#if USING_CUDA && !USE_PPU
+        py_batch_invariant_lm_head_ =
+            py::module_::import("rtp_llm.models_py.kernels.cuda.batch_invariant").attr("lm_head");
+#else
+        RTP_LLM_FAIL("RTP_BATCH_INVARIANT requires an NVIDIA CUDA build");
+#endif
+    }
     // MtpExecutor passes use_spec_decoding only to its target wrapper. The
     // normal and draft wrappers may share the same Python class, but must not
     // activate target transactions.

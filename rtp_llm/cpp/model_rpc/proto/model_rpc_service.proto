@@ -351,6 +351,9 @@ message AuxInfoPB {
     int32 disk_reuse_len = 31;
     int32 prefill_disk_reuse_len = 32;
     int32 decode_disk_reuse_len = 33;
+    // Unmodified model logprobs of generated tokens when batch invariance and
+    // return_softmax_probs are enabled. Values are FP32.
+    TensorPB raw_logprobs = 34;
 }
 
 message PromptLogitsOutputPB {

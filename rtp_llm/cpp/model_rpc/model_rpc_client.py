@@ -1122,6 +1122,10 @@ def trans_output(
                 current_aux_info.softmax_probs = trans_tensor(
                     aux_info_pb.softmax_probs
                 ).tolist()
+            if aux_info_pb.HasField("raw_logprobs"):
+                current_aux_info.raw_logprobs = trans_tensor(
+                    aux_info_pb.raw_logprobs
+                ).tolist()
             if len(aux_info_pb.multimodal_lengths) > 0:
                 current_aux_info.multimodal_lengths = dict(
                     aux_info_pb.multimodal_lengths

@@ -11,8 +11,6 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple, Union
 current_file_path = pathlib.Path(__file__).parent.absolute()
 sys.path.append(str(current_file_path.parent.absolute()))
 
-from dataclasses import asdict
-
 from pydantic import BaseModel
 
 from rtp_llm.config.engine_config import EngineConfig
@@ -158,7 +156,7 @@ class FrontendWorker:
                 aux = out.aux_info
                 if gc.has_num_beams():
                     aux.beam_responses = generate_texts
-                aux_info_dict = asdict(aux)
+                aux_info_dict = aux.to_dict()
             prompt_logits_dict = (
                 build_prompt_logits_dict(out.prompt_logits)
                 if gc.return_prompt_logits
@@ -287,7 +285,7 @@ class FrontendWorker:
         response = PipelineResponse(
             response=generate_texts[0],
             finished=finished,
-            aux_info=asdict(aux_info) if generate_config.aux_info else {},
+            aux_info=aux_info.to_dict() if generate_config.aux_info else {},
             hidden_states=(
                 hidden_states.tolist()
                 if generate_config.return_hidden_states and hidden_states is not None
@@ -345,7 +343,7 @@ class FrontendWorker:
             if generate_config.aux_info:
                 aux_info = []
                 for seq in gen_responses.generate_outputs.generate_outputs:
-                    info = asdict(seq.aux_info)
+                    info = seq.aux_info.to_dict()
                     aux_info.append(info)
             sequences_pipeline_response = MultiSequencesPipelineResponse(
                 response=generate_texts,

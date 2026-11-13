@@ -23,7 +23,8 @@ public:
                                const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                                const CacheConfig&                 cache_config,
                                bool                               warm_up,
-                               int                                async_worker_count = 0);
+                               int                                async_worker_count = 0,
+                               bool                               batch_invariant    = false);
 
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
     virtual absl::Status dispatchPrefillOnly(const StreamGroups&              stream_groups,

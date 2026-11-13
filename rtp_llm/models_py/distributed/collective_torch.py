@@ -955,7 +955,11 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
 
 
 def all_reduce(
-    tensor: torch.Tensor, group: Group, *, inplace: bool = True
+    tensor: torch.Tensor,
+    group: Group,
+    *,
+    inplace: bool = True,
+    batch_invariant: bool = False,
 ) -> torch.Tensor:
     """All-reduce a tensor across all ranks in the group.
 
@@ -964,10 +968,27 @@ def all_reduce(
         group: Process group to use
         inplace: If true, write fast-path results back to ``tensor``. Defaults to
             true to preserve the in-place contract of torch.distributed.all_reduce.
+        batch_invariant: Sum FP32 partials in rank order for each element.
 
     Returns:
         All-reduced tensor.
     """
+    if batch_invariant:
+        process_group = _get_group(group)
+        rank_count = torch.distributed.get_world_size(process_group)
+        if rank_count == 1 or tensor.numel() == 0:
+            return tensor if inplace else tensor.clone()
+        # All-gather moves bits unchanged. Sum FP32 partials in rank order
+        # independently of the NCCL algorithm or the number of live tokens.
+        flat = tensor.contiguous().view(-1)
+        gathered = tensor.new_empty((rank_count * flat.numel(),))
+        torch.distributed.all_gather_into_tensor(gathered, flat, group=process_group)
+        partials = gathered.view(rank_count, *tensor.shape)
+        reduced = partials[0].to(torch.float32, copy=True)
+        for rank in range(1, rank_count):
+            reduced.add_(partials[rank])
+        return tensor.copy_(reduced) if inplace else reduced.to(tensor.dtype)
+
     rocm_rccl = _get_rocm_rccl()
     if rocm_rccl is not None:
         rocm_rccl.ensure_capture_comm_ready(group == Group.TP)

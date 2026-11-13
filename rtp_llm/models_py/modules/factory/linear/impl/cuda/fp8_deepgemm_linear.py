@@ -62,6 +62,8 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
+        *,
+        batch_invariant: bool = False,
     ):
         super().__init__(
             weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
@@ -71,9 +73,11 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         self.weight_scales = weight_scales
         self.input_scales = input_scales
         self.bias = bias
+        self.batch_invariant = batch_invariant
+        self.supports_fused_silu_quant = not batch_invariant
 
         # Check if DeepGEMM is available
-        if not has_deep_gemm():
+        if not batch_invariant and not has_deep_gemm():
             error_msg = "DeepGEMM is not available. Please install the `deep_gemm` package to enable DeepGEMM kernels."
             logger.error(error_msg)
             raise RuntimeError(error_msg)
@@ -115,6 +119,8 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             error_msg = f"Weight scale dtype must be float32 or int32, got {self.weight_scales.dtype}"
             logger.error(error_msg)
             raise ValueError(error_msg)
+        if batch_invariant and self.K % 128 != 0:
+            raise ValueError("batch-invariant block FP8 requires K divisible by 128")
         # Check bias
         if self.bias is not None:
             if self.bias.dim() != 1 and self.bias.dim() != 2:
@@ -143,7 +149,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         self.cached_scales_max_len = 0
 
     def maybe_cache_quant_scale(self, max_len: int) -> None:
-        if not self.scale_ue8m0:
+        if self.batch_invariant or not self.scale_ue8m0:
             return
 
         # 使用 (device, K, max_len) 作为 cache key
@@ -290,6 +296,20 @@ class CudaFp8DeepGEMMLinear(LinearBase):
     def forward(
         self, input: torch.Tensor, out: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        if self.batch_invariant:
+            from rtp_llm.models_py.kernels.cuda.batch_invariant import (
+                fp8_per_block_linear,
+            )
+
+            self._validate_input(input)
+            if input.dtype != torch.bfloat16:
+                raise ValueError("batch-invariant block FP8 requires BF16 input")
+            if out is not None:
+                self._prepare_output(input, input.size(0), out)
+            output = fp8_per_block_linear(
+                input, self.weight, self.weight_scales, self.bias
+            )
+            return output if out is None else out.copy_(output)
         M, _ = self._validate_input(input)
         input_fp8, input_scales = self.quantize_input(input)
 
@@ -306,7 +326,8 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         formats retain the existing activation + Linear path.
         """
         if (
-            not self.scale_ue8m0
+            self.batch_invariant
+            or not self.scale_ue8m0
             or gate_up.dtype != torch.bfloat16
             or gate_up.dim() != 2
             or gate_up.shape[-1] != 2 * self.K

@@ -24,18 +24,20 @@ class DecodeGraphConfigPickleTest(unittest.TestCase):
 
     def test_previous_layouts_keep_defaults(self):
         state = HWKernelConfig().__getstate__()
-        for legacy in (state[:16], state[:14]):
+        for legacy in (state[:8], state[:7], state[:5]):
             result = HWKernelConfig.__new__(HWKernelConfig)
             result.__setstate__(legacy)
             self.assertFalse(result.enable_decode_cascade_attention)
+            self.assertFalse(result.batch_invariant)
             self.assertEqual(result.decode_capture_batch_sizes, [])
             self.assertEqual(result.generation_prefill_cuda_graph_max_requests, 1)
         # The retired independent decode capacity is ignored when reading an
         # older in-flight bootstrap; the Cascade flag still round-trips.
-        previous = state[:16] + (4096, True)
+        previous = state[:8] + (4096, True)
         result = HWKernelConfig.__new__(HWKernelConfig)
         result.__setstate__(previous)
         self.assertTrue(result.enable_decode_cascade_attention)
+        self.assertFalse(result.batch_invariant)
         self.assertEqual(result.decode_capture_batch_sizes, [])
 
 
@@ -240,6 +242,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         config.generation_prefill_capture_token_buckets = [32, 64, 96]
         config.prefill_capture_seq_lens = [17, 23]
         config.decode_capture_batch_sizes = [2, 7]
+        config.batch_invariant = True
 
         restored = pickle.loads(pickle.dumps(config))
 
@@ -252,6 +255,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         )
         self.assertEqual(restored.prefill_capture_seq_lens, [17, 23])
         self.assertEqual(restored.decode_capture_batch_sizes, [2, 7])
+        self.assertTrue(restored.batch_invariant)
 
     def test_core_only_tuple_uses_generation_prefill_cuda_graph_defaults(self):
         restored = pickle.loads(pickle.dumps(_LegacyHWKernelConfig()))

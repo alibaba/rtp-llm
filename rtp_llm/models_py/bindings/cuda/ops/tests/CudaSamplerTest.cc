@@ -780,6 +780,45 @@ TEST_F(CudaSamplerTest, testTopPOneRenormPreservesUnfilteredDistribution) {
     }
 }
 
+#if !USE_PPU
+TEST_F(CudaSamplerTest, BatchInvariantSamplingIgnoresOtherRowsAndSamplingOptions) {
+    torch::manual_seed(20261113);
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto logits  = torch::randn({3, 65539}, options);
+    // The first two logits have distinct FP32 values and may round to the
+    // same probability. The greedy token must use the original logits.
+    logits[0].fill_(-1e3f);
+    logits[0][0] = 0.0f;
+    logits[0][1] = std::numeric_limits<float>::epsilon() / 4;
+
+    auto sample = [&](torch::Tensor scores, std::vector<int32_t> top_k, std::vector<float> top_p) {
+        const auto   rows = scores.size(0);
+        GreedyParams params{};
+        params.logits           = scores.clone();
+        params.input_lengths    = torch::zeros({rows}, torch::kInt32);
+        params.sequence_lengths = torch::zeros({rows}, torch::kInt32);
+        params.token_ids        = torch::zeros({rows, 1}, options.dtype(torch::kInt32));
+        params.top_k            = torch::tensor(top_k, torch::kInt32);
+        params.top_p            = torch::tensor(top_p, torch::kFloat32);
+        params.temperature      = torch::ones({rows}, torch::kFloat32);
+        params.batch_invariant  = true;
+        for (int64_t i = 0; i < rows; ++i) {
+            auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
+            generator.set_current_seed(42);
+            params.generator.push_back(generator);
+        }
+        execSampleGreedy(params);
+        return params.token_ids.cpu();
+    };
+
+    const auto mixed = sample(logits, {1, 0, 11}, {1.0f, 0.8f, 1.0f});
+    EXPECT_EQ(mixed[0].item<int32_t>(), 1);
+    EXPECT_TRUE(torch::equal(mixed.narrow(0, 1, 1), sample(logits.narrow(0, 1, 1), {0}, {0.8f})));
+    EXPECT_TRUE(torch::equal(mixed.narrow(0, 2, 1), sample(logits.narrow(0, 2, 1), {11}, {1.0f})));
+    EXPECT_TRUE(torch::equal(mixed.flip({0}), sample(logits.flip({0}), {11, 0, 1}, {1.0f, 0.8f, 1.0f})));
+}
+#endif
+
 TEST_F(CudaSamplerTest, testTopPOneCategoricalPreservesPublicOutputsAndRngReservation) {
     torch::manual_seed(20261019);
     for (int64_t batch : {1, 4, 17, 32, 33}) {

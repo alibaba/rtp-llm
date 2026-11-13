@@ -47,11 +47,16 @@ class Qwen3DecoderLayer(nn.Module):
             quant_config,
             hw_kernel_config,
         )
+        norm_options = (
+            {"batch_invariant": True}
+            if getattr(hw_kernel_config, "batch_invariant", False)
+            else {}
+        )
         self.input_layernorm = RMSNorm(
-            weights[W.pre_ln_gamma], eps=config.layernorm_eps
+            weights[W.pre_ln_gamma], eps=config.layernorm_eps, **norm_options
         )
         self.post_attention_layernorm = RMSNorm(
-            weights[W.post_ln_gamma], eps=config.layernorm_eps
+            weights[W.post_ln_gamma], eps=config.layernorm_eps, **norm_options
         )
 
     def forward(
@@ -80,6 +85,8 @@ class Qwen3DecoderLayer(nn.Module):
 
 
 class Qwen3Model(GptModelBase):
+    supports_batch_invariant = True
+
     def __init__(
         self,
         config: ModelConfig,
@@ -123,7 +130,9 @@ class Qwen3Model(GptModelBase):
         )
         self.norm = (
             RMSNorm(
-                weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
+                weights.get_global_weight(W.final_ln_gamma),
+                eps=config.layernorm_eps,
+                **({"batch_invariant": True} if self.batch_invariant else {}),
             )
             if self.layer_num - 1 in layer_ids
             else None

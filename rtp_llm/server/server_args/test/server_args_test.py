@@ -385,6 +385,24 @@ class CacheConfigArgumentsTest(TestCase):
                 self.assertEqual(getattr(restored, f"reco_{name}"), type(value)())
 
 
+class BatchInvariantArgumentsTest(TestCase):
+    def test_batch_invariant_is_opt_in_and_cli_overrides_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        for args, env, expected in (
+            ([], {}, False),
+            (["--RTP_BATCH_INVARIANT"], {}, True),
+            ([], {"RTP_BATCH_INVARIANT": "1"}, True),
+            (["--RTP_BATCH_INVARIANT=0"], {"RTP_BATCH_INVARIANT": "1"}, False),
+        ):
+            with (
+                self.subTest(args=args, env=env),
+                patch.dict(os.environ, env, clear=True),
+            ):
+                config = EngineConfig.create(server_args.setup_args(args))
+                self.assertIs(config.hw_kernel_config.batch_invariant, expected)
+
+
 class DecodeGraphCapacityArgumentsTest(TestCase):
     @staticmethod
     def create_engine(args=(), env=None):

@@ -19,6 +19,7 @@ from rtp_llm.models_py.model_desc.hidden_state_capture import (
 )
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
+from rtp_llm.ops import RopeStyle
 from rtp_llm.ops.compute_ops import (
     KVCache,
     PyModelInitResources,
@@ -29,6 +30,8 @@ from rtp_llm.utils.model_weight import W
 
 
 class GptModelBase(nn.Module):
+    supports_batch_invariant = False
+
     def __init__(
         self,
         config: ModelConfig,
@@ -44,6 +47,8 @@ class GptModelBase(nn.Module):
         self.weight = weight
         self.fmha_config = fmha_config
         self.py_hw_kernel_config = py_hw_kernel_config
+        self.batch_invariant = getattr(py_hw_kernel_config, "batch_invariant", False)
+        self.batch_invariant_rope_cache = None
         self.decode_cascade_max_requests = (
             max_generate_batch_size
             if py_hw_kernel_config
@@ -103,6 +108,21 @@ class GptModelBase(nn.Module):
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
+        if (
+            self.batch_invariant
+            and self.batch_invariant_rope_cache is None
+            and self.config.attn_config.rope_config.style != RopeStyle.No
+        ):
+            from rtp_llm.models_py.modules.factory.attention.cuda_impl.batch_invariant import (
+                BatchInvariantAttention,
+            )
+
+            config = self.config.getAttentionConfigs(
+                self.parallelism_config.get_attn_tp_size()
+            )
+            self.batch_invariant_rope_cache = BatchInvariantAttention.create_rope_cache(
+                config, self.weight.device
+            )
         if self.kv_cache is not None:
             num_layers = self.kv_cache.layer_count
             layer0_caches = (
@@ -128,6 +148,14 @@ class GptModelBase(nn.Module):
         cuda_graph_selection_mode: Optional[str] = None,
     ) -> AttentionImpl | dict[str, AttentionImpl]:
         attention_inputs = get_attention_inputs_value(inputs)
+        batch_invariant_options = (
+            {
+                "batch_invariant": True,
+                "batch_invariant_rope_cache": self.batch_invariant_rope_cache,
+            }
+            if getattr(self, "batch_invariant", False)
+            else {}
+        )
         if isinstance(attention_inputs, Mapping):
             fmha_group_tags = self._get_fmha_group_tags()
             selected_group_inputs = (
@@ -150,6 +178,7 @@ class GptModelBase(nn.Module):
                     decode_cascade_max_requests=getattr(
                         self, "decode_cascade_max_requests", 0
                     ),
+                    **batch_invariant_options,
                 )
                 for tag, group_inputs in selected_group_inputs
             }
@@ -162,6 +191,7 @@ class GptModelBase(nn.Module):
             is_cuda_graph=is_cuda_graph,
             cuda_graph_selection_mode=cuda_graph_selection_mode,
             decode_cascade_max_requests=getattr(self, "decode_cascade_max_requests", 0),
+            **batch_invariant_options,
         )
 
     def _get_fmha_group_tags(self) -> Optional[list[str]]:

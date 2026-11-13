@@ -276,6 +276,10 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 generate_output.aux_info.softmax_probs =
                     softmax_probs_[i].narrow(0, last_output_pos_, output_len).clone();
             }
+            if (sampling_state_.raw_logprobs.defined()) {
+                generate_output.aux_info.raw_logprobs =
+                    sampling_state_.raw_logprobs[i].narrow(0, last_output_pos_, output_len).clone();
+            }
             if (update_info.cum_log_probs.defined()) {
                 generate_output.aux_info.cum_log_probs = cum_log_probs_.narrow(0, i, 1).cpu().clone();
             }
@@ -352,6 +356,10 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         RTP_LLM_CHECK(update_info.softmax_probs.size(1) == update_info.num_new_tokens);
         setSoftmaxProbs(
             update_info.softmax_probs, seqLength() - update_info.num_new_tokens, update_info.src_batch_indices);
+    }
+    if (update_info.raw_logprobs.defined()) {
+        setRawLogProbs(
+            update_info.raw_logprobs, seqLength() - update_info.num_new_tokens, update_info.src_batch_indices);
     }
 
     finished_ = needFinish();

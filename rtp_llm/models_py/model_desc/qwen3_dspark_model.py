@@ -166,6 +166,8 @@ class _TorchMhaRotaryEmbeddingOp:
 
 
 class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
+    supports_batch_invariant = False
+
     def __init__(
         self,
         config: ModelConfig,

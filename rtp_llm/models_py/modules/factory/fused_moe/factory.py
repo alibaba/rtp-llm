@@ -33,7 +33,11 @@ class FusedMoeFactory:
 
     @torch.inference_mode()
     def create_fused_moe(
-        self, config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
+        self,
+        config: MoEConfigAdapter,
+        weights: Dict[str, torch.Tensor],
+        *,
+        batch_invariant: bool = False,
     ) -> FusedMoe:
         """Create FusedMoe instance
 
@@ -50,6 +54,31 @@ class FusedMoeFactory:
         Raises:
             ValueError: If no suitable strategy is found or configuration is not supported
         """
+        if batch_invariant:
+            from .defs.quant_config import FusedMoEQuantConfig
+            from .impl.cuda.executors.triton_fused_executor import (
+                TritonFusedMoeExecutor,
+            )
+            from .impl.cuda.routers.pure_tp_router import PureTpRouterNoQuant
+
+            if config.moe_quant_method not in (None, "FP8_PER_BLOCK"):
+                raise ValueError(
+                    "RTP_BATCH_INVARIANT does not support this expert quantization"
+                )
+            quant = (
+                FusedMoEQuantConfig(
+                    quant_dtype=torch.float8_e4m3fn, block_shape=[128, 128]
+                )
+                if config.moe_quant_method == "FP8_PER_BLOCK"
+                else FusedMoEQuantConfig()
+            )
+            return FusedMoe(
+                PureTpRouterNoQuant(config, quant, batch_invariant=True),
+                TritonFusedMoeExecutor(config, quant, weights, batch_invariant=True),
+                expert_num=config.expert_num,
+                strategy_name="batch_invariant",
+            )
+
         strategy = self.registry.get_strategy(config)
 
         router = strategy.create_router(config)

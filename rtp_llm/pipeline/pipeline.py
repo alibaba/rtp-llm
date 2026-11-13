@@ -3,7 +3,6 @@ import copy
 import logging
 import queue
 import threading
-from dataclasses import asdict
 from typing import Any, AsyncGenerator, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
@@ -584,7 +583,7 @@ class Pipeline(object):
                 aux_info = None
                 if generate_outputs_cache.generate_outputs:
                     aux_info = generate_outputs_cache.generate_outputs[0].aux_info
-                aux_info_dict = asdict(aux_info) if aux_info is not None else {}
+                aux_info_dict = aux_info.to_dict() if aux_info is not None else {}
                 aux_info_dict.setdefault("input_len", input.prompt_length)
                 aux_info_dict.setdefault("output_len", 0)
                 aux_info_dict.setdefault("step_output_len", 0)

@@ -8,6 +8,7 @@ from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.config.engine_config import EngineConfig, update_worker_addrs
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.device.device_type import is_cuda
 from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
@@ -44,6 +45,8 @@ class BackendManager(object):
 
     def start(self):
         """Initialize backend server without entering service loop"""
+        if self.py_env_configs.py_hw_kernel_config.batch_invariant and not is_cuda():
+            raise ValueError("RTP_BATCH_INVARIANT requires an NVIDIA GPU")
         self._distributed_server.start(self.py_env_configs)
         # Create EngineConfig from py_env_configs (server/distribute config already adjusted for this rank)
         engine_config = EngineConfig.create(
@@ -83,6 +86,7 @@ class BackendManager(object):
             render_config=self.py_env_configs.render_config,
             eplb_config=self.py_env_configs.eplb_config,
             vit_config=self.py_env_configs.vit_config,
+            hw_kernel_config=engine_config.hw_kernel_config,
         )
         # Let engine_config finalize based on model_config (e.g. scheduler config)
         ModelFactory.update_engine_config_from_model_config(
@@ -112,6 +116,7 @@ class BackendManager(object):
         # Initialize DeepEP/MoriEP wrapper if MOE model and EP is enabled
         if (
             model_config.expert_num > 0
+            and not engine_config.hw_kernel_config.batch_invariant
             and engine_config.parallelism_config.world_size > 1
             and not engine_config.moe_config.use_all_gather
         ):

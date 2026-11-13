@@ -324,7 +324,56 @@ class SM120Qwen3Test(unittest.TestCase):
         self.assertIn("1", matches, "No runtime decode Graph replay for batch 1")
         self.assertIn("2", matches, "No runtime decode Graph replay for batch 2")
 
+    def check_batch_invariant_scores(self):
+        query = self.query(
+            self.prompt("Write one short sentence about a lighthouse."),
+            max_new_tokens=8,
+            random_seed=42,
+            return_softmax_probs=True,
+        )
+        solo = self.request("invariant_solo", query)
+        scores = solo["aux_info"]["raw_logprobs"]
+        self.assertEqual(len(scores), len(solo["output_ids"][0]))
+        self.assertGreater(len(scores), 1)
+        other = self.prompt("Give a longer explanation of why boats use lighthouses.")
+        for target_row, prompts in enumerate(
+            ((query["prompt"], other), (other, query["prompt"]))
+        ):
+            result = self.request(
+                f"invariant_batch_{target_row}",
+                {
+                    "prompt_batch": list(prompts),
+                    "generate_config": query["generate_config"],
+                },
+                "/batch_infer",
+            )["response_batch"][target_row]
+            self.assertEqual(result["output_ids"], solo["output_ids"])
+            self.assertEqual(result["aux_info"]["raw_logprobs"], scores)
+
+        # Re-score the generated continuation as prompt tokens. Each label is
+        # scored by the same prefix as in the original generation.
+        tokens = solo["input_ids"][0] + solo["output_ids"][0]
+        text = self.tokenizer.decode(tokens, clean_up_tokenization_spaces=False)
+        if self.tokenizer.encode(text) != tokens:
+            self.fail("score test prompt did not round-trip through the tokenizer")
+        rescored = self.request(
+            "invariant_rescore",
+            self.query(
+                text,
+                max_new_tokens=1,
+                return_prompt_logits=True,
+                prompt_logits_top_k=1,
+                prompt_logits_start=len(solo["input_ids"][0]) - 1,
+                prompt_logits_end=len(tokens) - 1,
+            ),
+        )
+        self.assertEqual(rescored["prompt_logprobs"]["target_logprobs"], scores)
+        self.check_graph()
+
     def test_requests_share_one_server(self):
+        if os.environ.get("RTP_TEST_BATCH_INVARIANT") == "1":
+            self.check_batch_invariant_scores()
+            return
         # One test method owns the server; helper phases never restart it.
         with self.subTest(scenario="long_prefix_cache"):
             self.run_cache()

@@ -27,6 +27,10 @@
 
 namespace rtp_llm {
 
+#if USING_CUDA && !USE_PPU
+void invokeLogProbStats(const float* logits, float* stats, int rows, int vocab_size, cudaStream_t stream);
+#endif
+
 template<typename T>
 void invokeAddBiasSoftMax(T*           logits,
                           const T*     bias,

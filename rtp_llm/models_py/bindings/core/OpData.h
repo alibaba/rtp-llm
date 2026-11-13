@@ -325,6 +325,7 @@ struct GreedyParams {
 
     std::vector<at::Generator> generator;
     GreedySamplingBuffers*     sampling_buffers = nullptr;
+    bool                       batch_invariant  = false;
 };
 
 struct GreedyOutput {

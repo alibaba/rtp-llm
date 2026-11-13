@@ -581,6 +581,7 @@ class HWKernelConfig:
     generation_prefill_cuda_graph_max_capture_buckets: typing.ClassVar[int]
     generation_prefill_cuda_graph_max_capture_tokens: typing.ClassVar[int]
     generation_prefill_cuda_graph_max_requests_limit: typing.ClassVar[int]
+    batch_invariant: bool
     decode_capture_batch_sizes: list[int]
     enable_decode_cascade_attention: bool
     deterministic_attn: bool

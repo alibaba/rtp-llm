@@ -15,12 +15,20 @@ from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 class RMSNorm(BaseNorm):
-    def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
+    def __init__(
+        self, weight: torch.Tensor, eps: float = 1e-6, *, batch_invariant: bool = False
+    ):
         super().__init__(weight, eps)
+        self.batch_invariant = batch_invariant
 
     def forward(
         self, hidden_states: torch.Tensor, output: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        if self.batch_invariant:
+            from rtp_llm.models_py.kernels.cuda.batch_invariant import rms_norm
+
+            normalized = rms_norm(hidden_states, self.weight, self.variance_epsilon)
+            return normalized if output is None else output.copy_(normalized)
         # Lazy import: this module is also imported where flashinfer is
         # absent (e.g. ppu/rocm), so importing it must not require flashinfer.
         import flashinfer
@@ -34,12 +42,22 @@ class RMSNorm(BaseNorm):
 
 
 class RMSResNorm(BaseResNorm):
-    def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
+    def __init__(
+        self, weight: torch.Tensor, eps: float = 1e-6, *, batch_invariant: bool = False
+    ):
         super().__init__(weight, eps)
+        self.batch_invariant = batch_invariant
 
     def forward(
         self, hidden_states: torch.Tensor, residual: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.batch_invariant:
+            from rtp_llm.models_py.kernels.cuda.batch_invariant import rms_norm
+
+            summed = residual.float() + hidden_states.float()
+            residual.copy_(summed)
+            hidden_states.copy_(rms_norm(summed, self.weight, self.variance_epsilon))
+            return hidden_states, residual
         import flashinfer
 
         flashinfer.norm.fused_add_rmsnorm(
@@ -99,6 +117,8 @@ class FusedQKRMSNorm(nn.Module):
         size_per_head: int = 128,
         eps: float = 1e-6,
         enable_pdl: bool = False,
+        *,
+        batch_invariant: bool = False,
     ):
         super().__init__()
         self.q_weight = q_weight
@@ -110,10 +130,9 @@ class FusedQKRMSNorm(nn.Module):
         self.q_size = self.head_num * self.size_per_head
         self.kv_size = self.kv_head_num * self.size_per_head
         self.enable_pdl = enable_pdl
+        self.batch_invariant = batch_invariant
 
     def forward(self, hidden_states: torch.Tensor):
-        import flashinfer
-
         assert hidden_states.dim() == 2
         m, n = hidden_states.shape
         qkv = hidden_states.reshape(
@@ -121,6 +140,15 @@ class FusedQKRMSNorm(nn.Module):
         )
         q = qkv[:, : self.head_num, :]
         k = qkv[:, self.head_num : self.head_num + self.kv_head_num, :]
+        if self.batch_invariant:
+            from rtp_llm.models_py.kernels.cuda.batch_invariant import rms_norm
+
+            q.copy_(rms_norm(q, self.q_weight, self.eps))
+            k.copy_(rms_norm(k, self.k_weight, self.eps))
+            return qkv.reshape(m, n)
+
+        import flashinfer
+
         flashinfer.norm.rmsnorm(
             q, self.q_weight, eps=self.eps, out=q, enable_pdl=self.enable_pdl
         )

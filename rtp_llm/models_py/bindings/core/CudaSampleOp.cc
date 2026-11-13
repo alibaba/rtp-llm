@@ -289,14 +289,15 @@ void processLogits(const GreedyParams& params, const torch::Tensor& device_token
 
 }  // anonymous namespace
 
-static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& samples_t) {
+static GreedyOutput
+flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& samples_t, const torch::Tensor& greedy_tokens) {
     const auto batch_size = params.logits.size(0);
     auto       cur_stream = at::cuda::getCurrentCUDAStream().stream();
 
     // [batch_size, vocab_size] — compute softmax probabilities.
     // Copy result back to logits to preserve the in-place behavior of the original kernel,
     // since callers may reuse the logits tensor across iterations.
-    auto probs_t = samplerSoftmaxInplace(params.logits);
+    auto probs_t = samplerSoftmaxInplace(params.logits, params.batch_invariant);
     auto success = torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
 
     constexpr bool deterministic       = true;
@@ -332,7 +333,34 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     const bool all_top_p_one =
         std::all_of(top_p_ptr, top_p_ptr + batch_size, [](auto t) { return std::abs(t - 1.0f) < 1e-7; });
 
-    if (all_top_k_one) {
+    if (params.batch_invariant) {
+        // Use one sampling algorithm for every row, regardless of the other
+        // requests' top-k/top-p settings. Greedy rows keep argmax tie-breaking.
+        auto top_k_gpu   = top_k_t.to(probs_t.device(), /*non_blocking=*/true);
+        auto greedy_rows = top_k_gpu.eq(1);
+        top_k_gpu        = torch::where(top_k_gpu.gt(0), top_k_gpu, probs_t.size(1));
+        top_k_top_p_sampling_from_probs(probs_t,
+                                        samples_t,
+                                        success_t,
+                                        std::nullopt,
+                                        top_k_gpu,
+                                        0,
+                                        top_p_t,
+                                        1.0,
+                                        deterministic,
+                                        seed_t,
+                                        0,
+                                        offset_t,
+                                        0,
+                                        (int64_t)cur_stream);
+        samples_t.copy_(torch::where(greedy_rows, greedy_tokens, samples_t), true);
+        success_t.logical_or_(greedy_rows);
+        if (need_renorm_probs) {
+            auto temp_t = torch::empty_like(probs_t);
+            top_p_renorm_probs(probs_t, temp_t, top_p_t, 1.0, (int64_t)cur_stream);
+            top_k_renorm_probs(temp_t, sampling_probs_t, top_k_gpu, 0, (int64_t)cur_stream);
+        }
+    } else if (all_top_k_one) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens, true);
         success = torch::Tensor();  // mark as undefined — all succeeded
@@ -477,11 +505,13 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // fast path for topk = 1
     // TODO: Support output_all_probs and cum_log_probs in this fast path.
     auto top_k_ptr = params.top_k.data_ptr<int32_t>();
-    if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })
-        && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value()) {
+    const bool all_greedy = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t == 1; });
+    if (all_greedy && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value()) {
         samples_t.copy_(torch::argmax(params.logits, -1, /*keepdim=*/false), true);
     } else {
-        output = flashinferSampleGreedy(params, samples_t);
+        auto greedy_tokens =
+            params.batch_invariant ? torch::argmax(params.logits, -1).to(torch::kInt32) : torch::Tensor();
+        output = flashinferSampleGreedy(params, samples_t, greedy_tokens);
     }
 
     // Sampling only changes the output column; every history prefix stays in place.

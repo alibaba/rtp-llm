@@ -54,6 +54,7 @@ struct StreamUpdateInfo {
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     // Appended to preserve existing aggregate initializers. CPU context rows.
     const torch::Tensor custom_output{};
+    const torch::Tensor raw_logprobs{};
 };
 
 struct StreamSpecUpdateInfo {
@@ -425,6 +426,7 @@ public:
     void                        setSoftmaxProbs(const torch::Tensor& softmax_probs,
                                                 int                  start_pos,
                                                 const torch::Tensor& src_batch_indices = torch::Tensor());
+    void setRawLogProbs(const torch::Tensor& logprobs, int start_pos, const torch::Tensor& src_batch_indices);
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
     BatchKVCacheResourcePtr     kvCachePtr();

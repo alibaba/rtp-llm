@@ -1510,34 +1510,54 @@ void GenerateStream::setLoss(const torch::Tensor& loss) {
     loss_index_ += loss_size;
 }
 
-void GenerateStream::setSoftmaxProbs(const torch::Tensor& softmax_probs,
-                                     int                  start_pos,
-                                     const torch::Tensor& src_batch_indices) {
-    RTP_LLM_PROFILE_FUNCTION();
-    auto& softmax_probs_ = sampling_state_.softmax_probs;
-    RTP_LLM_CHECK(softmax_probs_.defined());
-    auto probs_cpu = softmax_probs.to(torch::kCPU, torch::kFloat32).contiguous();
+namespace {
+
+void appendTokenScores(torch::Tensor&       history,
+                       const torch::Tensor& scores,
+                       int                  start_pos,
+                       int                  batch_size,
+                       const torch::Tensor& src_batch_indices) {
+    RTP_LLM_CHECK(history.defined());
+    auto probs_cpu = scores.to(torch::kCPU, torch::kFloat32).contiguous();
     RTP_LLM_CHECK(probs_cpu.dim() == 2);
-    RTP_LLM_CHECK(probs_cpu.size(0) == currentBatchSize());
+    RTP_LLM_CHECK(probs_cpu.size(0) == batch_size);
     auto num_probs = probs_cpu.size(1);
     RTP_LLM_CHECK(start_pos >= 0);
-    RTP_LLM_CHECK(start_pos + num_probs <= softmax_probs_.size(1));
-    RTP_LLM_CHECK(currentBatchSize() <= softmax_probs_.size(0));
+    RTP_LLM_CHECK(start_pos + num_probs <= history.size(1));
+    RTP_LLM_CHECK(batch_size <= history.size(0));
 
     if (src_batch_indices.defined()) {
         auto indices_cpu = src_batch_indices.to(torch::kCPU, torch::kLong).contiguous();
         RTP_LLM_CHECK(indices_cpu.dim() == 1);
-        RTP_LLM_CHECK(indices_cpu.numel() == currentBatchSize());
+        RTP_LLM_CHECK(indices_cpu.numel() == batch_size);
         RTP_LLM_CHECK(indices_cpu.min().item<int64_t>() >= 0);
-        RTP_LLM_CHECK(indices_cpu.max().item<int64_t>() < softmax_probs_.size(0));
+        RTP_LLM_CHECK(indices_cpu.max().item<int64_t>() < history.size(0));
 
         if (start_pos > 0) {
-            auto history = softmax_probs_.narrow(1, 0, start_pos).index_select(0, indices_cpu);
-            softmax_probs_.narrow(0, 0, currentBatchSize()).narrow(1, 0, start_pos).copy_(history);
+            auto parent_scores = history.narrow(1, 0, start_pos).index_select(0, indices_cpu);
+            history.narrow(0, 0, batch_size).narrow(1, 0, start_pos).copy_(parent_scores);
         }
     }
 
-    softmax_probs_.narrow(0, 0, currentBatchSize()).narrow(1, start_pos, num_probs).copy_(probs_cpu);
+    history.narrow(0, 0, batch_size).narrow(1, start_pos, num_probs).copy_(probs_cpu);
+}
+
+}  // namespace
+
+void GenerateStream::setSoftmaxProbs(const torch::Tensor& softmax_probs,
+                                     int                  start_pos,
+                                     const torch::Tensor& src_batch_indices) {
+    RTP_LLM_PROFILE_FUNCTION();
+    appendTokenScores(sampling_state_.softmax_probs, softmax_probs, start_pos, currentBatchSize(), src_batch_indices);
+}
+
+void GenerateStream::setRawLogProbs(const torch::Tensor& logprobs,
+                                    int                  start_pos,
+                                    const torch::Tensor& src_batch_indices) {
+    if (!sampling_state_.raw_logprobs.defined()) {
+        sampling_state_.raw_logprobs = torch::zeros({(int64_t)maxBatchSize(), (int64_t)maxTokenNum()}, torch::kFloat32);
+    }
+    appendTokenScores(sampling_state_.raw_logprobs, logprobs, start_pos, currentBatchSize(), src_batch_indices);
 }
 
 torch::Tensor GenerateStream::getLoss() {

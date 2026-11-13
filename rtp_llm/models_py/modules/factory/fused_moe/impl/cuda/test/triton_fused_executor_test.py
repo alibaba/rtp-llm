@@ -194,6 +194,59 @@ class TritonFusedMoeExecutorTest(TestCase):
         self._run_test(1, 512, 8, 4, 256, torch.bfloat16)
         self._run_test(7, 384, 6, 3, 192, torch.bfloat16)  # odd sizes
 
+    def test_batch_invariant_experts_ignore_other_routes(self):
+        torch.manual_seed(19)
+        config = self._make_config(256, 4, 2, 128, 71)
+        weights = {
+            W.moe_w1: torch.randn((4, 256, 256), device="cuda", dtype=torch.bfloat16),
+            W.moe_w2: torch.randn((4, 256, 128), device="cuda", dtype=torch.bfloat16),
+        }
+        x = torch.randn((71, 256), device="cuda", dtype=torch.bfloat16)
+        ids = torch.tensor([[1, 2]], device="cuda", dtype=torch.int32).repeat(71, 1)
+        ids[0, 0] = 0
+        scores = torch.softmax(torch.randn((71, 2), device="cuda"), dim=1)
+
+        def run(executor, x, ids, scores):
+            return executor.execute(
+                ExpertForwardPayload(
+                    x, expert_topk_ids=ids, expert_topk_weights=scores
+                ),
+                "SiGLU",
+                None,
+                None,
+                False,
+                None,
+            ).fused_expert_output
+
+        cases = [(weights, FusedMoEQuantConfig())]
+        if torch.cuda.get_device_capability() >= (8, 9):
+            fp8 = torch.float8_e4m3fn
+            quant_config = FusedMoEQuantConfig(quant_dtype=fp8, block_shape=[128, 128])
+            quantized = {key: value.to(fp8) for key, value in weights.items()}
+            cases.extend(
+                (
+                    (
+                        {**quantized, W.moe_s1: scale1, W.moe_s2: scale2},
+                        quant_config,
+                    )
+                    for scale1, scale2 in (
+                        (torch.ones((4, 2, 2)), torch.ones((4, 2, 1))),
+                        (
+                            torch.full((4, 256, 1), 0x7F7F7F7F, dtype=torch.int32),
+                            torch.full((4, 256, 1), 0x7F7F7F7F, dtype=torch.int32),
+                        ),
+                    )
+                )
+            )
+        for expert_weights, quant_config in cases:
+            executor = TritonFusedMoeExecutor(
+                config, quant_config, expert_weights, batch_invariant=True
+            )
+            solo = run(executor, x[37:38], ids[37:38], scores[37:38])
+            self.assertTrue(torch.equal(run(executor, x, ids, scores)[37:38], solo))
+            reordered = run(executor, x.flip(0), ids.flip(0), scores.flip(0))
+            self.assertTrue(torch.equal(reordered[33:34], solo))
+
 
 if __name__ == "__main__":
     main()

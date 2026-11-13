@@ -10,6 +10,35 @@
 namespace rtp_llm {
 namespace {
 
+#if USING_CUDA && !USE_PPU
+TEST(NormalOutputDispatcherTest, BatchInvariantPromptScoresIgnoreOtherRows) {
+    if (!torch::cuda::is_available()) {
+        GTEST_SKIP() << "NVIDIA GPU required";
+    }
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto logits  = torch::randn({33, 65539}, options);
+    auto tokens  = torch::arange(34, torch::kInt32);
+    auto batch   = makePromptLogitsOutput(logits, tokens, 8, 0, -1, true, true);
+    auto row     = makePromptLogitsOutput(logits.narrow(0, 17, 1), tokens.narrow(0, 17, 2), 8, 0, -1, true, true);
+    ASSERT_TRUE(batch.has_value());
+    ASSERT_TRUE(row.has_value());
+    EXPECT_TRUE(torch::equal(batch->target_logprobs.narrow(0, 17, 1), row->target_logprobs));
+    EXPECT_TRUE(torch::equal(batch->topk_logprobs.narrow(0, 17, 1), row->topk_logprobs));
+}
+
+TEST(NormalOutputDispatcherTest, BatchInvariantPromptScoresHandleLargeNegativeLogits) {
+    if (!torch::cuda::is_available()) {
+        GTEST_SKIP() << "NVIDIA GPU required";
+    }
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto logits  = torch::full({1, 2}, -1e30, options);
+    auto tokens  = torch::zeros({2}, torch::kInt32);
+    auto output  = makePromptLogitsOutput(logits, tokens, 1, 0, -1, true, true);
+    ASSERT_TRUE(output.has_value());
+    EXPECT_NEAR(output->target_logprobs.item<float>(), -0.69314718f, 1e-6f);
+}
+#endif
+
 TEST(NormalOutputDispatcherTest, ProcessorErrorsUseSamplerInputCoordinatesAfterBeamExpansion) {
     SamplerOutput sampler_output;
     sampler_output.processor_errors = {

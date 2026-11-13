@@ -19,6 +19,18 @@ setup_cutlass_import_path()
 logger = logging.getLogger(__name__)
 
 
+class _MergedLinear(nn.Module):
+    def __init__(self, projections: nn.ModuleList, dim: int) -> None:
+        super().__init__()
+        self.projections = projections
+        self.dim = dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.cat(
+            [projection(x) for projection in self.projections], dim=self.dim
+        )
+
+
 class LinearFactory:
     """Linear factory class
 
@@ -101,6 +113,43 @@ class LinearFactory:
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ):
+        if getattr(hw_kernel_config, "batch_invariant", False):
+            if weight_scales is None and weight.dtype in (
+                torch.float16,
+                torch.bfloat16,
+                torch.float32,
+            ):
+                from .impl.cuda.f16_linear import CudaF16Linear
+
+                return CudaF16Linear(weight, bias=bias, batch_invariant=True)
+
+            from .impl.cuda.fp8_per_tensor_linear import CudaFp8PerTensorLinear
+
+            if (
+                weight.dtype == torch.float8_e4m3fn
+                and CudaFp8PerTensorLinear.can_handle(
+                    quant_config, weight, weight_scales
+                )
+            ):
+                return CudaFp8PerTensorLinear(
+                    weight, weight_scales, input_scale, bias, batch_invariant=True
+                )
+            if (
+                quant_config is not None
+                and quant_config.get_method() == "FP8_PER_BLOCK"
+            ):
+                from .impl.cuda.fp8_deepgemm_linear import CudaFp8DeepGEMMLinear
+
+                if CudaFp8DeepGEMMLinear.can_handle(
+                    quant_config, weight, weight_scales
+                ):
+                    return CudaFp8DeepGEMMLinear(
+                        weight, weight_scales, input_scale, bias, batch_invariant=True
+                    )
+            raise ValueError(
+                "RTP_BATCH_INVARIANT does not support this linear quantization"
+            )
+
         candidates = [
             strategy_class
             for strategy_class in cls._strategies
@@ -173,6 +222,34 @@ class LinearFactory:
         hw_kernel_config: Optional["HWKernelConfig"] = None,
     ) -> nn.Module:
         """Create merged Linear layer (e.g., gate_up_proj)."""
+        if (
+            getattr(hw_kernel_config, "batch_invariant", False)
+            and quant_config is not None
+            and quant_config.get_method()
+            in (
+                "FP8",
+                "FP8_PER_TENSOR_COMPRESSED",
+                "FP8_DYNAMIC_PER_TENSOR",
+                "FP8_PER_BLOCK",
+            )
+            and weights[weight_keys[0]].dtype == torch.float8_e4m3fn
+        ):
+            # Independent checkpoint scales belong to each projection.
+            projections = nn.ModuleList(
+                cls.create_linear_from_weights(
+                    weights,
+                    key,
+                    scale_key=scale_keys[i] if scale_keys else None,
+                    bias_key=bias_keys[i] if bias_keys else None,
+                    input_scale_key=input_scale_keys[i] if input_scale_keys else None,
+                    quant_config=quant_config,
+                    hw_kernel_config=hw_kernel_config,
+                )
+                for i, key in enumerate(weight_keys)
+            )
+
+            return _MergedLinear(projections, dim)
+
         # Check FP8 usage based on first weight
         use_fp8 = LinearFactory.should_use_fp8_linear(
             quant_config, weights, weight_keys[0]

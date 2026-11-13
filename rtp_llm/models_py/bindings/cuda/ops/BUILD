@@ -64,7 +64,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/common/kernels:kernels_activation",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
         "@local_config_cuda//cuda:cuda_headers",
-    ],
+    ] + torch_deps(),
     visibility = ["//visibility:public"],
     copts = copts(),
 )

@@ -890,6 +890,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_decode_cascade_attention", &HWKernelConfig::enable_decode_cascade_attention)
         .def_readwrite("disable_dpc_random", &HWKernelConfig::disable_dpc_random)
         .def_readwrite("rocm_disable_custom_ag", &HWKernelConfig::rocm_disable_custom_ag)
+        .def_readwrite("batch_invariant", &HWKernelConfig::batch_invariant)
         .def("to_string", &HWKernelConfig::to_string)
         .def(py::pickle(
             [](const HWKernelConfig& self) {
@@ -900,7 +901,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.decode_capture_batch_sizes,
                                       self.generation_prefill_cuda_graph_max_requests,
                                       self.generation_prefill_capture_token_buckets,
-                                      self.enable_decode_cascade_attention);
+                                      self.enable_decode_cascade_attention,
+                                      py::dict(py::arg("batch_invariant") = self.batch_invariant));
             },
             [](py::tuple t) {
                 if (t.size() != 5 && t.size() != 7 && t.size() != 8 && t.size() != 9 && t.size() != 10)
@@ -919,10 +921,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     if (t.size() >= 8) {
                         c.enable_decode_cascade_attention = t[7].cast<bool>();
                     }
-                    // Sizes 9/10 carry the retired independent decode capacity
-                    // at t[8] (ignored; capacity is derived from buckets); the
-                    // 10-tuple additionally re-states the cascade flag at t[9].
-                    if (t.size() >= 10) {
+                    // Historical layouts use t[8] for the retired decode capacity.
+                    // New options are stored by name in that slot.
+                    if (t.size() == 9 && py::isinstance<py::dict>(t[8])) {
+                        c.batch_invariant = t[8].cast<py::dict>()["batch_invariant"].cast<bool>();
+                    } else if (t.size() == 10) {
                         c.enable_decode_cascade_attention = t[9].cast<bool>();
                     }
                 } catch (const std::exception& e) {

@@ -6,6 +6,14 @@ py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
 
+py_test(
+    name = "batch_invariant_test",
+    srcs = ["batch_invariant_test.py"],
+    deps = py_test_deps + ["//rtp_llm/models_py:kernels"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+)
+
 py_test (
     name = "per_token_group_quant_8bit_test",
     srcs = ["per_token_group_quant_8bit_test.py"],

@@ -50,6 +50,8 @@ class CudaFp8PerTensorLinear(LinearBase):
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
+        *,
+        batch_invariant: bool = False,
     ):
         super().__init__(
             weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
@@ -59,8 +61,23 @@ class CudaFp8PerTensorLinear(LinearBase):
         self.input_scale = input_scales
         self.bias = bias
         self.block_quant = None
+        self.batch_invariant = batch_invariant
+        if batch_invariant and (
+            weight_scales is None
+            or weight_scales.numel() != 1
+            or (input_scales is not None and input_scales.numel() != 1)
+        ):
+            raise ValueError("batch-invariant per-tensor FP8 requires scalar scales")
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if self.batch_invariant:
+            from rtp_llm.models_py.kernels.cuda.batch_invariant import (
+                fp8_per_tensor_linear,
+            )
+
+            return fp8_per_tensor_linear(
+                input, self.weight.T, self.weight_scale, self.input_scale, self.bias
+            )
         input_2d = input.view(-1, input.shape[-1])
         output_shape = [*input.shape[:-1], self.weight.shape[1]]
 

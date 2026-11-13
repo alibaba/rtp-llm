@@ -22,9 +22,11 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
-from rtp_llm.device.device_type import is_hip
+from rtp_llm.device.device_type import is_cuda, is_hip
 from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
 from rtp_llm.ops import (
+    HWKernelConfig,
+    KvCacheDataType,
     ProfilingDebugLoggingConfig,
     SpeculativeType,
     TaskType,
@@ -64,6 +66,87 @@ class ModelFactory:
         return model_cls
 
     @staticmethod
+    def _validate_batch_invariant_config(
+        model_config: ModelConfig, engine_config: EngineConfig
+    ) -> None:
+        import torch
+
+        if not is_cuda():
+            raise ValueError("RTP_BATCH_INVARIANT requires an NVIDIA GPU")
+        parallelism = engine_config.parallelism_config
+        capability = torch.cuda.get_device_capability(parallelism.local_rank)
+        if capability < (8, 0):
+            raise ValueError(
+                "RTP_BATCH_INVARIANT requires NVIDIA compute capability 8.0 or newer"
+            )
+        if (
+            parallelism.pp_size > 1
+            or parallelism.prefill_cp_config.is_enabled()
+            or parallelism.prefill_cp_config.is_prefill_enabled()
+        ):
+            raise ValueError("RTP_BATCH_INVARIANT does not support PP or CP yet")
+        if model_config.expert_num > 0 and (
+            parallelism.dp_size > 1
+            or parallelism.ep_size not in (1, parallelism.tp_size)
+            or engine_config.moe_config.fake_balance_expert
+            or model_config.eplb_config.enable_eplb()
+        ):
+            raise ValueError(
+                "RTP_BATCH_INVARIANT requires local or TP-aligned MoE routing"
+            )
+        if model_config.is_mtp or engine_config.sp_config.type != SpeculativeType.NONE:
+            raise ValueError(
+                "RTP_BATCH_INVARIANT does not support speculative execution yet"
+            )
+        if (
+            model_config.task_type != TaskType.LANGUAGE_MODEL
+            or model_config.is_multimodal()
+        ):
+            raise ValueError(
+                "RTP_BATCH_INVARIANT currently requires a text generation model"
+            )
+        quant = model_config.quant_config
+        quant_method = quant.get_method() if quant is not None else None
+        if quant_method not in (
+            None,
+            "FP8",
+            "FP8_PER_TENSOR_COMPRESSED",
+            "FP8_DYNAMIC_PER_TENSOR",
+            "FP8_PER_BLOCK",
+        ) or (
+            model_config.expert_num > 0 and quant_method not in (None, "FP8_PER_BLOCK")
+        ):
+            raise ValueError(
+                "RTP_BATCH_INVARIANT does not support this quantization yet"
+            )
+        if quant_method == "FP8_PER_BLOCK" and capability < (8, 9):
+            raise ValueError(
+                "RTP_BATCH_INVARIANT with block FP8 requires NVIDIA SM89 or newer"
+            )
+        if (
+            model_config.has_positional_encoding
+            or model_config.use_attention_linear_bias
+            or getattr(model_config, "headwise_config", None)
+        ):
+            raise ValueError(
+                "RTP_BATCH_INVARIANT does not support this position or head layout"
+            )
+
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.batch_invariant import (
+            BatchInvariantAttention,
+        )
+
+        attn = model_config.getAttentionConfigs(parallelism.get_attn_tp_size())
+        if not BatchInvariantAttention.supports_config(attn):
+            raise ValueError(
+                "RTP_BATCH_INVARIANT does not support this attention configuration"
+            )
+        if attn.kv_cache_dtype == KvCacheDataType.FP8 and capability < (8, 9):
+            raise ValueError(
+                "RTP_BATCH_INVARIANT with FP8 KV cache requires NVIDIA SM89 or newer"
+            )
+
+    @staticmethod
     def _create_model(
         model_config: ModelConfig,
         engine_config: EngineConfig,
@@ -80,6 +163,10 @@ class ModelFactory:
             vit_config: Optional VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
         """
+        batch_invariant = engine_config.hw_kernel_config.batch_invariant
+        if batch_invariant:
+            ModelFactory._validate_batch_invariant_config(model_config, engine_config)
+
         configure_warmup(
             engine_config.runtime_config.warm_up,
             engine_config.runtime_config.model_warm_up,
@@ -113,6 +200,12 @@ class ModelFactory:
             loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
             moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
         )
+        if batch_invariant and not getattr(
+            model.py_model, "supports_batch_invariant", False
+        ):
+            raise ValueError(
+                f"RTP_BATCH_INVARIANT has no execution path for {model_type}"
+            )
         return model
 
     @staticmethod
@@ -357,6 +450,7 @@ class ModelFactory:
         render_config: Optional[Any] = None,
         eplb_config: Optional[Any] = None,
         vit_config: Optional[VitConfig] = None,
+        hw_kernel_config: Optional[HWKernelConfig] = None,
     ) -> ModelConfig:
         """Create ModelConfig from configuration objects.
 
@@ -375,6 +469,7 @@ class ModelFactory:
             generate_env_config: Optional GenerateEnvConfig for generation settings
             embedding_config: Optional EmbeddingConfig for embedding settings
             quantization_config: Optional QuantizationConfig for quantization settings
+            hw_kernel_config: Optional kernel policy for the KV cache namespace
             render_config: Optional RenderConfig for renderer factory settings
             eplb_config: Optional EPLBConfig for EPLB settings
 
@@ -394,6 +489,10 @@ class ModelFactory:
         )
         model_cls._apply_kv_cache_config(model_config, kv_cache_config)
         model_cls._post_build_model_config(model_config)
+        if hw_kernel_config is not None and hw_kernel_config.batch_invariant:
+            # Prefix caches may survive a process restart or be shared by P/D
+            # workers. Separate entries produced by a different kernel policy.
+            model_config.cache_key_hash_seed ^= 0x5254505F42495F31
 
         # Set model metadata fields
         # Set lora_infos from lora_config (direct assignment)

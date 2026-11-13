@@ -2,8 +2,31 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/activation_kernels.h"
 #include "rtp_llm/models_py/bindings/common/kernels/mask_logits.h"
+#if USING_CUDA && !USE_PPU
+#include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAGuard.h>
+#endif
 
 namespace rtp_llm {
+
+#if USING_CUDA && !USE_PPU
+torch::Tensor cudaLogProbStats(const torch::Tensor& logits) {
+    RTP_LLM_CHECK(logits.is_cuda() && logits.scalar_type() == torch::kFloat32 && logits.dim() == 2
+                  && logits.size(1) > 0);
+    c10::cuda::CUDAGuard guard(logits.device());
+    auto                 stats = torch::empty({logits.size(0), 2}, logits.options());
+    if (logits.size(0) > 0) {
+        auto contiguous = logits.contiguous();
+        invokeLogProbStats(contiguous.data_ptr<float>(),
+                           stats.data_ptr<float>(),
+                           logits.size(0),
+                           logits.size(1),
+                           c10::cuda::getCurrentCUDAStream().stream());
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+    return stats;
+}
+#endif
 
 void cudaSoftmaxInplace(torch::Tensor& input, cudaStream_t stream) {
     RTP_LLM_CHECK(input.dim() == 2);

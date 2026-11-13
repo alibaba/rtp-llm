@@ -184,6 +184,7 @@ class FrontendServer(object):
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
             vit_config=self.py_env_configs.vit_config,
+            hw_kernel_config=self.py_env_configs.py_hw_kernel_config,
         )
 
         # Create a temporary tokenizer to initialize special_tokens

@@ -49,8 +49,10 @@ void syncPinnedCpuCopies(bool need_sync) {
 
 }  // namespace
 
-NormalOutputDispatcher::NormalOutputDispatcher(std::vector<int64_t> output_vocab_ids, int async_worker_count):
-    output_vocab_ids_(std::move(output_vocab_ids)) {
+NormalOutputDispatcher::NormalOutputDispatcher(std::vector<int64_t> output_vocab_ids,
+                                               int                  async_worker_count,
+                                               bool                 batch_invariant):
+    output_vocab_ids_(std::move(output_vocab_ids)), batch_invariant_(batch_invariant) {
     if (async_worker_count < 0) {
         throw std::invalid_argument("output_dispatcher_worker_count must be non-negative");
     }
@@ -80,7 +82,11 @@ std::optional<PromptLogitsOutput> makePromptLogitsOutput(const torch::Tensor& re
                                                          int                  top_k,
                                                          int                  start,
                                                          int                  end,
-                                                         bool                 return_target_logprob) {
+                                                         bool                 return_target_logprob,
+                                                         bool                 batch_invariant) {
+#if !USING_CUDA || USE_PPU
+    RTP_LLM_CHECK_WITH_INFO(!batch_invariant, "RTP_BATCH_INVARIANT requires NVIDIA CUDA");
+#endif
     const int token_size = static_cast<int>(request_logits.size(0));
     const int start_pos  = std::clamp(start >= 0 ? start : 0, 0, token_size);
     const int end_pos    = std::clamp(end >= 0 ? end : token_size, start_pos, token_size);
@@ -95,8 +101,19 @@ std::optional<PromptLogitsOutput> makePromptLogitsOutput(const torch::Tensor& re
     /** Ranking raw logits preserves log-probability order. One log-normalizer reduction avoids
      * materializing the full [slice_len, vocab_size] probability tensor. */
     auto [topk_values_raw, topk_indices] = sliced_logits.topk(top_k, -1);
-    auto log_sum_exp                     = sliced_logits.logsumexp(-1, /*keepdim=*/true);
-    auto topk_logprobs                   = topk_values_raw - log_sum_exp;
+    torch::Tensor row_max;
+    torch::Tensor log_sum_exp;
+#if USING_CUDA && !USE_PPU
+    if (batch_invariant) {
+        auto stats  = cudaLogProbStats(sliced_logits);
+        row_max     = stats.narrow(1, 0, 1);
+        log_sum_exp = stats.narrow(1, 1, 1);
+    } else
+#endif
+    {
+        log_sum_exp = sliced_logits.logsumexp(-1, /*keepdim=*/true);
+    }
+    auto topk_logprobs = (row_max.defined() ? topk_values_raw - row_max : topk_values_raw) - log_sum_exp;
 
     torch::Tensor target_logprobs;
     if (return_target_logprob) {
@@ -111,6 +128,9 @@ std::optional<PromptLogitsOutput> makePromptLogitsOutput(const torch::Tensor& re
                               .to(sliced_logits.device(), torch::kLong)
                               .unsqueeze(1);
             auto target_raw = sliced_logits.narrow(0, 0, logprob_len).gather(1, labels).squeeze(1);
+            if (row_max.defined()) {
+                target_raw = target_raw - row_max.narrow(0, 0, logprob_len).squeeze(1);
+            }
             target_logprobs =
                 (target_raw - log_sum_exp.narrow(0, 0, logprob_len).squeeze(1)).to(torch::kCPU).contiguous();
         }
@@ -436,12 +456,16 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         auto       tokens   = stream->currentExecuteTokens(0);
         auto request_tokens = torch::from_blob(tokens.data(), {static_cast<int64_t>(tokens.size())}, torch::kInt32);
         auto request_logits = model_output.all_logits.narrow(0, token_offset, token_size);
-        auto output         = makePromptLogitsOutput(request_logits,
+        if (batch_invariant_) {
+            request_logits = request_logits.narrow(1, 0, std::min(request_logits.size(1), stream->vocabSize()));
+        }
+        auto output = makePromptLogitsOutput(request_logits,
                                              request_tokens,
                                              config->prompt_logits_top_k,
                                              config->prompt_logits_start,
                                              config->prompt_logits_end,
-                                             config->return_target_logprob);
+                                             config->return_target_logprob,
+                                             batch_invariant_);
         if (output.has_value()) {
             prompt_logits_output = std::move(output.value());
         }
@@ -479,24 +503,53 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         }
     }
 
+    auto error_info =
+        collectStreamSamplerError(sampler_output.processor_errors, success_cpu, batch_idx_in, cur_batch_size);
+
     torch::Tensor current_softmax_result;
-    if (stream->calculateSoftmaxProbs()) {
-#if USING_CUDA
-        // The in-place kernel must not overwrite model logits or the views returned to streams.
-        auto batch_softmax_input = raw_logits.to(torch::kFloat32, /*non_blocking=*/false, /*copy=*/true).contiguous();
-        cudaSoftmaxInplace(batch_softmax_input, at::cuda::getCurrentCUDAStream().stream());
-#else
-        auto batch_softmax_input = torch::softmax(raw_logits.to(torch::kFloat32).contiguous(), -1);
+    torch::Tensor current_raw_logprobs;
+    if (stream->calculateSoftmaxProbs() && !error_info.has_value()) {
+#if USING_CUDA && !USE_PPU
+        if (batch_invariant_) {
+            const auto           vocab_size = std::min(raw_logits.size(1), stream->vocabSize());
+            std::vector<int64_t> parent_rows(next_batch_size);
+            std::vector<int64_t> selected_tokens(next_batch_size);
+            for (int i = 0; i < next_batch_size; ++i) {
+                parent_rows[i]     = get_src_idx(i);
+                selected_tokens[i] = new_tokens.data_ptr<int32_t>()[i];
+                if (selected_tokens[i] < 0 || selected_tokens[i] >= vocab_size) {
+                    stream->reportError(ErrorCode::OUT_OF_VOCAB_RANGE,
+                                        "sampler token id is outside the model vocabulary");
+                    return;
+                }
+            }
+            auto rows              = torch::tensor(parent_rows, torch::kInt64).to(raw_logits.device());
+            auto tokens            = torch::tensor(selected_tokens, torch::kInt64).to(raw_logits.device());
+            auto logits            = raw_logits.narrow(1, 0, vocab_size).to(torch::kFloat32);
+            auto stats             = cudaLogProbStats(logits).index_select(0, rows);
+            auto scores            = logits.index({rows, tokens});
+            auto logprobs          = (scores - stats.select(1, 0)) - stats.select(1, 1);
+            current_raw_logprobs   = logprobs.unsqueeze(1).cpu();
+            current_softmax_result = logprobs.exp().unsqueeze(1).cpu();
+        } else
 #endif
-        auto batch_softmax_tensor = batch_softmax_input.cpu();
-        current_softmax_result    = torch::empty({(int64_t)next_batch_size, 1}, torch::kFloat32);
-        for (int i = 0; i < next_batch_size; ++i) {
-            current_softmax_result[i][0] = batch_softmax_tensor[get_src_idx(i)][new_tokens.data_ptr<int32_t>()[i]];
+        {
+#if USING_CUDA
+            // The in-place kernel must not overwrite model logits or the views returned to streams.
+            auto batch_softmax_input =
+                raw_logits.to(torch::kFloat32, /*non_blocking=*/false, /*copy=*/true).contiguous();
+            cudaSoftmaxInplace(batch_softmax_input, at::cuda::getCurrentCUDAStream().stream());
+#else
+            auto batch_softmax_input = torch::softmax(raw_logits.to(torch::kFloat32).contiguous(), -1);
+#endif
+            auto batch_softmax_tensor = batch_softmax_input.cpu();
+            current_softmax_result    = torch::empty({(int64_t)next_batch_size, 1}, torch::kFloat32);
+            for (int i = 0; i < next_batch_size; ++i) {
+                current_softmax_result[i][0] = batch_softmax_tensor[get_src_idx(i)][new_tokens.data_ptr<int32_t>()[i]];
+            }
         }
     }
 
-    auto error_info =
-        collectStreamSamplerError(sampler_output.processor_errors, success_cpu, batch_idx_in, cur_batch_size);
     if (custom_output_batch_idx >= 0 && !model_output.custom_output_error.empty() && !error_info.has_value()) {
         error_info = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
                                "custom output processor failed: " + model_output.custom_output_error);
@@ -544,7 +597,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                  std::move(error_info),
                                  stream->isContextStream() ? model_output.generation_prefill_cuda_graph_status :
                                                              GenerationPrefillCudaGraphStatus::NOT_REQUESTED,
-                                 batch_custom_output};
+                                 batch_custom_output,
+                                 current_raw_logprobs};
     stream->update(update_info, true, recorded_timings, cur_batch_size);
 }
 

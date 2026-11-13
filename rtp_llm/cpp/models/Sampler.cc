@@ -15,6 +15,7 @@ namespace rtp_llm {
 
 Sampler::Sampler(const SamplerInitParams& params):
     fixed_max_batch_size_(params.max_batch_size > 0 && params.fixed_max_batch_size),
+    batch_invariant_(params.batch_invariant),
     copy_stream_(cuda_graph::graphGetStreamFromPool(false)) {
     if (params.max_batch_size > 0) {
         allocateGreedySamplingBuffers(params.max_batch_size);
@@ -248,7 +249,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  frequency_penalty,
                  do_sample,
                  generator,
-                 greedy_sampling_buffer_ptr});
+                 greedy_sampling_buffer_ptr,
+                 batch_invariant_});
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
             } else {

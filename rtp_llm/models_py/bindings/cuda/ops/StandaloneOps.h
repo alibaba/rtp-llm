@@ -12,6 +12,11 @@ namespace rtp_llm {
 // Modifies input in-place.
 void cudaSoftmaxInplace(torch::Tensor& input, cudaStream_t stream);
 
+#if USING_CUDA && !USE_PPU
+// Return FP32 [row_max, log(sum(exp(logit - row_max)))] per row.
+torch::Tensor cudaLogProbStats(const torch::Tensor& logits);
+#endif
+
 // Masks logits with a uint8 mask.
 // logits: [batch_size, vocab_size] on CUDA, FP32/FP16/BF16
 // mask: [batch_size, vocab_size] on CUDA, UINT8

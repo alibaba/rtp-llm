@@ -148,7 +148,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     // through num_return_sequences or variable beams. Preallocate the common case and grow safely.
     const auto initial_sampler_batch_size =
         static_cast<size_t>(std::max<int64_t>(1, params.runtime_config.max_generate_batch_size));
-    sampler_.reset(new Sampler(SamplerInitParams{initial_sampler_batch_size, false}));
+    sampler_.reset(
+        new Sampler(SamplerInitParams{initial_sampler_batch_size, false, params.hw_kernel_config.batch_invariant}));
 
     GptModelInitParams model_init_params(
         {params.gpt_weights,
@@ -232,7 +233,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                                  params.profiling_debug_logging_config,
                                                                  cache_config,
                                                                  warm_up_,
-                                                                 async_worker_count));
+                                                                 async_worker_count,
+                                                                 params.hw_kernel_config.batch_invariant));
     LogitsProcessorFactory::init(params.model_config_,
                                  params.grammar_config,
                                  params.sp_config.tree_decode_config,

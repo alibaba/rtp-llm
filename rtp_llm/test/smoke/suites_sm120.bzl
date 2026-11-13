@@ -16,6 +16,18 @@ def sm120_suites():
                 deps = ["//rtp_llm:transformers"],
                 gpu_type = ["RTX_5000_PRO_CU13"],
             ),
+            custom_smoke_test(
+                name = "qwen3_batch_invariant_sm120",
+                main = "sm120_qwen3_test.py",
+                smoke_args = "--RTP_BATCH_INVARIANT --role_type PDFUSION --act_type BF16 --warm_up 0 --tp_size 1 --world_size 1 --frontend_server_count 1 --max_seq_len 2048 --seq_size_per_block 64 --concurrency_limit 4 --enable_cuda_graph 1 --decode_capture_config '1,2'",
+                data = [
+                    "//rtp_llm:sdk",
+                    "data/model/qwen3/q_r_1_7b_bf16_sm120.json",
+                ],
+                deps = ["//rtp_llm:transformers"],
+                gpu_type = ["RTX_5000_PRO_CU13"],
+                test_envs = {"RTP_TEST_BATCH_INVARIANT": "1"},
+            ),
             smoke_test(
                 name = "generation_prefill_cuda_graph_sm120",
                 task_info = "data/model/qwen25/q_r_generation_prefill_cuda_graph_sm120.json",

@@ -31,12 +31,20 @@ class CudaF16Linear(LinearBase):
         input_scales: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
-        weight_scale_2: Optional[torch.Tensor] = None
+        weight_scale_2: Optional[torch.Tensor] = None,
+        *,
+        batch_invariant: bool = False,
     ):
-        super().__init__(weight, weight_scales, input_scales,
-                         bias, quant_config, weight_scale_2)
+        super().__init__(
+            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
+        )
         self.weight = weight.T
         self.bias = bias
+        self.batch_invariant = batch_invariant
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if self.batch_invariant:
+            from rtp_llm.models_py.kernels.cuda.batch_invariant import linear
+
+            return linear(input, self.weight, self.bias)
         return F.linear(input, self.weight, self.bias)

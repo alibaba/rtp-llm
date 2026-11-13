@@ -22,11 +22,52 @@
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #endif
 
+#if USING_CUDA && !USE_PPU
+#include <math_constants.h>
+#endif
+
 #if USING_ROCM
 #include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #endif
 
 namespace rtp_llm {
+
+#if USING_CUDA && !USE_PPU
+namespace {
+
+__global__ void logProbStats(const float* logits, float* stats, int vocab_size) {
+    const auto       row    = static_cast<int64_t>(blockIdx.x);
+    const auto*      scores = logits + row * vocab_size;
+    __shared__ float row_max;
+
+    float maximum = -CUDART_INF_F;
+    for (int col = threadIdx.x; col < vocab_size; col += blockDim.x) {
+        maximum = fmaxf(maximum, scores[col]);
+    }
+    maximum = blockReduceMax(maximum, -CUDART_INF_F);
+    if (threadIdx.x == 0) {
+        row_max        = maximum;
+        stats[row * 2] = maximum;
+    }
+    __syncthreads();
+
+    float sum = 0.0f;
+    for (int col = threadIdx.x; col < vocab_size; col += blockDim.x) {
+        sum += expf(scores[col] - row_max);
+    }
+    sum = blockReduceSum(sum);
+    if (threadIdx.x == 0) {
+        stats[row * 2 + 1] = logf(sum);
+    }
+}
+
+}  // namespace
+
+void invokeLogProbStats(const float* logits, float* stats, int rows, int vocab_size, cudaStream_t stream) {
+    // Keep a fixed reduction tree per vocabulary row.
+    logProbStats<<<rows, 256, 0, stream>>>(logits, stats, vocab_size);
+}
+#endif
 
 template<typename T>
 __global__ void

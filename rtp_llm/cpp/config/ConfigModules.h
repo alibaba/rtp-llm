@@ -310,6 +310,7 @@ struct HWKernelConfig {
     bool             enable_decode_cascade_attention = false;
     bool             disable_dpc_random               = false;
     bool             rocm_disable_custom_ag           = true;
+    bool             batch_invariant                  = false;
     std::string      to_string() const;
 };
 

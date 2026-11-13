@@ -44,8 +44,11 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         config: MoEConfigAdapter,
         quant_config: FusedMoEQuantConfig,
         weights: Dict[str, torch.Tensor],
+        *,
+        batch_invariant: bool = False,
     ):
         super().__init__(config, quant_config, weights)
+        self.batch_invariant = batch_invariant
 
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
@@ -59,10 +62,28 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         # w1: [E, 2*inter_size, hidden_size], w2: [E, hidden_size, inter_size]
         self.w1 = weights[W.moe_w1]
         self.w2 = weights[W.moe_w2]
+        self.w1_scale = (
+            weights[W.moe_s1]
+            if batch_invariant and quant_config.is_block_quantized
+            else None
+        )
+        self.w2_scale = weights[W.moe_s2] if self.w1_scale is not None else None
+        if batch_invariant and (
+            self.w1.dtype not in (torch.float16, torch.bfloat16, torch.float8_e4m3fn)
+            or self.w2.dtype != self.w1.dtype
+            or (self.w1.dtype == torch.float8_e4m3fn) != (self.w1_scale is not None)
+        ):
+            raise ValueError(
+                "RTP_BATCH_INVARIANT requires FP16, BF16 or block FP8 experts"
+            )
         self.E = self.w1.size(0)
         self.N = self.w1.size(1)  # 2 * inter_size
         self.K = self.w1.size(2)  # hidden_size
         self.inter_size = self.N // 2
+        if self.w1_scale is not None and (self.K % 128 or self.inter_size % 128):
+            raise ValueError(
+                "batch-invariant block FP8 experts require K divisible by 128"
+            )
         capabilities = decode_capabilities(
             self.w1,
             self.top_k,
@@ -76,6 +97,22 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
     @property
     def topk_ids_dtype(self) -> torch.dtype:
         return torch.int32
+
+    def _quantize_expert_input(
+        self, x: torch.Tensor, weight_scales: torch.Tensor | None
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        if weight_scales is None:
+            return x, {}
+        from rtp_llm.models_py.kernels.cuda.batch_invariant import quantize_fp8_blocks
+
+        packed = weight_scales.dtype == torch.int32
+        quantized, scales = quantize_fp8_blocks(x, packed)
+        return quantized, {
+            "A_scale": scales,
+            "B_scale": weight_scales,
+            "block_shape": self.quant_config.block_shape,
+            "scale_ue8m0": packed,
+        }
 
     def execute(
         self,
@@ -94,7 +131,8 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         assert topk_weights is not None
 
         if (
-            self._small_moe_gemv
+            not self.batch_invariant
+            and self._small_moe_gemv
             and activation in ("silu", "SiGLU")
             and expert_map is None
             and a2_scale is None
@@ -124,9 +162,18 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         compute_type = tl.bfloat16 if dtype == torch.bfloat16 else tl.float16
 
         # Config selection for both GEMMs
-        config1 = get_default_config(M, self.E, self.N, K, top_k)
-        config2 = get_default_config(M, self.E, K, self.inter_size, top_k)
-        if self._decode_tiles:
+        if self.batch_invariant:
+            config1 = config2 = {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 128 if self.w1_scale is not None else 32,
+                "GROUP_SIZE_M": 1,
+                "num_warps": 4,
+            }
+        else:
+            config1 = get_default_config(M, self.E, self.N, K, top_k)
+            config2 = get_default_config(M, self.E, K, self.inter_size, top_k)
+        if self._decode_tiles and not self.batch_invariant:
             from rtp_llm.models_py.triton_kernels.moe.decode_alignment import (
                 sm120_decode_gemm_configs,
             )
@@ -142,7 +189,8 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         block_m2 = config2["BLOCK_SIZE_M"]
         align = moe_align_block_size_torch
         if (
-            self._decode_alignment
+            not self.batch_invariant
+            and self._decode_alignment
             and 0 < M <= 32
             and topk_ids.dtype == torch.int32
             and topk_ids.is_contiguous()
@@ -168,8 +216,11 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
 
         # GEMM1: hidden_states @ w1.T → intermediate1 [M*top_k, 2*inter]
         intermediate1 = torch.empty(M * top_k, self.N, device=device, dtype=dtype)
+        expert_input, scale_options = self._quantize_expert_input(
+            hidden_states, self.w1_scale
+        )
         invoke_fused_moe_kernel(
-            hidden_states,
+            expert_input,
             self.w1,
             intermediate1,
             flat_topk_weights,
@@ -181,6 +232,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             top_k=top_k,
             config=config1,
             compute_type=compute_type,
+            **scale_options,
         )
 
         # Activation: silu_and_mul(intermediate1) → intermediate2 [M*top_k, inter]
@@ -191,8 +243,11 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
 
         # GEMM2: intermediate2 @ w2.T → out [M*top_k, K]
         out = torch.empty(M * top_k, K, device=device, dtype=dtype)
+        expert_input, scale_options = self._quantize_expert_input(
+            intermediate2, self.w2_scale
+        )
         invoke_fused_moe_kernel(
-            intermediate2,
+            expert_input,
             self.w2,
             out,
             flat_topk_weights,
@@ -204,9 +259,17 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             top_k=1,
             config=config2,
             compute_type=compute_type,
+            **scale_options,
         )
 
         # Sum reduce over top_k: out is [M*top_k, K], reshape and sum
-        output = out.view(M, top_k, K).sum(dim=1)
+        routed = out.view(M, top_k, K)
+        if self.batch_invariant:
+            output = routed[:, 0].float()
+            for expert_slot in range(1, top_k):
+                output = output + routed[:, expert_slot]
+            output = output.to(dtype)
+        else:
+            output = routed.sum(dim=1)
 
         return CombineForwardPayload(fused_expert_output=output)

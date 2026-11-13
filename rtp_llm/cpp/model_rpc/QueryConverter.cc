@@ -563,6 +563,9 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             if (response.aux_info.softmax_probs.has_value()) {
                 transTensorPB(aux_info->mutable_softmax_probs(), response.aux_info.softmax_probs.value());
             }
+            if (response.aux_info.raw_logprobs.has_value()) {
+                transTensorPB(aux_info->mutable_raw_logprobs(), response.aux_info.raw_logprobs.value());
+            }
         }
     }
 

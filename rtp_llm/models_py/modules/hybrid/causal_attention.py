@@ -35,6 +35,9 @@ class CausalAttention(nn.Module):
         self.linear_factory = linear_factory or LinearFactory
         self.layer_idx = layer_idx
         self.parallelism_config = parallelism_config
+        self.batch_invariant = bool(
+            hw_kernel_config and getattr(hw_kernel_config, "batch_invariant", False)
+        )
         self.tp_size = parallelism_config.get_attn_tp_size()
         self.head_num = attn_config.head_num
         self.num_key_value_groups = attn_config.head_num // attn_config.kv_head_num
@@ -72,6 +75,7 @@ class CausalAttention(nn.Module):
                 attn_config.kv_head_num,
                 attn_config.size_per_head,
                 layernorm_eps,
+                **({"batch_invariant": True} if self.batch_invariant else {}),
             )
 
     def forward(
@@ -91,5 +95,7 @@ class CausalAttention(nn.Module):
             attn_output = attn_output * torch.sigmoid(gate)
         output = self.o_proj(attn_output)
         if self.tp_size > 1:
-            output = all_reduce(output, group=Group.TP)
+            output = all_reduce(
+                output, group=Group.TP, batch_invariant=self.batch_invariant
+            )
         return output

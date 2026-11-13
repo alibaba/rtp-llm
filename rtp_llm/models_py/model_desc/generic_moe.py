@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Mapping
+from functools import partial
 from typing import Any, Dict, Optional
 
 import torch
@@ -92,7 +93,13 @@ class GenericMoeLayer(nn.Module):
             enable_cuda_graph=enable_cuda_graph,
         )
         config_adapter.has_shared_expert_gate = W.shared_expert_gate in weights
-        self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
+        batch_invariant = getattr(hw_kernel_config, "batch_invariant", False)
+        moe_options = {"batch_invariant": True} if batch_invariant else {}
+        self.fused_moe = FusedMoeFactory().create_fused_moe(
+            config_adapter, weights, **moe_options
+        )
+        if batch_invariant:
+            self.tp_all_reduce = partial(all_reduce, batch_invariant=True)
         router = self.fused_moe.router
         router_tp_size = router.tp_collective_size
 
@@ -121,7 +128,7 @@ class GenericMoeLayer(nn.Module):
                 # For ROCm devices shared_expert_gate is not pre-swizzled during weight
                 # loading and its single output column does not satisfy the SwizzleA
                 # layout. Keep this scalar projection on the no-swizzle backend.
-                hw_kernel_config=None,
+                hw_kernel_config=hw_kernel_config if batch_invariant else None,
             )
             self.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
         else:
@@ -345,12 +352,17 @@ class GenericMoeDecoderLayer(nn.Module):
                 hw_kernel_config=hw_kernel_config,
             )
 
+        norm_options = (
+            {"batch_invariant": True}
+            if getattr(hw_kernel_config, "batch_invariant", False)
+            else {}
+        )
         # 使用 RMSResNorm 来 fuse residual add 和 layernorm
         self.input_layernorm = RMSResNorm(
-            weights[W.pre_ln_gamma], eps=config.layernorm_eps
+            weights[W.pre_ln_gamma], eps=config.layernorm_eps, **norm_options
         )
         self.post_attention_layernorm = RMSResNorm(
-            weights[W.post_ln_gamma], eps=config.layernorm_eps
+            weights[W.post_ln_gamma], eps=config.layernorm_eps, **norm_options
         )
 
     def forward(
@@ -377,6 +389,8 @@ class GenericMoeDecoderLayer(nn.Module):
 
 class GenericMoeModel(GptModelBase):
     """Generic MoE model supporting Qwen3-MoE, internal model, and other MoE architectures."""
+
+    supports_batch_invariant = True
 
     def __init__(
         self,
@@ -428,7 +442,9 @@ class GenericMoeModel(GptModelBase):
             ]
         )
         self.norm = RMSResNorm(
-            weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
+            weights.get_global_weight(W.final_ln_gamma),
+            eps=model_config.layernorm_eps,
+            **({"batch_invariant": True} if self.batch_invariant else {}),
         )
         self._init_capture_context(
             self._capture_canonical_layer,

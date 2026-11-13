@@ -673,6 +673,7 @@ class DashScApp:
                     embedding_config=self.py_env_configs.embedding_config,
                     quantization_config=self.py_env_configs.quantization_config,
                     render_config=self.py_env_configs.render_config,
+                    hw_kernel_config=self.py_env_configs.py_hw_kernel_config,
                 )
 
                 backend_visitor = create_backend_rpc_server_visitor(

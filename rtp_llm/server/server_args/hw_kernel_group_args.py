@@ -118,6 +118,17 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     hw_kernel_group = parser.add_argument_group("硬件/Kernel 特定优化")
 
     hw_kernel_group.add_argument(
+        "--RTP_BATCH_INVARIANT",
+        env_name="RTP_BATCH_INVARIANT",
+        bind_to=(hw_kernel_config, "batch_invariant"),
+        type=str2bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Enable batch-invariant inference on NVIDIA GPUs.",
+    )
+
+    hw_kernel_group.add_argument(
         "--enable_cuda_graph",
         env_name="ENABLE_CUDA_GRAPH",
         bind_to=(hw_kernel_config, "enable_cuda_graph"),

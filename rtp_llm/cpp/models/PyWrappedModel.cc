@@ -130,8 +130,9 @@ CudaGraphState& PyWrappedModel::selectGraphState(const torch_ext::PyAttentionInp
 void PyWrappedModel::cleanupAfterConstructionFailure() noexcept {
     try {
         py::gil_scoped_acquire gil;
-        held_attn_pyobj_   = py::object();
-        py_forward_method_ = py::object();
+        held_attn_pyobj_            = py::object();
+        py_forward_method_          = py::object();
+        py_batch_invariant_lm_head_ = py::object();
         generation_prefill_graph_runner_.reset();
         graph_runner_.reset();
         if (py_model_ && py::hasattr(py_model_, "close")) {
@@ -259,8 +260,9 @@ std::string PyWrappedModel::finalizeSpeculativeTargetCommit() {
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
-        held_attn_pyobj_   = py::object();
-        py_forward_method_ = py::object();
+        held_attn_pyobj_            = py::object();
+        py_forward_method_          = py::object();
+        py_batch_invariant_lm_head_ = py::object();
         if (hidden_state_capture_publisher_) {
             hidden_state_capture_publisher_->flushAndClose();
             hidden_state_capture_publisher_.reset();
@@ -1149,6 +1151,11 @@ torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& hidden) {
     RTP_LLM_PROFILE_SCOPE("py_model.computeLogits");
     const auto&   head   = *weights_.lm_head;
     const auto&   kernel = head.kernel;
+    if (py_batch_invariant_lm_head_) {
+        py::gil_scoped_acquire gil;
+        auto scale = kernel.scalar_type() == torch::kFloat8_e4m3fn ? py::cast(head.scales) : py::none();
+        return py_batch_invariant_lm_head_(hidden, kernel, scale).cast<torch::Tensor>();
+    }
     torch::Tensor logits;
     {
         RTP_LLM_PROFILE_SCOPE("py_model.computeLogits(lm_head_mm)");

@@ -1,6 +1,8 @@
 import logging
 from typing import Callable, Dict, List, Optional, Union
 
+import torch
+
 from rtp_llm.config.cuda_graph import (
     CudaGraphSelectionMode,
     GenerationPrefillCudaGraphUnsupportedBackend,
@@ -350,20 +352,36 @@ class AttnImplFactory(object):
         is_cuda_graph: bool = False,
         cuda_graph_selection_mode: Optional[Union[str, CudaGraphSelectionMode]] = None,
         decode_cascade_max_requests: int = 0,
+        batch_invariant: bool = False,
+        batch_invariant_rope_cache: Optional[torch.Tensor] = None,
     ) -> AttentionImpl:
         # Extract AttentionConfigs from ModelConfig
         attn_configs = model_config.getAttentionConfigs(
             parallelism_config.get_attn_tp_size()
         )
         attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
+        if batch_invariant:
+            from .cuda_impl.batch_invariant import BatchInvariantAttention
+
+            if not BatchInvariantAttention.support(
+                attn_configs, attn_inputs
+            ) or not BatchInvariantAttention.support_parallelism_config(
+                parallelism_config
+            ):
+                raise ValueError(
+                    "RTP_BATCH_INVARIANT does not support this attention configuration"
+                )
+            attn_inputs.is_cuda_graph = is_cuda_graph
+            return BatchInvariantAttention(
+                attn_configs, attn_inputs, batch_invariant_rope_cache
+            )
+
         if (
             decode_cascade_max_requests > 0
             and not attn_inputs.is_prefill
             and not attn_configs.use_mla
             and not attn_inputs.headwise_config
         ):
-            import torch
-
             attn_inputs.is_cuda_graph = is_cuda_graph
             if torch.version.hip is not None and torch.cuda.is_available():
                 from rtp_llm.models_py.modules.factory.attention.rocm_impl.beam_search_cascade import (

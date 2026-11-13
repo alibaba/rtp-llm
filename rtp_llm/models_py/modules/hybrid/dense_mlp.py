@@ -41,6 +41,9 @@ class DenseMLP(nn.Module):
 
         self.activation_type = activation_type
         self.parallelism_config = parallelism_config
+        self.batch_invariant = bool(
+            hw_kernel_config and getattr(hw_kernel_config, "batch_invariant", False)
+        )
         if self.activation_type not in _ACTIVATION_FUNC_MAP:
             raise ValueError(f"Unsupported activation type: {activation_type}")
         self.act_fn = _ACTIVATION_FUNC_MAP[activation_type]()
@@ -111,5 +114,7 @@ class DenseMLP(nn.Module):
         if output is None:
             output = self.down_proj(activated)
         if not skip_allreduce and ffn_tp_size > 1:
-            output = all_reduce(output, group=Group.TP)
+            output = all_reduce(
+                output, group=Group.TP, batch_invariant=self.batch_invariant
+            )
         return output

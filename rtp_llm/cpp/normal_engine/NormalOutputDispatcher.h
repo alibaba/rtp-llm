@@ -19,7 +19,8 @@ std::optional<PromptLogitsOutput> makePromptLogitsOutput(const torch::Tensor& re
                                                          int                  top_k,
                                                          int                  start,
                                                          int                  end,
-                                                         bool                 return_target_logprob);
+                                                         bool                 return_target_logprob,
+                                                         bool                 batch_invariant = false);
 
 std::optional<ErrorInfo> collectStreamSamplerError(const std::vector<std::optional<ErrorInfo>>& processor_errors,
                                                    const torch::Tensor&                         success_cpu,
@@ -28,7 +29,9 @@ std::optional<ErrorInfo> collectStreamSamplerError(const std::vector<std::option
 
 class NormalOutputDispatcher {
 public:
-    explicit NormalOutputDispatcher(std::vector<int64_t> output_vocab_ids = {}, int async_worker_count = 0);
+    explicit NormalOutputDispatcher(std::vector<int64_t> output_vocab_ids   = {},
+                                    int                  async_worker_count = 0,
+                                    bool                 batch_invariant    = false);
     ~NormalOutputDispatcher();
 
     absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
@@ -53,6 +56,7 @@ private:
 
 private:
     std::vector<int64_t>                       output_vocab_ids_;
+    bool                                       batch_invariant_;
     std::unique_ptr<autil::LockFreeThreadPool> thread_pool_;
 };
 
