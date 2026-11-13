@@ -139,8 +139,15 @@ def build_configuration_json(py_env_configs, engine=None) -> str:
                 context_tokens = min(context_tokens, native)
     except Exception:  # noqa: BLE001 - configuration must never break startup
         logging.warning("AWI: could not read max_seq_len from engine config")
+    kv_cfg = getattr(py_env_configs, "kv_cache_config", None)
+    # Honest flag: memory KV reuse requires the HOST tier to actually be
+    # deployed (ENABLE_MEMORY_CACHE=1 with a sized MEMORY_CACHE_SIZE_MB pool),
+    # not just REUSE_CACHE — a device-tier-only deployment structurally
+    # cannot produce memory-tier reuse hits.
     memory_kv_reuse = bool(
-        getattr(getattr(py_env_configs, "kv_cache_config", None), "reuse_cache", False)
+        getattr(kv_cfg, "reuse_cache", False)
+        and getattr(kv_cfg, "enable_memory_cache", False)
+        and int(getattr(kv_cfg, "memory_cache_size_mb", 0) or 0) > 0
     )
     graph_backend = "hip" if getattr(__import__("torch").version, "hip", None) else "cuda"
     return json.dumps(

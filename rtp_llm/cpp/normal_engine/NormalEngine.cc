@@ -1017,15 +1017,17 @@ void NormalEngine::recordAwiStepObservations(const std::list<GenerateStreamPtr>&
                 prefill_event.end_ns         = time_info.first_token_time_us * 1000;
                 awi.recordEvent(std::move(prefill_event));
 
-                // Contract `reuse` event: report the admission-time memory KV
-                // prefix match — the same accounting as aux_info.reuse_len
-                // (frontend cached_tokens). prefillMemoryReuseLen() is never
-                // populated on this path (setPrefillReuseLength has no callers
-                // in this deployment), so the previous >0-gated emitter could
-                // never fire. Emit for EVERY prefilled request: a measured
-                // hit_tokens=0 for independent-prefix benchmarks must be
-                // distinguishable from a dead hook.
-                const int64_t memory_reuse = stream->initialReuseLength();
+                // Contract `reuse` event: hit_tokens must come from ACTUALLY
+                // reused memory (HOST-tier) KV blocks — the same accounting
+                // as aux_info.memory_reuse_len (hostReuseLength, published by
+                // publishAllocatorReuse from LoadAsyncContext Tier::HOST
+                // counts only after a real async H2D load completes).
+                // Device-tier-only matches (initialReuseLength) deliberately
+                // measure 0 here: a generic/device hit is not a memory hit.
+                // Emit for EVERY prefilled request: a measured hit_tokens=0
+                // for independent-prefix benchmarks must be distinguishable
+                // from a dead hook.
+                const int64_t memory_reuse = stream->hostReuseLength();
                 AwiEvent      reuse_event;
                 reuse_event.type           = "reuse";
                 reuse_event.request_id     = request_id;
