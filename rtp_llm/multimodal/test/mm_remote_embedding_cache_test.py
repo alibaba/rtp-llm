@@ -81,67 +81,6 @@ class RemoteCacheTest(unittest.TestCase):
                 self.assertIsNone(remote.load("invalid", entry=fresh))
                 self.assertFalse(fresh.greennet_passed)
 
-    def test_approval_is_bounded_and_scoped_to_shareable_checked_results(self):
-        tensor_store, approvals = Store(), Store()
-        remote = self.remote(
-            tensor_store, inspection_factory=lambda: approvals, max_pending=1
-        )
-        result = (torch.ones(2, 4), None)
-        tensor_store.objects["image"] = pack_object(plan_object(result))
-        entry = MMEmbeddingCacheEntry()
-        self.assertIsNotNone(remote.load("image", entry=entry))
-        entry.set_greennet_verdict(GreenNetVerdict(True), checked=False)
-        self.assertFalse(approvals.saved.is_set())
-        verdict = GreenNetVerdict(True, 1, "reinspected")
-        entry.set_greennet_verdict(verdict)
-        self.assertTrue(approvals.saved.wait(2))
-        remote.close()
-        reader = self.remote(
-            tensor_store, inspection_factory=lambda: approvals, max_pending=1
-        )
-        fresh = MMEmbeddingCacheEntry()
-        self.assertIsNotNone(reader.load("image", entry=fresh))
-        self.assertEqual(fresh.greennet_snapshot(), (verdict, True))
-        scoped = self.remote(
-            tensor_store,
-            inspection_factory=lambda: self.fail("scoped approval lookup"),
-            request_scoped_inspection=True,
-        )
-        isolated = MMEmbeddingCacheEntry()
-        self.assertIsNotNone(scoped.load("image", entry=isolated))
-        self.assertFalse(isolated.greennet_passed)
-        isolated.set_greennet_verdict(GreenNetVerdict(True))
-        approvals.objects["image"] = torch.tensor([255], dtype=torch.uint8)
-        malformed = MMEmbeddingCacheEntry()
-        self.assertIsNotNone(reader.load("image", entry=malformed))
-        self.assertFalse(malformed.greennet_passed)
-
-    def test_approval_write_failure_keeps_embedding_and_requires_next_audit(self):
-        tensors, approvals = Store(), Store()
-        remote = self.remote(tensors, inspection_factory=lambda: approvals)
-        original = (torch.ones(2, 4), None)
-        tensors.objects["key"] = pack_object(plan_object(original))
-        entry = MMEmbeddingCacheEntry()
-        restored = remote.load("key", entry=entry)
-        write_started = threading.Event()
-
-        def fail_write(*args, **kwargs):
-            write_started.set()
-            raise TimeoutError("unknown write outcome")
-
-        with patch.object(approvals, "save_one", side_effect=fail_write):
-            entry.set_greennet_verdict(GreenNetVerdict(True))
-            self.assertTrue(write_started.wait(2))
-            remote.close()
-        torch.testing.assert_close(restored[0], original[0])
-        self.assertTrue(entry.greennet_passed)
-        self.assertEqual(remote.stats()["approval_write_error"], 1)
-        self.assertFalse(approvals.objects)
-        other = self.remote(tensors, inspection_factory=lambda: approvals)
-        fresh = MMEmbeddingCacheEntry()
-        torch.testing.assert_close(other.load("key", entry=fresh)[0], original[0])
-        self.assertFalse(fresh.greennet_passed)
-
     def test_repeated_acquisition_creates_one_client(self):
         store = Store()
         with patch(
@@ -1048,12 +987,9 @@ class EngineRemoteCacheTest(unittest.TestCase):
         model.ckpt_path = "/nonexistent/test-model"
         interface = FakeEmbeddingLengthInterface()
         interface.inspection_verdict_is_request_scoped = request_scoped
-        store.approvals = Store()
         factory = patch(
             "rtp_llm.multimodal.kvcm.RtpKvMetaObjectClient.from_env",
-            side_effect=lambda **kwargs: (
-                store.approvals if kwargs.get("inspection") else store
-            ),
+            return_value=store,
         )
         factory.start()
         self.addCleanup(factory.stop)
@@ -1112,7 +1048,7 @@ class EngineRemoteCacheTest(unittest.TestCase):
                 )
                 self.assertEqual(engine._remote_embedding_cache.stats()["hit"], 1)
 
-    def test_local_reaudit_after_unchecked_encoder_write_refreshes_remote(self):
+    def test_local_reaudit_after_unchecked_encoder_write_stays_local(self):
         from rtp_llm.multimodal.test.multimodal_process_engine_test import (
             _StubGreenNetProvider,
         )
@@ -1125,19 +1061,22 @@ class EngineRemoteCacheTest(unittest.TestCase):
         engine._inspection._greennet_provider = provider
         engine.get_embedding_result([item], input_inspection_enabled=False)
         self.assertTrue(store.saved.wait(2))
-        self.assertFalse(store.approvals.saved.is_set())
+        key = engine._remote_embedding_cache.key([item])
+        original = store.objects[key].clone()
+        store.saved.clear()
+        engine.get_embedding_result([item], hashes_only=True)
+        self.assertTrue(engine._embedding_cache.peek(item.cache_key()).greennet_passed)
         engine.get_embedding_result([item], hashes_only=True)
         self.assertEqual(provider.calls, 1)
-        self.assertTrue(store.approvals.saved.wait(2))
-        reader_store = Store(store.objects)
-        reader = self.engine(reader_store)
-        reader_store.approvals.objects = store.approvals.objects
-        reader_provider = _StubGreenNetProvider(
-            GreenNetVerdict(False, 2, "unexpected audit")
-        )
+        engine._remote_embedding_cache.close()
+        self.assertFalse(store.saved.is_set())
+        torch.testing.assert_close(store.objects[key], original)
+
+        reader = self.engine(Store(store.objects))
+        reader_provider = _StubGreenNetProvider(verdict)
         reader._inspection._greennet_provider = reader_provider
         reader.get_embedding_result([item], hashes_only=True)
-        self.assertEqual(reader_provider.calls, 0)
+        self.assertEqual(reader_provider.calls, 1)
 
     def test_request_scoped_writer_or_reader_requires_fresh_verdict(self):
         from rtp_llm.config.exceptions import FtRuntimeException
@@ -1843,12 +1782,9 @@ class DownloadedImageCacheTest(unittest.TestCase):
         model.ckpt_path = "/nonexistent/test-model"
         model.mm_related_params.preprocess_batch_size = 1
         store = Store()
-        store.approvals = Store()
         factory = patch(
             "rtp_llm.multimodal.kvcm.RtpKvMetaObjectClient.from_env",
-            side_effect=lambda **kwargs: (
-                store.approvals if kwargs.get("inspection") else store
-            ),
+            return_value=store,
         )
         factory.start()
         self.addCleanup(factory.stop)
@@ -1951,7 +1887,6 @@ class DownloadedImageCacheTest(unittest.TestCase):
         self.assertEqual(model.forward_count, 0)
         self.assertIsNone(engine._embedding_cache.peek(item.cache_key()))
         self.assertFalse(store.saved.is_set())
-        self.assertFalse(store.approvals.saved.is_set())
 
     def test_fresh_remote_hit_inspection_timeout_never_publishes(self):
         import concurrent.futures
@@ -1969,35 +1904,36 @@ class DownloadedImageCacheTest(unittest.TestCase):
         self.assertEqual(model.forward_count, 0)
         self.assertIsNone(engine._embedding_cache.peek(key))
         self.assertFalse(store.saved.is_set())
-        self.assertFalse(store.approvals.saved.is_set())
 
-    def test_reinspection_refreshes_same_remote_key_for_next_worker(self):
+    def test_unchecked_remote_hit_requires_reinspection_on_each_fresh_worker(self):
         for hashes_only in (False, True):
             with self.subTest(hashes_only=hashes_only):
                 writer, store, provider, model, _ = self.engine(self.image_bytes())
                 key, original = self.seed(writer, store)
                 item = self.item()
-                original_object = store.objects[key]
+                original_object = store.objects[key].clone()
                 if hashes_only:
                     writer.get_embedding_result([item], hashes_only=True)
                 else:
                     writer._embed_with_greennet_sync([item])
-                self.assertTrue(store.approvals.saved.wait(2))
-                self.assertEqual(set(store.approvals.objects), {key})
-                self.assertIs(store.objects[key], original_object)
+                self.assertTrue(
+                    writer._embedding_cache.peek(item.cache_key()).greennet_passed
+                )
+                writer._remote_embedding_cache.close()
+                self.assertFalse(store.saved.is_set())
+                torch.testing.assert_close(store.objects[key], original_object)
                 self.assertEqual(len(provider.calls), 1)
                 self.assertEqual(model.forward_count, 0)
                 reader, other, inspection, vit, download = self.engine(
-                    self.image_bytes(), passed=False
+                    self.image_bytes()
                 )
                 other.objects.update(store.objects)
-                other.approvals.objects.update(store.approvals.objects)
                 result = reader.get_embedding_result([item])[0]
                 torch.testing.assert_close(result.embeddings[0], original[0])
-                self.assertFalse(inspection.calls)
+                self.assertEqual(len(inspection.calls), 1)
                 self.assertEqual(vit.forward_count, 0)
-                download.target.load_image_source.assert_not_called()
-                self.assertFalse(other.approvals.saved.is_set())
+                download.target.load_image_source.assert_called_once()
+                self.assertFalse(other.saved.is_set())
 
     def test_approved_http_entry_on_fresh_worker_skips_changed_source(self):
         for sync in (True, False):

@@ -567,7 +567,6 @@ class MMEmbeddingCacheEntry:
         self._greennet_verdict: Optional[GreenNetVerdict] = None
         self._greennet_error: Optional[Exception] = None
         self._greennet_checked = False
-        self._on_shared_approval = None
 
     @property
     def has_read_callback(self) -> bool:
@@ -697,17 +696,6 @@ class MMEmbeddingCacheEntry:
     def is_done(self) -> bool:
         return self._event.is_set()
 
-    def on_shared_approval(self, callback: Callable[[GreenNetVerdict], None]) -> None:
-        """Register once for an unchecked remote hit, including a racing audit."""
-        with self._state_lock:
-            verdict = self._greennet_verdict
-            if self._greennet_error is not None:
-                return
-            if not (self._greennet_checked and verdict and verdict.passed):
-                self._on_shared_approval = callback
-                return
-        callback(verdict)
-
     def set_greennet_verdict(
         self, verdict: GreenNetVerdict, *, checked: bool = True
     ) -> None:
@@ -720,15 +708,6 @@ class MMEmbeddingCacheEntry:
             self._greennet_verdict = verdict
             self._greennet_checked = checked
             self._greennet_event.set()
-            callback = (
-                self._on_shared_approval
-                if checked and verdict.passed and self._greennet_error is None
-                else None
-            )
-            if callback is not None:
-                self._on_shared_approval = None
-        if callback is not None:
-            callback(verdict)
 
     def greennet_snapshot(self) -> Tuple[Optional[GreenNetVerdict], bool]:
         with self._state_lock:

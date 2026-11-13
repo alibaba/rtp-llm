@@ -13,7 +13,6 @@ import threading
 import time
 from collections import Counter
 from contextlib import contextmanager
-from functools import partial
 from pathlib import Path
 
 import torch
@@ -43,7 +42,6 @@ class MMRemoteEmbeddingCache:
         read_timeout_ms=200,
         cuda_device=None,
         client_factory=None,
-        inspection_factory=None,
         namespace="",
         model_identity=None,
         gdr_enabled=None,
@@ -60,9 +58,6 @@ class MMRemoteEmbeddingCache:
             )
         self._client = client
         self._factory = client_factory
-        self._inspection_factory = inspection_factory
-        self._inspection_client = None
-        self._inspection_lock = threading.Lock()
         self._client_lock = threading.Lock()
         self._client_users = {}
         self.max_object_bytes = max_object_bytes
@@ -175,7 +170,6 @@ class MMRemoteEmbeddingCache:
         return cls(
             client,
             client_factory=None if gdr_enabled else factory,
-            inspection_factory=partial(raw_factory, inspection=True),
             namespace=namespace,
             model_identity=identity,
             max_object_bytes=vit_config.mm_remote_cache_max_object_bytes,
@@ -641,15 +635,6 @@ class MMRemoteEmbeddingCache:
             self._report_operation("write", started, "error", plan.nbytes)
             done(None)
             return
-        if (
-            entry is not None
-            and self._inspection_factory is not None
-            and not self.request_scoped_inspection
-            and not (inspection and inspection["checked"])
-        ):
-            # An unchecked encoder result can later be audited from the local
-            # cache without another remote lookup.
-            entry.on_shared_approval(partial(self._write_approval, key, trace_id))
         # The worker owns only the snapshot and small metadata, not tensors.
         nbytes, tensors = plan.nbytes, plan.header["tensors"]
 
@@ -749,127 +734,6 @@ class MMRemoteEmbeddingCache:
             raise ValueError("remote object is not a multimodal result")
         return value, approval
 
-    # Small CPU-only objects in a separate KVMeta instance use the exact
-    # embedding key. Immutable saves allow concurrent approvals without
-    # removing tensors that other clients may still be reading.
-    _MAX_APPROVAL_BYTES = 64 * 1024
-
-    @contextmanager
-    def _use_inspection_client(self):
-        # Small metadata transfers share a CPU client. Replace a failed native
-        # client only after its active operation has ended.
-        with self._inspection_lock:
-            if self._inspection_client is None:
-                self._inspection_client = self._inspection_factory()
-            try:
-                yield self._inspection_client
-            except Exception:
-                self._close_client(self._inspection_client)
-                self._inspection_client = None
-                raise
-
-    def _write_approval(self, key, trace_id, verdict):
-        try:
-            payload = json.dumps(
-                dict(
-                    version=1,
-                    key=key,
-                    checked=True,
-                    passed=True,
-                    request_scoped=False,
-                    code=verdict.code,
-                    message=verdict.message,
-                ),
-                separators=(",", ":"),
-            ).encode()
-            if len(payload) > min(
-                self._MAX_APPROVAL_BYTES, self.max_object_bytes
-            ) or not self._reserve(len(payload)):
-                self._report_skip("approval_write", "admission")
-                return
-
-            def write():
-                with self._observe_stage("approval_write", "transfer", len(payload)):
-                    buffer = torch.frombuffer(bytearray(payload), dtype=torch.uint8)
-                    with self._use_inspection_client() as client:
-                        client.save_one(key, buffer, trace_id=trace_id)
-
-            try:
-                future = self._executor.submit(write)
-            except RuntimeError:
-                self._release(len(payload))
-                return
-
-            def done(task):
-                self._release(len(payload))
-                if not task.cancelled():
-                    error = task.exception()
-                    self.record(
-                        "approval_write_error" if error else "approval_stored",
-                        key=key,
-                        trace_id=trace_id,
-                    )
-
-            future.add_done_callback(done)
-        except Exception:
-            # A best-effort cache update cannot change the inspection verdict.
-            self.record("approval_write_error", key=key, trace_id=trace_id)
-
-    def _read_approval(self, key, trace_id, deadline):
-        # Caller already has the tensor. An absent, invalid or late verdict
-        # only triggers inspection and must never turn that tensor into a miss.
-        timeout = deadline - time.monotonic()
-        budget = min(
-            self._MAX_APPROVAL_BYTES, self.max_inflight_bytes, self.max_object_bytes
-        )
-        if timeout <= 0 or not self._reserve(budget):
-            return None
-
-        def read():
-            with self._use_inspection_client() as client:
-                remaining = int((deadline - time.monotonic()) * 1000)
-                if remaining <= 0:
-                    return None
-                size = client.object_size(key, trace_id=trace_id, timeout_ms=remaining)
-                if size is None:
-                    return None
-                if not 0 < size <= budget:
-                    raise ValueError("invalid remote approval size")
-                buffer = torch.empty(size, dtype=torch.uint8)
-                client.load_one(key, buffer, trace_id=trace_id)
-            value = json.loads(buffer.numpy().tobytes())
-            if (
-                not isinstance(value, dict)
-                or type(value.get("version")) is not int
-                or value["version"] != 1
-                or value.get("key") != key
-                or value.get("checked") is not True
-                or value.get("passed") is not True
-                or value.get("request_scoped") is not False
-                or type(value.get("code")) is not int
-                or not isinstance(value.get("message"), str)
-            ):
-                raise ValueError("invalid remote approval")
-            return GreenNetVerdict(True, value["code"], value["message"])
-
-        try:
-            future = self._executor.submit(read)
-        except RuntimeError:
-            self._release(budget)
-            return None
-        future.add_done_callback(lambda _: self._release(budget))
-        try:
-            return future.result(timeout=max(0, deadline - time.monotonic()))
-        except Exception as error:
-            future.cancel()
-            self.record(
-                "approval_read_error",
-                key=key,
-                trace_id=trace_id,
-                error_type=type(error).__name__,
-            )
-            return None
-
     def load(
         self, key, *, timeout_ms=None, trace_id=None, entry=None, restore_approval=True
     ):
@@ -886,7 +750,6 @@ class MMRemoteEmbeddingCache:
             return None
         cost = 0
         future = None
-        transfer_released = False
 
         def read():
             nonlocal cost
@@ -952,19 +815,13 @@ class MMRemoteEmbeddingCache:
                 )
                 value, approval = self._decode_value(value)
                 plan = plan_object(value, max_bytes=self.max_object_bytes)
-                if entry is not None and not self.request_scoped_inspection:
-                    if approval is None and self._inspection_factory is not None:
-                        # The tensor read is complete. Allow the small lookup even
-                        # with max_pending=1, under the original read deadline.
-                        self._release(cost)
-                        transfer_released = True
-                        approval = self._read_approval(key, trace_id, deadline)
-                        if approval is None:
-                            entry.on_shared_approval(
-                                partial(self._write_approval, key, trace_id)
-                            )
-                    if approval is not None and restore_approval:
-                        entry.set_greennet_verdict(approval)
+                if (
+                    entry is not None
+                    and restore_approval
+                    and not self.request_scoped_inspection
+                    and approval is not None
+                ):
+                    entry.set_greennet_verdict(approval)
             self._count("hit")
             outcome = "hit"
             payload_nbytes = buffer.numel()
@@ -1005,11 +862,10 @@ class MMRemoteEmbeddingCache:
                 status=outcome,
                 scope="caller_queue_client_acquire_sdk_load_unpack_and_validation",
             )
-            if not transfer_released:
-                if future is None or future.done():
-                    self._release(cost)
-                else:
-                    future.add_done_callback(lambda _: self._release(cost))
+            if future is None or future.done():
+                self._release(cost)
+            else:
+                future.add_done_callback(lambda _: self._release(cost))
 
     def stats(self):
         with self._lock, self._stats_lock:
@@ -1023,8 +879,6 @@ class MMRemoteEmbeddingCache:
                 return
             self._closed = True
         self._executor.shutdown(wait=True, cancel_futures=True)
-        if self._inspection_client is not None:
-            self._close_client(self._inspection_client)
         with self._client_lock:
             client, self._client = self._client, None
             if client is not None:
