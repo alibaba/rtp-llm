@@ -138,6 +138,26 @@ class CudaNvfp4CutlassStrategy(MoeStrategy):
         )
 
 
+class CudaNvfp4HybridStrategy(CudaNvfp4CutlassStrategy):
+    """Decode variant of the NVFP4 family, selected by executor conditions."""
+
+    def get_attributes(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.nvfp4_hybrid_executor import (
+            Nvfp4HybridExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
+            PureTpRouterNvfp4Cutlass,
+        )
+
+        return StrategyAttributes(
+            router_class=PureTpRouterNvfp4Cutlass,
+            executor_class=Nvfp4HybridExecutor,
+            quant_config=FusedMoEQuantConfig(
+                quant_dtype=torch.uint8, block_shape=[16, 16]
+            ),
+        )
+
+
 class CudaNvfp4MarlinStrategy(CudaNvfp4CutlassStrategy):
     strategy_name = "nvfp4_marlin"
 
