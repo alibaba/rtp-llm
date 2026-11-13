@@ -84,13 +84,17 @@ TEST_F(LinearGroupSetTest, MatchValidatorBusyResourceInvalidWithoutLatch) {
         auto validator = group_->createMatchValidator();
 
         auto* busy_node = makeNode(100);
-        setDeviceBlock(busy_node, 0);
+        if (state == GroupSetTransferState::DEMOTING) {
+            busy_node->group_set_resources[0].host_block = 15;
+        } else {
+            setDeviceBlock(busy_node, 0);
+        }
         busy_node->group_set_resources[0].transfer_state = state;
 
         auto* usable_node = makeNode(200);
         setDeviceBlock(usable_node, 0);
 
-        // Point-state semantics: a busy node is unusable on its own but must
+        // Point-state semantics: an unavailable source is unusable on its own but must
         // not poison later nodes.
         EXPECT_FALSE(validator->validate(busy_node->group_set_resources[0]));
         EXPECT_TRUE(validator->validate(usable_node->group_set_resources[0]));
@@ -98,6 +102,17 @@ TEST_F(LinearGroupSetTest, MatchValidatorBusyResourceInvalidWithoutLatch) {
         delete busy_node;
         delete usable_node;
     }
+}
+
+TEST_F(LinearGroupSetTest, MatchValidatorAllowsCompleteDeviceSourceDuringDemotion) {
+    auto  validator = group_->createMatchValidator();
+    auto* node      = makeNode(100);
+    setDeviceBlock(node, 0);
+    node->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
+
+    EXPECT_TRUE(validator->validate(node->group_set_resources[0]));
+
+    delete node;
 }
 
 TEST_F(LinearGroupSetTest, MatchValidatorAllowsLoadingResource) {

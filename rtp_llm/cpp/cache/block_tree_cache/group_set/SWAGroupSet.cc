@@ -24,8 +24,8 @@ SWAMatchValidator::SWAMatchValidator(size_t sliding_window_size, size_t seq_size
     sliding_window_size_(sliding_window_size), seq_size_per_block_(seq_size_per_block) {}
 
 bool SWAMatchValidator::validate(const GroupSetResource& resource) {
-    // A busy resource (DEMOTING/LOAD_PENDING) counts as a hole: it cannot serve
-    // this match, so the window accumulation restarts behind it.
+    // An unavailable source counts as a hole and restarts the window; complete
+    // DEVICE demotion sources can still serve the match.
     const bool has_swa_data = resource.isMatchUsable() && !resource.is_empty();
 
     if (!has_swa_data) {

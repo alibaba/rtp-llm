@@ -200,13 +200,17 @@ TEST_F(FullGroupSetTest, MatchValidatorBusyResourceBreaksPrefixLikeHole) {
         auto validator = group_->createMatchValidator();
 
         auto* busy_node = makeNode(100);
-        setDeviceBlock(busy_node, 0);
+        if (state == GroupSetTransferState::DEMOTING) {
+            setHostBlock(busy_node, 0);
+        } else {
+            setDeviceBlock(busy_node, 0);
+        }
         busy_node->group_set_resources[0].transfer_state = state;
 
         auto* usable_node = makeNode(200);
         setDeviceBlock(usable_node, 0);
 
-        // Busy resource is unusable, and the FULL prefix latch keeps later usable
+        // A lower-tier demotion or pending load is unusable; the FULL latch keeps later usable
         // nodes invalid so device reuse stays contiguous from the root.
         EXPECT_FALSE(validator->validate(busy_node->group_set_resources[0]));
         EXPECT_FALSE(validator->validate(usable_node->group_set_resources[0]));
@@ -214,6 +218,17 @@ TEST_F(FullGroupSetTest, MatchValidatorBusyResourceBreaksPrefixLikeHole) {
         delete busy_node;
         delete usable_node;
     }
+}
+
+TEST_F(FullGroupSetTest, MatchValidatorAllowsCompleteDeviceSourceDuringDemotion) {
+    auto  validator = group_->createMatchValidator();
+    auto* node      = makeNode(100);
+    setDeviceBlock(node, 0);
+    node->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
+
+    EXPECT_TRUE(validator->validate(node->group_set_resources[0]));
+
+    delete node;
 }
 
 TEST_F(FullGroupSetTest, MatchValidatorAllowsLoadingResource) {
