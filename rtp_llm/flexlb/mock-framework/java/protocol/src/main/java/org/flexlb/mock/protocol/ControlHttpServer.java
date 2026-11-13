@@ -16,7 +16,7 @@ import java.util.function.Supplier;
 /**
  * Exposes component control operations over HTTP with typed JSON requests and responses.
  */
-public final class ControlServer implements AutoCloseable {
+public final class ControlHttpServer implements AutoCloseable {
     private final Map<String, Binding> bindings = new HashMap<>();
     private final HttpServer server;
     private final ExecutorService handlers = Executors.newVirtualThreadPerTaskExecutor();
@@ -26,7 +26,7 @@ public final class ControlServer implements AutoCloseable {
 
     private Runnable health = () -> {};
 
-    public ControlServer(InetSocketAddress address) throws IOException {
+    public ControlHttpServer(InetSocketAddress address) throws IOException {
         server = HttpServer.create(address, 0);
         server.setExecutor(handlers);
         server.createContext("/health", exchange -> {
@@ -41,30 +41,30 @@ public final class ControlServer implements AutoCloseable {
         });
     }
 
-    public <A, R> ControlServer route(String name, Class<A> input, Class<R> output, Operation<A, R> operation) {
+    public <A, R> ControlHttpServer route(String name, Class<A> input, Class<R> output, Operation<A, R> operation) {
         if (started) throw new IllegalStateException("Cannot bind after start");
         if (!name.matches("[a-z][a-z0-9_]*(/[a-z][a-z0-9_]*)+") || !input.isRecord())
             throw new IllegalArgumentException("Invalid control route: " + name);
-        var binding = new Binding(JsonWire.schema(input), JsonWire.schema(output),
-            args -> operation.call(input.cast(JsonWire.decode(args, input))));
+        var binding = new Binding(ControlJson.schema(input), ControlJson.schema(output),
+            args -> operation.call(ControlJson.JSON.treeToValue(args, input)));
         if (bindings.putIfAbsent(name, binding) != null) throw new IllegalArgumentException("Duplicate binding: " + name);
         return this;
     }
 
-    public ControlServer health(Runnable check) {
+    public ControlHttpServer health(Runnable check) {
         if (started) throw new IllegalStateException("Cannot bind after start");
         health = Objects.requireNonNull(check);
         return this;
     }
 
-    public ControlServer start() {
+    public ControlHttpServer start() {
         if (!bindings.isEmpty()) server.createContext("/invoke", this::invoke);
         server.start(); started = true;
         return this;
     }
 
     /** Optional pull endpoint; exposition and metric definitions belong to the component. */
-    public ControlServer metrics(Supplier<String> scrape) {
+    public ControlHttpServer metrics(Supplier<String> scrape) {
         if (started) throw new IllegalStateException("Cannot bind after start");
         Objects.requireNonNull(scrape);
         server.createContext("/metrics", exchange -> {
@@ -89,7 +89,7 @@ public final class ControlServer implements AutoCloseable {
     /** Launcher variables are supplied by Python; publish only after initialization and API binding. */
     public void publishReady(Path path) throws IOException {
         if (!started) throw new IllegalStateException("API server is not started");
-        JsonWire.writeAtomically(path, Map.of("url", url()));
+        JsonFiles.writeAtomically(path, Map.of("url", url()));
     }
 
     public String url() {
@@ -110,20 +110,20 @@ public final class ControlServer implements AutoCloseable {
             Future<Object> pending = null;
             try {
                 byte[] bytes = exchange.getRequestBody().readNBytes(1024 * 1024 + 1);
-                JsonWire.require(bytes.length <= 1024 * 1024, "Request is too large");
-                JsonNode request = JsonWire.JSON.readTree(bytes);
+                ControlJson.require(bytes.length <= 1024 * 1024, "Request is too large");
+                JsonNode request = ControlJson.JSON.readTree(bytes);
                 keys(request, Set.of("interface", "args", "timeout_ms"));
-                JsonWire.require(request.get("interface").isTextual(), "Invalid interface name");
+                ControlJson.require(request.get("interface").isTextual(), "Invalid interface name");
                 var binding = bindings.get(request.get("interface").textValue());
-                JsonWire.require(binding != null, "Interface is not implemented by this component");
-                JsonWire.require(request.get("timeout_ms").isIntegralNumber() && request.get("timeout_ms").canConvertToLong(), "Invalid timeout");
+                ControlJson.require(binding != null, "Interface is not implemented by this component");
+                ControlJson.require(request.get("timeout_ms").isIntegralNumber() && request.get("timeout_ms").canConvertToLong(), "Invalid timeout");
                 long timeout = request.get("timeout_ms").longValue();
-                JsonWire.require(timeout > 0, "Timeout must be positive");
-                JsonWire.validate(request.get("args"), binding.input());
+                ControlJson.require(timeout > 0, "Timeout must be positive");
+                ControlJson.validate(request.get("args"), binding.input());
                 pending = calls.submit(() -> binding.operation().call(request.get("args")));
                 Object result = pending.get(timeout, TimeUnit.MILLISECONDS);
-                JsonNode encoded = JsonWire.JSON.valueToTree(result);
-                try { JsonWire.validate(encoded, binding.output()); }
+                JsonNode encoded = ControlJson.JSON.valueToTree(result);
+                try { ControlJson.validate(encoded, binding.output()); }
                 catch (IllegalArgumentException error) { throw new IllegalStateException("Invalid component result: " + error.getMessage()); }
                 send(exchange, 200, Map.of("result", encoded));
             } catch (TimeoutException error) {
@@ -139,16 +139,16 @@ public final class ControlServer implements AutoCloseable {
     }
 
     private static void send(HttpExchange exchange, int status, Object value) throws IOException {
-        byte[] bytes = JsonWire.JSON.writeValueAsBytes(value);
+        byte[] bytes = ControlJson.JSON.writeValueAsBytes(value);
         exchange.getResponseHeaders().set("Content-Type", "application/json");
         exchange.sendResponseHeaders(status, bytes.length);
         exchange.getResponseBody().write(bytes);
     }
 
     private static void keys(JsonNode value, Set<String> expected) {
-        JsonWire.require(value != null && value.isObject(), "Expected object envelope");
+        ControlJson.require(value != null && value.isObject(), "Expected object envelope");
         Set<String> actual = new HashSet<>(); value.fieldNames().forEachRemaining(actual::add);
-        JsonWire.require(actual.equals(expected), "Unexpected/missing envelope fields");
+        ControlJson.require(actual.equals(expected), "Unexpected/missing envelope fields");
     }
 
     /**

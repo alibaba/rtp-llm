@@ -3,7 +3,7 @@ package org.flexlb;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.config.DeploymentIdentity;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.mock.protocol.ControlServer;
+import org.flexlb.mock.protocol.ControlHttpServer;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.service.grace.ApplicationLifecycle;
 import org.flexlb.sync.status.WorkerDirectory;
@@ -86,7 +86,7 @@ public final class MasterMain {
                                             .map(s -> s.getIp() + ":" + s.getGrpcPort())
                                             .collect(Collectors.toSet()));
             try (var api =
-                    new ControlServer(new InetSocketAddress(host, 0))
+                    new ControlHttpServer(new InetSocketAddress(host, 0))
                             .route(
                                     "master/leadership/get",
                                     None.class,

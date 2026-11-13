@@ -74,7 +74,7 @@ class NativeVisionTest {
                 }
             }).build().start();
             try(var client=new BackendRpcClient(event -> {}, 1000, 0L, 4,
-                    () -> List.of(new MasterDiscovery.Target("127.0.0.1:"+master.getPort(), false)))) {
+                    () -> List.of(new MasterRoutes.Target("127.0.0.1:"+master.getPort(), false)))) {
                 for(long id:List.of(1L,2L,3L)) {
                     var input=GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(id == 3 ? List.of(10,1000) : List.of(10,1000,20))
                         .addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl("same-image")

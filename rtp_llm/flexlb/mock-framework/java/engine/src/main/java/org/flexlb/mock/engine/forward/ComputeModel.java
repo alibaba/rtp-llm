@@ -32,12 +32,12 @@ public final class ComputeModel {
     private final FormulaForward forward;
     private final NoiseModel noise;
     private final DecodeStepModel decode;
-    private final StoppingModel stopping;
+    private final EosPolicy eos;
 
     private ComputeModel(Config spec, Map<String, Double> constants) {
         configuration = Objects.requireNonNull(spec);
         forward = new FormulaForward(spec.forward().expression(), constants); noise = new NoiseModel(spec.forward().noise());
-        decode = new DecodeStepModel(spec.decode()); stopping = new StoppingModel(spec.eos());
+        decode = new DecodeStepModel(spec.decode()); eos = new EosPolicy(spec.eos());
     }
 
     public static Set<String> settingNames() {
@@ -95,7 +95,7 @@ public final class ComputeModel {
     /** Pure result calculation: no request mutation, queue operations or resource release. */
     public Result completed(Plan plan) {
         var request = plan.request();
-        return stopping.complete(request.key(), request.generated(), plan.candidates(), request.minimum(), request.limit(), request.ignoreEos());
+        return eos.complete(request.key(), request.generated(), plan.candidates(), request.minimum(), request.limit(), request.ignoreEos());
     }
 
     public NoiseModel.Sample sampleDuration(Role role, String engineId, ForwardBatch batch) {
@@ -141,11 +141,11 @@ public final class ComputeModel {
     /**
      * Defines the compute settings read by Jackson and supplies default generation settings.
      */
-    private record Config(Forward forward, DecodeStepModel.Config decode, StoppingModel.Config eos) {
+    private record Config(Forward forward, DecodeStepModel.Config decode, EosPolicy.Config eos) {
         private Config {
             if (forward == null) throw new IllegalArgumentException("Compute requires forward");
             decode = decode == null ? DecodeStepModel.Config.DEFAULT : decode;
-            eos = eos == null ? new StoppingModel.Config(null, null) : eos;
+            eos = eos == null ? new EosPolicy.Config(null, null) : eos;
         }
 
         /**

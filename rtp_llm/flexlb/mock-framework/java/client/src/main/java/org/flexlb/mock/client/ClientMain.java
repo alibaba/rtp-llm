@@ -8,7 +8,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import org.flexlb.mock.protocol.ConfigInput;
-import org.flexlb.mock.protocol.JsonWire;
+import org.flexlb.mock.protocol.JsonFiles;
 import org.flexlb.mock.protocol.MultimodalProtocol;
 
 /**
@@ -59,9 +59,9 @@ public final class ClientMain {
             if (configuredImageToken != null) effective.put("image_token_id", imageToken);
             Files.createDirectories(directory);
             var writer = JSON.writerWithDefaultPrettyPrinter();
-            JsonWire.writeAtomically(directory.resolve("effective-config.json"), effective, writer, true);
+            JsonFiles.writeAtomically(directory.resolve("effective-config.json"), effective, writer, true);
             String url = client.url();
-            JsonWire.writeAtomically(directory.resolve("endpoints.json"), Map.of("id", id, "role", "client",
+            JsonFiles.writeAtomically(directory.resolve("endpoints.json"), Map.of("id", id, "role", "client",
                 "control", url, "rpc", URI.create(url).getAuthority(), "metrics", url + "/metrics"), writer, true);
             client.publishReady(Path.of(required("MOCK_READY_FILE")));
             try {

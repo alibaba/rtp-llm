@@ -40,7 +40,7 @@ Runner 按 Phase 推进。Step 解析前置结果或全局发现引用，校验�
 
 `RunEnvironment` 先启动 Prometheus 和 ZooKeeper，再启动 Engine、Master、Client 并完成采集基线。`ProcessSupervisor` 监视子进程并负责回收。每个实例发布有效配置和端点，`EndpointRegistry` 维护活动拓扑，供 Master 发现文件和 Prometheus 采集目标使用。Master 的主备身份以实际选举结果为准。
 
-Python 的 `*Role` 管理 Case 中对应角色的子进程、就绪检查和收尾。Java 的 `*Main` 读取启动配置，启动本 JVM 的服务并发布就绪信息。JVM 内的组件实例负责关闭自己持有的服务和资源。Client 的 HTTP 监听和路由由 `ControlServer` 提供，`ClientNode` 同时管理控制端点和回放会话。
+Python 的 `*Role` 管理 Case 中对应角色的子进程、就绪检查和收尾。Java 的 `*Main` 读取启动配置，启动本 JVM 的服务并发布就绪信息。JVM 内的组件实例负责关闭自己持有的服务和资源。Client 的 HTTP 监听和路由由 `ControlHttpServer` 提供，`ClientNode` 同时管理控制端点和回放会话。
 
 | 组件             | Python 编排      | Java 进程入口         | JVM 内服务                                      |
 | ---------------- | ---------------- | --------------------- | ----------------------------------------------- |

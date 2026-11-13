@@ -11,8 +11,8 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.Consumer;
-import org.flexlb.mock.protocol.ControlServer;
-import org.flexlb.mock.protocol.JsonWire;
+import org.flexlb.mock.protocol.ControlHttpServer;
+import org.flexlb.mock.protocol.JsonFiles;
 import org.flexlb.mock.client.ClientProtocol.*;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
 
@@ -33,7 +33,7 @@ public final class ClientNode implements AutoCloseable {
     private final Path topology, directory;
     private final ClientMetrics metrics = new ClientMetrics();
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
-    private final ControlServer api;
+    private final ControlHttpServer api;
 
     private volatile ReplayWorker worker;
 
@@ -52,7 +52,7 @@ public final class ClientNode implements AutoCloseable {
         this.imageToken = imageToken; this.physicalBlockSize = physicalBlockSize; this.cacheKeySeed = seed;
         this.prefillCpSize = prefillCpSize;
         this.id = id; this.topology = topology; this.directory = directory;
-        api = new ControlServer(new InetSocketAddress("127.0.0.1", 0)).route("client/start", Start.class, Ack.class, this::startReplay)
+        api = new ControlHttpServer(new InetSocketAddress("127.0.0.1", 0)).route("client/start", Start.class, Ack.class, this::startReplay)
             .route("client/stop", Empty.class, Summary.class, this::stopReplay)
             .route("worker/prepare", ClientReplayPlan.class, Ack.class, this::prepareWorker)
             .route("worker/begin", Begin.class, Ack.class, this::begin)
@@ -171,7 +171,7 @@ public final class ClientNode implements AutoCloseable {
 
     private static void save(Path path, Object value) throws IOException {
         Files.createDirectories(path.getParent());
-        JsonWire.writeAtomically(path, value, JSON.writerWithDefaultPrettyPrinter(), true);
+        JsonFiles.writeAtomically(path, value, JSON.writerWithDefaultPrettyPrinter(), true);
     }
 
     private JsonNode call(String url, String operation, Object args) throws Exception {
@@ -277,7 +277,7 @@ public final class ClientNode implements AutoCloseable {
         private final BackendRpcClient client;
         private final RequestJournal journal;
         private final Path resultFile;
-        private final MasterDiscovery discovery;
+        private final MasterRoutes masterRoutes;
         private final ClientMetrics metrics;
         private final ArrayBlockingQueue<Item> queue;
         private final Map<Long, BackendRpcClient.Call> active = new HashMap<>();
@@ -306,10 +306,10 @@ public final class ClientNode implements AutoCloseable {
             resultFile = evidence.resolveSibling("result.json");
             queue = new ArrayBlockingQueue<>(plan.queue_capacity());
             for (var outcome : BackendRpcClient.Outcome.values()) outcomes.put(outcome.name(), 0L);
-            discovery = new MasterDiscovery(topology, plan.masters());
+            masterRoutes = new MasterRoutes(topology, plan.masters());
             try { journal = new RequestJournal(evidence, id, plan); }
-            catch (Exception error) { discovery.close(); throw error; }
-            client = new BackendRpcClient(journal::record, imageToken, seed, prefillCpSize, discovery::routes);
+            catch (Exception error) { masterRoutes.close(); throw error; }
+            client = new BackendRpcClient(journal::record, imageToken, seed, prefillCpSize, masterRoutes::routes);
             // A lost begin command must not leave a prepared worker alive forever.
             dispatcher = Thread.ofVirtual().name("client-dispatch").start(this::dispatch);
         }
@@ -429,7 +429,7 @@ public final class ClientNode implements AutoCloseable {
             long prepareDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
             try {
                 while (true) {
-                    discovery.check();
+                    masterRoutes.check();
                     if (journal.failure() != null) fail(journal.failure());
                     List<BackendRpcClient.Call> cancel = List.of();
                     Item item = null;
@@ -458,7 +458,7 @@ public final class ClientNode implements AutoCloseable {
             finally {
                 if (player != null) try { player.join(1000); }
                 catch (InterruptedException error) { Thread.currentThread().interrupt(); }
-                client.close(); discovery.close();
+                client.close(); masterRoutes.close();
                 try { journal.finish(issued, finished); }
                 catch (java.io.IOException error) { fail(error.getMessage()); }
                 var result = snapshot(true);

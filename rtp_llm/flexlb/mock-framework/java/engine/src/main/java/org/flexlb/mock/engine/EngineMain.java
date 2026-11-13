@@ -16,7 +16,7 @@ import org.flexlb.mock.engine.execution.LLMMockEngine;
 import org.flexlb.mock.engine.vit.VitConfig;
 import org.flexlb.mock.engine.vit.VitNode;
 import org.flexlb.mock.protocol.ConfigInput;
-import org.flexlb.mock.protocol.JsonWire;
+import org.flexlb.mock.protocol.JsonFiles;
 
 /**
  * Foreground single-engine service. The platform owns discovery and process replacement.
@@ -56,9 +56,9 @@ public final class EngineMain {
                     "event", "engine_started", "endpoints", endpoints, "effective_config", started.effective())));
                 if (ready != null) {
                     Path output = Path.of(System.getenv("MOCK_OUTPUT_DIR"));
-                    JsonWire.writeAtomically(output.resolve("effective-config.json"), started.effective());
-                    JsonWire.writeAtomically(output.resolve("endpoints.json"), endpoints);
-                    JsonWire.writeAtomically(ready, Map.of("url", endpoints.get("control")));
+                    JsonFiles.writeAtomically(output.resolve("effective-config.json"), started.effective());
+                    JsonFiles.writeAtomically(output.resolve("endpoints.json"), endpoints);
+                    JsonFiles.writeAtomically(ready, Map.of("url", endpoints.get("control")));
                 }
                 while (!stopped.await(1, TimeUnit.SECONDS)) node.health().run();
             } finally {

@@ -7,7 +7,7 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import org.apache.zookeeper.server.NIOServerCnxnFactory;
 import org.apache.zookeeper.server.ZooKeeperServer;
-import org.flexlb.mock.protocol.JsonWire;
+import org.flexlb.mock.protocol.JsonFiles;
 
 /**
  * A real, runner-owned standalone ZooKeeper; independent of every Master lifecycle.
@@ -30,7 +30,7 @@ public final class ZooKeeperMain {
             connections.startup(server);
             Runtime.getRuntime().addShutdownHook(new Thread(connections::shutdown, "mock-zk-close"));
             Path ready = Path.of(System.getenv("MOCK_READY_FILE"));
-            JsonWire.writeAtomically(ready, Map.of("connect", "127.0.0.1:" + connections.getLocalPort()));
+            JsonFiles.writeAtomically(ready, Map.of("connect", "127.0.0.1:" + connections.getLocalPort()));
             new CountDownLatch(1).await();
         } finally {
             connections.shutdown();

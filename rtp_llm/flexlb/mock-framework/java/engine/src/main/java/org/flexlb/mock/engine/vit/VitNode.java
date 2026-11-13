@@ -23,7 +23,7 @@ public final class VitNode implements AutoCloseable {
     private final RpcService service;
     private final Address address=Address.local();
     private Server rpc;
-    private ControlServer api;
+    private ControlHttpServer api;
     private org.flexlb.mock.metrics.MetricsOutput metrics;
     private volatile boolean closed;
     private VitNode(VitConfig config) { this.config=config;service=new RpcService(config, new VitMetrics()); }
@@ -32,7 +32,7 @@ public final class VitNode implements AutoCloseable {
         try {
             node.rpc=NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service).addService(node.service.mockVitService()).build().start();
             node.metrics=org.flexlb.mock.metrics.MetricsOutput.start(node.service::collectMetrics);
-            node.api=new ControlServer(node.address.listener(controlPort)).health(node::checkHealthy);
+            node.api=new ControlHttpServer(node.address.listener(controlPort)).health(node::checkHealthy);
             if(node.metrics.prometheus()) node.api.metrics(node.service::metrics);
             node.api.start();return node;
         } catch(Exception | Error error) {

@@ -24,7 +24,7 @@ public final class BackendRpcClient implements AutoCloseable {
 
     private static final int GENERATE_INPUT_REQUIRED = 8409;
 
-    private final java.util.function.Supplier<List<MasterDiscovery.Target>> masters;
+    private final java.util.function.Supplier<List<MasterRoutes.Target>> masters;
     private final java.util.function.Consumer<ObjectNode> events;
     private final VitClient vision;
 
@@ -51,12 +51,12 @@ public final class BackendRpcClient implements AutoCloseable {
 
     BackendRpcClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<ObjectNode> events, int imageToken, long seed, int prefillCpSize) {
         this(events, imageToken, seed, prefillCpSize,
-            () -> masters.get().stream().map(rpc -> new MasterDiscovery.Target(rpc, true)).toList());
+            () -> masters.get().stream().map(rpc -> new MasterRoutes.Target(rpc, true)).toList());
         Objects.requireNonNull(masters);
     }
 
     BackendRpcClient(java.util.function.Consumer<ObjectNode> events, int imageToken, long seed, int prefillCpSize,
-                     java.util.function.Supplier<List<MasterDiscovery.Target>> masters) {
+                     java.util.function.Supplier<List<MasterRoutes.Target>> masters) {
         cacheKeySeed = seed;
         this.prefillCpSize = prefillCpSize;
         vision = new VitClient(imageToken);
@@ -170,7 +170,7 @@ public final class BackendRpcClient implements AutoCloseable {
         private FlexlbScheduleRequestPB request;
         private GenerateInputPB input;
 
-        private final List<MasterDiscovery.Target> routes;
+        private final List<MasterRoutes.Target> routes;
 
         private String scheduledMaster;
 
@@ -201,8 +201,8 @@ public final class BackendRpcClient implements AutoCloseable {
             this.physicalBlockSize = physicalBlockSize;
             this.expectedImageTokens = expectedImageTokens;
             routes = List.copyOf(masters.get());
-            if (routes.size() > 2 || routes.stream().map(MasterDiscovery.Target::rpc).distinct().count() != routes.size()
-                    || routes.stream().map(MasterDiscovery.Target::rpc).anyMatch(String::isBlank))
+            if (routes.size() > 2 || routes.stream().map(MasterRoutes.Target::rpc).distinct().count() != routes.size()
+                    || routes.stream().map(MasterRoutes.Target::rpc).anyMatch(String::isBlank))
                 throw new IllegalArgumentException("Expected distinct primary and optional backup Master");
             context = Context.ROOT.withDeadlineAfter(budget, TimeUnit.NANOSECONDS, timers);
         }

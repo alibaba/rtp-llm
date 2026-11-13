@@ -46,11 +46,11 @@ class DecodeModelsTest {
     @Test void invalidParametersAreRejected() {
         assertThrows(IllegalArgumentException.class, () -> new DecodeStepModel.Config(Double.NaN));
         assertThrows(IllegalArgumentException.class, () -> new DecodeStepModel.Config(.9));
-        assertThrows(IllegalArgumentException.class, () -> new StoppingModel.Config(.1, null));
-        assertThrows(IllegalArgumentException.class, () -> new StoppingModel.Config(Double.NaN, 1L));
+        assertThrows(IllegalArgumentException.class, () -> new EosPolicy.Config(.1, null));
+        assertThrows(IllegalArgumentException.class, () -> new EosPolicy.Config(Double.NaN, 1L));
         assertThrows(IllegalArgumentException.class, () -> new DecodeStepModel(new DecodeStepModel.Config(null)).tokens(-1));
         assertThrows(IllegalArgumentException.class, () -> stopping(.1, 1).complete("", 0, 1, 0, 10, false));
     }
 
-    private StoppingModel stopping(double p, long seed) { return new StoppingModel(new StoppingModel.Config(p, seed)); }
+    private EosPolicy stopping(double p, long seed) { return new EosPolicy(new EosPolicy.Config(p, seed)); }
 }

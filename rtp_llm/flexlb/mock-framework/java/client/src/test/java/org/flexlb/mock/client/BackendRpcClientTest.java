@@ -90,7 +90,7 @@ class BackendRpcClientTest {
     @Test void invalidRequestDoesNotResendGenerateInput() throws Exception {
         try (var h = new Harness();
              var client = new BackendRpcClient(event -> {}, 1000, 0L, 1,
-                 () -> List.of(new MasterDiscovery.Target(h.endpoint().get("rpc"), false)))) {
+                 () -> List.of(new MasterRoutes.Target(h.endpoint().get("rpc"), false)))) {
             h.route = response -> FlexlbScheduleResponsePB.newBuilder().setCode(8406)
                 .setErrorMessage("missing serialized generate_input for batch dispatch").build();
             var result = h.result(client.send(request(1), input(1), Duration.ofSeconds(2), List.of()));

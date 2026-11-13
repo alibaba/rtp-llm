@@ -15,7 +15,7 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * Verifies Master selection as topology and heartbeat responses change.
  */
-class MasterDiscoveryTest {
+class MasterRoutesTest {
     @TempDir Path directory;
 
     final ObjectMapper json = new ObjectMapper();
@@ -25,7 +25,7 @@ class MasterDiscoveryTest {
         try (var first = new BackendRpcClientTest.Harness(); var second = new BackendRpcClientTest.Harness(); var added = new BackendRpcClientTest.Harness()) {
             first.leader = second.leader;
             publish(topology, List.of(first.endpoint(), second.endpoint()));
-            try (var discovery = new MasterDiscovery(topology, null)) {
+            try (var discovery = new MasterRoutes(topology, null)) {
                 assertEquals(List.of(second.endpoint().get("rpc"), first.endpoint().get("rpc")), addresses(discovery));
                 first.leader = first.http().substring(7); second.leader = first.leader;
                 PlaybackTest.eventually(() -> addresses(discovery).getFirst().equals(first.endpoint().get("rpc")));
@@ -69,7 +69,7 @@ class MasterDiscoveryTest {
                         exchange.getResponseBody().write(bytes);
                     }
                 });
-                try (var discovery = new MasterDiscovery(topology, null)) {
+                try (var discovery = new MasterRoutes(topology, null)) {
                     assertTrue(discovery.routes().isEmpty(), response);
                 }
             }
@@ -80,7 +80,7 @@ class MasterDiscoveryTest {
         Path topology = directory.resolve("topology.json");
         try (var first = new BackendRpcClientTest.Harness(); var second = new BackendRpcClientTest.Harness()) {
             publish(topology, List.of(first.endpoint(), second.endpoint()));
-            try (var discovery = new MasterDiscovery(topology, List.of(first.endpoint().get("rpc")))) {
+            try (var discovery = new MasterRoutes(topology, List.of(first.endpoint().get("rpc")))) {
                 assertEquals(List.of(first.endpoint().get("rpc")), addresses(discovery));
                 first.heartbeatStatus = 503;
                 PlaybackTest.eventually(() -> addresses(discovery).isEmpty());
@@ -100,7 +100,7 @@ class MasterDiscoveryTest {
             String rpc = "127.0.0.1:1";
             var endpoint = Map.of("role", "master", "http", master.http(), "rpc", rpc);
             publish(topology, List.of(endpoint, endpoint));
-            try (var discovery = new MasterDiscovery(topology, null)) {
+            try (var discovery = new MasterRoutes(topology, null)) {
                 assertEquals(List.of(rpc), addresses(discovery));
                 assertTrue(discovery.routes().getFirst().requiresGenerateInput());
             }
@@ -114,7 +114,7 @@ class MasterDiscoveryTest {
             backup.requiresGenerateInput = true;
             backup.leader = primary.leader;
             publish(topology, List.of(primary.endpoint(), backup.endpoint()));
-            try (var discovery = new MasterDiscovery(topology, null);
+            try (var discovery = new MasterRoutes(topology, null);
                  var client = new BackendRpcClient(event -> {}, 1000, 0L, 1, discovery::routes)) {
                 var input = BackendRpcClientTest.input(1);
                 var request = BackendRpcClientTest.request(1).toBuilder().clearGenerateInput().setCacheKeyBlockSize(1).build();
@@ -147,7 +147,7 @@ class MasterDiscoveryTest {
             String primary = first.endpoint().get("rpc");
             String backup = second.endpoint().get("rpc");
             var probes = new AtomicInteger();
-            var active = new AtomicReference<MasterDiscovery>();
+            var active = new AtomicReference<MasterRoutes>();
             var routesAfterFirstFailure = new CompletableFuture<List<String>>();
             first.heartbeat.removeContext("/rtp_llm/master/info");
             first.heartbeat.createContext("/rtp_llm/master/info", exchange -> {
@@ -162,7 +162,7 @@ class MasterDiscoveryTest {
                     exchange.getResponseBody().write(bytes);
                 }
             });
-            try (var discovery = new MasterDiscovery(topology, null)) {
+            try (var discovery = new MasterRoutes(topology, null)) {
                 active.set(discovery);
                 assertEquals(List.of(primary, backup), addresses(discovery));
                 assertEquals(retained ? List.of(primary, backup) : List.of(backup),
@@ -172,7 +172,7 @@ class MasterDiscoveryTest {
         }
     }
 
-    private static List<String> addresses(MasterDiscovery discovery) {
-        return discovery.routes().stream().map(MasterDiscovery.Target::rpc).toList();
+    private static List<String> addresses(MasterRoutes discovery) {
+        return discovery.routes().stream().map(MasterRoutes.Target::rpc).toList();
     }
 }

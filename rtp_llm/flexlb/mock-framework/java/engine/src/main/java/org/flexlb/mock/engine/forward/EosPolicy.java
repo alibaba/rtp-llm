@@ -5,8 +5,8 @@ import java.util.SplittableRandom;
 /**
  * Applies a constant per-token EOS probability at each absolute output position.
  */
-record StoppingModel(Config configuration) {
-    StoppingModel { java.util.Objects.requireNonNull(configuration); }
+record EosPolicy(Config configuration) {
+    EosPolicy { java.util.Objects.requireNonNull(configuration); }
 
     public ComputeModel.Result complete(String requestKey, int generated, int candidates, int minimum, int maximum, boolean ignoreEos) {
         if (requestKey == null || requestKey.isBlank() || generated < 0 || candidates < 1

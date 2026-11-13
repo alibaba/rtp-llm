@@ -3,7 +3,7 @@ package org.flexlb.mock.protocol;
 import java.net.InetSocketAddress;
 import java.nio.file.*;
 import java.util.*;
-import org.flexlb.mock.protocol.ControlServer.OptionalArgument;
+import org.flexlb.mock.protocol.ControlHttpServer.OptionalArgument;
 
 /**
  * Starts a minimal control peer for transport tests.
@@ -18,9 +18,9 @@ public final class TransportProbe {
         }
     }
 
-    static ControlServer server() throws Exception {
+    static ControlHttpServer server() throws Exception {
         var probe = new Implementation();
-        return new ControlServer(new InetSocketAddress("127.0.0.1", 0))
+        return new ControlHttpServer(new InetSocketAddress("127.0.0.1", 0))
             .route("probe/action", Request.class, MasterReceipt.class, probe::action)
             .route("probe/masters", None.class, MasterSet.class, probe::masters)
             .route("probe/metric", Request.class, MetricValue.class, probe::metric)

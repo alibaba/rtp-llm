@@ -1,7 +1,7 @@
 package org.flexlb.mock.client;
 
 import java.util.*;
-import org.flexlb.mock.protocol.ControlServer.OptionalArgument;
+import org.flexlb.mock.protocol.ControlHttpServer.OptionalArgument;
 import com.fasterxml.jackson.annotation.JsonInclude;
 
 /**

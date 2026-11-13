@@ -9,10 +9,10 @@ import org.junit.jupiter.api.*;
 /**
  * Verifies control request validation and error responses.
  */
-class ControlServerTest {
+class ControlHttpServerTest {
     private static final HttpClient CLIENT = HttpClient.newHttpClient();
 
-    private ControlServer server;
+    private ControlHttpServer server;
 
     @BeforeEach void start() throws Exception {
         server = TransportProbe.server();
@@ -22,7 +22,7 @@ class ControlServerTest {
 
     @Test void optionalMetricsEndpointIsExactAndReportsCollectionFailure() throws Exception {
         var fail = new java.util.concurrent.atomic.AtomicBoolean();
-        try (var exporter = new ControlServer(new InetSocketAddress("127.0.0.1", 0)).metrics(() -> {
+        try (var exporter = new ControlHttpServer(new InetSocketAddress("127.0.0.1", 0)).metrics(() -> {
             if (fail.get()) throw new IllegalStateException("broken collector");
             return "# TYPE probe_total counter\nprobe_total 3\n";
         }).start()) {
@@ -42,13 +42,13 @@ class ControlServerTest {
     @Test void typedRecords() throws Exception {
         var response = call("probe/action", Map.of(), 1000);
         assertEquals(200, response.statusCode());
-        assertEquals("master-0", JsonWire.JSON.readTree(response.body()).at("/result/affected/instances/0/id").asText());
+        assertEquals("master-0", ControlJson.JSON.readTree(response.body()).at("/result/affected/instances/0/id").asText());
     }
 
     @Test void unhealthyComponentsReturnUnavailableWithoutCollectingMetrics() throws Exception {
         var broken = new java.util.concurrent.atomic.AtomicBoolean();
         var scrapes = new java.util.concurrent.atomic.AtomicInteger();
-        try (var service = new ControlServer(new InetSocketAddress("127.0.0.1", 0))
+        try (var service = new ControlHttpServer(new InetSocketAddress("127.0.0.1", 0))
                 .health(() -> { if (broken.get()) throw new IllegalStateException("worker failed"); })
                 .metrics(() -> { scrapes.incrementAndGet(); return ""; }).start()) {
             var request = HttpRequest.newBuilder(URI.create(service.url() + "/health")).GET().build();
@@ -60,10 +60,10 @@ class ControlServerTest {
     }
 
     @Test void nativeOnlyNodeIsHealthyWithoutInvokeRoute() throws Exception {
-        try (var nativeHost = new ControlServer(new InetSocketAddress("127.0.0.1", 0)).start()) {
+        try (var nativeHost = new ControlHttpServer(new InetSocketAddress("127.0.0.1", 0)).start()) {
             var response = CLIENT.send(HttpRequest.newBuilder(URI.create(nativeHost.url() + "/health")).GET().build(), HttpResponse.BodyHandlers.ofString());
             assertEquals(200, response.statusCode());
-            assertEquals(JsonWire.JSON.readTree("{\"status\":\"ok\"}"), JsonWire.JSON.readTree(response.body()));
+            assertEquals(ControlJson.JSON.readTree("{\"status\":\"ok\"}"), ControlJson.JSON.readTree(response.body()));
             var invoke = HttpRequest.newBuilder(URI.create(nativeHost.url() + "/invoke"))
                 .POST(HttpRequest.BodyPublishers.noBody()).build();
             assertEquals(404, CLIENT.send(invoke, HttpResponse.BodyHandlers.ofString()).statusCode());
@@ -89,8 +89,8 @@ class ControlServerTest {
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"127.0.0.1", "127.0.0.2", "::1"})
     void publishesTheActualBoundAddress(String host) throws Exception {
-        ControlServer bound;
-        try { bound = new ControlServer(new InetSocketAddress(host, 0)); }
+        ControlHttpServer bound;
+        try { bound = new ControlHttpServer(new InetSocketAddress(host, 0)); }
         catch (java.net.SocketException unavailable) {
             if (unavailable instanceof java.net.BindException || unavailable.getCause() instanceof java.nio.channels.UnsupportedAddressTypeException) {
                 org.junit.jupiter.api.Assumptions.assumeTrue(false, "Loopback address unavailable: " + host); return;
@@ -107,7 +107,7 @@ class ControlServerTest {
     }
 
     private HttpResponse<String> call(String route, Object args, long timeout) throws Exception {
-        var body = JsonWire.JSON.writeValueAsString(Map.of("interface", route, "args", args, "timeout_ms", timeout));
+        var body = ControlJson.JSON.writeValueAsString(Map.of("interface", route, "args", args, "timeout_ms", timeout));
         return CLIENT.send(HttpRequest.newBuilder(URI.create(server.url() + "/invoke"))
             .POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
     }

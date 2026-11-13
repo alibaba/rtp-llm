@@ -12,7 +12,7 @@ import java.util.concurrent.*;
 /**
  * Probes Master endpoints from the Runner topology and publishes a primary and optional backup.
  */
-final class MasterDiscovery implements AutoCloseable {
+final class MasterRoutes implements AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private final Path topology;
@@ -26,7 +26,7 @@ final class MasterDiscovery implements AutoCloseable {
     private volatile Exception failure;
     private String primary;
 
-    MasterDiscovery(Path topology, List<String> allowed) throws Exception {
+    MasterRoutes(Path topology, List<String> allowed) throws Exception {
         this.topology = topology;
         this.allowed = allowed == null ? null : Set.copyOf(allowed);
         try {
@@ -47,7 +47,7 @@ final class MasterDiscovery implements AutoCloseable {
     List<Target> routes() { check(); return routes; }
 
     void check() {
-        if (failure != null) throw new IllegalStateException("Master discovery failed", failure);
+        if (failure != null) throw new IllegalStateException("Could not refresh Master routes", failure);
     }
 
     private void update() throws Exception {

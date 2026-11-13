@@ -14,7 +14,7 @@ import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 import org.flexlb.mock.engine.service.RtpRpcService;
 import org.flexlb.mock.metrics.MetricTags;
-import org.flexlb.mock.protocol.ControlServer;
+import org.flexlb.mock.protocol.ControlHttpServer;
 
 /**
  * One LLM Mock P/D Engine with independent listeners and resources. Does not contain the case runner or a cluster controller.
@@ -28,7 +28,7 @@ public final class LLMMockEngine implements AutoCloseable {
     private final org.flexlb.mock.engine.EngineMain.Address address = org.flexlb.mock.engine.EngineMain.Address.local();
 
     private Server rpc;
-    private ControlServer api;
+    private ControlHttpServer api;
     private org.flexlb.mock.metrics.MetricsOutput metrics;
     private java.util.function.Supplier<List<MetricFamilySamples>> metricSource;
 
@@ -75,7 +75,7 @@ public final class LLMMockEngine implements AutoCloseable {
             if (config.role() == org.flexlb.mock.protocol.Role.decode) builder.addService(node.service.mockDecodeService());
             node.rpc = builder.build().start();
             node.metrics = org.flexlb.mock.metrics.MetricsOutput.start(node::collectMetrics);
-            node.api = new ControlServer(node.address.listener(controlPort)).health(node::checkHealthy);
+            node.api = new ControlHttpServer(node.address.listener(controlPort)).health(node::checkHealthy);
             if (node.metrics.prometheus()) node.api.metrics(() -> MetricTags.scrape(node.collectMetrics()));
             node.api.start();
             node.cacheManager.startKvcmReporter(config, node.address.rpc(node.rpc.getPort() - 1));
