@@ -76,7 +76,7 @@ def test_stop_selection_and_replacement_preserve_identity_and_artifacts(tmp_path
         [
             step("one", "master/stop", args={"targets": ["127.0.0.1:12000"]}),
             step("added", "master/start", args={"count": 2}),
-            step("all", "master/stop"),
+            step("all", "master/stop", args={"targets": {"ref": "globals.masters"}}),
         ],
     )
     output = tmp_path / "run"
@@ -104,7 +104,7 @@ def test_stale_reference_cannot_stop_replacement(tmp_path):
     case, launch = generic(
         tmp_path,
         [
-            step("old", "master/stop"),
+            step("old", "master/stop", args={"targets": {"ref": "globals.masters"}}),
             step("new", "master/start"),
             step("stale", "master/stop", args={"targets": {"ref": "steps.old"}}),
         ],
@@ -149,7 +149,11 @@ def test_partial_stop_failure_aborts_and_keeps_completed_operations(
 
     monkeypatch.setattr(ProcessSupervisor, "stop_intentionally", fail_second)
     case, launch = generic(
-        tmp_path, [step("stop", "master/stop"), step("never", "master/start")]
+        tmp_path,
+        [
+            step("stop", "master/stop", args={"targets": {"ref": "globals.masters"}}),
+            step("never", "master/start"),
+        ],
     )
     output = tmp_path / "run"
     result = asyncio.run(run_case(case, launch, output))
@@ -503,7 +507,7 @@ def test_kill_and_restore_keep_addresses_and_preserve_each_launch_artifact(tmp_p
                 "master/restart",
                 args={"targets": {"ref": "steps.killed"}},
             ),
-            step("all", "master/stop"),
+            step("all", "master/stop", args={"targets": {"ref": "globals.masters"}}),
         ],
     )
     output = tmp_path / "run"

@@ -146,6 +146,7 @@ def no_children(output):
     [
         {},
         {"direction": "other"},
+        {"direction": "in"},
         {"direction": "out", "targets": ["p:1"]},
         {"direction": "out", "count": 1025},
     ],
@@ -247,7 +248,11 @@ def test_scale_updates_topology_and_preserves_instance_artifacts(tmp_path):
         assert len(created) == 2 and not set(created) & set(original)
         assert (retired / "endpoints.json").read_bytes() == endpoints
         assert len(ctx.list_rpc_addresses()["prefill"]) == 3
-        assert len(await engine_scale(ctx, EngineScaleArgs(direction="in"))) == 3
+        targets = ctx.list_rpc_addresses()["prefill"]
+        assert (
+            await engine_scale(ctx, EngineScaleArgs(direction="in", targets=targets))
+            == targets
+        )
         assert ctx.list_rpc_addresses()["prefill"] == []
         assert len(await engine_scale(ctx, EngineScaleArgs(direction="out"))) == 1
         return True

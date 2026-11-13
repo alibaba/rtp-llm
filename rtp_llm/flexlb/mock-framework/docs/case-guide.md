@@ -26,11 +26,23 @@
 
 ID 使用小写 `snake_case`，Case、Phase 和 Step 的 ID 在同一个 Case 中全局唯一。Case ID 与目录同名，Phase ID 描述阶段。Step ID 写成“动作 + 对象”，例如 `start_client`、`get_master_a`、`check_prefill_tps`、`check_client_success_rate_after_drain`。阈值放进 `expect`，场景意图放进 `describe`。改名时同步修改引用。
 
-### 引用、断言与时间预算
+### `targets`
 
-`{ref: steps.<id>}` 引用前置 Step 的完整返回值，`{ref: steps.<id>.<field>}` 引用它的字段。实时目标列表可用 `{ref: globals.masters}`、`globals.prefill`、`globals.decode` 或 `globals.vit`。全局列表在当前 Step 取值，已保存的返回值仍指向原地址。支持 `targets` 的接口通常在省略时选择操作域内的全部实例，显式空列表、重复或无效地址按接口报错。
+`args.targets` 指定当前 Step 要操作或查询的实例。它是非空且无重复的 RPC 地址列表，可以直接写地址，也可以引用返回值或实时拓扑。Step 在执行时检查地址是否属于对应角色，以及实例状态是否符合操作要求。
 
-`expect.eq` 比较结构和值，列表顺序参与比较。`count` 检查列表长度。`gte` 和 `lte` 检查数值，可组合成上下限。省略 `expect` 时只执行接口并保存返回值。
+| 接口                  | 目标规则                                                                                                                           |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `master/stop`         | 必须传 `targets`，地址须属于在线 Master。                                                                                          |
+| `master/restart`      | 必须传 `targets`，地址须属于已停止的 Master。可以引用停止步骤返回的地址。                                                          |
+| `engine/scale` 缩容   | 至少传 `targets` 或 `count`。有 `targets` 时按列表顺序选择，两者都传时取前 `count` 个。只传 `count` 时从对应角色的在线实例中选择。 |
+| `engine/scale` 扩容   | 用 `role` 和 `count` 指定新增实例，`count` 默认 1。                                                                                |
+| 支持 `targets` 的查询 | 省略时查询该接口对应角色的全部在线实例。                                                                                           |
+
+`{ref: globals.masters}`、`globals.prefill`、`globals.decode` 和 `globals.vit` 提供当前 Step 取到的在线实例地址。引用前置 Step 的返回值时，取的是当时保存的地址。
+
+### 引用 Step 返回值
+
+`{ref: steps.<id>}` 取前置 Step 的完整返回值，`{ref: steps.<id>.<field>}` 取对象中的已声明字段。编译时检查字段是否存在，以及引用的值能否传给该参数。以下示例把主 Master 查询返回的整个地址列表传给下一步。
 
 ```yaml
 phases:
@@ -53,6 +65,22 @@ phases:
           role: prefill
 ```
 
+假设前置 Step `inspect_engines` 返回一个对象，其中 `prefill_addresses` 和 `decode_addresses` 都是地址列表。缩容步骤只引用 Decode 地址。
+
+```yaml
+- id: shrink_decode
+  describe: 缩掉前一步选中的 Decode 实例
+  interface: engine/scale
+  args:
+    direction: in
+    role: decode
+    targets: { ref: steps.inspect_engines.decode_addresses }
+```
+
+### 断言与时间预算
+
+`expect.eq` 比较结构和值，列表顺序参与比较。`count` 检查列表长度。`gte` 和 `lte` 检查数值，可组合成上下限。省略 `expect` 时只执行接口并保存返回值。
+
 - `timeout` 是整个 Phase 的预算，`within` 是单步上限，取其与 Phase 剩余预算的较小值。两者都使用正的带单位时长。
 - `wait_after` 在接口与断言成功后执行，默认 `0s`，计入 Step 和 Phase 预算。它不刷新结果。要验证等待后的状态，另写一个读取 Step。
 - Step 默认按顺序执行。`background: true` 允许与同 Phase 的其他 Step 并行，Phase 结束前会收齐或取消这些任务。后台 Step 的结果不可用于 `ref`。
@@ -61,21 +89,30 @@ phases:
 
 先从同类 Case 复用步骤。基础收发在回放结束后检查逐请求结果。性能回归在预热后检查绝对阈值。故障恢复先保存实际选举出的主备地址，再按地址执行故障步骤。操作回执之后，用独立的读取 Step 验证发现、选举和流量是否恢复。[Basic](../cases/basic/case.yaml) · [性能回归](../cases/performance_regression/case.yaml) · [Master HA](../cases/master_ha_failover/case.yaml)
 
-接口名用 `角色/动词[/对象]`，例如 `client/query/qps`。对应的 Python 文件名和函数名用 `角色_动词[_对象]`。接口名以 `standard_actions()` 注册的动作列表为准。每个动作的参数类型、默认值、返回类型和单位由函数签名及 `@register_step` 声明。门禁记录在 `gates.jsonl` 中保存当次检查的单位。[已注册的 Step](../python/mock_framework/execution/step/__init__.py)
-
 ### 指标门禁
 
 优先选择有明确单位和聚合方式的指标动作，用 `expect` 写绝对阈值。查询范围相对当前 Step 的固定查询时刻。比如 `range: [-60s, 0s]` 表示截至该时刻的最近 60 秒。安排预热和等待时，把所选窗口放在需要观察的阶段。
 
 支持 `mode` 的指标动作默认汇总整个区间。比例类指标分别汇总分子和分母，再相除。需要每个采样点都达标时，使用 `mode: series`，数值上下限会逐点检查。缺少样本或分母为零按查询错误处理。具体接口支持的参数和单位查动作源码，指标采样边界见 [指标覆盖](../views/coverage.md#指标口径)。
 
-## 新增 Case 接口
+## Step 函数规范
 
 用现有接口组合完成的场景留在 YAML。只有缺少可独立复用的操作或查询时，才在 `python/mock_framework/execution/step/` 新增动作。
 
+### 命名与注册
+
+接口名用 `角色/动词[/对象]`，例如 `client/query/qps`。对应的独立 Python 文件和函数用 `角色_动词[_对象]`。指标查询在 `execution/step/metrics/` 按角色放在一起。将函数加入 [`standard_actions()`](../python/mock_framework/execution/step/__init__.py)，使 Case 能通过接口名调用。
+
+### 参数与执行
+
 1. 在动作文件定义带类型注解的参数 dataclass 和异步函数。参数默认值写在 dataclass，跨字段约束写在 `__post_init__`。用 `@register_step` 声明稳定的接口名、`effect="read"` 或 `effect="write"`，数值接口声明单位。
-2. 将函数加入 `execution/step/__init__.py` 的 `standard_actions()`。现有 `Step` 负责解析引用、校验参数和结果、执行断言与等待。动作通过 `StepContext` 使用共享查询、角色管理和剩余预算。
+2. `Step` 负责解析引用、校验参数和结果、执行断言与等待。动作通过 `StepContext` 使用共享查询、角色管理和剩余预算。
 3. 在动作或角色管理层处理目标选择和业务状态。Runner 负责时间预算及整场收尾，Java 端点提供实例能力。写操作发出后未取得有效回执，Step 记录 `outcome_unknown`，禁止自动重放。
-4. 返回值供 YAML 引用和断言使用。单值指标返回数值，逐点指标返回数值列表，实例查询保留地址或按地址组织的结果。在动作旁的测试验证参数、返回值和失败语义，用实际 Case 验证接线。
+
+### 返回值
+
+用函数的返回类型注解声明结果。只有一个值时直接返回，例如单值指标用 `float`，逐点指标用 `list[float]`，地址列表用 `list[str]`。有多个固定字段时，在产出结果的 Step 文件中定义 dataclass。接收方只声明自己需要的参数类型，YAML 用 `ref` 指定取整个结果还是单个字段。门禁记录在 `gates.jsonl` 中保存当次检查的单位。
+
+用测试验证参数、返回值和失败语义，用实际 Case 验证接线。
 
 [现有动作示例 `master/list/addresses`](../python/mock_framework/execution/step/master_list_addresses.py) · [Step 注册和类型校验](../python/mock_framework/execution/step/step_registry.py) · [Case 执行架构](architecture.md#case-如何执行)

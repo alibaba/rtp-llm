@@ -302,17 +302,16 @@ class MasterRole:
             node["rpc"] for node in self.topology.list_active_endpoints("master")
         }
         candidates = available if active else self._instances.keys() - available
-        addresses = sorted(candidates) if targets is None else targets
         if (
-            not addresses
-            or len(set(addresses)) != len(addresses)
-            or set(addresses) - candidates
+            not targets
+            or len(set(targets)) != len(targets)
+            or set(targets) - candidates
         ):
             state = "active" if active else "stopped"
             raise ExecutionError(
                 f"Master targets must be nonempty, unique, {state} addresses"
             )
-        return list(addresses)
+        return list(targets)
 
     async def stop(self, targets, mode="terminate"):
         async with self._lock:

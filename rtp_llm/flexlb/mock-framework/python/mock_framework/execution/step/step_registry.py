@@ -1,6 +1,6 @@
 """Register typed Python Case steps and validate their arguments and results."""
 
-from dataclasses import MISSING, asdict, dataclass
+from dataclasses import MISSING, asdict, dataclass, field
 from dataclasses import fields as data_fields
 from dataclasses import is_dataclass
 from inspect import iscoroutinefunction, signature
@@ -27,6 +27,11 @@ class Targets:
             not self.targets or len(set(self.targets)) != len(self.targets)
         ):
             raise ValueError("targets must be nonempty and unique when supplied")
+
+
+@dataclass(frozen=True)
+class RequiredTargets(Targets):
+    targets: list[str] = field()
 
 
 def _construct(kind, value, where="argument"):

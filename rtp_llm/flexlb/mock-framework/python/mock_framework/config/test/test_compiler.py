@@ -76,6 +76,15 @@ def test_rejects_invalid_case_before_execution(case_data, compile_data, change):
         compile_data(case_data)
 
 
+@pytest.mark.parametrize("interface", ["master/stop", "master/restart"])
+def test_master_lifecycle_requires_targets(case_data, compile_data, interface):
+    step = case_data["phases"][0]["steps"][0]
+    step.update(interface=interface, args={})
+    step.pop("expect", None)
+    with pytest.raises(ConfigError, match="targets"):
+        compile_data(case_data)
+
+
 def test_old_call_check_wrappers_are_rejected(case_data, compile_data):
     case_data["phases"][0]["steps"][0] = {"check": case_data["phases"][0]["steps"][0]}
     with pytest.raises(ConfigError):

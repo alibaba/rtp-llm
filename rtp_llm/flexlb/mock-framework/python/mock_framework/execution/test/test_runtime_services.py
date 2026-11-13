@@ -142,7 +142,10 @@ def test_topology_write_failure_after_launch_still_reaps_process(tmp_path, monke
         write_json(path, nodes)
 
     monkeypatch.setattr(environment, "write_json", fail_on_active_topology)
-    case, launch = generic(tmp_path, [step("never", "master/stop")])
+    case, launch = generic(
+        tmp_path,
+        [step("never", "master/stop", args={"targets": {"ref": "globals.masters"}})],
+    )
     output = tmp_path / "run"
     result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "ERROR" and "topology unavailable" in result["error"]

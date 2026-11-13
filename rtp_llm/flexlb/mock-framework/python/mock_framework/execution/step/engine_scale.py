@@ -15,6 +15,8 @@ class EngineScaleArgs(Targets):
 
     def __post_init__(self):
         super().__post_init__()
+        if self.direction == "in" and self.targets is None and self.count is None:
+            raise ValueError("scale-in requires targets or count")
         if self.direction == "out":
             if self.targets is not None:
                 raise ValueError("targets may only be supplied when scaling in")
