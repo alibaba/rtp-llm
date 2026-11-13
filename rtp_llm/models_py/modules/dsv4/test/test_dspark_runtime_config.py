@@ -213,13 +213,17 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
             ModelFactory._setup_dspark_configs(sp_config, target_config, draft_config)
 
     def test_only_explicit_dspark_wires_dspark_runtime_config(self):
-        for sp_type, model_type, should_setup_dspark in (
-            (SpeculativeType.MTP, "deepseek_v4_mtp", False),
-            (SpeculativeType.EAGLE, "eagle", False),
-            (SpeculativeType.DSPARK, "deepseek_v4_dspark", True),
-            (SpeculativeType.DSPARK, "deepseek_v41_dspark", True),
+        for sp_type, model_type, should_setup_dspark, mode in (
+            (sp_type, model_type, should_setup_dspark, mode)
+            for mode in (EplbMode.NONE, EplbMode.ALL)
+            for sp_type, model_type, should_setup_dspark in (
+                (SpeculativeType.MTP, "deepseek_v4_mtp", False),
+                (SpeculativeType.EAGLE, "eagle", False),
+                (SpeculativeType.DSPARK, "deepseek_v4_dspark", True),
+                (SpeculativeType.DSPARK, "deepseek_v41_dspark", True),
+            )
         ):
-            with self.subTest(sp_type=sp_type, model_type=model_type):
+            with self.subTest(sp_type=sp_type, model_type=model_type, mode=mode):
                 sp_config, target_config, draft_config = self._configs(gamma=3)
                 sp_config.type = sp_type
                 sp_config.checkpoint_path = "/unused/checkpoint"
@@ -227,9 +231,14 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
                 sp_config.quantization = None
                 target_config.max_seq_len = 4096
                 target_config.eplb_config = EPLBConfig()
-                target_config.eplb_config.eplb_mode = EplbMode.ALL
+                target_config.eplb_config.eplb_mode = mode
                 target_config.eplb_config.redundant_expert = 32
                 target_config.eplb_config.eplb_metrics_report_interval = 4
+                target_config.eplb_config.eplb_update_time = 7
+                target_config.eplb_config.eplb_stats_window_size = 3
+                target_config.eplb_config.eplb_rearrange_after_prefill = True
+                target_config.eplb_config.eplb_rearrange_p2p_groups = 2
+                target_config.eplb_config.eplb_metrics_snapshot_max_files = 5
                 draft_config.eplb_config = EPLBConfig()
                 target_config.capture_aux_hidden_layer_ids = None
                 draft_config.tokenizer_path = ""
@@ -261,11 +270,13 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
 
                 self.assertIs(result, draft_config)
                 self.assertEqual(result.max_seq_len, target_config.max_seq_len)
-                self.assertEqual(result.eplb_config.redundant_expert, 0)
-                self.assertEqual(result.eplb_config.eplb_mode, EplbMode.NONE)
-                self.assertEqual(result.eplb_config.eplb_metrics_report_interval, 0)
-                self.assertIsNot(result.eplb_config, target_config.eplb_config)
-                self.assertEqual(target_config.eplb_config.eplb_mode, EplbMode.ALL)
+                expected_eplb = (
+                    target_config.eplb_config if should_setup_dspark else EPLBConfig()
+                )
+                self.assertEqual(
+                    result.eplb_config.__getstate__(), expected_eplb.__getstate__()
+                )
+                self.assertEqual(target_config.eplb_config.eplb_mode, mode)
                 self.assertEqual(target_config.eplb_config.redundant_expert, 32)
                 if should_setup_dspark:
                     setup_dspark.assert_called_once_with(

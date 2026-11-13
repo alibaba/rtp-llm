@@ -1,6 +1,7 @@
 #include "ClientWrapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "kvcm_client/HostCacheStateCompat.h"
+#include "kvcm_client/TransferClientCompat.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/Subscriber.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -739,10 +740,13 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
         return kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS;
     }
+    const int64_t deadline_ms = deadline ?
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline->time_since_epoch()).count() : 0;
     if (!remoteCacheDecodePublicationEnabled()) {
         if (completion)
             *completion = TransferCompletion::UNKNOWN;
-        const auto ec = transfer_clients_[slot->second]->LoadKvCaches(uri_str_vec, block_buffers, trace_info);
+        const auto ec = loadSdkKvCaches(*transfer_clients_[slot->second], uri_str_vec, block_buffers, deadline_ms,
+                                       trace_info);
         if (completion)
             *completion = sdkResultCompletion(ec);
         if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
@@ -787,7 +791,7 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
         try {
             if (completion)
                 *completion = TransferCompletion::UNKNOWN;
-            ec = transfer_clients_[slot->second]->LoadKvCaches(uris, buffers, part_trace);
+            ec = loadSdkKvCaches(*transfer_clients_[slot->second], uris, buffers, deadline_ms, part_trace);
         } catch (...) {
             if (!inner_observation)
                 observeTransfer(/*is_read=*/true, 0, /*completion_unknown=*/true);
@@ -867,10 +871,13 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
         return {kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS, {}};
     }
+    const int64_t deadline_ms = deadline ?
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline->time_since_epoch()).count() : 0;
     if (!remoteCacheDecodePublicationEnabled()) {
         if (completion)
             *completion = TransferCompletion::UNKNOWN;
-        auto result = transfer_clients_[slot->second]->SaveKvCaches(uri_str_vec, block_buffers, trace_info);
+        auto result = saveSdkKvCaches(*transfer_clients_[slot->second], uri_str_vec, block_buffers, deadline_ms,
+                                     trace_info);
         if (completion)
             *completion = sdkResultCompletion(result.first);
         if (result.first != kv_cache_manager::ClientErrorCode::ER_OK) {
@@ -917,7 +924,7 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
             try {
                 if (completion)
                     *completion = TransferCompletion::UNKNOWN;
-                return transfer_clients_[slot->second]->SaveKvCaches(uris, buffers, part_trace);
+                return saveSdkKvCaches(*transfer_clients_[slot->second], uris, buffers, deadline_ms, part_trace);
             } catch (...) {
                 if (!inner_observation)
                     observeTransfer(/*is_read=*/false, 0, /*completion_unknown=*/true);

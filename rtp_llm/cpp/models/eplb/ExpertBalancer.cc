@@ -91,9 +91,11 @@ void ExpertBalancer::step(bool warmup, bool is_prompt) {
         load_monitor_->beforeMappingChange();
     }
     if (metrics_reporter_) {
+        kmonitor::MetricsTags tags("model_id", std::to_string(model_id_));
+        tags.AddTag("model_type", model_id_ == 0 ? "target" : "draft");
         RtpLLmEplbMetricsCollector collector{};
         collector.step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_us;
-        metrics_reporter_->report<RtpLLmEplbMetrics, RtpLLmEplbMetricsCollector>(nullptr, &collector);
+        metrics_reporter_->report<RtpLLmEplbMetrics, RtpLLmEplbMetricsCollector>(&tags, &collector);
     }
 }
 

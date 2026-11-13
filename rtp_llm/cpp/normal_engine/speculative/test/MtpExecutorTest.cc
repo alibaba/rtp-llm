@@ -12,6 +12,7 @@
 #include <thread>
 #include "torch/all.h"
 #include "gtest/gtest.h"
+#include "kmonitor/client/core/MetricsRecord.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
@@ -1350,20 +1351,40 @@ TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
     }
 }
 
-TEST_F(MtpExecutorTest, testRealModelWrappersOnlyEnableTargetEplb) {
+TEST_F(MtpExecutorTest, testRealModelWrappersEnableEplbForDSparkProposals) {
     py::scoped_interpreter interpreter;
+    // Match NormalEngineCustomOutputTest's embedded-torch setup: KVCM's
+    // OpenSSL symbols conflict with Python's _hashlib in this linked binary.
+    py::exec(R"(
+import os, sys
+sys.path = [p for p in sys.path if not os.path.isdir(os.path.join(p, "nvidia"))]
+sys.modules['_hashlib'] = None
+import torch)");
+    c10::InferenceMode inference_guard(true);
     auto                   module = py::module_::import("__main__");
     py::class_<torch_ext::PyModelInitResources>(module, "TestModelInitResources");
+    py::class_<torch_ext::PyModelInputs>(module, "TestModelInputs");
+    py::class_<torch_ext::PyModelOutputs>(module, "TestModelOutputs");
     auto types                  = py::module_::import("types");
     auto py_model               = types.attr("SimpleNamespace")();
     py_model.attr("initialize") = py::cpp_function([](py::object) { return true; });
-    auto forward = py::cpp_function([](py::args) { ADD_FAILURE() << "construction must not run model forward"; });
+    bool expect_counts                 = false;
+    auto forward                       = py::cpp_function([&](const torch_ext::PyModelInputs& inputs, py::object) {
+        EXPECT_EQ(inputs.expert_token_counts.defined(), expect_counts);
+        if (inputs.expert_token_counts.defined()) {
+            inputs.expert_token_counts.add_(1);
+        }
+        return torch_ext::PyModelOutputs(
+            torch::zeros({inputs.input_ids.numel(), 1}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA)));
+    });
+    py_model.attr("prepare_fmha_impl") = py::cpp_function([](py::args) { return py::none(); });
     py_model.attr("forward")         = forward;
     py_model.attr("forward_propose") = forward;
     py_model.attr("forward_commit")  = forward;
     py_model.attr("get_eplb_layers") = py::cpp_function([]() { return py::list(); });
 
     int  runtime_initializations                 = 0;
+    std::array<int, 2> runtime_steps{};
     auto runtime_module                          = types.attr("ModuleType")("rtp_llm.eplb.runtime");
     runtime_module.attr("RuntimeExpertBalancer") = py::cpp_function([&](py::object,
                                                                         py::object config,
@@ -1376,9 +1397,16 @@ TEST_F(MtpExecutorTest, testRealModelWrappersOnlyEnableTargetEplb) {
         EXPECT_EQ(config.attr("eplb_mode").cast<int>(), static_cast<int>(EplbMode::ALL));
         EXPECT_EQ(ep_rank, 0);
         EXPECT_EQ(ep_size, 1);
-        EXPECT_EQ(model_id, 0);
+        EXPECT_EQ(model_id, runtime_initializations - 1);
         EXPECT_FALSE(sync_prompt_phase);
-        return types.attr("SimpleNamespace")();
+        auto runtime         = types.attr("SimpleNamespace")();
+        runtime.attr("step") = py::cpp_function([&, model_id](const torch::Tensor& counts, bool is_prompt) {
+            EXPECT_FALSE(is_prompt);
+            EXPECT_TRUE(counts.eq(1).all().item<bool>());
+            ++runtime_steps[model_id];
+            return false;
+        });
+        return runtime;
     });
     py::dict replacements;
     replacements["rtp_llm.eplb.runtime"] = runtime_module;
@@ -1409,13 +1437,16 @@ TEST_F(MtpExecutorTest, testRealModelWrappersOnlyEnableTargetEplb) {
                                  << "mode=" << static_cast<int>(mode) << " sp_type=" << static_cast<int>(sp_type)
                                  << " role=" << static_cast<int>(role) << " enable_graph=" << enable_graph);
                     runtime_initializations                   = 0;
+                    runtime_steps           = {};
+                    params.metrics_reporter =
+                        std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
                     params.sp_config.type                     = sp_type;
                     params.pd_sep_config.role_type            = role;
                     params.parallelism_config.role_type       = role;
                     params.hw_kernel_config.enable_cuda_graph = enable_graph;
                     auto draft_params                         = std::make_unique<EngineInitParams>(params);
                     draft_params->model_id                    = 1;
-                    draft_params->eplb_config                 = EPLBConfig{};
+                    draft_params->eplb_config = sp_type == SP_TYPE_DSPARK ? params.eplb_config : EPLBConfig{};
                     if (sp_type == SP_TYPE_DSPARK) {
                         const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
                         draft_params->gpt_weights.dspark_markov_w1 =
@@ -1436,7 +1467,9 @@ TEST_F(MtpExecutorTest, testRealModelWrappersOnlyEnableTargetEplb) {
                     const auto& target_counts = target->expert_balancer_.stable_expert_token_counts();
                     ASSERT_TRUE(target_counts.defined());
                     EXPECT_EQ(target_counts.sizes(), (torch::IntArrayRef{2, 2}));
-                    EXPECT_EQ(runtime_initializations, mode == EplbMode::ALL ? 1 : 0);
+                    const bool draft_eplb        = sp_type == SP_TYPE_DSPARK && role != RoleType::PREFILL;
+                    const int  expected_runtimes = mode == EplbMode::ALL ? 1 + draft_eplb : 0;
+                    EXPECT_EQ(runtime_initializations, expected_runtimes);
                     EXPECT_EQ(target->expert_balancer_.runtime_requested_, mode == EplbMode::ALL);
 
                     const bool expect_propose = sp_type != SP_TYPE_DSPARK || role != RoleType::PREFILL;
@@ -1447,14 +1480,64 @@ TEST_F(MtpExecutorTest, testRealModelWrappersOnlyEnableTargetEplb) {
                         if (model) {
                             auto* draft = dynamic_cast<PyWrappedModel*>(model);
                             ASSERT_NE(draft, nullptr);
-                            EXPECT_FALSE(draft->expert_balancer_.stable_expert_token_counts().defined());
-                            EXPECT_FALSE(draft->expert_balancer_.runtime_requested_);
-                            EXPECT_EQ(draft->expert_balancer_.load_monitor_, nullptr);
-                            draft->expert_balancer_.step(true);
-                            draft->expert_balancer_.step();
+                            const bool  enabled = draft_eplb && model == executor.draft_model_.get();
+                            const auto& counts  = draft->expert_balancer_.stable_expert_token_counts();
+                            EXPECT_EQ(counts.defined(), enabled);
+                            EXPECT_EQ(draft->expert_balancer_.runtime_requested_, enabled && mode == EplbMode::ALL);
+                            EXPECT_EQ(draft->expert_balancer_.load_monitor_ != nullptr, enabled);
+                            if (enabled) {
+                                EXPECT_EQ(counts.sizes(), (torch::IntArrayRef{2, 2}));
+                                EXPECT_NE(counts.data_ptr(), target_counts.data_ptr());
+                                EXPECT_EQ(draft->expert_balancer_.config_.to_string(), params.eplb_config.to_string());
+                            } else {
+                                draft->expert_balancer_.step(true);
+                                draft->expert_balancer_.step();
+                            }
                         }
                     }
-                    EXPECT_EQ(runtime_initializations, mode == EplbMode::ALL ? 1 : 0);
+                    EXPECT_EQ(runtime_initializations, expected_runtimes);
+                    if (sp_type == SP_TYPE_DSPARK && role == RoleType::DECODE) {
+                        GptModelInputs inputs;
+                        const auto     options  = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
+                        inputs.combo_tokens     = torch::zeros({1}, options);
+                        inputs.input_lengths    = torch::ones({1}, options);
+                        inputs.prefix_lengths   = torch::zeros({1}, options);
+                        inputs.sequence_lengths = torch::empty({0}, options);
+                        inputs.is_target_verify = true;
+                        inputs.skip_lm_head     = true;
+                        // Exercise MtpExecutor's real proposal/commit routes and
+                        // PyWrappedModel::forward. Only model math/planning is scripted.
+                        expect_counts = true;
+                        inputs.warmup = true;
+                        executor.runDSparkProposeForward(inputs);
+                        EXPECT_EQ(runtime_steps[1], 0);
+                        inputs.warmup = false;
+                        for (int round = 1; round <= 2; ++round) {
+                            executor.runDSparkProposeForward(inputs);
+                            EXPECT_EQ(runtime_steps[1], mode == EplbMode::ALL ? round : 0);
+                            expect_counts = false;
+                            executor.runDraftPrefillForward(inputs);
+                            EXPECT_EQ(runtime_steps[1], mode == EplbMode::ALL ? round : 0);
+                            expect_counts = true;
+                        }
+                        target->forward(inputs);
+                        EXPECT_EQ(runtime_steps[0], mode == EplbMode::ALL ? 1 : 0);
+                        auto* metrics = params.metrics_reporter->getMetricsGroup<RtpLLmEplbMetrics>();
+                        for (size_t model_id : {0, 1}) {
+                            kmonitor::MetricsTags tags("model_id", std::to_string(model_id));
+                            tags.AddTag("model_type", model_id == 0 ? "target" : "draft");
+                            auto*                   metric = metrics->step_latency_us_metric->DeclareMetric(&tags);
+                            kmonitor::MetricsRecord record(nullptr, nullptr, 0);
+                            metric->Snapshot(&record, 1000);
+                            EXPECT_EQ(!record.Values().empty(), mode == EplbMode::ALL);
+                            metrics->step_latency_us_metric->UndeclareMetric(metric);
+                        }
+                        auto*                   untagged = metrics->step_latency_us_metric->DeclareMetric(nullptr);
+                        kmonitor::MetricsRecord record(nullptr, nullptr, 0);
+                        untagged->Snapshot(&record, 1000);
+                        EXPECT_TRUE(record.Values().empty());
+                        metrics->step_latency_us_metric->UndeclareMetric(untagged);
+                    }
                 }
             }
         }

@@ -6,14 +6,24 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitConfig
-from rtp_llm.multimodal.kvcm.tensor_object import pack_object, plan_object
-from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCache
+from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+from rtp_llm.multimodal.kvcm.tensor_object import (
+    pack_object,
+    plan_object,
+    unpack_object,
+)
+from rtp_llm.multimodal.mm_embedding_cache import (
+    MMEmbeddingCache,
+    MMEmbeddingCacheEntry,
+)
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.mm_remote_embedding_cache import MMRemoteEmbeddingCache
 from rtp_llm.multimodal.test.multimodal_process_engine_test import (
     FakeEmbeddingLengthInterface,
+    _StubGreenNetProvider,
 )
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 
@@ -132,6 +142,65 @@ class RemoteCacheTest(unittest.TestCase):
             self.assertEqual(actual.dtype, value.dtype)
             self.assertTrue(torch.equal(actual.cpu(), value))
 
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_gpu_only_eviction_writes_snapshot_after_pool_reuse(self):
+        store = Store()
+        store.write_gate.clear()
+        remote = self.remote(store)
+        cache = MMEmbeddingCache(32, 0, on_gpu_evict=remote.submit_eviction)
+        self.addCleanup(cache.clear)
+        self.addCleanup(store.write_gate.set)
+
+        source = torch.arange(8, dtype=torch.float32, device="cuda").reshape(2, 4)
+        expected = source.cpu()
+        _, first = cache.try_acquire("first")
+        verdict = GreenNetVerdict(True, 1, "GPU eviction")
+        first.set_greennet_verdict(verdict)
+        cache.complete("first", first, (source, None))
+        self.assertEqual(cache.resident_tiers(), {"first": "gpu"})
+
+        with torch.cuda.stream(torch.cuda.Stream()):
+            _, second = cache.try_acquire("second")
+            cache.complete("second", second, (torch.zeros_like(source), None))
+        source.zero_()
+        self.assertEqual(cache.resident_tiers(), {"second": "gpu"})
+        self.assertEqual(cache.stats()["cpu_pool_capacity_bytes"], 0)
+        held = first.wait()[0]
+        self.assertEqual(held.device, source.device)
+        self.assertTrue(torch.equal(held.cpu(), expected))
+        held.zero_()
+
+        store.write_gate.set()
+        self.assertTrue(store.saved.wait(2))
+        restored = MMEmbeddingCacheEntry()
+        loaded, positions = remote.load("first", entry=restored)
+        self.assertEqual(restored.wait_greennet(0), verdict)
+        self.assertTrue(restored.greennet_passed)
+        self.assertIsNone(positions)
+        self.assertEqual(loaded.device, source.device)
+        self.assertTrue(torch.equal(loaded.cpu(), expected))
+        cache.clear()
+        remote.close()
+        self.assertEqual(set(store.objects), {"first"})
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_gpu_only_fragmentation_writes_only_the_lru_victim(self):
+        store = Store()
+        remote = self.remote(store)
+        cache = MMEmbeddingCache(32, 0, on_gpu_evict=remote.submit_eviction)
+        self.addCleanup(cache.clear)
+        for index, key in enumerate(("a", "b", "c", "d")):
+            _, entry = cache.try_acquire(key)
+            value = torch.full((2,), float(index), device="cuda")
+            cache.complete(key, entry, (value, None))
+        cache.remove("b")
+        cache.remove("d")
+        _, entry = cache.try_acquire("large")
+        cache.complete("large", entry, (torch.ones(4, device="cuda"), None))
+        self.assertEqual(cache.resident_tiers(), {"c": "gpu", "large": "gpu"})
+        remote.close()
+        self.assertEqual(set(store.objects), {"a"})
+
     def test_timeout_retains_budget_until_actual_io_completion(self):
         store = Store({"key": pack_object(plan_object((torch.ones(3, 4), None)))})
         store.read_gate.clear()
@@ -156,16 +225,38 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(remote.stats()["read_error"], 2)
         self.assertEqual(remote.stats()["inflight_bytes"], 0)
 
+    def test_malformed_or_rejected_remote_verdict_cannot_approve_an_entry(self):
+        store = Store()
+        remote = self.remote(store)
+        inspection = dict(
+            checked=True, passed=True, code=1, message="", request_scoped=False
+        )
+        for field, invalid in (
+            ("checked", "true"),
+            ("request_scoped", 0),
+            ("code", True),
+            ("message", 0),
+            ("passed", False),
+        ):
+            with self.subTest(field=field):
+                value = dict(
+                    version=1,
+                    result=(torch.ones(2, 4), None),
+                    greennet={**inspection, field: invalid},
+                )
+                store.objects["bad"] = pack_object(plan_object(value))
+                entry = MMEmbeddingCacheEntry()
+                self.assertIsNone(remote.load("bad", entry=entry))
+                self.assertFalse(entry.is_greennet_decided)
+        self.assertEqual(remote.stats()["read_error"], 5)
+
     def test_write_budget_dedup_and_unknown_failure_do_not_remove(self):
         store = Store()
         store.write_gate.clear()
         remote = self.remote(store, max_pending=1)
-        entry = SimpleNamespace(
-            pool_owners=[],
-            result=(torch.ones(2, 4), None),
-            error=None,
-            original_devices=(torch.device("cpu"), None),
-        )
+        entry = MMEmbeddingCacheEntry()
+        entry.complete((torch.ones(2, 4), None))
+        entry.original_devices = (torch.device("cpu"), None)
         remote.submit_eviction("same", entry)
         remote.submit_eviction("same", entry)
         remote.submit_eviction("different", entry)
@@ -199,17 +290,18 @@ class RemoteCacheTest(unittest.TestCase):
 
 
 class EngineRemoteCacheTest(unittest.TestCase):
-    def engine(self, store):
+    def engine(self, store, *, gpu_bytes=0, cpu_bytes=1024, request_scoped=False):
         config = VitConfig()
         config.use_local_preprocess = True
-        config.mm_cache_gpu_max_bytes = 0
-        config.mm_cache_cpu_max_bytes = 1024
+        config.mm_cache_gpu_max_bytes = gpu_bytes
+        config.mm_cache_cpu_max_bytes = cpu_bytes
         config.mm_hash_key_cache_max_bytes = 4096
         config.mm_remote_cache_enable = True
         config.mm_remote_cache_read_timeout_ms = 500
         model = ModelConfig()
         model.mm_related_params.preprocess_batch_size = 1
         interface = FakeEmbeddingLengthInterface()
+        interface.inspection_verdict_is_request_scoped = request_scoped
         with patch(
             "rtp_llm.multimodal.kvcm.RtpKvMetaObjectClient.from_env", return_value=store
         ):
@@ -218,6 +310,191 @@ class EngineRemoteCacheTest(unittest.TestCase):
             )
         self.addCleanup(engine.stop)
         return engine
+
+    def test_remote_requires_at_least_one_local_tier(self):
+        with self.assertRaisesRegex(ValueError, "nonzero CPU or GPU embedding cache"):
+            self.engine(Store(), gpu_bytes=0, cpu_bytes=0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_engine_wires_gpu_only_eviction_to_remote(self):
+        store = Store()
+        engine = self.engine(store, gpu_bytes=32, cpu_bytes=0)
+        config = MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+        first, second = [
+            MultimodalInput(url, 1, torch.empty(0), config) for url in ("a", "bb")
+        ]
+
+        def embed(data_list, mm_types, **kwargs):
+            return [
+                (
+                    torch.arange(8, device="cuda").float().reshape(2, 4) + data.item(),
+                    None,
+                )
+                for data in data_list
+            ]
+
+        with patch.object(
+            engine.mm_part, "batched_embedding", side_effect=embed
+        ) as forward:
+            expected = engine.mm_embedding_impl([first]).embeddings[0].clone()
+            engine._embedding_cache.flush()
+            engine.mm_embedding_impl([second])
+            engine._embedding_cache.flush()
+            self.assertTrue(store.saved.wait(2))
+            self.assertEqual(set(store.objects), {first.cache_key()})
+            loaded = engine.mm_embedding_impl([first]).embeddings[0]
+            self.assertEqual(forward.call_count, 2)
+        self.assertEqual(loaded.device, expected.device)
+        self.assertTrue(torch.equal(loaded, expected))
+        self.assertEqual(engine._remote_embedding_cache.stats()["hit"], 1)
+
+    @staticmethod
+    def input(url):
+        config = MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+        return MultimodalInput(url, 1, torch.empty(0), config)
+
+    def test_checked_result_crosses_workers_without_reinspection(self):
+        # One 32-byte slot forces the first URL to be evicted to KVCM.
+        first, second = self.input("aa"), self.input("bb")
+        store = Store()
+        writer = self.engine(store, cpu_bytes=32)
+        verdict = GreenNetVerdict(True, 1, "accepted by writer")
+        writer._inspection._greennet_provider = _StubGreenNetProvider(verdict)
+        expected = writer._embed_with_greennet_sync([first]).embeddings[0].clone()
+        writer._embedding_cache.flush()
+        writer._embed_with_greennet_sync([second])
+        writer._embedding_cache.flush()
+        self.assertTrue(store.saved.wait(2))
+        for sync in (True, False):
+            with self.subTest(sync=sync):
+                reader = self.engine(Store(store.objects))
+                provider = _StubGreenNetProvider(
+                    GreenNetVerdict(False, 2, "unexpected")
+                )
+                reader._inspection._greennet_provider = provider
+                with patch.object(
+                    reader.preprocess_executor,
+                    "preprocess_func",
+                    side_effect=AssertionError("unexpected download"),
+                ), patch.object(
+                    reader.mm_part,
+                    "batched_embedding",
+                    side_effect=AssertionError("unexpected forward"),
+                ):
+                    if sync:
+                        result = reader._embed_with_greennet_sync([first])
+                    else:
+                        result = reader.get_embedding_result([first], request_id=71)[0]
+                self.assertTrue(torch.equal(result.embeddings[0], expected))
+                entry = reader._embedding_cache.peek(first.cache_key())
+                self.assertEqual(entry.greennet_snapshot(), (verdict, True))
+                self.assertEqual(provider.calls, 0)
+
+    def test_followers_of_remote_lookup_respect_producer_inspection_override(self):
+        item = self.input("inflight")
+        value = (torch.ones(2, 4), None)
+        for producer_checks in (True, False):
+            with self.subTest(producer_checks=producer_checks):
+                store = Store({item.cache_key(): pack_object(plan_object(value))})
+                store.read_gate.clear()
+                engine = self.engine(store)
+                provider = _StubGreenNetProvider(GreenNetVerdict(True))
+                engine._inspection._greennet_provider = provider
+                engine.async_submit(
+                    [item],
+                    request_id=1,
+                    user_id="producer",
+                    input_inspection_enabled=producer_checks,
+                )
+                self.assertTrue(store.read_started.wait(2))
+                # Release the producer only after the follower has joined the same lookup.
+                claim = engine._claim_and_submit_async
+
+                def join(*args, **kwargs):
+                    entries = claim(*args, **kwargs)
+                    store.read_gate.set()
+                    return entries
+
+                with patch.object(engine, "_claim_and_submit_async", side_effect=join):
+                    engine.get_embedding_result(
+                        [item],
+                        request_id=2,
+                        user_id="follower",
+                        input_inspection_enabled=True,
+                    )
+                self.assertEqual(
+                    provider.user_ids, ["producer" if producer_checks else "follower"]
+                )
+                self.assertEqual(engine._remote_embedding_cache.stats()["hit"], 1)
+
+    def test_source_batch_inspects_only_unchecked_remote_results(self):
+        from rtp_llm.multimodal.mm_preprocess import MMPreprocessResult
+
+        checked, unchecked, legacy = [self.input(url) for url in ("ok", "off", "old")]
+        store = Store()
+        writer = self.engine(store)
+        cache = writer._embedding_cache
+        value = (torch.ones(2, 4), None)
+        for item, approved in ((checked, True), (unchecked, False)):
+            _, entry = cache.try_acquire(item.cache_key())
+            entry.set_greennet_verdict(
+                GreenNetVerdict(True, 1, "stored"), checked=approved
+            )
+            cache.complete(item.cache_key(), entry, value)
+        cache.flush()
+        cache.resize(0, 0)
+        writer._remote_embedding_cache.close()
+        store.objects[legacy.cache_key()] = pack_object(plan_object(value))
+        unchecked_value = unpack_object(store.objects[unchecked.cache_key()])
+        self.assertFalse(unchecked_value["greennet"]["checked"])
+        reader = self.engine(Store(store.objects))
+        reader.mm_part.supports_inspection_sources = True
+        provider = _StubGreenNetProvider(GreenNetVerdict(True))
+        reader._inspection._greennet_provider = provider
+
+        def prepare(inputs, config, **kwargs):
+            self.assertTrue(kwargs["capture_inspection_sources"])
+            return MMPreprocessResult(None, [item.url.encode() for item in inputs])
+
+        with patch.object(
+            reader.preprocess_executor, "preprocess_func", side_effect=prepare
+        ) as preprocess, patch.object(
+            reader.mm_part,
+            "batched_embedding",
+            side_effect=AssertionError("unexpected forward"),
+        ):
+            result = reader._embed_with_greennet_sync([checked, unchecked, legacy])
+        self.assertEqual(len(result.embeddings), 3)
+        self.assertEqual(preprocess.call_count, 2)
+        self.assertEqual(provider.source_bytes, [b"off", b"old"])
+        self.assertEqual(
+            reader._embedding_cache.peek(checked.cache_key()).wait_greennet(0).message,
+            "stored",
+        )
+        self.assertTrue(
+            reader._embedding_cache.peek(unchecked.cache_key()).greennet_passed
+        )
+
+    def test_request_scoped_writer_or_reader_requires_fresh_verdict(self):
+        item = self.input("scoped")
+        for scoped_writer, scoped_reader in ((True, False), (False, True)):
+            with self.subTest(scoped_writer=scoped_writer, scoped_reader=scoped_reader):
+                store = Store()
+                writer = self.engine(store, request_scoped=scoped_writer)
+                writer._inspection._greennet_provider = _StubGreenNetProvider(
+                    GreenNetVerdict(True)
+                )
+                writer._embed_with_greennet_sync([item])
+                writer._embedding_cache.flush()
+                writer._embedding_cache.resize(0, 0)
+                self.assertTrue(store.saved.wait(2))
+                reader = self.engine(Store(store.objects), request_scoped=scoped_reader)
+                provider = _StubGreenNetProvider(GreenNetVerdict(False, 2, "blocked"))
+                reader._inspection._greennet_provider = provider
+                with self.assertRaisesRegex(FtRuntimeException, "blocked"):
+                    reader.get_embedding_result([item], user_id="new-user")
+                self.assertEqual(provider.user_ids, ["new-user"])
+                self.assertIsNone(reader._embedding_cache.peek(item.cache_key()))
 
     def test_sync_hit_preserves_extras_and_skips_preprocess_and_forward(self):
         mm_input = MultimodalInput(
@@ -262,12 +539,6 @@ class EngineRemoteCacheTest(unittest.TestCase):
         self.assertEqual(engine._remote_embedding_cache.stats()["miss"], 1)
 
     def test_remote_hit_does_not_bypass_greennet_rejection(self):
-        from rtp_llm.config.exceptions import FtRuntimeException
-        from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
-        from rtp_llm.multimodal.test.multimodal_process_engine_test import (
-            _StubGreenNetProvider,
-        )
-
         mm_input = MultimodalInput(
             "rejected",
             1,

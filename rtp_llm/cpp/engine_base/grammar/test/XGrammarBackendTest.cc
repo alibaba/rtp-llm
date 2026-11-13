@@ -581,11 +581,15 @@ TEST(XGrammarBackendTest, MissingRuleHashIsUnsupportedAndCached) {
     EXPECT_EQ(backend->stats().invalid_cache_size, 1);
 }
 
-TEST(XGrammarBackendTest, RealMissingRuleHashSchemaIsUnsupported) {
+TEST(XGrammarBackendTest, LargeRegexRepetitionCompilesAndEnforcesBounds) {
     auto       backend = makeBackend();
     const auto result  = backend->compileNow(jsonKey(R"({"type":"string","pattern":"^[\\s\\S]{8,600}$"})"));
-    EXPECT_EQ(result.status.code(), absl::StatusCode::kInvalidArgument);
-    EXPECT_NE(std::string(result.status.message()).find("compiler does not support this grammar"), std::string::npos);
+    ASSERT_TRUE(result.status.ok()) << result.status.ToString();
+    ASSERT_TRUE(result.compiled);
+    for (const int length : {7, 8, 600, 601}) {
+        xgrammar::GrammarMatcher matcher(*result.compiled);
+        EXPECT_EQ(matcher.AcceptString("\"" + std::string(length, 'a') + "\""), length >= 8 && length <= 600);
+    }
 }
 
 TEST(XGrammarBackendTest, ExplicitSyntaxRuntimeFailuresAreDeterministicAndCached) {

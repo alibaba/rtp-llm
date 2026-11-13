@@ -365,11 +365,13 @@ void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags*               t
 
 bool RtpLLMEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(step_latency_us_metric, "rtp_llm_step_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(step_interval_us_metric, "rtp_llm_step_interval_us");
     return true;
 }
 
 void RtpLLMEngineMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMEngineMetricsCollector* collector) {
     REPORT_GAUGE(step_latency_us);
+    REPORT_GAUGE(step_interval_us);
 }
 
 bool RtpLLMGrammarMetrics::init(kmonitor::MetricsGroupManager* manager) {

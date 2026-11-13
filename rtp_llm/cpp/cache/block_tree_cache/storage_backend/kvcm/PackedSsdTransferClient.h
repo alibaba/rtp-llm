@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <vector>
 #include "kvcm_client/transfer_client.h"
+#include "kvcm_client/TransferClientCompat.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkTransferObserver.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -30,6 +31,7 @@ class PackedSsdTransferClient final: public kv_cache_manager::TransferClient, pu
         Buffers buffers;
         Trace trace;
         size_t payload_bytes{0};
+        int64_t deadline_ms{0};
     };
 
 public:
@@ -100,14 +102,25 @@ public:
     }
 
     Code LoadKvCaches(const Uris& uris, const Buffers& destination, Trace trace = nullptr) override {
+        return LoadKvCachesWithDeadline(uris, destination, 0, std::move(trace));
+    }
+
+    Code LoadKvCachesWithDeadline(const Uris& uris, const Buffers& destination,
+                                  int64_t deadline_ms, Trace trace = nullptr)
+#if defined(KVCM_HAS_TRANSFER_DEADLINE)
+        override
+#endif
+    {
         std::lock_guard<std::mutex> lock(mutex_);
         if (trace && trace->block_ids.size() != uris.size())
             return kv_cache_manager::ER_INVALID_PARAMS;
         auto operation = makeOperation(uris, destination, false, read_thread_init_ ? max_read_window_objects : 1);
         if (!operation)
             return kv_cache_manager::ER_INVALID_LOCAL_BUFFERS;
-        for (size_t block = 0; block < uris.size(); ++block)
+        for (size_t block = 0; block < uris.size(); ++block) {
             operation->calls[block]->trace = blockTrace(trace, block, uris.size());
+            operation->calls[block]->deadline_ms = deadline_ms;
+        }
         auto scatter = [&](size_t block) {
             size_t offset = 0;
             for (const auto& iov : destination[block].iovs) {
@@ -182,6 +195,15 @@ public:
     }
 
     std::pair<Code, Uris> SaveKvCaches(const Uris& uris, const Buffers& source, Trace trace = nullptr) override {
+        return SaveKvCachesWithDeadline(uris, source, 0, std::move(trace));
+    }
+
+    std::pair<Code, Uris> SaveKvCachesWithDeadline(const Uris& uris, const Buffers& source,
+                                                 int64_t deadline_ms, Trace trace = nullptr)
+#if defined(KVCM_HAS_TRANSFER_DEADLINE)
+        override
+#endif
+    {
         std::lock_guard<std::mutex> lock(mutex_);
         if (trace && trace->block_ids.size() != uris.size())
             return {kv_cache_manager::ER_INVALID_PARAMS, {}};
@@ -190,6 +212,7 @@ public:
             return {kv_cache_manager::ER_INVALID_LOCAL_BUFFERS, {}};
         // Prepare trace slices before the first gather or SDK submission.
         for (size_t window = 0; window < operation->write_ranges.size(); ++window) {
+            operation->write_calls[window]->deadline_ms = deadline_ms;
             if (trace) {
                 const auto& range = operation->write_ranges[window];
                 auto slice = std::make_shared<kv_cache_manager::TransferTraceInfo>(*trace);
@@ -269,7 +292,7 @@ private:
     Code loadOne(const InnerIo& call) {
         Code code;
         try {
-            code = inner_->LoadKvCaches(call.uris, call.buffers, call.trace);
+            code = loadSdkKvCaches(*inner_, call.uris, call.buffers, call.deadline_ms, call.trace);
         } catch (...) {
             observe(true, 0, true);
             throw;
@@ -281,7 +304,7 @@ private:
     std::pair<Code, Uris> saveBatch(const InnerIo& call) {
         std::pair<Code, Uris> result;
         try {
-            result = inner_->SaveKvCaches(call.uris, call.buffers, call.trace);
+            result = saveSdkKvCaches(*inner_, call.uris, call.buffers, call.deadline_ms, call.trace);
         } catch (...) {
             observe(false, 0, true);
             throw;

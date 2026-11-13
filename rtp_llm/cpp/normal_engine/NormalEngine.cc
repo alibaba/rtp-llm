@@ -1042,8 +1042,9 @@ absl::Status NormalEngine::step() try {
     }
 
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    absl::Status status             = absl::OkStatus();
+    int64_t      step_begin_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
+    int64_t      execution_begin_time_us = 0;
+    absl::Status status                  = absl::OkStatus();
 
     // Per-request timeline: if any stream requested gen_timeline and no session is
     // active yet, configure the profiler so the executor-driven step window
@@ -1068,7 +1069,8 @@ absl::Status NormalEngine::step() try {
         ++execute_step_;
         RTP_LLM_PROFILE_SCOPE_DYNAMIC(
             "engine.normal.execute(step=%" PRId64 ",stream_size=%zu)", execute_step_, streams.size());
-        status = executor_->process(streams, tps_schedule_time_us);
+        execution_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        status                  = executor_->process(streams, tps_schedule_time_us);
         if (propose_params_) {
             step_profiler_.finishStep();
         }
@@ -1088,8 +1090,10 @@ absl::Status NormalEngine::step() try {
     // without this gate the gauge gets diluted to ~0 by idle iterations.
     if (parallelism_config.tp_rank == 0 && !streams.empty()) {
         RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
-        auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
-        reportMetrics({step_latency});
+        auto step_latency  = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
+        auto step_interval = previous_execution_begin_us_ ? execution_begin_time_us - previous_execution_begin_us_ : 0;
+        previous_execution_begin_us_ = execution_begin_time_us;
+        reportMetrics({step_latency, step_interval});
     }
 
     return status;

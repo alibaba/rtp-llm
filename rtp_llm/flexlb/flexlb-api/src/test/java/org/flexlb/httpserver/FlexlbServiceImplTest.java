@@ -123,8 +123,7 @@ class FlexlbServiceImplTest {
         var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(99999L).setSeqLen(2048).setGenerateInput(bytes).build();
         BalanceContext context = org.springframework.test.util.ReflectionTestUtils.invokeMethod(service, "buildContext", request);
-        if (batch) { assertSame(bytes, context.getGenerateInputPb()); }
-        else { org.junit.jupiter.api.Assertions.assertNull(context.getGenerateInputPb()); }
+        if (batch) { assertSame(bytes, context.getGenerateInputPb()); } else { org.junit.jupiter.api.Assertions.assertNull(context.getGenerateInputPb()); }
     }
 
     @ParameterizedTest
@@ -1258,12 +1257,19 @@ class FlexlbServiceImplTest {
             assertFalse(resp.getSuccess());
             assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), resp.getCode());
 
-            // The interceptor owns the span lifecycle; nothing is exported yet.
-            assertEquals(0, exporter.spans.size());
+            // The interceptor owns the server span lifecycle: it exports only after
+            // finish, while lifecycle events export their instantaneous child spans.
+            assertEquals(0, exporter.spans.stream()
+                    .filter(exported -> "rtp_llm.flexlb.schedule".equals(exported.getName())).count(),
+                    () -> "exported before server span finish: " + exporter.spans);
             org.flexlb.telemetry.FlexlbTrace.finish(serverSpan, null);
 
-            assertEquals(1, exporter.spans.size());
-            io.opentelemetry.sdk.trace.data.SpanData span = exporter.spans.get(0);
+            assertEquals(1, exporter.spans.stream()
+                    .filter(exported -> "rtp_llm.flexlb.schedule".equals(exported.getName())).count(),
+                    () -> "server span must be exported exactly once: " + exporter.spans);
+            io.opentelemetry.sdk.trace.data.SpanData span = exporter.spans.stream()
+                    .filter(exported -> "rtp_llm.flexlb.schedule".equals(exported.getName()))
+                    .findFirst().orElseThrow();
             assertEquals(io.opentelemetry.api.trace.StatusCode.ERROR,
                     span.getStatus().getStatusCode());
             assertEquals("FLEXLB_INTERNAL_ERROR",
@@ -1272,8 +1278,11 @@ class FlexlbServiceImplTest {
             assertEquals((long) StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
                     span.getAttributes().get(
                             io.opentelemetry.api.common.AttributeKey.longKey("flexlb.schedule.code")));
-            assertEquals(1, span.getEvents().size());
-            assertEquals("flexlb.schedule.failed", span.getEvents().getFirst().getName());
+            // Lifecycle trace events (request received, routing started, response ready)
+            // share the server span; the failure contract is exactly one failed event.
+            assertEquals(1, span.getEvents().stream().filter(
+                    event -> "flexlb.schedule.failed".equals(event.getName())).count(),
+                    () -> "events: " + span.getEvents());
         } finally {
             org.flexlb.telemetry.FlexlbTrace.configure(null, "");
             sdk.close();
@@ -1303,8 +1312,11 @@ class FlexlbServiceImplTest {
                     io.opentelemetry.api.common.AttributeKey.stringKey("error.type")));
             assertEquals((long) StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), data.getAttributes().get(
                     io.opentelemetry.api.common.AttributeKey.longKey("flexlb.schedule.code")));
-            assertEquals(1, data.getEvents().size());
-            assertEquals("flexlb.schedule.failed", data.getEvents().getFirst().getName());
+            // Lifecycle trace events share the forwarded span; the failure contract
+            // is exactly one failed event.
+            assertEquals(1, data.getEvents().stream().filter(
+                    event -> "flexlb.schedule.failed".equals(event.getName())).count(),
+                    () -> "events: " + data.getEvents());
             verify(routeService, never()).route(any());
         }
     }

@@ -1091,7 +1091,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 cache_manager,
                                 std::make_optional(0),
                                 mtp_params->model_config_.hc_mult});
-        // Keep EPLB disabled for every draft wrapper; only the target records expert load.
         model_params.metrics_reporter = metrics_reporter_;
         model_params.quant_algo       = mtp_params->model_config_.quant_algo;
         model_params.hidden_state_capture_layer_ids =
@@ -1129,6 +1128,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             // PREFILL descriptors omit every proposal-only tensor, so do not
             // instantiate a PROPOSE wrapper for that graph.
             if (!dspark_prefill_commit_only_) {
+                // only enable draft eplb if the draft model is used for proposal, not for commit-only
+                if (is_dspark_) {
+                    model_params.eplb_config = mtp_params->eplb_config;
+                }
                 draft_model_.reset(new PyWrappedModel(model_params,
                                                       params.py_sp_model,
                                                       false,
@@ -1139,6 +1142,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             // dspark use DSparkModelRole to call commit func, and token_per_bs is different
             // so another model is required
             if (enable_cuda_graph || is_dspark_) {
+                // DSpARK commit only writes feature KV. The proposal wrapper
+                // owns draft EPLB state and advances it once per proposal.
+                model_params.eplb_config = EPLBConfig{};
                 RTP_LLM_LOG_INFO("[speculative decoding] creating draft prefill model");
                 // Ordinary MTP captures a prefill graph. DSpARK uses a decode-graph
                 // commit wrapper: gamma+1 rows per request for dense verification,
