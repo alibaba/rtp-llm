@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
 
 namespace rtp_llm {
 namespace {
@@ -157,6 +158,40 @@ TEST(CacheTopologyTest, TagIdentityDoesNotDependOnNumericGroupOrder) {
     EXPECT_EQ(first->group("linear").policy.group_type, reversed->group("linear").policy.group_type);
     EXPECT_EQ(first->groupForLayer(0, "full").tag, reversed->groupForLayer(0, "full").tag);
     EXPECT_EQ(first->groupForLayer(0, "linear").tag, reversed->groupForLayer(0, "linear").tag);
+}
+
+TEST(CacheTopologyTest, InitialMlaBlockTablePrefersFullGroupOverEarlierLinearGroup) {
+    auto topology = CacheTopology::create({makeGroup("linear", CacheGroupType::LINEAR), makeGroup("full")},
+                                          {{0, {"linear"}}, {1, {"full"}}});
+    EXPECT_EQ(topology->initialMlaBlockTableGroup().tag, "full");
+
+    auto single = CacheTopology::create({makeGroup("linear", CacheGroupType::LINEAR)}, {{0, {"linear"}}});
+    EXPECT_EQ(single->initialMlaBlockTableGroup().tag, "linear");
+}
+
+TEST(CacheTopologyTest, InitialMlaBlockTableIgnoresFullGroupWithoutModelLayers) {
+    auto topology = CacheTopology::create(
+        {makeGroup("target_full"), makeGroup("linear", CacheGroupType::LINEAR), makeGroup("draft_full")},
+        {{0, {"linear"}}, {1, {"draft_full"}}});
+    EXPECT_EQ(topology->initialMlaBlockTableGroup().tag, "draft_full");
+}
+
+TEST(CacheTopologyTest, InitialMlaBlockTablePrefersMlaSpecOverEarlierFullIndexer) {
+    auto mla = makeGroup("arbitrary_mla_tag");
+    mla.spec = std::make_shared<MLAKVCacheSpec>(mla.tag, 8, 2, 1);
+    for (bool indexer_first : {false, true}) {
+        auto indexer  = makeGroup("arbitrary_indexer_tag");
+        auto groups   = indexer_first ? std::vector<GroupBase>{indexer, mla} : std::vector<GroupBase>{mla, indexer};
+        auto topology = CacheTopology::create(std::move(groups), {{0, {indexer.tag, mla.tag}}});
+        EXPECT_EQ(topology->initialMlaBlockTableGroup().tag, mla.tag);
+    }
+}
+
+TEST(CacheTopologyTest, InitialMlaBlockTableIgnoresUnusedMlaSpec) {
+    auto target   = makeGroup("unused_target_mla");
+    target.spec   = std::make_shared<MLAKVCacheSpec>(target.tag, 8, 2, 1);
+    auto topology = CacheTopology::create({target, makeGroup("owned_full")}, {{0, {"owned_full"}}});
+    EXPECT_EQ(topology->initialMlaBlockTableGroup().tag, "owned_full");
 }
 
 TEST(CacheTopologyTest, PhysicalGroupResolvesMultipleMtpModuleLayerRanges) {
