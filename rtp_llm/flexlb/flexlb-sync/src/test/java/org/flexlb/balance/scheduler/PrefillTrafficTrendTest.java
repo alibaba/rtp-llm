@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -82,6 +83,15 @@ class PrefillTrafficTrendTest {
             var observed = trend.observe(i * 1000L, 50000, 30000, 60000);
             if (i >= 4) { assertFalse(observed.grace()); }
         }
+    }
+
+    @Test void latestSnapshotPublishesTheLastObservationForDiagnostics() {
+        var trend = new PrefillTrafficTrend(config());
+        assertNull(trend.latestSnapshot());
+        var first = trend.observe(0, 50000, 30000, 60000);
+        assertEquals(first, trend.latestSnapshot());
+        var second = trend.observe(500, 40000, 30000, 60000);
+        assertEquals(second, trend.latestSnapshot());
     }
 
     @Test void softProbeNeverOverridesHardCapacityOrEvictionPriority() {

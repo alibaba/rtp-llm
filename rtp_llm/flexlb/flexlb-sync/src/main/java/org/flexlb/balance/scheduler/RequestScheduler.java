@@ -16,6 +16,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
@@ -163,6 +164,11 @@ public final class RequestScheduler {
             }
         }
         return (int) queued;
+    }
+
+    /** Latest per-pool prefill traffic trend snapshot; read-only, empty without the queue coordinator. */
+    public Map<String, PrefillTrafficTrend.Snapshot> prefillTrafficSnapshot() {
+        return globalQueue == null ? Map.of() : globalQueue.prefillTrafficSnapshot();
     }
 
     public List<RequestState> snapshotActiveRequests() {
