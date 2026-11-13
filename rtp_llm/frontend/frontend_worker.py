@@ -356,7 +356,10 @@ class FrontendWorker:
             "min_new_tokens": int(extra_configs.get("min_new_tokens", 0) or 0),
             "ignore_eos": bool(extra_configs.get("ignore_eos", False)),
             "is_streaming": True,
-            "return_incremental": False,
+            # Deltas make text_parts and output_ids additive; cumulative
+            # responses would duplicate every prefix in the final text and
+            # leave completion_tokens stuck at the last chunk length.
+            "return_incremental": True,
             "aux_info": True,
         }
         start_ns = time.monotonic_ns()
@@ -365,6 +368,7 @@ class FrontendWorker:
         step = 0
         last_response = None
         text_parts: List[str] = []
+        output_ids_all: List[int] = []
         # Real graph-replay receipt: CudaGraphRunner appends one byte per
         # decode replay.  Compare its size across this request so the aux
         # flag is backed by execution, never by a predetermined value.
@@ -396,6 +400,13 @@ class FrontendWorker:
                     },
                 )
                 aux = response.generate_outputs.generate_outputs[0].aux_info
+                _ids = getattr(
+                    response.generate_outputs.generate_outputs[0], "output_ids", None
+                )
+                if _ids is not None:
+                    output_ids_all.extend(
+                        _ids.reshape(-1).tolist() if hasattr(_ids, "reshape") else list(_ids)
+                    )
                 telemetry.record(
                     "reuse",
                     {
@@ -419,6 +430,13 @@ class FrontendWorker:
                         "elapsed_ms": (now_ns - last_yield_ns) / 1e6,
                     },
                 )
+                _ids = getattr(
+                    response.generate_outputs.generate_outputs[0], "output_ids", None
+                )
+                if _ids is not None:
+                    output_ids_all.extend(
+                        _ids.reshape(-1).tolist() if hasattr(_ids, "reshape") else list(_ids)
+                    )
             last_yield_ns = now_ns
             if response.generate_texts:
                 text_parts.append(response.generate_texts[0])
@@ -432,13 +450,7 @@ class FrontendWorker:
             _replay_after = _replay_before
         if output.aux_info is not None and _replay_after > _replay_before:
             output.aux_info.decode_graph_replay = True
-        raw_output_ids = getattr(output, "output_ids", None)
-        if raw_output_ids is None:
-            output_ids = []
-        elif hasattr(raw_output_ids, "reshape"):
-            output_ids = raw_output_ids.reshape(-1).tolist()
-        else:
-            output_ids = list(raw_output_ids)
+        output_ids = output_ids_all
         text = "".join(part for part in text_parts if part)
         return {
             "id": external_id,

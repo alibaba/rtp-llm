@@ -99,9 +99,10 @@ def unpack_packed_rows(packed, heads: int, dim: int):
     width = heads * dim
     aligned_tokens = triton.cdiv(tokens, 4) * 4
     scale_columns = triton.cdiv(width // 32, 4)
-    values = torch.empty(
-        (tokens, width), dtype=torch.float8_e4m3fn, device=packed.device
-    )
+    # Keep the Triton parameter a plain byte pointer. Passing a
+    # torch.float8_e4m3fn tensor makes Triton bind an fp8e4nv pointer, which
+    # SM80 rejects at compile time even though the kernel stores bytes.
+    values = torch.empty((tokens, width), dtype=torch.uint8, device=packed.device)
     storage = torch.empty(
         (scale_columns, aligned_tokens), dtype=torch.int32, device=packed.device
     )
@@ -121,4 +122,4 @@ def unpack_packed_rows(packed, heads: int, dim: int):
             BLOCK=block,
             num_warps=4,
         )
-    return values, scales
+    return values.view(torch.float8_e4m3fn), scales

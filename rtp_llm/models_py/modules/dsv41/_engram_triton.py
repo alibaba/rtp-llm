@@ -255,6 +255,10 @@ def lookup_prefetch_rows(weight_uva, scales_uva, indices, num_sms):
 def warmup_lookup_prefetch_rows(weight_uva, scales_uva, indices, num_sms):
     if torch.cuda.is_current_stream_capturing():
         raise RuntimeError("Engram prefetch kernel preparation cannot run in capture")
+    if _needs_reference_lookup(indices.device):
+        # SM80 has no fp8e4nv Triton type; the production lookup already uses
+        # the host-row reference, so warmup must exercise that same path.
+        return _lookup_host_rows_reference(weight_uva, scales_uva, indices)
     return _lookup_host_rows(
         weight_uva,
         scales_uva,
