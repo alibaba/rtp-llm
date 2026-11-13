@@ -30,6 +30,19 @@ def main():
         os.environ["RTP_QWEN4_MOE_LSA_LIBRARY"],
         os.environ["RTP_QWEN4_MOE_LSA_LIBRARY_SHA256"],
     )
+    results = []
+    for hidden_size in (8, 264, 2048, 2560, 4096, 8192):
+        results.extend(run_hidden_size(library, device, rank, hidden_size))
+    if rank == 0:
+        Path(os.environ["RTP_QWEN4_MOE_LSA_RESULTS"]).write_text(
+            json.dumps(results, indent=2) + "\n"
+        )
+    dist.destroy_process_group()
+    if rank == 0:
+        print("LSA_MODEL_ENTRY_DONE", flush=True)
+
+
+def run_hidden_size(library, device, rank, hidden_size):
     from rtp_llm.models_py.distributed import collective_torch
     from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
         PureTpRouterNvfp4Cutlass,
@@ -41,7 +54,7 @@ def main():
         ),
         shared_expert=object(),
         shared_expert_gate=SimpleNamespace(
-            weight=torch.empty(1, device=device, dtype=torch.bfloat16)
+            weight=torch.empty(1, hidden_size, device=device, dtype=torch.bfloat16)
         ),
         use_ep_shared_allreduce=False,
         use_unified_tp_allreduce=False,
@@ -50,7 +63,7 @@ def main():
     model = SimpleNamespace(layers=[SimpleNamespace(mlp=mlp)])
     config = SimpleNamespace(
         is_mtp=False,
-        hidden_size=2560,
+        hidden_size=hidden_size,
         _qwen4_dense_storage="source_bf16",
         eplb_config=SimpleNamespace(enable_eplb=lambda: False),
     )
@@ -80,12 +93,37 @@ def main():
             except RuntimeError:
                 pass
             parallelism.ep_size = 2
+            config.hidden_size = hidden_size + 8 * rank
+            mlp.shared_expert_gate.weight = torch.empty(
+                1, config.hidden_size, device=device, dtype=torch.bfloat16
+            )
+            try:
+                prepare_model_reduce(model, config, parallelism)
+                raise AssertionError("Mismatched rank hidden sizes accepted")
+            except RuntimeError:
+                pass
+            config.hidden_size = hidden_size
+            mlp.shared_expert_gate.weight = torch.empty(
+                1, hidden_size, device=device, dtype=torch.bfloat16
+            )
             owner = prepare_model_reduce(model, config, parallelism)
     assert mlp._reduce_shared_gate is owner
     assert not owner.supports(
-        torch.empty(33, 2560, device=device, dtype=torch.bfloat16)
+        torch.empty(33, hidden_size, device=device, dtype=torch.bfloat16)
     )
-    assert not owner.supports(torch.empty(2, 2560, device=device, dtype=torch.float32))
+    assert not owner.supports(
+        torch.empty(2, hidden_size, device=device, dtype=torch.float32)
+    )
+    assert not owner.supports(
+        torch.empty(1, hidden_size + 8, device=device, dtype=torch.bfloat16)
+    )
+    invalid = ctypes.c_void_p()
+    uid = ctypes.create_string_buffer(library.qwen38_lsa_uid_size())
+    for invalid_hidden in (0, 7, (2**31 - 1) // 32 + 1):
+        assert library.qwen38_lsa_create(
+            rank, device.index, invalid_hidden, uid, ctypes.byref(invalid)
+        )
+        assert not invalid.value
     library.qwen38_lsa_reference.argtypes = [
         ctypes.c_void_p,
         ctypes.c_void_p,
@@ -96,7 +134,7 @@ def main():
     results = []
     for rows in (1, 2, 4, 8, 16, 32):
         torch.manual_seed(300 + rank + rows)
-        partial = torch.randn(rows, 2560, device=device, dtype=torch.bfloat16)
+        partial = torch.randn(rows, hidden_size, device=device, dtype=torch.bfloat16)
         shared = torch.randn_like(partial)
         gate = torch.randn(rows, 1, device=device, dtype=torch.bfloat16)
         hidden = torch.zeros_like(partial)
@@ -184,13 +222,11 @@ def main():
                 dist.all_reduce(duration, op=dist.ReduceOp.MAX)
                 samples.append(duration.item())
             timings[name] = statistics.median(samples)
-        results.append(dict(rows=rows, bitwise=True, times_us=timings))
+        results.append(
+            dict(hidden_size=hidden_size, rows=rows, bitwise=True, times_us=timings)
+        )
         if rank == 0:
             print("LSA_MODEL_ENTRY_CASE", json.dumps(results[-1]), flush=True)
-    if rank == 0:
-        Path(os.environ["RTP_QWEN4_MOE_LSA_RESULTS"]).write_text(
-            json.dumps(results, indent=2) + "\n"
-        )
     # Model close retains contexts until process exit. Tests explicitly destroy
     # only after both ranks synchronize and all graph users have finished.
     torch.cuda.synchronize()
@@ -198,9 +234,7 @@ def main():
     owner.library.qwen38_lsa_destroy(owner.handle)
     owner.handle = None
     owner.close()
-    dist.destroy_process_group()
-    if rank == 0:
-        print("LSA_MODEL_ENTRY_DONE", flush=True)
+    return results
 
 
 if __name__ == "__main__":

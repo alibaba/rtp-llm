@@ -6,17 +6,16 @@
 #include <nccl_device.h>
 
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
 
 namespace {
-using Bf16                            = __nv_bfloat16;
-constexpr int            kHidden      = 2560;
-constexpr int            kMaxRows     = 32;
-constexpr int            kThreads     = 128;
-constexpr int            kMaxBlocks   = 64;
-constexpr size_t         kWindowBytes = 2 * 1024 * 1024;
+using Bf16                          = __nv_bfloat16;
+constexpr int            kMaxRows   = 32;
+constexpr int            kThreads   = 128;
+constexpr int            kMaxBlocks = 64;
 thread_local std::string error_message;
 
 void check(cudaError_t status) {
@@ -30,6 +29,7 @@ void check(ncclResult_t status) {
 
 struct Context {
     int          device;
+    int          hidden;
     ncclComm_t   comm = nullptr;
     ncclDevComm  dev{};
     ncclWindow_t window{};
@@ -37,7 +37,7 @@ struct Context {
     bool         dev_created = false;
     bool         registered  = false;
 
-    explicit Context(int ordinal): device(ordinal) {}
+    Context(int ordinal, int hidden_size): device(ordinal), hidden(hidden_size) {}
     ~Context() {
         // This path is also used after partial construction. No kernel may
         // consume the mapping until construction succeeds on both ranks.
@@ -58,8 +58,8 @@ struct alignas(16) Pack {
     Bf16 values[8];
 };
 
-__global__ void
-reduce_gate(Bf16* output, const Bf16* shared, const Bf16* gate, int count, ncclDevComm comm, ncclWindow_t window) {
+__global__ void reduce_gate(
+    Bf16* output, const Bf16* shared, const Bf16* gate, int count, int hidden, ncclDevComm comm, ncclWindow_t window) {
     const auto*                        local = static_cast<const Pack*>(ncclGetLsaPointer(window, 0, comm.lsaRank));
     const auto*                        peer  = static_cast<const Pack*>(ncclGetLsaPointer(window, 0, 1 - comm.lsaRank));
     const auto*                        shared_packs = reinterpret_cast<const Pack*>(shared);
@@ -72,7 +72,7 @@ reduce_gate(Bf16* output, const Bf16* shared, const Bf16* gate, int count, ncclD
         const Pack  x          = local[i];
         const Pack  y          = peer[i];
         const Pack  addend     = shared_packs[i];
-        const float gate_value = __bfloat162float(gate[(i * 8) / kHidden]);
+        const float gate_value = __bfloat162float(gate[(i * 8) / hidden]);
         const float scale      = __fdividef(1.0f, 1.0f + __expf(-gate_value));
         Pack        result;
 #pragma unroll
@@ -101,7 +101,7 @@ int protect(Function function) {
 }  // namespace
 
 extern "C" int qwen38_lsa_abi() {
-    return 2;
+    return 3;
 }
 extern "C" const char* qwen38_lsa_error() {
     return error_message.c_str();
@@ -114,11 +114,13 @@ extern "C" int qwen38_lsa_unique_id(void* output) {
     return protect([&] { check(ncclGetUniqueId(static_cast<ncclUniqueId*>(output))); });
 }
 
-extern "C" int qwen38_lsa_create(int rank, int device, const void* unique_id, void** output) {
+extern "C" int qwen38_lsa_create(int rank, int device, int hidden, const void* unique_id, void** output) {
     return protect([&] {
         *output = nullptr;
         if (rank < 0 || rank > 1)
             throw std::runtime_error("LSA requires two ranks");
+        if (hidden <= 0 || hidden % 8 != 0 || hidden > std::numeric_limits<int>::max() / kMaxRows)
+            throw std::runtime_error("LSA hidden size must be positive, divisible by 8 and fit its row capacity");
         check(cudaSetDevice(device));
         int major, minor;
         check(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device));
@@ -129,7 +131,7 @@ extern "C" int qwen38_lsa_create(int rank, int device, const void* unique_id, vo
         check(ncclGetVersion(&runtime_version));
         if (runtime_version / 100 != NCCL_VERSION_CODE / 100)
             throw std::runtime_error("Build the LSA library with matching NCCL major/minor headers");
-        auto context = std::make_unique<Context>(device);
+        auto context = std::make_unique<Context>(device, hidden);
         check(ncclCommInitRank(&context->comm, 2, *static_cast<const ncclUniqueId*>(unique_id), rank));
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2, 30, 0)
         ncclCommProperties properties = NCCL_COMM_PROPERTIES_INITIALIZER;
@@ -137,9 +139,10 @@ extern "C" int qwen38_lsa_create(int rank, int device, const void* unique_id, vo
         if (!properties.deviceApiSupport || properties.nLsaTeams != 1)
             throw std::runtime_error("NCCL device LSA is unavailable");
 #endif
-        check(ncclMemAlloc(&context->input, kWindowBytes));
+        const size_t window_bytes = static_cast<size_t>(kMaxRows) * hidden * sizeof(Bf16);
+        check(ncclMemAlloc(&context->input, window_bytes));
         check(ncclCommWindowRegister(
-            context->comm, context->input, kWindowBytes, &context->window, NCCL_WIN_COLL_SYMMETRIC));
+            context->comm, context->input, window_bytes, &context->window, NCCL_WIN_COLL_SYMMETRIC));
         context->registered = true;
 #ifdef NCCL_DEV_COMM_REQUIREMENTS_INITIALIZER
         ncclDevCommRequirements requirements = NCCL_DEV_COMM_REQUIREMENTS_INITIALIZER;
@@ -171,13 +174,14 @@ extern "C" int qwen38_lsa_apply(void*       handle,
         if (device != context->device)
             throw std::runtime_error("LSA device mismatch");
         const auto   stream = static_cast<cudaStream_t>(stream_pointer);
-        const size_t bytes  = rows * kHidden * sizeof(Bf16);
+        const size_t bytes  = rows * context->hidden * sizeof(Bf16);
         check(cudaMemcpyAsync(context->input, input, bytes, cudaMemcpyDeviceToDevice, stream));
-        const int blocks = std::min(kMaxBlocks, (rows * kHidden + 255) / 256);
+        const int blocks = std::min(kMaxBlocks, (rows * context->hidden - 1) / 256 + 1);
         reduce_gate<<<blocks, kThreads, 0, stream>>>(static_cast<Bf16*>(output),
                                                      static_cast<const Bf16*>(shared),
                                                      static_cast<const Bf16*>(gate),
-                                                     rows * kHidden,
+                                                     rows * context->hidden,
+                                                     context->hidden,
                                                      context->dev,
                                                      context->window);
         check(cudaGetLastError());
@@ -192,7 +196,7 @@ extern "C" int qwen38_lsa_reference(void* handle, const void* input, void* outpu
             throw std::runtime_error("Invalid NCCL reference context or rows");
         check(ncclAllReduce(input,
                             output,
-                            rows * kHidden,
+                            rows * context->hidden,
                             ncclBfloat16,
                             ncclSum,
                             context->comm,

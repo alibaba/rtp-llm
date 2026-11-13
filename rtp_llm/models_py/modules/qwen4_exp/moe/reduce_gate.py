@@ -26,11 +26,12 @@ def load_library(path, expected_sha256):
     library = ctypes.CDLL(str(path.resolve()))
     library.qwen38_lsa_error.restype = ctypes.c_char_p
     library.qwen38_lsa_abi.restype = ctypes.c_int
-    if library.qwen38_lsa_abi() != 2:
-        raise ValueError("Qwen3.8 LSA requires ABI 2. Rebuild reduce_gate.cu.")
+    if library.qwen38_lsa_abi() != 3:
+        raise ValueError("Qwen3.8 LSA requires ABI 3. Rebuild reduce_gate.cu.")
     library.qwen38_lsa_uid_size.restype = ctypes.c_int
     library.qwen38_lsa_unique_id.argtypes = [ctypes.c_void_p]
     library.qwen38_lsa_create.argtypes = [
+        ctypes.c_int,
         ctypes.c_int,
         ctypes.c_int,
         ctypes.c_void_p,
@@ -53,15 +54,24 @@ def load_library(path, expected_sha256):
 class LsaMoeReduce:
     """One symmetric window shared by serialized forwards of a single model."""
 
-    def __init__(self, library, group, device):
+    def __init__(self, library, group, device, hidden_size):
         if dist.get_world_size(group) != 2:
             raise ValueError("Qwen3.8 LSA reduction requires a TP2 group")
+        if not (
+            type(hidden_size) is int
+            and 0 < hidden_size <= (2**31 - 1) // 32
+            and hidden_size % 8 == 0
+        ):
+            raise ValueError(
+                "LSA hidden size must be positive, divisible by 8 and fit its row capacity"
+            )
+        self.hidden_size = hidden_size
         self.library = library
         self.device = torch.device(device)
         self.closed = False
         self.handle = ctypes.c_void_p()
         uid = ctypes.create_string_buffer(library.qwen38_lsa_uid_size())
-        state = {"uid": None, "error": None}
+        state = {"uid": None, "error": None, "hidden": hidden_size}
         if dist.get_rank(group) == 0:
             try:
                 self._check(library.qwen38_lsa_unique_id(uid))
@@ -69,7 +79,10 @@ class LsaMoeReduce:
             except Exception as error:
                 state["error"] = str(error)
         peers = exchange_group_state(group, state, "qwen38-lsa-uid")
-        if any(peer["error"] for peer in peers):
+        if (
+            any(peer["error"] for peer in peers)
+            or len({peer["hidden"] for peer in peers}) != 1
+        ):
             raise RuntimeError(str(peers))
         uid.raw = bytes.fromhex(peers[0]["uid"])
         with torch.cuda.device(self.device):
@@ -77,6 +90,7 @@ class LsaMoeReduce:
                 library.qwen38_lsa_create(
                     dist.get_rank(group),
                     self.device.index,
+                    hidden_size,
                     uid,
                     ctypes.byref(self.handle),
                 )
@@ -94,7 +108,7 @@ class LsaMoeReduce:
             and value.dtype == torch.bfloat16
             and value.ndim == 2
             and 1 <= value.shape[0] <= 32
-            and value.shape[1] == 2560
+            and value.shape[1] == self.hidden_size
             and value.is_contiguous()
             and value.data_ptr() % 16 == 0
         )
@@ -109,7 +123,9 @@ class LsaMoeReduce:
             and gate.is_contiguous()
             and gate.shape == (partial.shape[0], 1)
         ):
-            raise ValueError("LSA epilogue requires BF16 [M,2560] and gate [M,1]")
+            raise ValueError(
+                "LSA epilogue requires contiguous BF16 [M,H] matching its hidden size and gate [M,1]"
+            )
         output = torch.empty_like(partial)
         with torch.cuda.device(self.device):
             stream = torch.cuda.current_stream(self.device)
@@ -158,7 +174,12 @@ def prepare_model_reduce(model, config, parallelism):
         return None
     if modes != ["1", "1"]:
         raise ValueError("RTP_QWEN4_MOE_REDUCE_GATE_FUSION must agree on TP ranks")
-    state = {"error": None, "host": socket.gethostname(), "layers": len(model.layers)}
+    state = {
+        "error": None,
+        "host": socket.gethostname(),
+        "layers": len(model.layers),
+        "hidden": config.hidden_size,
+    }
     library = None
     try:
         if not (
@@ -166,12 +187,14 @@ def prepare_model_reduce(model, config, parallelism):
             and parallelism.dp_size == parallelism.pp_size == 1
             and parallelism.local_world_size == 2
             and parallelism.get_ffn_tp_size() == 1
-            and config.hidden_size == 2560
+            and type(config.hidden_size) is int
+            and 0 < config.hidden_size <= (2**31 - 1) // 32
+            and config.hidden_size % 8 == 0
             and getattr(config, "_qwen4_dense_storage", None) == "source_bf16"
             and not config.eplb_config.enable_eplb()
         ):
             raise ValueError(
-                "LSA shared merge requires local EP2, BF16 Dense and H2560"
+                "LSA shared merge requires local EP2, BF16 Dense and a positive hidden size divisible by 8"
             )
         for layer in model.layers:
             mlp = layer.mlp
@@ -182,6 +205,8 @@ def prepare_model_reduce(model, config, parallelism):
                 and not mlp.use_ep_shared_allreduce
                 and not mlp.use_unified_tp_allreduce
                 and getattr(mlp, "_shared_stream", None) is None
+                and tuple(mlp.shared_expert_gate.weight.shape)
+                == (1, config.hidden_size)
                 and mlp.shared_expert_gate.weight.is_cuda
                 and mlp.shared_expert_gate.weight.dtype == torch.bfloat16
             ):
@@ -199,10 +224,14 @@ def prepare_model_reduce(model, config, parallelism):
         any(peer["error"] for peer in peers)
         or len({peer["host"] for peer in peers}) != 1
         or len({peer["layers"] for peer in peers}) != 1
+        or len({peer["hidden"] for peer in peers}) != 1
     ):
         raise RuntimeError(f"Qwen3.8 LSA startup agreement failed: {peers}")
     owner = LsaMoeReduce(
-        library, group, torch.device("cuda", torch.cuda.current_device())
+        library,
+        group,
+        torch.device("cuda", torch.cuda.current_device()),
+        config.hidden_size,
     )
     for layer in model.layers:
         layer.mlp._reduce_shared_gate = owner
