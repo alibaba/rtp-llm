@@ -288,7 +288,7 @@ def compile_case(
 
 
 _RESOURCE = re.compile(r"^[1-9]\d*(?:\.\d+)?(?:KiB|MiB|GiB|TiB|[kmgtKMGT]i?|B)?$")
-_ROLES = {"master", "client", "prefill", "decode", "vit"}
+_ROLES = {"master", "frontend", "prefill", "decode", "vit"}
 
 
 def _expand_config(raw):

@@ -190,12 +190,6 @@ public final class EngineLoop implements AutoCloseable {
 
     private void step() {
         scheduler.prepareKvAndCheckTimeouts();
-        if (inFlightForward != null && scheduler.isForwardCancelled(inFlightForward.work)) {
-            var cancelled = inFlightForward;
-            inFlightForward = null;
-            cancelled.execution.cancel();
-            scheduler.failForward(cancelled.work, new RequestFailure(RequestFailure.Reason.CANCELLED, "All batch members stopped"));
-        }
         if (nextForwardAt != 0) {
             if (nextForwardAt - System.nanoTime() > 0) return;
             nextForwardAt = 0;

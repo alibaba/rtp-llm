@@ -76,7 +76,7 @@ class LocalRpcTest {
                 var first=rpc.generateStreamCall(input);while(first.hasNext()) first.next();
                 var cache=rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
                 var base=org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(org.flexlb.mock.protocol.MultimodalProtocol.text(input), 2, 0, 1).keys();
-                assertEquals(Set.of(base.get(3),base.get(7)),Set.copyOf(cache.getCacheKeyListList()));
+                assertEquals(Set.of(base.get(3),base.get(7)),Set.copyOf(cache.getCacheKeysMap().keySet()));
                 assertEquals(8,cache.getBlockSize());assertEquals(64,cache.getTotalKvCache());
                 var worker = rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance());
                 assertEquals(64, worker.getTotalKvCache());
@@ -100,9 +100,8 @@ class LocalRpcTest {
                 var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS);
                 var query = CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build();
                 var first = rpc.getCacheStatus(query);
-                assertEquals(Set.of(Long.MIN_VALUE, Long.MAX_VALUE), Set.copyOf(first.getCacheKeyListList()));
-                assertEquals(0, first.getCacheKeysCount());
-                assertEquals(first.getCacheKeyListList(), rpc.getCacheStatus(query).getCacheKeyListList());
+                assertEquals(java.util.Map.of(Long.MIN_VALUE, true, Long.MAX_VALUE, true), first.getCacheKeysMap());
+                assertEquals(first.getCacheKeysMap(), rpc.getCacheStatus(query).getCacheKeysMap());
                 assertEquals(2, first.getBlockSize());
                 assertEquals(16, first.getTotalKvCache());
                 assertEquals(16, first.getAvailableKvCache());
@@ -110,11 +109,11 @@ class LocalRpcTest {
                     assertNotNull(held);
                     var unchanged = rpc.getCacheStatus(query.toBuilder().setLatestCacheVersion(first.getVersion()).build());
                     assertEquals(first.getVersion(), unchanged.getVersion());
-                    assertEquals(0, unchanged.getCacheKeyListCount());
+                    assertEquals(0, unchanged.getCacheKeysCount());
                     assertEquals(14, unchanged.getAvailableKvCache());
                     var capacityOnly = rpc.getCacheStatus(query.toBuilder().setNeedCacheKeys(false).setLatestCacheVersion(12345).build());
                     assertEquals(12345, capacityOnly.getVersion());
-                    assertEquals(0, capacityOnly.getCacheKeyListCount());
+                    assertEquals(0, capacityOnly.getCacheKeysCount());
                     assertEquals(14, capacityOnly.getAvailableKvCache());
                 }
                 assertEquals(16, rpc.getCacheStatus(query).getAvailableKvCache());
@@ -134,12 +133,12 @@ class LocalRpcTest {
                 assertEquals(16, rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
                 var text = metrics(node);
                 assertEquals(1, sample(text, "rtp_llm_framework_requests_total", "outcome=\"timeout\""));
-                assertEquals(0, sample(text, "rtp_llm_model_forward_seconds_count", ""));
+                assertEquals(0, sample(text, "rtp_llm_forward_tokens_total", "kind=\"output\""));
             } finally { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
         }
     }
 
-    @Test void grpcCancellationReleasesInFlightLeaseAndDoesNotCommitLater() throws Exception {
+    @Test void grpcCancellationKeepsForwardAndReleasesLeaseWithoutCommittingOutput() throws Exception {
         try (var node = LLMMockEngine.start(config("300"))) {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             var context = Context.current().withCancellation();
@@ -168,16 +167,15 @@ class LocalRpcTest {
                 assertEquals(10, read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
                 assertEquals(10, sample(metrics(node), "rtp_llm_kv_tokens", "state=\"available\""));
                 context.cancel(null); assertTrue(done.await(2, TimeUnit.SECONDS));
-                await(() -> read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 0);
-                Thread.sleep(350);
+                await(() -> read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache() == 16);
                 assertEquals(0, frames.get());
-                assertEquals(16, read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
-                assertEquals(0, read.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build()).getCacheKeyListCount());
+                assertEquals(0, read.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build()).getCacheKeysCount());
                 var text = metrics(node);
                 assertEquals(1, sample(text, "rtp_llm_framework_requests_total", "outcome=\"cancelled\""));
                 assertEquals(2,sample(text,"rtp_llm_rpc_onflight_request_count",""));
                 assertEquals(3,sample(text,"rtp_llm_rpc_onflight_request_sum",""));
-                assertEquals(0, sample(text, "rtp_llm_model_forward_seconds_count", ""));
+                assertEquals(1, sample(text, "rtp_llm_model_forward_seconds_count", ""));
+                assertEquals(0, sample(text, "rtp_llm_forward_tokens_total", "kind=\"output\""));
                 assertEquals(16, sample(text, "rtp_llm_kv_tokens", "state=\"available\""));
                 var next=read.generateStreamCall(PrefillAdmissionTest.input(3,0,true));
                 while(next.hasNext()) next.next();
@@ -216,11 +214,11 @@ class LocalRpcTest {
     }
 
     @Test void rpcDeadlineIndependentlyCancelsARequestWithoutItsOwnBudget() throws Exception {
-        try (var node = LLMMockEngine.start(config("3000"))) {
+        try (var node = LLMMockEngine.start(config("1500"))) {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             try {
-                var read = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS);
-                read.checkHealth(EmptyPB.getDefaultInstance());
+                var read = RpcServiceGrpc.newBlockingStub(channel);
+                read.withDeadlineAfter(3, TimeUnit.SECONDS).checkHealth(EmptyPB.getDefaultInstance());
                 var done = new CountDownLatch(1);
                 var failure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
                 RpcServiceGrpc.newStub(channel).withDeadlineAfter(500, TimeUnit.MILLISECONDS)
@@ -229,13 +227,16 @@ class LocalRpcTest {
                         @Override public void onError(Throwable error) { failure.set(error); done.countDown(); }
                         @Override public void onCompleted() { done.countDown(); }
                     });
-                await(() -> read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 1);
+                await(() -> read.withDeadlineAfter(3, TimeUnit.SECONDS).getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 1);
                 assertTrue(done.await(2, TimeUnit.SECONDS));
                 assertEquals(Status.Code.DEADLINE_EXCEEDED, Status.fromThrowable(failure.get()).getCode());
-                await(() -> read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 0);
-                var status = read.getWorkerStatus(StatusVersionPB.getDefaultInstance());
+                await(() -> read.withDeadlineAfter(3, TimeUnit.SECONDS).getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 0);
+                var status = read.withDeadlineAfter(3, TimeUnit.SECONDS).getWorkerStatus(StatusVersionPB.getDefaultInstance());
                 assertEquals(603, status.getFinishedTaskList(0).getErrorInfo().getErrorCode());
                 assertEquals(16, status.getAvailableKvCache());
+                var text = metrics(node);
+                assertEquals(1, sample(text, "rtp_llm_model_forward_seconds_count", ""));
+                assertEquals(0, sample(text, "rtp_llm_forward_tokens_total", "kind=\"output\""));
             } finally { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
         }
     }

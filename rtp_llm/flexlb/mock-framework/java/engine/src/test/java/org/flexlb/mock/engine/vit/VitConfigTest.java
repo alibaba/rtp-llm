@@ -74,7 +74,7 @@ class VitConfigTest {
         var inputs = org.flexlb.engine.grpc.EngineRpcService.MultimodalInputsPB.newBuilder();
         for (int i = 0; i < 257; i++) inputs.addMultimodalInputs(image);
         assertDoesNotThrow(() -> VitGeometry.validate(inputs.build(), true));
-        assertTrue(VitGeometry.rows(40000, 40000, 14, 3, 0, 1024) <= 1024);
+        assertTrue(VitGeometry.plan(40000, 40000, 14, 3, 0, 1024).rows() <= 1024);
     }
 
     private ObjectNode root() {

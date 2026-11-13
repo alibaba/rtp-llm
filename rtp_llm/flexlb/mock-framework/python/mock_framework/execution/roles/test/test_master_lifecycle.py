@@ -239,17 +239,17 @@ class Empty:
     pass
 
 
-@register_step("test/client_progress", effect="read")
+@register_step("test/frontend_progress", effect="read")
 async def progress(ctx, args: Empty) -> int:
     successes = 0
     for node in ctx.runtime.topology.list_active_endpoints():
-        if node["role"] == "client":
+        if node["role"] == "frontend":
             value = await invoke(node["control"], "worker/state", {"sequence": 1}, 1)
             successes += value["outcomes"]["success"]
     return successes
 
 
-def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path):
+def test_real_master_replacement_with_uninterrupted_frontend_plan(tmp_path):
     from mock_framework.execution.test.test_master import configuration
 
     root = FRAMEWORK
@@ -309,7 +309,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path):
         ),
         step(
             "traffic",
-            "client/start/playback",
+            "frontend/start/playback",
             args={
                 "requests_file": source.name,
                 "qps": 8,
@@ -320,7 +320,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path):
             },
             wait_after="4s",
         ),
-        step("before", "test/client_progress", expect={"gte": 1}),
+        step("before", "test/frontend_progress", expect={"gte": 1}),
         step(
             "stop_primary",
             "master/stop",
@@ -335,11 +335,11 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path):
         ),
         step(
             "after_first",
-            "test/client_progress",
+            "test/frontend_progress",
             expect={"gte": {"ref": "steps.before"}},
         ),
         step("replacement", "master/start", within="60s", wait_after="3s"),
-        step("before_second", "test/client_progress"),
+        step("before_second", "test/frontend_progress"),
         step(
             "stop_survivor",
             "master/stop",
@@ -354,26 +354,26 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path):
         ),
         step(
             "after_second",
-            "test/client_progress",
+            "test/frontend_progress",
             expect={"gte": {"ref": "steps.before_second"}},
             wait_after="3s",
         ),
         step(
             "steady",
-            "test/client_progress",
+            "test/frontend_progress",
             expect={"gte": {"ref": "steps.after_second"}},
         ),
         step("engines", "master/list/engines"),
-        step("collected", "client/stop/playback"),
+        step("collected", "frontend/stop/playback"),
     ]
     document = dict(
         id="master_ha",
-        describe="Native Master replacement during one Client plan",
+        describe="Native Master replacement during one Frontend plan",
         environment={
             "master": {"deployment": {"replicas": 2}, "config": config},
             "prefill": engine,
             "decode": engine,
-            "client": {"deployment": {"replicas": 2}, "config": {}},
+            "frontend": {"deployment": {"replicas": 2}, "config": {}},
         },
         phases=[dict(id="replace", describe="replace", timeout="150s", steps=steps)],
     )
@@ -399,12 +399,12 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path):
             ],
             "startup_timeout": "60s",
         },
-        "client": {
+        "frontend": {
             "command": [
                 java,
                 "-XX:ActiveProcessorCount=2",
                 "-jar",
-                str(root / "java/client/target/mock-client-1.0-SNAPSHOT-all.jar"),
+                str(root / "java/frontend/target/mock-frontend-1.0-SNAPSHOT-all.jar"),
             ]
         },
     }
@@ -469,7 +469,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path):
         )
         for node in masters
     ]
-    for key in ("deployment_id", "FLEXLB_CONFIG", "server_port"):
+    for key in ("HIPPO_ROLE", "FLEXLB_CONFIG", "server_port"):
         assert all(
             config[key] == effective_configs[0][key] for config in effective_configs
         )
@@ -593,6 +593,12 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(
                         expect={"count": 1},
                     ),
                     step(
+                        "added",
+                        "engine/scale",
+                        args={"direction": "out", "role": "prefill", "count": 1},
+                        expect={"count": 1},
+                    ),
+                    step(
                         "restored",
                         "master/restart",
                         args={"targets": {"ref": "steps.a"}},
@@ -604,12 +610,6 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(
                         "master/list/addresses",
                         args={"is_leader": True},
                         expect={"eq": {"ref": "steps.a"}},
-                    ),
-                    step(
-                        "added",
-                        "engine/scale",
-                        args={"direction": "out", "role": "prefill", "count": 1},
-                        expect={"count": 1},
                     ),
                 ],
             )
@@ -639,8 +639,14 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(
     original = json.loads((first / "endpoints.json").read_text())
     restored = json.loads((current / "endpoints.json").read_text())
     assert original["rpc"] == restored["rpc"] and original["http"] == restored["http"]
-    assert len(json.loads((first / "discovery.json").read_text())["p-domain"]) == 1
-    assert len(json.loads((current / "discovery.json").read_text())["p-domain"]) == 1
+    assert (
+        json.loads((first / "discovery.json").read_text())["p-domain"]
+        == values["removed"]
+    )
+    assert (
+        json.loads((current / "discovery.json").read_text())["p-domain"]
+        == values["added"]
+    )
     process = [
         item
         for item in logs(output)

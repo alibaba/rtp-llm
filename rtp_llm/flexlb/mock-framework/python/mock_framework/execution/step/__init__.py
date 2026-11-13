@@ -2,21 +2,22 @@
 
 
 def standard_actions():
-    from .client_start_playback import client_start_playback
-    from .client_stop_playback import client_stop_playback
-    from .engine_scale import engine_scale
-    from .master_list_addresses import master_list_addresses
-    from .master_list_engines import master_list_engines
-    from .master_restart import master_restart
-    from .master_start import master_start
-    from .master_stop import master_stop
-    from .metrics.client import query_qps, query_success_rate, query_tpot, query_ttft
+    from .engine import engine_scale
+    from .frontend import frontend_start_playback, frontend_stop_playback
+    from .master import (
+        master_list_addresses,
+        master_list_engines,
+        master_restart,
+        master_start,
+        master_stop,
+    )
     from .metrics.engine import (
         query_cache_hit_rate,
         query_decode_tps,
         query_prefill_tps,
         query_prefill_tps_with_cache,
     )
+    from .metrics.frontend import query_qps, query_success_rate, query_tpot, query_ttft
     from .metrics.prometheus import query_promql
 
     return (
@@ -35,6 +36,6 @@ def standard_actions():
         query_ttft,
         query_tpot,
         query_success_rate,
-        client_start_playback,
-        client_stop_playback,
+        frontend_start_playback,
+        frontend_stop_playback,
     )

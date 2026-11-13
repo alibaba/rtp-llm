@@ -1,8 +1,6 @@
 package org.flexlb.mock.engine.scheduler;
 
-import io.prometheus.client.Collector;
 import java.util.*;
-import java.util.function.Supplier;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.engine.cache.KvCacheManager;
@@ -30,24 +28,19 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
     private long batchSequence;
     protected boolean closed;
 
-    AbstractRtpScheduler(Object lock, RtpConfig config, KvCacheManager cache, TaskHistory history) {
+    AbstractRtpScheduler(Object lock, RtpConfig config, KvCacheManager cache, TaskHistory history, RtpMetrics metrics) {
         this.history = Objects.requireNonNull(history);
         this.lock = Objects.requireNonNull(lock);
         this.config = Objects.requireNonNull(config);
         this.cache = Objects.requireNonNull(cache);
-        this.metrics = new RtpMetrics(config.role().name(), this::metricState, System::nanoTime, cache::itemCount);
-        cache.onEviction(metrics::blockEvicted);
-        cache.onReclaim(metrics::blocksReclaimed);
+        this.metrics = Objects.requireNonNull(metrics);
     }
 
-    public static Supplier<List<Collector.MetricFamilySamples>> metricsFor(EngineScheduler scheduler) {
-        return scheduler instanceof AbstractRtpScheduler rtp ? rtp.metrics()::collect : null;
-    }
-
-    public static EngineScheduler.Factory factory(RtpConfig config) {
-        Objects.requireNonNull(config);
-        return (lock, cache, finished) -> config.groupScheduling()
-            ? new RtpPrefillGroupScheduler(lock, config, cache, finished) : new RtpFifoScheduler(lock, config, cache, finished);
+    public static AbstractRtpScheduler create(Object lock, RtpConfig config, KvCacheManager cache, TaskHistory finished,
+                                               RtpMetrics metrics) {
+        return config.groupScheduling()
+            ? new RtpPrefillGroupScheduler(lock, config, cache, finished, metrics)
+            : new RtpFifoScheduler(lock, config, cache, finished, metrics);
     }
 
     @Override public Request enqueue(Input input, Listener listener) {
@@ -205,10 +198,6 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         var failure = error instanceof RequestFailure known ? known : new RequestFailure(INTERNAL, "Forward failed", error);
         try { batch.members().forEach(member -> finish(member.request(), failure)); }
         finally { metrics.computeFinished(); batch.members().forEach(member -> member.use().close()); }
-    }
-
-    @Override public boolean isForwardCancelled(Work work) {
-        return work == executing && ((Batch) work.owner()).members().stream().allMatch(member -> member.request().state.terminating());
     }
 
     @Override public RequestState.Use beginTransfer(Request request) {
@@ -522,16 +511,6 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         }
         if (reportRound) metrics.schedulerRound(queued, executing);
         return new QueueSnapshot(queued, executing, protocolWaiting, ready);
-    }
-
-    private RtpMetrics.State metricState() {
-        synchronized (lock) {
-            var counts = queues();
-            var kv = cache.snapshot(0, false);
-            long block = config.tokensPerCacheKey();
-            return new RtpMetrics.State(counts.waiting(), counts.running(), counts.loading(), counts.ready(), kv.totalBlocks() * block,
-                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, config.tokensPerCacheKey());
-        }
     }
 
     /**

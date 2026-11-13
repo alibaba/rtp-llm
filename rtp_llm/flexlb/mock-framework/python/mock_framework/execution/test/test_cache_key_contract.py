@@ -1,6 +1,5 @@
-from mock_framework.execution.test.helpers import FRAMEWORK
+"""Check Mock keys against the real text path and the DSV4.1 media span contract."""
 
-"""Compare real DSV Frontend + C++ hash implementation with Mock Client/Engine keys."""
 import ctypes
 import importlib.util
 import os
@@ -11,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from mock_framework.execution.test.helpers import FRAMEWORK
 
 ROOT = FRAMEWORK.parents[2]
 
@@ -60,6 +60,24 @@ extern "C" int64_t hash_array(int64_t seed, const int32_t* values, int count) {
     return blocks
 
 
+def media_span_segments(tokens, spans, block_size):
+    # DSV4.1 hashes the token block, then the overlapping media rows and their
+    # positions. The main Frontend uses image digests instead of row hashes.
+    segments = []
+    for begin in range(0, len(tokens) - block_size + 1, block_size):
+        identity = []
+        for start, rows in spans:
+            first = max(begin, start)
+            end = min(begin + block_size, start + len(rows))
+            if first < end:
+                identity.extend(
+                    [-42, first - begin, len(rows), first - start, end - first]
+                )
+                identity.extend(rows[first - start : end - start])
+        segments.extend([tokens[begin : begin + block_size], identity])
+    return segments
+
+
 @pytest.mark.parametrize("stride", [1, 2, 4])
 @pytest.mark.parametrize("seed", [0, 0x4453563431494631, 0x4453563431494231])
 @pytest.mark.parametrize(
@@ -83,7 +101,7 @@ extern "C" int64_t hash_array(int64_t seed, const int32_t* values, int count) {
         ([10] + [-200] * 700 + list(range(100, 600)), [(1, list(range(700)))], 128),
     ],
 )
-def test_real_frontend_and_mock_have_identical_signed_block_keys(
+def test_mock_signed_block_keys_match_text_and_media_contracts(
     native_hash, monkeypatch, tokens, spans, block, seed, stride
 ):
     monkeypatch.setitem(
@@ -96,9 +114,10 @@ def test_real_frontend_and_mock_have_identical_signed_block_keys(
     )
     frontend = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(frontend)
-    expected = frontend.get_block_cache_keys(
-        tokens, block, multimodal_cache_spans=spans, cache_key_seed=seed
-    )
+    if spans:
+        expected = native_hash(media_span_segments(tokens, spans, block), seed)[1::2]
+    else:
+        expected = frontend.get_block_cache_keys(tokens, block, cache_key_seed=seed)
     java = (
         str(Path(os.environ["JAVA_HOME"]) / "bin/java")
         if "JAVA_HOME" in os.environ

@@ -220,7 +220,7 @@ def test_real_engine_observations_return_to_rtp_panels_and_mock_rows_only_compar
     assert "py_rtp_vit_preprocess_rt_sum{" in items[300452]["targets"][2]["expr"]
     assert "py_rtp_vit_preprocess_rt_count{" in items[300452]["targets"][2]["expr"]
     assert "rtp_llm_sp_estimate_tpot_us_sum{" in items[210112]["targets"][0]["expr"]
-    assert any("mock_client_tpot_seconds" in t["expr"] for t in items[5]["targets"])
+    assert any("mock_frontend_tpot_seconds" in t["expr"] for t in items[5]["targets"])
     assert all(
         "rtp_llm_sp_" not in t["expr"] or "rtp_llm_sp_estimate_tpot_us" in t["expr"]
         for p in panels()
@@ -239,7 +239,7 @@ def test_real_engine_observations_return_to_rtp_panels_and_mock_rows_only_compar
 
 def test_custom_panels_follow_their_own_address_selection_without_losing_business_dimensions():
     variables = {v["name"]: v for v in dashboard()["templating"]["list"]}
-    for kind in ("prefill", "decode", "vit", "master", "client"):
+    for kind in ("prefill", "decode", "vit", "master", "frontend"):
         group = variables[kind + "_group"]
         assert group["hide"] == 2 and group["type"] == "query"
         assert "${" + kind + "_instance}" in group["query"]
@@ -247,15 +247,15 @@ def test_custom_panels_follow_their_own_address_selection_without_losing_busines
         if panel.get("links"):
             continue
         for target in panel["targets"]:
-            for kind in ("prefill", "decode", "vit", "master", "client"):
+            for kind in ("prefill", "decode", "vit", "master", "frontend"):
                 if "${" + kind + "_instance}" not in target["expr"]:
                     continue
                 group = "${" + kind + "_group}"
                 assert group in target["expr"], panel["title"]
                 assert "{{" + group + "}}" in target["legendFormat"], panel["title"]
     items = {p["id"]: p for p in panels()}
-    assert "by(${client_group},le)" in items[5]["targets"][1]["expr"]
-    assert "by(${client_group},outcome)" in items[3]["targets"][0]["expr"]
+    assert "by(${frontend_group},le)" in items[5]["targets"][1]["expr"]
+    assert "by(${frontend_group},outcome)" in items[3]["targets"][0]["expr"]
     assert (
         "avg by(${master_group},area)(sum by(instance,application,area)"
         in items[56]["targets"][0]["expr"]

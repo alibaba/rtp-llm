@@ -27,7 +27,7 @@ async def addresses(ctx, args: ProbeArgs) -> list[str]:
     return ctx.list_rpc_addresses()["prefill"]
 
 
-def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
+def test_runner_starts_isolated_packaged_rtp_nodes_and_native_frontend_reads_them(
     tmp_path,
 ):
     import yaml
@@ -177,31 +177,31 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                         "PREFILL_COMPLETE",
                     ]
                     assert endpoints["remote_generation"]["load"] is True
-                    client_result = tmp_path / "client.json"
-                    client_classpath = os.pathsep.join(
+                    frontend_result = tmp_path / "frontend.json"
+                    frontend_classpath = os.pathsep.join(
                         [
-                            str(ROOT / "java/client/target/test-classes"),
-                            str(ROOT / "java/client/target/classes"),
+                            str(ROOT / "java/frontend/target/test-classes"),
+                            str(ROOT / "java/frontend/target/classes"),
                             classpath,
                         ]
                     )
-                    client = await asyncio.to_thread(
+                    frontend = await asyncio.to_thread(
                         subprocess.run,
                         [
                             str(java),
                             "-cp",
-                            client_classpath,
-                            "org.flexlb.mock.client.ClientProbe",
+                            frontend_classpath,
+                            "org.flexlb.mock.frontend.FrontendProbe",
                             prefill["rpc"],
                             endpoints["rpc"],
-                            str(client_result),
+                            str(frontend_result),
                         ],
                         capture_output=True,
                         text=True,
                         timeout=10,
                     )
-                    assert client.returncode == 0, client.stderr
-                    observed = json.loads(client_result.read_text())
+                    assert frontend.returncode == 0, frontend.stderr
+                    observed = json.loads(frontend_result.read_text())
                     assert observed["schedule_calls"] == 2
                     for mode in ("generate", "fetch"):
                         assert observed[mode]["outcome"] == "success"

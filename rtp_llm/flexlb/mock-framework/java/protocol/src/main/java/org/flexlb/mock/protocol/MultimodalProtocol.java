@@ -13,7 +13,7 @@ import org.flexlb.mock.protocol.grpc.MockEngineProtocol.ImageHashSeeds;
 import org.flexlb.mock.protocol.grpc.MockEngineProtocol.ImageSeeds;
 
 /**
- * Shares image identity, feature hashes, and multimodal message conversion across Client, ViT, and Prefill.
+ * Shares image identity, feature hashes, and multimodal message conversion across Frontend, ViT, and Prefill.
  */
 public final class MultimodalProtocol {
     public static final int IMAGE_TOKEN = -200;

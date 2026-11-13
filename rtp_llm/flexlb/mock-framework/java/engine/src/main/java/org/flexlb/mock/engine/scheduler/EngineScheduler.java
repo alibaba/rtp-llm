@@ -46,8 +46,6 @@ public interface EngineScheduler extends AutoCloseable {
 
     void failForward(Work work, RuntimeException error);
 
-    boolean isForwardCancelled(Work work);
-
     /** Bounded, per-request ordered callbacks. EngineLoop invokes these outside the scheduling lock. */
     List<Runnable> takeNotifications();
 

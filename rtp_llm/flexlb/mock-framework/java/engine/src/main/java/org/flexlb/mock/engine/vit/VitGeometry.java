@@ -9,7 +9,7 @@ import org.flexlb.mock.protocol.MultimodalProtocol;
  */
 final class VitGeometry {
     /** The DSV4.1 grid planner, without tensor materialization. */
-    static int rows(int width, int height, int patch, int downsample, int minPixels, int maxTokens) {
+    static Grid plan(int width, int height, int patch, int downsample, int minPixels, int maxTokens) {
         if ((long) width * height < minPixels) {
             double scale = Math.sqrt((double) minPixels / ((long) width * height));
             width = (int) (width * scale); height = (int) (height * scale);
@@ -33,7 +33,7 @@ final class VitGeometry {
             llmW = (resizedW / patch + downsample - 1) / downsample;
             llmH = (resizedH / patch + downsample - 1) / downsample;
         }
-        return Math.toIntExact((long) llmH * (llmW + 1) + 2);
+        return new Grid(Math.toIntExact(resizedW), Math.toIntExact(resizedH), Math.toIntExact(llmH * (llmW + 1) + 2));
     }
 
     static void validate(MultimodalInputsPB input, boolean skipDownload) {
@@ -52,10 +52,12 @@ final class VitGeometry {
             throw MultimodalProtocol.invalid("Image width/height must be positive; skip-download inputs require explicit dimensions");
     }
 
+    record Grid(int width, int height, int rows) {}
+
     /**
-     * Carries source and resized image dimensions and the resulting token count.
+     * Carries the ViT input dimensions and the resulting LLM token count.
      */
-    record Image(String key, int width, int height, int rows, String featureIdentity) {
+    record Image(String key, int forwardWidth, int forwardHeight, int rows, String featureIdentity) {
         Image(String key, int width, int height, int rows) { this(key, width, height, rows, key); }
         public long bytes(int hidden, int dtypeBytes) { return Math.multiplyExact(Math.multiplyExact((long) rows, hidden), dtypeBytes); }
     }

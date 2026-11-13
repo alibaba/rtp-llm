@@ -39,7 +39,7 @@ with tempfile.TemporaryDirectory() as directory, tarfile.open(sys.argv[1], 'w:gz
         archive.add(target / 'classes')
     for path in (
         Path('java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'),
-        Path('java/client/target/mock-client-1.0-SNAPSHOT-all.jar'),
+        Path('java/frontend/target/mock-frontend-1.0-SNAPSHOT-all.jar'),
     ):
         archive.add(path)
 PY

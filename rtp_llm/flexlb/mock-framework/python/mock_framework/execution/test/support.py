@@ -52,7 +52,7 @@ def native_kvcm(tmp_path):
         log = (tmp_path / "kvcm.log").open("w")
         classpath = os.pathsep.join(
             [
-                str(ROOT / "java/client/target/test-classes"),
+                str(ROOT / "java/frontend/target/test-classes"),
                 str(
                     ROOT / "java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar"
                 ),
@@ -63,7 +63,7 @@ def native_kvcm(tmp_path):
                 str(Path(os.environ["JAVA_HOME"]) / "bin/java"),
                 "-cp",
                 classpath,
-                "org.flexlb.mock.client.KvcmMetaProbe",
+                "org.flexlb.mock.frontend.KvcmMetaProbe",
                 str(ready),
             ],
             stdout=log,
