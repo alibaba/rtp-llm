@@ -315,13 +315,8 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     config.cache_min_replay_tokens = std::max(1, model_config.cache_min_replay_tokens);
     config.cache_key_hash_seed     = model_config.cache_key_hash_seed;
 
-    const auto& cp = parallelism_config.prefill_cp_config;
-    // Existing models retain Query-CP Prefill sharding and replicated Decode.
-    // Models that declare a local layout select it independently of Query CP.
-    const bool legacy_local_sharding =
-        cp.kv_cache_sharded && cp.is_enabled() && parallelism_config.role_type != RoleType::DECODE;
-    config.local_kv_cache_sharded =
-        parallelism_config.tp_size > 1 && model_config.local_kv_cache_sharded.value_or(legacy_local_sharding);
+    const auto& cp                = parallelism_config.prefill_cp_config;
+    config.local_kv_cache_sharded = resolveLocalKVCacheSharding(model_config.local_kv_cache_layout, parallelism_config);
     RTP_LLM_CHECK_WITH_INFO(!config.local_kv_cache_sharded || cp.kv_cache_sharded,
                             "local PageRR allocation requires kv_cache_sharded transport metadata");
 

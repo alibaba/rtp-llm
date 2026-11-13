@@ -173,6 +173,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("MHA_HEADS", TpCacheTransferMode::MHA_HEADS)
         .value("LINEAR_QKV", TpCacheTransferMode::LINEAR_QKV);
 
+    py::enum_<LocalKVCacheLayoutPolicy>(m, "LocalKVCacheLayoutPolicy")
+        .value("FOLLOW_QUERY_CP", LocalKVCacheLayoutPolicy::FOLLOW_QUERY_CP)
+        .value("FULL_TABLE", LocalKVCacheLayoutPolicy::FULL_TABLE)
+        .value("PAGE_RR", LocalKVCacheLayoutPolicy::PAGE_RR);
+
     py::enum_<CpPrefillSliceLayout>(m, "CpPrefillSliceLayout")
         .value("NONE", CpPrefillSliceLayout::NONE)
         .value("PAYLOAD", CpPrefillSliceLayout::PAYLOAD)
@@ -2005,7 +2010,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cache_min_replay_tokens", &ModelConfig::cache_min_replay_tokens)
         .def_readwrite("cache_key_hash_seed", &ModelConfig::cache_key_hash_seed)
         .def_readwrite("kv_cache_spec_descs", &ModelConfig::kv_cache_spec_descs)
-        .def_readwrite("local_kv_cache_sharded", &ModelConfig::local_kv_cache_sharded)
+        .def_readwrite("local_kv_cache_layout", &ModelConfig::local_kv_cache_layout)
         // task_type is defined as property below
         .def_readwrite("ckpt_path", &ModelConfig::ckpt_path)
         .def_readwrite("tokenizer_path", &ModelConfig::tokenizer_path)

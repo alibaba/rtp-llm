@@ -957,6 +957,11 @@ class TpCacheTransferMode:
     MHA_HEADS: typing.ClassVar[TpCacheTransferMode]
     LINEAR_QKV: typing.ClassVar[TpCacheTransferMode]
 
+class LocalKVCacheLayoutPolicy:
+    FOLLOW_QUERY_CP: typing.ClassVar[LocalKVCacheLayoutPolicy]
+    FULL_TABLE: typing.ClassVar[LocalKVCacheLayoutPolicy]
+    PAGE_RR: typing.ClassVar[LocalKVCacheLayoutPolicy]
+
 class CpPrefillSliceLayout:
     NONE: typing.ClassVar[CpPrefillSliceLayout]
     PAYLOAD: typing.ClassVar[CpPrefillSliceLayout]
@@ -1023,7 +1028,7 @@ class ModelConfig:
     embedding_size: int
     eplb_config: EPLBConfig
     kv_cache_spec_descs: list[list[KVCacheSpecDesc]]
-    local_kv_cache_sharded: typing.Optional[bool]
+    local_kv_cache_layout: LocalKVCacheLayoutPolicy
     cache_min_replay_tokens: int
     cache_key_hash_seed: int
     expert_num: int

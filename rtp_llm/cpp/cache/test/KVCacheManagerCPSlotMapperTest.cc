@@ -43,32 +43,36 @@ static ModelConfig makePageRrModelConfig() {
     return model;
 }
 
-TEST(CacheConfigLocalShardingTest, ResolvesExplicitLayoutAndPreservesLegacyDefaults) {
+TEST(CacheConfigLocalShardingTest, ResolvesLayoutPoliciesAndPreservesQueryCpDefaults) {
+    using Policy = LocalKVCacheLayoutPolicy;
     struct Case {
-        RoleType            role;
-        CPRotateMethod      method;
-        size_t              tp_size;
-        bool                upstream_sharded;
-        std::optional<bool> local_sharded;
-        bool                expected;
+        RoleType                 role;
+        CPRotateMethod           method;
+        size_t                   tp_size;
+        bool                     upstream_sharded;
+        LocalKVCacheLayoutPolicy layout;
+        bool                     expected;
     };
     const std::vector<Case> cases = {
-        {RoleType::PREFILL, CPRotateMethod::ALL_GATHER, 8, true, std::nullopt, true},
-        {RoleType::PREFILL, CPRotateMethod::DISABLED, 8, true, std::nullopt, false},
-        {RoleType::DECODE, CPRotateMethod::ALL_GATHER, 4, true, std::nullopt, false},
-        {RoleType::DECODE, CPRotateMethod::PREFILL_CP, 4, true, std::nullopt, false},
-        {RoleType::PREFILL, CPRotateMethod::ALL_GATHER, 8, false, std::nullopt, false},
-        {RoleType::PREFILL, CPRotateMethod::DISABLED, 8, true, true, true},
-        {RoleType::DECODE, CPRotateMethod::DISABLED, 4, true, true, true},
-        {RoleType::PREFILL, CPRotateMethod::ALL_GATHER, 8, true, false, false},
-        {RoleType::DECODE, CPRotateMethod::DISABLED, 4, true, false, false},
-        {RoleType::PREFILL, CPRotateMethod::DISABLED, 1, true, true, false},
+        {RoleType::PREFILL, CPRotateMethod::ALL_GATHER, 8, true, Policy::FOLLOW_QUERY_CP, true},
+        {RoleType::PREFILL, CPRotateMethod::ALL_GATHER_WITH_OVERLAP, 8, true, Policy::FOLLOW_QUERY_CP, true},
+        {RoleType::PDFUSION, CPRotateMethod::ALLTOALL, 8, true, Policy::FOLLOW_QUERY_CP, true},
+        {RoleType::PREFILL, CPRotateMethod::DISABLED, 8, true, Policy::FOLLOW_QUERY_CP, false},
+        {RoleType::PREFILL, CPRotateMethod::UNKNOWN, 8, true, Policy::FOLLOW_QUERY_CP, false},
+        {RoleType::DECODE, CPRotateMethod::ALL_GATHER, 4, true, Policy::FOLLOW_QUERY_CP, false},
+        {RoleType::DECODE, CPRotateMethod::PREFILL_CP, 4, true, Policy::FOLLOW_QUERY_CP, false},
+        {RoleType::PREFILL, CPRotateMethod::ALL_GATHER, 8, false, Policy::FOLLOW_QUERY_CP, false},
+        {RoleType::PREFILL, CPRotateMethod::DISABLED, 8, true, Policy::PAGE_RR, true},
+        {RoleType::DECODE, CPRotateMethod::DISABLED, 4, true, Policy::PAGE_RR, true},
+        {RoleType::PREFILL, CPRotateMethod::ALL_GATHER, 8, true, Policy::FULL_TABLE, false},
+        {RoleType::DECODE, CPRotateMethod::DISABLED, 4, true, Policy::FULL_TABLE, false},
+        {RoleType::PREFILL, CPRotateMethod::DISABLED, 1, true, Policy::PAGE_RR, false},
     };
     for (size_t i = 0; i < cases.size(); ++i) {
         SCOPED_TRACE(i);
         const auto& c     = cases[i];
         auto        model = makePageRrModelConfig();
-        model.local_kv_cache_sharded = c.local_sharded;
+        model.local_kv_cache_layout = c.layout;
         ParallelismConfig par;
         par.role_type                         = c.role;
         par.tp_size                           = c.tp_size;
@@ -82,7 +86,7 @@ TEST(CacheConfigLocalShardingTest, ResolvesExplicitLayoutAndPreservesLegacyDefau
 
 TEST(CacheConfigLocalShardingTest, ExplicitPageRrRequiresTransportMetadata) {
     auto model = makePageRrModelConfig();
-    model.local_kv_cache_sharded = true;
+    model.local_kv_cache_layout = LocalKVCacheLayoutPolicy::PAGE_RR;
     ParallelismConfig par;
     par.tp_size   = 4;
     par.role_type = RoleType::DECODE;
@@ -92,7 +96,7 @@ TEST(CacheConfigLocalShardingTest, ExplicitPageRrRequiresTransportMetadata) {
 
 TEST(CacheConfigLocalShardingTest, TargetAndDraftShareOneLocalLayout) {
     auto target = makePageRrModelConfig();
-    target.local_kv_cache_sharded = true;
+    target.local_kv_cache_layout = LocalKVCacheLayoutPolicy::PAGE_RR;
     auto draft = target;
     ParallelismConfig par;
     par.role_type                         = RoleType::DECODE;
@@ -106,7 +110,7 @@ TEST(CacheConfigLocalShardingTest, TargetAndDraftShareOneLocalLayout) {
     EXPECT_TRUE(config.local_kv_cache_sharded);
     EXPECT_TRUE(config.mtp_sub_configs[0]->local_kv_cache_sharded);
 
-    draft.local_kv_cache_sharded = false;
+    draft.local_kv_cache_layout = LocalKVCacheLayoutPolicy::FULL_TABLE;
     EXPECT_ANY_THROW(CacheConfigCreator::createConfig(target, par, {}, sp, &draft));
 }
 
@@ -144,7 +148,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, ExplicitCompactPrefillTp8AndDecodeTp4Allo
         for (size_t rank = 0; rank < tp_size; ++rank) {
             SCOPED_TRACE(rank);
             auto model = makePageRrModelConfig();
-            model.local_kv_cache_sharded = true;
+            model.local_kv_cache_layout = LocalKVCacheLayoutPolicy::PAGE_RR;
             ParallelismConfig par;
             par.role_type                         = role;
             par.tp_size                           = tp_size;

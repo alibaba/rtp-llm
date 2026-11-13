@@ -18,6 +18,7 @@ from rtp_llm.ops import (
     HybridAttentionType,
     KvCacheDataType,
     KVCacheSpecType,
+    LocalKVCacheLayoutPolicy,
     QuantAlgo,
     RoleType,
     TpCacheTransferMode,
@@ -58,7 +59,7 @@ class KimiK3ModelConfig(ModelConfig):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Target and MTP use compact PageRR tables in both P and D roles.
-        self.local_kv_cache_sharded = True
+        self.local_kv_cache_layout = LocalKVCacheLayoutPolicy.PAGE_RR
 
     def init_precision_config(self, kv_cache_config, act_type):
         # K3's nested quantization metadata describes only routed experts.
@@ -113,7 +114,7 @@ class KimiK3(BaseModel):
 
     @classmethod
     def _post_build_model_config(cls, model_config):
-        if model_config.local_kv_cache_sharded is not True:
+        if model_config.local_kv_cache_layout != LocalKVCacheLayoutPolicy.PAGE_RR:
             raise ValueError("K3 MLA requires compact local PageRR cache tables")
         if not model_config.kv_cache_spec_descs:
             model_config.kv_cache_spec_descs = build_hybrid_kv_cache_spec_descs(

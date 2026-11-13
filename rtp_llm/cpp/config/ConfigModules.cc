@@ -8,6 +8,7 @@
 #include <string>
 #include <cctype>
 #include <regex>
+#include <stdexcept>
 
 namespace rtp_llm {
 
@@ -80,6 +81,23 @@ std::string ParallelismConfig::to_string() const {
         << "prefill_cp_config: {\n"
         << prefill_cp_config.to_string() << "}\n";
     return oss.str();
+}
+
+bool resolveLocalKVCacheSharding(LocalKVCacheLayoutPolicy policy, const ParallelismConfig& parallelism_config) {
+    if (parallelism_config.tp_size <= 1) {
+        return false;
+    }
+    switch (policy) {
+        case LocalKVCacheLayoutPolicy::FOLLOW_QUERY_CP:
+            return parallelism_config.prefill_cp_config.kv_cache_sharded
+                   && parallelism_config.prefill_cp_config.is_enabled()
+                   && parallelism_config.role_type != RoleType::DECODE;
+        case LocalKVCacheLayoutPolicy::FULL_TABLE:
+            return false;
+        case LocalKVCacheLayoutPolicy::PAGE_RR:
+            return true;
+    }
+    throw std::invalid_argument("unknown local KV cache layout policy");
 }
 
 // ConcurrencyConfig

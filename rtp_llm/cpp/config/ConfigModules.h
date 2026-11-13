@@ -35,6 +35,14 @@ enum class CPRotateMethod {
     PREFILL_CP              = 4,
     UNKNOWN                 = 5,
 };
+
+// Policy for the local FULL/BLOCK_ROUND_ROBIN cache table.
+enum class LocalKVCacheLayoutPolicy {
+    FOLLOW_QUERY_CP = 0,
+    FULL_TABLE      = 1,
+    PAGE_RR         = 2,
+};
+
 struct PrefillCPConfig {
     CPRotateMethod method           = CPRotateMethod::DISABLED;
     size_t         comm_buffer_size = 512 * 1024 * 1024;  // 512MB
@@ -96,6 +104,8 @@ struct ParallelismConfig {
     }
     std::string to_string() const;
 };
+
+bool resolveLocalKVCacheSharding(LocalKVCacheLayoutPolicy policy, const ParallelismConfig& parallelism_config);
 
 struct ConcurrencyConfig {
     bool        concurrency_with_block = false;
