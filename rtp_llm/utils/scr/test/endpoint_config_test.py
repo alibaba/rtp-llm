@@ -2,7 +2,9 @@
 
 import json
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -15,6 +17,14 @@ from rtp_llm.utils.scr.template_utils import _BackendVisitorTemplateHook
 
 
 class ScrEndpointConfigTest(unittest.TestCase):
+    def manifest_file(self, manifest):
+        if manifest is None:
+            return ""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "endpoints.json"
+        path.write_text(json.dumps(manifest))
+        return str(path)
 
     def test_restored_manifest_gates_backend_before_publishing_real_endpoints(self):
         configs = PyEnvConfigs()
@@ -59,7 +69,7 @@ class ScrEndpointConfigTest(unittest.TestCase):
                     os.environ,
                     {
                         "SCR_PHASE": "checkpoint",
-                        "RTP_LLM_SCR_ENDPOINT_MANIFEST": json.dumps(manifest),
+                        "RTP_LLM_SCR_ENDPOINT_MANIFEST": self.manifest_file(manifest),
                     },
                 ), patch(
                     "rtp_llm.server.backend_manager.get_world_info",
@@ -111,9 +121,8 @@ class ScrEndpointConfigTest(unittest.TestCase):
                     os.environ,
                     {
                         "SCR_PHASE": phase,
-                        "RTP_LLM_SCR_ENDPOINT_MANIFEST": (
-                            json.dumps(manifest) if manifest else ""
-                        ),
+                        "RTPLLM_ENABLE_SCR": "1" if nodes == 1 else "0",
+                        "RTP_LLM_SCR_ENDPOINT_MANIFEST": self.manifest_file(manifest),
                     },
                 ), patch(
                     "rtp_llm.distribute.distributed_server.get_world_info",
@@ -132,7 +141,7 @@ class ScrEndpointConfigTest(unittest.TestCase):
                     require_manifest=required,
                     require_transport=required,
                     expected_world_size=configs.parallelism_config.world_size,
-                    manifest=manifest,
+                    manifest=manifest if nodes > 1 else None,
                 )
                 visitor.update_addresses.assert_called_once_with(["192.0.2.20:9001"])
 
@@ -169,9 +178,8 @@ class ScrEndpointConfigTest(unittest.TestCase):
                     os.environ,
                     {
                         "SCR_PHASE": phase,
-                        "RTP_LLM_SCR_ENDPOINT_MANIFEST": (
-                            json.dumps(manifest) if manifest else ""
-                        ),
+                        "RTPLLM_ENABLE_SCR": "1" if nodes == 1 else "0",
+                        "RTP_LLM_SCR_ENDPOINT_MANIFEST": self.manifest_file(manifest),
                     },
                 ), patch(
                     "rtp_llm.server.backend_manager.get_world_info",
@@ -189,7 +197,7 @@ class ScrEndpointConfigTest(unittest.TestCase):
                     require_manifest=required,
                     require_transport=required,
                     expected_world_size=configs.parallelism_config.world_size,
-                    manifest=manifest,
+                    manifest=manifest if nodes > 1 else None,
                 )
                 update.assert_called_once_with(
                     backend._engine_config.runtime_config,

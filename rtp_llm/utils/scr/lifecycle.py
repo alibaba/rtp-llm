@@ -12,9 +12,10 @@ import logging
 import os
 import threading
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import TYPE_CHECKING, Callable, Protocol
 
-from rtp_llm.utils.scr.restore_context import RestoreContext
+if TYPE_CHECKING:
+    from rtp_llm.utils.scr.restore_context import RestoreContext
 
 LOGGER = logging.getLogger(__name__)
 

@@ -18,6 +18,28 @@ from rtp_llm.ops import RoleType, VitSeparation
 
 
 class BackendScrIntegrationTest(unittest.TestCase):
+    def test_manager_arrives_before_waiting_for_rank_readiness(self):
+        config = self._launcher_config(world_size=2)
+        config.distribute_config = SimpleNamespace(fake_gang_env=False)
+        config.server_config.shutdown_timeout = 1
+        config.server_config.monitor_interval = 1
+        order = mock.Mock()
+        manifest = self._manifest()
+        with mock.patch.object(backend.multiprocessing, "get_context"), mock.patch.object(
+            backend, "_create_rank_processes", order.spawn
+        ), mock.patch.object(
+            backend, "_start_scr_manager_arrival", order.arrive
+        ), mock.patch.object(
+            backend, "_wait_for_ranks_startup", order.wait
+        ), mock.patch.object(
+            backend, "_send_pipe_status", order.status
+        ), mock.patch.object(
+            backend, "ProcessManager"
+        ):
+            backend.multi_rank_start(None, config, scr_manifest=manifest)
+        self.assertEqual([call[0] for call in order.mock_calls[:4]], ["spawn", "arrive", "wait", "status"])
+        order.arrive.assert_called_once_with(manifest)
+
     def test_rank_starts_services_only_after_template_release(self):
         from rtp_llm.utils.scr import template_utils as scr
         from rtp_llm.utils.scr.lifecycle import CallbackHook, TemplateLifecycle
@@ -289,9 +311,12 @@ class BackendScrIntegrationTest(unittest.TestCase):
         register.assert_called_once_with(manager.engine, local_rank=2)
         self.assertFalse(hasattr(manager, "_scr_checkpoint_arrival"))
 
-    def test_rank_arrival_uses_local_rank_and_local_world_size(self):
+    def test_rank_arrival_uses_world_rank_from_the_manifest(self):
         manager = SimpleNamespace(engine=object())
         config = self._config(local_rank=2, world_rank=7)
+        manifest = self._manifest()
+        manifest.worker_id = mock.Mock(return_value=2)
+        manifest.participant_ids["backend_rank:7"] = 2
         result = 0
         with mock.patch.dict(
             os.environ,
@@ -306,11 +331,12 @@ class BackendScrIntegrationTest(unittest.TestCase):
         ) as arrive:
             self.assertEqual(
                 backend._start_scr_rank_arrival(
-                    manager, config, scr_manifest=self._manifest()
+                    manager, config, scr_manifest=manifest
                 ),
                 result,
             )
 
+        manifest.worker_id.assert_called_once_with("backend_rank", "7")
         arrive.assert_called_once_with(
             worker_id=2,
             worker_num=4,
@@ -407,12 +433,24 @@ class BackendScrIntegrationTest(unittest.TestCase):
         ), mock.patch.object(launcher, "_visible_device_count", return_value=1):
             manifest = launcher._build_scr_participant_manifest(config)
 
-        self.assertIsNotNone(manifest)
-        # VIT does not arrive at the barrier and does not restore runtime state,
-        # so it must not appear as a participant that the quorum waits for.
-        self.assertNotIn("backend_vit:0", manifest.participant_ids)
-        self.assertNotIn("backend_rank:0", manifest.participant_ids)
-        self.assertNotIn("backend_manager:0", manifest.participant_ids)
+        self.assertIsNone(manifest)
+
+    def test_pd_rank_with_separate_vit_uses_its_nonzero_world_rank(self):
+        for role in (RoleType.PREFILL, RoleType.DECODE):
+            config = self._launcher_config(
+                role_type=role, world_size=4, world_rank=2,
+                vit_separation=VitSeparation.VIT_SEPARATION_ROLE,
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint", "LOCAL_WORLD_SIZE": "1"},
+                clear=True,
+            ), mock.patch.object(launcher, "_visible_device_count", return_value=4):
+                manifest = launcher._build_scr_participant_manifest(config)
+            self.assertEqual(
+                set(manifest.participant_ids),
+                {"start_server:0", "backend_rank:2", "frontend:2:0", "dash_sc:2:0"},
+            )
 
     def test_vit_children_run_without_the_scr_environment(self):
         scr_env = {
@@ -432,7 +470,9 @@ class BackendScrIntegrationTest(unittest.TestCase):
             return "started"
 
         with mock.patch.dict(os.environ, scr_env, clear=True):
-            result = launcher._run_vit_without_scr(fake_vit_entry, 0, "cfg")
+            with launcher._vit_without_scr():
+                result = fake_vit_entry(0, "cfg")
+            self.assertEqual(dict(os.environ), scr_env)
 
         self.assertEqual(result, "started")
         self.assertEqual(seen["env"], {"UNRELATED": "keep"})

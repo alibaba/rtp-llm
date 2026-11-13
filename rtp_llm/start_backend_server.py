@@ -108,7 +108,7 @@ def _register_scr_resources(backend_manager, py_env_configs):
         return None
 
 
-def _start_scr_rank_arrival(backend_manager, py_env_configs, scr_manifest=None, world_rank=None):
+def _start_scr_rank_arrival(backend_manager, py_env_configs, scr_manifest=None):
     """Synchronously announce this CUDA rank's pre-service safe point."""
 
     if not is_scr_template_phase_active() or backend_manager is None:
@@ -121,12 +121,7 @@ def _start_scr_rank_arrival(backend_manager, py_env_configs, scr_manifest=None, 
             raise RuntimeError(
                 "sCR phase is active but no participant manifest was provided"
             )
-        rank_key = str(getattr(pc, "world_rank", world_rank if world_rank is not None else 0))
-        # A one-rank-per-container scheduler scope uses local rank 0 even
-        # when the distributed world rank is non-zero.  Multi-rank local
-        # scopes use the launcher world-rank keys frozen by the parent.
-        if f"backend_rank:{rank_key}" not in scr_manifest.participant_ids:
-            rank_key = str(getattr(pc, "local_rank", 0))
+        rank_key = str(pc.world_rank)
         worker_id = scr_manifest.worker_id("backend_rank", rank_key)
         worker_num = scr_manifest.worker_num
         logging.info(
@@ -162,7 +157,7 @@ def _start_scr_rank_arrival(backend_manager, py_env_configs, scr_manifest=None, 
         raise
 
 
-def _start_scr_manager_arrival(manager, scr_manifest):
+def _start_scr_manager_arrival(scr_manifest):
     """Synchronously announce the manager's pre-service safe point."""
 
     if scr_manifest is None or not is_scr_template_phase_active():
@@ -247,7 +242,7 @@ def local_rank_start(
         # no-op unless the SCR controller selected a template phase, in which
         # case this rank blocks here until the dump is complete.
         _start_scr_rank_arrival(
-            backend_manager, py_env_configs, scr_manifest=scr_manifest, world_rank=world_rank
+            backend_manager, py_env_configs, scr_manifest=scr_manifest
         )
         # Phase 2: start workers and transports, then bind listeners.
         backend_manager.start_service()
@@ -326,7 +321,11 @@ def _create_rank_processes(
     mid-loop abort still leaves every spawned object in the caller's list; teardown
     guards proc.pid to skip any that never started."""
     pc = py_env_configs.parallelism_config
-    local_world_size = _get_local_world_size(py_env_configs)
+    local_world_size = (
+        pc.local_world_size
+        if scr_manifest is not None
+        else _get_local_world_size(py_env_configs)
+    )
     cuda_device_list = _get_cuda_device_list()
     _validate_dp_configuration(py_env_configs)
 
@@ -466,7 +465,9 @@ def multi_rank_start(
             _close_readers(rank_pipe_readers)
             return processes
 
-        # Wait for all ranks to report startup status
+        # Ranks report ready only after Epsilon releases the entire process
+        # tree. The manager must arrive while the ranks are still waiting.
+        _start_scr_manager_arrival(scr_manifest)
         _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size)
 
         manager = ProcessManager(
@@ -476,9 +477,6 @@ def multi_rank_start(
             pre_exit_cleanup=cleanup,
         )
         manager.set_processes(processes, shutdown_group="backend")
-        # The outer manager is a manifest participant of its own: every declared
-        # role must arrive or the Epsilon quorum never completes.
-        _start_scr_manager_arrival(manager, scr_manifest)
         _send_pipe_status(
             pipe_writer,
             "success",
@@ -559,7 +557,14 @@ def start_backend_server(
     load_gpu_nic_affinity()
 
     pc = py_env_configs.parallelism_config
+    if scr_manifest is not None:
+        # Keep the launcher topology authoritative even with multiple visible GPUs.
+        os.environ["LOCAL_WORLD_SIZE"] = str(pc.local_world_size)
     if not torch.cuda.is_available():
+        if scr_manifest is not None and pc.local_world_size > 1:
+            raise RuntimeError(
+                "SCR backend manifest requires multiple local ranks, but CUDA is unavailable"
+            )
         return local_rank_start(
             global_controller,
             py_env_configs,
@@ -569,7 +574,8 @@ def start_backend_server(
         )
 
     if (
-        pc.world_size % torch.cuda.device_count() != 0
+        scr_manifest is None
+        and pc.world_size % torch.cuda.device_count() != 0
         and pc.world_size > torch.cuda.device_count()
     ):
         raise Exception(
@@ -585,7 +591,12 @@ def start_backend_server(
             manager = start_from_config(py_env_configs.jit_config)
         except Exception:  # cold start; a signal instead unwinds to the finally
             logging.exception("JIT_CACHE_FAIL_OPEN: setup failed; cold start")
-        if torch.cuda.device_count() > 1 and pc.world_size > 1:
+        multi_rank = (
+            "backend_manager:0" in scr_manifest.participant_ids
+            if scr_manifest is not None
+            else torch.cuda.device_count() > 1 and pc.world_size > 1
+        )
+        if multi_rank:
             return multi_rank_start(
                 global_controller,
                 py_env_configs,

@@ -201,9 +201,9 @@ def current_pod_ip():
 def cache_store_advertise_ip(world_info, parallelism_config):
     """Keep local control addresses separate from cross-Pod KV advertisements.
 
-    Return an override only for the single-Pod SCR loopback topology. Explicit
-    routable manifest addresses retain their authority. Resolve on every fixup
-    because both the seed environment and server configuration survive CRIU.
+    Return an override for single-Pod SCR loopback. Multi-Pod topology uses
+    its own routable addresses. Resolve on every fixup because both the seed
+    environment and server configuration survive CRIU.
     """
     if not local_comm_enabled(
         parallelism_config.world_size,

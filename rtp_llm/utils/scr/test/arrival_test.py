@@ -191,6 +191,15 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             self.assertEqual(scr._scr_timeouts(), (scr.DEFAULT_TIMEOUT_SECONDS, scr.DEFAULT_INACTIVITY_TIMEOUT_SECONDS))
         self.assertEqual(log_error.call_count, 2)
 
+    def test_timeout_aliases_cannot_override_the_controller_budget(self):
+        for conflicting_value in ("38", "invalid"):
+            with self.subTest(value=conflicting_value), mock.patch.dict(
+                os.environ,
+                {"RTP_LLM_SCR_TIMEOUT": "37", "SCR_TIMEOUT": conflicting_value},
+                clear=True,
+            ), self.assertRaisesRegex(scr.EpsilonProtocolError, "conflicting"):
+                scr._scr_timeouts()
+
     def test_arrival_passes_timeout_budget_and_restore_elapsed_is_observable(self):
         epsilon = _EpsilonDouble()
         restore_elapsed_ms = None

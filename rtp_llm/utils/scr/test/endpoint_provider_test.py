@@ -25,14 +25,19 @@ class ScrEndpointProviderTest(unittest.TestCase):
 
     def test_manifest_phase_overrides_snapshotted_checkpoint_environment(self):
         manifest = {"generation": "g1", "phase": "restore"}
+        with tempfile.NamedTemporaryFile(mode="w+") as file:
+            json.dump(manifest, file)
+            file.flush()
+            with patch.dict(
+                os.environ,
+                {"SCR_PHASE": "checkpoint", "RTP_LLM_SCR_ENDPOINT_MANIFEST": file.name},
+            ):
+                self.assertTrue(is_restore_phase(read_restore_manifest("g1")))
         with patch.dict(
             os.environ,
-            {
-                "SCR_PHASE": "checkpoint",
-                "RTP_LLM_SCR_ENDPOINT_MANIFEST": json.dumps(manifest),
-            },
-        ):
-            self.assertTrue(is_restore_phase(read_restore_manifest("g1")))
+            {"SCR_PHASE": "checkpoint", "RTP_LLM_SCR_ENDPOINT_MANIFEST": json.dumps(manifest)},
+        ), self.assertRaisesRegex(ValueError, "must be a file path"):
+            read_restore_manifest("g1")
         with patch.dict(os.environ, {"SCR_PHASE": "restore"}):
             self.assertTrue(is_restore_phase({"phase": "checkpoint"}))
 

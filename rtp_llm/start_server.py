@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import traceback
+from contextlib import contextmanager
 from typing import Iterator
 
 import requests
@@ -73,9 +74,9 @@ def _visible_device_count() -> int:
     must stay driver-free so CRIU never captures an open NVIDIA device.  Read
     the launcher's visibility instead of asking torch.
     """
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
-    if visible:
-        return len([entry for entry in visible.split(",") if entry.strip()])
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is not None:
+        return sum(entry.strip() not in {"", "-1"} for entry in visible.split(","))
     try:
         return len(glob.glob("/dev/nvidia[0-9]*"))
     except OSError:
@@ -116,39 +117,21 @@ def _build_scr_participant_manifest(
     # A feature-enabled normal serving process must not enter a template
     # rendezvous or advertise participants before the controller selects a
     # checkpoint/restore phase.
-    if not is_scr_template_phase_active():
+    role = py_env_configs.role_config.role_type
+    # A standalone ViT Pod owns its own listeners and never enters Epsilon.
+    if role == RoleType.VIT or not is_scr_template_phase_active():
         return None
 
     participants: list[tuple[str, object]] = [("start_server", "0")]
-    backend_enabled = py_env_configs.role_config.role_type != RoleType.FRONTEND
-    backend_is_vit = (
-        py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
-    )
-    backend_rank_count = 0
-
-    local_world_size = _scr_local_world_size(py_env_configs)
-    manager_separate = False
-    if backend_enabled and not backend_is_vit:
-        # The backend uses one outer manager plus rank children whenever the
-        # launcher advertises more than one local rank.  Do not call into
-        # torch/CUDA here: the coordinator must stay driver-free.
-        manager_separate = local_world_size > 1
-        # A single-rank backend is the outer process itself; only the true
-        # multi-rank path creates one child process per local rank.
-        backend_rank_count = local_world_size if manager_separate else 1
-    elif backend_enabled:
-        # VIT separation owns one standalone backend process.  It is not a
-        # manifest participant yet: the VIT launcher does not reach the SCR
-        # arrival barrier, and declaring a role that never arrives would stall
-        # the Epsilon quorum.  Add it here once VIT startup joins the barrier.
-        backend_rank_count = 0
-    if manager_separate:
-        participants.append(("backend_manager", "0"))
-    world_rank_start = (
-        int(py_env_configs.parallelism_config.world_rank) if manager_separate else 0
-    )
-    for world_rank in range(world_rank_start, world_rank_start + backend_rank_count):
-        participants.append(("backend_rank", str(world_rank)))
+    if role != RoleType.FRONTEND:
+        # ViT separation describes the deployment. Prefill and decode still
+        # own their LLM ranks. The backend dispatches from this frozen plan.
+        pc = py_env_configs.parallelism_config
+        local_world_size = _scr_local_world_size(py_env_configs)
+        if local_world_size > 1:
+            participants.append(("backend_manager", "0"))
+        for world_rank in range(pc.world_rank, pc.world_rank + local_world_size):
+            participants.append(("backend_rank", str(world_rank)))
 
     frontend_specs = [
         (rank, server_id)
@@ -157,9 +140,7 @@ def _build_scr_participant_manifest(
     ]
     for rank, server_id in frontend_specs:
         participants.append(("frontend", f"{rank}:{server_id}"))
-    if py_env_configs.role_config.role_type != RoleType.VIT:
-        for rank, server_id in frontend_specs:
-            participants.append(("dash_sc", f"{rank}:{server_id}"))
+        participants.append(("dash_sc", f"{rank}:{server_id}"))
 
     manifest = build_scr_participant_manifest(participants)
     logging.info(
@@ -470,11 +451,15 @@ _SCR_CHILD_ENV_KEYS = (
 )
 
 
-def _run_vit_without_scr(target, *args):
-    """Run a VIT entry point with the SCR environment removed."""
-    for key in _SCR_CHILD_ENV_KEYS:
-        os.environ.pop(key, None)
-    return target(*args)
+@contextmanager
+def _vit_without_scr():
+    # Spawn imports application modules before calling the process target.
+    # Remove the markers in the parent so import-time reporters start eagerly.
+    saved = {key: os.environ.pop(key) for key in _SCR_CHILD_ENV_KEYS if key in os.environ}
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
 
 
 @timer_wrapper(description="start vit server")
@@ -546,9 +531,8 @@ def start_vit_server_impl(
                 f"internal http_port={internal_http_port})"
             )
             process = torch.multiprocessing.Process(
-                target=_run_vit_without_scr,
+                target=vit_start_server,
                 args=(
-                    vit_start_server,
                     i,
                     py_env_configs,
                     internal_grpc_port,  # grpc_port
@@ -572,9 +556,8 @@ def start_vit_server_impl(
             f"(external grpc_port={external_grpc_port}, http_port={external_http_port})"
         )
         proxy_process = torch.multiprocessing.Process(
-            target=_run_vit_without_scr,
+            target=vit_proxy_start_server,
             args=(
-                vit_proxy_start_server,
                 py_env_configs,
                 worker_addresses,
                 external_grpc_port,  # grpc_port
@@ -602,9 +585,8 @@ def start_vit_server_impl(
             f"(grpc_port={grpc_port}, http_port={http_port})"
         )
         process = torch.multiprocessing.Process(
-            target=_run_vit_without_scr,
+            target=vit_start_server,
             args=(
-                vit_start_server,
                 0,
                 py_env_configs,
                 grpc_port,  # grpc_port
@@ -880,6 +862,13 @@ def start_server(py_env_configs: PyEnvConfigs):
     dash_sc_enabled = py_env_configs.role_config.role_type != RoleType.VIT
     py_env_configs.server_config.validate_port_layout(dash_sc_enabled=dash_sc_enabled)
 
+    if (
+        is_scr_template_phase_active()
+        and py_env_configs.role_config.role_type != RoleType.VIT
+    ):
+        py_env_configs.parallelism_config.local_world_size = _scr_local_world_size(
+            py_env_configs
+        )
     scr_manifest = _build_scr_participant_manifest(py_env_configs)
     # Impls register spawned processes right after start, so later failures still reach them in the finally cleanup.
     startup_warmup_gate_file = _setup_startup_warmup_health_gate(py_env_configs)
@@ -887,7 +876,8 @@ def start_server(py_env_configs: PyEnvConfigs):
     try:
         if py_env_configs.role_config.role_type == RoleType.VIT:
             logging.info("start vit server")
-            start_vit_server_impl(py_env_configs, process_manager)
+            with _vit_without_scr():
+                start_vit_server_impl(py_env_configs, process_manager)
 
         if (
             py_env_configs.role_config.role_type != RoleType.FRONTEND

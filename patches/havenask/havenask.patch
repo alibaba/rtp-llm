@@ -109,25 +109,26 @@ diff --git aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.h aio
 diff --git aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.cpp aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.cpp
 --- aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.cpp
 +++ aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.cpp
-@@ -53,6 +53,17 @@
+@@ -53,6 +53,18 @@
  }
 
  void MetricsSystem::Init(MetricsConfig *config) {
 +    output_override_tags_.clear();
++    const auto &globalTags = config->global_tags()->GetTagsMap();
++    const auto &commonTags = config->CommonTags();
 +    for (const auto &key : output_tag_keys_) {
-+        const auto &globalTags = config->global_tags()->GetTagsMap();
 +        auto globalTag = globalTags.find(key);
-+        auto commonTag = config->CommonTags().find(key);
 +        if (globalTag != globalTags.end()) {
 +            output_override_tags_[key] = globalTag->second;
-+        } else if (config->use_common_tag() && commonTag != config->CommonTags().end()) {
++        } else if (auto commonTag = commonTags.find(key);
++                   config->use_common_tag() && commonTag != commonTags.end()) {
 +            output_override_tags_[key] = commonTag->second;
 +        }
 +    }
      if (!initSink(config)) {
          AUTIL_LOG(ERROR, "sink init fail, metric system event timer stop");
          return;
-@@ -114,6 +125,11 @@
+@@ -114,6 +126,11 @@
  }
 
  void MetricsSystem::PublishMetrics(MetricsRecords &records) {

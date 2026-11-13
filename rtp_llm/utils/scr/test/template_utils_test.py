@@ -341,6 +341,16 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             self.assertTrue(scr.register_for_scr(engine))
         self.assertEqual([call[0] for call in epsilon.calls], ["before", "cache"])
 
+    def test_initialized_cuda_is_quiesced_without_registered_tensors(self) -> None:
+        with mock.patch.object(scr, "_registrations", {}), mock.patch(
+            "torch.cuda._initialized", True
+        ), mock.patch("torch.cuda.is_available", return_value=True), mock.patch(
+            "torch.cuda.synchronize"
+        ) as synchronize, mock.patch("torch.cuda.empty_cache") as empty_cache:
+            scr._prepare_cuda_for_arrival(2)
+        synchronize.assert_called_once_with(device=2)
+        empty_cache.assert_called_once_with()
+
     def test_before_callback_uses_captured_device(self) -> None:
         epsilon = _FakeEpsilon()
         engine = SimpleNamespace(gpu_cache_tensors=lambda: [_FakeTensor(1)])

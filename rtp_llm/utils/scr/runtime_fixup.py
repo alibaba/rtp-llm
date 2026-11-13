@@ -11,6 +11,7 @@ import ipaddress
 import json
 import logging
 import os
+import socket
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -74,6 +75,8 @@ def _read_restore_env_file() -> Mapping[str, str | None]:
     """Read a freshly published JSON environment object; absence is supported.
 
     The platform must publish this file for the current container, atomically.
+    Its mount is the identity source for HIPPO metadata. The RequestedIP read
+    from the file is separately checked against the current network namespace.
     A full environment may contain unrelated keys; only repairable identity and
     metrics inputs are selected. Null explicitly removes an allowed seed key.
     """
@@ -130,12 +133,12 @@ def fixup_runtime_after_restore(
     the caller must not release serving after a partial fixup.
     """
     global _runtime_identity
+    read_platform_file = restore_env is None and _restore_env_provider is None
     if restore_env is None:
-        restore_env = (
-            _restore_env_provider(generation)
-            if _restore_env_provider is not None
-            else _read_restore_env_file()
-        )
+        if _restore_env_provider is not None:
+            restore_env = _restore_env_provider(generation)
+        else:
+            restore_env = _read_restore_env_file()
     updates = _validate_environment(restore_env)
     # Only an explicitly fresh provider may override namespace discovery.
     # os.environ['RequestedIP'] by itself can still be the seed's value.
@@ -145,6 +148,14 @@ def fixup_runtime_after_restore(
     if parsed.is_loopback or parsed.is_unspecified or parsed.is_multicast:
         raise ValueError("restore identity requires a non-loopback Pod IP")
     pod_ip = str(parsed)
+    if read_platform_file and supplied_ip is not None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            try:
+                probe.bind((pod_ip, 0))
+            except OSError as exc:
+                raise ValueError(
+                    "SCR restore environment RequestedIP is not local"
+                ) from exc
     extension = sys.modules.get("libth_transformer")
     refresh_logger = getattr(extension, "refresh_logger_after_scr", None)
     if extension is not None and not callable(refresh_logger):

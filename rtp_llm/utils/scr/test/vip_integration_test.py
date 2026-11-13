@@ -48,7 +48,7 @@ class ScrVipIntegrationTest(unittest.TestCase):
                 clear=True,
             ), patch.object(network, "validate_device"):
                 self.assertEqual(
-                    get_master(configs.distribute_config, pc), ("22.0.1.2", "")
+                    get_master(configs.distribute_config, pc), ("22.0.1.2", "1234")
                 )
                 world = get_local_world_info(
                     configs.server_config, configs.distribute_config, pc
@@ -114,7 +114,7 @@ class ScrVipIntegrationTest(unittest.TestCase):
                             launcher, "setproctitle"
                         ):
                             entry = getattr(launcher, launcher.__name__.split(".")[-1])
-                            entry(local_rank, 0, None, configs)
+                            entry(node_rank + local_rank, 0, None, configs)
                         self.assertEqual(pc.world_rank, node_rank + local_rank)
                         self.assertEqual(pc.local_rank, local_rank)
                         self.assertEqual(
@@ -128,6 +128,7 @@ class ScrVipIntegrationTest(unittest.TestCase):
                 configs = PyEnvConfigs()
                 pc = configs.parallelism_config
                 pc.world_size, pc.local_world_size = 4, 2
+                pc.tp_size = 4
                 pc.world_rank, pc.local_rank = rank, rank % 2
                 configs.server_config.ip = "10.0.0.3"
                 configs.server_config.start_port = 22290
@@ -138,10 +139,14 @@ class ScrVipIntegrationTest(unittest.TestCase):
                         "RTPLLM_ENABLE_SCR": "1",
                         "SCR_PHASE": "checkpoint",
                         "RANK_ID": str(rank // 2),
+                        "RANK_SIZE": "2",
                     },
                     clear=True,
                 ), patch.object(
                     network, "topology", return_value={0: "22.0.1.2", 1: "22.0.1.3"}
+                ), patch(
+                    "rtp_llm.distribute.distributed_server.get_master",
+                    return_value=("22.0.1.2", "22290"),
                 ), patch(
                     "rtp_llm.distribute.distributed_server.TCPStore"
                 ) as store:
