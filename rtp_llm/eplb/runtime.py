@@ -1,4 +1,4 @@
-"""DeepInfer EPLB at the target verification boundary, over full WORLD experts.
+"""DeepInfer EPLB after target forwards or DSpARK proposals, over WORLD experts.
 
 Adapted from DeepInfer 9bd9cf243fc53ef9afbf8f04d391d989117d6ab9
 (Apache-2.0), deepinfer/model_executor/eplb/__init__.py.
@@ -304,10 +304,10 @@ class _ExpertLayoutGroup:
 
 
 class RuntimeExpertBalancer:
-    """Adapt DeepInfer's layer groups to RTP's target-only counters and control.
+    """Adapt DeepInfer's layer groups to each model's counters and control.
 
     Shapes and placement are fixed before graph capture. Call step only after
-    target verification, never during warmup, proposal or speculative commit.
+    a target forward or DSpARK proposal, never during warmup or draft commit.
     Step counts are borrowed and must be cleared by their C++ owner afterward.
     """
 

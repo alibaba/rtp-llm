@@ -490,6 +490,8 @@ class ModelFactory:
         # Ensure max_seq_len matches main model
         propose_model_config.max_seq_len = model_config.max_seq_len
         propose_model_config.quantization = sp_config.quantization
+        if sp_config.type == SpeculativeType.DSPARK:
+            propose_model_config.eplb_config = model_config.eplb_config
 
         logging.info(
             f"load propose model from tokenizer_path: {propose_model_config.tokenizer_path}, "

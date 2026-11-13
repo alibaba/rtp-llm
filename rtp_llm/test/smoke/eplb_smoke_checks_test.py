@@ -52,15 +52,34 @@ class EplbSmokeChecksTest(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, "model_id=0"):
                     check_eplb_applied(self.logs, 2)
 
-    def test_draft_migration_is_rejected_even_with_zero_changed_slots(self):
+    def test_prefill_rejects_draft_migration_even_with_zero_changed_slots(self):
         for changed in ((0, 0), (8, 4)):
             with self.subTest(changed=changed):
                 self.write(
                     "process.log",
                     applied() + applied(rank=1) + applied(model=1, changed=changed),
                 )
-                with self.assertRaisesRegex(AssertionError, "draft.*model_id=1"):
+                with self.assertRaisesRegex(AssertionError, "Unexpected.*model_id=1"):
                     check_eplb_applied(self.logs, 2)
+
+    def test_decode_requires_both_models_to_complete(self):
+        target = applied() + applied(rank=1)
+        draft = applied(model=1, layers=(0, 1, 2), changed=(2, 4, 6), rank=0)
+        self.write("process.log", target + draft)
+        with self.assertRaisesRegex(AssertionError, "model_id=1"):
+            check_eplb_applied(self.logs, 2, model_ids=(0, 1))
+        self.write(
+            "rank1.log", applied(model=1, layers=(0, 1, 2), changed=(2, 4, 6), rank=1)
+        )
+        records = check_eplb_applied(self.logs, 2, model_ids=(0, 1))
+        self.assertEqual([record["model_id"] for record in records], [0, 1])
+        self.assertEqual(records[1]["layer_ids"], [0, 1, 2])
+        self.assertEqual(records[1]["ep_ranks"], [0, 1])
+
+    def test_target_and_draft_ranks_cannot_complete_each_other(self):
+        self.write("process.log", applied() + applied(model=1, rank=1))
+        with self.assertRaisesRegex(AssertionError, "model_id=0"):
+            check_eplb_applied(self.logs, 2, model_ids=(0, 1))
 
     def test_duplicate_rank_is_not_a_collective_update(self):
         self.write("process.log", applied() * 2)

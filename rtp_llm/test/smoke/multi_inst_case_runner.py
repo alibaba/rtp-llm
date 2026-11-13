@@ -530,6 +530,7 @@ class SeparatedCaseRunner(CaseRunner):
                     role: check_eplb_applied(
                         Path(managers[role].log_file_path).parent,
                         sizes[role],
+                        model_ids=(0, 1) if role == DECODE_ROLE_NAME else (0,),
                     )
                     for role in (PREFILL_ROLE_NAME, DECODE_ROLE_NAME)
                 }

@@ -72,7 +72,7 @@ class DeepSeekV41DSparkContractTest(contract.DeepSeekV41ContractTest):
             "extra_configs": {
                 "random_seed": 42,
                 "reuse_cache": False,
-                "can_use_pd_separation": False,
+                "can_use_pd_separation": self.pd_separation,
             },
         }
         # A predictable list can become a point mass at every step after top-p.
