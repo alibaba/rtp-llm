@@ -6,7 +6,9 @@ and announces its Epsilon barrier arrival.
 """
 
 import os
+import sys
 import unittest
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest import mock
 
@@ -16,6 +18,178 @@ from rtp_llm.ops import RoleType, VitSeparation
 
 
 class BackendScrIntegrationTest(unittest.TestCase):
+    def test_rank_starts_services_only_after_template_release(self):
+        from rtp_llm.utils.scr import template_utils as scr
+        from rtp_llm.utils.scr.lifecycle import CallbackHook, TemplateLifecycle
+
+        for phase, failing_step in (
+            ("normal", None),
+            ("checkpoint", None),
+            ("restore", None),
+            ("restore", "checkpoint"),
+            ("restore", "fixup"),
+        ):
+            with self.subTest(phase=phase, failing_step=failing_step), ExitStack() as stack:
+                order = []
+                config = self._config(local_rank=0, world_rank=0)
+                config.parallelism_config.world_size = 1
+                config.prefill_cp_config = None
+                config.moe_config = object()
+                config.deep_ep_config = object()
+                config.server_config = mock.Mock()
+                config.distribute_config = mock.Mock()
+                manager = mock.Mock()
+                manager.start.side_effect = lambda: order.append("prepare-engine")
+                manager.start_service.side_effect = lambda: order.append(
+                    "start-services"
+                )
+                manager.serve_forever.side_effect = lambda: order.append("serve")
+                pipe = mock.Mock()
+                pipe.send.side_effect = lambda status: order.append(status["status"])
+
+                lifecycle = TemplateLifecycle()
+                lifecycle.register(
+                    "test-services",
+                    CallbackHook(
+                        prepare=lambda generation: order.append("prepare-template"),
+                        release=lambda generation: order.append("release"),
+                        abort=lambda generation: order.append("abort"),
+                    ),
+                )
+
+                def checkpoint(**kwargs):
+                    manager.start_service.assert_not_called()
+                    pipe.send.assert_not_called()
+                    order.append("checkpoint")
+                    if failing_step == "checkpoint":
+                        raise TimeoutError("checkpoint failed")
+                    return 0
+
+                def fixup(generation, lifecycle):
+                    order.append("fixup")
+                    if failing_step == "fixup":
+                        raise ValueError("fixup failed")
+                    lifecycle.restore_fixup(SimpleNamespace(generation=generation))
+
+                stack.enter_context(
+                    mock.patch.dict(
+                        os.environ,
+                        {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": phase},
+                        clear=True,
+                    )
+                )
+                for name in (
+                    "_install_hot_hook_runtime",
+                    "copy_gemm_config",
+                    "set_parallelism_config",
+                    "finalize_rank_local_deepep_internode",
+                    "configure_kv_cache_event_host_ip_port",
+                    "setup_cuda_device_and_accl_env",
+                    "set_global_controller",
+                    "install_oom_dump",
+                    "ignore_sigpipe",
+                ):
+                    stack.enter_context(mock.patch.object(backend, name))
+                stack.enter_context(mock.patch.object(backend.signal, "signal"))
+                stack.enter_context(
+                    mock.patch.dict(
+                        sys.modules,
+                        {
+                            "rtp_llm.server.backend_manager": SimpleNamespace(
+                                BackendManager=mock.Mock(return_value=manager)
+                            )
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        backend,
+                        "register_for_scr",
+                        side_effect=lambda *args, **kwargs: order.append("register-kv")
+                        or True,
+                    )
+                )
+                stack.enter_context(mock.patch.object(scr, "ignore_sigpipe"))
+                stack.enter_context(
+                    mock.patch.object(
+                        scr, "get_template_lifecycle", return_value=lifecycle
+                    )
+                )
+                arrival = mock.Mock(side_effect=checkpoint)
+                epsilon = SimpleNamespace(
+                    is_snapstart_enable=lambda: True, snapstart_checkpoint=arrival
+                )
+                load_epsilon = stack.enter_context(
+                    mock.patch.object(
+                        scr, "_load_epsilon", return_value=epsilon
+                    )
+                )
+                stack.enter_context(mock.patch.object(scr, "_capture_cuda_device"))
+                stack.enter_context(mock.patch.object(scr, "_prepare_cuda_for_arrival"))
+                stack.enter_context(
+                    mock.patch.object(
+                        scr, "fixup_runtime_after_restore", side_effect=fixup
+                    )
+                )
+
+                if failing_step is not None:
+                    error_type = (
+                        scr.ScrArrivalError
+                        if failing_step == "checkpoint"
+                        else ValueError
+                    )
+                    with self.assertRaisesRegex(error_type, f"{failing_step} failed"):
+                        backend.local_rank_start(
+                            None,
+                            config,
+                            pipe_writer=pipe,
+                            scr_manifest=self._manifest(),
+                        )
+                    self.assertEqual(
+                        order,
+                        [
+                            "prepare-engine",
+                            "register-kv",
+                            "prepare-template",
+                            "checkpoint",
+                            *(["fixup"] if failing_step == "fixup" else []),
+                            "abort",
+                            "failed",
+                        ],
+                    )
+                    manager.start_service.assert_not_called()
+                    manager.serve_forever.assert_not_called()
+                else:
+                    backend.local_rank_start(
+                        None,
+                        config,
+                        pipe_writer=pipe,
+                        scr_manifest=self._manifest() if phase != "normal" else None,
+                    )
+                    expected = ["prepare-engine"]
+                    if phase != "normal":
+                        expected.extend(
+                            [
+                                "register-kv",
+                                "prepare-template",
+                                "checkpoint",
+                                "fixup",
+                                "release",
+                            ]
+                        )
+                    self.assertEqual(
+                        order, [*expected, "start-services", "success", "serve"]
+                    )
+                if phase == "normal":
+                    arrival.assert_not_called()
+                    load_epsilon.assert_not_called()
+                else:
+                    arrival.assert_called_once()
+                    self.assertEqual(arrival.call_args.kwargs["wait_mode"], 1)
+                    self.assertEqual(arrival.call_args.kwargs["worker_id"], 0)
+                    self.assertEqual(arrival.call_args.kwargs["worker_num"], 4)
+                self.assertFalse(lifecycle.active)
+
     def test_parent_arrival_runs_template_lifecycle_hooks(self):
         from rtp_llm.utils.scr import template_utils as scr
         from rtp_llm.utils.scr.lifecycle import CallbackHook, TemplateLifecycle

@@ -128,6 +128,8 @@ class BindBarrierTest(TestCase):
         app._shutdown_event = Mock()
         app._install_signal_handlers = Mock()
         app._start_enqueue_loop = Mock(return_value=Mock())
+        app._stop_enqueue_loop = Mock()
+        app._close_servicer_on_loop = Mock()
         app.stop = Mock()
 
         events = []
@@ -152,6 +154,21 @@ class BindBarrierTest(TestCase):
         ), patch("rtp_llm.dash_sc.app.kmonitor.init"), patch(
             "rtp_llm.dash_sc.app.get_log_path", return_value="/tmp"
         ):
+            ready_pipe = Mock()
+            with self.assertRaisesRegex(RuntimeError, "SCR restore failed"):
+                app.start(
+                    bind_barrier=barrier,
+                    on_prebind=Mock(side_effect=RuntimeError("SCR restore failed")),
+                    on_ready=on_ready,
+                    ready_pipe_writer=ready_pipe,
+                )
+            app._grpc_server.start_on_loop.assert_not_called()
+            on_ready.assert_not_called()
+            ready_pipe.send.assert_called_once()
+            self.assertEqual(ready_pipe.send.call_args.args[0]["status"], "failed")
+            barrier.abort.assert_called_once_with()
+            events.clear()
+
             app.start(
                 bind_barrier=barrier,
                 on_prebind=on_prebind,
