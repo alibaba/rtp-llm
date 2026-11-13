@@ -424,7 +424,7 @@ def _supports_pdl(device_index):
     return torch.cuda.get_device_capability(device_index)[0] >= 9
 
 
-def fused_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps):
+def fused_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps, *, packed_output=False):
     if q.ndim != 2 or kv.ndim != 2 or q.shape[0] != kv.shape[0]:
         raise ValueError("MLA Q/KV norms require rank-2 Q/KV with equal token counts")
     for x, weight in ((q, q_weight), (kv, kv_weight)):
@@ -436,8 +436,12 @@ def fused_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps):
             raise ValueError("MLA Q/KV norms require contiguous features and weights")
         if weight.ndim != 1 or weight.numel() != x.shape[1] or x.shape[1] <= 0:
             raise ValueError("MLA norm weight shape does not match input")
-    q_out = torch.empty(q.shape, device=q.device, dtype=q.dtype)
-    kv_out = torch.empty(kv.shape, device=kv.device, dtype=kv.dtype)
+    if packed_output:
+        packed = q.new_empty((q.shape[0], q.shape[1] + kv.shape[1]))
+        q_out, kv_out = packed.split((q.shape[1], kv.shape[1]), dim=-1)
+    else:
+        q_out = torch.empty(q.shape, device=q.device, dtype=q.dtype)
+        kv_out = torch.empty(kv.shape, device=kv.device, dtype=kv.dtype)
     if q.shape[0]:
         block = triton.next_power_of_2(max(q.shape[1], kv.shape[1]))
         _fused_q_kv_rmsnorm_kernel[(q.shape[0], 2)](
@@ -447,7 +451,7 @@ def fused_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps):
             launch_pdl=_supports_pdl(q.device.index),
             num_warps=8 if block >= 2048 else 4,
         )
-    return q_out, kv_out
+    return packed if packed_output else (q_out, kv_out)
 
 
 @triton.jit

@@ -96,10 +96,33 @@ class KimiK3MtpModel(KimiK3Model):
         # The embedding gathers hidden shards across TP. Project only this
         # rank's token rows after that gather, before entering the SP layer.
         embedded = self._embed_inputs(inputs, tp_gather=self._gather_modeling_boundary)
+        previous_h = inputs.input_hiddens.narrow(0, local_start, local_rows)
+        if (
+            embedded.is_cuda
+            and embedded.dtype == previous_h.dtype == torch.bfloat16
+            and embedded.stride(-1) == previous_h.stride(-1) == 1
+            and self.enorm.weight.dtype == self.hnorm.weight.dtype == torch.bfloat16
+            and self.enorm.weight.is_contiguous()
+            and self.hnorm.weight.is_contiguous()
+            and self.enorm.variance_epsilon == self.hnorm.variance_epsilon
+        ):
+            from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
+                fused_q_kv_rmsnorm,
+            )
+
+            packed = fused_q_kv_rmsnorm(
+                embedded.narrow(0, local_start, local_rows),
+                previous_h,
+                self.enorm.weight,
+                self.hnorm.weight,
+                self.enorm.variance_epsilon,
+                packed_output=True,
+            )
+            del embedded
+            return self.eh_proj(packed)
         # A contiguous narrow is still a view. Detach the local rows so the
         # projection does not retain the complete gathered embedding storage.
         embedded = embedded.narrow(0, local_start, local_rows).clone()
-        previous_h = inputs.input_hiddens.narrow(0, local_start, local_rows)
         return self.eh_proj(
             torch.cat(
                 (self.enorm(embedded), self.hnorm(previous_h.contiguous())), dim=-1

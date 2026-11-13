@@ -2,18 +2,23 @@
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import flashinfer
 import torch
 from torch import nn
 
 from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3DecoderLayer
+from rtp_llm.models_py.model_desc.kimi_k3_mtp import KimiK3MtpModel
 from rtp_llm.models_py.modules.hybrid.kda_attention import KdaAttention
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
 from rtp_llm.models_py.triton_kernels.common.activation import (
     rmsnorm_sigmoid_gate_per_token_group_quant_fp8,
 )
-from rtp_llm.models_py.triton_kernels.common.layernorm_gated import rounded_add_rmsnorm
+from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
+    fused_q_kv_rmsnorm,
+    rounded_add_rmsnorm,
+)
 
 
 def capture(run):
@@ -50,6 +55,16 @@ class _Mlp(nn.Module):
         return combined if residual is None else residual + combined
 
 
+class _Norm(nn.Module):
+    def __init__(self, weight, eps):
+        super().__init__()
+        self.weight = weight
+        self.variance_epsilon = eps
+
+    def forward(self, value):
+        return flashinfer.norm.rmsnorm(value, self.weight, eps=self.variance_epsilon)
+
+
 class SharedModelingTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -65,6 +80,95 @@ class SharedModelingTest(unittest.TestCase):
         return KimiK3AttentionResidual(
             self.random(7168) * 0.02, self.random(7168) * 0.02, 1e-5
         )
+
+    def test_packed_dual_norm_preserves_default_tuple_and_strides(self):
+        for rows, q_width, kv_width in (
+            (0, 1536, 512),
+            (3, 1536, 512),
+            (8, 7168, 7168),
+        ):
+            packed_input = self.random(rows, q_width + kv_width + 128)
+            q = packed_input[:, :q_width]
+            kv = packed_input[:, q_width : q_width + kv_width]
+            qw, kvw = self.random(q_width), self.random(kv_width)
+            separate = fused_q_kv_rmsnorm(q, kv, qw, kvw, 1e-5)
+            self.assertIsInstance(separate, tuple)
+            actual = fused_q_kv_rmsnorm(q, kv, qw, kvw, 1e-5, packed_output=True)
+            self.assertTrue(actual.is_contiguous())
+            torch.testing.assert_close(
+                actual, torch.cat(separate, dim=-1), rtol=0, atol=0
+            )
+
+    def _mtp_fixture(self, rows, tp):
+        model = KimiK3MtpModel.__new__(KimiK3MtpModel)
+        nn.Module.__init__(model)
+        model.tp_size, model.tp_rank = tp, tp - 1
+        # Full TP input extent; the production method selects this rank's rows.
+        physical_rows = rows * tp
+        embedding = self.random(physical_rows, 7168 + 16)[:, :7168]
+        inputs = SimpleNamespace(
+            input_ids=torch.zeros(physical_rows, dtype=torch.int32, device="cuda"),
+            input_hiddens=self.random(physical_rows, 7168),
+        )
+        model._embed_inputs = lambda *args, **kwargs: embedding
+        model.enorm = _Norm(self.random(7168), 1e-5)
+        model.hnorm = _Norm(self.random(7168), 1e-5)
+        # Inspect the exact eh_proj input without adding GEMM rounding to the check.
+        model.eh_proj = nn.Identity()
+        return model, inputs, embedding
+
+    def test_mtp_packed_input_graph_at_prefill_and_decode_shapes(self):
+        # TP8 Prefill 32K/64K/128K; DP4TP4 Q1 and Verify4/update local rows.
+        cases = [(p // 8, 8) for p in (32768, 65536, 131072)]
+        cases += [(m, 4) for m in (1, 2, 4, 8, 16, 32)]
+        for rows, tp in cases:
+            model, inputs, embedding = self._mtp_fixture(rows, tp)
+            with patch(
+                "rtp_llm.models_py.triton_kernels.common.layernorm_gated.fused_q_kv_rmsnorm",
+                wraps=fused_q_kv_rmsnorm,
+            ) as fused:
+                graph, actual = capture(lambda: model._project_local_mtp_input(inputs))
+                self.assertTrue(fused.called)
+                self.assertTrue(
+                    all(
+                        call.kwargs.get("packed_output")
+                        for call in fused.call_args_list
+                    )
+                )
+            for step in range(2):
+                embedding.add_(step * 0.125)
+                inputs.input_hiddens.add_(step * 0.0625)
+                graph.replay()
+                local = slice((tp - 1) * rows, tp * rows)
+                expected = torch.cat(
+                    (
+                        model.enorm(embedding[local].clone()),
+                        model.hnorm(inputs.input_hiddens[local]),
+                    ),
+                    dim=-1,
+                )
+                self.assertEqual(actual.shape, (rows, 14336))
+                self.assertTrue(actual.is_contiguous())
+                torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+
+    def test_mtp_different_norm_eps_keeps_existing_path(self):
+        model, inputs, embedding = self._mtp_fixture(8, 4)
+        model.hnorm.variance_epsilon = 1e-6
+        with patch(
+            "rtp_llm.models_py.triton_kernels.common.layernorm_gated.fused_q_kv_rmsnorm",
+            wraps=fused_q_kv_rmsnorm,
+        ) as fused:
+            graph, actual = capture(lambda: model._project_local_mtp_input(inputs))
+            fused.assert_not_called()
+        graph.replay()
+        expected = torch.cat(
+            (
+                model.enorm(embedding[24:32].clone()),
+                model.hnorm(inputs.input_hiddens[24:32]),
+            ),
+            dim=-1,
+        )
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def test_kda_composition_preserves_packed_qkv_stride(self):
         class Kernel(nn.Module):
