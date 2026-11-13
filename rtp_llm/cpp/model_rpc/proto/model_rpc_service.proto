@@ -199,8 +199,6 @@ message MultimodalInputsPB {
     int64 timeout_ms = 4;
     reserved 5;
     reserved "v41_inputs";
-    reserved 6;
-    reserved "accept_mock_feature_seeds";
 }
 
 enum TensorDataTypePB {
@@ -254,8 +252,6 @@ message MultimodalOutputPB {
     repeated MMRdmaSlotPB output_rdma_slots = 5;
     // Compact CPU row hashes stay inline for either transport.
     TensorPB multimodal_feature_hash = 7;
-    reserved 8;
-    reserved "mock_feature_seeds";
 }
 
 message ReleaseLeasePB {
@@ -463,8 +459,6 @@ message GenerateRequestPB {
     TensorPB propose_hidden = 11;
     repeated MultimodalCacheSpanPB multimodal_cache_spans = 12;
     PrefillKvHandoffPB prefill_kv_handoff = 13;
-    reserved 14;
-    reserved "mock_decode_prompt";
 }
 
 // In the TP case, the decode master broadcasts to decode workers.
@@ -566,8 +560,6 @@ message CacheStatusPB {
     MultimodalCacheStatusPB multimodal_cache = 6;
     // Prefer this list when nonempty; otherwise fall back to legacy cache_keys.
     repeated sfixed64 cache_key_list = 7 [packed = true];
-    reserved 8;
-    reserved "mock_decode_cache_seed";
 }
 
 message MultimodalCacheStatusPB {
@@ -1137,8 +1129,6 @@ message MultimodalHashRequestPB {
     repeated string keys = 1;
     MultimodalInputsPB inputs = 2;
     int64 timeout_ms = 3;
-    reserved 4;
-    reserved "accept_mock_feature_seeds";
 }
 
 message MultimodalHashEntryPB {
@@ -1151,8 +1141,6 @@ message MultimodalHashEntryPB {
     repeated uint32 split_size = 7;
     // Flattened little-endian signed int32 hashes, one per output token.
     bytes feature_hashes = 8;
-    reserved 9;
-    reserved "mock_feature_seed";
 }
 
 message MultimodalHashResponsePB {
