@@ -97,6 +97,23 @@ class ConfigServiceTest {
     }
 
     @Test
+    void statusStaleAfterMsIsOptInAndValidatedAgainstTheStatusRpcTimeout() {
+        assertNull(ConfigTestFixtures.parse("{}").getWorkerRegistry()
+                .getHealth().getStatusStaleAfterMs());
+        assertEquals(12000L, ConfigTestFixtures.parse("""
+                {"workerRegistry":{"health":{"statusStaleAfterMs":12000}}}
+                """).getWorkerRegistry().getHealth().getStatusStaleAfterMs());
+        for (String patch : new String[]{
+                "{\"workerRegistry\":{\"health\":{\"statusStaleAfterMs\":0}}}",
+                "{\"workerRegistry\":{\"health\":{\"statusStaleAfterMs\":-1}}}",
+                "{\"workerRegistry\":{\"health\":{\"statusStaleAfterMs\":9999}}}",
+                "{\"workerRegistry\":{\"health\":{\"statusStaleAfterMs\":\"12000\"}}}"}) {
+            assertThrows(ConfigValidationException.class,
+                    () -> ConfigTestFixtures.parse(patch), patch);
+        }
+    }
+
+    @Test
     void requires_explicit_request_timeout_and_defaults_decision_lifetime() {
         assertThrows(ConfigValidationException.class, () -> new ConfigService((String) null));
         assertThrows(ConfigValidationException.class,

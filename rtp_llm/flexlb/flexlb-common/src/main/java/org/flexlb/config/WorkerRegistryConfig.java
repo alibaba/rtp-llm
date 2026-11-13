@@ -26,6 +26,8 @@ public final class WorkerRegistryConfig {
         private long statusPollIntervalMs = 20;
         private long statusRpcTimeoutMs = 5000;
         private long cleanupIntervalMs = 3000;
+        /** Null keeps elapsed time alone from ever evicting a worker. */
+        private Long statusStaleAfterMs;
     }
 
     @Getter

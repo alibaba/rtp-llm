@@ -346,7 +346,7 @@ class EngineSyncRunnerTest {
                 status.lock.unlock();
             }
 
-            new ExpirationCleaner(localKvCacheAwareManager, directory).retireUnavailableWorkers();
+            new ExpirationCleaner(localKvCacheAwareManager, directory, config).retireUnavailableWorkers();
 
             assertFalse(directory.isCurrentStatus(RoleType.PREFILL, status.getIpPort(), status));
             assertNull(registry.get(RoleType.PREFILL, status.getIpPort()));

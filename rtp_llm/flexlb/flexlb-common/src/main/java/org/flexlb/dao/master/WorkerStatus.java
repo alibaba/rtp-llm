@@ -152,7 +152,8 @@ public class WorkerStatus {
 
     /**
      * Worker health and successful-poll timing, independent of local status application.
-     * Successful timestamps are used for diagnostics, never worker expiration.
+     * Successful timestamps are used for diagnostics; they drive retirement only through
+     * the opt-in {@code workerRegistry.health.statusStaleAfterMs} threshold.
      * A zero timestamp means no RPC has succeeded in this generation.
      * reportedAlive retains the last valid worker report. Once established,
      * healthy is retained until three confirmed worker failures. Unattributed
@@ -335,7 +336,8 @@ public class WorkerStatus {
 
     public enum RetirementReason {
         CONSECUTIVE_WORKER_FAILURES,
-        DISCOVERY_REMOVED
+        DISCOVERY_REMOVED,
+        STATUS_STALE
     }
 
     /** The first confirmed reason remains latched until this generation is removed. */
@@ -349,6 +351,29 @@ public class WorkerStatus {
             if (!workerHealth.retiring && workerHealth.unavailableReason == null) {
                 workerHealth.unavailableReason = RetirementReason.DISCOVERY_REMOVED;
             }
+        }
+    }
+
+    /**
+     * Latch {@link RetirementReason#STATUS_STALE} when the last successful poll is
+     * older than the configured opt-in threshold. A zero {@code lastSuccessfulPollUs}
+     * never latches: a freshly discovered generation with no successful poll yet stays
+     * protected, because no discovery timestamp exists to prove the generation is old.
+     * The comparison and the latch are atomic against concurrent poll results.
+     *
+     * @return {@code true} only for the caller whose decision latched the reason
+     */
+    public boolean markStatusStale(long staleAfterUs, long nowUs) {
+        synchronized (workerHealth) {
+            if (workerHealth.retiring || workerHealth.unavailableReason != null) {
+                return false;
+            }
+            long lastSuccessfulUs = workerHealth.health.lastSuccessfulPollUs();
+            if (lastSuccessfulUs <= 0L || nowUs - lastSuccessfulUs <= staleAfterUs) {
+                return false;
+            }
+            workerHealth.unavailableReason = RetirementReason.STATUS_STALE;
+            return true;
         }
     }
 
