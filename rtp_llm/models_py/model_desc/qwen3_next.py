@@ -1890,10 +1890,6 @@ class Qwen35Model(Qwen3NextModel):
     def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
         input_ids: torch.Tensor = inputs.input_ids
 
-        if _IS_ASCEND:
-            # Pure token lookup; Ascend serves text-only (see _parse_mm_config).
-            return self.embed_tokens(input_ids)
-
         position_ids = inputs.combo_position_ids
         token_type_ids = inputs.embedding_inputs.combo_tokens_type_ids
         text_tokens_mask = inputs.embedding_inputs.text_tokens_mask

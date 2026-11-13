@@ -242,19 +242,6 @@ class Qwen35Moe(Qwen3NextBase):
             raise ValueError(
                 "Qwen3Next requires rope_parameters.mrope_interleaved to be true"
             )
-        if is_ascend():
-            # Ascend RoPE cache supports Base/Yarn only; keep Base as main does.
-            logging.warning(
-                "Qwen3.5 on Ascend: rope style downgraded Mrope->Base for "
-                "text-only serving (1-D positions)."
-            )
-            config.attn_config.rope_config.style = 1
-            config.attn_config.rope_config.base = rope_parameters["rope_theta"]
-            config.partial_rotary_factor = rope_parameters["partial_rotary_factor"]
-            config.attn_config.rope_config.dim = int(
-                config.attn_config.size_per_head * config.partial_rotary_factor
-            )
-            return
         config.attn_config.rope_config.style = 7
         config.attn_config.rope_config.base = rope_parameters["rope_theta"]
         config.partial_rotary_factor = rope_parameters["partial_rotary_factor"]
@@ -272,9 +259,6 @@ class Qwen35Moe(Qwen3NextBase):
 
     @classmethod
     def _parse_mm_config(cls, config_json: dict, config: ModelConfig):
-        # Ascend is text-only: the mm flag would build ViT on a CUDA device string.
-        if is_ascend():
-            return
         config.mm_model_config.is_multimodal = True
         config.mm_model_config.mm_sep_tokens = [
             [config_json["vision_start_token_id"], config_json["vision_end_token_id"]]
