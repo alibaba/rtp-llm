@@ -7,12 +7,10 @@ from typing import Any
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
-    apply_partial_rope,
-    build_qsa_rope_from_logical_positions,
-)
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import apply_partial_rope
 
 from .qsa_selection import select_qsa_paged_tokens
+from .step_metadata import cached_text_rope
 
 
 def select_target_verify_tokens(
@@ -117,21 +115,23 @@ def select_target_verify_tokens(
             current_cos, current_sin = position_state.rope(rope_config)
             position_state.stage()
         else:
-            rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
+            rope_cos, rope_sin = cached_text_rope(
+                self,
                 block_starts,
                 rope_config,
+                indexer,
                 token_count=token_count,
                 dtype=raw_keys.dtype,
                 device=raw_keys.device,
-                inv_freq=frequency,
             )
-            current_cos, current_sin = build_qsa_rope_from_logical_positions(
+            current_cos, current_sin = cached_text_rope(
+                self,
                 flat_query_positions,
                 rope_config,
+                indexer,
                 token_count=token_count,
                 dtype=raw_keys.dtype,
                 device=raw_keys.device,
-                inv_freq=frequency,
             )
         if target_writer:
             from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (

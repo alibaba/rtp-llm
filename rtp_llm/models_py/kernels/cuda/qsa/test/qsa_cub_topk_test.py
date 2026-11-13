@@ -238,7 +238,7 @@ class QsaCubTopkTest(unittest.TestCase):
             scores.zero_()
             scores.view(torch.int32)[:, ::2] = -2147483648
 
-    def test_mtp3_target_opt_in_preserves_default_and_adjacent_domains(self):
+    def test_target_backend_preserves_native_default_and_capacity_guards(self):
         self.assertEqual(torch.version.git_version, cub._TORCH_GIT)
         with patch.dict("os.environ", RTP_QWEN4_TARGET_TOPK_IMPL="invalid"):
             with self.assertRaisesRegex(ValueError, "must be native or cub"):
@@ -261,14 +261,12 @@ class QsaCubTopkTest(unittest.TestCase):
             RTP_QWEN4_TARGET_TOPK_IMPL="cub",
         ):
             for rows, columns in (
-                (63, 2048),
-                (65, 2048),
-                (255, 2048),
-                (257, 2048),
-                (64, 2047),
-                (64, 2049),
-                (64, 2144),
-                (256, 2144),
+                (0, 2048),
+                (32769, 2048),
+                (64, 1024),
+                (64, 2046),
+                (64, 16385),
+                (32769, 4096),
             ):
                 scores = torch.randn(rows, columns, device="cuda")
                 lengths = self._mtp3_target_lengths(rows).clamp(max=columns * 4)
@@ -279,6 +277,27 @@ class QsaCubTopkTest(unittest.TestCase):
                 self.assertTrue(cub.is_supported(scores, lengths))
                 with patch.object(torch.version, "git_version", "unqualified-runtime"):
                     self.assertFalse(cub.is_supported(scores, lengths))
+
+    def test_padded_score_widths_and_all_mtp_row_counts_match_torch(self):
+        with patch.dict("os.environ", RTP_QWEN4_TARGET_TOPK_IMPL="cub"):
+            for rows in (2, 48, 64):
+                for columns in list(range(2047, 2177)) + list(range(4095, 4353)):
+                    scores = torch.randn(rows, columns, device="cuda")
+                    lengths = torch.arange(rows, device="cuda", dtype=torch.int32) * 379
+                    lengths[0] = columns * 4 - 1
+                    for kind in ("random", "ties", "nonfinite", "signed_zero"):
+                        self._fill_mtp3_target_scores(scores, kind)
+                        for finite in (True, False):
+                            actual = cub.try_cub_qsa_tokens(
+                                scores, lengths, finite_only=finite
+                            )
+                            self.assertIsNotNone(actual, (rows, columns, kind))
+                            torch.testing.assert_close(
+                                actual,
+                                self.reference(scores, lengths, finite),
+                                rtol=0,
+                                atol=0,
+                            )
 
     def test_mtp3_target_all_tokens_match_pinned_torch_without_native_fallback(self):
         self.assertEqual(torch.version.git_version, cub._TORCH_GIT)

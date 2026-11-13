@@ -8,6 +8,9 @@ from rtp_llm.models_py.kernels.cuda.qsa.rope_triton import (
     try_apply_partial_rope,
     try_build_text_rope,
 )
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.step_metadata import (
+    cached_text_rope,
+)
 from rtp_llm.models_py.model_desc.test.qwen4_exp.qsa_fixtures import QSARuntimeFixture
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     Qwen4ExpQSAIndexer,
@@ -171,6 +174,60 @@ class IndexerRoPETritonTest(unittest.TestCase):
                     x, cos.view(4, 4, 1, 64), sin.view(4, 4, 1, 64)
                 )
             self.assertTrue(torch.equal(actual, expected))
+
+    def test_shared_text_rope_refreshes_each_graph_and_forward(self):
+        for inference in (False, True):
+            config = self.config()
+            indexers = []
+            with torch.inference_mode(inference):
+                for _ in range(12):
+                    frequency = float(config.base) ** (
+                        -2.0 * torch.arange(32, device="cuda", dtype=torch.float32) / 64
+                    )
+                    indexers.append(
+                        SimpleNamespace(
+                            rope_inv_freq=lambda _config, value=frequency: value,
+                            _rope_inv_freq_key=(float(config.base), 64),
+                        )
+                    )
+            for rows in (2, 3, 4, 6, 8, 12, 16, 32, 64):
+                positions = torch.arange(rows, device="cuda")
+                kwargs = dict(
+                    token_count=rows, dtype=torch.bfloat16, device=positions.device
+                )
+
+                def forward():
+                    context = SimpleNamespace(metadata_cache={})
+                    values = [
+                        cached_text_rope(context, positions, config, indexer, **kwargs)
+                        for indexer in indexers
+                    ]
+                    self.assertTrue(all(value is values[0] for value in values))
+                    return values[0]
+
+                forward()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    actual = forward()
+                for prefix in (0, 127, 8192, 10240, 32768):
+                    positions.copy_(torch.arange(rows, device="cuda") + prefix)
+                    graph.replay()
+                    for x, y in zip(actual, self.rope(positions, config, False)):
+                        torch.testing.assert_close(x, y, rtol=0, atol=0)
+                self.assertIsNot(forward()[0], actual[0])
+                context = SimpleNamespace(metadata_cache={})
+                first = cached_text_rope(
+                    context, positions, config, indexers[0], **kwargs
+                )
+                config.scale = 3.0
+                second = cached_text_rope(
+                    context, positions, config, indexers[0], **kwargs
+                )
+                self.assertIsNot(first[0], second[0])
+                for x, y in zip(second, self.rope(positions, config, False)):
+                    torch.testing.assert_close(x, y, rtol=0, atol=0)
+                config.scale = 1.0
+                graph.reset()
 
     def test_frequency_is_model_owned_and_config_changes_fall_back(self):
         config = self.config()
