@@ -14,6 +14,15 @@ py_test(
 )
 
 py_test(
+    name = "deepseek_v4_config_test",
+    srcs = ["deepseek_v4_config_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
     name = "deepseek_v4_dspark_commit_only_test",
     srcs = ["deepseek_v4_dspark_commit_only_test.py"],
     deps = ["//rtp_llm:testlib"],

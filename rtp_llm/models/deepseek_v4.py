@@ -118,6 +118,32 @@ def detect_fp4_expert_storage(weight_keys) -> "str | None":
     return None
 
 
+def _get_hf_text_config(config_json: dict) -> dict:
+    """Read text geometry without discarding checkpoint-level metadata."""
+    text_config = config_json.get("text_config")
+    if text_config is None:
+        text_config = {}
+    if not isinstance(text_config, dict):
+        raise ValueError("DeepSeek-V4 config.json 'text_config' must be an object")
+
+    normalized = {**config_json, **text_config}
+    normalized.pop("text_config", None)
+    # Quantization and dtype describe the checkpoint as a whole. Keep their
+    # top-level values even if the text sub-config supplies its own defaults.
+    for key in ("quantization_config", "dtype", "torch_dtype"):
+        if key in config_json:
+            normalized[key] = config_json[key]
+    dtype = (
+        config_json.get("dtype")
+        or config_json.get("torch_dtype")
+        or text_config.get("dtype")
+        or text_config.get("torch_dtype")
+    )
+    if dtype is not None:
+        normalized["dtype"] = dtype
+    return normalized
+
+
 def _require_n_shared_experts(config_json: dict) -> int:
     """Return the explicitly declared shared-expert count.
 
@@ -783,6 +809,8 @@ class DeepSeekV4(DeepSeekV2):
             with open(config_path) as reader:
                 config_json = json.loads(reader.read())
 
+        config_json = _get_hf_text_config(config_json)
+
         # ---- basic geometry ----
         config.num_layers = config_json["num_hidden_layers"]
         config.hidden_size = config_json["hidden_size"]
@@ -898,6 +926,9 @@ class DeepSeekV4(DeepSeekV2):
         # width -- the model-wide width overestimates V4-Pro by 1.81x
         # (1562GB vs 893GB on disk) and misroutes the loader.
         expert_dtype = config_json.get("expert_dtype")
+        if expert_dtype is None:
+            quantization_config = config_json.get("quantization_config") or {}
+            expert_dtype = quantization_config.get("expert_dtype")
         if expert_dtype is not None:
             config.expert_weight_dtype = str(expert_dtype).strip().lower()
 
@@ -920,7 +951,7 @@ class DeepSeekV4(DeepSeekV2):
         )
         config.dspark_markov_rank = config_json.get("dspark_markov_rank")
 
-        config.config_dtype = config_json.get("torch_dtype", None)
+        config.config_dtype = config_json.get("dtype", config_json.get("torch_dtype"))
 
         # Keep lm_head in its checkpoint dtype (bf16).  The framework default
         # ``enable_fp32_lm_head=True`` calls _fix_fp32_lm_head which overrides
@@ -1244,7 +1275,7 @@ class DeepSeekV4DSpark(DeepSeekV4):
         config = super()._create_config(ckpt_path)
         config_path = os.path.join(ckpt_path, "config.json")
         with open(config_path) as reader:
-            config_json = json.load(reader)
+            config_json = _get_hf_text_config(json.load(reader))
 
         target_layers = int(config_json["num_hidden_layers"])
         compress_ratios = list(config_json.get("compress_ratios", ()))
