@@ -607,7 +607,7 @@ def load_gpu_nic_affinity() -> bool:
 
 
 def setup_cuda_device_and_accl_env(local_rank: int) -> None:
-    """Apply CUDA device and ACCL env side effects (same as ParallelInfo.from_params)."""
+    """Set the rank's CUDA device and ACCL environment."""
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
 

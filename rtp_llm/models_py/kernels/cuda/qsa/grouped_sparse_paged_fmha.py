@@ -1,23 +1,62 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Experimental SM120 grouped QSA with compensated BF16 probability MMA."""
+"""SM120 short-query QSA with grouped heads and split KV reduction."""
 
 import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.kernels.cuda.qsa.chunk_paged_gqa import (
+    _fp8_to_bf16,
+    _require_fp8_toolchain,
+)
+
+
+def _fp8_short_config(batch, queries, kv_heads):
+    """Measured (splits, KV tile, warps, stages), including merge cost.
+
+    Preserve the existing Q1/Q4 launches. Other business windows use the
+    number of independent query/KV-head groups to balance split parallelism
+    against partial-state and merge traffic. The large-grid two-warp path
+    uses BK64; it is not the long-prefill BK64/no-split configuration.
+    """
+    if queries not in (1, 4) or batch == 16 or (batch == 1 and kv_heads == 2):
+        groups = batch * queries * kv_heads
+        if groups <= 4:
+            return 32, 128, 4, 1
+        if groups <= 12:
+            return 32, 32, 4, 1
+        if groups <= 20:
+            return 16, 32, 4, 1
+        if groups <= 48:
+            return 16, 128, 4, 1
+        if groups <= 128:
+            return 8, 128, 4, 1
+        if groups <= 192:
+            return 4, 128, 4, 1
+        if groups <= 256:
+            return 8, 64, 2, 1
+        return 4, 64, 2, 1
+    if batch == 1:
+        return 32, (128 if queries == 4 else 64), 4, 2
+    if (batch, queries, kv_heads) == (4, 1, 1):
+        return 32, 128, 4, 2
+    if queries == 4 and batch * kv_heads >= 8:
+        return 16, 128, 4, 1
+    return 32, 32, 4, 1
+
 
 def preferred_splits(q, cache, selected, *, page_size, block_k):
-    """Measured FP8 TP2 shapes; keep the original split policy elsewhere."""
+    """FP8 TP1/TP2 short windows; retain the prior policy elsewhere."""
     if not (
         q.ndim == 4
         and cache.ndim == 5
         and q.dtype == torch.bfloat16
         and cache.dtype == torch.float8_e4m3fn
-        and q.shape[1] == 12
+        and cache.shape[2] in (1, 2)
+        and q.shape[1] == 12 * cache.shape[2]
         and q.shape[3] == 256
-        and cache.shape[2] == 1
-        and q.shape[0] in (1, 4)
-        and q.shape[2] in (1, 4)
+        and q.shape[0] in (1, 2, 4, 8, 16)
+        and 1 <= q.shape[2] <= 15
         and selected.shape[:2] == (q.shape[0], q.shape[2])
         and selected.shape[-1] in (2051, 2052)
         and page_size == 128
@@ -27,7 +66,7 @@ def preferred_splits(q, cache, selected, *, page_size, block_k):
         and torch.cuda.get_device_capability(q.device) == (12, 0)
     ):
         return None
-    return 32
+    return _fp8_short_config(q.shape[0], q.shape[2], cache.shape[2])[0]
 
 
 def is_supported(
@@ -51,7 +90,7 @@ def is_supported(
         return False
     group_heads = heads // kv_heads
     # Smaller decode batches benefit only for the larger GQA head group.
-    # Single-query batches below four keep the lower-latency online path.
+    # Small single-query batches require the measured 32-split configuration.
     if q.shape[0] < 8 and (
         group_heads != 12 or (q.shape[0] < 4 and q.shape[2] == 1 and splits != 32)
     ):
@@ -76,7 +115,11 @@ def is_supported(
         and q.ndim == 4
         and 1 <= q.shape[0] <= 64
         and heads in (3, 6, 12, 24)
-        and 1 <= q.shape[2] <= 4
+        # Each CTA owns one query: extending the GQA12 verify window changes
+        # the grid, not its head tile or accumulator. Keep the previous
+        # compatibility domain for other GQA ratios.
+        and q.shape[2] >= 1
+        and (q.shape[2] <= 4 or group_heads == 12)
         and q.shape[3] == 256
         and cache.ndim == 5
         and tuple(cache.shape[1:]) == (2, kv_heads, 128, 256)
@@ -145,6 +188,9 @@ def _grouped_sparse_paged_split_kernel(
     DRAFT_QS: tl.constexpr = 0,
     DRAFT_LENGTHS=None,
     DRAFT_PREFIX=None,
+    DIRECT_FP8: tl.constexpr = False,
+    UNIT_SCALE: tl.constexpr = False,
+    SINGLE_PV: tl.constexpr = False,
 ):
     batch = tl.program_id(0)
     group_query = tl.program_id(1)
@@ -215,22 +261,32 @@ def _grouped_sparse_paged_split_kernel(
         )
         key = tl.load(kp, mask=valid[:, None], other=0.0)
         if FP8_CACHE:
+            if DIRECT_FP8:
+                key = _fp8_to_bf16(key)
+        if FP8_CACHE and not UNIT_SCALE:
             sp = scale + physical * SP + group * SH + (token % PAGE) * ST
             kscale = tl.load(sp, mask=valid, other=1.0)
             key = (key.to(tl.float32) * kscale[:, None]).to(tl.bfloat16)
+        else:
+            key = key.to(tl.bfloat16)
         score = tl.dot(query_values, tl.trans(key)) * (1.0 / 16.0)
         score = tl.where(valid[None, :], score, float("-inf"))
         new_max = tl.maximum(maximum, tl.max(score, 1))
         alpha = tl.where(normalizer > 0, tl.exp(maximum - new_max), 0.0)
         prob = tl.where(valid[None, :], tl.exp(score - new_max[:, None]), 0.0)
-        value = tl.load(kp + CKV, mask=valid[:, None], other=0.0).to(tl.float32)
+        value = tl.load(kp + CKV, mask=valid[:, None], other=0.0)
         if FP8_CACHE:
+            if DIRECT_FP8:
+                value = _fp8_to_bf16(value)
+        if FP8_CACHE and not UNIT_SCALE:
             vscale = tl.load(sp + SKV, mask=valid, other=1.0)
-            value *= vscale[:, None]
+            value = value.to(tl.float32) * vscale[:, None]
         # Preserve the BF16 dequant boundary. A bounded alternative uses FP16
         # probabilities; keep compensated BF16 for values outside FP16 range.
         value_bf16 = value.to(tl.bfloat16)
-        if FP16_PV:
+        if SINGLE_PV:
+            acc = tl.dot(prob.to(tl.bfloat16), value_bf16, acc * alpha[:, None])
+        elif FP16_PV:
             safe_fp16 = (
                 tl.max(tl.max(tl.abs(value_bf16.to(tl.float32)), 1), 0) <= 65504.0
             )
@@ -269,11 +325,13 @@ def grouped_sparse_paged_split(
     scale=None,
     selected_has_count=False,
     fp16_pv=False,
+    unit_scale=False,
 ):
     """Write FP32 split states using the original merge layout.
 
-    K/V are shared across the three query heads. Softmax and accumulation stay
-    FP32; two BF16 probability components compensate Tensor Core rounding.
+    K/V are shared across each query head group. FP8 uses a single BF16 PV
+    with FP32 accumulation; arbitrary scales keep the BF16 dequant boundary.
+    ``unit_scale`` certifies the entire visible cache, including prefixes.
     The caller validates metadata and selects the verified shape domain.
     """
     batch, heads, query_len, dim = q.shape
@@ -281,15 +339,21 @@ def grouped_sparse_paged_split(
     width = row_width - int(selected_has_count)
     kv_heads = cache.shape[2]
     fp8 = cache.dtype == torch.float8_e4m3fn
+    if fp8 and unit_scale:
+        if torch.version.hip is not None or torch.cuda.get_device_capability(
+            q.device
+        ) != (12, 0):
+            raise RuntimeError("QSA FP8 grouped decode requires NVIDIA SM120")
+        _require_fp8_toolchain()
     strides = scale.stride() if fp8 else (0, 0, 0, 0)
     tuned = fp8 and splits == preferred_splits(
         q, cache, selected, page_size=page_size, block_k=64
     )
-    # The measured M4 target/draft domains benefit from wider KV tiles.
-    # Keep per-token scales, BF16 dequant and compensated PV unchanged.
-    block_k = (
-        128 if tuned and not fp16_pv and (batch, query_len) in ((1, 4), (4, 1)) else 64
-    )
+    block_k, num_warps, num_stages = 64, 4, 2
+    if tuned and not fp16_pv:
+        _, block_k, num_warps, num_stages = _fp8_short_config(
+            batch, query_len, kv_heads
+        )
     _grouped_sparse_paged_split_kernel[(batch, kv_heads * query_len, splits)](
         q,
         cache,
@@ -324,7 +388,10 @@ def grouped_sparse_paged_split(
         ST=strides[3],
         ROTATE_TILES=tuned,
         FP16_PV=fp16_pv,
-        num_warps=4,
-        num_stages=2,
+        DIRECT_FP8=fp8 and unit_scale,
+        UNIT_SCALE=fp8 and unit_scale,
+        SINGLE_PV=fp8 and not fp16_pv,
+        num_warps=num_warps,
+        num_stages=num_stages,
         enable_fp_fusion=False,
     )

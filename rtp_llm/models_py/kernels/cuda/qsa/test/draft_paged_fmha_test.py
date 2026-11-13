@@ -36,6 +36,12 @@ class DraftPagedFmhaTest(unittest.TestCase):
         torch.manual_seed(20261020)
 
     def test_two_graphs_ragged_padded_pools_live_pages_and_scales(self):
+        self._check_live_graphs(unit_scale=False)
+
+    def test_unit_scale_graph_ignores_poisoned_scales(self):
+        self._check_live_graphs(unit_scale=True)
+
+    def _check_live_graphs(self, unit_scale):
         for batch in (1, 2, 3, 4, 8):
             rows, pages = batch * 4, batch * 4 + 1
             qkv = torch.randn(rows, 4096, device="cuda", dtype=torch.bfloat16)[:, :3584]
@@ -53,6 +59,7 @@ class DraftPagedFmhaTest(unittest.TestCase):
                 torch.float8_e4m3fn
             )
             scale = torch.rand(pages, 256 + 16, device="cuda") + 0.1
+            reference_scale = torch.ones_like(scale) if unit_scale else scale
             gate = torch.randn(rows, 3072, device="cuda", dtype=torch.bfloat16)
             initial = cache.view(torch.uint8).clone()
 
@@ -81,6 +88,7 @@ class DraftPagedFmhaTest(unittest.TestCase):
                         page_size=128,
                         kv_scale=scale,
                         gate=gate if gated else None,
+                        kv_scale_is_unity=unit_scale,
                     )
                     self.assertIsNotNone(value)
                 else:
@@ -95,7 +103,7 @@ class DraftPagedFmhaTest(unittest.TestCase):
                         indices,
                         page_size=128,
                         kv_head_num=1,
-                        kv_scale=scale,
+                        kv_scale=reference_scale,
                         graph_capture=True,
                     )
                     value = try_unpack_output(
@@ -104,6 +112,8 @@ class DraftPagedFmhaTest(unittest.TestCase):
                 return packed, value
 
             graphs = []
+            if unit_scale:
+                scale.fill_(float("nan"))
             for gated in (False, True):
                 call(True, gated)
                 graph = torch.cuda.CUDAGraph()
@@ -127,7 +137,10 @@ class DraftPagedFmhaTest(unittest.TestCase):
                     table[:, 2] = pages + 3
                 qkv.normal_()
                 selected.random_(-1, 512)
-                scale.uniform_(0.1, 1.0)
+                if unit_scale:
+                    scale.fill_(float("nan"))
+                else:
+                    scale.uniform_(0.1, 1.0)
                 gate.normal_()
                 for gated, graph, actual in graphs:
                     expected = call(False, gated)

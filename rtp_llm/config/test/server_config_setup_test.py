@@ -14,6 +14,7 @@ from rtp_llm.config.server_config_setup import (
     configure_kv_cache_event_host_ip_port,
     set_parallelism_config,
     setup_and_configure_server,
+    setup_cuda_device_and_accl_env,
     setup_default_args,
 )
 from rtp_llm.ops import CPAllGatherImpl, CPRotateMethod, NcclCommConfig, RoleType
@@ -73,6 +74,53 @@ class RtxPeerTransportTest(TestCase):
 
     def test_frontend_does_not_set_gpu_transport_policy(self):
         self.assertIsNone(self.configure(capability=(8, 9), role=RoleType.FRONTEND))
+
+
+class CudaStartupToolchainTest(TestCase):
+    def test_sm120_uses_the_image_toolchain_without_environment_overrides(self):
+        with (
+            patch.dict(os.environ, _jit_env(), clear=True),
+            patch("torch.cuda.is_available", return_value=True),
+            patch("torch.cuda.set_device") as set_device,
+            patch("torch.cuda.get_device_capability", return_value=(12, 0)),
+            patch("torch.version.hip", None),
+        ):
+            before = dict(os.environ)
+            setup_cuda_device_and_accl_env(3)
+            set_device.assert_called_once_with(3)
+            self.assertEqual(dict(os.environ), before)
+
+    def test_other_platforms_keep_the_existing_compiler_environment(self):
+        for cuda_available, hip, capability in (
+            (False, None, None),
+            (True, "6.4", None),
+            (True, None, (9, 0)),
+            (True, None, (10, 0)),
+            (True, None, (12, 1)),
+        ):
+            with (
+                self.subTest(
+                    cuda_available=cuda_available, hip=hip, capability=capability
+                ),
+                patch.dict(os.environ, _jit_env(), clear=True),
+                patch("torch.cuda.is_available", return_value=cuda_available),
+                patch("torch.cuda.set_device"),
+                patch(
+                    "torch.cuda.get_device_capability",
+                    side_effect=(
+                        AssertionError("capability queried on CPU/ROCm")
+                        if capability is None
+                        else None
+                    ),
+                    return_value=capability,
+                ),
+                patch("torch.version.hip", hip),
+            ):
+                before = dict(os.environ)
+
+                setup_cuda_device_and_accl_env(0)
+
+                self.assertEqual(dict(os.environ), before)
 
 
 class ServerConfigPortLayoutTest(TestCase):
@@ -375,10 +423,11 @@ class GenerateConfigTest(TestCase):
             for from_env in (False, True):
                 env = {option.upper(): value} if from_env else {}
                 args = [] if from_env else ["--" + option, value]
-                with self.subTest(option=option, value=value, env=from_env), patch.dict(
-                    "os.environ", _jit_env(**env), clear=True
-                ), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(
-                    SystemExit
+                with (
+                    self.subTest(option=option, value=value, env=from_env),
+                    patch.dict("os.environ", _jit_env(**env), clear=True),
+                    contextlib.redirect_stderr(io.StringIO()),
+                    self.assertRaises(SystemExit),
                 ):
                     setup_args(args)
 
@@ -639,8 +688,9 @@ class GenerateConfigTest(TestCase):
             ),
         )
         for args, env, expected in valid:
-            with self.subTest(args=args, env=env), patch.dict(
-                os.environ, _jit_env(**env), clear=True
+            with (
+                self.subTest(args=args, env=env),
+                patch.dict(os.environ, _jit_env(**env), clear=True),
             ):
                 config = setup_args(args).jit_config
                 self.assertEqual(
@@ -652,8 +702,9 @@ class GenerateConfigTest(TestCase):
             (["--manage_jit_cache", "0"], {}, False),
             ([], {"MANAGE_JIT_CACHE": "0"}, False),
         ):
-            with self.subTest(args=args, env=env), patch.dict(
-                os.environ, _jit_env(**env), clear=True
+            with (
+                self.subTest(args=args, env=env),
+                patch.dict(os.environ, _jit_env(**env), clear=True),
             ):
                 self.assertIs(setup_args(args).jit_config.manage_jit_cache, expected)
 
@@ -669,11 +720,12 @@ class GenerateConfigTest(TestCase):
             ([], {"MANAGE_JIT_CACHE": ""}, bool_error),
         ):
             stderr = io.StringIO()
-            with self.subTest(args=args, env=env), patch.dict(
-                os.environ, _jit_env(**env), clear=True
-            ), contextlib.redirect_stderr(stderr), self.assertRaises(
-                SystemExit
-            ) as context:
+            with (
+                self.subTest(args=args, env=env),
+                patch.dict(os.environ, _jit_env(**env), clear=True),
+                contextlib.redirect_stderr(stderr),
+                self.assertRaises(SystemExit) as context,
+            ):
                 setup_args(args)
             self.assertEqual(context.exception.code, 2)
             # Fail *because of this validator*, not from an unrelated parse error.
@@ -688,8 +740,10 @@ class GenerateConfigTest(TestCase):
             ({"JIT_CACHE_SETUP_TIMEOUT_S": "45"}, (45, True)),
             ({"MANAGE_JIT_CACHE": "0"}, (180, False)),
         ):
-            with self.subTest(env=env), patch.object(sys, "argv", ["prog"]), patch.dict(
-                os.environ, _jit_env(**env), clear=True
+            with (
+                self.subTest(env=env),
+                patch.object(sys, "argv", ["prog"]),
+                patch.dict(os.environ, _jit_env(**env), clear=True),
             ):
                 config = setup_args().jit_config
                 self.assertEqual(

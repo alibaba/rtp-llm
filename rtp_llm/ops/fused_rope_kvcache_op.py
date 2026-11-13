@@ -87,6 +87,10 @@ class FusedRopeAttnParams:
 
 
 class FusedRopeKVCachePrefillOpBase:
+    # Native fused RoPE writers cast FP8 K/V directly and write unit scales.
+    # This certifies their writes, not existing or transferred prefix blocks.
+    fp8_kv_scale_is_unity = True
+
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.attn_configs = attn_configs
         self._graph_rope_cache: Optional[torch.Tensor] = None
@@ -263,6 +267,10 @@ class FusedRopeKVCachePrefillOpQOut(FusedRopeKVCachePrefillOpBase):
 
 
 class FusedRopeKVCacheDecodeOp:
+    # Native fused RoPE writers cast FP8 K/V directly and write unit scales.
+    # This certifies their writes, not existing or transferred prefix blocks.
+    fp8_kv_scale_is_unity = True
+
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.attn_configs = attn_configs
         self._dummy_scale: Optional[torch.Tensor] = None
