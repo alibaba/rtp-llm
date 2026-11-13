@@ -199,8 +199,8 @@ public class WorkerAddressService {
         if (hosts.isEmpty()) {
             if (state.shouldWarnForEmptyWorkers()) {
                 logger.warn(
-                        "No workers discovered, model={}, address={}, group={}; "
-                                + "retaining last non-empty worker list (warning limited to once per minute)",
+                        "No workers discovered, model={}, address={}, group={}; retaining last"
+                                + " non-empty worker list (warning limited to once per minute)",
                         modelName,
                         endpoint.getAddress(),
                         endpoint.getGroup());

@@ -34,9 +34,7 @@ import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RequestId;
@@ -48,6 +46,9 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -97,13 +98,19 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     final DefaultBatchDispatcher dispatcher;
     private final RequestSchedulerTestRuntime schedulerRuntime;
 
-    /** requestIds in the order the mock engines actually received them via enqueueBatch. */
+    /**
+     * requestIds in the order the mock engines actually received them via enqueueBatch.
+     */
     final List<Long> engineArrivalOrder = new CopyOnWriteArrayList<>();
 
-    /** requestId -> first enqueueBatch arrival time (nanos), for latency measurements. */
+    /**
+     * requestId -> first enqueueBatch arrival time (nanos), for latency measurements.
+     */
     final Map<Long, Long> engineArrivalNanos = new ConcurrentHashMap<>();
 
-    /** Prefill index chosen by the deterministic fixture route. */
+    /**
+     * Prefill index chosen by the deterministic fixture route.
+     */
     volatile Function<BalanceContext, Integer> prefillSelector = ctx -> 0;
 
     private final Map<Integer, WorkerStatus> statusByPort = new ConcurrentHashMap<>();
@@ -378,13 +385,17 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     @Override
     public void close() {
-        stopAutoPump();
-        schedulerRuntime.close();
-        dispatcher.shutdown();
-        for (JavaMockEngineCluster.FastRpcService svc : services.values()) {
-            svc.shutdown();
+        try {
+            stopAutoPump();
+        } finally {
+            schedulerRuntime.close();
+            dispatcher.shutdown();
+            for (JavaMockEngineCluster.FastRpcService svc : services.values()) {
+                svc.shutdown();
+            }
+            engineScheduler.shutdownNow();
         }
-        engineScheduler.shutdownNow();
+        assertAutoPumpHealthy();
     }
 
     // ==================== endpoint / route wiring ====================
@@ -573,7 +584,9 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                     try {
                         pumpOnce();
                     } catch (Throwable failure) {
-                        pumpFailure.compareAndSet(null, failure);
+                        if (!isPumpShutdownInterruption(failure)) {
+                            pumpFailure.compareAndSet(null, failure);
+                        }
                     }
                 },
                 intervalMs,
@@ -591,7 +604,14 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     void pumpOnce() {
         synchronized (pumpLock) {
             for (JavaMockEngineCluster.FastRpcService svc : services.values()) {
-                pumpEngine(svc);
+                try {
+                    pumpEngine(svc);
+                } catch (Throwable failure) {
+                    if (isPumpShutdownInterruption(failure)) {
+                        return;
+                    }
+                    pumpFailure.compareAndSet(null, failure);
+                }
             }
         }
     }
@@ -606,7 +626,17 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     void stopAutoPump() {
         if (pumpExecutor != null) {
             pumpExecutor.shutdownNow();
-            pumpExecutor = null;
+            try {
+                if (!pumpExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("worker status pump did not terminate");
+                }
+            } catch (InterruptedException interruption) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(
+                        "interrupted while stopping status pump", interruption);
+            } finally {
+                pumpExecutor = null;
+            }
         }
     }
 
@@ -659,7 +689,8 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(initial));
+                    WorkerStatusTestFixtures.prepare(
+                            status, WorkerStatusTestFixtures.observation(status, initial));
             endpointRegistry.publishPreparedEndpoint(status.getIpPort(), status, prepared);
         } finally {
             status.lock.unlock();
@@ -744,6 +775,15 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 workerStatus(svc, status.appliedStatusCursor().latestFinishedTaskVersion());
         RoleType role = decodeEngines.contains(svc) ? RoleType.DECODE : RoleType.PREFILL;
         schedulerRuntime.applyStatus(status, statusResponse(role, snapshot));
+    }
+
+    private boolean isPumpShutdownInterruption(Throwable failure) {
+        ScheduledExecutorService executor = pumpExecutor;
+        return executor != null
+                && executor.isShutdown()
+                && Thread.currentThread().isInterrupted()
+                && (failure instanceof InterruptedException
+                        || failure.getCause() instanceof InterruptedException);
     }
 
     private MockPerformanceModel model(String prefillFormulaMs, double decodeStepMs) {

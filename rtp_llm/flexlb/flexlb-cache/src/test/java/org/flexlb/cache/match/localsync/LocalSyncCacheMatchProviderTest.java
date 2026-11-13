@@ -80,7 +80,7 @@ class LocalSyncCacheMatchProviderTest {
         assertEquals(100L, result.getAvailableKvCache());
         assertEquals(200L, result.getTotalKvCache());
         assertEquals(3L, result.getCacheVersion());
-        verify(kvCacheManager).updateEngineCache(workerStatus, "PREFILL", Set.of(11L, 22L));
+        verify(kvCacheManager).updateEngineCache(workerStatus, "PREFILL", Set.of(11L, 22L), null);
         verify(metricsReporter)
                 .reportUpdateEngineBlockCacheRT(
                         eq("127.0.0.1:8080"), eq("PREFILL"), anyLong(), eq("1"));
@@ -135,7 +135,7 @@ class LocalSyncCacheMatchProviderTest {
 
         assertTrue(result.isSuccess());
         assertEquals(0, result.getCacheBlockCount());
-        verify(kvCacheManager).updateEngineCache(workerStatus, "PREFILL", Set.of());
+        verify(kvCacheManager).updateEngineCache(workerStatus, "PREFILL", Set.of(), null);
         verify(metricsReporter)
                 .reportUpdateEngineBlockCacheRT(
                         eq("127.0.0.1:8080"), eq("PREFILL"), anyLong(), eq("1"));
@@ -150,7 +150,7 @@ class LocalSyncCacheMatchProviderTest {
         WorkerStatus workerStatus = workerStatusFixture();
         doThrow(new IllegalStateException("cache update failed"))
                 .when(kvCacheManager)
-                .updateEngineCache(workerStatus, "PREFILL", Set.of(11L, 22L));
+                .updateEngineCache(workerStatus, "PREFILL", Set.of(11L, 22L), null);
 
         WorkerCacheUpdateResult result = provider.updateFromWorkerStatus(workerStatus);
 

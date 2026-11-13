@@ -560,7 +560,7 @@ class RequestLifetimeTest {
                         })
                 .when(fixture.slot)
                 .onInactivityDeadline(any(ExpirationTimer.InactivityDeadline.class), anyLong());
-        try (var timer = new ExpirationTimer(registry, config)) {
+        try (var timer = new ExpirationTimer(registry)) {
             synchronized (fixture.slot) {
                 RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);
                 RequestLifecycleTestSupport.markAcknowledged(fixture.slot);
@@ -632,7 +632,7 @@ class RequestLifetimeTest {
                         })
                 .when(fixture.slot)
                 .onInactivityDeadline(any(ExpirationTimer.InactivityDeadline.class), anyLong());
-        try (var timer = new ExpirationTimer(registry, config, now::get)) {
+        try (var timer = new ExpirationTimer(registry, now::get)) {
             synchronized (fixture.slot) {
                 fixture.slot.configureInactivityTimeout(100L);
                 RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);

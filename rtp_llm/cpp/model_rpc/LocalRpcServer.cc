@@ -826,10 +826,9 @@ LocalRpcServer::GetCacheStatus(grpc::ServerContext* context, const CacheVersionP
     response->set_total_kv_cache(cache_status.total_kv_cache);
     response->set_block_size(cache_status.block_size);
     response->set_version(cache_status.version);
-    auto* cache_map = response->mutable_cache_keys();
-    for (const auto& key : cache_status.cached_keys) {
-        (*cache_map)[static_cast<int64_t>(key)] = true;
-    }
+    auto* cache_keys = response->mutable_cache_key_list();
+    cache_keys->Resize(static_cast<int>(cache_status.cached_keys.size()), 0);
+    std::copy(cache_status.cached_keys.begin(), cache_status.cached_keys.end(), cache_keys->mutable_data());
     return grpc::Status::OK;
 }
 

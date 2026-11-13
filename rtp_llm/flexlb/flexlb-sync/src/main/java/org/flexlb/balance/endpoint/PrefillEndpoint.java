@@ -106,34 +106,46 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.prefillState = runtime.ownedState();
     }
 
-    /** Capture the canonical queue/work inputs for one pure route projection. */
+    /**
+     * Capture the canonical queue/work inputs for one pure route projection.
+     */
     public RouteProjection.Inputs captureRouteProjectionInputs() {
         return runtime.captureRouteProjectionInputs();
     }
 
-    /** Stable delivery semantics selected once for this endpoint generation. */
+    /**
+     * Stable delivery semantics selected once for this endpoint generation.
+     */
     public RouteProjection.DeliveryProjection deliveryProjection() {
         return runtime.deliveryProjection();
     }
 
-    /** Publish one exact route after validating its generation pin. */
+    /**
+     * Publish one exact route after validating its generation pin.
+     */
     public boolean offerPinned(GenerationPin exactPin, ScheduledRequest exactItem) {
         requirePinnedGeneration(exactPin);
         return runtime.offer(exactItem);
     }
 
-    /** Publish a role/group-scoped edge after real queue or status progress. */
+    /**
+     * Publish a role/group-scoped edge after real queue or status progress.
+     */
     public void signalPlacementCapacityChanged() {
         WorkerStatus.TopologySnapshot topology = getStatus().topologySnapshot();
         placementAvailability.capacityChanged(getStatus().getRole(), topology.group(), ipPort());
     }
 
-    /** Read the last scheduling decision without traversing or locking the queue. */
+    /**
+     * Read the last scheduling decision without traversing or locking the queue.
+     */
     public Map<String, Object> queueWaitDiagnostics() {
         return runtime.waitDiagnostics();
     }
 
-    /** Capture exact queued identities for eviction planning. */
+    /**
+     * Capture exact queued identities for eviction planning.
+     */
     public WorkerBatcher.QueueSnapshot captureQueueSnapshot() {
         return runtime.captureQueueSnapshot();
     }
@@ -144,6 +156,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     public PrefillState.ReservationResult<PrefillState.BatchReservation> reserveBatch(
             ScheduledRequest exactHead, long batchId, int maximumInflightBatches) {
+        if (!hasAvailableSchedulingStatus()) {
+            return new PrefillState.ReservationResult<>(
+                    PrefillState.CapacityStatus.CAPACITY_FULL, null);
+        }
         EndpointGenerationLifecycle.HandoffPermit handoffPermit = tryAcquireGenerationHandoff();
         if (handoffPermit == null) {
             return new PrefillState.ReservationResult<>(
@@ -177,23 +193,34 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return prefillState.reserveRoute(exactItem, predictedMs);
     }
 
-    /** Acquire the generation capability only for the final route commit. */
+    /**
+     * Acquire the generation capability only for the final route commit.
+     */
     public RouteCommitAdmission tryBeginRouteCommitAdmission() {
+        if (!hasAvailableSchedulingStatus()) {
+            return null;
+        }
         EndpointGenerationLifecycle.HandoffPermit handoffPermit = tryAcquireGenerationHandoff();
         return handoffPermit == null ? null : new RouteCommitAdmission(handoffPermit);
     }
 
-    /** Exact wake source for this generation's batch admission capacity. */
+    /**
+     * Exact wake source for this generation's batch admission capacity.
+     */
     public CapacityBoundary.Availability batchAdmissionAvailability(int maximumInflightBatches) {
-        return prefillState.batchAvailability(maximumInflightBatches);
+        return prefillState.batchAvailability(maximumInflightBatches, getStatus());
     }
 
-    /** Explain a failed admission using the current owner-priority summary. */
+    /**
+     * Explain a failed admission using the current owner-priority summary.
+     */
     public AdmissionRejectReason admissionRejectReason(int priority) {
         return prefillState.admissionRejectReason(priority, inflightRequestLimit);
     }
 
-    /** Advisory capacity; publication repeats the count check under the ownership lock. */
+    /**
+     * Advisory capacity; publication repeats the count check under the ownership lock.
+     */
     public boolean canAcceptRequest() {
         return inflightRequestLimit == 0L || prefillState.canAcceptRequest(inflightRequestLimit);
     }
@@ -202,7 +229,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return prefillState.canPreemptQueuedRequest(priority, inflightRequestLimit);
     }
 
-    /** Advisory endpoint ownership revision captured by queue placement. */
+    /**
+     * Advisory endpoint ownership revision captured by queue placement.
+     */
     public long placementVersion() {
         return prefillState.mutationVersion();
     }
@@ -218,23 +247,31 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return prefillState.reserveUnqueuedRoute(item, predictedMs, inflightRequestLimit);
     }
 
-    /** End the exact failed member, whether still queued or committed to a batch. */
+    /**
+     * End the exact failed member, whether still queued or committed to a batch.
+     */
     public void settleFailedRequest(ScheduledRequest exactItem) {
         removeQueued(exactItem, "REQUEST_FAILED");
         releaseCommittedItem(exactItem);
     }
 
-    /** Remove only the supplied canonical ACTIVE queue identity. */
+    /**
+     * Remove only the supplied canonical ACTIVE queue identity.
+     */
     public boolean removeQueued(ScheduledRequest exactItem, String reason) {
         return runtime.removeQueued(exactItem, reason);
     }
 
-    /** Exact counterpart cleanup; stale item generations are a no-op. */
+    /**
+     * Exact counterpart cleanup; stale item generations are a no-op.
+     */
     public boolean releaseCommittedItem(ScheduledRequest exactItem) {
         return prefillState.terminalizeCommittedItem(exactItem);
     }
 
-    /** Expire an exact local committed lease without claiming Engine completion. */
+    /**
+     * Expire an exact local committed lease without claiming Engine completion.
+     */
     public boolean expireCommittedItem(ScheduledRequest exactItem) {
         return prefillState.terminalizeCommittedItem(exactItem);
     }
@@ -248,7 +285,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return stats.locallyOwnedRequests();
     }
 
-    /** Individually-accounted DIRECT and QUEUE_ROUTE requests. */
+    /**
+     * Individually-accounted DIRECT and QUEUE_ROUTE requests.
+     */
     public int getIndividuallyTrackedRequestCount() {
         PrefillState.Stats stats = prefillState.stats();
         return stats.individuallyOwnedRequests();
@@ -315,7 +354,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     // ==================== Ownership diagnostics ====================
 
-    /** Diagnostic snapshot of canonical local plus worker-reported ownership. */
+    /**
+     * Diagnostic snapshot of canonical local plus worker-reported ownership.
+     */
     public long observedRequestCount() {
         return prefillState.observedRequestCount();
     }
@@ -325,7 +366,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return stats.batchCount();
     }
 
-    /** Evict endpoint orphans while retaining IDs still registered by the scheduler. */
+    /**
+     * Evict endpoint orphans while retaining IDs still registered by the scheduler.
+     */
     public int evictExpiredInflight(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
         return evictExpiredBatches(ttlMs, retainForSchedulerCleanup)
                 + evictExpiredRequests(ttlMs, retainForSchedulerCleanup);
@@ -341,12 +384,16 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return evictExpiredBatches(ttlMs, ignored -> false);
     }
 
-    /** Evict only batches whose member IDs are absent from the scheduler directory. */
+    /**
+     * Evict only batches whose member IDs are absent from the scheduler directory.
+     */
     public int evictExpiredBatches(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
         return prefillState.evictExpiredBatches(ttlMs, retainForSchedulerCleanup);
     }
 
-    /** Evict stale individual requests whose IDs are absent from the scheduler directory. */
+    /**
+     * Evict stale individual requests whose IDs are absent from the scheduler directory.
+     */
     public int evictExpiredRequests(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
         return prefillState.evictExpiredIndividuals(ttlMs, retainForSchedulerCleanup);
     }
@@ -388,7 +435,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
         reporter.reportInflightMaxAgeMs(role, engineIp, stats.maxObservedAgeMs());
     }
 
-    /** Runs once, after every accepted generation handoff has released its pin. */
+    /**
+     * Runs once, after every accepted generation handoff has released its pin.
+     */
     @Override
     protected void closeEndpoint() {
         // A self-await invariant escapes here before ledger mutation/event
@@ -423,7 +472,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
         rethrowEndpointRetirementFailure(retirementFailure);
     }
 
-    /** Start the attached generation exactly once before routing publication. */
+    /**
+     * Start the attached generation exactly once before routing publication.
+     */
     void startGeneration() {
         runtime.start();
     }
@@ -497,7 +548,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
         completions.forEach(this::reportBatchCompletion);
     }
 
-    /** Re-estimate surviving members, using the default formula if the configured predictor fails. */
+    /**
+     * Re-estimate surviving members, using the default formula if the configured predictor fails.
+     */
     private long predictRepackedBatchMs(List<ScheduledRequest> survivingRequests) {
         PrefillBatchFeatures features =
                 PrefillBatchFeatures.from(

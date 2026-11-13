@@ -20,15 +20,16 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -136,8 +137,9 @@ class PdfusionSchedulingTest {
             endpoints.publishPreparedEndpoint(
                     worker.getLogicalIpPort(),
                     worker,
-                    worker.prepareNewStatus(worker.freezeStatusResponse(status)));
-            worker.recordSuccessfulPoll(true);
+                    WorkerStatusTestFixtures.prepare(
+                            worker, WorkerStatusTestFixtures.observation(worker, status)));
+            WorkerStatusTestFixtures.receive(worker, true, null);
         } finally {
             worker.lock.unlock();
         }
@@ -203,7 +205,9 @@ class PdfusionSchedulingTest {
                 projection =
                         endpoint.applyPreparedStatus(
                                 worker,
-                                worker.prepareNewStatus(worker.freezeStatusResponse(status)));
+                                WorkerStatusTestFixtures.prepare(
+                                        worker,
+                                        WorkerStatusTestFixtures.observation(worker, status)));
             } finally {
                 worker.lock.unlock();
             }

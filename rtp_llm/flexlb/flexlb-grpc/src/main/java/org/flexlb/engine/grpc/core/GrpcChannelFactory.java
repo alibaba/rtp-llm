@@ -13,6 +13,10 @@ import io.netty.channel.epoll.EpollSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.engine.grpc.GrpcCallTrace;
+import org.flexlb.engine.grpc.GrpcTransportObserver;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -28,13 +32,32 @@ import java.util.concurrent.TimeUnit;
 @Getter
 @Component
 public class GrpcChannelFactory {
-
     public static final String CONNECT_TIMEOUT_PROPERTY = "flexlb.engine-grpc.connect-timeout-ms";
+
     private static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 20;
     private static final int DEFAULT_MAX_INBOUND_MESSAGE_BYTES = 16 * 1024 * 1024;
 
+    public static final String KEEP_ALIVE_TIME_PROPERTY = "flexlb.engine-grpc.keep-alive-time-ms";
+    public static final String KEEP_ALIVE_WITHOUT_CALLS_PROPERTY =
+            "flexlb.engine-grpc.keep-alive-without-calls";
+    public static final String VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY =
+            "flexlb.engine-grpc.vit-cache-max-inbound-message-bytes";
+
+    @Value("${" + KEEP_ALIVE_TIME_PROPERTY + ":2000}")
+    private long keepAliveTimeMillis = 2000;
+
+    @Value("${" + KEEP_ALIVE_WITHOUT_CALLS_PROPERTY + ":true}")
+    private boolean keepAliveWithoutCalls = true;
+
+    @Value("${" + VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY + ":16777216}")
+    private int vitCacheMaxInboundMessageBytes = 16 * 1024 * 1024;
+
+    private FlexlbConfig.EngineGrpcConfig engineGrpcConfig = new FlexlbConfig.EngineGrpcConfig();
+
+    private final GrpcTransportObserver transportObserver = new GrpcTransportObserver();
     private final ThreadPoolExecutor executor;
     private final EventLoopGroup eventLoopGroup;
+
     private final int connectTimeoutMillis;
 
     @Autowired
@@ -55,11 +78,40 @@ public class GrpcChannelFactory {
         this(executor, eventLoopGroup, DEFAULT_CONNECT_TIMEOUT_MILLIS);
     }
 
+    @Autowired
+    public void configureEngineGrpc(ConfigService configService) {
+        engineGrpcConfig = configService.loadBalanceConfig().getEngineGrpc();
+    }
+
+    @javax.annotation.PostConstruct
+    public void validateOptions() {
+        if (keepAliveTimeMillis <= 0) {
+            throw new IllegalArgumentException("keepAliveTimeMillis must be positive");
+        }
+        if (vitCacheMaxInboundMessageBytes <= 0) {
+            throw new IllegalArgumentException("vitCacheMaxInboundMessageBytes must be positive");
+        }
+    }
+
+    public int getKvCacheMaxInboundMessageBytes() {
+        return engineGrpcConfig.getKvCacheMaxInboundMessageBytes();
+    }
+
     public ManagedChannel create(GrpcTarget target) {
+        return create(target, DEFAULT_MAX_INBOUND_MESSAGE_BYTES, false);
+    }
+
+    public ManagedChannel create(
+            GrpcTarget target, int maxInboundMessageBytes, boolean traceTransport) {
         log.info("Creating gRPC channel: {}", target);
-        return NettyChannelBuilder.forAddress(target.host(), target.port())
-                .channelType(channelType(eventLoopGroup))
-                .withOption(ChannelOption.TCP_NODELAY, true)
+        NettyChannelBuilder builder = NettyChannelBuilder.forAddress(target.host(), target.port());
+        if (traceTransport) {
+            builder.channelFactory(() -> transportObserver.newChannel(eventLoopGroup));
+            builder.intercept(GrpcCallTrace.INTERCEPTOR);
+        } else {
+            builder.channelType(channelType(eventLoopGroup));
+        }
+        return builder.withOption(ChannelOption.TCP_NODELAY, true)
                 .withOption(ChannelOption.SO_KEEPALIVE, true)
                 .withOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
                 // Connection timeout in milliseconds
@@ -71,17 +123,17 @@ public class GrpcChannelFactory {
                 // Receive/send buffer size
                 .withOption(ChannelOption.SO_RCVBUF, 512 * 1024)
                 .withOption(ChannelOption.SO_SNDBUF, 512 * 1024)
-                .maxInboundMessageSize(DEFAULT_MAX_INBOUND_MESSAGE_BYTES)
+                .maxInboundMessageSize(maxInboundMessageBytes)
                 // HTTP/2 initial flow control window: prevents transmission issues due to flow
                 // control
                 .initialFlowControlWindow(2 * 1024 * 1024)
                 // Send an HTTP/2 PING after this interval without read activity
-                .keepAliveTime(2, TimeUnit.SECONDS)
+                .keepAliveTime(keepAliveTimeMillis, TimeUnit.MILLISECONDS)
                 // Close the connection if no read activity is observed within this timeout after a
                 // PING
                 .keepAliveTimeout(10, TimeUnit.SECONDS)
                 // Keep probing even when there are no active RPC calls
-                .keepAliveWithoutCalls(true)
+                .keepAliveWithoutCalls(keepAliveWithoutCalls)
                 .executor(executor)
                 .eventLoopGroup(eventLoopGroup)
                 .usePlaintext()

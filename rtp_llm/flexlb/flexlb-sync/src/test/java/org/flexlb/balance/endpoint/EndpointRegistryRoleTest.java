@@ -2,11 +2,11 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.config.ConfigService;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Checks endpoint registry separation by worker role.
+ * Verifies role-specific endpoint publication, replacement, and orphan cleanup.
  */
 class EndpointRegistryRoleTest {
     private EndpointRegistry registry;
@@ -50,6 +50,65 @@ class EndpointRegistryRoleTest {
     @AfterEach
     void tearDown() {
         registry.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void pdfusionOrphanCleanupRetainsRegisteredBatchMembers() {
+        var requestRuntime = EndpointTestSupport.requestRuntime();
+        var endpoint =
+                new PrefillEndpoint(
+                        EndpointTestSupport.workerStatus(
+                                RoleType.PDFUSION, "127.0.0.1", 8003, 8004),
+                        org.flexlb.balance.scheduler.SchedulingTestConfig.batchConfig(),
+                        EndpointTestSupport.routeStrategy(requestRuntime),
+                        requestRuntime.events(),
+                        Mockito.mock(BatchSchedulerReporter.class),
+                        new PlacementAvailability());
+        // Keep dispatch stopped so this test controls the exact committed batch.
+        var endpoints =
+                (Map<RoleType, java.util.concurrent.ConcurrentHashMap<String, WorkerEndpoint>>)
+                        org.springframework.test.util.ReflectionTestUtils.getField(
+                                registry, "endpointsByRole");
+        assertNotNull(endpoints);
+        endpoints.get(RoleType.PDFUSION).put("127.0.0.1:8003", endpoint);
+        var first = Mockito.mock(org.flexlb.balance.scheduler.ScheduledRequest.class);
+        var second = Mockito.mock(org.flexlb.balance.scheduler.ScheduledRequest.class);
+        Mockito.when(first.requestId()).thenReturn("101");
+        Mockito.when(second.requestId()).thenReturn("102");
+        Mockito.when(first.prefillEp()).thenReturn(endpoint);
+        Mockito.when(second.prefillEp()).thenReturn(endpoint);
+        var state =
+                (PrefillState)
+                        org.springframework.test.util.ReflectionTestUtils.getField(
+                                endpoint, "prefillState");
+        Object runtime =
+                org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "runtime");
+        var queueLock =
+                (java.util.concurrent.locks.ReentrantLock)
+                        org.springframework.test.util.ReflectionTestUtils.getField(
+                                runtime, "queueLock");
+        assertNotNull(state);
+        assertNotNull(queueLock);
+        queueLock.lock();
+        try {
+            assertTrue(state.enqueueActiveUnderLock(first, Long.MAX_VALUE));
+            assertTrue(state.enqueueActiveUnderLock(second, Long.MAX_VALUE));
+        } finally {
+            queueLock.unlock();
+        }
+        try (var handoff =
+                EndpointTestSupport.commitBatch(endpoint, 7L, 100L, List.of(first, second))) {
+            assertNotNull(handoff);
+        }
+
+        registry.evictExpiredOrphans(0L, "101"::equals);
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(2L, endpoint.observedRequestCount());
+
+        registry.evictExpiredOrphans(0L, ignored -> false);
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0L, endpoint.observedRequestCount());
     }
 
     @Test
