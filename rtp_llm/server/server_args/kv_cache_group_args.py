@@ -701,7 +701,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="RECO_ASYNCWRAPPER_THREAD_NUM",
         bind_to=(kv_cache_config, "kvcm_asyncwrapper_thread_num"),
         type=int,
-        default=4,
+        default=16,
         help="Remote Cache 读写共用的业务线程数，独立于 BTC。单 rank 本地搬运池使用相同的线程数。",
     )
     kv_cache_group.add_argument(
