@@ -150,7 +150,12 @@ class TestCausalConv1dNpuAdapter(unittest.TestCase):
         )
 
     def test_decode_is_tokenwise_and_copies_state_when_page_changes(self):
-        # conv_state uses the AscendC pool layout (pages, state_len, dim)
+        # conv_state uses the AscendC pool layout (pages, state_len, dim).
+        # A matching 2-D block_map dispatches multi-token decode to the
+        # device-metadata path (_causal_conv1d_update_tokens_device): the
+        # update operator runs once per token with device-side write indices,
+        # and the per-page state seeding happens inside the wrapper via
+        # paged_state.seed_state_segment.
         x = torch.tensor([[[20, 21], [30, 31]]], dtype=torch.float16)
         weight = torch.arange(8, dtype=torch.float32).reshape(2, 4)
         conv_state = torch.zeros(6, 3, 2, dtype=torch.float32)
@@ -158,6 +163,85 @@ class TestCausalConv1dNpuAdapter(unittest.TestCase):
             [[1, 11], [2, 12], [3, 13]], dtype=torch.float32
         )
         block_map = torch.tensor([[2, 5]], dtype=torch.int32)
+        sequence_lengths = torch.tensor([2], dtype=torch.int32)
+        calls = []
+
+        def fake_npu_causal_conv1d_update(**kwargs):
+            calls.append(
+                {
+                    "x_shape": tuple(kwargs["x"].shape),
+                    "weight_shape": tuple(kwargs["weight"].shape),
+                    "state_shape": tuple(kwargs["conv_state"].shape),
+                    "conv_state_indices": kwargs["conv_state_indices"].tolist(),
+                    "indices_dtype": kwargs["conv_state_indices"].dtype,
+                    "activation": kwargs["activation"],
+                    "null_block_id": kwargs["null_block_id"],
+                    "out_shape": tuple(kwargs["out"].shape),
+                }
+            )
+            states = kwargs["conv_state"]
+            for batch_index, page_index in enumerate(kwargs["conv_state_indices"]):
+                previous = states[page_index].clone()
+                states[page_index, :-1].copy_(previous[1:])
+                states[page_index, -1].copy_(kwargs["x"][batch_index])
+            kwargs["out"].copy_(kwargs["x"] + 100)
+            return kwargs["out"]
+
+        with mock.patch.object(
+            self.module,
+            "_load_npu_causal_conv1d_update",
+            return_value=fake_npu_causal_conv1d_update,
+        ):
+            output = self.module.causal_conv1d_update(
+                x=x,
+                conv_state=conv_state,
+                weight=weight,
+                activation=True,
+                block_map=block_map,
+                seq_size_per_block=4,
+                sequence_lengths=sequence_lengths,
+            )
+
+        # RTP snapshots every speculative token in its own consecutive block
+        # entry: token 0 writes page 2, token 1 writes page 5.
+        self.assertEqual(
+            [call["conv_state_indices"] for call in calls], [[2], [5]]
+        )
+        self.assertTrue(all(call["x_shape"] == (1, 2) for call in calls))
+        self.assertTrue(all(call["weight_shape"] == (4, 2) for call in calls))
+        self.assertTrue(all(call["state_shape"] == (6, 3, 2) for call in calls))
+        self.assertTrue(
+            all(call["indices_dtype"] == torch.int32 for call in calls)
+        )
+        self.assertTrue(all(call["activation"] == "silu" for call in calls))
+        self.assertTrue(all(call["null_block_id"] == 0 for call in calls))
+        self.assertTrue(all(call["out_shape"] == (1, 2) for call in calls))
+        self.assertEqual(tuple(output.shape), tuple(x.shape))
+        self.assertEqual(output.dtype, x.dtype)
+        torch.testing.assert_close(output, x + 100)
+
+        # Token 1 uses page 5 even though logical length 3 has not crossed a
+        # normal block-size-4 boundary, and its page is seeded from the
+        # just-updated page 2 by the device-side state migration.
+        torch.testing.assert_close(
+            conv_state[5],
+            torch.tensor([[3, 13], [20, 30], [21, 31]], dtype=torch.float32),
+        )
+
+    def test_decode_host_fallback_is_tokenwise_and_copies_state_when_page_changes(self):
+        # A block_map whose leading dim does not match the batch skips the
+        # device-metadata dispatch and takes the host-metadata fallback, which
+        # drives _load_npu_causal_conv1d with host-computed cache_indices and
+        # does the cross-page state copies inline.
+        x = torch.tensor([[[20, 21], [30, 31]]], dtype=torch.float16)
+        weight = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+        conv_state = torch.zeros(6, 3, 2, dtype=torch.float32)
+        conv_state[2] = torch.tensor(
+            [[1, 11], [2, 12], [3, 13]], dtype=torch.float32
+        )
+        # shape[0]=2 != batch=1 forces the host path; the padded second row is
+        # never addressed by sequence 0.
+        block_map = torch.tensor([[2, 5], [-1, -1]], dtype=torch.int32)
         sequence_lengths = torch.tensor([2], dtype=torch.int32)
         calls = []
 
@@ -206,9 +290,8 @@ class TestCausalConv1dNpuAdapter(unittest.TestCase):
         self.assertEqual(output.dtype, x.dtype)
         torch.testing.assert_close(output, x + 100)
 
-        # RTP snapshots every speculative token in its own consecutive block
-        # entry.  Thus token 2 uses page 5 even though logical length 3 has not
-        # crossed a normal block-size-4 boundary, and inherits updated page 2.
+        # Same page-sequence semantics as the device path: token 1 inherits
+        # the updated page 2 state into page 5 before its own update.
         torch.testing.assert_close(
             conv_state[5],
             torch.tensor([[3, 13], [20, 30], [21, 31]], dtype=torch.float32),
