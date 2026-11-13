@@ -48,6 +48,7 @@ def mhc_pre_big_fuse(
     mhc_post_mult_value: float,
     sinkhorn_repeat: int,
     n_splits: int = 16,
+    batch_invariant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert residual.dtype == torch.bfloat16
     assert fn.dtype == torch.float32
@@ -73,7 +74,10 @@ def mhc_pre_big_fuse(
 
     block_k = 64
     block_m = 64
-    n_splits = _compute_num_split(block_k, mhc_hidden_size, _ceil_div(num_tokens, block_m))
+    # GLM53 keeps the one-token reduction for graph padding and prefill
+    # token shards. Other models retain the normal occupancy-based choice.
+    grid_size = 1 if batch_invariant else _ceil_div(num_tokens, block_m)
+    n_splits = _compute_num_split(block_k, mhc_hidden_size, grid_size)
 
     post_mix = torch.empty(
         num_tokens, mhc_mult, dtype=torch.float32, device=residual.device
