@@ -149,6 +149,17 @@ public class RequestWorkerSelector {
         return CostBasedPrefillStrategy.ColdAdmission.UNKNOWN;
     }
 
+    CostBasedPrefillStrategy.TokenEstimate estimateQueuedTokens(RequestContext context, String policyGroup) {
+        var selectedVit = context.data().getRequest().getSelectedVit();
+        String group = selectedVit == null ? policyGroup : selectedVit.getGroup();
+        for (RoleType role : requiredRoles) {
+            if (role.supportsPrefill()) {
+                return prefillSelector.estimateQueuedTokens(context.data().getRequest(), role, group);
+            }
+        }
+        return null;
+    }
+
     PrefillQueueShedding.Estimate estimateQueuedWork(RequestContext context, String policyGroup) {
         // A pinned VIT selection further restricts the eligible Prefill pool.
         var selectedVit = context.data().getRequest().getSelectedVit();
