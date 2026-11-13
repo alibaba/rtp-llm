@@ -614,6 +614,8 @@ public final class PrefillState {
     private volatile long occupiedRouteSlots;
     /** Outstanding uncached token accounting for selection scoring; null when disabled. */
     private volatile PrefillTokenWorkload tokenWorkload;
+    /** Engine waiting-queue admission gate; null when tokenBalance disables the gate. */
+    private volatile EngineQueueAdmission engineQueueAdmission;
 
     /** Enable outstanding-token accounting used by token-balanced Prefill selection. */
     public void enableTokenWorkload(long windowMs) {
@@ -639,6 +641,13 @@ public final class PrefillState {
     public long pendingTokenWork() {
         PrefillTokenWorkload ledger = tokenWorkload;
         return ledger == null ? 0L : ledger.snapshot().pendingTokens();
+    }
+
+    /** Attach the Engine waiting-queue admission gate before the endpoint starts serving. */
+    void configureEngineQueueAdmission(EngineQueueAdmission admission) {
+        requireState(engineQueueAdmission == null,
+                "Engine queue admission is already configured");
+        engineQueueAdmission = Objects.requireNonNull(admission, "admission");
     }
 
     /** Caller holds {@link #lock}. */
@@ -919,7 +928,8 @@ public final class PrefillState {
     private boolean batchCapacityAvailable(int maximum) {
         lock.lock();
         try {
-            return batchLeasesInUse < maximum;
+            return batchLeasesInUse < maximum
+                    && engineQueueAdmissionAvailableUnderLock();
         } finally {
             lock.unlock();
         }
@@ -941,14 +951,59 @@ public final class PrefillState {
         }
     }
 
+    /** Advisory dispatch check; the reservation repeats the admission gate under the lock. */
     public boolean canDispatchRoute(long maximum) {
-        return maximum == 0L || occupiedRouteSlots < maximum;
+        EngineQueueAdmission admission = engineQueueAdmission;
+        boolean dispatchAllowed = admission == null
+                || admission.state() != EngineQueueAdmission.State.CONGESTED
+                && !admission.dispatchBlocked();
+        return dispatchAllowed && (maximum == 0L || occupiedRouteSlots < maximum);
     }
 
     private boolean routeCapacityAvailableUnderLock(long maximum) {
         requireLock();
         return maximum == 0L || routeLeasesInUse < maximum
-                && unknownEngineRequestCount < maximum - routeLeasesInUse;
+                && unknownEngineRequestCount < maximum - routeLeasesInUse
+                && engineQueueAdmissionAvailableUnderLock();
+    }
+
+    /** Caller holds {@link #lock}; unknown Engine feedback keeps the legacy capacity verdict. */
+    private boolean engineQueueAdmissionAvailableUnderLock() {
+        requireLock();
+        return !engineQueueAdmissionBlockedUnderLock();
+    }
+
+    /**
+     * Caller holds {@link #lock}. Admission gates new work only: sustained
+     * congestion, or observed waiting plus headroom for not-yet-observed sends.
+     */
+    private boolean engineQueueAdmissionBlockedUnderLock() {
+        requireLock();
+        EngineQueueAdmission admission = engineQueueAdmission;
+        return admission != null
+                && admission.state() != EngineQueueAdmission.State.UNKNOWN
+                && (admission.state() == EngineQueueAdmission.State.CONGESTED
+                        || admission.dispatchBlocked(unknownEngineRequestCount));
+    }
+
+    /**
+     * Caller holds {@link #lock}. Feed one committed Engine observation to the
+     * admission gate and report whether the gate reopened, releasing wakeups.
+     */
+    private boolean observeEngineQueueReleaseUnderLock(
+            WorkerStatus.EngineObservation engine,
+            Long statusVersion,
+            long nowMs) {
+        requireLock();
+        EngineQueueAdmission admission = engineQueueAdmission;
+        if (admission == null) {
+            return false;
+        }
+        boolean blockedBefore = engineQueueAdmissionBlockedUnderLock();
+        long waiting = statusVersion == null || statusVersion < 0L
+                ? -1L : Math.max(0L, engine.waitingQueryLen());
+        admission.observe(waiting, nowMs);
+        return blockedBefore && !engineQueueAdmissionBlockedUnderLock();
     }
 
     private static void requirePositiveBatchLimit(int maximum) {
@@ -1235,6 +1290,7 @@ public final class PrefillState {
             Runnable failedReduction) {
         return reconcileEngineStatus(
                 observation.engine(),
+                observation.statusVersion(),
                 observation.finishedTasks(),
                 repredictor,
                 committedPublication,
@@ -1283,6 +1339,8 @@ public final class PrefillState {
             }
             capacityReleased = nextUnknown < unknownEngineRequestCount;
             unknownEngineRequestCount = nextUnknown;
+            capacityReleased |= observeEngineQueueReleaseUnderLock(
+                    engine, observation.statusVersion(), nowMs);
             if (schedulingInputsChanged) {
                 committedWorkCapture = null;
                 recordMutationUnderLock();
@@ -1433,6 +1491,7 @@ public final class PrefillState {
 
     private StatusReconciliation reconcileEngineStatus(
             WorkerStatus.EngineObservation engine,
+            Long statusVersion,
             Map<String, WorkerStatus.TaskObservation> finishedTasks,
             ToLongFunction<List<RequestExecution>> repredictor,
             Runnable committedPublication,
@@ -1512,6 +1571,8 @@ public final class PrefillState {
             });
             capacityReleased |= nextUnknown < unknownEngineRequestCount;
             unknownEngineRequestCount = nextUnknown;
+            capacityReleased |= observeEngineQueueReleaseUnderLock(
+                    engine, statusVersion, nowMs);
             // Status reduction changes counts after invalidating the old work revision.
             publishRequestCountUnderLock();
             try {
@@ -1849,7 +1910,8 @@ public final class PrefillState {
     private boolean canAcceptRequestUnderLock(long maxOutstandingRequests) {
         requireLock();
         return requests.size() < maxOutstandingRequests
-                && unknownEngineRequestCount < maxOutstandingRequests - requests.size();
+                && unknownEngineRequestCount < maxOutstandingRequests - requests.size()
+                && engineQueueAdmissionAvailableUnderLock();
     }
 
     public long observedRequestCount() {
