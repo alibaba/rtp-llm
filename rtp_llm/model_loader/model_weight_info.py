@@ -137,7 +137,8 @@ class ModelDeployWeightInfo:
     # Environment variables read directly by this model's code that change how its weights are
     # processed (for example the MoE strategy transforming them in initialize()). Resident weights
     # put their values into the fingerprint; config fields are fingerprinted already.
-    resident_weights_env_vars: Tuple[str, ...] = ()
+    # MOE_MEGA_SHARED_EXPERT: the fused-MoE factory then fuses the shared expert into MegaMoE.
+    resident_weights_env_vars: Tuple[str, ...] = ("MOE_MEGA_SHARED_EXPERT",)
 
     TRT_ENGINE_LAYER_WEIGHT_MAP = {
         W.pre_ln_beta: "transformer.layers.{i}.input_layernorm.bias",

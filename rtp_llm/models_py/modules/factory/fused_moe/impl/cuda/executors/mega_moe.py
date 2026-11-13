@@ -43,6 +43,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup impor
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     sync_cuda_graph_warmup_ranks,
 )
+from rtp_llm.resident_weights import resident_init_tensors
 from rtp_llm.utils.model_weight import W
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase, normalize_moe_w13_gate_up
@@ -212,6 +213,31 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
     def _transform_routed_weights(
         self, layer_weights: Dict, deep_gemm, inter: int
     ) -> torch.device:
+        cfg = self.cfg
+        group = (
+            f"fp8_fp4.mega_moe.routed:e{cfg.n_local_experts}:d{cfg.dim}"
+            f":i{inter}:w1_{cfg.moe_w1_layout}"
+        )
+        (
+            self._mega_l1_w,
+            self._mega_l1_sf,
+            self._mega_l2_w,
+            self._mega_l2_sf,
+        ) = resident_init_tensors(
+            layer_weights,
+            transform_key=group,
+            output_names=(
+                f"{group}.l1_w",
+                f"{group}.l1_sf",
+                f"{group}.l2_w",
+                f"{group}.l2_sf",
+            ),
+            consumed_names=(W.moe_w1, W.moe_s1, W.moe_w2, W.moe_s2),
+            builder=lambda: self._build_routed_weights(layer_weights, deep_gemm, inter),
+        )
+        return self._mega_l1_w.device
+
+    def _build_routed_weights(self, layer_weights: Dict, deep_gemm, inter: int):
         """Stack EP-local routed-expert SFs into the int32 UTCCP-transposed
         layout ``fp8_fp4_mega_moe`` expects.
 
@@ -297,14 +323,9 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         del w13, s13_int, w2, s2_int
         torch.cuda.empty_cache()
 
-        # Stash as plain attributes (not Parameters — the kernel reads
-        # raw int8/int32 buffers with no autograd).  Original stacked
-        # fp32 SFs are dropped now that the int layout has been derived.
-        self._mega_l1_w = l1_w
-        self._mega_l1_sf = l1_sf
-        self._mega_l2_w = l2_w
-        self._mega_l2_sf = l2_sf
-        return device
+        # Kept as plain attributes (not Parameters — the kernel reads raw
+        # int8/int32 buffers with no autograd).
+        return l1_w, l1_sf, l2_w, l2_sf
 
     def _resolve_jit_warmup_token_counts(
         self, num_sms: int, deep_gemm=None
