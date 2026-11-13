@@ -62,6 +62,25 @@ public final class RoutingConfig {
         private Long engineQueueAdmissionThreshold = 10L;
         /** Sustained-above-threshold waiting depth before a worker counts as congested. */
         private long engineQueueOverloadDurationMs = 5_000L;
+        /** Opt-in rescue of queued requests away from congested Engines; null disables it. */
+        private HotspotRescueConfig hotspotRescue;
+    }
+
+    /** Rescue of small, aged queued requests to lightly loaded cache-eligible Prefill workers. */
+    @Getter
+    @Setter
+    public static final class HotspotRescueConfig {
+        /** Migrate only when the source Engine reports more waiting streams than this count. */
+        private long engineQueueMigrationThreshold = 30L;
+        private long minWaitMs = 5_000L;
+        /** Total input, not just uncached tokens: a cache miss on the target must stay cheap. */
+        private long maxInputTokens = 32_768L;
+        /** Target's outstanding uncached tokens (pending plus planned), excluding completed history. */
+        private long maxIdlePendingTokens = 0L;
+        /** Minimum interval between rescue rounds; unused rounds never accumulate. */
+        private long migrationIntervalMs = 1_000L;
+        /** Maximum withdrawals per round, shared by all workers in this model scheduler. */
+        private int maxMigrationsPerRound = 1;
     }
 
     @Getter

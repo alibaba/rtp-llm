@@ -2,12 +2,15 @@ package org.flexlb.balance.scheduler;
 
 import io.opentelemetry.api.common.Attributes;
 import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PrefillQueueSheddingConfig;
+import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -71,6 +74,10 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private final ConfigService configService;
     /** Optional age-based shedding; null keeps the queue purely deadline-driven. */
     private final PrefillQueueSheddingConfig sheddingConfig;
+    /** Optional rescue of queued routes from congested Engines; null disables it. */
+    private final RoutingConfig.HotspotRescueConfig hotspotRescue;
+    /** Last rescue round start; rounds never accumulate while idle. */
+    private long lastRescueRoundNanos = Long.MIN_VALUE;
     // Decision-thread confined feedback state, keyed by routing group.
     private final Map<String, PrefillQueueShedding.Controller> sheddingControllers =
             new LinkedHashMap<>();
@@ -120,6 +127,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         this.priorityOrdering = resolvePriorityOrdering(checkedConfig);
         this.sheddingConfig = checkedConfig.loadBalanceConfig()
                 .queueScheduler().getPrefillQueueShedding();
+        this.hotspotRescue = hotspotRescueConfig(checkedConfig);
         this.orderedQueue = new OrderedRequestQueue(priorityOrdering);
         this.waitingRequests = new PlacementWaitQueue(priorityOrdering, availability);
         this.scanBudgetMultiplier = checkedConfig.loadBalanceConfig().queueScheduler().getScanBudgetMultiplier();
@@ -240,6 +248,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                     processCompletedPlan(completed);
                 }
                 shedOverloadedQueue();
+                rescueHotspotQueues();
                 // Reuse released slots even when other completed plans are buffered.
                 claimPlanningSlots().forEach(this::submitPlan);
                 awaitIfNoWork();
@@ -285,7 +294,11 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                     && (inFlight.size() == plannerCount
                         || (!orderedQueue.hasUnscannedRequests()
                             && !waitingRequests.hasReadyRequests()))) {
-                awaitChanged();
+                // A cadence wake leaves the park so the loop re-runs its control
+                // rounds: rescue acts on worker queues while this queue is idle.
+                if (!awaitChanged()) {
+                    break;
+                }
             }
         } finally {
             lock.unlock();
@@ -801,27 +814,125 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 pool, ignored -> new PrefillTrafficTrend(recovery));
     }
 
+    // ==================== Hotspot queue rescue ====================
+
+    /**
+     * Decision-thread rescue round: withdraw a bounded set of small, aged
+     * queued routes from congested Engines and return them to this queue for
+     * re-selection on an idle, cache-eligible worker. One round per migration
+     * interval; unused rounds never accumulate. A rescue keeps the request
+     * alive, so it is not an eviction and never completes the Future.
+     */
+    void rescueHotspotQueues() {
+        RoutingConfig.HotspotRescueConfig rescue = hotspotRescue;
+        if (rescue == null || closed.get()) {
+            return;
+        }
+        long nowNanos = System.nanoTime();
+        if (lastRescueRoundNanos != Long.MIN_VALUE && nowNanos - lastRescueRoundNanos
+                < TimeUnit.MILLISECONDS.toNanos(rescue.getMigrationIntervalMs())) {
+            return;
+        }
+        lastRescueRoundNanos = nowNanos;
+        int limit = Math.min(plannerCount, rescue.getMaxMigrationsPerRound());
+        List<CostBasedPrefillStrategy.HotspotRescuePool> pools =
+                router.hotspotRescuePools(rescue);
+        int migrated = 0;
+        for (CostBasedPrefillStrategy.HotspotRescuePool pool : pools) {
+            if (migrated >= limit) {
+                break;
+            }
+            if (!pool.idleTarget()) {
+                continue;
+            }
+            for (PrefillEndpoint source : pool.sources()) {
+                if (migrated >= limit) {
+                    break;
+                }
+                migrated += rescueSourceQueue(source, pool.group(), rescue, limit - migrated);
+            }
+        }
+    }
+
+    /** Withdraw the best rescue candidates from one congested source queue. */
+    private int rescueSourceQueue(
+            PrefillEndpoint source,
+            String group,
+            RoutingConfig.HotspotRescueConfig rescue,
+            int remaining) {
+        List<ScheduledRequest> items = source.captureQueueSnapshot().items();
+        // Bounded scan in scheduling order; the shortlist is then ranked by total
+        // input and original worker-queue sequence, like ordinary queue ordering.
+        int budget = (int) Math.min(items.size(), Math.max(64L, 64L * remaining));
+        long nowMs = System.currentTimeMillis();
+        List<ScheduledRequest> candidates = new ArrayList<>();
+        for (int index = 0; index < budget; index++) {
+            ScheduledRequest item = items.get(index);
+            if (item.future().isDone() || item.requestExpired(nowMs)
+                    || item.seqLen() > rescue.getMaxInputTokens()
+                    || item.ctx().getPrefillMigrationSource() != null
+                    || nowMs - item.ctx().getStartTime() < rescue.getMinWaitMs()) {
+                continue;
+            }
+            candidates.add(item);
+        }
+        candidates.sort(java.util.Comparator
+                .comparingLong(ScheduledRequest::seqLen)
+                .thenComparingLong(item -> item.ctx().getWorkerEnqueueSequence()));
+        // Validate only the bounded shortlist, ranked first; final placement
+        // rechecks the current cache fleet.
+        List<ScheduledRequest> shortlist = candidates.subList(
+                0, Math.min(candidates.size(), remaining));
+        int migrated = 0;
+        for (ScheduledRequest candidate : shortlist) {
+            if (migrated >= remaining) {
+                break;
+            }
+            if (!router.hasCacheEligibleRescueTarget(candidate.ctx(), group, source)) {
+                continue;
+            }
+            if (lifecycle.migrateQueuedPrefillRoute(source, candidate)) {
+                migrated++;
+                Logger.debug(
+                        "Hotspot rescue migrated queued prefill request: request_id={}, source={}",
+                        candidate.requestId(), source.ipPort());
+            }
+        }
+        return migrated;
+    }
+
     private int calculateScanBudget(int candidates) {
         return (int) Math.min(Integer.MAX_VALUE, Math.ceil(candidates * scanBudgetMultiplier));
+    }
+
+    private static RoutingConfig.HotspotRescueConfig hotspotRescueConfig(
+            ConfigService configService) {
+        FlexlbConfig config = configService.loadBalanceConfig();
+        RoutingConfig.TokenBalanceConfig balance = config == null ? null
+                : config.getRouter().getRoles().getPrefill().getTokenBalance();
+        return balance == null ? null : balance.getHotspotRescue();
     }
 
     private static boolean resolvePriorityOrdering(ConfigService configService) {
         return configService.loadBalanceConfig().isPriorityOrdering();
     }
 
-    private void awaitChanged() {
+    /** True when parked without a cadence deadline; false after a cadence wake. */
+    private boolean awaitChanged() {
         try {
-            if (sheddingConfig == null) {
+            if (sheddingConfig == null && hotspotRescue == null) {
                 changed.await();
-                return;
+                return true;
             }
-            // Shedding cadence needs periodic control rounds even without
-            // arrivals, capacity events or completed plans.
+            // Shedding and rescue cadence needs periodic control rounds even
+            // without arrivals, capacity events or completed plans.
             changed.await(SHED_WAKEUP_MS, TimeUnit.MILLISECONDS);
+            return false;
         } catch (InterruptedException interruption) {
             if (closed.get()) {
                 Thread.currentThread().interrupt();
             }
+            return true;
         }
     }
 

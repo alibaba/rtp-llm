@@ -643,6 +643,16 @@ public final class PrefillState {
         return ledger == null ? 0L : ledger.snapshot().pendingTokens();
     }
 
+    /** Advisory outstanding uncached work including soft reservations, for rescue idle targets. */
+    public long outstandingTokenWork() {
+        PrefillTokenWorkload ledger = tokenWorkload;
+        if (ledger == null) {
+            return 0L;
+        }
+        PrefillTokenWorkload.Snapshot snapshot = ledger.snapshot();
+        return snapshot.pendingTokens() + snapshot.plannedTokens();
+    }
+
     /** Attach the Engine waiting-queue admission gate before the endpoint starts serving. */
     void configureEngineQueueAdmission(EngineQueueAdmission admission) {
         requireState(engineQueueAdmission == null,

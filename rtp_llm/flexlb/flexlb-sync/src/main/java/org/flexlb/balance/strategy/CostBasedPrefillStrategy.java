@@ -87,9 +87,16 @@ public class CostBasedPrefillStrategy {
         // Rank known work and cache hits without excluding admission-blocked candidates.
         RoutingConfig.TokenBalanceConfig tokenBalance = config.getRouter()
                 .getRoles().getPrefill().getTokenBalance();
+        RoutingConfig.HotspotRescueConfig hotspotRescue = tokenBalance == null
+                ? null : tokenBalance.getHotspotRescue();
+        // A rescued request only moves to a cache-eligible idle worker and never
+        // back to the congested worker it was withdrawn from.
+        String migrationSource = hotspotRescue == null
+                ? null : balanceContext.getPrefillMigrationSource();
         int selectedIndex = tokenBalance != null
                 ? selectTokenBalancedCandidate(
-                        survivors, roleType, group, seqLen, tokenBalance)
+                        survivors, roleType, group, seqLen, tokenBalance,
+                        migrationSource, hotspotRescue)
                 : selectBestCandidate(
                         survivors, survivors.minimumProjectedTtftMs,
                         roleType, group, seqLen, config);
@@ -181,11 +188,14 @@ public class CostBasedPrefillStrategy {
     /**
      * Rank outstanding uncached token work instead of modeled TTFT. Cold
      * requests go to the least-loaded worker; hot requests only rotate among
-     * cache leaders so their prefix reuse is not discarded.
+     * cache leaders so their prefix reuse is not discarded. A rescued request
+     * additionally excludes its migration source and only accepts idle,
+     * admission-open targets within the rescue watermark.
      */
     private int selectTokenBalancedCandidate(PrefillCandidateSet survivors,
             RoleType roleType, String group, long seqLen,
-            RoutingConfig.TokenBalanceConfig tokenBalance) {
+            RoutingConfig.TokenBalanceConfig tokenBalance,
+            String migrationSource, RoutingConfig.HotspotRescueConfig hotspotRescue) {
         boolean cacheFirst = PrefillTokenBalance.cacheFirst(
                 survivors.maximumCacheHit, seqLen, tokenBalance.getMinPrefixHitPercent());
         long maxPendingComputeTokens = tokenBalance.getMaxPendingComputeTokens();
@@ -198,6 +208,11 @@ public class CostBasedPrefillStrategy {
             if (!PrefillTokenBalance.eligible(cacheHit, survivors.maximumCacheHit, cacheFirst)
                     || !cacheFirst && !PrefillTokenBalance.hasCapacity(
                             endpoint.pendingTokenWork(), maxPendingComputeTokens)) {
+                scores[index] = Double.MAX_VALUE;
+                continue;
+            }
+            if (migrationSource != null && hotspotRescue != null
+                    && !rescueTargetAllows(survivors, index, migrationSource, hotspotRescue)) {
                 scores[index] = Double.MAX_VALUE;
                 continue;
             }
@@ -215,6 +230,19 @@ public class CostBasedPrefillStrategy {
         return tieRotation.next(roleType, group, survivors.size(),
                 index -> scores[index] == selectedScore,
                 survivors::endpointAddress);
+    }
+
+    /** Rescue placement keeps the ordinary cache eligibility and only relaxes the target's load. */
+    private boolean rescueTargetAllows(PrefillCandidateSet survivors, int index,
+            String migrationSource, RoutingConfig.HotspotRescueConfig hotspotRescue) {
+        PrefillEndpoint endpoint = survivors.endpoint(index);
+        if (migrationSource.equals(survivors.endpointAddress(index))) {
+            return false;
+        }
+        if (survivors.admissionBlock(index) != null || endpoint.engineQueueAdmissionBlocked()) {
+            return false;
+        }
+        return endpoint.outstandingTokenWork() <= hotspotRescue.getMaxIdlePendingTokens();
     }
 
     private static Response admissionFailure(PrefillEndpoint endpoint, int priority) {
@@ -247,6 +275,97 @@ public class CostBasedPrefillStrategy {
             pendingTokens += Math.max(0L, endpoint.pendingTokenWork());
         }
         return new PrefillPoolSnapshot(candidates.size(), accepting, pendingTokens);
+    }
+
+    /**
+     * Rescue facts of one Prefill pool: congested source workers whose committed
+     * Engine status reports more waiting streams than the migration threshold,
+     * and whether at least one idle, admission-open target exists.
+     */
+    public record HotspotRescuePool(String group, List<PrefillEndpoint> sources, boolean idleTarget) { }
+
+    /** Read-only pool facts for one rescue round; empty when rescue is disabled. */
+    public List<HotspotRescuePool> hotspotRescuePools(
+            RoleType roleType, RoutingConfig.HotspotRescueConfig rescue) {
+        if (rescue == null) {
+            return List.of();
+        }
+        Map<String, List<PrefillEndpoint>> sourcesByGroup = new java.util.LinkedHashMap<>();
+        Map<String, Boolean> idleByGroup = new java.util.LinkedHashMap<>();
+        for (EndpointRegistry.PrefillRoutingEntry routingEntry
+                : discoverEndpoints(roleType, null).candidates()) {
+            PrefillEndpoint endpoint = routingEntry.endpoint();
+            String group = endpoint.getStatus().topologySnapshot().group();
+            WorkerStatus.CommittedWorkerStatus engineStatus =
+                    endpoint.getStatus().committedWorkerStatus();
+            if (engineStatus.cursor().statusVersion() >= 0L
+                    && engineStatus.fields().waitingQueryLen() > rescue.getEngineQueueMigrationThreshold()) {
+                sourcesByGroup.computeIfAbsent(group, ignored -> new ArrayList<>()).add(endpoint);
+            }
+            boolean idle = !endpoint.engineQueueAdmissionBlocked()
+                    && endpoint.outstandingTokenWork() <= rescue.getMaxIdlePendingTokens();
+            idleByGroup.merge(group, idle, Boolean::logicalOr);
+        }
+        List<HotspotRescuePool> pools = new ArrayList<>();
+        for (Map.Entry<String, List<PrefillEndpoint>> pool : sourcesByGroup.entrySet()) {
+            pools.add(new HotspotRescuePool(
+                    pool.getKey(), List.copyOf(pool.getValue()),
+                    idleByGroup.getOrDefault(pool.getKey(), false)));
+        }
+        return pools;
+    }
+
+    /**
+     * Whether one migrated request still has a target in its pool that keeps
+     * the ordinary cache eligibility, is not the source, is admission-open and
+     * within the rescue idle watermark. Read-only; final placement rechecks
+     * the current fleet.
+     */
+    public boolean hasCacheEligibleRescueTarget(
+            BalanceContext balanceContext, RoleType roleType, String group,
+            PrefillEndpoint source) {
+        RoutingConfig.TokenBalanceConfig tokenBalance = balanceContext.getConfig()
+                .getRouter().getRoles().getPrefill().getTokenBalance();
+        RoutingConfig.HotspotRescueConfig rescue = tokenBalance == null
+                ? null : tokenBalance.getHotspotRescue();
+        if (rescue == null) {
+            return false;
+        }
+        Request request = balanceContext.getRequest();
+        if (request == null) {
+            return false;
+        }
+        EndpointDiscovery discovery = discoverEndpoints(roleType, group);
+        List<EndpointRegistry.PrefillRoutingEntry> candidates = discovery.candidates();
+        if (candidates.isEmpty()) {
+            return false;
+        }
+        Map<String, Integer> cacheMatchResults = discovery.directory().isEmpty() ? Map.of()
+                : getCacheMatchResults(balanceContext, roleType, discovery);
+        long seqLen = Math.max(0L, request.getSeqLen());
+        long[] hits = new long[candidates.size()];
+        long maxHit = 0L;
+        for (int index = 0; index < candidates.size(); index++) {
+            EndpointRegistry.PrefillRoutingEntry routingEntry = candidates.get(index);
+            long hit = Math.max(0L, calculateCacheMatch(
+                    routingEntry.endpoint(), routingEntry.address(),
+                    cacheMatchResults, request).effectiveHitTokens());
+            hits[index] = hit;
+            maxHit = Math.max(maxHit, hit);
+        }
+        boolean cacheFirst = PrefillTokenBalance.cacheFirst(
+                maxHit, seqLen, tokenBalance.getMinPrefixHitPercent());
+        for (int index = 0; index < candidates.size(); index++) {
+            PrefillEndpoint endpoint = candidates.get(index).endpoint();
+            if (endpoint == source
+                    || !PrefillTokenBalance.eligible(hits[index], maxHit, cacheFirst)
+                    || endpoint.engineQueueAdmissionBlocked()
+                    || endpoint.outstandingTokenWork() > rescue.getMaxIdlePendingTokens()) {
+                continue;
+            }
+            return true;
+        }
+        return false;
     }
 
     /** True when more than half of the pool reports deep Engine waiting queues for a sustained period. */
