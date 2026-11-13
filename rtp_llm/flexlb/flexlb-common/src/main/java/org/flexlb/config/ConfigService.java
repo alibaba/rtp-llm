@@ -7,18 +7,21 @@ import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.dao.route.ServiceRoute;
+import org.flexlb.util.JsonUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.Iterator;
 import java.util.Map;
 
-/** Loads the single, strict FLEXLB_CONFIG JSON document. */
+/**
+ * Loads Master behavior and model topology from their startup documents.
+ */
 @Slf4j
 @Component
 public class ConfigService {
-
     static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";
-
+    static final String MODEL_SERVICE_CONFIG_ENV = "MODEL_SERVICE_CONFIG";
     private static final ObjectMapper STRICT_MAPPER = JsonMapper.builder()
             .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
@@ -31,27 +34,28 @@ public class ConfigService {
             .build();
 
     private final FlexlbConfig flexlbConfig;
+    private final ServiceRoute modelServiceConfig;
 
     public ConfigService() {
         this(System.getenv());
     }
 
     ConfigService(Map<String, String> environment) {
-        this(configDocument(environment));
+        this(environment.get(FLEXLB_CONFIG_ENV), environment.get(MODEL_SERVICE_CONFIG_ENV));
     }
 
     ConfigService(String document) {
+        this(document, null);
+    }
+
+    private ConfigService(String document, String topologyDocument) {
         if (document == null || document.isBlank()) {
             throw new ConfigValidationException(FLEXLB_CONFIG_ENV,
                     "is required; configure requestLifecycle.request.timeoutMs");
         }
         this.flexlbConfig = parse(document);
-        FlexlbConfigValidator.validate(flexlbConfig);
+        this.modelServiceConfig = topologyDocument == null ? null : parseModelServiceConfig(topologyDocument);
         logEffectiveConfig(flexlbConfig);
-    }
-
-    private static String configDocument(Map<String, String> environment) {
-        return environment.get(FLEXLB_CONFIG_ENV);
     }
 
     public static FlexlbConfig parse(String document) {
@@ -75,6 +79,13 @@ public class ConfigService {
         return flexlbConfig;
     }
 
+    public ServiceRoute modelServiceConfig() {
+        if (modelServiceConfig == null) {
+            throw new IllegalStateException("master load balancer env MODEL_SERVICE_CONFIG is empty");
+        }
+        return modelServiceConfig;
+    }
+
     public synchronized void updateTrafficPolicy(TrafficPolicyConfig groupSelector) {
         if (groupSelector == null) {
             throw new IllegalArgumentException("groupSelector cannot be null");
@@ -82,6 +93,13 @@ public class ConfigService {
         TrafficPolicyConfig.validate(groupSelector);
         flexlbConfig.getRouter().setGroupSelector(groupSelector);
         log.info("Group selector updated: rules={}", groupSelector.getRules().size());
+    }
+
+    static ServiceRoute parseModelServiceConfig(String document) {
+        if (document == null || document.isBlank()) {
+            throw new IllegalStateException("master load balancer env MODEL_SERVICE_CONFIG is empty");
+        }
+        return JsonUtils.toObject(document, ServiceRoute.class);
     }
 
     private static void rejectJsonNull(JsonNode node, String path) {

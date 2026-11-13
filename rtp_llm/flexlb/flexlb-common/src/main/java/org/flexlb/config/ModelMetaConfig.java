@@ -7,13 +7,16 @@ import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.util.IdUtils;
-import org.flexlb.util.JsonUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
 
+/**
+ * Exposes the configured model name, required roles, and grouped endpoints.
+ */
 @Component
 public class ModelMetaConfig {
 
@@ -28,16 +31,16 @@ public class ModelMetaConfig {
     private final String modelName;
     private final List<RoleType> requiredRoles;
 
-    public ModelMetaConfig() {
-        this(System.getenv("MODEL_SERVICE_CONFIG"));
+    @Autowired
+    public ModelMetaConfig(ConfigService configService) {
+        this(configService.modelServiceConfig());
     }
 
     public ModelMetaConfig(String document) {
-        if (document == null || document.isBlank()) {
-            throw new IllegalStateException(
-                    "master load balancer env MODEL_SERVICE_CONFIG is empty");
-        }
-        ServiceRoute parsed = JsonUtils.toObject(document, ServiceRoute.class);
+        this(ConfigService.parseModelServiceConfig(document));
+    }
+
+    private ModelMetaConfig(ServiceRoute parsed) {
         if (parsed.getServiceId() == null || parsed.getServiceId().isBlank()) {
             throw new IllegalStateException(
                     "MODEL_SERVICE_CONFIG must declare service_id");

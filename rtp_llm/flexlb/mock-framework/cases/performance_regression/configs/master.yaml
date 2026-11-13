@@ -81,7 +81,6 @@ FLEXLB_CONFIG: |-
       "executorMaxSize": 64,
       "executorQueueSize": 1000,
       "receiveBudgetBytes": 17179869184,
-      "maxReceivingRequests": 1016,
       "maxReceivingControlRequests": 8
     },
     "cacheMatching": {
