@@ -133,6 +133,19 @@ class FlashInferAllReduce:
                 max_num_tokens = _MAX_WORKSPACE_BYTES[self.world_size] // (
                     hidden_dim * tensor.element_size()
                 )
+                # The measured H20 hidden-2560 path benefits on Decode;
+                # long Prefill retains its existing collective and workspace.
+                if (
+                    self.world_size == 2
+                    and hidden_dim == 2560
+                    and torch.version.hip is None
+                    and torch.cuda.get_device_capability(self.device) == (9, 0)
+                    and torch.cuda.get_device_properties(
+                        self.device
+                    ).multi_processor_count
+                    == 78
+                ):
+                    max_num_tokens = min(max_num_tokens, 128)
                 workspace = self._flashinfer_comm.create_allreduce_fusion_workspace(
                     backend="trtllm",
                     world_size=self.world_size,
@@ -171,8 +184,7 @@ class FlashInferAllReduce:
         self._max_num_tokens = (
             workspace.max_bytes // (self._hidden_dim * tensor.element_size())
             if hasattr(workspace, "max_bytes")
-            else _MAX_WORKSPACE_BYTES[self.world_size]
-            // (self._hidden_dim * tensor.element_size())
+            else max_num_tokens
         )
         logging.info(
             "Initialized FlashInfer TRT-LLM all-reduce: rank=%s, tp=%s, "

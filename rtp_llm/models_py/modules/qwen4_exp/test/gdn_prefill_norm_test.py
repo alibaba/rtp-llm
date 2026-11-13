@@ -84,7 +84,7 @@ class GdnPrefillNormTest(unittest.TestCase):
         for rows, role, width in (
             (4, "PREFILL", 3072),
             (4096, "DECODE", 3072),
-            (12288, "PREFILL", 3072),
+            (32769, "PREFILL", 3072),
             (4096, "PREFILL", 1024),
         ):
             native = RmsNormGated(

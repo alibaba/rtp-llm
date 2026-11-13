@@ -232,7 +232,7 @@ class GdnDecodeConvGateSM90Test(unittest.TestCase):
             W.linear_attn_dt_b: weight(48 // tp, scale=0.2, dtype=torch.float32),
             W.linear_attn_alog: weight(48 // tp, scale=0.3, dtype=torch.float32),
             W.linear_attn_norm_w: 1 + weight(128, scale=0.1),
-            W.linear_attn_out_w: weight(6144 // tp, 2560, scale=(6144 // tp)**-0.5),
+            W.linear_attn_out_w: weight(6144 // tp, 2560, scale=(6144 // tp) ** -0.5),
         }
         layers = []
         for _ in range(2):
@@ -245,8 +245,10 @@ class GdnDecodeConvGateSM90Test(unittest.TestCase):
         for layer in layers:
             assert tuple(layer.in_proj_fused.weight.shape) == (16480 // tp, 2560)
             assert callable(layer.decode_gdn._decode_conv_gate)
-        # Disable the fusion only on the reference instance; the candidate
-        # exercises normal construction without an experimental opt-in.
+        # Isolate Conv1D/gating here; the default packed recurrence has its
+        # own paged-state and Graph coverage in gdn_sm90_candidates_test.
+        for layer in layers:
+            layer.decode_gdn._packed_decode = None
         layers[0].decode_gdn._decode_conv_gate = None
         return tuple(layers)
 
@@ -255,19 +257,33 @@ class GdnDecodeConvGateSM90Test(unittest.TestCase):
         converter = layer.decode_gdn.linear_cache_converter
         pages = batch * 4 + 2
         packed = torch.full(
-            (pages, converter.block_size_bytes + 128), -91,
-            dtype=torch.int8, device="cuda",
+            (pages, converter.block_size_bytes + 128),
+            -91,
+            dtype=torch.int8,
+            device="cuda",
         )
-        for view in (converter.get_ssm_state_tensor(packed), converter.get_conv_state_tensor(packed)):
+        for view in (
+            converter.get_ssm_state_tensor(packed),
+            converter.get_conv_state_tensor(packed),
+        ):
             view.copy_(torch.randn_like(view) * 0.05)
         mapping = torch.zeros(batch, 7, dtype=torch.int32, device="cuda")[:, :4]
-        mapping.copy_(torch.randperm(pages - 2, device="cuda", dtype=torch.int32).view(batch, 4) + 1)
-        lengths = torch.tensor([65 if i % 2 == 0 else 19 for i in range(batch)],
-                               dtype=torch.int32, device="cuda")
+        mapping.copy_(
+            torch.randperm(pages - 2, device="cuda", dtype=torch.int32).view(batch, 4)
+            + 1
+        )
+        lengths = torch.tensor(
+            [65 if i % 2 == 0 else 19 for i in range(batch)],
+            dtype=torch.int32,
+            device="cuda",
+        )
         verify = tokens > 1
         inputs = SimpleNamespace(
-            is_prefill=verify, is_target_verify=verify, is_cuda_graph=False,
-            kv_cache_kernel_block_id_device=mapping, sequence_lengths_plus_1_device=lengths,
+            is_prefill=verify,
+            is_target_verify=verify,
+            is_cuda_graph=False,
+            kv_cache_kernel_block_id_device=mapping,
+            sequence_lengths_plus_1_device=lengths,
             prefix_lengths=torch.ones(batch, dtype=torch.int32),
         )
         meta = SimpleNamespace(is_target_verify=verify, is_cp_linear_attn=False)
@@ -300,8 +316,11 @@ class GdnDecodeConvGateSM90Test(unittest.TestCase):
 
     def check_decode_bitwise_and_graph_page_replay(self, tp):
         old, new = self.make_pair(tp)
-        with patch.object(new.decode_gdn, "_conv1d",
-                          side_effect=AssertionError("Eligible call fell back")):
+        with patch.object(
+            new.decode_gdn,
+            "_conv1d",
+            side_effect=AssertionError("Eligible call fell back"),
+        ):
             for batch in (1, 16, 32, 64):
                 with self.subTest(batch=batch):
                     hidden, initial, inputs, meta = self.make_decode_case(new, batch)
@@ -375,16 +394,21 @@ class GdnDecodeConvGateSM90Test(unittest.TestCase):
 
     @torch.inference_mode()
     def test_unpadded_decode_graph_refreshes_paged_state(self):
-        self.check_unpadded_decode_graph(8, (
-            (1, (8192, 32768)),
-            (16, (2048, 2048)),
-            (32, (2048, 2048)),
-            (64, (2048, 2048)),
-        ))
+        self.check_unpadded_decode_graph(
+            8,
+            (
+                (1, (8192, 32768)),
+                (16, (2048, 2048)),
+                (32, (2048, 2048)),
+                (64, (2048, 2048)),
+            ),
+        )
 
     @torch.inference_mode()
     def test_tp2_decode_graph_refreshes_paged_state(self):
-        self.check_unpadded_decode_graph(2, tuple((b, (2048, 2048)) for b in (16, 32, 64)))
+        self.check_unpadded_decode_graph(
+            2, tuple((b, (2048, 2048)) for b in (16, 32, 64))
+        )
 
     @torch.inference_mode()
     def test_tp1_decode_graph_refreshes_paged_state(self):
@@ -474,9 +498,7 @@ class GdnDecodeConvGateSM90Test(unittest.TestCase):
         for tp in (1, 2, 4, 8):
             with self.subTest(tp=tp):
                 old, new = self.make_pair(tp)
-                hidden, initial, inputs, meta = self.make_decode_case(
-                    new, 3, tokens=2
-                )
+                hidden, initial, inputs, meta = self.make_decode_case(new, 3, tokens=2)
                 original, fused = initial.clone(), initial.clone()
                 expected = self.run_decode(old, hidden, original, inputs, meta)
                 with patch.object(
@@ -507,9 +529,7 @@ class GdnDecodeConvGateSM90Test(unittest.TestCase):
                     block_map=torch.tensor(
                         [[1, 2], [3, 4]], device="cuda", dtype=torch.int32
                     ),
-                    lengths=torch.full(
-                        (batch,), 65, device="cuda", dtype=torch.int32
-                    ),
+                    lengths=torch.full((batch,), 65, device="cuda", dtype=torch.int32),
                     a=bf16(batch, heads),
                     b=bf16(batch, heads),
                     a_log=torch.zeros(heads, device="cuda"),
@@ -532,9 +552,9 @@ class GdnDecodeConvGateSM90Test(unittest.TestCase):
                     dict(a_log=args["a_log"].half()),
                     dict(lengths=args["lengths"].long()),
                     dict(
-                        lengths=torch.ones(
-                            batch * 2, device="cuda", dtype=torch.int32
-                        )[::2]
+                        lengths=torch.ones(batch * 2, device="cuda", dtype=torch.int32)[
+                            ::2
+                        ]
                     ),
                     dict(block_map=None),
                     dict(block_map=args["block_map"][:, ::2]),
@@ -544,9 +564,7 @@ class GdnDecodeConvGateSM90Test(unittest.TestCase):
                         candidate = {**args, **override}
                         state_before = candidate["state"].clone()
                         self.assertIsNone(try_decode_conv_gate(**candidate))
-                        self.assertTrue(
-                            torch.equal(candidate["state"], state_before)
-                        )
+                        self.assertTrue(torch.equal(candidate["state"], state_before))
                         self.assertTrue(torch.equal(args["state"], snapshot))
                 for capability in ((8, 0), (10, 0), (12, 0)):
                     with patch.object(

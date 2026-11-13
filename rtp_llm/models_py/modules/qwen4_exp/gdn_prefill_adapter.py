@@ -1,8 +1,11 @@
-"""Qwen4-only SM120 prefill candidate retaining every resumable cache page.
+"""Qwen4 SM90/SM120 prefill adapters retaining every resumable cache page.
 
 The FlashInfer0.7 non-CP implementation is isolated under gdn_sm120. It does
 not replace installed FlashInfer or the speculative Decode state owner.
 """
+
+import logging
+from functools import lru_cache
 
 import torch
 import triton
@@ -132,7 +135,34 @@ def sm120_prefill_prepared(
     return output.unsqueeze(0), checkpoints, final, checkpoint_starts
 
 
+@lru_cache(maxsize=1)
+def _sm90_cp_available():
+    try:
+        import cutlass
+        import flashinfer
+    except ImportError:
+        logging.warning("H20 CP dependencies unavailable, using native Prefill")
+        return False
+    available = (
+        flashinfer.__version__.split("+")[0] == "0.7.3"
+        and cutlass.__version__ == "4.8.0"
+    )
+    if not available:
+        logging.warning(
+            "H20 CP Prefill requires FlashInfer 0.7.3 and Cutlass DSL 4.8.0; "
+            "found %s and %s, using native Prefill",
+            flashinfer.__version__,
+            cutlass.__version__,
+        )
+    return available
+
+
 class Qwen4Sm120GdnPrefill(Qwen3NextGatedDeltaNetPrefill):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sm90_cp_prefill = True
+        self.sm90_grouped_prepare = True
+
     def _fla(
         self,
         mixed_qkv,
@@ -143,6 +173,29 @@ class Qwen4Sm120GdnPrefill(Qwen3NextGatedDeltaNetPrefill):
         attn_inputs,
         attn_meta,
     ):
+        if (
+            self.sm90_cp_prefill
+            and mixed_qkv.is_cuda
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(mixed_qkv.device) == (9, 0)
+            and torch.cuda.get_device_properties(mixed_qkv.device).multi_processor_count
+            == 78
+            and _sm90_cp_available()
+        ):
+            from .gdn_prefill_cp_sm90 import try_sm90_prefill
+
+            result = try_sm90_prefill(
+                self,
+                mixed_qkv,
+                b,
+                a,
+                kv_cache_tensor,
+                seq_size_per_block,
+                attn_inputs,
+                attn_meta,
+            )
+            if result is not None:
+                return result
         host_lengths = attn_inputs.input_lengths
         host_prefixes = attn_inputs.prefix_lengths
         supported = (

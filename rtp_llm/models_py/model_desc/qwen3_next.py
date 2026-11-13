@@ -510,6 +510,21 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             if kv_cache_tensor is not None
             else None
         )
+        block_n = 256
+        if (
+            mixed_qkv.is_cuda
+            and torch.version.hip is None
+            and mixed_qkv.dtype == torch.bfloat16
+            and mixed_qkv.shape in ((8192, 5120), (32768, 5120))
+            and seq_size_per_block == 64
+            and attn_inputs.input_lengths.numel() == 1
+            and attn_inputs.prefix_lengths.device.type == "cpu"
+            and int(attn_inputs.prefix_lengths[0]) == 0
+            and torch.cuda.get_device_capability(mixed_qkv.device) == (9, 0)
+            and torch.cuda.get_device_properties(mixed_qkv.device).multi_processor_count
+            == 78
+        ):
+            block_n = 512
         out = causal_conv1d_fn(
             x=mixed_qkv.transpose(0, 1),
             weight=self.conv_weights,
@@ -520,6 +535,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             seq_size_per_block=seq_size_per_block,
             prefix_lengths=attn_inputs.prefix_lengths_device,
             metadata=metadata,
+            block_n=block_n,
         ).transpose(0, 1)
         return out
 
@@ -560,7 +576,26 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         attn_inputs: PyAttentionInputs,
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
-        g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
+        from rtp_llm.models_py.triton_kernels.fla.gdn_post_conv import (
+            try_post_conv_gating,
+        )
+
+        prepared = try_post_conv_gating(
+            mixed_qkv,
+            a,
+            b,
+            self.alog,
+            self.dt_bias,
+            self.local_num_k_heads,
+            self.local_num_v_heads,
+            self.head_k_dim,
+            self.head_v_dim,
+        )
+        g, beta = (
+            fused_gdn_gating(self.alog, a, b, self.dt_bias)
+            if prepared is None
+            else prepared[3:]
+        )
         ssm_states = (
             self._get_ssm_states(kv_cache_tensor)
             if kv_cache_tensor is not None
@@ -589,8 +624,10 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         # M >= 2048: scatter_qkv (Triton, SGLang port) avoids the .view() ->
         # .contiguous() copies that torch.split + view triggers. Below 2048,
         # kernel launch overhead beats the savings (microbench measured).
-        qk_l2normalized = False
-        if mixed_qkv.shape[0] >= 2048 and self.head_k_dim == self.head_v_dim:
+        qk_l2normalized = prepared is not None
+        if prepared is not None:
+            query, key, value = prepared[:3]
+        elif mixed_qkv.shape[0] >= 2048 and self.head_k_dim == self.head_v_dim:
             from rtp_llm.models_py.triton_kernels.common.scatter_qkv import (
                 try_scatter_qkv_l2norm_sm90,
             )
@@ -640,6 +677,28 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             and is_flydsl_chunk_gdn_enabled()
             and is_flydsl_chunk_gdn_shape_supported(query, key, value, beta)
         )
+        page_state_store = None
+        if (
+            query.is_cuda
+            and torch.version.hip is None
+            and not use_aiter_flydsl_gdn
+            and not use_flydsl_chunk_gdn
+            and ssm_states is not None
+            and ssm_states.dtype == torch.float32
+            and query.dtype == key.dtype == value.dtype == torch.bfloat16
+            and query.shape[-2:] == (8, 128)
+            and value.shape[-2:] == (24, 128)
+            and 2048 <= query.shape[1] <= 32768
+            and cu_seqlens_without_padding.numel() == 2
+            and seq_size_per_block in (64, 128)
+            and torch.cuda.get_device_capability(query.device) == (9, 0)
+        ):
+            page_state_store = (
+                ssm_states,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                attn_inputs.prefix_lengths_device,
+                seq_size_per_block,
+            )
         if use_aiter_flydsl_gdn:
             attn_out, h, final_state = (
                 chunk_gated_delta_rule_aiter_flydsl_with_intermediate_states(
@@ -699,8 +758,13 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 output_final_state=True,
                 cu_seqlens=cu_seqlens_without_padding,
                 use_qk_l2norm_in_kernel=not qk_l2normalized,
+                page_state_store=page_state_store,
             )
-        if ssm_states is not None and not use_flydsl_chunk_gdn:
+        if (
+            ssm_states is not None
+            and not use_flydsl_chunk_gdn
+            and page_state_store is None
+        ):
             store_ssm_state_to_block_map(
                 h,
                 final_state,
@@ -829,6 +893,26 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         batch, seq = self._get_bs_from_attenion_input(
             mixed_qkv, attn_inputs, is_target_verify
         )
+        packed_decode = getattr(self, "_packed_decode", None)
+        if (
+            packed_decode is not None
+            and seq == 1
+            and not is_target_verify
+            and precomputed_gates is None
+        ):
+            fused = packed_decode(
+                mixed_qkv,
+                a,
+                b,
+                self.alog,
+                self.dt_bias,
+                self._get_ssm_states(kv_cache_tensor),
+                attn_inputs.kv_cache_kernel_block_id_device,
+                attn_inputs.sequence_lengths_plus_1_device,
+                seq_size_per_block,
+            )
+            if fused is not None:
+                return fused.reshape(batch, self.local_num_v_heads, self.head_v_dim)
         # asserr head_k_dim == head_v_dim
         mixed_qkv = mixed_qkv.reshape(
             batch,
@@ -973,7 +1057,11 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         )
         is_target_verify = self._is_target_verify(attn_inputs, attn_meta)
         conv_gate = getattr(self, "_decode_conv_gate", None)
-        if conv_gate is not None and not is_target_verify:
+        if (
+            conv_gate is not None
+            and not is_target_verify
+            and getattr(self, "_packed_decode", None) is None
+        ):
             fused = conv_gate(
                 mixed_qkv,
                 self.conv_weights,
@@ -989,8 +1077,14 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             if fused is not None:
                 mixed_qkv, g, beta = fused
                 return self._fla(
-                    mixed_qkv, b, a, kv_cache_tensor, kv_cache.seq_size_per_block,
-                    attn_inputs, attn_meta, precomputed_gates=(g, beta),
+                    mixed_qkv,
+                    b,
+                    a,
+                    kv_cache_tensor,
+                    kv_cache.seq_size_per_block,
+                    attn_inputs,
+                    attn_meta,
+                    precomputed_gates=(g, beta),
                 )
         mixed_qkv = self._conv1d(
             mixed_qkv,
@@ -1110,6 +1204,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         # cannot represent both source weights and their fused output layout.
         qkvz_w = weights[W.linear_attn_qkvz_w]
         ba_w = weights[W.linear_attn_ba_w]
+        projection_sources = (qkvz_w, ba_w)
         qkvz_is_bf16 = weights.get(W.linear_attn_qkvz_s) is None
         _is_rocm = hasattr(torch.version, "hip") and torch.version.hip is not None
         rocm_swizzle_enabled = (
@@ -1192,6 +1287,12 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             )
 
             self.decode_gdn._decode_conv_gate = try_decode_conv_gate
+            from rtp_llm.models_py.modules.qwen4_exp.gdn_decode_triton import (
+                try_packed_decode,
+            )
+
+            if attn_tp_size == 2 and self.decode_gdn.ssm_state_dtype == torch.float32:
+                self.decode_gdn._packed_decode = try_packed_decode
         self.norm = RmsNormGated(
             weights[W.linear_attn_norm_w],
             eps=layernorm_eps,
@@ -1206,6 +1307,50 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             quant_config,
             hw_kernel_config=hw_kernel_config,
         )
+
+        if (
+            norm_activation == "sigmoid"
+            and self._qkvz_ba_fused
+            and attn_tp_size == 2
+            and (self.local_num_k_heads, self.local_num_v_heads) == (8, 24)
+            and self.head_k_dim == self.head_v_dim == 128
+            and torch.version.hip is None
+        ):
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import (
+                CudaF16Linear,
+            )
+            from rtp_llm.models_py.modules.qwen4_exp.gdn_projection import Sm90GdnLinear
+            from rtp_llm.models_py.utils.device_capability import (
+                cached_device_capability,
+            )
+
+            if (
+                type(self.in_proj_fused) is CudaF16Linear
+                and self.in_proj_fused.weight.is_cuda
+                and self.in_proj_fused.weight.shape == (8240, 2560)
+                and self.in_proj_fused.weight.dtype == torch.bfloat16
+                and not self.in_proj_fused.weight.requires_grad
+                and cached_device_capability(self.in_proj_fused.weight.device) == (9, 0)
+                and torch.cuda.get_device_properties(
+                    self.in_proj_fused.weight.device
+                ).multi_processor_count
+                == 78
+            ):
+                self.in_proj_fused = Sm90GdnLinear(self.in_proj_fused)
+                if not self.in_proj_fused.weight.is_inference():
+                    # RPC updates must not leave graph-bound packed weights stale.
+                    for source in (
+                        *projection_sources,
+                        weights[W.linear_attn_qkvz_w],
+                        weights[W.linear_attn_ba_w],
+                    ):
+                        source._rtp_requires_restart_for_update = True
+                if type(self.out_proj) is CudaF16Linear:
+                    self.out_proj = Sm90GdnLinear(self.out_proj)
+                    if self.out_proj._refresh_weight():
+                        weights[
+                            W.linear_attn_out_w
+                        ]._rtp_requires_restart_for_update = True
 
     def _input_project(
         self, hidden_states: torch.Tensor
@@ -1660,7 +1805,9 @@ class Qwen3NextModel(GptModelBase):
         is_cuda_graph: bool = False,
         cuda_graph_selection_mode: Optional[str] = None,
     ):
-        impls = super().prepare_fmha_impl(inputs, is_cuda_graph, cuda_graph_selection_mode)
+        impls = super().prepare_fmha_impl(
+            inputs, is_cuda_graph, cuda_graph_selection_mode
+        )
         if torch.version.hip is None:
             return impls
         attention_inputs = get_attention_inputs_value(inputs)

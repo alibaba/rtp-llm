@@ -492,6 +492,7 @@ def solve_tril(
     A: torch.Tensor,
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float,
+    num_warps: int = 4,
 ) -> torch.Tensor:
     """
     Compute the inverse of the lower triangular matrix
@@ -553,7 +554,7 @@ def solve_tril(
         T=T,
         H=H,
         BT=BT,
-        num_warps=4,
+        num_warps=num_warps,
         num_stages=3,
     )
     return Ai
