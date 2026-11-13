@@ -16,6 +16,7 @@ import torch.profiler
 from rtp_llm.access_logger.access_logger import MMAccessLogger
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.log_config import get_log_path
+from rtp_llm.config.mm_download_domains import check_download_urls
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitConfig
 from rtp_llm.metrics import kmonitor
@@ -586,7 +587,7 @@ class MMProcessEngine:
         try:
             with _input_inspection_scope(input_inspection_enabled):
                 self._normalize_remote_url_inputs(mm_inputs)
-                self.mm_part.validate_inputs(mm_inputs)
+                self._validate_inputs(mm_inputs)
                 result = self._embed_with_greennet_sync_impl(
                     mm_inputs,
                     request_id=request_id,
@@ -877,6 +878,7 @@ class MMProcessEngine:
         current_entry: Optional[MMEmbeddingCacheEntry] = None
         deadline = time.monotonic() + timeout_ms / 1000.0
         try:
+            check_download_urls(item.url for item in mm_inputs)
             if not self._greennet_enabled():
                 return GreenNetVerdict(passed=True)
 
@@ -1000,6 +1002,10 @@ class MMProcessEngine:
             raise
         return res
 
+    def _validate_inputs(self, mm_inputs):
+        check_download_urls(item.url for item in mm_inputs)
+        self.mm_part.validate_inputs(mm_inputs)
+
     def _normalize_remote_url_inputs(self, mm_inputs):
         # Both the local C++ path and separated ViT RPCs may carry the
         # GenerateInput URL placeholder. Normalize before any cache claim.
@@ -1056,7 +1062,7 @@ class MMProcessEngine:
         query_started = False
         try:
             self._normalize_remote_url_inputs(mm_inputs)
-            self.mm_part.validate_inputs(mm_inputs)
+            self._validate_inputs(mm_inputs)
             if report_image_count:
                 _report_image_count(mm_inputs)
             with torch.profiler.record_function("mm_embedding_impl"):
@@ -1431,7 +1437,7 @@ class MMProcessEngine:
         """
         try:
             self._normalize_remote_url_inputs(mm_inputs)
-            self.mm_part.validate_inputs(mm_inputs)
+            self._validate_inputs(mm_inputs)
             claims = self._claim_and_submit_async(
                 mm_inputs,
                 request_id=request_id,
@@ -1503,7 +1509,7 @@ class MMProcessEngine:
         deadline = time.monotonic() + timeout_ms / 1000.0
         try:
             self._normalize_remote_url_inputs(mm_inputs)
-            self.mm_part.validate_inputs(mm_inputs)
+            self._validate_inputs(mm_inputs)
             _report_image_count(mm_inputs)
             self._raise_if_async_request_cancelled(request_id, cancellation_event)
             if time.monotonic() >= deadline:

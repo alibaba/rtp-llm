@@ -18,6 +18,7 @@ import requests
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.mm_download_domains import check_download_urls, domain_checked_get
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMPreprocessConfigPB,
@@ -78,10 +79,7 @@ CONNECT_TIMEOUT_RETRIES = 2
 
 
 def _default_request_get(url, headers, timeout=10):
-    import requests
-    from urllib3.exceptions import ReadTimeoutError
-
-    return requests.get(url, stream=True, headers=headers, timeout=timeout)
+    return domain_checked_get(url, stream=True, headers=headers, timeout=timeout)
 
 
 def _check_download(deadline, cancellation_event):
@@ -277,9 +275,7 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
     load_start = time.monotonic()
     try:
         if url.startswith("http") or url.startswith("https"):
-            import requests
-
-            response = requests.get(url, stream=True, headers=headers, timeout=10)
+            response = domain_checked_get(url, stream=True, headers=headers, timeout=10)
             if response.status_code == 200:
                 res = response.content.decode("utf-8")
             else:
@@ -292,6 +288,8 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
             with open(url, "r", encoding="utf-8") as fh:
                 buf = fh.read()
             res = buf
+    except FtRuntimeException:
+        raise
     except Exception as e:
         raise Exception(f"download and load {url} error, exception {e}")
     finally:
@@ -394,6 +392,7 @@ def get_bytes_io_from_url(
     """
 
     _check_download(deadline, cancellation_event)
+    check_download_urls((url,))
     cached_res = url_data_cache_.check_cache(url)
     if cached_res is None:
         headers = _get_http_heads(download_headers)

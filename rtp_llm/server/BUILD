@@ -27,6 +27,7 @@ py_library(
     deps = [
         ":request_headers",
         ":vit_rpc_control",
+        "//rtp_llm:mm_download_domains",
         "//rtp_llm:oss_download_config",
         "//rtp_llm:telemetry",
         "//rtp_llm:warmup",

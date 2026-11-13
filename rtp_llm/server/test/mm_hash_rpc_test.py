@@ -1,4 +1,5 @@
 import asyncio
+import os
 import struct
 import threading
 import unittest
@@ -260,6 +261,23 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         call = self.engine.get_embedding_result.call_args
         self.assertEqual(call.kwargs["region"], "cn-beijing")
         self.assertEqual(len(call.args[0]), 2)
+
+    async def test_domain_denylist_rejects_even_a_warm_hash(self):
+        self.engine._hash_key_cache.put(self.keys[0], self.hashes)
+        with patch.dict(
+            os.environ, {"MM_DOWNLOAD_DOMAIN_DENYLIST": '["https://example/"]'}
+        ):
+            with self.assertRaises(FtRuntimeException) as error:
+                await self.client.get_vit_cache_metadata(
+                    self.address, self.keys, self.request
+                )
+            self.assertEqual(
+                error.exception.exception_type, ExceptionType.MM_WRONG_FORMAT_ERROR
+            )
+            with self.assertRaises(grpc.aio.AioRpcError) as error:
+                await self.stub.GetMultimodalHashes(self.wire_request())
+            self.assertEqual(error.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+        self.engine.get_embedding_result.assert_not_called()
 
     async def test_missing_region_reaches_vit_as_none(self):
         await self.client.get_vit_cache_metadata(self.address, self.keys, self.request)

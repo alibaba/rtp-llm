@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.mm_download_domains import check_download_urls
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalHashResponsePB
 from rtp_llm.telemetry import vit_media
 
@@ -108,6 +109,10 @@ def get_mm_cache_metadata(
         raise ValueError("invalid multimodal cache key")
     if timeout_ms <= 0:
         raise ValueError("multimodal hash timeout must be positive")
+    if inputs is not None:
+        if len(inputs.multimodal_inputs) > MAX_METADATA_KEYS:
+            raise ValueError("too many multimodal inputs")
+        check_download_urls(item.multimodal_url for item in inputs.multimodal_inputs)
     cache = engine._hash_key_cache
     try:
         metadata = cache.metadata(
@@ -137,8 +142,6 @@ def get_mm_cache_metadata(
 
     from rtp_llm.multimodal.multimodal_util import trans_mm_input
 
-    if len(inputs.multimodal_inputs) > MAX_METADATA_KEYS:
-        raise ValueError("too many multimodal inputs")
     if any(
         not item.multimodal_url or item.multimodal_tensor.ByteSize()
         for item in inputs.multimodal_inputs

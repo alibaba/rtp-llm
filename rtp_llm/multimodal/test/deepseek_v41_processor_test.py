@@ -304,6 +304,24 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
         self.assertEqual(requests, 1)
         self.assertEqual(elapsed_ms, 125.0)
 
+    def test_denied_url_rejects_before_source_cache_lookup(self):
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+            load_image_source,
+        )
+        from rtp_llm.multimodal.multimodal_util import url_data_cache_
+
+        with patch.dict(
+            os.environ, {"MM_DOWNLOAD_DOMAIN_DENYLIST": '["web.archive.org"]'}
+        ), patch.object(
+            url_data_cache_, "check_cache", return_value=io.BytesIO(b"cached source")
+        ) as lookup:
+            with self.assertRaises(FtRuntimeException) as error:
+                load_image_source("https://web.archive.org/cached.png")
+        self.assertEqual(
+            error.exception.exception_type, ExceptionType.MM_WRONG_FORMAT_ERROR
+        )
+        lookup.assert_not_called()
+
     def test_ssrf_client_error_is_preserved_without_retry(self):
         error = FtRuntimeException(
             ExceptionType.MM_WRONG_FORMAT_ERROR, "url ssrf check failed"

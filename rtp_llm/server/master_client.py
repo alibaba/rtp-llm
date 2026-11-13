@@ -18,6 +18,7 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import RoleAddr, RoleType
+from rtp_llm.config.mm_download_domains import check_download_urls
 from rtp_llm.config.py_config_modules import MasterConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import trans_input
 from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
@@ -596,6 +597,8 @@ class MasterClient:
         unique_keys = list(dict.fromkeys(keys))
         probe_timeout = DEFAULT_REQUEST_TIMEOUT_SEC
         if input is not None:
+            # The first hash probe carries only keys, even on a warm hit.
+            check_download_urls(item.url for item in input.mm_inputs)
             input.greennet_verified_vit = None
             configured_timeout = input.generate_config.mm_timeout_ms
             if not configured_timeout or configured_timeout <= 0:

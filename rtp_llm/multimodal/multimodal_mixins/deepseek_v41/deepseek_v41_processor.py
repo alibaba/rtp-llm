@@ -19,6 +19,7 @@ from pillow_heif import register_heif_opener
 from urllib3.exceptions import ProtocolError, ReadTimeoutError
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.mm_download_domains import check_download_urls
 from rtp_llm.metrics import GaugeMetrics
 from rtp_llm.multimodal.vit_metrics import (
     record_vit_preprocess_value,
@@ -97,6 +98,7 @@ def load_image_source(
             deadline=deadline,
             cancellation_event=cancellation_event,
         )
+    check_download_urls((url,))
     cached = url_data_cache_.check_cache(url)
     if cached is not None:
         try:
