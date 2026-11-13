@@ -170,12 +170,16 @@ TEST_F(SWAGroupSetTest, WindowValidatorBusyResourceResetsLikeHole) {
         setDeviceBlock(b, 0);
         setDeviceBlock(c, 0);
         setDeviceBlock(d, 0);
+        if (state == GroupSetTransferState::DEMOTING) {
+            b->group_set_resources[0].device_blocks.clear();
+            setHostBlock(b, 0, 15);
+        }
         b->group_set_resources[0].transfer_state = state;
 
         EXPECT_TRUE(validator->validate(a->group_set_resources[0]));
 
-        // Busy resource has data but is owned by an in-flight transfer: it must
-        // behave exactly like a hole and reset the window accumulation.
+        // A lower-tier demotion or pending load cannot provide a stable source;
+        // it resets the window accumulation like a hole.
         EXPECT_FALSE(validator->validate(b->group_set_resources[0]));
         EXPECT_FALSE(swa_validator->connectedToRoot());
         EXPECT_EQ(swa_validator->accumulatedLength(), 0u);
@@ -189,6 +193,17 @@ TEST_F(SWAGroupSetTest, WindowValidatorBusyResourceResetsLikeHole) {
         delete c;
         delete d;
     }
+}
+
+TEST_F(SWAGroupSetTest, MatchValidatorAllowsCompleteDeviceSourceDuringDemotion) {
+    auto  validator = group_->createMatchValidator();
+    auto* node      = makeNode(100);
+    setDeviceBlock(node, 0);
+    node->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
+
+    EXPECT_TRUE(validator->validate(node->group_set_resources[0]));
+
+    delete node;
 }
 
 TEST_F(SWAGroupSetTest, WindowValidatorAllowsLoadingResource) {

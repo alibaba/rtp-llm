@@ -11,7 +11,7 @@ size_t LinearGroupSet::computeReuseBlockCount(size_t matched_block_count) const 
 }
 
 bool LinearMatchValidator::validate(const GroupSetResource& resource) {
-    // Point-state: each node is judged on its own; a busy resource is unusable.
+    // Point-state: each node is judged on its own, including stable DEVICE demotion sources.
     return resource.isMatchUsable() && !resource.is_empty();
 }
 
