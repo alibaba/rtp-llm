@@ -1,24 +1,29 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.endpoint.DecodeEndpoint.AdmissionCapacity;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DispatchOutcome;
 import org.flexlb.balance.endpoint.DecodeEndpoint.ReleaseReason;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
-import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.Map;
 
-import static org.flexlb.balance.endpoint.DecodeEndpoint.EngineDispatchPermitTransferStatus.*;
-import static org.flexlb.balance.endpoint.DecodeEndpoint.ReservationReleaseResult.*;
-import static org.junit.jupiter.api.Assertions.*;
+import static org.flexlb.balance.endpoint.DecodeEndpoint.EngineDispatchPermitTransferStatus.OWNERSHIP_LOST;
+import static org.flexlb.balance.endpoint.DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED;
+import static org.flexlb.balance.endpoint.DecodeEndpoint.ReservationReleaseResult.RELEASED;
+import static org.flexlb.balance.endpoint.DecodeEndpoint.ReservationReleaseResult.STILL_OWNED;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** The resource ledger can run without an Endpoint, scheduler, RPC client or callback. */
 class DecodeStateTest {

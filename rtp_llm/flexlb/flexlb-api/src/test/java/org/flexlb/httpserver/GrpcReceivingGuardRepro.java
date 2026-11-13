@@ -1,17 +1,43 @@
 package org.flexlb.httpserver;
 
-import io.grpc.*;
-import io.grpc.netty.*;
-import io.grpc.stub.*;
-import io.netty.buffer.*;
-import io.netty.channel.*;
-import io.netty.handler.codec.http2.*;
-import java.io.*;
+import io.grpc.CallOptions;
+import io.grpc.ClientCall;
+import io.grpc.ConnectivityState;
+import io.grpc.ManagedChannel;
+import io.grpc.Metadata;
+import io.grpc.MethodDescriptor;
+import io.grpc.Server;
+import io.grpc.ServerServiceDefinition;
+import io.grpc.Status;
+import io.grpc.netty.NettyChannelBuilder;
+import io.grpc.netty.NettyServerBuilder;
+import io.grpc.stub.ServerCallStreamObserver;
+import io.grpc.stub.ServerCalls;
+import io.grpc.stub.StreamObserver;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
+import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelOption;
+import io.netty.channel.FixedRecvByteBufAllocator;
+import io.netty.handler.codec.http2.DefaultHttp2Headers;
+import io.netty.handler.codec.http2.DefaultHttp2HeadersEncoder;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.util.*;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class GrpcReceivingGuardRepro {
   static final MethodDescriptor<byte[], byte[]> METHOD =

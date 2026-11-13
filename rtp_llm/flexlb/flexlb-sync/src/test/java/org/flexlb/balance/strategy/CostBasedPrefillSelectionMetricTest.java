@@ -1,12 +1,11 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.projection.RouteProjection;
-import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.scheduler.PlacementKey;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
@@ -19,12 +18,13 @@ import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

@@ -3,7 +3,6 @@ package org.flexlb.service;
 import com.google.protobuf.ByteString;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DefaultRouter;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.DispatcherConfig;
@@ -13,6 +12,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;

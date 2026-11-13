@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.junit.jupiter.api.Test;
+
 import static org.flexlb.balance.endpoint.EngineQueueAdmission.State.AVAILABLE;
 import static org.flexlb.balance.endpoint.EngineQueueAdmission.State.CONGESTED;
 import static org.flexlb.balance.endpoint.EngineQueueAdmission.State.UNKNOWN;

@@ -1,14 +1,16 @@
 package org.flexlb.balance.prediction;
 
-import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
+import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
-import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.junit.jupiter.api.Test;
-import static org.junit.jupiter.api.Assertions.*;
+
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 
 class ProjectionPredictionCacheTest {

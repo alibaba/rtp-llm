@@ -1,15 +1,14 @@
 package org.flexlb.engine.grpc;
 
-import io.grpc.Context;
-import io.grpc.ClientCall;
-import io.grpc.CallOptions;
-import io.grpc.MethodDescriptor;
-import io.grpc.Metadata;
-import io.grpc.ForwardingClientCall;
-import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ForwardingListenableFuture;
-import java.util.function.Function;
+import com.google.common.util.concurrent.ListenableFuture;
+import io.grpc.CallOptions;
+import io.grpc.ClientCall;
+import io.grpc.Context;
+import io.grpc.ForwardingClientCall;
 import io.grpc.ManagedChannel;
+import io.grpc.Metadata;
+import io.grpc.MethodDescriptor;
 import io.grpc.Server;
 import io.grpc.Status;
 import io.grpc.netty.NettyServerBuilder;
@@ -22,12 +21,29 @@ import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-import java.util.List;
 import java.net.InetSocketAddress;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.*;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 @Timeout(30)

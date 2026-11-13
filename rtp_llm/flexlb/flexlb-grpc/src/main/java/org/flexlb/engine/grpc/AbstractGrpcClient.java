@@ -1,7 +1,7 @@
 package org.flexlb.engine.grpc;
 
-import io.grpc.ManagedChannel;
 import io.grpc.Deadline;
+import io.grpc.ManagedChannel;
 import lombok.Getter;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;

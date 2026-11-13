@@ -2,8 +2,8 @@ package org.flexlb.balance.eviction;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestRegistry;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RouteAdmission;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;

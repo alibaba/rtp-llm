@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import org.flexlb.balance.PlacementResult;
@@ -27,9 +26,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.metric.NoOpFlexMonitor;
@@ -37,6 +34,9 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;

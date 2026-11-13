@@ -1,9 +1,16 @@
 package org.flexlb.engine.grpc.config;
 
-import io.grpc.*;
-import io.grpc.netty.NettyChannelBuilder;
+import io.grpc.CallOptions;
+import io.grpc.ClientCall;
+import io.grpc.ManagedChannel;
+import io.grpc.Metadata;
+import io.grpc.MethodDescriptor;
+import io.grpc.Server;
+import io.grpc.ServerCall;
+import io.grpc.ServerServiceDefinition;
+import io.grpc.Status;
 import io.grpc.internal.GrpcUtil;
-import java.net.InetSocketAddress;
+import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.ChannelOption;
@@ -15,12 +22,20 @@ import org.junit.jupiter.api.Timeout;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.concurrent.*;
+import java.net.InetSocketAddress;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 @Timeout(30)
 class GrpcCallbackOverloadTest {

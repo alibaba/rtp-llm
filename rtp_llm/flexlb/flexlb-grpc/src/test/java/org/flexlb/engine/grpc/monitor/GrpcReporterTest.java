@@ -1,8 +1,8 @@
 package org.flexlb.engine.grpc.monitor;
 
 import io.grpc.Status;
-import org.flexlb.engine.grpc.GrpcFailure;
 import org.flexlb.engine.grpc.GrpcCallTrace;
+import org.flexlb.engine.grpc.GrpcFailure;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;

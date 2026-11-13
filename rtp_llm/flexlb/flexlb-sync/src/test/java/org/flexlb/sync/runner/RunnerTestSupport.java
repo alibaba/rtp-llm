@@ -1,17 +1,17 @@
 package org.flexlb.sync.runner;
 
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.config.ConfigService;
-import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.mockito.Mockito;
 
 import java.util.Map;

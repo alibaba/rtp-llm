@@ -1,10 +1,17 @@
 package org.flexlb.engine.grpc;
 
 import com.google.protobuf.MapField;
-import java.util.Map;
 import org.flexlb.cache.primitive.PackedBooleanCacheMap;
 import org.junit.jupiter.api.Test;
-import static org.junit.jupiter.api.Assertions.*;
+
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PackedCacheMapCompatibilityTest {
     @Test

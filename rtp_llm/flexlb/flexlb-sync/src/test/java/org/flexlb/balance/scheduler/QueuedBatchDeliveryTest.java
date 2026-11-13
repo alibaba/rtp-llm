@@ -1,12 +1,12 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DeliverySettlementTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.scheduler.ExpirationTimer.InactivityDeadline;
-import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -15,9 +15,9 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -35,8 +35,8 @@ import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;

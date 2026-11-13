@@ -489,8 +489,7 @@ class FlexlbGrpcForwarderTest {
         org.junit.jupiter.api.Assertions.assertThrows(AssertionError.class,
                 () -> call.listener.onClose(success ? Status.OK : Status.UNAVAILABLE, new io.grpc.Metadata()));
         assertTrue(stage.isDone(), "telemetry Error must not strand the result");
-        if (success) { assertSame(response, stage.join().response()); }
-        else { assertEquals("UNAVAILABLE", stage.join().failure()); }
+        if (success) { assertSame(response, stage.join().response()); } else { assertEquals("UNAVAILABLE", stage.join().failure()); }
         assertEquals(0L, forwardCharge(forwarder));
     }
 
@@ -527,8 +526,7 @@ class FlexlbGrpcForwarderTest {
         org.junit.jupiter.api.Assertions.assertThrows(AssertionError.class,
                 () -> call.listener.onClose(success ? Status.OK : Status.UNAVAILABLE, new io.grpc.Metadata()));
         assertTrue(stage.isDone());
-        if (success) { assertSame(response, stage.join().response()); }
-        else { assertEquals("UNAVAILABLE", stage.join().failure()); }
+        if (success) { assertSame(response, stage.join().response()); } else { assertEquals("UNAVAILABLE", stage.join().failure()); }
     }
 
     private static final class ControllableCancelCall extends io.grpc.ClientCall<

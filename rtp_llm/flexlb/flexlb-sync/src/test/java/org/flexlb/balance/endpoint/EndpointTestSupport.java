@@ -1,20 +1,20 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
-import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 
 import java.util.ArrayList;
 import java.util.List;
