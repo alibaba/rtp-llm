@@ -250,6 +250,8 @@ class GatedResidual(nn.Module):
         hyper_input: torch.Tensor,
         sublayer_out: torch.Tensor,
         inject_weights: torch.Tensor,
+        *,
+        inplace_residual: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         fp8_down = (
             self.down_projection is not None
@@ -289,10 +291,15 @@ class GatedResidual(nn.Module):
                 self.norm_gamma,
                 self.norm_eps,
                 collect_scale=collect_scale,
+                inplace_residual=inplace_residual,
             )
             if fused is not None:
                 residual, normed, scale = fused
                 return self._forward_normed(residual, normed, down_input_scale=scale)
+        if inplace_residual:
+            raise RuntimeError(
+                "Private HC residual requires the supported fused producer"
+            )
         return self(inject_into_residual(hyper_input, sublayer_out, inject_weights))
 
     def _forward_normed(
@@ -301,7 +308,9 @@ class GatedResidual(nn.Module):
 
         inject_weights = None
         bf16_fp8_candidate = self._use_bf16_down_inject(normed)
-        merged = self.bf16_fp8_down_inject if bf16_fp8_candidate else self.merged_down_inject
+        merged = (
+            self.bf16_fp8_down_inject if bf16_fp8_candidate else self.merged_down_inject
+        )
         rows = normed.numel() // self.hc_hidden_size
         # Wide BF16 inputs use separate projections to preserve the model's
         # down/inject rounding.

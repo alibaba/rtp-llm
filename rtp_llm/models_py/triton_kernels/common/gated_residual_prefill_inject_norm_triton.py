@@ -54,13 +54,15 @@ def _hc_prefill_inject_norm(
         tl.store(AMAX + row * 4 + group, tl.max(absolute, 0))
 
 
-def _inject_grouped_norm(x, sublayer, gates, gamma, eps=1e-6, *, collect_scale=True):
+def _inject_grouped_norm(
+    x, sublayer, gates, gamma, eps=1e-6, *, collect_scale=True, inplace_residual=False
+):
     rows = x.numel() // 10240
-    residual = torch.empty_like(x)
+    # Each (row, group) program reads and writes a disjoint residual slice.
+    # The sublayer and gates must have separate storage from the private x.
+    residual = x if inplace_residual else torch.empty_like(x)
     norm = torch.empty_like(x)
-    collect = collect_scale and (
-        1 <= rows <= 4096 or 8192 <= rows <= 12288
-    )
+    collect = collect_scale and (1 <= rows <= 4096 or 8192 <= rows <= 12288)
     partial = (
         torch.empty(rows * 4, device=x.device, dtype=torch.float32)
         if collect
@@ -92,7 +94,9 @@ def _inject_grouped_norm(x, sublayer, gates, gamma, eps=1e-6, *, collect_scale=T
     return residual, norm, scale
 
 
-def try_inject_grouped_norm(x, sublayer, gates, gamma, eps, *, collect_scale=True):
+def try_inject_grouped_norm(
+    x, sublayer, gates, gamma, eps, *, collect_scale=True, inplace_residual=False
+):
     if not (
         x.is_cuda
         and torch.version.hip is None
@@ -115,4 +119,17 @@ def try_inject_grouped_norm(x, sublayer, gates, gamma, eps, *, collect_scale=Tru
         and cached_device_capability(x.device) in ((9, 0), (12, 0))
     ):
         return None
-    return _inject_grouped_norm(x, sublayer, gates, gamma, eps, collect_scale=collect_scale)
+    if inplace_residual and any(
+        tensor.untyped_storage().data_ptr() == x.untyped_storage().data_ptr()
+        for tensor in (sublayer, gates, gamma)
+    ):
+        raise ValueError("In-place HC residual requires separate auxiliary storage")
+    return _inject_grouped_norm(
+        x,
+        sublayer,
+        gates,
+        gamma,
+        eps,
+        collect_scale=collect_scale,
+        inplace_residual=inplace_residual,
+    )

@@ -193,6 +193,40 @@ class SegmentPolicyTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "private input slot"):
                 module.reuse_moe_input_slot(slot, result)
 
+    def test_compact_hc_reuses_residual_without_an_extra_copy(self):
+        live = (torch.ones(3, 16), torch.ones(3, 4), torch.ones(3, 4))
+        slots = tuple(t.clone() for t in live)
+        for offset in (2, 7):
+            outputs = (slots[0], live[1] + offset, live[2] + offset)
+            with patch.object(
+                module, "reuse_moe_input_slot", wraps=module.reuse_moe_input_slot
+            ) as copy:
+                result = module.reuse_hc_moe_slots(slots, outputs)
+                self.assertEqual(copy.call_count, 2)
+            self.assertIs(result, slots)
+            self.assertTrue(torch.equal(slots[1], live[1] + offset))
+            self.assertTrue(torch.equal(slots[2], live[2] + offset))
+            self.assertTrue(all(torch.equal(t, torch.ones_like(t)) for t in live))
+
+    def test_compact_hc_rejects_incomplete_outputs(self):
+        slots = (torch.ones(3, 16), torch.ones(3, 4), torch.ones(3, 4))
+        for outputs in ((), slots[:2], list(slots)):
+            with self.assertRaisesRegex(RuntimeError, "private input slots"):
+                module.reuse_hc_moe_slots(slots, outputs)
+
+    def test_compact_fallback_never_calls_private_mutating_function(self):
+        admission = module.SegmentAdmission()
+        segment = module.StaticPrefillSegment(0, "hc_moe_compact", admission)
+        private = SimpleNamespace()
+        with patch.object(module, "require_rank_agreement") as collective:
+            for rows in (768, 3072, 5376):
+                x = torch.ones(rows, 4)
+                output = segment.run(lambda t: t + 1, x, capture_eager=private)
+                self.assertTrue(torch.equal(output, x + 1))
+                self.assertTrue(torch.equal(x, torch.ones_like(x)))
+            collective.assert_not_called()
+        self.assertEqual(segment.graphs, {})
+
     def test_all_hot_shapes_fit_shared_budget_without_non_hot_promotion(self):
         with patch.dict(os.environ, {}, clear=True):
             admission = module.SegmentAdmission()
