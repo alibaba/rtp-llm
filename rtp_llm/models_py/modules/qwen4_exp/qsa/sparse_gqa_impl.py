@@ -43,6 +43,7 @@ from rtp_llm.ops.fused_rope_kvcache_op import (
 )
 
 from . import fmha_inputs, fmha_validation
+from .flashinfer_indexer import use_flashinfer_qsa
 from .fmha_plans import IncrementalPrefillInputs, PagedInputs
 
 
@@ -659,6 +660,23 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 "selected_indices must be packed [total_tokens, K], got "
                 f"{tuple(selected_indices.shape)} for total_tokens={tokens}"
             )
+
+        if use_flashinfer_qsa():
+            from .flashinfer_prefill import try_flashinfer_cold_prefill
+
+            output = try_flashinfer_cold_prefill(
+                self,
+                q,
+                k,
+                v,
+                selected_indices,
+                lengths,
+                trusted_selected=trusted_selected,
+            )
+            if output is not None:
+                self._selected_indices = None
+                self._trusted_prefill_cu_seqlens = None
+                return output
 
         cu = getattr(self, "_trusted_prefill_cu_seqlens", None)
         owner_cu = getattr(self.attn_inputs, "cu_seqlens_device", None)

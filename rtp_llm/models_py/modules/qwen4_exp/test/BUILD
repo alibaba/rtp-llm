@@ -1,3 +1,4 @@
+load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
 
 package(default_visibility = ["//visibility:public"])
@@ -437,6 +438,13 @@ models_py_test(
     src = "qsa/indexer_cuda_contract_test.py",
     gpu = "L20_CU13",
     deps = _REFERENCE_DEPS,
+)
+
+cuda13_sm100_py_test(
+    name = "qsa_flashinfer_test",
+    srcs = ["qsa/qsa_flashinfer_test.py"],
+    main = "qsa/qsa_flashinfer_test.py",
+    deps = ["//rtp_llm:testlib"],
 )
 
 # Preserve the existing CI entrypoint while sharing component parity coverage.
