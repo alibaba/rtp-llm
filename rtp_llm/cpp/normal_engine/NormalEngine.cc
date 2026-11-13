@@ -259,6 +259,9 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 #else
     RTP_LLM_LOG_INFO("skip warm up on non-CUDA platform.");
 #endif
+    // AWI: assign the serving rank and scope startup graph-capture events to the
+    // launched evaluation operation before the executor captures CUDA graphs.
+    initAwiObservability();
     initCacheManager(warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
 
@@ -276,6 +279,24 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         (void)startLoop();
     }
     (void)construction_guard.release();
+}
+
+void NormalEngine::initAwiObservability() {
+    auto& awi = AwiCollector::instance();
+    // Graph capture runs inside initExecutor, before initScheduler would set the
+    // rank. Set it here so capture events carry the real serving rank.
+    awi.setRank(parallelism_config.tp_rank);
+    // The frozen evaluator launches the container with AWI_OPERATION_ID and later
+    // queries /awi/observations for that id. Captures happen before the barrier,
+    // so without this scoping the real capture events would have an empty
+    // operation id and be filtered out of the operation's telemetry.
+    const char* operation_id = std::getenv("AWI_OPERATION_ID");
+    if (operation_id != nullptr && operation_id[0] != '\0') {
+        AwiOperation operation;
+        operation.operation_id = operation_id;
+        awi.armOperation(std::move(operation));
+        RTP_LLM_LOG_INFO("AWI: startup observations scoped to operation [%s]", operation_id);
+    }
 }
 
 void NormalEngine::initExecutor(const EngineInitParams&                        params,

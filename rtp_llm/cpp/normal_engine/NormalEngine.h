@@ -71,6 +71,7 @@ private:
     void checkAwiBarrierCapacity(const AwiOperation& operation);
     void recordAwiDeviceOom(const std::exception& exception);
 
+    void                            initAwiObservability();
     void                            initScheduler();
     std::shared_ptr<GenerateStream> createStream(const std::shared_ptr<GenerateInput>& input);
     bool                            validateStreamForScheduling(const GenerateStreamPtr& stream) const;
