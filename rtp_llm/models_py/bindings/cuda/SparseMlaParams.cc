@@ -496,6 +496,18 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
     }
 }
 
+void SparseMlaParams::fillSparseMlaDecodeCudaGraphParams(torch::Tensor sequence_lengths_plus_1_d,
+                                                         torch::Tensor kv_cache_block_id_device,
+                                                         int           seq_size_per_block) {
+    FlashInferMlaAttnParams::fillDecodeCudaGraphParams(
+        sequence_lengths_plus_1_d, kv_cache_block_id_device, seq_size_per_block);
+    auto options_cuda   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    topk_indices_offset = torch::empty({0}, options_cuda);
+    ks                  = torch::empty({0}, options_cuda);
+    ke                  = torch::empty({0}, options_cuda);
+    expanded_seq_lens   = kvlen_d;
+}
+
 void registerPySparseMlaParams(pybind11::module& m) {
     // Third template parameter must be FlashInferMlaAttnParams (not ParamsBase)
     // This allows Python to access all def_readonly attributes of the base class
@@ -510,6 +522,11 @@ void registerPySparseMlaParams(pybind11::module& m) {
             pybind11::arg("attention_inputs"),
             pybind11::arg("seq_size_per_block"),
             pybind11::arg("forbid_realloc") = false)
+        .def("fill_sparse_mla_decode_cuda_graph_params",
+             &SparseMlaParams::fillSparseMlaDecodeCudaGraphParams,
+             pybind11::arg("sequence_lengths_plus_1_device"),
+             pybind11::arg("kv_cache_block_id_device"),
+             pybind11::arg("seq_size_per_block"))
         .def_readonly("expanded_seq_lens", &SparseMlaParams::expanded_seq_lens)
         .def_readonly("topk_indices_offset", &SparseMlaParams::topk_indices_offset)
         .def_readonly("ks", &SparseMlaParams::ks)

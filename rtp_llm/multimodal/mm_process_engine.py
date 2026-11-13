@@ -1,12 +1,15 @@
 import asyncio
 import concurrent.futures
 import gc
+import json
 import logging
 import multiprocessing.pool
 import os
+import re
 import signal
 import threading
 import time
+from contextvars import copy_context
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -29,7 +32,12 @@ from rtp_llm.multimodal.mm_embedding_cache import (
     MMHashKeyCache,
     _current_cuda_streams,
 )
+from rtp_llm.multimodal.mm_error_messages import MediaDownloadError
 from rtp_llm.multimodal.mm_profiler import MMProfiler
+from rtp_llm.multimodal.mm_request_context import (
+    MEDIA_REQUEST_CONTEXT,
+    MediaRequestContext,
+)
 from rtp_llm.multimodal.mm_scheduler import (
     MMScheduler,
     MMSchedulerError,
@@ -991,6 +999,34 @@ class MMProcessEngine:
             # proxy deployment the RPC response carries a marker, allowing the
             # proxy to report transport-only failures without double counting.
             kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
+            if isinstance(error, MediaDownloadError):
+                context = MEDIA_REQUEST_CONTEXT.get()
+                attempt = re.search(r"#attempt([0-9]{1,6})$", context.source_request_id)
+                source_id = context.source_request_id
+                if attempt:
+                    source_id = source_id[: attempt.start()]
+                logging.warning(
+                    "multimodal_media_download_failure %s",
+                    json.dumps(
+                        {
+                            "request_id": context.request_id,
+                            "source_request_id": source_id,
+                            "source_retry_count": (
+                                int(attempt.group(1)) if attempt else 0
+                            ),
+                            "media_domain": error.domain,
+                            "http_status": error.http_status,
+                            "failure_type": error.failure_type,
+                            "elapsed_ms": error.elapsed_ms,
+                            "retry_count": error.retry_count,
+                        }
+                    ),
+                )
+                kmonitor.report(
+                    AccMetrics.VIT_MEDIA_DOWNLOAD_FAILURE_QPS_METRIC,
+                    1,
+                    error.metric_tags(),
+                )
         except Exception:
             # Metrics must never mask the original ViT request failure.
             logging.exception("Failed to report ViT error QPS")
@@ -1531,6 +1567,11 @@ class MMProcessEngine:
         logging.debug(f"{self.server_id} request [{request_id}] received")
         work_items: List[MMWorkItem] = []
         query_started = False
+        context_token = MEDIA_REQUEST_CONTEXT.set(
+            MediaRequestContext(
+                request_id, MEDIA_REQUEST_CONTEXT.get().source_request_id
+            )
+        )
         try:
             self.mm_part.validate_inputs(mm_inputs)
             if report_image_count:
@@ -1597,8 +1638,11 @@ class MMProcessEngine:
             self._access_logger.log_exception_access(mm_inputs, e, request_id)
             raise
         finally:
-            if query_started:
-                self.dec_query_num()
+            try:
+                if query_started:
+                    self.dec_query_num()
+            finally:
+                MEDIA_REQUEST_CONTEXT.reset(context_token)
 
     def _create_work_items(
         self,
@@ -2232,6 +2276,7 @@ class MMProcessEngine:
             try:
                 for mm_input, cache_key, entry in active_pending:
                     future = self._async_compute_executor.submit(
+                        copy_context().run,
                         self._run_async_compute,
                         [mm_input],
                         cache_key,

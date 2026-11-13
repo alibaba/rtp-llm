@@ -23,15 +23,15 @@ struct GroupBase {
 
     uint32_t block_num = 0;
 
-    size_t   seqSizePerBlock() const;
-    size_t   kernelSeqSizePerBlock() const;
-    size_t   kernelBlocksPerKvBlock() const;
-    size_t   kvBlockStrideBytes() const;
-    size_t   kvScaleStrideBytes() const;
-    size_t   cacheKeyTokenStride() const;
-    size_t   reuseBlockCount(size_t matched_block_count) const;
+    size_t seqSizePerBlock() const;
+    size_t kernelSeqSizePerBlock() const;
+    size_t kernelBlocksPerKvBlock() const;
+    size_t kvBlockStrideBytes() const;
+    size_t kvScaleStrideBytes() const;
+    size_t cacheKeyTokenStride() const;
+    size_t reuseBlockCount(size_t matched_block_count) const;
     // Zero keeps the ordinary table; otherwise reserve distinct native banks for chunk execution.
-    size_t chunkCacheBlockCount(int prompt_tokens, int chunk_tokens, bool reuse_cache, int reserve_tokens = 0) const;
+    size_t   chunkCacheBlockCount(int prompt_tokens, int chunk_tokens, bool reuse_cache, int reserve_tokens = 0) const;
     uint32_t localKvHeadNum() const;
 };
 
@@ -61,13 +61,18 @@ public:
     }
 
     const GroupBase& group(std::string_view tag) const;
+    // MLA prepares its slot map before the per-layer table selection. Draft
+    // models with independent pools must bind that map to their model-owned
+    // MLA group, not an earlier FULL indexer or a target-owned placeholder.
+    // Legacy topologies without an MLA spec retain the first owned FULL group.
+    const GroupBase& initialMlaBlockTableGroup() const;
     const LayerBase& layer(int layer_id) const;
     GroupRefs        groupsForLayer(int layer_id) const;
     const GroupBase& groupForLayer(int layer_id, std::string_view tag) const;
     const GroupBase& soleGroupForLayer(int layer_id) const;
 
-    bool   hasSingleGlobalGroup() const;
-    bool   hasOneGroupPerLayer() const;
+    bool hasSingleGlobalGroup() const;
+    bool hasOneGroupPerLayer() const;
 
     // Canonical topology geometry. A merged MTP CacheConfig may have child-owned
     // physical strides; its callers must use CacheConfig::{blockSizeBytesForGroup,
@@ -90,8 +95,8 @@ private:
     CacheTopology(std::vector<GroupBase> groups, std::vector<LayerBase> layers);
     void validateAndBuildIndex();
 
-    std::vector<GroupBase> groups_;
-    std::vector<LayerBase> layers_;
+    std::vector<GroupBase>   groups_;
+    std::vector<LayerBase>   layers_;
     std::vector<std::string> group_tags_;
 
     std::unordered_map<std::string, size_t> tag_to_group_id_;

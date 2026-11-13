@@ -28,8 +28,8 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         RTP_LLM_CHECK_WITH_INFO(attn.kv_lora_rank > 0,
                                 "MLA KVCacheSpecDesc tag=%s requires positive attn_config.kv_lora_rank",
                                 desc.tag.c_str());
-        RTP_LLM_CHECK_WITH_INFO(attn.rope_head_dim > 0,
-                                "MLA KVCacheSpecDesc tag=%s requires positive attn_config.rope_head_dim",
+        RTP_LLM_CHECK_WITH_INFO(attn.rope_head_dim > 0 || attn.indexer_compress_ratio > 1,
+                                "MLA KVCacheSpecDesc tag=%s without RoPE requires a grouped indexer",
                                 desc.tag.c_str());
 
         const auto seq    = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;

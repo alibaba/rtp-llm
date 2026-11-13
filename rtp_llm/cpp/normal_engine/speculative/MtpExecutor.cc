@@ -828,8 +828,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                       is_dspark_ ? DSparkModelRole::PROPOSE : DSparkModelRole::NONE,
                                                       draft_graph_allowed));
             }
-            /** MTP separates prefill/decode graph shapes; DSpARK separates fixed PROPOSE/COMMIT entry points. */
-            if (enable_cuda_graph || is_dspark_) {
+            // GLM53's draft prefill sizes its compressed index from live host
+            // lengths. Use the existing eager path for that forward.
+            const bool capture_draft_prefill = enable_cuda_graph && params.model_config_.model_type != "glm5_3_flash";
+            if (capture_draft_prefill || is_dspark_) {
                 RTP_LLM_LOG_INFO("[speculative decoding] creating draft prefill model");
                 // Ordinary MTP captures a prefill graph. DSpARK keeps the same
                 // runtime slot but constructs a gamma+1 decode-graph commit wrapper.
@@ -1581,13 +1583,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         launch_spec_logits_phase();
     }
 
-    // Launch draft-prefill prepare BEFORE target verify forward so it overlaps
-    // with target verify GPU work instead of running serially after it. Sync
-    // on this prepare happens just before draft_model_forward below.
-    // DSpARK commit reuses the verify token/length geometry verbatim. Only its
-    // rank-local feature tensor is bound after target forward, so attention
-    // preparation can overlap target verification just like ordinary MTP.
-    launchDraftPrefillPrepareAsync(model_input);
+    // Device-state MTP and DSpARK keep the dense verify geometry through
+    // rejection, so their prepare can overlap target verification. The host
+    // path compacts tokens and lengths to accept_len; prepare its final layout
+    // only after rejection instead of reusing metadata for the dense rows.
+    const bool draft_prefill_geometry_is_fixed = is_dspark_ || useStreamAsync() || useAsyncDeviceState();
+    if (draft_prefill_geometry_is_fixed) {
+        launchDraftPrefillPrepareAsync(model_input);
+    }
 
     SpeculativeTargetCommitGuard target_commit_guard(model_.get());
 
@@ -1831,6 +1834,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     launchDraftPrefillPrepareAsync(model_input, /*post_rejection=*/true);
     broadcastPostRejectionInputs(model_input);
 
+    if (!draft_prefill_geometry_is_fixed) {
+        launchDraftPrefillPrepareAsync(model_input);
+    }
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
 
     {

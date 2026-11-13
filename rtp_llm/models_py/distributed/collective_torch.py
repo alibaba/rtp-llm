@@ -841,6 +841,31 @@ def destroy_distributed_environment():
     gc.collect()
 
 
+def get_process_group(group: Group) -> torch.distributed.ProcessGroup:
+    return _get_group(group)
+
+
+def reduce_scatter_padded(tensor: torch.Tensor, group: Group) -> torch.Tensor:
+    """Pad token rows before a reduce-scatter, preserving the last dimension."""
+    if tensor.ndim == 0:
+        raise ValueError("reduce_scatter_padded requires a token dimension")
+    world_size = torch.distributed.get_world_size(_get_group(group))
+    rows = int(tensor.shape[0])
+    missing = -rows % world_size
+    if missing:
+        tensor = torch.cat((tensor, tensor.new_zeros((missing, *tensor.shape[1:]))))
+    return reduce_scatter(tensor, group) if world_size > 1 else tensor
+
+
+def all_gather_trim(
+    tensor: torch.Tensor, logical_tokens: int, group: Group
+) -> torch.Tensor:
+    gathered = all_gather(tensor, group)
+    if not 0 <= logical_tokens <= gathered.shape[0]:
+        raise ValueError("logical token count exceeds the gathered rows")
+    return gathered.narrow(0, 0, logical_tokens)
+
+
 def _get_group(
     group: Group, cpu_backend: bool = False
 ) -> torch.distributed.ProcessGroup:

@@ -5,6 +5,7 @@ load(":pip.bzl", "PIP_EXTRA_ARGS")
 
 package(default_visibility = ["//visibility:public"])
 exports_files([
+    "glm53_deepgemm_lock.txt",
     "http.bzl",
     "requirements_base.txt",
     "requirements_base_ppu.txt",

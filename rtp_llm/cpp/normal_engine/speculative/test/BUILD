@@ -71,6 +71,22 @@ cc_test(
     tags = ["L20_CU13"],
 )
 
+mtp_executor_test_deps = [
+    "//rtp_llm/cpp/cache",
+    "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+    "//rtp_llm/cpp/config:config_modules",
+    "//rtp_llm/cpp/engine_base/schedulers",
+    "//rtp_llm/cpp/models",
+    "//rtp_llm/cpp/normal_engine",
+    "//rtp_llm/cpp/normal_engine/test:mock_engine",
+    "//rtp_llm/cpp/testing:device_test_utils",
+    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+    "@com_google_googletest//:gtest",
+    "@com_google_googletest//:gtest_main",
+    "@local_config_cuda//cuda:cuda_headers",
+    "@local_config_cuda//cuda:cudart",
+] + torch_deps() + cuda13_torch_link_deps
+
 cc_test(
     name = "mtp_compute_test",
     srcs = glob([
@@ -108,21 +124,7 @@ cc_test(
     }),
     data = [],
     copts = test_copts,
-    deps = [
-        "//rtp_llm/cpp/cache",
-        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/engine_base/schedulers",
-        "//rtp_llm/cpp/models",
-        "//rtp_llm/cpp/normal_engine",
-        "//rtp_llm/cpp/normal_engine/test:mock_engine",
-        "//rtp_llm/cpp/testing:device_test_utils",
-        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ] + torch_deps() + cuda13_torch_link_deps,
+    deps = mtp_executor_test_deps,
     env = select({
         "@//:using_ppu": {
             "TEST_USING_DEVICE": "CUDA",
@@ -136,4 +138,24 @@ cc_test(
         "//conditions:default": {"gpu": "L20_CU13"},
     }),
     tags = ["L20_CU13", "PPU-ZW810E"],
+)
+
+cc_test(
+    name = "mtp_executor_async_prepare_host_test",
+    srcs = ["MtpExecutorTest.cc"],
+    args = ["--gtest_filter=" + ":".join([
+        "MtpExecutorTest.testSingleBatchDecode",
+        "MtpExecutorTest.testMultiBatchDecode",
+        "MtpExecutorTest.testPdfusionPrefillOnlyDoesNotSkipSingleBatchDecode",
+    ])],
+    copts = test_copts,
+    deps = mtp_executor_test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+        "RTP_LLM_MTP_ASYNC_PREPARE": "1",
+        "RTP_LLM_STREAM_ASYNC": "0",
+        "RTP_LLM_MTP_ASYNC_DEVICE_STATE": "0",
+    },
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )

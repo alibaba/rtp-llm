@@ -7,6 +7,21 @@ requirement([
 ])
 
 py_test(
+    name = "test_causal_conv1d_int64",
+    srcs = ["test_causal_conv1d_int64.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:causal_conv1d",
+        "//rtp_llm/models_py/triton_kernels:common",
+        ":numpy",
+        ":torch",
+        ":triton",
+    ],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    tags = ["manual", "SM103_CU13"],
+)
+
+py_test(
     name = "test_casual_conv1d_prefill",
     srcs = [
         "test_casual_conv1d_prefill.py",

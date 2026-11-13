@@ -7,6 +7,7 @@ load("@pip_cuda13_arm_torch//:requirements.bzl", requirement_cuda13_arm = "requi
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9 = "requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12 = "requirement")
 load("@pip_gpu_cuda13_torch//:requirements.bzl", requirement_gpu_cuda13 = "requirement")
+load("@pip_glm53_deepgemm//:requirements.bzl", requirement_glm53 = "requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requirement")
 load("@pip_ppu_torch//:requirements.bzl", requirement_ppu = "requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
@@ -96,19 +97,22 @@ def requirement(names):
                 visibility = ["//visibility:public"],
             )
             continue
+        platform_deps = {
+            "@rtp_llm//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
+            "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
+            "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
+            "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
+            "@rtp_llm//:using_cuda12_arm": [requirement_cuda12_arm(name)],
+            "@rtp_llm//:using_rocm": [requirement_gpu_rocm("amd-aiter" if name == "aiter" else name)],
+            "@rtp_llm//:using_arm": [requirement_arm(name)],
+            "@rtp_llm//:using_ppu": ppu_deps,
+            "//conditions:default": [requirement_cpu(name)],
+        }
+        if name in ["deep-gemm", "deep_gemm"]:
+            platform_deps["@rtp_llm//:using_glm53_cuda13_x86"] = [requirement_glm53("deep-gemm")]
         native.py_library(
             name = name,
-            deps = select({
-                "@rtp_llm//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
-                "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
-                "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
-                "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
-                "@rtp_llm//:using_cuda12_arm": [requirement_cuda12_arm(name)],
-                "@rtp_llm//:using_rocm": [requirement_gpu_rocm("amd-aiter" if name == "aiter" else name)],
-                "@rtp_llm//:using_arm": [requirement_arm(name)],
-                "@rtp_llm//:using_ppu": ppu_deps,
-                "//conditions:default": [requirement_cpu(name)],
-            }),
+            deps = select(platform_deps),
             visibility = ["//visibility:public"],
         )
 
@@ -155,8 +159,6 @@ def whl_deps():
             # source upstream is download.pytorch.org/whl/cu130).
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
-            # CI-built DeepGEMM: opt_glm5 with isolated SM120 GEMMs.
-            "deep_gemm==2.8.0+122e18b.cu132",
             "flash-mla==1.0.0+9241ae3",
             "deep-ep==2.1.0+a56d615",
             "fast-hadamard-transform==1.1.0+e7706fa.cu132.torch2.11.cxx11abitrue",
@@ -265,6 +267,12 @@ def whl_deps():
             "fastsafetensors==0.1.19rc5+ali",
         ],
         "//conditions:default": ["torch==2.1.2"],
+    }) + select({
+        "@rtp_llm//:using_glm53_cuda13_x86": [
+            "deep-gemm @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/deep_gemm-2.8.2%2B522942a.cu132-cp310-cp310-linux_x86_64.whl#sha256=806896fa0e88c5c50f5f02bc1c0c72983506a9bc079bed4d6829b184e7e83957",
+        ],
+        "@rtp_llm//:using_cuda13_x86": ["deep_gemm==2.8.0+122e18b.cu132"],
+        "//conditions:default": [],
     })
 
 def ml_pin_reqs():

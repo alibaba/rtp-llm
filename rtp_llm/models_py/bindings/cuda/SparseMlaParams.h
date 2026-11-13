@@ -65,6 +65,9 @@ private:
 
 public:
     void fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq_size_per_block, bool forbid_realloc = false);
+    void fillSparseMlaDecodeCudaGraphParams(torch::Tensor sequence_lengths_plus_1_d,
+                                            torch::Tensor kv_cache_block_id_device,
+                                            int           seq_size_per_block);
 
     // SparseMlaParams-specific outputs (5 parameters)
     torch::Tensor expanded_seq_lens;

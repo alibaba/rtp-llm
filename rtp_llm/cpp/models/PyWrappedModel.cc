@@ -610,7 +610,13 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
 
     // The model topology, including placeholders, determines the input shape;
     // extra rows in a shared target payload do not make a single-group model tagged.
-    py_attn_inputs = by_tag.at(model_groups.front().tag);
+    // MLA builds its slot map before per-layer table selection. Bind the singular
+    // tables to the model's FULL group so an Eagle draft with independent pools
+    // cannot index its arena with the target model's block IDs.
+    const auto& initial_group = description_.attention_conf.use_mla ?
+                                    kv_cache_layer_layout_->topology().initialMlaBlockTableGroup() :
+                                    model_groups.front();
+    py_attn_inputs            = by_tag.at(initial_group.tag);
     if (model_groups.size() == 1) {
         return {};
     }

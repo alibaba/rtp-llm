@@ -235,8 +235,11 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     // Decode retains every received FULL page on each TP rank. Its sharding
     // flag describes the upstream prefill layout for transport/state sizing,
     // not local allocation: applying the CP mapper here would underallocate by the CP factor.
-    if (cp_cfg.kv_cache_sharded && cp_cfg.is_enabled() && parallelism_config_.role_type != RoleType::DECODE
-        && parallelism_config_.tp_size > 1) {
+    // Prefill models can implement CP themselves and leave the shared
+    // forward CP path disabled. The allocator still owns rank-local pages.
+    const bool prefill_shards_cache = parallelism_config_.role_type == RoleType::PREFILL;
+    if (cp_cfg.kv_cache_sharded && (prefill_shards_cache || cp_cfg.is_enabled())
+        && parallelism_config_.role_type != RoleType::DECODE && parallelism_config_.tp_size > 1) {
         cp_slot_mapper_ = std::make_shared<CPSlotMapper>(static_cast<int>(parallelism_config_.tp_rank),
                                                          static_cast<int>(parallelism_config_.tp_size),
                                                          static_cast<int>(config_.seq_size_per_block));

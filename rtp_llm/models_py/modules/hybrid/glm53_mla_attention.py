@@ -1,0 +1,379 @@
+from typing import Any, Dict, Optional, Tuple, Union
+
+import torch
+from rtp_llm.device.device_type import DeviceType, get_device_type
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_reduce,
+    reduce_scatter_padded,
+)
+from rtp_llm.models_py.modules import RMSNorm
+from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.models_py.modules.factory.attention.attn_factory import MlaImplBase
+from rtp_llm.models_py.modules.hybrid.glm53_indexer import Indexer
+from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
+from rtp_llm.ops.compute_ops import KVCache, LayerKVCache
+from rtp_llm.utils.model_weight import W
+from torch import nn
+
+# CUDA-only fused strided RMSNorm (replaces .contiguous() + RMSNorm). When
+# q_b_proj is fp8, we additionally emit fp8+scale to skip a separate
+# per-token-group fp8 quant launch. ROCm path falls back to the unfused chain.
+_DEVICE_TYPE = get_device_type()
+if _DEVICE_TYPE == DeviceType.Cuda:
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
+        CudaFp8GEMMLinear,
+    )
+    from rtp_llm.models_py.triton_kernels.common.fused_strided_rmsnorm import (
+        fused_strided_rmsnorm,
+        fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output,
+    )
+else:
+    CudaFp8GEMMLinear = None  # type: ignore
+    fused_strided_rmsnorm = None  # type: ignore
+    fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output = None  # type: ignore
+
+
+class MlaAttention(nn.Module):
+    """MLA attention. Supports both dense and sparse (indexer/top-k) modes.
+    Whether to use Indexer is determined by attn_config.is_sparse.
+    """
+
+    def __init__(
+        self,
+        attn_config: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
+        weights: Dict[str, torch.Tensor],
+        layer_idx: int,
+        layernorm_eps: float,
+        quant_config: object,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
+        global_weights: Optional[Dict[str, torch.Tensor]] = None,
+        has_indexer: Optional[bool] = None,
+        reuse_topk_indices: bool = False,
+        indexer_layernorm_eps: Optional[float] = None,
+    ):
+        super().__init__()
+        self.attn_config = attn_config
+        self.parallelism_config = parallelism_config
+        self.num_heads = (
+            attn_config.head_num // self.parallelism_config.get_attn_tp_size()
+        )
+        self.qk_nope_head_dim = attn_config.nope_head_dim
+        self.qk_rope_head_dim = attn_config.rope_head_dim
+        self.q_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+        self.kv_lora_rank = attn_config.kv_lora_rank
+        self.v_head_dim = attn_config.v_head_dim
+        self.q_lora_rank = attn_config.q_lora_rank
+        self.softmax_scale = self.q_head_dim ** (-0.5)
+        self.layer_idx = layer_idx
+        self.token_per_block = attn_config.kernel_tokens_per_block
+        self.has_indexer = (
+            bool(attn_config.is_sparse) if has_indexer is None else has_indexer
+        )
+        self.reuse_topk_indices = bool(reuse_topk_indices)
+
+        if self.has_indexer:
+            self.indexer = Indexer(
+                attn_config,
+                weights,
+                global_weights,
+                layer_idx,
+                (
+                    layernorm_eps
+                    if indexer_layernorm_eps is None
+                    else indexer_layernorm_eps
+                ),
+                quant_config,
+                hw_kernel_config,
+                parallelism_config,
+            )
+        else:
+            self.indexer = None
+
+        if self.q_lora_rank > 0:
+            self.fused_qkv_a_proj = LinearFactory.create_linear_from_weights(
+                weights,
+                W.mla_fusedqkrope_w,
+                W.mla_fusedqkrope_s,
+                None,
+                quant_config=quant_config,
+                hw_kernel_config=hw_kernel_config,
+            )
+            self.q_a_layernorm = RMSNorm(
+                weights.get(W.mla_q_a_ln_gamma, None), eps=layernorm_eps
+            )
+            self.q_b_proj = LinearFactory.create_linear_from_weights(
+                weights,
+                W.mla_q_b_w,
+                W.mla_q_b_s,
+                None,
+                quant_config=quant_config,
+                hw_kernel_config=hw_kernel_config,
+            )
+        else:
+            self.fused_qkv_proj = LinearFactory.create_linear_from_weights(
+                weights,
+                W.mla_fusedqkrope_no_lora_w,
+                W.mla_fusedqkrope_no_lora_s,
+                None,
+                quant_config=quant_config,
+                hw_kernel_config=hw_kernel_config,
+            )
+
+        self.kv_a_layernorm = RMSNorm(
+            weights.get(W.mla_kv_a_ln_gamma, None), eps=layernorm_eps
+        )
+
+        self.o_proj = LinearFactory.create_linear_from_weights(
+            weights,
+            W.attn_o_w,
+            W.attn_o_s,
+            W.attn_o_b,
+            quant_config=quant_config,
+            hw_kernel_config=hw_kernel_config,
+        )
+
+        # ------------------------------------------------------------------
+        # Fusion detection (DSV3.2 MLA path).
+        #
+        # F2  : kv_a_layernorm receives a strided slice from torch.split. We
+        #       always try the fused_strided_rmsnorm path; the wrapper falls
+        #       back to .contiguous() + flashinfer.norm.rmsnorm when the input
+        #       isn't compatible (H>8192 or last-dim stride != 1).
+        # F1a : q_a_layernorm with bf16 q_b_proj — same as F2 (bf16 output).
+        # F1b : q_a_layernorm with fp8 q_b_proj — produces dual output
+        #       (bf16 for the indexer wq_b consumer, fp8 + scale for q_b_proj).
+        # ------------------------------------------------------------------
+        from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
+
+        _fuse_on = fuse_kernels_enabled(hw_kernel_config)
+        self._fuse_kv_a_norm = (
+            _fuse_on
+            and _DEVICE_TYPE == DeviceType.Cuda
+            and fused_strided_rmsnorm is not None
+        )
+
+        # q-path fusion mode: "fp8_dual" (F1b), "bf16" (F1a), or "off" (fallback)
+        self._fuse_q_a_norm_mode = "off"
+        if _fuse_on and self.q_lora_rank > 0 and _DEVICE_TYPE == DeviceType.Cuda:
+            q_b_is_fp8 = (
+                CudaFp8GEMMLinear is not None
+                and isinstance(self.q_b_proj, CudaFp8GEMMLinear)
+                and self.q_lora_rank % 128 == 0
+            )
+            if q_b_is_fp8:
+                # UE8M0 needs num_groups % 4 == 0
+                if self.q_b_proj.scale_ue8m0:
+                    if (self.q_lora_rank // 128) % 4 == 0:
+                        self._fuse_q_a_norm_mode = "fp8_dual"
+                else:
+                    self._fuse_q_a_norm_mode = "fp8_dual"
+            elif fused_strided_rmsnorm is not None:
+                self._fuse_q_a_norm_mode = "bf16"
+
+    def _run_sparse_indexer(
+        self,
+        hidden_states: torch.Tensor,
+        q_c: Optional[torch.Tensor],
+        q_view: Optional[torch.Tensor],
+        kv_cache: Optional[LayerKVCache],
+        fmha_impl: MlaImplBase,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+        q_c_fp8: Optional[torch.Tensor] = None,
+        q_c_scale: Optional[torch.Tensor] = None,
+        prev_topk_indices: Optional[torch.Tensor] = None,
+        force_reuse_topk_indices: bool = False,
+        global_kv_cache: Optional[KVCache] = None,
+    ) -> Optional[torch.Tensor]:
+        if self.reuse_topk_indices or force_reuse_topk_indices:
+            if not fmha_impl.is_sparse():
+                return None
+            if prev_topk_indices is None:
+                raise RuntimeError(
+                    f"DSA shared layer {self.layer_idx} needs previous top-k "
+                    "indices, but none were provided"
+                )
+            return prev_topk_indices
+
+        if self.indexer is None:
+            return None
+        q_for_indexer = q_c if self.q_lora_rank > 0 else q_view
+        return self.indexer(
+            hidden_states,
+            q_for_indexer,
+            kv_cache,
+            fmha_impl.fmha_params,
+            fmha_impl.attn_inputs,
+            use_fast_path=not fmha_impl.is_sparse(),
+            cp_params=fmha_impl.cp_params,
+            x_fp8=x_fp8,
+            x_scale=x_scale,
+            q_c_fp8=q_c_fp8,
+            q_c_scale=q_c_scale,
+            global_kv_cache=global_kv_cache,
+            group_inputs=fmha_impl.glm53_group_inputs,
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: MlaImplBase,
+        kv_cache: Optional[LayerKVCache] = None,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+        prev_topk_indices: Optional[torch.Tensor] = None,
+        force_reuse_topk_indices: bool = False,
+        return_topk: bool = False,
+        global_kv_cache: Optional[KVCache] = None,
+        reduce_scatter_output: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
+        input_shape = hidden_states.shape[:-1]
+        early_prefetch = (
+            self.q_lora_rank > 0
+            and fmha_impl.is_sparse()
+            and self.layer_idx in getattr(fmha_impl, "pinned_mla_groups", {})
+        )
+        q_c = None
+        q_c_fp8 = None
+        q_c_scale = None
+        if self.q_lora_rank > 0:
+            if x_fp8 is not None and x_scale is not None:
+                fused_qkv = self.fused_qkv_a_proj.forward_quantized(x_fp8, x_scale)
+            else:
+                fused_qkv = self.fused_qkv_a_proj(hidden_states)
+            kv_offset = self.q_lora_rank
+            q, compressed_kv = torch.split(
+                fused_qkv,
+                [
+                    kv_offset,
+                    self.kv_lora_rank + self.qk_rope_head_dim,
+                ],
+                dim=-1,
+            )
+            # F1a/F1b: fused strided RMSNorm (skip .contiguous() copy). When
+            # q_b_proj is fp8 we additionally emit fp8+scale (F1b dual output)
+            # so q_b_proj can skip its internal quantization.
+            if self._fuse_q_a_norm_mode == "fp8_dual":
+                q_c, q_c_fp8, q_c_scale = (
+                    fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
+                        q,
+                        self.q_a_layernorm.weight.data,
+                        self.q_a_layernorm.variance_epsilon,
+                        group_size=128,
+                        scale_ue8m0=self.q_b_proj.scale_ue8m0,
+                    )
+                )
+            elif self._fuse_q_a_norm_mode == "bf16":
+                q_c = fused_strided_rmsnorm(
+                    q,
+                    self.q_a_layernorm.weight.data,
+                    self.q_a_layernorm.variance_epsilon,
+                )
+            else:
+                q_c = self.q_a_layernorm(q.contiguous())
+            if early_prefetch:
+                # Indexer consumes q_c, so Q expansion and KV normalization can
+                # run while the selected historical KV is being fetched.
+                topk_indices = self._run_sparse_indexer(
+                    hidden_states,
+                    q_c,
+                    None,
+                    kv_cache,
+                    fmha_impl,
+                    x_fp8,
+                    x_scale,
+                    q_c_fp8,
+                    q_c_scale,
+                    prev_topk_indices,
+                    force_reuse_topk_indices,
+                    global_kv_cache,
+                )
+                fmha_impl.prefetch_kv(self.layer_idx, topk_indices)
+            q = (
+                self.q_b_proj.forward_quantized(q_c_fp8, q_c_scale)
+                if q_c_fp8 is not None
+                else self.q_b_proj(q_c)
+            )
+        else:
+            if x_fp8 is not None and x_scale is not None:
+                fused_qkv = self.fused_qkv_proj.forward_quantized(x_fp8, x_scale)
+            else:
+                fused_qkv = self.fused_qkv_proj(hidden_states)
+            kv_offset = self.num_heads * self.attn_config.size_per_head
+            q, compressed_kv = torch.split(
+                fused_qkv,
+                [
+                    kv_offset,
+                    self.kv_lora_rank + self.qk_rope_head_dim,
+                ],
+                dim=-1,
+            )
+        q_view = q.reshape(-1, self.num_heads, self.q_head_dim)
+
+        compressed_kv, k_pe = torch.split(
+            compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
+
+        # F2: fused strided RMSNorm on compressed_kv (skip .contiguous() copy)
+        if self._fuse_kv_a_norm:
+            compressed_kv = fused_strided_rmsnorm(
+                compressed_kv,
+                self.kv_a_layernorm.weight.data,
+                self.kv_a_layernorm.variance_epsilon,
+            )
+        else:
+            compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
+
+        if not early_prefetch:
+            topk_indices = self._run_sparse_indexer(
+                hidden_states,
+                q_c,
+                q_view,
+                kv_cache,
+                fmha_impl,
+                x_fp8,
+                x_scale,
+                q_c_fp8,
+                q_c_scale,
+                prev_topk_indices,
+                force_reuse_topk_indices,
+                global_kv_cache,
+            )
+        # q_c and its quantized representation are Indexer-only. Releasing
+        # the local references here lets SparseMLA reuse their blocks;
+        # q_view, compressed_kv and k_pe must stay live through attention.
+        del q_c, q_c_fp8, q_c_scale
+        attn_output = fmha_impl.forward(
+            q_view,
+            compressed_kv,
+            k_pe,
+            kv_cache,
+            self.layer_idx,
+            topk_indices,
+            **({"kv_prefetched": True} if early_prefetch else {}),
+        )
+
+        # The sparse-attention launch has consumed these projections. PyTorch's
+        # stream-aware allocator delays physical reuse until the launch is safe.
+        del q_view, compressed_kv, k_pe, fused_qkv, q
+
+        if attn_output is not None:
+            attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        else:
+            attn_output = torch.zeros(
+                (*input_shape, self.num_heads * self.v_head_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+        attn_output = self.o_proj(attn_output)
+        if self.parallelism_config.get_attn_tp_size() > 1:
+            attn_output = (
+                reduce_scatter_padded(attn_output, Group.TP)
+                if reduce_scatter_output
+                else all_reduce(attn_output, group=Group.TP)
+            )
+        if return_topk:
+            return attn_output, topk_indices
+        return attn_output

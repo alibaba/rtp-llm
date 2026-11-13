@@ -42,6 +42,7 @@ def mhc_pre(
     sinkhorn_eps: float = 1e-6,
     sinkhorn_repeat: int = 10,
     n_splits: int = 16,
+    batch_invariant: bool = False,
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
     """MHC pre-processing for one sublayer (attention or FFN).
 
@@ -62,6 +63,7 @@ def mhc_pre(
         sinkhorn_eps: epsilon for Sinkhorn normalization
         sinkhorn_repeat: number of Sinkhorn iterations
         n_splits: number of splits for split-K GEMM
+        batch_invariant: preserve the one-token inference reduction at every batch size
 
     Returns:
         layer_input: tensor of shape [..., hidden_size], input to the sublayer
@@ -79,6 +81,7 @@ def mhc_pre(
             mhc_post_mult_value=post_mult_value,
             sinkhorn_repeat=sinkhorn_repeat,
             n_splits=n_splits,
+            batch_invariant=batch_invariant,
         )
         return layer_input, (post_mix, comb_mix)
 

@@ -639,6 +639,24 @@ TEST(PrefillBatchRpcServerTest, LatchedPriorityCancelBeforeEnqueuePreservesRaw84
     EXPECT_EQ(response.errors(0).error_info().error_code(), static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
 }
 
+TEST(PrefillBatchRpcServerTest, ReportsTypedDownloadFailureInBatchResponse) {
+    PrefillBatchRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots;
+    std::vector<PrefillBatchRpcServer::ReadySlot> ready_slots;
+    buildReadySlots(server, {1014}, slots, ready_slots);
+
+    ErrorDetailsPB details;
+    details.set_error_code(static_cast<int64_t>(ErrorCode::MM_DOWNLOAD_FAILED));
+    grpc::Status           status(grpc::StatusCode::INTERNAL, "download failed", details.SerializeAsString());
+    EnqueueBatchResponsePB response;
+    server.rejectSlot(ready_slots[0], status, &response);
+
+    ASSERT_EQ(response.errors_size(), 1);
+    EXPECT_EQ(response.errors(0).request_id(), 1014);
+    EXPECT_EQ(response.errors(0).error_info().error_code(), static_cast<int64_t>(ErrorCode::MM_DOWNLOAD_FAILED));
+}
+
 TEST(PrefillBatchRpcServerTest, RejectsWhenEnqueueMultipleReordersStreams) {
     PrefillBatchRpcServer server;
     server.meta_   = std::make_shared<RpcServerRuntimeMeta>();
@@ -1588,7 +1606,7 @@ TEST_F(PrefillBatchTraceTest, VitPreservesErrorsAndEndsOnException) {
         EXPECT_EQ(result.code(), code);
         EXPECT_EQ(result.ToString(), "embedding failed");
     }
-    processor->throws = true;
+    processor->throws           = true;
     const auto exception_result = server.prepareInput(makeVitRequest(4301), input, parent);
     EXPECT_EQ(exception_result.code(), ErrorCode::EXECUTION_EXCEPTION);
     EXPECT_EQ(exception_result.ToString(), "embedding failed");

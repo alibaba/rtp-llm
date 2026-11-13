@@ -10,6 +10,8 @@ _DSV4_FP8_TEST_DEPS = [
 
 # Numerical kernels and the associated metadata/pool boundary regressions.
 _GPU_TESTS = [
+    "test_glm53_int64_cache_ops",
+    "test_glm53_kpool_kernel",
     "test_bf16_gemm_fp32",
     "test_compressor_disable_raw_path",
     "test_compressor_forward_flat_input",

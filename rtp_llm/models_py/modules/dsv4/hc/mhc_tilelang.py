@@ -33,6 +33,8 @@ from typing import NoReturn, Tuple
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.forward_metadata import mhc_batch_invariant_enabled
+
 # Lazy-imported callables (populated on first successful import).
 _tk_mhc_pre = None
 _tk_mhc_post = None
@@ -191,6 +193,7 @@ def tk_mhc_pre(
             pre_eps=pre_eps,
             sinkhorn_eps=sinkhorn_eps,
             sinkhorn_repeat=sinkhorn_iters,
+            batch_invariant=mhc_batch_invariant_enabled(),
         )
         return out, post_mix, comb_mix
     except Exception as e:

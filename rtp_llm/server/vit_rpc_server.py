@@ -2,6 +2,7 @@ import logging
 import threading
 import time
 from concurrent import futures
+from functools import wraps
 
 import grpc
 
@@ -30,6 +31,10 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.mm_error_messages import format_mm_rpc_error
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
+from rtp_llm.multimodal.mm_request_context import (
+    MEDIA_REQUEST_CONTEXT,
+    MediaRequestContext,
+)
 from rtp_llm.multimodal.mm_scheduler import (
     MMSchedulerOverloadError,
     MMSchedulerRequestTooLargeError,
@@ -47,12 +52,43 @@ from rtp_llm.server.mm_cache_metadata import (
     get_mm_cache_metadata,
     metadata_to_proto,
 )
-from rtp_llm.server.request_headers import extract_request_headers
+from rtp_llm.server.request_headers import (
+    VIT_SOURCE_REQUEST_ID_METADATA,
+    extract_correlation_request_id,
+    extract_request_headers,
+)
 from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
 
 
 def _now_us() -> int:
     return time.monotonic_ns() // 1000
+
+
+def _media_request_context(method):
+    """Scope diagnostic identity to one RPC, including async compute submission."""
+
+    @wraps(method)
+    def wrapped(self, request, context):
+        metadata = dict(context.invocation_metadata() or ())
+        source_id = metadata.get(VIT_SOURCE_REQUEST_ID_METADATA, b"")
+        source_id = (
+            source_id[:256].decode("utf-8", errors="replace")
+            if isinstance(source_id, bytes)
+            else ""
+        )
+        source_id = source_id or extract_correlation_request_id(metadata)[:256]
+        inputs = (
+            request.inputs if isinstance(request, MultimodalHashRequestPB) else request
+        )
+        token = MEDIA_REQUEST_CONTEXT.set(
+            MediaRequestContext(inputs.request_id, source_id)
+        )
+        try:
+            return method(self, request, context)
+        finally:
+            MEDIA_REQUEST_CONTEXT.reset(token)
+
+    return wrapped
 
 
 _EXCEPTION_CATEGORY_TO_GRPC_STATUS = {
@@ -148,6 +184,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             rpc_done.set()
         return rpc_done
 
+    @_media_request_context
     def GetMultimodalHashes(self, request: MultimodalHashRequestPB, context):
         try:
             inputs = request.inputs if request.HasField("inputs") else None
@@ -201,6 +238,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             )
         return MultimodalHashResponsePB()
 
+    @_media_request_context
     def AsyncSubmitEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         try:
             converted_inputs = trans_mm_input(multimodal_inputs)
@@ -227,6 +265,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 f"[MM_PROCESS_ERROR] {type(error).__name__}: {error}",
             )
 
+    @_media_request_context
     def WaitGreenNetVerdict(self, multimodal_inputs: MultimodalInputsPB, context):
         """Start missing work and block until GreenNet decides for all inputs."""
         verdict = None
@@ -297,6 +336,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             return EmptyPB()
         return EmptyPB()
 
+    @_media_request_context
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         tags = {"source": "vit_server"}
         start_us = _now_us()

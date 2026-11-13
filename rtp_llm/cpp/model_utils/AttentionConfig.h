@@ -57,6 +57,11 @@ struct AttentionConfigs {
     int  indexer_head_dim    = 0;
     int  indexer_head_num    = 0;
     int  indexer_topk        = 0;
+    // Compressed entries are expanded to raw-token indices before sparse MLA.
+    int              indexer_compress_ratio     = 1;
+    int              indexer_compressor_overlap = 0;
+    int              sparse_attention_topk      = 0;
+    std::vector<int> indexer_layer_ids;
 
     // DeepSeek-V4 specific
     // Per-layer attention type schedule. Length == num_layers (+1 for MTP).

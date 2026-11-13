@@ -1,0 +1,177 @@
+"""DSv4 Indexer FP8-paged score path via DeepGEMM.
+
+Wraps ``deep_gemm.fp8_paged_mqa_logits`` so it can drop into the indexer
+decode loop in place of the bf16 ``v4_indexer_score`` Triton kernel
+when the cache is FP8 packed (132B/slot).
+
+End-to-end shape contract:
+
+  q_fp8       [B, next_n, H, D]            float8_e4m3fn  (per-(t,h) quant)
+  w_fold      [B*next_n, H]                fp32           (per-token Q
+                                                            scale folded in)
+  kv_cache    [num_blocks, block_size, 1, D+4]  uint8     (132B per slot:
+                                                            128 FP8 K + 4B fp32 scale)
+  context_lens[B, next_n]                  int32          (live K length per row)
+  block_table [B, max_blocks]              int32          (logical→physical block id)
+
+Returns ``[B*next_n, max_ctx_len] fp32`` logits — same semantics as
+``v4_indexer_score``: each row is the per-K-token score after fused
+einsum + ReLU + per-head weighted sum.
+
+Caller is responsible for FP8 quantizing Q via
+:func:`indexer_q_fp8_quant_fold`, building the block_table, and the
+2D context_lens shape DeepGEMM requires.
+"""
+
+from __future__ import annotations
+
+import torch
+from rtp_llm.models_py.kernels.cuda import fp8_mqa
+from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
+    INDEXER_ENTRY_BYTES,
+    INDEXER_HEAD_DIM,
+)
+
+_HAS_NATIVE_MQA = fp8_mqa.available()
+
+
+def fp8_paged_indexer_score(
+    q_fp8: torch.Tensor,  # [B, next_n, H, D] float8_e4m3fn
+    w_fold: torch.Tensor,  # [B*next_n, H]    fp32
+    kv_pool_uint8: torch.Tensor,  # [total_slots, 132] uint8 — flat pool view
+    block_table: torch.Tensor,  # [B, max_blocks] int32 — logical→physical
+    context_lens: torch.Tensor,  # [B, next_n] int32 — live K length per row
+    block_size: int,  # tokens per cache block
+    max_ctx_len: int,  # output T dim
+) -> torch.Tensor:
+    """One-shot FP8 paged indexer logits via DeepGEMM.
+
+    Returns ``[B*next_n, max_ctx_len] fp32`` — feed straight to topk.
+    Padded columns past per-row ``context_lens[b, n]`` are left as
+    whatever DeepGEMM writes (use ``clean_logits=True`` if the
+    downstream topk needs ``-inf`` there; default False to save the
+    extra mask).
+    """
+    if block_size == 16:
+        from rtp_llm.models_py.modules.dsv4.fp8._indexer_small_page import (
+            small_page_indexer_score,
+        )
+
+        return small_page_indexer_score(
+            q_fp8,
+            w_fold,
+            kv_pool_uint8,
+            block_table,
+            context_lens,
+            block_size,
+            max_ctx_len,
+        )
+
+    if not _HAS_NATIVE_MQA:
+        return _indexer_score.fp8_paged_indexer_score(
+            q_fp8, w_fold, kv_pool_uint8, block_table, context_lens, block_size, max_ctx_len
+        )
+    assert q_fp8.dtype == torch.float8_e4m3fn, f"q_fp8 dtype={q_fp8.dtype}"
+    assert q_fp8.dim() == 4 and q_fp8.shape[-1] == INDEXER_HEAD_DIM
+    assert w_fold.dtype == torch.float32 and w_fold.dim() == 2
+    assert kv_pool_uint8.dtype == torch.uint8
+    assert kv_pool_uint8.shape[-1] == INDEXER_ENTRY_BYTES
+    assert block_table.dtype == torch.int32 and block_table.dim() == 2
+    assert context_lens.dtype == torch.int32 and context_lens.dim() == 2
+    # DeepGEMM kv_cache shape: [num_blocks, block_size, 1, D+4] uint8.
+    # Our pool is a flat [total_slots, 132] view; reshape into the 4D
+    # layout (no copy — just a metadata change).
+    total_slots = kv_pool_uint8.shape[0]
+    assert (
+        total_slots % block_size == 0
+    ), f"total_slots={total_slots} not divisible by block_size={block_size}"
+    num_blocks = total_slots // block_size
+    kv_4d = kv_pool_uint8.view(num_blocks, block_size, 1, INDEXER_ENTRY_BYTES)
+
+    num_sms = fp8_mqa.get_num_sms()
+    schedule = fp8_mqa.get_paged_mqa_logits_metadata(
+        context_lens, block_size, num_sms
+    )
+    return fp8_mqa.fp8_paged_mqa_logits(
+        q_fp8.contiguous(),
+        kv_4d,
+        w_fold.contiguous(),
+        context_lens,
+        block_table,
+        schedule,
+        max_ctx_len,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Prefill (non-paged) wrapper around ``deep_gemm.fp8_mqa_logits``.
+#
+# Shape contract:
+#   q_fp8        [M, H, D]    float8_e4m3fn  (M = total query tokens)
+#   w_fold       [M, H]       fp32           (per-(token, head) Q scale folded in)
+#   k_quant      [N, D]       float8_e4m3fn  (N = total key tokens — gathered
+#                                              contiguous from the FP8 cache)
+#   k_scale      [N]          float32
+#   cu_seqlen_ks [M]          int32          (K start, inclusive)
+#   cu_seqlen_ke [M]          int32          (K end,   exclusive)
+#
+# Returns ``[M, N] fp32`` logits — same semantics as ``v4_indexer_score``
+# but laid out flat over total query tokens (the indexer prefill caller
+# reshapes back to ``[B, S, T]``).
+# ---------------------------------------------------------------------------
+
+
+def fp8_mqa_indexer_score(
+    q_fp8: torch.Tensor,  # [M, H, D] float8_e4m3fn
+    w_fold: torch.Tensor,  # [M, H]    fp32
+    k_quant: torch.Tensor,  # [N, D]    float8_e4m3fn
+    k_scale: torch.Tensor,  # [N]       float32
+    cu_seqlen_ks: torch.Tensor,  # [M]       int32
+    cu_seqlen_ke: torch.Tensor,  # [M]       int32
+    *,
+    clean_logits: bool = False,
+    max_seqlen_k: int = 0,
+) -> torch.Tensor:
+    """One-shot non-paged FP8 indexer logits via DeepGEMM.
+
+    Returns ``[M, N] fp32`` (M = total Q tokens this chunk; N = total K
+    tokens in the gathered workspace). Caller reshapes back to ``[B, S, T]``.
+
+    ``clean_logits=False`` matches what we want — entries past
+    ``cu_seqlen_ke[m]`` are left untouched; the topk-with-causal-mask path
+    in :class:`Indexer.forward` re-applies its own ``q_pos`` causal cap.
+    """
+    if not _HAS_NATIVE_MQA:
+        return _indexer_score.fp8_mqa_indexer_score(
+            q_fp8,
+            w_fold,
+            k_quant,
+            k_scale,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            clean_logits=clean_logits,
+            max_seqlen_k=max_seqlen_k,
+        )
+    assert q_fp8.dtype == torch.float8_e4m3fn and q_fp8.dim() == 3
+    assert q_fp8.shape[-1] == INDEXER_HEAD_DIM
+    assert w_fold.dtype == torch.float32 and w_fold.dim() == 2
+    assert w_fold.shape[0] == q_fp8.shape[0]
+    assert k_quant.dtype == torch.float8_e4m3fn and k_quant.dim() == 2
+    assert k_quant.shape[-1] == INDEXER_HEAD_DIM
+    assert k_scale.dtype == torch.float32 and k_scale.dim() == 1
+    assert k_scale.shape[0] == k_quant.shape[0]
+    assert cu_seqlen_ks.dtype == torch.int32 and cu_seqlen_ks.dim() == 1
+    assert cu_seqlen_ke.dtype == torch.int32 and cu_seqlen_ke.dim() == 1
+    assert cu_seqlen_ks.shape[0] == q_fp8.shape[0]
+    assert cu_seqlen_ke.shape[0] == q_fp8.shape[0]
+
+    return fp8_mqa.fp8_mqa_logits(
+        q_fp8.contiguous(),
+        (k_quant.contiguous(), k_scale.contiguous()),
+        w_fold.contiguous(),
+        cu_seqlen_ks.contiguous(),
+        cu_seqlen_ke.contiguous(),
+        clean_logits,
+        max_seqlen_k,
+    )

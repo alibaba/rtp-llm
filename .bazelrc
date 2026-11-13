@@ -197,6 +197,9 @@ build:cuda13 --copt=-Wno-error=missing-field-initializers
 build:cuda13 --host_copt=-Wno-missing-field-initializers
 build:cuda13_arm --host_copt=-Wno-error=missing-field-initializers
 
+# GLM-5.3-Flash uses the shared-expert DeepGEMM build on SM10x.
+build:glm53 --define=using_glm53=true
+
 # Triton 3.6.0 (shipped with cuda13 lock) supports CUDA 13.x ptxas natively;
 # the ptxas wrapper that triton 3.4 needed is no longer required.  The wrapper
 # is still baked into the prod image — keep it there harmlessly, just don't

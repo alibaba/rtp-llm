@@ -18,6 +18,22 @@ namespace rtp_llm {
 
 namespace {
 
+// GLM-5.3 ViT emits [magic, starts_media, prefix_count, suffix_count, token_ids...].
+// The tensor travels with the embedding but belongs to prompt expansion, not deepstack.
+constexpr int32_t kInterleavedLayoutMagic = -53530053;
+
+const std::vector<torch::Tensor>* interleavedLayout(const std::optional<std::vector<torch::Tensor>>& extra_input) {
+    if (!extra_input || extra_input->empty()) {
+        return nullptr;
+    }
+    const auto& first = extra_input->front();
+    if (first.defined() && first.scalar_type() == torch::kInt32 && first.dim() == 1 && first.numel() > 0
+        && first[0].item<int32_t>() == kInterleavedLayoutMagic) {
+        return &*extra_input;
+    }
+    return nullptr;
+}
+
 ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* tensor_name) {
 #if USING_CUDA
     try {
@@ -47,9 +63,16 @@ ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* 
 
 }  // namespace
 
-ErrorInfo MultimodalProcessor::getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb) {
+ErrorInfo
+MultimodalProcessor::getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb, const torch::Tensor* precomputed) {
     try {
-        auto hashes = getMultimodalFeatureHash(mm_emb);
+        if (precomputed != nullptr
+            && (!precomputed->defined() || !precomputed->device().is_cpu()
+                || precomputed->scalar_type() != torch::kInt32 || precomputed->dim() != 1
+                || precomputed->numel() != mm_emb.size(0))) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid multimodal feature hashes");
+        }
+        auto hashes = precomputed == nullptr ? getMultimodalFeatureHash(mm_emb) : precomputed->contiguous();
         memcpy(token_ids, hashes.data_ptr<int32_t>(), hashes.nbytes());
     } catch (const std::exception& error) {
         return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, error.what());
@@ -58,11 +81,97 @@ ErrorInfo MultimodalProcessor::getFeatureHash(int32_t* token_ids, const torch::T
 }
 
 ErrorResult<ExpandedOutput>
+MultimodalProcessor::expandInterleavedTokenIds(const std::vector<torch::Tensor>&                features,
+                                               const torch::Tensor&                             token_ids,
+                                               const torch::Tensor&                             token_type_ids,
+                                               const std::vector<MultimodalInput>&              mm_inputs,
+                                               const std::vector<std::pair<int32_t, int32_t>>&  spans,
+                                               const std::optional<std::vector<torch::Tensor>>& feature_hashes,
+                                               const std::vector<torch::Tensor>&                layouts) {
+    if (layouts.size() != features.size()) {
+        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "multimodal layout and feature counts differ");
+    }
+    int64_t expanded_len = token_ids.numel();
+    for (const auto& [begin, end] : spans) {
+        expanded_len -= end - begin;
+    }
+    std::vector<torch::Tensor> segments;
+    segments.reserve(layouts.size());
+    size_t groups = 0;
+    for (size_t i = 0; i < layouts.size(); ++i) {
+        const auto& layout = layouts[i];
+        if (!layout.defined() || layout.scalar_type() != torch::kInt32 || layout.dim() != 1 || layout.numel() < 4
+            || !features[i].defined() || features[i].dim() != 2 || features[i].size(0) <= 0) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid interleaved multimodal segment");
+        }
+        auto        cpu   = layout.cpu().contiguous();
+        const auto* ids   = cpu.data_ptr<int32_t>();
+        const auto  count = int64_t(ids[2]) + ids[3];
+        if (ids[0] != kInterleavedLayoutMagic || (ids[1] != 0 && ids[1] != 1) || ids[2] < 0 || ids[3] < 0
+            || count != cpu.numel() - 4 || (groups == 0 && ids[1] == 0)) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid interleaved multimodal layout header");
+        }
+        groups += ids[1];
+        expanded_len += features[i].size(0) + count;
+        if (expanded_len >= max_seq_len_) {
+            return ErrorInfo(ErrorCode::MM_LONG_PROMPT_ERROR, "interleaved multimodal input exceeds sequence length");
+        }
+        segments.push_back(std::move(cpu));
+    }
+    if (groups != spans.size()) {
+        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "interleaved multimodal groups and tags differ");
+    }
+
+    auto    expanded = torch::empty({expanded_len}, torch::kInt32);
+    auto    masks    = torch::ones({expanded_len}, torch::kInt32);
+    auto    locs     = torch::empty({static_cast<int64_t>(features.size())}, torch::kInt32);
+    auto    types    = token_type_ids.defined() ? torch::zeros({expanded_len}, torch::kInt32) : torch::Tensor();
+    auto*   out      = expanded.data_ptr<int32_t>();
+    int64_t pos      = 0;
+    auto    copyText = [&](const int32_t* text, int64_t size) {
+        std::copy_n(text, size, out + pos);
+        pos += size;
+    };
+    auto copyInput = [&](int64_t start, int64_t end) {
+        if (types.defined()) {
+            std::copy_n(token_type_ids.data_ptr<int32_t>() + start, end - start, types.data_ptr<int32_t>() + pos);
+        }
+        copyText(token_ids.data_ptr<int32_t>() + start, end - start);
+    };
+    int64_t last_end = 0;
+    size_t  feature  = 0;
+    std::map<int, int> lengths;
+    for (size_t media = 0; media < spans.size(); ++media) {
+        const auto& [begin, end] = spans[media];
+        copyInput(last_end, begin);
+        last_end = end;
+        do {
+            const auto* ids    = segments[feature].data_ptr<int32_t>();
+            const auto  length = features[feature].size(0);
+            copyText(ids + 4, ids[2]);
+            locs.data_ptr<int32_t>()[feature] = pos;
+            RETURN_IF_STATUS_ERROR(
+                getFeatureHash(out + pos, features[feature], feature_hashes ? &feature_hashes->at(feature) : nullptr));
+            std::fill_n(masks.data_ptr<int32_t>() + pos, length, 0);
+            lengths[mm_inputs[media].mm_type] += length;
+            pos += length;
+            copyText(ids + 4 + ids[2], ids[3]);
+            ++feature;
+        } while (feature < segments.size() && segments[feature].data_ptr<int32_t>()[1] == 0);
+    }
+    copyInput(last_end, token_ids.numel());
+    ExpandedOutput output(std::move(expanded), std::move(types), std::move(masks), std::move(locs));
+    output.multimodal_lengths = std::move(lengths);
+    return output;
+}
+
+ErrorResult<ExpandedOutput>
 MultimodalProcessor::expandTokenIds(const std::vector<torch::Tensor>&                mm_embedding,
                                     const torch::Tensor&                             token_ids,
                                     const std::vector<rtp_llm::MultimodalInput>      mm_inputs,
                                     torch::Tensor                                    token_type_ids,
-                                    const std::optional<std::vector<torch::Tensor>>& feature_hashes) {
+                                    const std::optional<std::vector<torch::Tensor>>& feature_hashes,
+                                    const std::vector<torch::Tensor>*                interleaved_layout) {
     if (mm_embedding.size() == 0) {
         return ExpandedOutput(token_ids, token_type_ids);
     }
@@ -75,6 +184,13 @@ MultimodalProcessor::expandTokenIds(const std::vector<torch::Tensor>&           
     int           mm_num = mm_embedding.size();
     if (feature_hashes.has_value() && feature_hashes->size() != mm_embedding.size()) {
         return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "multimodal feature hash segment count mismatch");
+    }
+    if (interleaved_layout != nullptr) {
+        if (locs.size() != mm_inputs.size()) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "interleaved multimodal inputs and tags differ");
+        }
+        return expandInterleavedTokenIds(
+            mm_embedding, token_ids, token_type_ids, mm_inputs, locs, feature_hashes, *interleaved_layout);
     }
     if (locs.size() != mm_num) {
         std::stringstream exception_str;
@@ -114,17 +230,8 @@ MultimodalProcessor::expandTokenIds(const std::vector<torch::Tensor>&           
         *(new_locs.data_ptr<int32_t>() + i) = copy_len + new_loc_idx;
 
         auto* target = expanded_ids.data_ptr<int32_t>() + new_loc_idx + copy_len;
-        if (feature_hashes.has_value()) {
-            const auto& hashes = feature_hashes->at(i);
-            if (!hashes.defined() || !hashes.device().is_cpu() || hashes.scalar_type() != torch::kInt32
-                || hashes.dim() != 1 || hashes.numel() != mm_embedding[i].size(0)) {
-                return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid multimodal feature hashes");
-            }
-            auto contiguous_hashes = hashes.contiguous();
-            memcpy(target, contiguous_hashes.data_ptr<int32_t>(), contiguous_hashes.nbytes());
-        } else {
-            RETURN_IF_STATUS_ERROR(getFeatureHash(target, mm_embedding[i]));
-        }
+        RETURN_IF_STATUS_ERROR(
+            getFeatureHash(target, mm_embedding[i], feature_hashes ? &feature_hashes->at(i) : nullptr));
 
         new_loc_idx += copy_len + mm_embedding[i].sizes()[0];
         old_loc_idx = loc.second;
@@ -356,9 +463,13 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
         mm_embedding_res,
         MultimodalEmbedding(input->multimodal_inputs.value(), ip_port, input->request_id, server_context));
     auto                       mm_features = std::move(mm_embedding_res.mm_features);
+    const auto*                layout      = interleavedLayout(mm_embedding_res.mm_extra_input);
     std::vector<torch::Tensor> mm_extra_input;
-    if (mm_embedding_res.mm_extra_input.has_value()) {
+    if (layout == nullptr && mm_embedding_res.mm_extra_input.has_value()) {
         mm_extra_input = std::move(mm_embedding_res.mm_extra_input.value());
+    }
+    if (layout != nullptr && input->multimodal_token_layout.has_value()) {
+        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "interleaved tokens must be expanded from ViT output");
     }
     CHECK_AND_RETURN_REF(expanded_ids,
                          input->multimodal_token_layout.has_value() ?
@@ -367,7 +478,8 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
                                             input->input_ids,
                                             input->multimodal_inputs.value(),
                                             {},
-                                            mm_embedding_res.mm_feature_hashes));
+                                            mm_embedding_res.mm_feature_hashes,
+                                            layout));
     RETURN_IF_STATUS_ERROR(checkExpandLength(expanded_ids));
     RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_features, "embedding"));
     RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_extra_input, "extra input"));
@@ -377,6 +489,7 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     input->input_ids           = expanded_ids.expanded_ids;
     input->text_tokens_mask    = expanded_ids.text_tokens_mask;
     input->mm_locs             = expanded_ids.locs;
+    input->interleaved_multimodal_lengths = std::move(expanded_ids.multimodal_lengths);
     return ErrorInfo::OkStatus();
 }
 
@@ -393,7 +506,8 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
                                         input->token_ids,
                                         mm_inputs,
                                         input->token_type_ids,
-                                        mm_embedding_res.mm_feature_hashes));
+                                        mm_embedding_res.mm_feature_hashes,
+                                        interleavedLayout(mm_embedding_res.mm_extra_input)));
     mm_features.expanded_ids     = expanded_ids.expanded_ids;
     mm_features.text_tokens_mask = expanded_ids.text_tokens_mask;
     mm_features.locs             = expanded_ids.locs;
@@ -413,9 +527,13 @@ MultimodalProcessor::getMultimodalFeatures(const torch::Tensor&                 
     MultimodalFeature mm_features;
     CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs));
     mm_features.features = std::move(mm_embedding_res.mm_features);
-    CHECK_AND_RETURN_REF(
-        expanded_ids,
-        expandTokenIds(mm_features.features, input_ids, mm_inputs, {}, mm_embedding_res.mm_feature_hashes));
+    CHECK_AND_RETURN_REF(expanded_ids,
+                         expandTokenIds(mm_features.features,
+                                        input_ids,
+                                        mm_inputs,
+                                        {},
+                                        mm_embedding_res.mm_feature_hashes,
+                                        interleavedLayout(mm_embedding_res.mm_extra_input)));
     mm_features.expanded_ids     = expanded_ids.expanded_ids;
     mm_features.text_tokens_mask = expanded_ids.text_tokens_mask;
     mm_features.locs             = expanded_ids.locs;
