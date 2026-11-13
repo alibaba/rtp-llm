@@ -111,6 +111,8 @@ struct GptModelInputs {
     // (true) or may gather only the last-token rows lm_head needs (false).
     bool need_all_hidden_states = false;
     bool skip_lm_head           = false;
+    // PP batch contains only middle chunks; all TP ranks follow the same sampling/draft path.
+    bool is_middle_chunk_only = false;
     bool capture_hidden_states  = false;
     bool need_moe_gating        = false;
     bool warmup                 = false;

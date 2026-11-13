@@ -448,6 +448,10 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
     ScheduleOutput schedule_output{{stream}};
     if (parallelism_config.pp_size > 1) {
         auto* pp_executor = static_cast<PPExecutor*>(executor_.get());
+        if (mode == preRunMode::build_system_prompt) {
+            /** This direct execution bypasses PPScheduler, so it owns the corresponding PP inflight reference. */
+            stream->setPPInflight();
+        }
         THROW_IF_STATUS_ERROR(pp_executor->process(schedule_output));
         if (mode == preRunMode::build_system_prompt) {
             pp_executor->drainPendingResults();
@@ -606,7 +610,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 #else
     const int64_t token_budget = runtime_config.fifo_scheduler_config.prefill_chunk_size;
     const bool    use_global_budget_warmup =
-        token_budget > 0 && !runtime_config.warm_up_with_loss && parallelism_config.pp_size == 1;
+        token_budget > 0 && !runtime_config.warm_up_with_loss;
     const int64_t token_heavy_seq_len = std::max<int64_t>(1, static_cast<int64_t>(getWarmUpInputLength()));
 
     auto fake_input = makeFakeInput(static_cast<size_t>(token_heavy_seq_len));
@@ -693,7 +697,11 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         // The temporary paged cache is warmup infrastructure, not runtime activation memory.
         // Create it before tracing and destroy it before sampling production cache capacity.
         auto memory_tracker = std::make_unique<WarmupMemoryTracker>();
-        executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0));
+        if (parallelism_config.pp_size > 1) {
+            executor_.reset(new PPExecutor(params, warmup_cache_manager, true));
+        } else {
+            executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0));
+        }
         auto token_heavy_result = runPrefillWarmupShape(fake_input, warmup_resource_context, 0, token_budget);
         THROW_IF_STATUSOR_ERROR(token_heavy_result);
         max_consumed = memory_tracker->maxConsumedBytes();
@@ -921,6 +929,7 @@ absl::Status NormalEngine::stop() {
     // collectives for inputs that rank 0 has already published before exiting.
     CpuTpBroadcaster::instance().requestStop();
     loop_thread_->join();
+    scheduler_->finalizeCancelledStreams();
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
     resource_context_.cache_manager->stopMetricsReporter();

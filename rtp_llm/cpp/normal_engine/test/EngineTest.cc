@@ -67,7 +67,8 @@ class PPWarmupProbeModel: public ModelBase {
 public:
     using Observer = std::function<void(const GptModelInputs&)>;
 
-    PPWarmupProbeModel(int stage, Observer observer): stage_(stage), observer_(std::move(observer)) {}
+    PPWarmupProbeModel(int stage, Observer observer, size_t forward_count = 1):
+        stage_(stage), observer_(std::move(observer)), remaining_forwards_(forward_count) {}
 
     GptModelOutputs forward(const GptModelInputs& input) override {
         EXPECT_EQ(input.pp_intermediates.empty(), stage_ == 0);
@@ -76,7 +77,10 @@ public:
                                      torch::zeros({input.combo_tokens.numel(), 4})));
         }
         observer_(input);
-        throw PPWarmupObserved{};
+        if (--remaining_forwards_ == 0) {
+            throw PPWarmupObserved{};
+        }
+        return {};
     }
 
     PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& input, bool) override {
@@ -86,6 +90,7 @@ public:
 private:
     int      stage_;
     Observer observer_;
+    size_t   remaining_forwards_;
 };
 
 struct PPWarmupFactoryGuard {
@@ -845,6 +850,89 @@ TEST_F(NormalEngineTest, testPpPrefillWarmupStaysCachelessWithGenerationGraphBuc
         EXPECT_THROW((void)std::make_unique<NormalEngine>(params, nullptr), PPWarmupObserved);
         EXPECT_TRUE(saw_warmup);
         runtimeSyncAndCheck();
+    }
+}
+
+TEST_F(NormalEngineTest, testPpChunkedPrefillWarmupUsesStageCacheAndChunkShapes) {
+    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "0");
+    autil::EnvGuard device_input("RTP_LLM_DEVICE_INPUT", "0");
+    struct WarmupCase {
+        int                       budget;
+        SpeculativeType           type;
+        RoleType                  role;
+        std::vector<ForwardShape> shapes;
+    };
+    const WarmupCase cases[] = {
+        {4, SP_TYPE_NONE, RoleType::PDFUSION,
+         {{4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {12, 14, 3}, {7, 0, 1}}},
+        {5, SP_TYPE_MTP, RoleType::PDFUSION,
+         {{4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {15, 14, 3}, {7, 0, 1}}},
+        {5, SP_TYPE_MTP, RoleType::PREFILL,
+         {{4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {15, 14, 3}, {7, 0, 1}}},
+        {std::numeric_limits<int>::max(), SP_TYPE_NONE, RoleType::PREFILL,
+         {{19, 0, 1}, {57, 0, 3}, {7, 0, 1}}},
+    };
+    for (const auto& test_case : cases) {
+        CustomConfig config;
+        config.warm_up                  = true;
+        config.prefill_chunk_size       = test_case.budget;
+        config.max_context_batch_size   = 3;
+        config.role_type                = test_case.role;
+        config.multi_task_prompt_tokens = {{"system", {1, 2, 3, 4, 5, 6, 7}}};
+        ModelConfig   model_config;
+        RuntimeConfig runtime_config;
+        KVCacheConfig kv_cache_config;
+        auto params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+        params.parallelism_config.pp_size               = 2;
+        params.parallelism_config.world_size            = 2;
+        params.parallelism_config.pp_stage_layer_counts = {1, 1};
+        params.parallelism_config.role_type             = test_case.role;
+        params.sp_config.type                           = test_case.type;
+        params.sp_config.gen_num_per_cycle              = 3;
+        params.model_config_.max_seq_len = 19 + std::max(1, NormalEngine::calculateReserveStep(params));
+        params.model_config_.kv_cache_spec_descs = {
+            {{"first", KVCacheSpecType::MultiHeadAttention}},
+            {{"last", KVCacheSpecType::MultiHeadAttention}},
+        };
+        for (int stage : {0, 1}) {
+            SCOPED_TRACE(::testing::Message() << "budget=" << test_case.budget << ", type=" << test_case.type
+                                            << ", role=" << test_case.role << ", stage=" << stage);
+            params.parallelism_config.pp_rank    = stage;
+            params.parallelism_config.world_rank = stage;
+            const std::string tag                = stage == 0 ? "first" : "last";
+            auto proposal = stage == 1 && test_case.type != SP_TYPE_NONE ? makeLocalProposalParams(params) : nullptr;
+            PPWarmupFactoryGuard      factories;
+            std::vector<ForwardShape> shapes;
+            PPExecutor::test_model_factory = [&](const GptModelInitParams& init) {
+                EXPECT_NE(init.cache_manager, nullptr);
+                EXPECT_TRUE(init.kv_cache_layer_layout.has_value());
+                if (init.cache_manager) {
+                    const auto& cache = init.cache_manager->cacheConfig();
+                    EXPECT_EQ(cache.layer_num, 1u);
+                    EXPECT_EQ(cache.global_layer_begin, static_cast<uint32_t>(stage));
+                    EXPECT_EQ(cache.groupTags(), (std::vector<std::string>{tag}));
+                    EXPECT_EQ(cache.group(tag).block_num, 2u);
+                }
+                // Stop on the final system-prompt shape, after the real chunk loop and row-heavy shape.
+                return std::make_unique<PPWarmupProbeModel>(
+                    stage,
+                    [&](const GptModelInputs& input) {
+                        shapes.push_back({input.combo_tokens.numel(),
+                                          input.prefix_lengths.data_ptr<int32_t>()[0],
+                                          input.input_lengths.numel()});
+                        EXPECT_TRUE(input.warmup);
+                        EXPECT_TRUE(input.is_fake_stream);
+                        EXPECT_EQ(input.sequence_lengths.numel(), 0);
+                        EXPECT_EQ(input.kv_cache_group_tags, (std::vector<std::string>{tag}));
+                        EXPECT_TRUE(input.kv_cache_block_id.eq(0).all().item<bool>());
+                        EXPECT_TRUE(input.kv_cache_kernel_block_id.eq(0).all().item<bool>());
+                    },
+                    test_case.shapes.size());
+            };
+            EXPECT_THROW((void)std::make_unique<NormalEngine>(params, std::move(proposal)), PPWarmupObserved);
+            EXPECT_EQ(shapes, test_case.shapes);
+            runtimeSyncAndCheck();
+        }
     }
 }
 

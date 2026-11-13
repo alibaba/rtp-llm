@@ -1222,15 +1222,7 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
             }
             if (next_position_ids.defined()) {
                 auto* positions = next_position_ids.data_ptr<int>() + row * position_id_len_factor;
-                if (middle_chunk) {
-                    const int  boundary_pos        = stream->prefixLength() + stream->contextLength();
-                    const auto prompt_position_ids = stream->generateContextPositionIds();
-                    std::memcpy(positions,
-                                prompt_position_ids.data_ptr<int>() + boundary_pos * position_id_len_factor,
-                                position_id_len_factor * sizeof(int));
-                } else {
-                    stream->generateNextPositionId(positions);
-                }
+                stream->generateNextPositionId(positions);
             }
         }
     }
