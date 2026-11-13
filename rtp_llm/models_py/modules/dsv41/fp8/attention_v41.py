@@ -80,6 +80,16 @@ from rtp_llm.models_py.modules.dsv41.rope import apply_rotary_emb, precompute_fr
 from rtp_llm.models_py.modules.dsv41.utils import _v4_fp8_linear
 from rtp_llm.models_py.utils.memory import dispose_tensor
 
+# Opt-in crash diagnostics: dump all-thread native+python stacks to stderr on
+# fatal signals (SIGSEGV/SIGABRT/SIGBUS/SIGFPE/SIGILL). Default off; zero
+# behavior change unless RTP_LLM_FAULTHANDLER=1. Added for the bf16 selection
+# fault diagnosis: n35 (3-D matmul) and n36 (2-D mm) both died signal-level
+# with NO python traceback anywhere, so the faulting frame was unattributable.
+if os.environ.get("RTP_LLM_FAULTHANDLER", "0") == "1":
+    import faulthandler
+
+    faulthandler.enable(all_threads=True)
+
 # Bound one source AllGather receive independently of total Prefill rows.
 _CP_SOURCE_RECEIVE_BYTES = 320 * 1024**2
 
@@ -2011,6 +2021,36 @@ class AttentionV41FP8(AttentionFP8):
                 key_count = len(keys)
                 if key_count == 0:
                     continue
+                if (
+                    key_count > 65536
+                    and b == 0
+                    and not getattr(self, "_awi_selprobe_done", False)
+                ):
+                    # One line per heavy-prefill layer per process: settle the
+                    # integrated selection-keys provenance/dtype/layout that
+                    # the n35/n36 post-mortem could not resolve statically
+                    # (dequantize_indexer_k_fp4 defaults to fp32, yet the bf16
+                    # mm executed without a dtype error => keys arrive bf16
+                    # from an unlocated conversion; see progress.json).
+                    self._awi_selprobe_done = True
+                    logging.info(
+                        "[awi][selprobe] layer=%d key_count=%d keys_dtype=%s "
+                        "keys_type=%s shape=%s stride=%s contig=%s ptr=0x%x "
+                        "globals_type=%s fused_indexer=%s q_dtype=%s "
+                        "sel_bf16_env=%s",
+                        self.layer_id,
+                        key_count,
+                        keys.dtype,
+                        type(keys).__name__,
+                        tuple(keys.shape),
+                        tuple(keys.stride()),
+                        keys.is_contiguous(),
+                        keys.data_ptr(),
+                        type(globals_by_req).__name__,
+                        fused_indexer,
+                        q.dtype,
+                        os.environ.get("DSV41_SEL_BF16", "0"),
+                    )
                 candidates = shared.get("candidates")
                 probe = slice(rows.start, rows.start + 1) if contiguous else rows[:1]
                 sparse_request = (
@@ -2079,6 +2119,11 @@ class AttentionV41FP8(AttentionFP8):
                 # for instrumented diagnosis only; it is not a deliverable
                 # speed path until the crash is root-caused.
                 sel_bf16 = os.environ.get("DSV41_SEL_BF16", "0") == "1"
+                # Opt-in per-slice breadcrumbs + synchronize around the bf16
+                # mm (DSV41_SEL_BREADCRUMBS=1): makes a signal-level fault
+                # attributable to the exact slice/launch. Diagnostic only -
+                # the sync changes timing, never enable for measurements.
+                sel_crumb = os.environ.get("DSV41_SEL_BREADCRUMBS", "0") == "1"
                 # Hoisted fp32 copy of the indexer keys for the fp32
                 # selection branch: one keys.float() per selection call
                 # (~8 GiB transient at 1M keys, freed at loop exit;
@@ -2217,9 +2262,31 @@ class AttentionV41FP8(AttentionFP8):
                                 )
                                 for k0 in range(0, key_count, 65536):
                                     k1 = min(k0 + 65536, key_count)
+                                    crumb = sel_crumb and (
+                                        k0 < 8 * 65536 or (k0 // 65536) % 1024 == 0
+                                    )
+                                    if crumb:
+                                        logging.info(
+                                            "[awi][selcrumb] layer=%d b=%d "
+                                            "slice=%d k0=%d pre-mm",
+                                            self.layer_id,
+                                            b,
+                                            k0 // 65536,
+                                            k0,
+                                        )
                                     logits[:, :, k0:k1] = torch.mm(
                                         q_chunk16, keys[k0:k1].t()
                                     ).view(t_rows, n_heads, k1 - k0)
+                                    if crumb:
+                                        torch.cuda.synchronize()
+                                        logging.info(
+                                            "[awi][selcrumb] layer=%d b=%d "
+                                            "slice=%d k0=%d post-mm-ok",
+                                            self.layer_id,
+                                            b,
+                                            k0 // 65536,
+                                            k0,
+                                        )
                                 logits.relu_()
                             else:
                                 # n33-proven fp32 path (1M PASS, 6918s
