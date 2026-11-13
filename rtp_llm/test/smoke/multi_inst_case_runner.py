@@ -827,6 +827,13 @@ class DpSeperationCaseRunner(CaseRunner):
                 prefill_server_manager is not None
             ), "prefill server manager should not be None"
 
+            self.server_managers = {
+                "prefill": prefill_server_manager,
+                "decode": decode_server_manager,
+            }
+            if frontend_server_manager is not None:
+                self.server_managers["frontend"] = frontend_server_manager
+
             # Both roles report healthy HTTP frontends, but the peer model RPC
             # listeners are outside the health probe: wait for them before curling so
             # the first query cannot land while an upstream rpc port is still closed
@@ -867,14 +874,8 @@ class DpSeperationCaseRunner(CaseRunner):
             )
 
             if str_to_bool(os.environ.get("SMOKE_KEEP_SERVER_ALIVE", "False")):
-                servers = {
-                    "prefill": prefill_server_manager,
-                    "decode": decode_server_manager,
-                }
-                if frontend_server_manager is not None:
-                    servers["frontend"] = frontend_server_manager
                 return self._keep_servers_alive(
-                    servers, enable_remote_cache=enable_remote_cache
+                    self.server_managers, enable_remote_cache=enable_remote_cache
                 )
 
             task_states = self.curl_server(curl_server_mgr)

@@ -1,4 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeWrite.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeWrite.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
@@ -13,6 +16,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "autil/NetUtil.h"
 #include <algorithm>
+#include <limits>
 #include <set>
 #include <unistd.h>
 #include <utility>
@@ -36,11 +40,11 @@ bool P2PConnectorDecode::init() {
             RTP_LLM_LOG_ERROR("decode connector init failed: tp_broadcast_client init failed");
             return false;
         }
-        scheduler_ = std::make_unique<P2PSchedulerDecodeRead>(
+        read_scheduler_ = std::make_unique<P2PSchedulerDecodeRead>(
             config_.scheduler_config, metrics_reporter_, tp_broadcast_client_);
         std::string process_id = autil::NetUtil::getBindIp() + "_pid_" + std::to_string(getpid()) + "_timestamp_"
                                  + std::to_string(currentTimeUs());
-        if (!scheduler_->init(process_id)) {
+        if (!read_scheduler_->init(process_id)) {
             RTP_LLM_LOG_ERROR("decode connector init failed: scheduler init failed");
             return false;
         }
@@ -52,11 +56,27 @@ bool P2PConnectorDecode::init() {
         RTP_LLM_LOG_ERROR("decode connector init failed: transfer backend init failed");
         return false;
     }
-    worker_ = std::make_unique<P2PWorkerDecodeRead>(
+    read_worker_ = std::make_unique<P2PWorkerDecodeRead>(
         config_.worker_config, layer_block_converter_, metrics_reporter_, receiver);
-    if (!worker_->initialized()) {
+    if (!read_worker_->initialized()) {
         RTP_LLM_LOG_ERROR("decode connector init failed: worker init failed");
         return false;
+    }
+    if (config_.p2p_writeback_enable) {
+        auto sender = p2p_internal::createAndRegisterTransferBackend(
+            config_.worker_config, layer_block_converter_, transfer::TransferBackendRole::kSender, metrics_reporter_).sender;
+        write_worker_ = std::make_unique<P2PWorkerDecodeWrite>(config_.worker_config, layer_block_converter_, sender);
+        if (!write_worker_->init()) {
+            RTP_LLM_LOG_ERROR("decode connector init failed: write worker init failed");
+            return false;
+        }
+        if (config_.tp_rank == 0) {
+            write_scheduler_ = std::make_unique<P2PSchedulerDecodeWrite>(
+                config_.scheduler_config, tp_broadcast_client_, *write_worker_, metrics_reporter_);
+            if (!write_scheduler_->init()) {
+                return false;
+            }
+        }
     }
     return true;
 }
@@ -82,12 +102,12 @@ std::shared_ptr<AsyncContext> P2PConnectorDecode::read(const KVCacheResourcePtr&
         failed_context->markStartFailed(error_info);
         return failed_context;
     };
-    if (scheduler_ == nullptr) {
+    if (read_scheduler_ == nullptr) {
         ErrorInfo error_info(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "P2P scheduler is not ready");
         RTP_LLM_LOG_WARNING("asyncRead failed: %s", error_info.ToString().c_str());
         return make_failed_context(error_info);
     }
-    auto result = scheduler_->asyncRead(resource, meta, block_range, no_transfer);
+    auto result = read_scheduler_->asyncRead(resource, meta, block_range, no_transfer);
     if (!result.ok()) {
         RTP_LLM_LOG_WARNING("asyncRead failed, unique_key: %s, error: %s",
                             meta->p2pRouting().value_or(Meta::P2PRoutingContext{}).unique_key.c_str(),
@@ -98,10 +118,10 @@ std::shared_ptr<AsyncContext> P2PConnectorDecode::read(const KVCacheResourcePtr&
 }
 
 void P2PConnectorDecode::cancelRead(const std::shared_ptr<AsyncContext>& context) {
-    if (!scheduler_) {
+    if (!read_scheduler_) {
         return;
     }
-    scheduler_->cancel(std::dynamic_pointer_cast<P2PConnectorAsyncReadContext>(context));
+    read_scheduler_->cancel(std::dynamic_pointer_cast<P2PConnectorAsyncReadContext>(context));
 }
 
 namespace {
@@ -215,7 +235,7 @@ bool P2PConnectorDecode::readPerRank(int64_t                                 req
         }
         worker_plan.routes.push_back(std::move(worker_route));
     }
-    ErrorInfo error_info = worker_->read(request_id, unique_key, deadline_ms, worker_plan);
+    ErrorInfo error_info = read_worker_->read(request_id, unique_key, deadline_ms, worker_plan);
     if (error_info.hasError()) {
         RTP_LLM_LOG_WARNING("executeRead failed, request_id: %ld, unique_key: %s, error: %s",
                             request_id,
@@ -229,37 +249,164 @@ bool P2PConnectorDecode::readPerRank(int64_t                                 req
 bool P2PConnectorDecode::cancelReadPerRank(const std::string& unique_key,
                                            int64_t            request_deadline_ms,
                                            FunctionResponsePB& response) {
-    bool ret = worker_->cancelRead(unique_key, request_deadline_ms);
+    bool ret = read_worker_->cancelRead(unique_key, request_deadline_ms);
     setP2PResponseOk(response);
     return ret;
 }
 
-bool P2PConnectorDecode::queryLeaseStatusPerRank(const std::string& unique_key, FunctionResponsePB& response) {
-    bool sealed       = true;
+bool P2PConnectorDecode::queryLeaseStatusPerRank(const std::string&        unique_key,
+                                               P2PConnectorBroadcastType operation,
+                                               FunctionResponsePB&       response) {
+    response.mutable_p2p_response()->Clear();
+    bool sealed       = false;
     int  started_ops  = 0;
     int  finished_ops = 0;
-    bool stopped      = true;
+    bool stopped      = false;
+    bool found        = false;
 
-    const bool found = worker_->queryLeaseStatus(unique_key, sealed, started_ops, finished_ops, stopped);
-    // Missing leases are deliberately reported stopped; the worker checks the
-    // registration fence under the same lock before returning not-found.
+    if (operation == READ) {
+        found = read_worker_->queryLeaseStatus(unique_key, sealed, started_ops, finished_ops, stopped);
+        // Missing leases are deliberately reported stopped; the worker checks the
+        // registration fence under the same lock before returning not-found.
+    } else if (operation == WRITE) {
+        found = write_worker_
+                && write_worker_->queryLeaseStatus(unique_key, sealed, started_ops, finished_ops, stopped);
+        if (!found) {
+            setP2PResponse(
+                response, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "unknown write task"));
+            return false;
+        }
+    } else {
+        setP2PResponse(response, ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid lease operation"));
+        return false;
+    }
 
-    auto* p2p_response = response.mutable_p2p_response();
-    p2p_response->set_error_code(ErrorCodePB::NONE_ERROR);
-    auto* lease_status = p2p_response->mutable_lease_status();
+    setP2PResponseOk(response);
+    auto* lease_status = response.mutable_p2p_response()->mutable_lease_status();
     lease_status->set_sealed(sealed);
     lease_status->set_started_ops(started_ops);
     lease_status->set_finished_ops(finished_ops);
     lease_status->set_stopped(stopped);
 
-    RTP_LLM_LOG_DEBUG("executeQueryLeaseStatus: unique_key=%s found=%d sealed=%d started=%d finished=%d stopped=%d",
+    RTP_LLM_LOG_DEBUG("executeQueryLeaseStatus: unique_key=%s operation=%d found=%d sealed=%d started=%d finished=%d stopped=%d",
                       unique_key.c_str(),
+                      operation,
                       found,
                       sealed,
                       started_ops,
                       finished_ops,
                       stopped);
     return true;
+}
+
+void P2PConnectorDecode::stopWriteback() {
+    if (write_scheduler_) {
+        write_scheduler_->stop();
+    }
+}
+
+ErrorInfo P2PConnectorDecode::selectWriteSource(KVCacheResource&               resource,
+                                                int                            input_length,
+                                                size_t                         kv_ready_token_count,
+                                                const Meta::P2PRoutingContext& routing) {
+    return write_scheduler_ ?
+               write_scheduler_->selectSourceBlocks(resource, input_length, kv_ready_token_count, routing) :
+               ErrorInfo(ErrorCode::INVALID_PARAMS, "decode writeback scheduler unavailable");
+}
+
+std::shared_ptr<AsyncContext> P2PConnectorDecode::write(KVCacheResourcePtr      resource,
+                                                       std::vector<int>        token_ids,
+                                                       int                     input_length,
+                                                       size_t                  kv_ready_token_count,
+                                                       Meta::P2PRoutingContext routing) {
+    return write_scheduler_ ? write_scheduler_->asyncWrite(
+               std::move(resource), std::move(token_ids), input_length, kv_ready_token_count, std::move(routing)) :
+                              nullptr;
+}
+
+void P2PConnectorDecode::cancelWrite(const std::shared_ptr<AsyncContext>& context) {
+    if (!write_scheduler_) {
+        return;
+    }
+    write_scheduler_->cancel(std::dynamic_pointer_cast<P2PConnectorAsyncWriteContext>(context));
+}
+
+bool P2PConnectorDecode::writePerRank(const P2PConnectorBroadcastTpRequestPB& request, FunctionResponsePB& response) {
+    response.mutable_p2p_response()->Clear();
+    const auto deadline_ms = p2p_internal::writebackLocalDeadline(request.transfer_timeout_ms());
+    const auto reject = [&](const std::string& message) {
+        P2PConnector::setP2PResponse(response, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, message));
+        if (write_worker_) {
+            write_worker_->cancelWrite(request.unique_key(), currentTimeMs() + config_.worker_config.load_cache_timeout_ms);
+        }
+        return false;
+    };
+    if (!write_worker_) {
+        return reject("decode writeback disabled");
+    }
+    if (deadline_ms == 0) {
+        return reject("writeback requires a positive remaining transfer budget");
+    }
+    P2PWorkerRoutePlan plan;
+    plan.plan_digest = request.plan_digest();
+    for (const auto& pb : request.routes()) {
+        const auto     local = RouteCodec::decode(pb);
+        P2PWorkerRoute route;
+        route.route_id  = local.route_id;
+        route.cache_tag = local.cache_tag;
+        route.partition = local.partition;
+        route.slice     = local.slice;
+        if (local.peer_index < 0 || local.peer_index >= request.peer_workers_size()) {
+            return reject("write route peer index out of range");
+        }
+        const auto& peer = request.peer_workers(local.peer_index);
+        if (peer.ip().empty() || peer.cache_store_port() <= 0 || peer.cache_store_port() > 65535) {
+            return reject("write route has invalid peer endpoint");
+        }
+        route.dst_ip   = peer.ip();
+        route.dst_port = peer.cache_store_port();
+        for (const auto& layer : pb.layer_blocks()) {
+            if (layer.layer_id() > static_cast<uint32_t>(std::numeric_limits<int>::max())
+                || layer.cache_keys().empty() || layer.cache_keys_size() != layer.block_ids_size()) {
+                return reject("write route has invalid layer or key/block pairs");
+            }
+            auto              buffer = std::make_shared<LayerCacheBuffer>(layer.layer_id(), layer.cache_tag());
+            std::set<int64_t> keys;
+            for (int i = 0; i < layer.cache_keys_size(); ++i) {
+                if (layer.block_ids(i) == 0
+                    || layer.block_ids(i) > static_cast<uint32_t>(std::numeric_limits<int>::max())
+                    || !keys.insert(layer.cache_keys(i)).second) {
+                    return reject("write request contains invalid block or duplicate key");
+                }
+                buffer->addBlockId(layer.cache_keys(i), layer.block_ids(i));
+            }
+            route.layer_buffers.push_back(std::move(buffer));
+        }
+        plan.routes.push_back(std::move(route));
+    }
+    const auto error =
+        write_worker_->write(request.request_id(), request.unique_key(), deadline_ms, plan);
+    if (error.hasError()) {
+        write_worker_->cancelWrite(request.unique_key(), deadline_ms);
+    }
+    P2PConnector::setP2PResponse(response, error);
+    return error.ok();
+}
+
+bool P2PConnectorDecode::cancelWritePerRank(const std::string& unique_key,
+                                            int64_t            deadline_ms,
+                                            FunctionResponsePB& response) {
+    if (!write_worker_) {
+        P2PConnector::setP2PResponse(
+            response, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "decode writeback disabled"));
+        return false;
+    }
+    const bool ret = write_worker_->cancelWrite(unique_key, currentTimeMs() + config_.worker_config.load_cache_timeout_ms);
+    P2PConnector::setP2PResponse(
+        response,
+        ret ? ErrorInfo::OkStatus() :
+              ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "invalid write key"));
+    return ret;
 }
 
 }  // namespace rtp_llm

@@ -57,6 +57,54 @@ static KeyBlockInfoMap makeBlocks(int64_t cache_key, void* addr, size_t size) {
     return m;
 }
 
+static std::shared_ptr<::tcp_transfer::TcpLayerBlockTransferRequest>
+makeOwnedTransferRequest(const std::string& key) {
+    auto request = std::make_shared<::tcp_transfer::TcpLayerBlockTransferRequest>();
+    request->set_unique_key(key);
+    auto* blocks = request->add_blocks();
+    blocks->set_key(1);
+    auto* block = blocks->add_blocks();
+    block->set_len(4096);
+    block->set_content(std::string(4096, 'R'));
+    return request;
+}
+
+static void expectCompletionReleasesResources(
+    TcpKVCacheSender& sender,
+    uint32_t port,
+    std::shared_ptr<::tcp_transfer::TcpLayerBlockTransferRequest> request,
+    TransferErrorCode expected,
+    int64_t timeout_ms) {
+    std::weak_ptr<::tcp_transfer::TcpLayerBlockTransferRequest> weak_request = request;
+    auto owner = std::make_shared<int>(7);
+    std::weak_ptr<int> weak_owner = owner;
+    auto completion = std::make_shared<std::promise<TransferErrorCode>>();
+    auto done = completion->get_future();
+    auto callbacks = std::make_shared<std::atomic<int>>(0);
+    sender.loadToRemote(
+        "127.0.0.1", port, request,
+        [completion, owner, callbacks](TransferErrorCode code, const std::string&) {
+            EXPECT_EQ(*owner, 7);
+            ++*callbacks;
+            completion->set_value(code);
+        },
+        currentTimeMs() + timeout_ms);
+    // A positive wire timeout proves this reached RPC submission, not an early rejection.
+    EXPECT_GT(request->timeout_ms(), 0);
+    request.reset();
+    owner.reset();
+    ASSERT_EQ(done.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(done.get(), expected);
+    // Completion wakes the caller before Run() returns and destroys its captures.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while ((!weak_request.expired() || !weak_owner.expired()) && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(weak_request.expired()) << "completed RPC retained its protobuf KV payload";
+    EXPECT_TRUE(weak_owner.expired()) << "completed RPC retained its callback captures";
+    EXPECT_EQ(callbacks->load(), 1);
+}
+
 // ---------------------------------------------------------------------------
 // Fixture: Sender only (no Receiver)
 // ---------------------------------------------------------------------------
@@ -134,6 +182,134 @@ protected:
 };
 
 bool TcpSenderReceiverTest::device_initialized_ = false;
+
+TEST_F(TcpSenderReceiverTest, SuccessCompletionReleasesRequestAndCallbackCaptures) {
+    auto destination = allocDevice(4096);
+    RecvRequest receive;
+    receive.unique_key = "release-after-success";
+    receive.block_info = makeBlocks(1, destination.data_ptr(), 4096);
+    receive.deadline_ms = currentTimeMs() + 5000;
+    auto task = receiver_->recv(receive);
+    ASSERT_NE(task, nullptr);
+    expectCompletionReleasesResources(
+        *sender_, test_port_, makeOwnedTransferRequest(receive.unique_key), TransferErrorCode::OK, 5000);
+    EXPECT_TRUE(task->success());
+    EXPECT_TRUE(verifyDevice(destination.data_ptr(), std::string(4096, 'R')));
+}
+
+TEST_F(TcpSenderReceiverTest, ReceiverErrorCompletionReleasesRequestAndCallbackCaptures) {
+    expectCompletionReleasesResources(
+        *sender_, test_port_, makeOwnedTransferRequest("release-after-receiver-timeout"), TransferErrorCode::TIMEOUT, 250);
+}
+
+TEST_F(TcpSenderOnlyTest, RpcErrorCompletionReleasesRequestAndCallbackCaptures) {
+    expectCompletionReleasesResources(
+        *sender_, unused_port_, makeOwnedTransferRequest("release-after-rpc-timeout"), TransferErrorCode::TIMEOUT, 250);
+}
+
+TEST_F(TcpSenderOnlyTest, StagedGatherFollowsSourceDeviceOnReusedThread) {
+    if (torch::cuda::device_count() < 2) {
+        GTEST_SKIP() << "requires two CUDA devices";
+    }
+    auto copied = std::async(std::launch::async, [&]() {
+        for (const int device_index : {0, 1, 0}) {
+            std::vector<torch::Tensor> buffers;
+            auto blocks = std::make_shared<KeyBlockInfo>();
+            for (int tile = 0; tile < 4; ++tile) {
+                buffers.push_back(torch::full(
+                    {2048},
+                    10 * device_index + tile,
+                    torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_index))));
+                blocks->blocks.push_back(BlockInfo{true, device_index, 0, buffers.back().data_ptr(), 2048});
+            }
+            at::cuda::getCurrentCUDAStream(device_index).synchronize();
+            SendRequest request;
+            request.unique_key = "staged-device-" + std::to_string(device_index);
+            request.block_info[1] = blocks;
+            const auto wire = sender_->makeTransferRequest(request, std::make_shared<TransferClientMetricsCollector>());
+            if (!wire || wire->blocks_size() != 1 || wire->blocks(0).blocks_size() != 4) {
+                return false;
+            }
+            for (int tile = 0; tile < 4; ++tile) {
+                if (wire->blocks(0).blocks(tile).content() != std::string(2048, 10 * device_index + tile)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    });
+    EXPECT_TRUE(copied.get());
+}
+
+TEST_F(TcpSenderReceiverTest, MultiBlockKvHeadMergeAndReplicatedSplitPreserveBytes) {
+    constexpr int64_t block_count = 3;
+    constexpr int64_t head_bytes  = 4096;
+    const auto        host        = torch::arange(block_count * 2 * 2 * head_bytes, torch::kInt64)
+                          .remainder(251)
+                          .to(torch::kUInt8)
+                          .reshape({block_count, 2, 2, head_bytes});
+    auto merged = torch::zeros_like(host, torch::TensorOptions().device(torch::kCUDA));
+
+    auto transfer_head = [&](const torch::Tensor& source,
+                             const torch::Tensor& destination,
+                             int                  head,
+                             bool                 merge,
+                             const std::string&   key) {
+        KeyBlockInfoMap source_blocks;
+        KeyBlockInfoMap destination_blocks;
+        for (int64_t block = 0; block < block_count; ++block) {
+            const int64_t cache_key        = block % 2 == 0 ? -100 - block : 100 + block;
+            auto          source_info      = std::make_shared<KeyBlockInfo>();
+            auto          destination_info = std::make_shared<KeyBlockInfo>();
+            source_info->cache_key = destination_info->cache_key = cache_key;
+            for (int64_t component = 0; component < 2; ++component) {
+                const int64_t compact_offset = (block * 2 + component) * head_bytes;
+                const int64_t merged_offset  = ((block * 2 + component) * 2 + head) * head_bytes;
+                source_info->blocks.push_back(BlockInfo{
+                    true, 0, 0, source.data_ptr<uint8_t>() + (merge ? compact_offset : merged_offset), head_bytes});
+                destination_info->blocks.push_back(
+                    BlockInfo{true,
+                              0,
+                              0,
+                              destination.data_ptr<uint8_t>() + (merge ? merged_offset : compact_offset),
+                              head_bytes});
+            }
+            source_blocks.emplace(cache_key, source_info);
+            destination_blocks.emplace(cache_key, destination_info);
+        }
+        RecvRequest receive;
+        receive.unique_key  = key;
+        receive.block_info  = std::move(destination_blocks);
+        receive.deadline_ms = currentTimeMs() + 30000;
+        auto task           = receiver_->recv(receive);
+        ASSERT_NE(task, nullptr);
+        SendRequest send;
+        send.unique_key  = key;
+        send.ip          = "127.0.0.1";
+        send.port        = test_port_;
+        send.block_info  = std::move(source_blocks);
+        send.deadline_ms = receive.deadline_ms;
+        send.timeout_ms  = 30000;
+        ASSERT_EQ(syncSend(*sender_, send, std::chrono::seconds(30)), TransferErrorCode::OK);
+        ASSERT_TRUE(task->done());
+        ASSERT_EQ(task->errorCode(), TransferErrorCode::OK);
+        receiver_->stealTask(key);
+    };
+
+    for (int head = 0; head < 2; ++head) {
+        auto compact = host.select(2, head).contiguous().to(torch::kCUDA);
+        at::cuda::getCurrentCUDAStream().synchronize();
+        ASSERT_NO_FATAL_FAILURE(transfer_head(compact, merged, head, true, "merge-" + std::to_string(head)));
+    }
+    EXPECT_TRUE(torch::equal(merged.cpu(), host));
+    for (int rank = 0; rank < 4; ++rank) {
+        auto compact = torch::zeros({block_count, 2, head_bytes},
+                                    torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        at::cuda::getCurrentCUDAStream().synchronize();
+        ASSERT_NO_FATAL_FAILURE(transfer_head(merged, compact, rank / 2, false, "split-" + std::to_string(rank)));
+        EXPECT_TRUE(torch::equal(compact.cpu(), host.select(2, rank / 2)));
+    }
+}
 
 // ===========================================================================
 // F. Build request failures (Sender only, no network)

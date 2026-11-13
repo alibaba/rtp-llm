@@ -39,7 +39,8 @@ public:
                                  const std::vector<std::vector<GroupSetResource>>& resources,
                                  Tier                                              target_tier,
                                  bool                                              is_resident,
-                                 size_t&                                           resident_prefix_length);
+                                 size_t&                                           resident_prefix_length,
+                                 bool                                              is_writeback = false);
     void             stopAdmissionLocked();
 
 private:
@@ -49,7 +50,8 @@ private:
     void             publishDeviceLocked(const CacheKeysType&                              cache_keys,
                                          const std::vector<std::vector<GroupSetResource>>& resources,
                                          bool                                              is_resident,
-                                         size_t&                                           resident_prefix_length);
+                                         size_t&                                           resident_prefix_length,
+                                         bool                                              is_writeback);
     StorageRequest   makeStorageRequest(const CacheKeysType&                              cache_keys,
                                         const std::vector<std::vector<GroupSetResource>>& resources) const;
     void             submitLowerTierLocked(const CacheKeysType&                              cache_keys,

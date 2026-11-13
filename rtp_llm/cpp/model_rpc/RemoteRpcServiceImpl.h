@@ -66,6 +66,25 @@ public:
         }
     }
 
+public:
+    grpc::Status StartWriteBack(grpc::ServerContext*                   context,
+                            const P2PConnectorStartWriteBackRequestPB* request,
+                            P2PConnectorStartWriteBackResponsePB*      response) override {
+        if (prefill_server_) {
+            return prefill_server_->StartWriteBack(context, request, response);
+        }
+        return grpc::Status(grpc::StatusCode::INTERNAL, "server does not implement StartWriteBack");
+    }
+
+    grpc::Status CancelWriteBack(grpc::ServerContext*                    context,
+                             const P2PConnectorCancelWriteBackRequestPB* request,
+                             P2PConnectorStartWriteBackResponsePB*       response) override {
+        if (prefill_server_) {
+            return prefill_server_->CancelWriteBack(context, request, response);
+        }
+        return grpc::Status(grpc::StatusCode::INTERNAL, "server does not implement CancelWriteBack");
+    }
+
 private:
     std::shared_ptr<PrefillRpcServer> prefill_server_;
     std::shared_ptr<DecodeRpcServer>  decode_server_;

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -18,6 +19,7 @@
 #include "rtp_llm/cpp/cache/LinearCacheManager.h"
 #include "rtp_llm/cpp/cache/SWACacheManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/models_py/bindings/core/GpuBlockCopy.h"
 
 namespace rtp_llm {
@@ -25,6 +27,7 @@ namespace rtp_llm {
 class CPSlotMapper;
 class LoadAsyncContext;
 class BlockTreeCache;
+struct BlockTreeMatchResult;
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;
 class SingleTypeCacheManager;
 using SingleTypeCacheManagerPtr = std::shared_ptr<SingleTypeCacheManager>;
@@ -99,6 +102,14 @@ public:
     MallocResult malloc(const MallocInfo& malloc_info);
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
     bool         detachSharedBlocksForRecompute(const BatchKVCacheResourcePtr& resource, int device_ready_reuse_length);
+    ErrorInfo    admitWriteBackDecodeCache(const CacheKeysType&               cache_keys,
+                                           size_t                             required_prefix_blocks,
+                                           KVCacheResourcePtr&                resource,
+                                           size_t&                            start_block,
+                                           std::shared_ptr<LoadAsyncContext>& load_context,
+                                           bool require_device_prefix = true,
+                                           std::optional<double> max_kv_ratio = std::nullopt);
+    ErrorInfo    commitWriteBackDecodeCache(const KVCacheResource& resource, size_t start_block, int64_t deadline_ms);
     virtual void blockCopy(int src_block_index, int dest_block_index);
     virtual void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
     virtual void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
@@ -161,6 +172,13 @@ public:
     uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 
 protected:
+    ErrorInfo populateMatchedBlocks(const BlockTreeMatchResult& match_result, KVCacheResource& resource) const;
+    void      releaseMatchedBlockReferences(const BlockTreeMatchResult& match_result) const;
+    ErrorInfo mallocAndBindLoadTargets(KVCacheResource&  resource,
+                                       bool              enable_reuse_cache,
+                                       LoadAsyncContext* load_context,
+                                       std::optional<double> max_kv_ratio,
+                                       const std::map<DeviceBlockPool*, size_t>& available) const;
     // Which capacity snapshots evaluateInitCapacity() is allowed to consult.
     // TOTAL_ONLY answers "can this request ever fit"; TOTAL_AND_AVAILABLE also
     // answers "can it fit right now".
@@ -199,13 +217,15 @@ protected:
                                          int                    seq_len,
                                          int                    remaining_tokens,
                                          int                    reserve_step,
-                                         bool                   enable_reuse_cache) const;
+                                         bool                   enable_reuse_cache,
+                                         int                    writeback_alignment_tokens = 0) const;
     virtual int   estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                      int  common_seq_len,
                                                      int  remaining_tokens,
                                                      int  reserve_step,
                                                      bool enable_reuse_cache,
-                                                     int  target_batch_size) const;
+                                                     int  target_batch_size,
+                                                     int  writeback_alignment_tokens = 0) const;
     virtual void  checkCPShardedMallocResult(const MallocInfo&) const;
     virtual void  decrKVCacheRef(const KVCacheResource& kvcache_resource);
     size_t        logicalSeqSizePerBlockForCapacity(const std::string& tag) const;
@@ -236,6 +256,7 @@ protected:
     std::mutex malloc_mutex_;
 
     struct PreparedKVCache {
+        ReuseAccounting                reuse_accounting;
         size_t                         matched_device_blocks = 0;
         size_t                         total_logical_blocks  = 0;
         std::vector<RequiredPositions> required_positions;

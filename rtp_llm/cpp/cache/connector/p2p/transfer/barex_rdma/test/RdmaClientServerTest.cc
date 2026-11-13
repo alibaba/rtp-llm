@@ -117,14 +117,16 @@ protected:
         auto mm  = createRdmaMemoryManager();
         server_mm_ = std::dynamic_pointer_cast<RdmaMemoryManager>(mm);
         client_mm_ = server_mm_;
+        // These fixtures register buffers as small as 64 bytes.
+        server_mm_->setMinRegMemSize(64);
 
         server_ = std::make_unique<RdmaServer>(mm);
-        if (!server_->init(kTestPort, 2, 0)) {
+        if (!server_->init(kTestPort, 2, 1)) {
             GTEST_SKIP() << "RDMA server init failed — no RDMA hardware or port in use";
         }
 
         client_ = std::make_unique<RdmaClient>(mm, /*rdma_connections_per_host=*/2);
-        if (!client_->init(2, 0)) {
+        if (!client_->init(2, 1)) {
             GTEST_SKIP() << "RDMA client init failed — no RDMA hardware";
         }
     }

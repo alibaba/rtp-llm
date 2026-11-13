@@ -1274,6 +1274,31 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(elements[0]["type"], "tag")
         self.assertEqual(elements[1]["type"], "json_schema")
 
+    def test_trans_output_preserves_writeback_billing_and_physical_reuse(self):
+        input_py = GenerateInput(
+            token_ids=torch.arange(8, dtype=torch.int32),
+            generate_config=GenerateConfig(aux_info=True),
+            request_id=1,
+            mm_inputs=[],
+        )
+        for first_use_len in (0, 2):
+            with self.subTest(first_use_len=first_use_len):
+                outputs_pb = GenerateOutputsPB()
+                output_pb = outputs_pb.flatten_output
+                output_pb.finished.append(False)
+                aux_info = output_pb.aux_info.add()
+                aux_info.total_reuse_len = 6 - first_use_len
+                aux_info.writeback_first_use_len = first_use_len
+                aux_info.local_reuse_len = 6
+
+                outputs = trans_output(input_py, outputs_pb, StreamState())
+
+                actual = outputs.generate_outputs[0].aux_info
+                self.assertEqual(actual.reuse_len, 6 - first_use_len)
+                self.assertEqual(actual.actual_reuse_len, 6)
+                self.assertEqual(actual.writeback_first_use_len, first_use_len)
+                self.assertEqual(actual.local_reuse_len, 6)
+
     def test_trans_output_preserves_speculative_acceptance_counters(self):
         input_py = GenerateInput(
             token_ids=torch.tensor([1, 2], dtype=torch.int32),
@@ -1363,6 +1388,28 @@ class ModelRpcClientTest(TestCase):
 
             generate_config_pb = trans_input(input).generate_config
             self.assertEqual(generate_config_pb.enable_disk_cache, enabled)
+
+    def test_enable_p2p_writeback_serialization_preserves_presence(self):
+        self.assertIsNone(GenerateConfig(using_hf_sampling=False).enable_p2p_writeback)
+
+        for enabled in (None, False, True):
+            kwargs = {}
+            if enabled is not None:
+                kwargs["enable_p2p_writeback"] = enabled
+            input = GenerateInput(
+                token_ids=torch.tensor([1]),
+                generate_config=GenerateConfig(using_hf_sampling=False, **kwargs),
+                request_id=0,
+                mm_inputs=[],
+            )
+
+            generate_config_pb = trans_input(input).generate_config
+            self.assertEqual(
+                generate_config_pb.HasField("enable_p2p_writeback"),
+                enabled is not None,
+            )
+            if enabled is not None:
+                self.assertEqual(generate_config_pb.enable_p2p_writeback.value, enabled)
 
     def test_generate_stream_with_logits_index(self):
         client = FakeModelRpcClient()

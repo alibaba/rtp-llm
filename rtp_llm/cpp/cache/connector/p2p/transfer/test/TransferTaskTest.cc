@@ -4,14 +4,6 @@
 #include <thread>
 #include <vector>
 
-TEST_F(TransferTaskTest, UpperLayerCanCompleteReceptionInOneBatch) {
-    const std::vector<int64_t> expected{101, 102};
-    TransferTask task({}, currentTimeMs() + 5000, [&](const auto& keys) { return keys == expected; });
-
-    ASSERT_TRUE(task.startTransfer());
-    task.notifyBatchDone(expected);
-    EXPECT_TRUE(task.success());
-}
 
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -48,6 +40,15 @@ protected:
 };
 
 // ==================== 初始状态 ====================
+
+TEST_F(TransferTaskTest, UpperLayerCanCompleteReceptionInOneBatch) {
+    const std::vector<int64_t> expected{101, 102};
+    TransferTask task({}, currentTimeMs() + 5000, [&](const auto& keys) { return keys == expected; });
+
+    ASSERT_TRUE(task.startTransfer());
+    task.notifyBatchDone(expected);
+    EXPECT_TRUE(task.success());
+}
 
 TEST_F(TransferTaskTest, InitialState) {
     auto task = makeTask();

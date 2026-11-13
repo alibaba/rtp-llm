@@ -43,14 +43,15 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                                               const std::vector<std::vector<GroupSetResource>>& resources,
                                               Tier                                              target_tier,
                                               bool                                              is_resident,
-                                              size_t& resident_prefix_length) {
+                                              size_t&                                           resident_prefix_length,
+                                              bool                                              is_writeback) {
     resident_prefix_length = 0;
     assert(!is_resident || target_tier == Tier::DEVICE);
     RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE || target_tier == Tier::HOST || target_tier == Tier::DISK,
                             "unsupported store target tier: %s",
                             tierName(target_tier));
     if (target_tier == Tier::DEVICE) {
-        publishDeviceLocked(cache_keys, resources, is_resident, resident_prefix_length);
+        publishDeviceLocked(cache_keys, resources, is_resident, resident_prefix_length, is_writeback);
     } else {
         submitLowerTierLocked(cache_keys, resources, target_tier);
         return {};
@@ -62,8 +63,10 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
 void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                              cache_keys,
                                           const std::vector<std::vector<GroupSetResource>>& resources,
                                           bool                                              is_resident,
-                                          size_t&                                           resident_prefix_length) {
-    const BlockTreeInsertResult insert_result = tree_->insertNode(cache_keys, resources, false, is_resident);
+                                          size_t&                                           resident_prefix_length,
+                                          bool                                              is_writeback) {
+    const BlockTreeInsertResult insert_result =
+        tree_->insertNode(cache_keys, resources, false, is_resident, is_writeback);
     const bool resources_inserted = !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();
     if (resources_inserted || !insert_result.newly_resident_nodes.empty()) {
         evictor_.onInserted(insert_result);

@@ -246,6 +246,10 @@ TEST_F(RdmaTransferServiceTest, B3_ContextTimeout_OverridesRdmaFailed) {
     char dummy[64]{};
     auto task = task_store_->addTask("k_b3", makeKvBlocks(1, dummy, 64), currentTimeMs() - 1);
     ASSERT_NE(task, nullptr);
+    // Observe the logical timeout before the late RDMA failure. It owns the
+    // result, but observing it must not claim physical transfer completion.
+    EXPECT_EQ(task->errorCode(), TransferErrorCode::TIMEOUT);
+    EXPECT_FALSE(task->done());
 
     auto req = makeRequest("k_b3", currentTimeMs() + 5000);
     addRdmaBlock(req, 1, dummy, 64);
@@ -255,6 +259,8 @@ TEST_F(RdmaTransferServiceTest, B3_ContextTimeout_OverridesRdmaFailed) {
 
     ASSERT_TRUE(closure->waitFor(kWait));
     EXPECT_EQ(resp.error_code(), ::rdma_transfer::RDMA_TRANSFER_CONTEXT_TIMEOUT);
+    EXPECT_TRUE(task->done());
+    EXPECT_EQ(task->errorCode(), TransferErrorCode::TIMEOUT);
 }
 
 // ===========================================================================

@@ -1199,6 +1199,8 @@ private:
 
 class RtpLLMCacheReuseMetricsCollector final {
 public:
+    int64_t writeback_reuse_len = -1;
+    bool report_reuse_lengths = false;
     int64_t device_input_length              = 0;
     int64_t kv_cache_reuse_length            = 0;
     int64_t stream_cache_device_reuse_length = 0;
@@ -1331,6 +1333,7 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheReuseMetricsCollector* collector);
 
 public:
+    kmonitor::MutableMetric* writeback_reuse_len_metric = nullptr;
     kmonitor::MutableMetric* device_input_length_metric              = nullptr;
     kmonitor::MutableMetric* kv_cache_reuse_length_metric            = nullptr;
     kmonitor::MutableMetric* stream_cache_device_reuse_length_metric = nullptr;

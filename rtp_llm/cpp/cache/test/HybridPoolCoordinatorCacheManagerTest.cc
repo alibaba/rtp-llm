@@ -661,6 +661,47 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, RecomputePreservesCompactCpReadyPr
     }
 }
 
+TEST_F(HybridPoolCoordinatorCacheManagerTest, RequestWritebackRetentionPreservesAlignedSwaWindow) {
+    for (int alignment : {0, 4, 8, 16}) {
+        const auto config    = makeTinyFullSwaMultiPoolHybridConfig(128, 128);
+        auto       allocator = makeAllocator(config, RoleType::DECODE);
+        ASSERT_TRUE(allocator->init());
+        auto resource = makeBatchResource(1, config);
+        resource->setWritebackAlignmentTokens(alignment);
+        const int generation_end = 65;
+        const int estimated_peak =
+            allocator->estimateBatchPeakNeedBlocks(resource, 1, 1, generation_end - 1, 0, false, 1);
+        int observed_peak = 0;
+        for (int seq = 1; seq <= generation_end; ++seq) {
+            auto       tokens = makeCompleteTokenIds(1, seq, 4);
+            MallocInfo info{resource, tokens};
+            info.reuse_cache         = false;
+            info.enable_cache_lookup = false;
+            ASSERT_TRUE(allocator->malloc(info).success);
+            int used = 0;
+            for (const auto& pool : allocator->groupBlockPools()) {
+                used += pool->totalBlocksNum() - pool->freeBlocksNum();
+            }
+            observed_peak = std::max(observed_peak, used);
+            if (alignment > 0 && seq >= 2 * alignment) {
+                const int   endpoint_slot = (seq / alignment * alignment) / 4;
+                const auto& blocks        = resource->blocks(0, "swa");
+                ASSERT_GT(endpoint_slot, 1);
+                EXPECT_FALSE(isNullBlockIdx(blocks[endpoint_slot - 2]));
+                EXPECT_FALSE(isNullBlockIdx(blocks[endpoint_slot - 1]));
+            }
+            if (alignment == 0 && seq == 9) {
+                EXPECT_TRUE(isNullBlockIdx(resource->blocks(0, "swa")[0]));
+            }
+        }
+        EXPECT_GE(estimated_peak, observed_peak);
+        allocator->free({resource, makeCompleteTokenIds(1, generation_end, 4)});
+        for (const auto& pool : allocator->groupBlockPools()) {
+            EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+        }
+    }
+}
+
 TEST_F(HybridPoolCoordinatorCacheManagerTest, ResidentInsertProtectsAllReusableGroups) {
     const CacheConfig                                            config = makeTinyFullSwaMultiPoolHybridConfig(12, 12);
     const std::shared_ptr<TestHybridPoolCoordinatorCacheManager> allocator = makeAllocator(config);

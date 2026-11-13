@@ -11,6 +11,27 @@ bool P2PConnectorMetrics::init(kmonitor::MetricsGroupManager* manager) {
                                   "rtp_llm_p2p_connector_decode_scheduler_retained_context_count");
     REGISTER_GAUGE_MUTABLE_METRIC(decode_scheduler_oldest_kv_hold_ms_metric,
                                   "rtp_llm_p2p_connector_decode_scheduler_oldest_kv_hold_ms");
+    REGISTER_QPS_MUTABLE_METRIC(writeback_success_qps_metric, "rtp_llm_p2p_writeback_success_qps");
+    REGISTER_QPS_MUTABLE_METRIC(writeback_rejected_qps_metric, "rtp_llm_p2p_writeback_rejected_qps");
+    REGISTER_QPS_MUTABLE_METRIC(writeback_skipped_qps_metric, "rtp_llm_p2p_writeback_skipped_qps");
+    REGISTER_QPS_MUTABLE_METRIC(writeback_failed_qps_metric, "rtp_llm_p2p_writeback_failed_qps");
+    REGISTER_QPS_MUTABLE_METRIC(writeback_no_transfer_qps_metric, "rtp_llm_p2p_writeback_no_transfer_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(writeback_cost_time_us_metric, "rtp_llm_p2p_writeback_cost_time_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(writeback_hold_time_us_metric, "rtp_llm_p2p_writeback_hold_time_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(writeback_planned_bytes_metric, "rtp_llm_p2p_writeback_planned_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(writeback_committed_token_count_metric,
+                                  "rtp_llm_p2p_writeback_committed_token_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(writeback_drain_time_us_metric, "rtp_llm_p2p_writeback_drain_time_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(writeback_inflight_context_count_metric,
+                                  "rtp_llm_p2p_writeback_inflight_context_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(writeback_oldest_inflight_ms_metric, "rtp_llm_p2p_writeback_oldest_inflight_ms");
+    REGISTER_GAUGE_MUTABLE_METRIC(writeback_retained_context_count_metric,
+                                  "rtp_llm_p2p_writeback_retained_context_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(writeback_retained_kv_bytes_metric, "rtp_llm_p2p_writeback_retained_kv_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(writeback_retained_kv_percent_metric, "rtp_llm_p2p_writeback_retained_kv_percent");
+    REGISTER_GAUGE_MUTABLE_METRIC(writeback_oldest_kv_hold_ms_metric, "rtp_llm_p2p_writeback_oldest_kv_hold_ms");
+    REGISTER_GAUGE_MUTABLE_METRIC(writeback_stage_cost_time_us_metric, "rtp_llm_p2p_writeback_stage_cost_time_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(writeback_transferred_bytes_metric, "rtp_llm_p2p_writeback_transferred_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(decode_schedule_server_call_cost_time_us_metric,
                                   "rtp_llm_p2p_connector_decode_schedule_server_call_cost_time_us");
     REGISTER_GAUGE_MUTABLE_METRIC(decode_schedule_tp_sync_cost_time_us_metric,
@@ -131,6 +152,80 @@ bool P2PConnectorMetrics::init(kmonitor::MetricsGroupManager* manager) {
                                   "rtp_llm_p2p_connector_prefill_worker_computed_request_count");
 
     return true;
+}
+
+void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, WriteSchedulerMetricsCollector* collector) {
+    kmonitor::MetricsTags write_tags = tags ? *tags : kmonitor::MetricsTags{};
+    write_tags.AddTag("side", collector->prefill ? "prefill" : "decode");
+    write_tags.AddTag("submitted", collector->submitted ? "true" : "false");
+    const auto&       message                  = collector->error.ToString();
+    const std::string prefix_rejection         = "prefix_evicted_or_demoted";
+    const std::string wrapped_prefix_rejection = ": " + prefix_rejection;
+    const bool        prefix_rejected          = collector->error.code() == ErrorCode::CACHE_STORE_STORE_FAILED
+                                 && (message == prefix_rejection
+                                     || (message.size() >= wrapped_prefix_rejection.size()
+                                         && message.compare(message.size() - wrapped_prefix_rejection.size(),
+                                                            wrapped_prefix_rejection.size(),
+                                                            wrapped_prefix_rejection)
+                                                == 0));
+    const bool capacity_rejected = collector->error.code() == ErrorCode::MALLOC_FAILED;
+    const auto reason            = prefix_rejected   ? prefix_rejection :
+                                   capacity_rejected ? std::string("kv_capacity") :
+                                                       ErrorCodeToString(collector->error.code());
+    write_tags.AddTag("reason", collector->skip_reason ? collector->skip_reason : reason);
+    tags = &write_tags;
+    if (collector->skip_reason) {
+        REPORT_MUTABLE_QPS(writeback_skipped_qps_metric);
+        return;
+    }
+    if (collector->error.ok()) {
+        REPORT_MUTABLE_QPS(writeback_success_qps_metric);
+    } else if (prefix_rejected || capacity_rejected) {
+        REPORT_MUTABLE_QPS(writeback_rejected_qps_metric);
+    } else {
+        REPORT_MUTABLE_QPS(writeback_failed_qps_metric);
+    }
+    if (collector->no_transfer && collector->error.ok()) {
+        REPORT_MUTABLE_QPS(writeback_no_transfer_qps_metric);
+    }
+    REPORT_MUTABLE_METRIC(writeback_cost_time_us_metric, collector->total_cost_time_us);
+    if (collector->prefill) {
+        REPORT_MUTABLE_METRIC(writeback_hold_time_us_metric, collector->hold_time_us);
+    }
+    REPORT_MUTABLE_METRIC(writeback_planned_bytes_metric, collector->planned_bytes);
+    if (collector->committed_token_count >= 0) {
+        REPORT_MUTABLE_METRIC(writeback_committed_token_count_metric, collector->committed_token_count);
+    }
+    if (collector->drain_time_us >= 0) {
+        REPORT_MUTABLE_METRIC(writeback_drain_time_us_metric, collector->drain_time_us);
+    }
+}
+
+void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, WritebackStatusMetricsCollector* collector) {
+    kmonitor::MetricsTags status_tags = tags ? *tags : kmonitor::MetricsTags{};
+    status_tags.AddTag("side", collector->prefill ? "prefill" : "decode");
+    tags = &status_tags;
+    REPORT_MUTABLE_METRIC(writeback_inflight_context_count_metric, collector->inflight_context_count);
+    REPORT_MUTABLE_METRIC(writeback_oldest_inflight_ms_metric, collector->oldest_inflight_ms);
+    REPORT_MUTABLE_METRIC(writeback_retained_context_count_metric, collector->retained_context_count);
+    REPORT_MUTABLE_METRIC(writeback_retained_kv_bytes_metric, collector->retained_kv_bytes);
+    REPORT_MUTABLE_METRIC(writeback_retained_kv_percent_metric, collector->retained_kv_percent);
+    REPORT_MUTABLE_METRIC(writeback_oldest_kv_hold_ms_metric, collector->oldest_kv_hold_ms);
+}
+
+void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, WritebackStageMetricsCollector* collector) {
+    if (!collector->stage) {
+        return;
+    }
+    kmonitor::MetricsTags stage_tags = tags ? *tags : kmonitor::MetricsTags{};
+    stage_tags.AddTag("side", collector->prefill ? "prefill" : "decode");
+    stage_tags.AddTag("stage", collector->stage);
+    stage_tags.AddTag("success", collector->error.ok() ? "true" : "false");
+    tags = &stage_tags;
+    REPORT_MUTABLE_METRIC(writeback_stage_cost_time_us_metric, collector->cost_time_us);
+    if (collector->transferred_bytes >= 0 && collector->error.ok()) {
+        REPORT_MUTABLE_METRIC(writeback_transferred_bytes_metric, collector->transferred_bytes);
+    }
 }
 
 void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, P2PConnectorMetricsCollector* collector) {

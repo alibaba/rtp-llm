@@ -5,6 +5,7 @@
 #include "aios/network/arpc/arpc/ANetRPCController.h"
 #include <algorithm>
 #include <limits>
+#include <memory>
 
 namespace {
 inline size_t alignUp(size_t value, size_t alignment) {

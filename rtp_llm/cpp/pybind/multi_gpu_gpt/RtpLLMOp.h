@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/model_rpc/LocalRpcServiceImpl.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServiceImpl.h"
 #include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
+#include <functional>
 
 namespace th = torch;
 
@@ -25,7 +26,7 @@ public:
               py::object token_processor,
               py::object mm_process_engine,
               py::object trace_config = py::none());
-    void stop();
+    void stop(const std::function<void()>& before_rpc_shutdown = {});
     void
     startHttpServer(py::object model_weights_loader, py::object world_info, py::object tokenizer, py::object render);
     void pause();
@@ -46,6 +47,7 @@ private:
                                                                 py::object                                    token_processor,
                                                                 py::object                                    mm_process_engine,
                                                                 telemetry::TelemetryConfig                    trace_config);
+    void stopWriteback();
 
 private:
     std::unique_ptr<RpcServiceImpl> model_rpc_service_;

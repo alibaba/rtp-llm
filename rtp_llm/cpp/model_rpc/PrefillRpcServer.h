@@ -42,6 +42,15 @@ public:
     ::grpc::Status
     GetPeerInfo(::grpc::ServerContext* context, const GetPeerInfoRequestPB* request, GetPeerInfoResponsePB* response);
 
+public:
+    grpc::Status StartWriteBack(grpc::ServerContext*                   context,
+                            const P2PConnectorStartWriteBackRequestPB* request,
+                            P2PConnectorStartWriteBackResponsePB*      response);
+
+    grpc::Status CancelWriteBack(grpc::ServerContext*                    context,
+                             const P2PConnectorCancelWriteBackRequestPB* request,
+                             P2PConnectorStartWriteBackResponsePB*       response);
+
 private:
     std::unique_ptr<PrefillRequestLogger> request_logger_;
     std::unique_ptr<PDCancelRegistry> cancel_registry_;

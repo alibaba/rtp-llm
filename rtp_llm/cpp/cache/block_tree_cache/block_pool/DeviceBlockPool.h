@@ -70,6 +70,7 @@ public:
     uint32_t refCountNoCheck(BlockIdxType block) const;
     using IBlockPool::referencedBlocksNum;
     size_t referencedBlocksNum() const;
+    size_t availableBlocksAfterRelease(const BlockIdList& request_refs) const;
 
     // Stable CUDA device index of the backing buffer. Returns -1 for non-CUDA builds.
     int deviceIndex() const;

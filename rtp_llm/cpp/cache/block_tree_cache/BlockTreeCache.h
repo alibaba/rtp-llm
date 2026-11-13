@@ -123,6 +123,14 @@ public:
     void shutdownLoads();
 
     BlockTreeMatchResult match(const CacheKeysType& cache_keys, const std::function<bool(size_t)>& valid_prefix = {});
+    ErrorInfo            matchForExternalInsert(const CacheKeysType&  cache_keys,
+                                                size_t                required_prefix_blocks,
+                                                BlockTreeMatchResult& match_result,
+                                                bool require_device_prefix = true);
+    ErrorInfo            insertExternalBlocks(const CacheKeysType&                              cache_keys,
+                                              size_t                                            start_block,
+                                              const std::vector<std::vector<GroupSetResource>>& resources,
+                                              int64_t                                           deadline_ms);
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);
@@ -181,7 +189,10 @@ public:
     }
 
 private:
-    void checkWatermark();
+    ErrorInfo validateWritebackPrefixLocked(const CacheKeysType& cache_keys,
+                                            size_t required_prefix_blocks,
+                                            bool require_device_prefix = true) const;
+    void      checkWatermark();
     // Caller holds mutex_.
     void onWorkflowSettledLocked(bool check_watermark);
 

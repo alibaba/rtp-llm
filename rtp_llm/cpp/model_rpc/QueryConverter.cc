@@ -226,6 +226,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->enable_memory_cache = config_proto->enable_memory_cache();
     generate_config->enable_remote_cache = config_proto->enable_remote_cache();
     generate_config->enable_disk_cache   = config_proto->enable_disk_cache();
+    TRANS_OPTIONAL(enable_p2p_writeback);
     generate_config->unique_key          = config_proto->unique_key();
     TRANS_OPTIONAL(trace_id);
     TRANS_OPTIONAL(group_timeout);
@@ -467,6 +468,7 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             aux_info->set_step_output_len(response.aux_info.step_output_len);
             aux_info->set_pd_sep(response.aux_info.pd_sep);
             aux_info->set_total_reuse_len(response.aux_info.reuse_len);
+            aux_info->set_writeback_first_use_len(response.aux_info.writeback_first_use_len);
             aux_info->set_local_reuse_len(response.aux_info.local_reuse_len);
             aux_info->set_remote_reuse_len(response.aux_info.remote_reuse_len);
             aux_info->set_memory_reuse_len(response.aux_info.memory_reuse_len);

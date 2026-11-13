@@ -1096,8 +1096,10 @@ TEST_F(P2PConnectorWorkerTest, SharedSenderQueueIsolatesRejectedCancelledAndSucc
         }
         return predicate();
     };
-    for (int id = 4100; id < 4103; ++id)
+    for (int id = 4100; id < 4103; ++id) {
         addComputedBuffer(id, 0, deadline);
+        prefill_->finishPublication(id, deadline);
+    }
     a = submit(4100);
     ASSERT_TRUE(mock_sender_->waitForTransferCallCount(1, std::chrono::seconds(2)));
     b = submit(4101);

@@ -46,7 +46,7 @@ public:
         return already_done_.load(std::memory_order_acquire);
     }
 
-    bool waitDone(int timeout_ms) {
+    bool waitDone(int timeout_ms, bool fail_on_rpc_error = true) {
         std::unique_lock<std::mutex> lock(wait_done_mutex_);
         const auto completed = [this] { return already_done_.load(std::memory_order_acquire); };
         if (timeout_ms > 0) {
@@ -58,7 +58,7 @@ public:
         }
         const std::string fatal_error = fatal_error_;
         lock.unlock();
-        if (!fatal_error.empty()) {
+        if (fail_on_rpc_error && !fatal_error.empty()) {
             RTP_LLM_FAIL("%s", fatal_error.c_str());
         }
         return true;
@@ -75,6 +75,12 @@ public:
     bool rpcSucceeded(size_t rank) const {
         std::lock_guard<std::mutex> lock(wait_done_mutex_);
         return rank < rpc_succeeded_.size() && rpc_succeeded_[rank];
+    }
+
+    grpc::StatusCode rpcStatusCode(size_t rank) const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        return done() && rank < worker_contexts_.size() && worker_contexts_[rank] ?
+                   worker_contexts_[rank]->status.error_code() : grpc::StatusCode::UNKNOWN;
     }
 
     void onDone(DoneCallback callback) {
@@ -119,6 +125,19 @@ public:
             responses.push_back(worker_rpc_context->response);
         }
         return responses;
+    }
+
+    bool rpcSuccess() const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        if (!already_done_.load(std::memory_order_acquire) || !fatal_error_.empty()) {
+            return false;
+        }
+        for (const auto& context : worker_contexts_) {
+            if (!context || !context->status.ok()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     void finishRank(size_t rank, bool cq_event_ok) {
@@ -179,6 +198,13 @@ public:
                             error                = ErrorInfo(transRPCErrorCode(response.error_code()),
                                               location + ": " + response.error_message());
                         }
+                    }
+                } else if constexpr (std::is_same_v<RequestPB, P2PConnectorStartWriteBackRequestPB>
+                                     && std::is_same_v<ResponsePB, P2PConnectorStartWriteBackResponsePB>) {
+                    if (ctx->response.error_code() != ErrorCodePB::NONE_ERROR) {
+                        error = ErrorInfo(transRPCErrorCode(static_cast<ErrorCodePB>(ctx->response.error_code())),
+                                          "StartWriteBack peer=" + ctx->server_addr + " key=" + ctx->request.unique_key()
+                                              + ": " + ctx->response.error_message());
                     }
                 }
                 first_error_.record(error);

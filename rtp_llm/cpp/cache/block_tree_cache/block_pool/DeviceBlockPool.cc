@@ -9,6 +9,7 @@
 #include <exception>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -221,6 +222,26 @@ size_t DeviceBlockPool::referencedBlocksNum() const {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     return request_referenced_blocks_num_;
+}
+
+size_t DeviceBlockPool::availableBlocksAfterRelease(const BlockIdList& request_refs) const {
+    std::unordered_map<BlockIdxType, size_t> released_refs;
+    for (const auto block : request_refs) {
+        ++released_refs[block];
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    size_t available = availableBlocksNumNoLock();
+    for (const auto& [block, count] : released_refs) {
+        checkAllocatedNoLock(block);
+        const auto tree_refs         = treeRefCountNoLock(block);
+        const auto request_ref_count = refcounts_[block] - static_cast<uint32_t>(tree_refs > 0);
+        RTP_LLM_CHECK_WITH_INFO(count <= request_ref_count, "release exceeds request references for block [%d]", block);
+        if (count == request_ref_count && tree_refs == treeRefCountNoLock(block, BlockTreeRefType::CACHE)) {
+            ++available;
+        }
+    }
+    return available;
 }
 
 void DeviceBlockPool::onFirstTreeRefNoLock(BlockIdxType block) {
