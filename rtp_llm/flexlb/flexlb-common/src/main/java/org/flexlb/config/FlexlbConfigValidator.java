@@ -402,6 +402,14 @@ final class FlexlbConfigValidator {
                 "workerRegistry.health.statusRpcTimeoutMs");
         positive(workers.getHealth().getCleanupIntervalMs(),
                 "workerRegistry.health.cleanupIntervalMs");
+        Long statusStaleAfterMs = workers.getHealth().getStatusStaleAfterMs();
+        if (statusStaleAfterMs != null) {
+            positive(statusStaleAfterMs,
+                    "workerRegistry.health.statusStaleAfterMs");
+            require(statusStaleAfterMs >= 2L * workers.getHealth().getStatusRpcTimeoutMs(),
+                    "workerRegistry.health.statusStaleAfterMs",
+                    "must be at least twice workerRegistry.health.statusRpcTimeoutMs");
+        }
         require(workers.getCacheStatus() != null,
                 "workerRegistry.cacheStatus", "is required");
         positive(workers.getCacheStatus().getTargetDiffSize(),

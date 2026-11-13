@@ -867,7 +867,7 @@ class GrpcWorkerStatusRunnerTest {
                 mock(EngineHealthReporter.class), grpc, 30L, cache, Runnable::run).run();
 
         var timer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
-        ExpirationCleaner cleaner = new ExpirationCleaner(cache, directory);
+        ExpirationCleaner cleaner = new ExpirationCleaner(cache, directory, config);
         try {
             for (int attempt = 1; attempt <= 3; attempt++) {
                 var rpc = new CompletableFuture<EngineRpcService.WorkerStatusPB>();
@@ -1041,7 +1041,7 @@ class GrpcWorkerStatusRunnerTest {
                 .thenReturn(CompletableFuture.failedFuture(
                         io.grpc.Status.UNAVAILABLE.asRuntimeException()));
 
-        ExpirationCleaner cleaner = new ExpirationCleaner(cache, directory);
+        ExpirationCleaner cleaner = new ExpirationCleaner(cache, directory, config);
         for (int failure = 1; failure <= 3; failure++) {
             WorkerStatus.PollLease lease = status.tryBeginStatusPoll(1L);
             assertNotNull(lease);

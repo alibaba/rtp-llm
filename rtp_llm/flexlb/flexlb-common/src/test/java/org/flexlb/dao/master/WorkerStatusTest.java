@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -485,6 +486,41 @@ class WorkerStatusTest {
             } finally {
                 status.lock.unlock();
             }
+        }
+
+        @Test
+        @DisplayName("Stale marking latches only strictly past the threshold and never without a successful poll")
+        void staleMarkingLatchesOnlyPastTheThreshold() {
+            WorkerStatus status = discovered();
+            WorkerStatus.PollHealth health = WorkerStatusTestFixtures.receive(status, true, null);
+            long staleAfterUs = TimeUnit.MILLISECONDS.toMicros(1000L);
+            long atThresholdUs = health.lastSuccessfulPollUs() + staleAfterUs;
+            assertFalse(status.markStatusStale(staleAfterUs, atThresholdUs));
+            assertNull(status.retirementReason());
+            assertTrue(status.markStatusStale(staleAfterUs, atThresholdUs + 1L));
+            assertEquals(WorkerStatus.RetirementReason.STATUS_STALE, status.retirementReason());
+        }
+
+        @Test
+        @DisplayName("A generation without any successful poll is never marked stale")
+        void generationWithoutSuccessfulPollIsNeverMarkedStale() {
+            WorkerStatus status = discovered();
+            assertFalse(status.markStatusStale(1L, TimeUnit.DAYS.toMicros(1L)));
+            assertNull(status.retirementReason());
+        }
+
+        @Test
+        @DisplayName("The first latched retirement reason wins over stale marking")
+        void firstLatchedReasonWinsOverStaleMarking() {
+            WorkerStatus status = discovered();
+            for (int count = 0; count < 3; count++) {
+                WorkerStatusTestFixtures.receive(status, false, null);
+            }
+            assertEquals(WorkerStatus.RetirementReason.CONSECUTIVE_WORKER_FAILURES,
+                    status.retirementReason());
+            assertFalse(status.markStatusStale(1L, TimeUnit.DAYS.toMicros(1L)));
+            assertEquals(WorkerStatus.RetirementReason.CONSECUTIVE_WORKER_FAILURES,
+                    status.retirementReason());
         }
     }
 }

@@ -5,6 +5,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.AppenderBase;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -24,14 +25,18 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class ExpirationCleanerTest {
@@ -43,7 +48,8 @@ class ExpirationCleanerTest {
         WorkerStatus status = status("127.0.0.1", 8080);
         WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
         directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> status);
-        ExpirationCleaner cleaner = new ExpirationCleaner(cache, directory);
+        ExpirationCleaner cleaner = new ExpirationCleaner(
+                cache, directory, staleDisabledConfigService());
         cleaner.retireUnavailableWorkers();
         assertTrue(status.isActiveGeneration());
         for (int failures = 1; failures <= 3; failures++) {
@@ -73,7 +79,8 @@ class ExpirationCleanerTest {
         var directory = new WorkerDirectory(mock(EndpointRegistry.class));
         WorkerStatus worker = status("127.0.0.1", 8080);
         directory.currentOrDiscover(RoleType.PREFILL, worker.getIpPort(), () -> worker);
-        var cleaner = new ExpirationCleaner(mock(CacheAwareService.class), directory);
+        var cleaner = new ExpirationCleaner(mock(CacheAwareService.class),
+                directory, staleDisabledConfigService());
         var emitted = new CountDownLatch(1);
         var line = new AtomicReference<String>();
         var appender = new AppenderBase<ILoggingEvent>() {
@@ -171,7 +178,181 @@ class ExpirationCleanerTest {
             return null;
         }).when(firstDetached).retireAndAwait();
 
-        ExpirationCleaner cleaner = new ExpirationCleaner(cache, directory);
+        ExpirationCleaner cleaner = new ExpirationCleaner(cache, directory,
+                staleDisabledConfigService());
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> cleaning = executor.submit(
+                    cleaner::retireUnavailableWorkers);
+
+            assertTrue(firstAwaitEntered.await(2, TimeUnit.SECONDS));
+            assertFalse(first.isActiveGeneration());
+            assertFalse(second.isActiveGeneration(),
+                    "the second routing gate must close before the first drain waits");
+            releaseFirstAwait.countDown();
+            cleaning.get(5, TimeUnit.SECONDS);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (!directory.statusSnapshot(RoleType.PREFILL).isEmpty() && System.nanoTime() < deadline) {
+                java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+            }
+            assertTrue(directory.statusSnapshot(RoleType.PREFILL).isEmpty());
+            verify(cache).removeEngineBlockCache(
+                    first, first.trace());
+            verify(cache).removeEngineBlockCache(
+                    second, second.trace());
+        } finally {
+            releaseFirstAwait.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void staleEvictionStaysDisabledWhileStatusStaleAfterMsIsUnset() {
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        CacheAwareService cache = mock(CacheAwareService.class);
+        WorkerStatus status = status("127.0.0.1", 8080);
+        recordSuccessfulPoll(status, 1L);
+        WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
+        directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> status);
+        AtomicLong nowUs = new AtomicLong(
+                status.pollHealth().lastSuccessfulPollUs()
+                        + TimeUnit.HOURS.toMicros(1L));
+        ExpirationCleaner cleaner = new ExpirationCleaner(
+                cache, directory, null, nowUs::get);
+        cleaner.retireUnavailableWorkers();
+        assertTrue(status.isActiveGeneration());
+        assertNull(status.retirementReason());
+        verifyNoInteractions(cache);
+    }
+
+    @Test
+    void retiresStaleWorkerThroughTheTwoPhaseProtocolWhenEnabled() {
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        CacheAwareService cache = mock(CacheAwareService.class);
+        WorkerStatus status = status("127.0.0.1", 8080);
+        recordSuccessfulPoll(status, 1L);
+        WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
+        directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> status);
+        AtomicLong nowUs = new AtomicLong(
+                status.pollHealth().lastSuccessfulPollUs()
+                        + TimeUnit.MILLISECONDS.toMicros(1500L));
+        ExpirationCleaner cleaner = new ExpirationCleaner(
+                cache, directory, 1000L, nowUs::get);
+        cleaner.retireUnavailableWorkers();
+        assertFalse(status.isActiveGeneration());
+        assertEquals(WorkerStatus.RetirementReason.STATUS_STALE,
+                status.retirementReason());
+        assertTrue(directory.statusSnapshot(RoleType.PREFILL).isEmpty());
+        verify(cache).removeEngineBlockCache(status, status.trace());
+    }
+
+    @Test
+    void workerExactlyAtTheStaleThresholdIsRetiredOnlyOnceTheAgeExceedsIt() {
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        CacheAwareService cache = mock(CacheAwareService.class);
+        WorkerStatus status = status("127.0.0.1", 8080);
+        recordSuccessfulPoll(status, 1L);
+        WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
+        directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> status);
+        AtomicLong nowUs = new AtomicLong(
+                status.pollHealth().lastSuccessfulPollUs()
+                        + TimeUnit.MILLISECONDS.toMicros(1000L));
+        ExpirationCleaner cleaner = new ExpirationCleaner(
+                cache, directory, 1000L, nowUs::get);
+        cleaner.retireUnavailableWorkers();
+        assertTrue(status.isActiveGeneration(),
+                "an age exactly at the threshold must not evict");
+        nowUs.incrementAndGet();
+        cleaner.retireUnavailableWorkers();
+        assertFalse(status.isActiveGeneration());
+        assertEquals(WorkerStatus.RetirementReason.STATUS_STALE,
+                status.retirementReason());
+    }
+
+    @Test
+    void freshlyDiscoveredWorkerWithoutASuccessfulPollIsNotRetiredAsStale() {
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        CacheAwareService cache = mock(CacheAwareService.class);
+        WorkerStatus status = status("127.0.0.1", 8080);
+        WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
+        directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> status);
+        AtomicLong nowUs = new AtomicLong(TimeUnit.DAYS.toMicros(1L));
+        ExpirationCleaner cleaner = new ExpirationCleaner(
+                cache, directory, 1000L, nowUs::get);
+        cleaner.retireUnavailableWorkers();
+        assertTrue(status.isActiveGeneration());
+        assertNull(status.retirementReason());
+        verifyNoInteractions(cache);
+    }
+
+    @Test
+    void consecutiveFailureReasonWinsOverStaleAgeWithoutDoubleRetirement() {
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        CacheAwareService cache = mock(CacheAwareService.class);
+        WorkerStatus status = status("127.0.0.1", 8080);
+        for (int count = 1; count <= 3; count++) {
+            try (WorkerStatus.PollLease lease = status.tryBeginStatusPoll(count)) {
+                status.recordStatusRpcResult(lease, true, false, null);
+            }
+        }
+        assertEquals(WorkerStatus.RetirementReason.CONSECUTIVE_WORKER_FAILURES,
+                status.retirementReason());
+        WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
+        directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> status);
+        AtomicLong nowUs = new AtomicLong(
+                status.pollHealth().lastSuccessfulPollUs()
+                        + TimeUnit.HOURS.toMicros(1L));
+        ExpirationCleaner cleaner = new ExpirationCleaner(
+                cache, directory, 1000L, nowUs::get);
+        cleaner.retireUnavailableWorkers();
+        assertFalse(status.isActiveGeneration());
+        assertEquals(WorkerStatus.RetirementReason.CONSECUTIVE_WORKER_FAILURES,
+                status.retirementReason());
+        cleaner.retireUnavailableWorkers();
+        verify(cache, times(1)).removeEngineBlockCache(status, status.trace());
+    }
+
+    @Test
+    @Timeout(10)
+    void detachesEveryStaleWorkerBeforeAwaitingAnyRetirement()
+            throws Exception {
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        CacheAwareService cache = mock(CacheAwareService.class);
+        WorkerStatus first = status("127.0.0.1", 8080);
+        WorkerStatus second = status("127.0.0.2", 8080);
+        recordSuccessfulPoll(first, 1L);
+        recordSuccessfulPoll(second, 2L);
+        WorkerDirectory directory = new WorkerDirectory(registry);
+        directory.currentOrDiscover(
+                RoleType.PREFILL, first.getIpPort(), () -> first);
+        directory.currentOrDiscover(
+                RoleType.PREFILL, second.getIpPort(), () -> second);
+
+        EndpointRegistry.DetachedGeneration firstDetached =
+                mock(EndpointRegistry.DetachedGeneration.class);
+        EndpointRegistry.DetachedGeneration secondDetached =
+                mock(EndpointRegistry.DetachedGeneration.class);
+        WorkerEndpoint firstEndpoint = mock(WorkerEndpoint.class);
+        WorkerEndpoint secondEndpoint = mock(WorkerEndpoint.class);
+        configureDetach(
+                registry, first, firstEndpoint, firstDetached);
+        configureDetach(
+                registry, second, secondEndpoint, secondDetached);
+
+        CountDownLatch firstAwaitEntered = new CountDownLatch(1);
+        CountDownLatch releaseFirstAwait = new CountDownLatch(1);
+        org.mockito.Mockito.doAnswer(invocation -> {
+            firstAwaitEntered.countDown();
+            assertTrue(releaseFirstAwait.await(5, TimeUnit.SECONDS));
+            return null;
+        }).when(firstDetached).retireAndAwait();
+
+        AtomicLong nowUs = new AtomicLong(
+                Math.max(first.pollHealth().lastSuccessfulPollUs(),
+                        second.pollHealth().lastSuccessfulPollUs())
+                        + TimeUnit.MILLISECONDS.toMicros(1000L) + 1L);
+        ExpirationCleaner cleaner = new ExpirationCleaner(
+                cache, directory, 1000L, nowUs::get);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
             Future<?> cleaning = executor.submit(
@@ -213,6 +394,19 @@ class ExpirationCleanerTest {
                     status.beginRetirementAfterEndpointGateClosed();
                     return detached;
                 });
+    }
+
+    private static ConfigService staleDisabledConfigService() {
+        ConfigService configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(
+                SchedulingTestConfig.newConfig());
+        return configService;
+    }
+
+    private static void recordSuccessfulPoll(WorkerStatus status, long syncCycleId) {
+        try (WorkerStatus.PollLease lease = status.tryBeginStatusPoll(syncCycleId)) {
+            status.recordStatusRpcResult(lease, true, true, null);
+        }
     }
 
     private static WorkerStatus status(String ip, int port) {
