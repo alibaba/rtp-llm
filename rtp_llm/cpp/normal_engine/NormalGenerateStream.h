@@ -33,6 +33,7 @@ public:
     GenerationPrefillCudaGraphStatus generationPrefillCudaGraphStatus() const override;
 
 private:
+    torch::Tensor   selectLogits(const torch::Tensor& logits) const;
     GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);
     void            enqueueGenerateOutput(GenerateOutputs&& generate_results);
     bool            consumerReadyWithoutLock() const override;
@@ -44,5 +45,6 @@ private:
     GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status_{
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     std::deque<GenerateOutputs> generate_outputs_;
+    torch::Tensor               selected_logits_;
 };
 }  // namespace rtp_llm
