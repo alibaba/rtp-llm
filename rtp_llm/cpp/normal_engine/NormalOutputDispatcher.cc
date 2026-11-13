@@ -5,6 +5,8 @@
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <cstdlib>
+#include <chrono>
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <string>
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
@@ -43,8 +45,9 @@ void syncPinnedCpuCopies(bool need_sync) {
 
 }  // namespace
 
-absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
-                                              const MergedOutput& merge_outputs) const {
+absl::Status NormalOutputDispatcher::dispatch(const StreamGroups&                 stream_groups,
+                                              const MergedOutput&                 merge_outputs,
+                                              const kmonitor::MetricsReporterPtr& metrics_reporter) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     const auto&  sampler_output       = merge_outputs.sampler_output;
     const size_t total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
@@ -80,6 +83,7 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     int  token_offset     = 0;
     bool return_all_probs = stream_groups.needReturnAllProbs();
     auto new_tokens_all   = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
+    const auto update_start     = std::chrono::steady_clock::now();
 
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
@@ -101,6 +105,13 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
         token_offset += token_size;
     }
 
+    if (metrics_reporter && stream_groups.totalDecodeBatchSize() > 0) {
+        RtpLLMStreamUpdateMetricsCollector collector;
+        collector.latency_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - update_start)
+                .count();
+        metrics_reporter->report<RtpLLMStreamUpdateMetrics, RtpLLMStreamUpdateMetricsCollector>(nullptr, &collector);
+    }
     RTP_LLM_LOG_DEBUG("dispatch done");
     return absl::OkStatus();
 }

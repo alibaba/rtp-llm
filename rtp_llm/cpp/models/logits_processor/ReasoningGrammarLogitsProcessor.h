@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/GrammarTimeoutState.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -26,7 +27,10 @@ public:
                                     std::vector<int>                   begin_think_token_ids,
                                     std::vector<int>                   end_think_token_ids,
                                     int32_t                            input_length,
-                                    ErrorReporter                      error_reporter = nullptr);
+                                    ErrorReporter                      error_reporter    = nullptr,
+                                    int                                update_timeout_ms = 10,
+                                    kmonitor::MetricsReporterPtr       metrics_reporter  = nullptr,
+                                    std::string                        stream_log_tag    = {});
     ~ReasoningGrammarLogitsProcessor() override = default;
 
     void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
@@ -37,6 +41,7 @@ public:
     void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
     void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
     bool isSpecVerifyEligible() const override;
+    bool xgrammarUpdateTimedOut() const override;
     int  tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
     bool isStateful() const override {
         return true;
@@ -59,6 +64,7 @@ private:
     int64_t                            eos_token_id_;
     StreamThinkInfo                    think_info_;
     ErrorReporter                      error_reporter_;
+    GrammarTimeoutState                timeout_state_;
     std::atomic_bool                   reported_error_ = false;
 };
 

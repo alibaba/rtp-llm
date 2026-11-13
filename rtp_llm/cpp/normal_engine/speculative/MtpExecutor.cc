@@ -662,7 +662,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                               params.profiling_debug_logging_config,
                                                               target_cache_config,
                                                               params.sp_config,
-                                                              warm_up_));
+                                                              warm_up_,
+                                                              isTpRank0() && !warm_up_ ? metrics_reporter_ : nullptr));
 
     LogitsProcessorFactory::init(params.model_config_.ckpt_path,
                                  params.sp_config.tree_decode_config,

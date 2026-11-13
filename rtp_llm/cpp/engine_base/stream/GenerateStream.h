@@ -486,6 +486,7 @@ public:
 
     /// Log-friendly stream id: numeric ``streamId()`` (``request_id`` / ``inter_request_id``) + ``trace_id`` string.
     std::string streamLogTag() const;
+    bool        xgrammarUpdateTimedOut() const;
 
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
         return logits_processor_list_;

@@ -198,6 +198,8 @@ message AuxInfoPB {
     int32 decode_memory_reuse_len = 26;
     int32 speculative_draft_rounds = 27;
     repeated int32 speculative_accepted_tokens_per_pos = 28;
+    // Sticky after either grammar stage exceeds its budget three times consecutively.
+    bool xgrammar_update_timeout = 34;
 }
 
 message FlattenOutputPB {

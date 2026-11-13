@@ -75,6 +75,7 @@ struct XGrammarBackendOptions {
     // expensive grammar rather than to fail fast, because the cache is per rank: a rejected request that
     // retries onto another rank pays the compile again.
     int compile_timeout_ms = 2000;
+    int update_timeout_ms  = 10;
     // Compiles allowed to run at once. This times max_compiler_threads is the compile thread budget, which
     // should stay within the CPU the rank owns or compiles contend with the engine's own threads. For a
     // fixed budget, fanout finishes one compile sooner where concurrency finishes several slowly together,
@@ -139,6 +140,12 @@ public:
     GrammarBackendStats stats() const;
 
     void clear();
+    int  updateTimeoutMs() const {
+        return options_.update_timeout_ms;
+    }
+    kmonitor::MetricsReporterPtr metricsReporter() const {
+        return metrics_reporter_;
+    }
 
     // Replaces the xgrammar call inside the compile path so tests can drive the timeout, dedup and
     // queue-cap behaviour with a fake that blocks or throws on demand, instead of racing a real compile

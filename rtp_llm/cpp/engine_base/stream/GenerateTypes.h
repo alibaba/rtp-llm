@@ -90,6 +90,7 @@ public:
 };
 
 struct AuxInfo {
+    bool                         xgrammar_update_timeout  = false;
     int32_t                      cost_time_us             = 0;
     int32_t                      iter_count               = 0;
     int32_t                      input_len                = 0;

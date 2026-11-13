@@ -29,7 +29,8 @@ public:
                                                                       int32_t                        init_batch_size,
                                                                       int32_t                        max_batch_size,
                                                                       int64_t                        eos_token_id,
-                                                                      ErrorReporter error_reporter = nullptr);
+                                                                      ErrorReporter error_reporter = nullptr,
+                                                                      std::string   stream_log_tag = {});
 };
 
 }  // namespace rtp_llm

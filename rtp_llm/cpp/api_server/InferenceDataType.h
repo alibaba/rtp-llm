@@ -88,6 +88,7 @@ public:
         json.Jsonize("reuse_len", reuse_len, reuse_len);
         json.Jsonize("output_len", output_len, output_len);
         json.Jsonize("pd_sep", pd_sep, pd_sep);
+        json.Jsonize("xgrammar_update_timeout", xgrammar_update_timeout, xgrammar_update_timeout);
         json.Jsonize("step_output_len", step_output_len, step_output_len);
         json.Jsonize("beam_responses", beam_responses, beam_responses);
         if (json.GetMode() == FastJsonizableBase::Mode::TO_JSON && cum_log_probs.has_value()) {

@@ -54,7 +54,7 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + ["@xgrammar//:xgrammar"],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

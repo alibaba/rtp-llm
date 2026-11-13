@@ -189,8 +189,13 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         RTP_LLM_LOG_WARNING("py_model is None — model will not be initialized (test mode)");
     }
 
-    batch_stream_processor_.reset(new NormalBatchStreamProcessor(
-        params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
+    batch_stream_processor_.reset(
+        new NormalBatchStreamProcessor(params.model_config_,
+                                       params.pd_sep_config,
+                                       params.profiling_debug_logging_config,
+                                       cache_config,
+                                       warm_up_,
+                                       tp_rank_ == 0 && !warm_up_ && !is_propose_ ? metrics_reporter_ : nullptr));
     LogitsProcessorFactory::init(params.model_config_.ckpt_path,
                                  params.sp_config.tree_decode_config,
                                  params.grammar_config,

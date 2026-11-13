@@ -1239,6 +1239,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &GrammarConfig::constrained_json_disable_any_whitespace)
         .def_readwrite("num_workers", &GrammarConfig::num_workers)
         .def_readwrite("compile_timeout_ms", &GrammarConfig::compile_timeout_ms)
+        .def_readwrite("update_timeout_ms", &GrammarConfig::update_timeout_ms)
         .def_readwrite("compile_concurrency", &GrammarConfig::compile_concurrency)
         .def_readwrite("compile_queue_size", &GrammarConfig::compile_queue_size)
         .def_readwrite("compiler_cache_bytes", &GrammarConfig::compiler_cache_bytes)
@@ -1255,10 +1256,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.compile_queue_size,
                                       self.compiler_cache_bytes,
                                       self.tokenizer_info_json,
-                                      self.override_stop_tokens);
+                                      self.override_stop_tokens,
+                                      self.update_timeout_ms);
             },
             [](py::tuple t) {
-                if (t.size() != 9)
+                if (t.size() != 9 && t.size() != 10)
                     throw std::runtime_error("Invalid state!");
                 GrammarConfig c;
                 try {
@@ -1271,6 +1273,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.compiler_cache_bytes                    = t[6].cast<int64_t>();
                     c.tokenizer_info_json                     = t[7].cast<std::string>();
                     c.override_stop_tokens                    = t[8].cast<std::vector<int32_t>>();
+                    if (t.size() == 10) {
+                        c.update_timeout_ms = t[9].cast<int>();
+                    }
+                    if (c.update_timeout_ms <= 0) {
+                        throw std::runtime_error("grammar update_timeout_ms must be greater than 0");
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("GrammarConfig unpickle error: ") + e.what());
                 }

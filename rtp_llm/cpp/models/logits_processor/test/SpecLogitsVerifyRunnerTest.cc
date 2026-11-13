@@ -1,6 +1,11 @@
 #include <gtest/gtest.h>
 
 #include <torch/torch.h>
+#include <limits>
+#include <xgrammar/tokenizer_info.h>
+#include "rtp_llm/cpp/engine_base/grammar/XGrammarBackendCpp.h"
+#include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/ReasoningGrammarLogitsProcessor.h"
 
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
@@ -111,6 +116,55 @@ TEST(SpecLogitsVerifyRunnerTest, AllIneligibleReturnsNoArtifactWithSkipCount) {
     EXPECT_FALSE(result.spec_cap_gpu.defined());
     EXPECT_EQ(a->fillCalls(), 0);
     EXPECT_EQ(b->fillCalls(), 0);
+}
+
+TEST(SpecLogitsVerifyRunnerTest, TimedOutStreamPreservesThirdArtifactAndDoesNotAffectOtherStreams) {
+    std::vector<std::string> vocab;
+    for (int i = 0; i < 128; ++i) {
+        vocab.emplace_back(1, static_cast<char>(i));
+    }
+    xgrammar::TokenizerInfo info(vocab, xgrammar::VocabType::RAW, 128, std::vector<int32_t>{0});
+    XGrammarBackendOptions  options;
+    options.compile_timeout_ms = 0;
+    XGrammarBackendCpp backend(info.SerializeJSON(), options);
+    auto               compiled = backend.compileNow({"regex", "a*"}).compiled;
+    ASSERT_TRUE(compiled);
+    for (bool reasoning : {false, true}) {
+        BaseLogitsProcessorPtr slow;
+        auto                   matcher = backend.createMatcher(compiled, false, std::nullopt);
+        if (reasoning) {
+            auto p = std::make_shared<ReasoningGrammarLogitsProcessor>(
+                matcher, 0, 0, std::vector<int>{}, std::vector<int>{}, 0);
+            p->timeout_state_.timeout_ms_ = 0;
+            slow                          = p;
+        } else {
+            auto p                        = std::make_shared<GrammarLogitsProcessor>(matcher, 0);
+            p->timeout_state_.timeout_ms_ = 0;
+            slow                          = p;
+        }
+        auto fast = std::make_shared<GrammarLogitsProcessor>(
+            backend.createMatcher(compiled, false, std::nullopt), 0, nullptr, std::numeric_limits<int>::max());
+        auto task         = makeTask({std::dynamic_pointer_cast<SpecLogitsProcessor>(slow), fast}, 2, 128);
+        task.draft_tokens = torch::tensor({{'a', 'x'}, {'a', 'x'}}, torch::kInt32);
+        SpecLogitsVerifyRunner runner;
+        for (int round = 1; round <= 4; ++round) {
+            auto result = runner.buildInline(task);
+            ASSERT_TRUE(result.has_active_processor);
+            EXPECT_EQ(result.skipped_ineligible_processors, 0);
+            ASSERT_EQ(result.applied_processors.size(), 2);
+            if (result.ready_event) {
+                result.ready_event->synchronize();
+            }
+            auto mask = result.spec_vocab_mask_gpu.cpu();
+            auto cap  = result.spec_cap_gpu.cpu();
+            EXPECT_EQ(cap[0].item<int32_t>(), round <= 3 ? 1 : 2);
+            EXPECT_EQ(mask[0]['x'].item<bool>(), round <= 3);
+            EXPECT_EQ(cap[1].item<int32_t>(), 1);
+            EXPECT_TRUE(mask[3]['x'].item<bool>());
+            EXPECT_EQ(slow->xgrammarUpdateTimedOut(), round >= 3);
+            EXPECT_FALSE(fast->xgrammarUpdateTimedOut());
+        }
+    }
 }
 
 }  // namespace rtp_llm

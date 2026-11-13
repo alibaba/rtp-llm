@@ -146,6 +146,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.hidden_states = hidden_states_tensor.cpu().clone();
         }
 
+        generate_output.aux_info.xgrammar_update_timeout = xgrammarUpdateTimedOut();
         generate_results.generate_outputs.emplace_back(std::move(generate_output));
     }
     return generate_results;

@@ -1,6 +1,7 @@
 import asyncio
 import struct
 import sys
+from dataclasses import asdict
 from enum import Enum
 from unittest.mock import MagicMock, patch
 
@@ -212,6 +213,26 @@ class ModelRpcClientTest(TestCase):
         actual = outputs.generate_outputs[0].aux_info
         self.assertEqual(actual.speculative_draft_rounds, 7)
         self.assertEqual(actual.speculative_accepted_tokens_per_pos, [6, 4, 2])
+
+    def test_trans_output_preserves_xgrammar_timeout(self):
+        for timed_out in (False, True):
+            with self.subTest(timed_out=timed_out):
+                input_py = GenerateInput(
+                    token_ids=torch.tensor([1, 2], dtype=torch.int32),
+                    generate_config=GenerateConfig(aux_info=True),
+                    request_id=1,
+                    mm_inputs=[],
+                )
+                outputs_pb = GenerateOutputsPB()
+                outputs_pb.flatten_output.finished.append(False)
+                aux = outputs_pb.flatten_output.aux_info.add()
+                aux.xgrammar_update_timeout = timed_out
+                wire = GenerateOutputsPB.FromString(outputs_pb.SerializeToString())
+                output = trans_output(input_py, wire, StreamState()).generate_outputs[0]
+                self.assertEqual(output.aux_info.xgrammar_update_timeout, timed_out)
+                self.assertEqual(
+                    asdict(output.aux_info)["xgrammar_update_timeout"], timed_out
+                )
 
     @unittest.skip("need fix")
     def test_generate_stream(self):

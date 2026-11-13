@@ -190,11 +190,17 @@ void advanceThinkStateForSpec(StreamThinkInfo& info, int32_t token_id) {
 ReasoningGrammarLogitsProcessor::ReasoningGrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher,
                                                                  int64_t                            eos_token_id,
                                                                  int                                max_thinking_tokens,
-                                                                 std::vector<int> begin_think_token_ids,
-                                                                 std::vector<int> end_think_token_ids,
-                                                                 int32_t          input_length,
-                                                                 ErrorReporter    error_reporter):
-    matcher_(std::move(matcher)), eos_token_id_(eos_token_id), error_reporter_(std::move(error_reporter)) {
+                                                                 std::vector<int>             begin_think_token_ids,
+                                                                 std::vector<int>             end_think_token_ids,
+                                                                 int32_t                      input_length,
+                                                                 ErrorReporter                error_reporter,
+                                                                 int                          update_timeout_ms,
+                                                                 kmonitor::MetricsReporterPtr metrics_reporter,
+                                                                 std::string                  stream_log_tag):
+    matcher_(std::move(matcher)),
+    eos_token_id_(eos_token_id),
+    error_reporter_(std::move(error_reporter)),
+    timeout_state_(update_timeout_ms, std::move(metrics_reporter), std::move(stream_log_tag)) {
     think_info_.in_think_mode         = true;
     think_info_.max_thinking_tokens   = max_thinking_tokens;
     think_info_.begin_think_token_ids = std::move(begin_think_token_ids);
@@ -263,11 +269,12 @@ void ReasoningGrammarLogitsProcessor::updateStatus(const torch::Tensor& new_toke
     tokens_cpu            = tokens_cpu.to(torch::kInt32).contiguous();
     const auto* token_ptr = tokens_cpu.data_ptr<int32_t>();
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!matcher_ || matcher_->finished()) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!matcher_ || (!timeout_state_.disabled() && matcher_->finished())) {
         return;
     }
 
+    const auto start = std::chrono::steady_clock::now();
     for (int32_t i = 0; i < num_new_tokens; ++i) {
         const int32_t token_id = token_ptr[i];
         if (consumePendingForcedThinkEndToken(think_info_, token_id)) {
@@ -289,11 +296,27 @@ void ReasoningGrammarLogitsProcessor::updateStatus(const torch::Tensor& new_toke
             continue;
         }
 
+        if (timeout_state_.disabled()) {
+            continue;
+        }
         acceptCommittedGrammarTokenLocked(token_id);
         if (reported_error_.load(std::memory_order_relaxed)) {
             return;
         }
     }
+    const auto elapsed  = std::chrono::steady_clock::now() - start;
+    const bool disabled = timeout_state_.record(GrammarTimeoutState::Stage::UPDATE, elapsed);
+    lock.unlock();
+    if (disabled) {
+        timeout_state_.report(GrammarTimeoutState::Stage::UPDATE,
+                              std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count(),
+                              num_new_tokens);
+    }
+}
+
+bool ReasoningGrammarLogitsProcessor::xgrammarUpdateTimedOut() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return timeout_state_.disabled();
 }
 
 bool ReasoningGrammarLogitsProcessor::isSpecVerifyEligible() const {
@@ -305,7 +328,8 @@ int ReasoningGrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsPro
         return request.propose_step;
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
+    const auto                   start = std::chrono::steady_clock::now();
 
     const int  P                       = request.propose_step;
     const auto W                       = request.bitmask_size_int32;
@@ -315,7 +339,7 @@ int ReasoningGrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsPro
 
     auto fill_grammar_row = [&](int32_t* row) {
         std::fill_n(row, W, SpecLogitsProcessor::kBitmaskAllowAll);
-        if (matcher_->finished()) {
+        if (timeout_state_.disabled() || matcher_->finished()) {
             return;
         }
         if (matcher_->isTerminated()) {
@@ -359,7 +383,7 @@ int ReasoningGrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsPro
 
         const bool token_belongs_to_grammar = think_state.process_state == ThinkProcessState::AFTER_THINK
                                               || think_state.process_state == ThinkProcessState::NO_THINK;
-        if (token_belongs_to_grammar) {
+        if (token_belongs_to_grammar && !timeout_state_.disabled()) {
             if (!matcher_->acceptToken(draft_token)) {
                 cap = offset;
                 break;
@@ -371,7 +395,17 @@ int ReasoningGrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsPro
         }
     }
 
-    matcher_->rollback(grammar_accepted_prefix);
+    if (!timeout_state_.disabled()) {
+        matcher_->rollback(grammar_accepted_prefix);
+    }
+    const auto elapsed  = std::chrono::steady_clock::now() - start;
+    const bool disabled = timeout_state_.record(GrammarTimeoutState::Stage::VERIFY, elapsed);
+    lock.unlock();
+    if (disabled) {
+        timeout_state_.report(GrammarTimeoutState::Stage::VERIFY,
+                              std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count(),
+                              P);
+    }
     return cap;
 }
 
@@ -415,6 +449,9 @@ bool ReasoningGrammarLogitsProcessor::applyReasoningOrGrammarMaskLocked(const Sa
 }
 
 bool ReasoningGrammarLogitsProcessor::applyGrammarMaskLocked(const torch::Tensor& logits) {
+    if (timeout_state_.disabled()) {
+        return false;
+    }
     if (!matcher_ || matcher_->finished()) {
         return false;
     }
