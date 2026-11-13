@@ -246,7 +246,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
             )
             == 3
         )
-        original = ctx.globals()["prefill"]
+        original = ctx.list_rpc_addresses()["prefill"]
         first = next(
             item
             for item in owner.topology.active("prefill")
@@ -259,7 +259,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
             for name in ("config.json", "effective-config.json", "endpoints.json")
         }
         removed = await engine_scale(ctx, EngineScaleArgs(direction="in", count=1))
-        assert len(removed) == 1 and len(ctx.globals()["prefill"]) == 1
+        assert len(removed) == 1 and len(ctx.list_rpc_addresses()["prefill"]) == 1
         with pytest.raises(ExecutionError):
             await engine_scale(ctx, EngineScaleArgs(direction="in", targets=removed))
         # Force the allocator to encounter retired RPC and HTTP ports before fresh ports.
@@ -318,14 +318,15 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
                     urllib.request.urlopen, first["metrics"], timeout=1
                 )
             write_json(prom.directory / "targets.json", list(prom.targets.values()))
-        assert len(ctx.globals()["prefill"]) == 3 and not set(created) & set(original)
+        assert len(ctx.list_rpc_addresses()["prefill"]) == 3
+        assert not set(created) & set(original)
         assert (
             await engine_scale(
                 ctx, EngineScaleArgs(direction="in", targets=created[:1])
             )
             == created[:1]
         )
-        assert len(ctx.globals()["prefill"]) == 2
+        assert len(ctx.list_rpc_addresses()["prefill"]) == 2
         endpoints = [
             json.loads(path.read_text())
             for path in sorted(
@@ -357,9 +358,9 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
                 "-cp",
                 classpath,
                 "org.flexlb.mock.engine.scheduler.NativeProbe",
-                ctx.globals()["decode"][0],
+                ctx.list_rpc_addresses()["decode"][0],
                 str(tmp_path / "traffic.json"),
-                ctx.globals()["prefill"][0],
+                ctx.list_rpc_addresses()["prefill"][0],
             ],
             capture_output=True,
             text=True,
@@ -377,7 +378,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
                 item["rpc"] for item in endpoints
             }
         assert len(await engine_scale(ctx, EngineScaleArgs(direction="in"))) == 2
-        assert ctx.globals()["prefill"] == []
+        assert ctx.list_rpc_addresses()["prefill"] == []
         assert len(await engine_scale(ctx, EngineScaleArgs(direction="out"))) == 1
         return removed + created
 
@@ -535,7 +536,7 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
                 ),
             ]
         )
-        master = ctx.globals()["masters"][0]
+        master = ctx.list_rpc_addresses()["masters"][0]
 
         def rows():
             path = directory / "requests.jsonl"
@@ -582,10 +583,10 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
                 discovery = ctx.records.directory / "components/master-0/discovery.json"
                 assert (
                     json.loads(discovery.read_text())["p-domain"]
-                    == ctx.globals()["prefill"]
+                    == ctx.list_rpc_addresses()["prefill"]
                 )
                 created = await engine_scale(ctx, EngineScaleArgs(direction="out"))
-                expected = sorted(ctx.globals()["prefill"])
+                expected = sorted(ctx.list_rpc_addresses()["prefill"])
                 assert sorted(json.loads(discovery.read_text())["p-domain"]) == expected
                 observations = []
 

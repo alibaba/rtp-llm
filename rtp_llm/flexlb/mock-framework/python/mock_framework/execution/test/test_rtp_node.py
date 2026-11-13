@@ -24,7 +24,7 @@ class ProbeArgs:
 
 @register_step("probe/addresses", effect="read")
 async def addresses(ctx, args: ProbeArgs) -> list[str]:
-    return ctx.globals()["prefill"]
+    return ctx.list_rpc_addresses()["prefill"]
 
 
 def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(

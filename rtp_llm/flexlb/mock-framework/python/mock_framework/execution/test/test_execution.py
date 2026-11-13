@@ -327,7 +327,7 @@ def test_existing_output_is_not_overwritten(setup, tmp_path):
         asyncio.run(run_case(case, launch, tmp_path))
 
 
-def test_step_globals_use_one_topology_snapshot():
+def test_step_lists_rpc_addresses_from_one_topology_snapshot():
     from types import SimpleNamespace
     from unittest.mock import Mock
 
@@ -342,7 +342,7 @@ def test_step_globals_use_one_topology_snapshot():
     )
     runtime = SimpleNamespace(topology=SimpleNamespace(active=active))
     context = StepContext(runtime, records=None, query_time="", deadline=0)
-    assert context.globals() == {
+    assert context.list_rpc_addresses() == {
         "masters": ["m:1"],
         "prefill": ["p:1", "p:2"],
         "decode": ["d:1"],

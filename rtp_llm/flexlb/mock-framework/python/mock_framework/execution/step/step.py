@@ -10,12 +10,10 @@ from .. import ExecutionError
 from .step_registry import StepDefinition, to_record_value
 
 
-def resolve_refs(value, results, case_globals):
+def resolve_refs(value, results, addresses):
     if isinstance(value, Reference):
         try:
-            result = (
-                case_globals if value.source == "globals" else results[value.source]
-            )
+            result = addresses if value.source == "globals" else results[value.source]
             for part in value.path:
                 result = result[part]
             return result
@@ -24,9 +22,9 @@ def resolve_refs(value, results, case_globals):
                 f"Cannot resolve {value.source}.{value.path}"
             ) from error
     if isinstance(value, dict):
-        return {k: resolve_refs(v, results, case_globals) for k, v in value.items()}
+        return {k: resolve_refs(v, results, addresses) for k, v in value.items()}
     if isinstance(value, list):
-        return [resolve_refs(v, results, case_globals) for v in value]
+        return [resolve_refs(v, results, addresses) for v in value]
     return value
 
 
@@ -94,11 +92,11 @@ class Step:
         stage = "arguments"
         records.emit(event="step_started")
         try:
-            case_globals = context.globals()
-            args = resolve_refs(self.args, results, case_globals)
+            addresses = context.list_rpc_addresses()
+            args = resolve_refs(self.args, results, addresses)
             arguments = definition.arguments(args)
             expected = (
-                resolve_refs(self.expect.comparisons, results, case_globals)
+                resolve_refs(self.expect.comparisons, results, addresses)
                 if self.expect
                 else None
             )
@@ -184,7 +182,7 @@ class StepContext:
             raise TimeoutError("Step deadline exceeded")
         return remaining
 
-    def globals(self):
+    def list_rpc_addresses(self):
         nodes = self.runtime.topology.active()
         return {
             name: sorted(item["rpc"] for item in nodes if item["role"] == role)
