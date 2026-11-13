@@ -67,7 +67,11 @@ class AccessLoggerTest(unittest.TestCase):
                         else:
                             contents = "".join(p.read_text() for p in files)
                             self.assertIn("hello", contents)
-                            self.assertIn("failure", contents)
+                            if logger_type is MMAccessLogger:
+                                self.assertIn("RuntimeError", contents)
+                                self.assertNotIn("failure", contents)
+                            else:
+                                self.assertIn("failure", contents)
                         for sink in sinks:
                             for handler in sink.handlers[:]:
                                 sink.removeHandler(handler)
