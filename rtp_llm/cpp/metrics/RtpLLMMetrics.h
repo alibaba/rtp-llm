@@ -1227,17 +1227,42 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+// Host-only metadata, staged with the same round's acceptance counts.
+struct VerificationMetrics {
+    int64_t batch_size        = 0;
+    int64_t target_rows       = 0;  // Includes one mandatory target row per request.
+    int64_t dense_rows        = 0;
+    bool    adaptive_enabled  = false;
+    int64_t decision_mode     = 0;  // 0 fixed, 1 calibration, 2 learned, 3 confidence fallback.
+    int64_t zero_cap_requests = 0;
+    int64_t full_cap_requests = 0;
+    double  plan_us           = 0;
+    bool    valid() const {
+        return batch_size > 0 && target_rows >= batch_size && dense_rows >= target_rows;
+    }
+    double rowsPerRequest() const {
+        return valid() ? double(target_rows) / batch_size : 0;
+    }
+    double savedRowRatio() const {
+        return valid() ? 1.0 - double(target_rows) / dense_rows : 0;
+    }
+    double verifiedDraftAcceptRate(int64_t accepted) const {
+        return valid() && target_rows > batch_size ? double(accepted - batch_size) / (target_rows - batch_size) : 0;
+    }
+};
+
 class RtpLLMSpeculativeEngineMetricsCollector final {
 public:
-    int64_t step_latency_us                = 0;
-    int64_t propose_step_latency_us        = 0;
-    int64_t score_step_latency_us          = 0;
-    int64_t speculative_sampler_latency_us = 0;
-    int64_t total_propose_token_num        = 0;
-    int64_t total_accepted_token_num       = 0;
-    int64_t total_stream_num               = 0;
-    int64_t spec_steps                     = 1;
-    double  estimateTpotUs() const {
+    int64_t             step_latency_us                = 0;
+    int64_t             propose_step_latency_us        = 0;
+    int64_t             score_step_latency_us          = 0;
+    int64_t             speculative_sampler_latency_us = 0;
+    int64_t             total_propose_token_num        = 0;
+    int64_t             total_accepted_token_num       = 0;
+    int64_t             total_stream_num               = 0;
+    int64_t             spec_steps                     = 1;
+    VerificationMetrics verification;
+    double              estimateTpotUs() const {
         return static_cast<double>(step_latency_us)
                / (static_cast<double>(total_accepted_token_num) / total_stream_num);
     }
@@ -1259,6 +1284,18 @@ public:
     kmonitor::MutableMetric* sp_avg_accept_rate_metric             = nullptr;
     kmonitor::MutableMetric* sp_avg_fix_accept_rate_metric         = nullptr;
     kmonitor::MutableMetric* sp_estimate_tpot_us_metric            = nullptr;
+    kmonitor::MutableMetric* verify_batch_size_metric              = nullptr;
+    kmonitor::MutableMetric* verify_target_rows_metric             = nullptr;
+    kmonitor::MutableMetric* verify_rows_per_request_metric        = nullptr;
+    kmonitor::MutableMetric* verify_saved_row_ratio_metric         = nullptr;
+    kmonitor::MutableMetric* verify_draft_accept_rate_metric       = nullptr;
+    kmonitor::MutableMetric* adaptive_enabled_metric               = nullptr;
+    kmonitor::MutableMetric* adaptive_calibration_metric           = nullptr;
+    kmonitor::MutableMetric* adaptive_confidence_fallback_metric   = nullptr;
+    kmonitor::MutableMetric* adaptive_learned_metric               = nullptr;
+    kmonitor::MutableMetric* adaptive_zero_cap_ratio_metric        = nullptr;
+    kmonitor::MutableMetric* adaptive_full_cap_ratio_metric        = nullptr;
+    kmonitor::MutableMetric* adaptive_plan_us_metric               = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

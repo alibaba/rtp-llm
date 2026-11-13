@@ -5,6 +5,7 @@
 #include "torch/all.h"
 #include "autil/EnvUtil.h"
 #include "gtest/gtest.h"
+#include "pybind11/embed.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -554,7 +555,7 @@ TEST_F(MtpExecutorTest, testForwardOverlapHiddenStateContract) {
     target.attn_config.layer_compress_ratios.clear();
     draft.hc_mult = 4;
     EXPECT_FALSE(MtpExecutor::supportsForwardOverlapHiddenState(target, draft));
-    draft.hc_mult = 1;
+    draft.hc_mult     = 1;
     draft.hidden_size = 16;
     EXPECT_FALSE(MtpExecutor::supportsForwardOverlapHiddenState(target, draft));
 }
@@ -1253,7 +1254,112 @@ TEST_F(MtpExecutorTest, testForwardOverlapConsumesGrpcPayloadBeforeFirstForwardA
     EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
 }
 
+TEST_F(MtpExecutorTest, testVerificationMetricsStayAlignedAcrossBatches) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 3;
+    auto  components         = createMtpExecutorComponents(config);
+    auto& executor           = *components.executor;
+    auto  event              = cuda_graph::makeGraphEvent();
+    EXPECT_FALSE(executor.consumePendingAcceptLenMetrics().valid);
+    VerificationMetrics mixed;
+    mixed.batch_size        = 2;
+    mixed.target_rows       = 5;
+    mixed.dense_rows        = 8;
+    mixed.adaptive_enabled  = true;
+    mixed.decision_mode     = 2;
+    mixed.zero_cap_requests = 1;
+    mixed.full_cap_requests = 1;
+    mixed.plan_us           = 12.5;
+    executor.stageAcceptLenMetrics(torch::tensor({1, 3}, torch::kInt32), event, 2, {0, 1}, {}, {}, mixed);
+    const auto previous = executor.consumePendingAcceptLenMetrics();
+    EXPECT_TRUE(previous.valid);
+    EXPECT_EQ(previous.total_accept_len, 4);
+    EXPECT_EQ(previous.verification.batch_size, 2);
+    EXPECT_DOUBLE_EQ(previous.verification.rowsPerRequest(), 2.5);
+    EXPECT_DOUBLE_EQ(previous.verification.savedRowRatio(), 0.375);
+    EXPECT_DOUBLE_EQ(previous.verification.verifiedDraftAcceptRate(previous.total_accept_len), 2.0 / 3);
+    EXPECT_EQ(previous.verification.decision_mode, 2);
+    EXPECT_DOUBLE_EQ(previous.verification.plan_us, 12.5);
+    EXPECT_FALSE(executor.consumePendingAcceptLenMetrics().valid);
+    VerificationMetrics zero = mixed;
+    zero.batch_size = zero.target_rows = 1;
+    zero.dense_rows                    = 4;
+    zero.zero_cap_requests             = 1;
+    zero.full_cap_requests             = 0;
+    zero.decision_mode                 = 0;
+    executor.stageAcceptLenMetrics(torch::ones({1}, torch::kInt32), event, 1, {1}, {}, {}, zero);
+    const auto next = executor.consumePendingAcceptLenMetrics();
+    EXPECT_EQ(next.total_accept_len, 1);
+    EXPECT_EQ(next.verification.batch_size, 1);
+    EXPECT_DOUBLE_EQ(next.verification.savedRowRatio(), 0.75);
+    EXPECT_DOUBLE_EQ(next.verification.verifiedDraftAcceptRate(1), 0);
+    EXPECT_EQ(next.verification.full_cap_requests, 0);
+    EXPECT_FALSE(VerificationMetrics{}.valid());
+}
+
+TEST_F(MtpExecutorTest, testAdaptiveTargetPrepareUsesExactPackedMetadata) {
+    if (!autil::EnvUtil::getEnv("RTP_LLM_MTP_ASYNC_PREPARE", false)) {
+        GTEST_SKIP() << "Run the adaptive async-prepare target";
+    }
+    struct PreparedModel final: ModelBase {
+        GptModelInputs  prepared;
+        int             calls = 0;
+        GptModelOutputs forward(const GptModelInputs&) override {
+            return {};
+        }
+        void prepareAttentionInputs(const GptModelInputs& inputs) override {
+            prepared = inputs;
+            ++calls;
+        }
+    };
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 3;
+    auto  components         = createMtpExecutorComponents(config);
+    auto& executor           = *components.executor;
+    // Enable after construction: this test exercises metadata, not the Python sampler.
+    executor.adaptive_verification_ = true;
+    auto  model                     = std::make_unique<PreparedModel>();
+    auto* captured                  = model.get();
+    executor.setTargetModel(std::move(model));
+    const auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    for (const std::vector<int32_t>& caps : {std::vector<int32_t>{0, 0}, {1, 3}, {3, 3}}) {
+        GptModelInputs input;
+        input.combo_tokens            = torch::zeros({2}, options);
+        input.input_lengths           = torch::ones({2}, options);
+        input.prefix_lengths          = torch::tensor({31, 63}, options);
+        input.sequence_lengths        = torch::tensor({32, 64}, options);
+        input.lm_output_indexes       = torch::tensor({0, 1}, options);
+        auto          capacities      = torch::tensor(caps, options);
+        const int64_t total           = 2 + caps[0] + caps[1];
+        const auto    original_prefix = input.prefix_lengths.clone();
+        executor.launchTargetVerifyPrepareAsync(input, 2, capacities, total);
+        executor.target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+        ASSERT_GT(captured->calls, 0);
+        EXPECT_EQ(captured->prepared.combo_tokens.numel(), total);
+        checkTensorEqual(captured->prepared.input_lengths, capacities + 1);
+        checkTensorEqual(captured->prepared.prefix_lengths, original_prefix);
+        checkTensorEqual(captured->prepared.sequence_lengths_plus_1, original_prefix + 1);
+        checkTensorEqual(captured->prepared.lm_output_indexes, torch::arange(total, options));
+        checkTensorEqual(input.input_lengths, torch::ones({2}, options));
+        EXPECT_TRUE(captured->prepared.is_target_verify);
+    }
+    EXPECT_EQ(captured->calls, 3);
+}
+
 TEST_F(MtpExecutorTest, testForwardOverlapMultiStepFusionMatchesBarrierPath) {
+    if (autil::EnvUtil::getEnv("RTP_LLM_ADAPTIVE_VERIFICATION", false)) {
+        static auto interpreter = Py_IsInitialized() ? nullptr : std::make_unique<py::scoped_interpreter>();
+        py::exec(R"(
+import os
+import sys
+from pathlib import Path
+runfiles = Path(os.environ["TEST_SRCDIR"])
+sys.path[:0] = [str(runfiles), str(runfiles / os.environ["TEST_WORKSPACE"])] + [
+    str(path) for path in sorted(runfiles.glob("pip*/site-packages"))
+]
+import torch
+)");
+    }
     if (!autil::EnvUtil::getEnv("RTP_LLM_MTP_FORWARD_OVERLAP", false)
         || !autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", false)
         || !autil::EnvUtil::getEnv("RTP_LLM_DEVICE_INPUT", false)
@@ -1357,13 +1463,24 @@ TEST_F(MtpExecutorTest, testForwardOverlapMultiStepFusionMatchesBarrierPath) {
                 executor.setTargetModel(std::move(target));
                 // No worker drain between rounds. Reorder published batch rows,
                 // then shrink while the removed request still has bookkeeping.
-                active = {streams[0], streams[1]};
-                ASSERT_TRUE(executor.decodeStep(active, metrics).ok());
-                active = {streams[1], streams[0]};
-                ASSERT_TRUE(executor.decodeStep(active, metrics).ok());
-                active = {streams[0]};
-                ASSERT_TRUE(executor.decodeStep(active, metrics).ok());
-                executor.waitPreviousBookkeepingAndKvSwaps({streams[0], streams[1]});
+                const auto run_rounds = [&]() {
+                    active = {streams[0], streams[1]};
+                    ASSERT_TRUE(executor.decodeStep(active, metrics).ok());
+                    active = {streams[1], streams[0]};
+                    ASSERT_TRUE(executor.decodeStep(active, metrics).ok());
+                    active = {streams[0]};
+                    ASSERT_TRUE(executor.decodeStep(active, metrics).ok());
+                    executor.waitPreviousBookkeepingAndKvSwaps({streams[0], streams[1]});
+                };
+                if (executor.adaptive_verification_) {
+                    // Keep the GIL for Python-owned constructor/destructor
+                    // state, but never hold it across worker synchronization.
+                    py::gil_scoped_release release;
+                    run_rounds();
+                } else {
+                    run_rounds();
+                }
+                ASSERT_FALSE(HasFatalFailure());
                 EXPECT_EQ(target_forwards, 3);
                 int result_row = 0;
                 for (const auto& stream : streams) {
@@ -1371,7 +1488,14 @@ TEST_F(MtpExecutorTest, testForwardOverlapMultiStepFusionMatchesBarrierPath) {
                     EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
                     const auto& state = stream->getMtpAsyncDeviceState();
                     EXPECT_EQ(state.draft_all_probs_gpu.defined(), !mtpFusionEnabled());
-                    const int        expected_length = result_row == 0 ? 1 + 3 * (steps + 1) : 2 + steps + 1;
+                    const int effective_steps = executor.adaptive_verification_ ?
+                                                    autil::EnvUtil::getEnv("RTP_LLM_ADAPTIVE_VERIFY_CAP", steps) :
+                                                    steps;
+                    // Dynamic calibration: first B2 round uses full cap,
+                    // second B2 round probes cap-1, and new B1 starts full.
+                    const int expected_length = effective_steps < 0 ? (result_row == 0 ? 3 * steps + 3 : steps + 2) :
+                                                                      (result_row == 0 ? 1 + 3 * (effective_steps + 1) :
+                                                                                         2 + effective_steps + 1);
                     std::vector<int> expected_tokens;
                     for (int i = 0; i < expected_length; ++i) {
                         expected_tokens.push_back((result_row + 1 + i) % 4);
@@ -1402,6 +1526,12 @@ TEST_F(MtpExecutorTest, testForwardOverlapMultiStepFusionMatchesBarrierPath) {
                         stream->top_logprob_token_ids_.narrow(1, 0, stream->logprobs_history_size_).cpu().clone());
                     results.push_back(stream->top_logprobs_.narrow(1, 0, stream->logprobs_history_size_).cpu().clone());
                     stream->releaseResource();
+                }
+                if (executor.adaptive_verification_) {
+                    // Worker thread-local Python state is destroyed after task_done.
+                    // Never join the workers holding the embedded interpreter GIL.
+                    py::gil_scoped_release release;
+                    components.executor.reset();
                 }
             };
             std::vector<torch::Tensor> barrier, overlap;
@@ -2223,10 +2353,10 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
 }
 
 TEST_F(MtpExecutorTest, testProfileWindowSkipsIdleAndClosesOnPrefillFailure) {
-    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
-    int starts = 0;
-    int finishes = 0;
-    bool active = false;
+    auto components                          = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    int  starts                              = 0;
+    int  finishes                            = 0;
+    bool active                              = false;
     components.executor->profile_step_start_ = [&]() {
         EXPECT_FALSE(active);
         active = true;
@@ -2245,9 +2375,9 @@ TEST_F(MtpExecutorTest, testProfileWindowSkipsIdleAndClosesOnPrefillFailure) {
     auto stream = createContextStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3});
     GptModelInputs input;
-    input.combo_tokens = torch::tensor({0, 1, 2, 3}, torch::kInt32);
-    input.input_lengths = torch::tensor({4}, torch::kInt32);
-    input.prefix_lengths = torch::tensor({0}, torch::kInt32);
+    input.combo_tokens      = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+    input.input_lengths     = torch::tensor({4}, torch::kInt32);
+    input.prefix_lengths    = torch::tensor({0}, torch::kInt32);
     input.lm_output_indexes = torch::tensor({3}, torch::kInt32);
     components.fake_target_model->setInputs({input});
     components.fake_target_model->setForwardCallback([&]() {
@@ -2361,9 +2491,9 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     test_config.vocab_size_override = 4;
     auto components                 = createMtpExecutorComponents(test_config);
 
-    int profile_starts = 0;
-    int profile_finishes = 0;
-    components.executor->profile_step_start_ = [&]() { ++profile_starts; };
+    int profile_starts                        = 0;
+    int profile_finishes                      = 0;
+    components.executor->profile_step_start_  = [&]() { ++profile_starts; };
     components.executor->profile_step_finish_ = [&]() { ++profile_finishes; };
     components.fake_target_model->setForwardCallback([&]() {
         EXPECT_EQ(profile_starts, 1);

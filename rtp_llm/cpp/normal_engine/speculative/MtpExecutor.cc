@@ -1124,6 +1124,7 @@ MtpExecutor::AcceptLenMetricsSnapshot MtpExecutor::consumePendingAcceptLenMetric
 
     snapshot.total_accept_len        = metrics_accept_len_sum_cpu_.item<int64_t>();
     snapshot.total_stream_num        = metrics_accept_len_stream_num_;
+    snapshot.verification            = metrics_verification_;
     snapshot.total_propose_token_num = metrics_accept_len_propose_token_num_;
     if (metrics_accept_len_rows_cpu_.defined() && metrics_accept_len_rows_cpu_.numel() > 0) {
         // Rebuild priority buckets from the staged per-stream rows. Every row is
@@ -1149,17 +1150,19 @@ MtpExecutor::AcceptLenMetricsSnapshot MtpExecutor::consumePendingAcceptLenMetric
     metrics_accept_len_rows_cpu_ = torch::Tensor();
     metrics_accept_len_row_priorities_.clear();
     metrics_accept_len_ready_event_.reset();
+    metrics_verification_                 = {};
     metrics_accept_len_stream_num_        = 0;
     metrics_accept_len_propose_token_num_ = 0;
     return snapshot;
 }
 
-void MtpExecutor::stageAcceptLenMetrics(const torch::Tensor& accept_len,
-                                        torch::Event&        accept_len_ready_event,
-                                        size_t               stream_count,
-                                        std::vector<int32_t> row_priorities,
-                                        const torch::Tensor& prepared_rows,
-                                        const torch::Tensor& prepared_total) {
+void MtpExecutor::stageAcceptLenMetrics(const torch::Tensor&       accept_len,
+                                        torch::Event&              accept_len_ready_event,
+                                        size_t                     stream_count,
+                                        std::vector<int32_t>       row_priorities,
+                                        const torch::Tensor&       prepared_rows,
+                                        const torch::Tensor&       prepared_total,
+                                        const VerificationMetrics& verification) {
     if (!accept_len.defined()) {
         return;
     }
@@ -1168,6 +1171,7 @@ void MtpExecutor::stageAcceptLenMetrics(const torch::Tensor& accept_len,
     metrics_accept_len_stream_num_        = static_cast<int64_t>(stream_count);
     metrics_accept_len_propose_token_num_ = static_cast<int64_t>(stream_count * propose_step_);
     metrics_accept_len_row_priorities_    = std::move(row_priorities);
+    metrics_verification_                 = verification;
 
     if (!accept_len.is_cuda()) {
         metrics_accept_len_sum_gpu_  = torch::Tensor();
@@ -1475,11 +1479,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     // profiling state to the worker thread can crash while perf timelines are
     // being recorded.
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true), false) {
-    data_type_        = params.model_config_.data_type;
-    hidden_size_      = mtpHiddenSize(params.model_config_);
-    propose_step_     = propose_params->gen_num_per_circle;
-    vocab_size_       = params.model_config_.vocab_size;
-    draft_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
+    data_type_               = params.model_config_.data_type;
+    hidden_size_             = mtpHiddenSize(params.model_config_);
+    propose_step_            = propose_params->gen_num_per_circle;
+    vocab_size_              = params.model_config_.vocab_size;
+    draft_vocab_size_        = propose_params->getEngineInitParams().model_config_.vocab_size;
     const char* adaptive_env = std::getenv("RTP_LLM_ADAPTIVE_VERIFICATION");
     RTP_LLM_CHECK_WITH_INFO(!adaptive_env || std::string(adaptive_env) == "0" || std::string(adaptive_env) == "1",
                             "RTP_LLM_ADAPTIVE_VERIFICATION must be 0 or 1");
@@ -1493,10 +1497,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     const bool context_parallel_enabled = params.parallelism_config.prefill_cp_config.is_enabled()
                                           || draft_engine_params.parallelism_config.prefill_cp_config.is_enabled();
     mtp_indexer_share_enabled_ =
-        !adaptive_verification_ && kMtpIndexerShareFlag.on && python_draft_share_capable
-        && params.hw_kernel_config.enable_cuda_graph && !params.device_resource_config.enable_layer_micro_batch
-        && !context_parallel_enabled && draft_model_config.index_share_for_mtp_iteration
-        && draft_model_config.num_layers == 1 && draft_model_config.attn_config.indexer_topk > 0 && propose_step_ >= 3;
+        kMtpIndexerShareFlag.on && python_draft_share_capable && params.hw_kernel_config.enable_cuda_graph
+        && !params.device_resource_config.enable_layer_micro_batch && !context_parallel_enabled
+        && draft_model_config.index_share_for_mtp_iteration && draft_model_config.num_layers == 1
+        && draft_model_config.attn_config.indexer_topk > 0 && propose_step_ >= 3;
     mtp_indexer_topk_ = draft_model_config.attn_config.indexer_topk;
     // Forward overlap consumes per-request MTP GPU state, independently of
     // indexer sharing (including GLM-5.1 models without an indexer). Preserve
@@ -1535,7 +1539,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         });
     }
     RTP_LLM_LOG_INFO(
-        "[adaptive-verify] enabled=%d; fixed verification when disabled; indexer sharing disabled when enabled",
+        "[adaptive-verify] enabled=%d; fixed verification when disabled; draft indexer sharing remains independent",
         adaptive_verification_);
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, tp_rank_);
 
@@ -1803,10 +1807,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          input_vocab);
     }
     speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
-    fast_topk_sampler_.reset(new speculative::FastTopKSampler(
-        d2t_map_,
-        role_type_ == RoleType::PDFUSION && parallelism_config_.tp_size == 1,
-        params.model_config_.model_type == "hy_v4"));
+    fast_topk_sampler_.reset(
+        new speculative::FastTopKSampler(d2t_map_,
+                                         role_type_ == RoleType::PDFUSION && parallelism_config_.tp_size == 1,
+                                         params.model_config_.model_type == "hy_v4"));
 
     RTP_LLM_LOG_INFO("[speculative decoding] d2t_map size: %ld", d2t_map_.defined() ? d2t_map_.numel() : 0);
 }
@@ -2304,7 +2308,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     std::shared_ptr<MtpForwardClaims> forward_claims;
     std::optional<StreamGroups>       forward_groups;
     bool                              overlapped_forward = false;
-    if (!adaptive_verification_ && useForwardOverlap() && !streams.empty()) {
+    // Planning uses completed confidence snapshots and stable request identities, not host history.
+    // Retain forward claims and the post-forward wait before grammar/host updates.
+    if (useForwardOverlap() && !streams.empty()) {
         // RPC may publish GPU state before its initial host payload is consumed.
         // Consume that payload once before forward; never inspect host mirrors
         // while bookkeeping owns them, or retain empty steady rows in this list.
@@ -2394,7 +2400,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         ensureModelInputsOnCuda(model_input, "decode.after_tp_sync");
     }
     ProfileStepGuard profile_guard(profile_step_start_, profile_step_finish_);
-    size_t batch_size             = model_input.input_lengths.size(0);
+    size_t           batch_size   = model_input.input_lengths.size(0);
     spec_logits_processor_present = isTpRank0() && !model_input.is_fake_stream && hasSpecLogitsProcessor(streams);
     if (isTpRank0() && !model_input.is_fake_stream && hasUnsupportedMtpStatefulLogitsProcessor(streams)) {
         return absl::InternalError(
@@ -2409,11 +2415,51 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         return absl::OkStatus();
     }
 
-    if (adaptive_session_ && !model_input.is_fake_stream) {
-        py::gil_scoped_acquire gil;
-        adaptive_session_->attr("begin")(adaptiveRequestIds(stream_groups));
+    VerificationMetrics verification;
+    verification.batch_size        = batch_size;
+    verification.dense_rows        = batch_size * (propose_step_ + 1);
+    verification.target_rows       = verification.dense_rows;
+    verification.full_cap_requests = batch_size;
+    torch::Tensor adaptive_caps;
+    torch::Tensor adaptive_rows;
+    const bool    packed_verify = adaptive_verification_ && !warm_up_ && !model_input.is_fake_stream;
+    if (packed_verify) {
+        // Only completed prior-round confidence is used for planning. The host
+        // row count is known before draft forward, allowing exact async prepare.
+        auto row_count = torch::empty({1}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
+        if (isTpRank0()) {
+            py::gil_scoped_acquire gil;
+            adaptive_session_->attr("begin")(adaptiveRequestIds(stream_groups));
+            auto plan                        = adaptive_session_->attr("prepared_plan")().cast<py::tuple>();
+            adaptive_caps                    = plan[0].cast<torch::Tensor>();
+            adaptive_rows                    = plan[1].cast<torch::Tensor>();
+            row_count.data_ptr<int64_t>()[0] = plan[2].cast<int64_t>();
+            // Host-only telemetry; never copy capacities back from the GPU.
+            auto telemetry                 = adaptive_session_->attr("metrics_snapshot")().cast<py::tuple>();
+            verification.adaptive_enabled  = true;
+            verification.target_rows       = row_count.data_ptr<int64_t>()[0];
+            verification.decision_mode     = telemetry[0].cast<int64_t>();
+            verification.zero_cap_requests = telemetry[1].cast<int64_t>();
+            verification.full_cap_requests = telemetry[2].cast<int64_t>();
+            verification.plan_us           = telemetry[3].cast<double>();
+        }
+        if (parallelism_config_.tp_size > 1) {
+            // Every rank executes the same CPU metadata broadcast followed by
+            // the same two GPU broadcasts. No GPU nonzero/masked_select readback.
+            execBroadcastCpu({{row_count}, 0});
+            if (!isTpRank0()) {
+                adaptive_caps = torch::empty({static_cast<int64_t>(batch_size)}, model_input.combo_tokens.options());
+                adaptive_rows =
+                    torch::empty({row_count.data_ptr<int64_t>()[0]}, adaptive_caps.options().dtype(torch::kInt64));
+            }
+            execBroadcast({{adaptive_caps, adaptive_rows}, 0});
+        }
     }
-    launchTargetVerifyPrepareAsync(model_input, batch_size);
+    const bool compacted_verify = packed_verify && adaptive_rows.numel() != batch_size * (propose_step_ + 1);
+    launchTargetVerifyPrepareAsync(model_input,
+                                   batch_size,
+                                   compacted_verify ? adaptive_caps : torch::Tensor(),
+                                   compacted_verify ? adaptive_rows.numel() : -1);
 
     if (propose_step_ > 1) {
         if (shouldSkipFakeStreamForStop(model_input, "draftModelDecode")) {
@@ -2437,29 +2483,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     auto draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     draft_tokens_ready_event->record(cuda_graph::graphGetCurrentStream());
 
-    torch::Tensor  adaptive_caps;
-    torch::Tensor  adaptive_rows;
-    const bool     packed_verify = adaptive_verification_ && !warm_up_ && !model_input.is_fake_stream;
+    if (packed_verify && isTpRank0()) {
+        // Freeze training eligibility only after this round's draft predictions.
+        py::gil_scoped_acquire gil;
+        adaptive_session_->attr("plan")();
+    }
     GptModelInputs dense_verify_input;
-    if (packed_verify) {
+    if (compacted_verify) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.adaptive_pack");
-        if (isTpRank0()) {
-            py::gil_scoped_acquire gil;
-            auto                   plan = adaptive_session_->attr("plan")().cast<py::tuple>();
-            adaptive_caps               = plan[0].cast<torch::Tensor>();
-            adaptive_rows               = plan[1].cast<torch::Tensor>();
-        } else {
-            adaptive_caps = torch::empty({static_cast<int64_t>(batch_size)}, model_input.combo_tokens.options());
-        }
-        if (parallelism_config_.tp_size > 1) {
-            execBroadcast({{adaptive_caps}, 0});
-            if (!isTpRank0()) {
-                auto rows =
-                    torch::arange(batch_size * (propose_step_ + 1), adaptive_caps.options().dtype(torch::kInt64));
-                auto keep     = rows.remainder(propose_step_ + 1) <= adaptive_caps.repeat_interleave(propose_step_ + 1);
-                adaptive_rows = rows.masked_select(keep);
-            }
-        }
         dense_verify_input            = model_input;
         model_input.combo_tokens      = model_input.combo_tokens.index_select(0, adaptive_rows);
         model_input.input_lengths     = adaptive_caps + 1;
@@ -2482,12 +2513,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    if (packed_verify) {
+    if (compacted_verify) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.adaptive_unpack");
-        if (isTpRank0()) {
-            py::gil_scoped_acquire gil;
-            adaptive_session_->attr("target_done")();
-        }
         if (!isCpContextRequest(parallelism_config_, model_input)) {
             maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_);
         }
@@ -2651,15 +2678,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
 
             // target model sample
-            CHECK_AND_RETURN_REF(
-                sampler_input,
-                batch_stream_processor_->gatherSpecSamplerInput(stream_groups,
-                                                                model_input,
-                                                                model_output,
-                                                                *spec_logits_result,
-                                                                sampler_->optimizedSamplingEnabled()
-                                                                    && draft_sampler_output.draft_point_mass,
-                                                                draft_sampler_output.token_ids));
+            CHECK_AND_RETURN_REF(sampler_input,
+                                 batch_stream_processor_->gatherSpecSamplerInput(
+                                     stream_groups,
+                                     model_input,
+                                     model_output,
+                                     *spec_logits_result,
+                                     sampler_->optimizedSamplingEnabled() && draft_sampler_output.draft_point_mass,
+                                     draft_sampler_output.token_ids));
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
             if (packed_verify) {
                 if (sampler_input.spec_mask_ready_event) {
@@ -2678,15 +2704,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                     sampler_input.rejection_generators.push_back(stream->getGenerator());
                 }
             }
-            sampler_output           = std::move(sampler_->forward(sampler_input));
+            sampler_output = std::move(sampler_->forward(sampler_input));
             RTP_LLM_CHECK_WITH_INFO(
                 !packed_verify || sampler_output.deferred_token_sampling,
                 "adaptive verification requires the logits rejection sampler; disable adaptive verification to use legacy sampling");
             if (!sampler_output.deferred_token_sampling) {
                 sampler_output.all_probs = reshapeMtpTargetAllProbs(sampler_output.all_probs,
-                                                                static_cast<int64_t>(batch_size),
-                                                                static_cast<int64_t>(propose_step_ + 1),
-                                                                sampler_output.all_probs.size(-1));
+                                                                    static_cast<int64_t>(batch_size),
+                                                                    static_cast<int64_t>(propose_step_ + 1),
+                                                                    sampler_output.all_probs.size(-1));
                 if (sampler_output.all_probs_indices.defined()) {
                     sampler_output.all_probs_indices =
                         sampler_output.all_probs_indices.reshape_as(sampler_output.all_probs);
@@ -2722,7 +2748,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                     forced.push_back(stream->forceSpAccept());
                 }
                 py::gil_scoped_acquire gil;
-                adaptive_session_->attr("observe")(speculative_sampler_output.accept_len - 1, forced);
+                adaptive_session_->attr("observe")(
+                    speculative_sampler_output.accept_len - 1, forced, sampler_input.spec_cap_gpu);
             }
         }
 
@@ -2750,7 +2777,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         rejection_event->record(cuda_graph::graphGetCurrentStream());
     }
 
-    if (!packed_verify) {
+    if (!compacted_verify) {
         maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     }
     broadcastPostRejectionInputs(model_input, stream_groups, post_rejection_selected_tokens);
@@ -2854,7 +2881,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     finishEarlyMtpTargetLogprobsFinalize(early_target_logprobs_finalize_state, target_logprobs);
 
     if (metrics_reporter_ || stream_groups.needFrontendMetricStreaming()) {
-        collectDecodeMetrics(stream_groups, accept_len_ready_event, speculative_sampler_output, metrics_collector);
+        collectDecodeMetrics(
+            stream_groups, accept_len_ready_event, speculative_sampler_output, metrics_collector, verification);
     }
 
     const int64_t decode_execute_time_us       = autil::TimeUtility::currentTimeInMicroSeconds() - decode_start_time_us;
@@ -2882,19 +2910,28 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
     }
 
-    return dispatchDecodeOutput(stream_groups,
-                                streams,
-                                speculative_sampler_output,
-                                std::move(target_logprobs),
-                                std::move(draft_prefill_model_output),
-                                std::move(draft_prefill_sampler_output),
-                                std::move(rejection_event),
-                                std::move(draft_event),
-                                std::move(forward_claims));
+    auto dispatch_status = dispatchDecodeOutput(stream_groups,
+                                                streams,
+                                                speculative_sampler_output,
+                                                std::move(target_logprobs),
+                                                std::move(draft_prefill_model_output),
+                                                std::move(draft_prefill_sampler_output),
+                                                std::move(rejection_event),
+                                                std::move(draft_event),
+                                                std::move(forward_claims));
+    if (packed_verify) {
+        py::gil_scoped_acquire gil;
+        adaptive_session_->attr("finish")((autil::TimeUtility::currentTimeInMicroSeconds() - decode_start_time_us)
+                                          / 1000.0);
+    }
+    return dispatch_status;
 }
 
-void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size) {
-    if (!useAsyncPrepare() || adaptive_verification_) {
+void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_input,
+                                                 size_t                batch_size,
+                                                 const torch::Tensor&  adaptive_caps,
+                                                 int64_t               adaptive_rows) {
+    if (!useAsyncPrepare()) {
         return;
     }
     if (isCpContextRequest(parallelism_config_, model_input)) {
@@ -2964,6 +3001,14 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
             model_input_copy.prefix_lengths          = toCudaInt32WithHostHold(target_prefix_lengths, buffer_holder_);
             model_input_copy.sequence_lengths_plus_1 = model_input_copy.prefix_lengths + 1;
         }
+    }
+    if (adaptive_caps.defined()) {
+        // Keep prefix/KV offsets from the dense preparation, but use exactly
+        // the packed row count and per-request lengths that forward will see.
+        const auto cuda_i32                = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        model_input_copy.combo_tokens      = torch::empty({adaptive_rows}, cuda_i32);
+        model_input_copy.input_lengths     = adaptive_caps + 1;
+        model_input_copy.lm_output_indexes = torch::arange(adaptive_rows, cuda_i32);
     }
     model_input_copy.last_hidden_states = torch::Tensor();
     model_input_copy.sequence_lengths =
@@ -3438,7 +3483,8 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
 void MtpExecutor::collectDecodeMetrics(const StreamGroups&                          stream_groups,
                                        torch::Event&                                accept_len_ready_event,
                                        const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                                       MtpMetricsCollector&                         metrics_collector) {
+                                       MtpMetricsCollector&                         metrics_collector,
+                                       const VerificationMetrics&                   verification) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(collect_metrics)");
     auto& executor_collector  = metrics_collector.executor_collector;
     auto& sp_engine_collector = metrics_collector.sp_engine_collector;
@@ -3456,7 +3502,8 @@ void MtpExecutor::collectDecodeMetrics(const StreamGroups&                      
                           stream_groups.size(),
                           std::move(accept_len_row_priorities),
                           speculative_sampler_output.accept_metric_rows,
-                          speculative_sampler_output.accept_metric_total);
+                          speculative_sampler_output.accept_metric_total,
+                          verification);
     const int64_t total_accept_len         = accept_len_metrics.total_accept_len;
     executor_collector.generate_batch_size = stream_groups.totalModelBatchSize();
     executor_collector.execute_token_size += total_accept_len;
@@ -3470,6 +3517,7 @@ void MtpExecutor::collectDecodeMetrics(const StreamGroups&                      
     sp_engine_collector.total_stream_num             = accept_len_metrics.total_stream_num;
     sp_engine_collector.total_propose_token_num      = accept_len_metrics.total_propose_token_num;
     sp_engine_collector.spec_steps                   = propose_step_;
+    sp_engine_collector.verification                 = accept_len_metrics.verification;
     metrics_collector.accepted_token_num_by_priority = accept_len_metrics.accept_len_by_priority;
 }
 
