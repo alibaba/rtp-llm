@@ -346,3 +346,14 @@ py_test(
     tags = ["L20_CU13"],
     exec_properties = {"gpu": "L20_CU13"},
 )
+
+# Source-derived CPU lifecycle regression; CXX must name a host C++17 compiler.
+py_test(
+    name = "cuda_graph_deferred_capture_state_test",
+    srcs = ["cuda_graph_deferred_capture_state_test.py"],
+    data = [
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_srcs",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs",
+    ],
+    tags = ["manual"],
+)

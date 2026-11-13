@@ -9,20 +9,25 @@ void CudaGraphRunner::finishDeferredDecodeInit() {
     if (!hasDeferredDecodeInit()) {
         return;
     }
-    decode_capture_done_     = true;
-    // initCapture() runs the eager datatype probe, allocates the graph
-    // workspace and calls captureDecode().  Both defer flags must be cleared
-    // first: initCapture() re-defers whenever decode_init_deferred_ is still
-    // set, which previously left graph_instances_ empty and made every decode
-    // step fall back to eager execution after a full-context prefill.
+    // initCapture() defers when this flag is false. Explicitly consume that
+    // startup-only deferral on every deferred capture, including recapture
+    // after releaseCapturedDecodeGraph().
+    decode_init_deferred_    = true;
     decode_capture_deferred_ = false;
-    decode_init_deferred_    = false;
-    // Prefill's large temporary allocations are dead by the first decode.
-    // Return their cached segments to the driver before allocating the graph
-    // private pool; without this the graph capture fails on a reserved block.
-    cuda_graph::graphEmptyCache();
-    RTP_LLM_LOG_INFO("Initializing deferred decode CUDA graphs on first decode");
-    initCapture();
+    try {
+        cuda_graph::graphEmptyCache();
+        RTP_LLM_LOG_INFO("Initializing deferred decode CUDA graphs");
+        initCapture();
+        RTP_LLM_CHECK_WITH_INFO(!graph_instances_.empty(), "deferred decode capture produced no graph");
+        decode_capture_done_ = true;
+    } catch (...) {
+        // Do not publish completion after failure. Keep capture resources for
+        // the existing dirty-session owner to diagnose/drain; destroying them
+        // here could race work from a failed capture. Preserve the exception.
+        decode_capture_done_     = false;
+        decode_capture_deferred_ = true;
+        throw;
+    }
 }
 
 void CudaGraphRunner::releaseCapturedDecodeGraph() {
