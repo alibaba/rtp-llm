@@ -8,17 +8,16 @@ namespace rtp_llm {
 grpc::Status RemoteRpcServer::init(const EngineInitParams&                                maga_init_params,
                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                                    py::object                                             mm_process_engine) {
-    rtp_llm::ProposeModelEngineInitParams* propose_params_ptr = propose_params ? propose_params.get() : nullptr;
     auto ret = LocalRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
     if (!ret.ok()) {
         return ret;
     }
     if (defer_cache_store_) {
-        RTP_LLM_LOG_INFO("deferring remote cache-store/network initialization until SCR release");
+        RTP_LLM_LOG_INFO("deferring remote cache-store initialization until RPC service startup");
     } else {
         initLocalHostInfo();
         initLocalPeerInfo();
-        initCacheStore(maga_init_params, propose_params_ptr);
+        initCacheStore(maga_init_params);
     }
     return grpc::Status::OK;
 }
@@ -30,7 +29,7 @@ void RemoteRpcServer::startDeferredServices() {
         // cache-store TCP/RDMA resources out of the restored service.
         initLocalHostInfo();
         initLocalPeerInfo();
-        initCacheStore(maga_init_params_, nullptr);
+        initCacheStore(maga_init_params_);
         defer_cache_store_ = false;
     }
     // ACCL RDMA initialization calls setenv/unsetenv; finish it before starting
@@ -76,8 +75,7 @@ void RemoteRpcServer::initLocalPeerInfo() {
     RTP_LLM_LOG_INFO("%s", worker_grpc_info.c_str());
 }
 
-void RemoteRpcServer::initCacheStore(const EngineInitParams&                init_params,
-                                     rtp_llm::ProposeModelEngineInitParams* propose_params) {
+void RemoteRpcServer::initCacheStore(const EngineInitParams& init_params) {
     RTP_LLM_LOG_INFO("init_params.role_type : %d", init_params.pd_sep_config.role_type);
 
     if (init_params.pd_sep_config.role_type != RoleType::PREFILL
