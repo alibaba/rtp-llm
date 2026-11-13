@@ -554,10 +554,11 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             self.mlp.select_topk = Qwen4ExpMoeTopk(self.mlp.select_topk)
             self.mlp.prepare_shared_expert_overlap()
         from rtp_llm.models_py.modules.qwen4_exp.tp_reduce import (
-            install_target_graph_all_reduce,
+            all_reduce_with_graph_input,
+            install_tp_all_reduce,
         )
 
-        install_target_graph_all_reduce(self.self_attn, self.mlp)
+        install_tp_all_reduce(self.self_attn, self.mlp, all_reduce_with_graph_input)
         # Full-attention layers only; linear-attention layers have no qk norm.
         # The checkpoint's q/k gamma is stored raw for this reason, so the fused
         # version would silently drop upstream's +1 -- see norm.py.
@@ -819,7 +820,7 @@ class Qwen4ExpModel(Qwen35Model):
 
         self._cpu_target_status = prepare_cpu_target_status(config, parallelism_config)
         from rtp_llm.models_py.modules.qwen4_exp.tp_reduce import (
-            install_target_graph_all_reduce,
+            install_tp_all_reduce,
             prepare_target_reduce,
         )
 
@@ -827,7 +828,35 @@ class Qwen4ExpModel(Qwen35Model):
         dispatch = self._target_reduce
         if dispatch is not None:
             for layer in self.layers:
-                install_target_graph_all_reduce(layer.self_attn, layer.mlp, dispatch)
+                install_tp_all_reduce(layer.self_attn, layer.mlp, dispatch)
+
+        from rtp_llm.models_py.modules.qwen4_exp.decode_communication import (
+            DecodeVocabEmbedding,
+            prepare_decode_reduce,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.decode_vocab_weights import (
+            prepare_decode_vocab,
+        )
+
+        self._decode_reduce = prepare_decode_reduce(config, parallelism_config)
+        if self._decode_reduce is not None:
+            vocab = prepare_decode_vocab(
+                source_weights=weights.global_weights,
+                compute_weights=compute_weights.global_weights,
+                group=self._decode_reduce.workspace.group,
+            )
+            self.embed_tokens = DecodeVocabEmbedding(vocab, self._decode_reduce)
+            for ple in self.ple_layers.values():
+                ple.ple_embedding.tp_all_reduce = self._decode_reduce
+            if getattr(config, "is_mtp", False):
+                for layer in self.layers:
+                    install_tp_all_reduce(
+                        layer.self_attn, layer.mlp, self._decode_reduce
+                    )
+        elif hasattr(self.embed_tokens.weight, "_rtp_decode_vocab_layout"):
+            raise ValueError(
+                "vocabulary-sharded weights require decode custom AllReduce"
+            )
 
     def _ple_coordinator(self) -> PLETransactionCoordinator:
         coordinator = self.__dict__.get("_ple_transaction_coordinator")
@@ -913,6 +942,9 @@ class Qwen4ExpModel(Qwen35Model):
         target_reduce = self.__dict__.get("_target_reduce")
         if target_reduce is not None:
             target_reduce.close()
+        decode_reduce = self.__dict__.get("_decode_reduce")
+        if decode_reduce is not None:
+            decode_reduce.close()
         self._closed = True
 
     def initialize(self, init_resource) -> bool:
@@ -1097,6 +1129,10 @@ class Qwen4ExpModel(Qwen35Model):
 
     def on_cuda_graph_capture(self, graph_key: int, inputs: PyModelInputs) -> None:
         """Retain model-owned tensors for this captured graph instance."""
+        # Draft proposal and post-verify Graphs also own registered IPC inputs.
+        decode_reduce = self.__dict__.get("_decode_reduce")
+        if decode_reduce is not None:
+            decode_reduce.finish_graph_capture()
         if not get_primary_attention_inputs(inputs).is_target_verify:
             return
         target_reduce = self.__dict__.get("_target_reduce")

@@ -344,6 +344,20 @@ models_py_test(
 )
 
 models_py_test(
+    name = "decode_communication_test",
+    src = "distributed/decode_communication_test.py",
+    deps = _REFERENCE_DEPS,
+)
+
+models_py_test(
+    name = "decode_communication_sm120_test",
+    src = "distributed/decode_communication_sm120_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    gpus = 2,
+    deps = _REFERENCE_DEPS,
+)
+
+models_py_test(
     name = "tp_registered_input_test",
     src = "distributed/tp_registered_input_test.py",
     deps = _REFERENCE_DEPS,
@@ -565,6 +579,8 @@ test_suite(
     name = "qwen4_distributed",
     tests = [
         ":cpu_target_status_test",
+        ":decode_communication_test",
+        ":decode_communication_sm120_test",
         ":tp_registered_input_test",
     ],
 )

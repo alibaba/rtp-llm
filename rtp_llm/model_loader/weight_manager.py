@@ -195,6 +195,13 @@ class WeightManager:
                     raise PermissionError(
                         f"shared projection {internal_name!r} requires a service restart to update"
                     )
+        else:
+            internal_name = rename_function(req["name"])
+            destination = self._weights.global_weights.get(internal_name)
+            if getattr(destination, "_rtp_requires_restart_for_update", False):
+                raise PermissionError(
+                    f"global weight {internal_name!r} requires a service restart to update"
+                )
         method: str = req["method"]
         desc: str = req["desc"]
         name: str = req["name"]

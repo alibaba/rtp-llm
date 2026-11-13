@@ -393,7 +393,13 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             # loading the distributed runtime; production TP reaches this path.
             from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
-            out = all_reduce(out, group=Group.TP)
+            decode_reduce = getattr(self, "tp_all_reduce", None)
+            if decode_reduce is None:
+                out = all_reduce(out, group=Group.TP)
+            else:
+                shape = out.shape
+                out = decode_reduce(out.reshape(-1, shape[-2] * shape[-1]), Group.TP)
+                out = out.reshape(shape)
         return out.flatten(-2)
 
     def forward(self, token_history: torch.Tensor, seq_len: int) -> torch.Tensor:
