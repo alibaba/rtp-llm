@@ -220,3 +220,11 @@ def _mega_moe_se_unavailable_reason() -> str | None:
 
 def _mega_moe_se_available() -> bool:
     return _mega_moe_se_unavailable_reason() is None
+
+
+def _mega_moe_gated_se_available() -> bool:
+    if not _mega_moe_se_available():
+        return False
+    import deep_gemm
+
+    return _signature_has(deep_gemm.fp8_fp4_mega_moe, ("shared_expert_gates",)) is None

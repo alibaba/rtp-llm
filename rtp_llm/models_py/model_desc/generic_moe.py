@@ -33,6 +33,7 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import ExpertGatePayload
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -93,6 +94,11 @@ class GenericMoeLayer(nn.Module):
         )
         config_adapter.has_shared_expert_gate = W.shared_expert_gate in weights
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
+        self._uses_shared_expert_gates = getattr(
+            getattr(self.fused_moe, "fused_experts", None),
+            "uses_shared_expert_gates",
+            False,
+        )
         router = self.fused_moe.router
         router_tp_size = router.tp_collective_size
 
@@ -179,6 +185,39 @@ class GenericMoeLayer(nn.Module):
     def _forward_routed(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
+        expert_args = None
+        if self._uses_shared_expert_gates:
+            from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_inputs import (
+                shared_expert_sigmoid,
+            )
+
+            if self.shared_expert_gate is None or self.ffn_tp_size != 1:
+                raise ValueError(
+                    "Gated MegaMoE requires a complete gated shared expert"
+                )
+            # Preserve the original linear output dtype/rounding before FP32 sigmoid.
+            gates = shared_expert_sigmoid(self.shared_expert_gate(hidden_states))
+            expert_args = {"shared_expert_gates": gates}
+            if (
+                self.fused_moe.supports_gate_pack
+                and self.config.scoring_func == 0
+                and self.config.has_moe_norm
+                and float(self.config.routed_scaling_factor or 1.0) == 1.0
+                and self.correction_bias is None
+                and self.fake_balance_expert is None
+            ):
+                return self.fused_moe.forward_gate_pack(
+                    hidden_states=hidden_states,
+                    gate_payload=ExpertGatePayload(
+                        scores=router_logits,
+                        topk=self.top_k,
+                        score_func="softmax",
+                        route_scale=1.0,
+                        norm_eps=0.0,
+                    ),
+                    activation="SiGLU",
+                    extra_expert_args=expert_args,
+                )
 
         topk_weights = torch.empty(
             (num_tokens, self.top_k),
@@ -229,6 +268,7 @@ class GenericMoeLayer(nn.Module):
             topk_ids=topk_ids,
             activation="SiGLU",
             skip_tp_allreduce=self.use_unified_tp_allreduce,
+            extra_expert_args=expert_args,
         )
         return experts_output
 

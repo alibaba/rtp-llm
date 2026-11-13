@@ -6,6 +6,14 @@ _CUDA13_ONLY = select({
     "//conditions:default": ["@platforms//:incompatible"],
 })
 
+dsv4_sm100_py_test(
+    name = "test_gated_shared_inputs",
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
 py_test(
     name = "timeline_test",
     srcs = ["timeline_test.py"],

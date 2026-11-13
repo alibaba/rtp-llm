@@ -211,7 +211,7 @@ py_test(
             "--dp_size", "8",
             "--ep_size", "8",
             "--world_size", "8",
-            "--moe_strategy", "mega_moe",
+            "--moe_strategy", "mega_moe_se",
             "--use_deepep_moe", "0",
             "--vit_separation", "2",
             "--load_method", "scratch",

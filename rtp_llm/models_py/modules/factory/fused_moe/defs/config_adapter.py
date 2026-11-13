@@ -115,6 +115,10 @@ class MoEConfigAdapter:
         )
         if getattr(model_config, "_qwen4_mxfp4_source", False):
             self.moe_quant_method = "FP8_FP4"
+            if self.moe_config.moe_strategy == "mega_moe_se":
+                self.shared_bf16_to_mxfp8 = True
+                self.shared_fp8_block_size = 32
+                self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
         self.data_type = model_config.data_type
         self.head_num = model_config.attn_config.head_num
         self.ll_num_max_token = moe_config.ll_num_max_token

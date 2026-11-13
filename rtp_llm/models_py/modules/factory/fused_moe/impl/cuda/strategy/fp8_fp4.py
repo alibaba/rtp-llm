@@ -32,7 +32,14 @@ class _CudaFp8Fp4Strategy(MoeStrategy):
         checker.check((config.ep_size > 1) == cls.requires_ep)
         if cls.requires_shared:
             checker.check(config.n_shared_experts > 0)
-            checker.check(not config.has_shared_expert_gate)
+            checker.check(
+                not config.has_shared_expert_gate
+                or (
+                    config.moe_strategy == "mega_moe_se"
+                    and getattr(config, "shared_bf16_to_mxfp8", False)
+                    and getattr(config, "ffn_tp_size", 0) == 1
+                )
+            )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.fp8_fp4_router import (
@@ -59,6 +66,12 @@ class CudaMegaMoeSEStrategy(_CudaFp8Fp4Strategy):
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         super().check_conditions(checker, config)
+        if config.has_shared_expert_gate:
+            from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.se_buffer import (
+                _mega_moe_gated_se_available,
+            )
+
+            checker.check(_mega_moe_gated_se_available())
         if config.moe_strategy == "auto":
             from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
                 _mega_moe_se_available,

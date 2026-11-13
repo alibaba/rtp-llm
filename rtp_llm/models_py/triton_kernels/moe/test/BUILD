@@ -10,6 +10,12 @@ requirement([
     "numpy",
 ])
 
+cuda13_sm100_py_test(
+    name = "test_softmax_gate_pack",
+    srcs = ["test_softmax_gate_pack.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
 py_test(
     name = "test_remap_local_ids",
     srcs = ["test_remap_local_ids.py"],
