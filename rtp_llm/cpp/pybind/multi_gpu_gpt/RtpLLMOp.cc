@@ -471,9 +471,7 @@ void RtpLLMOp::prepareRPCService(const EngineInitParams&                       m
         } else {
             model_rpc_service_.reset(new LocalRpcServiceImpl());
         }
-        // Listeners always start in startRPCServerInternal(); the service only
-        // prepares its state here.
-        model_rpc_service_->deferServiceStart();
+        // Listeners always start in startRPCServerInternal(); init prepares the service.
         grpc::Status grpc_status =
             model_rpc_service_->init(maga_init_params, std::move(propose_params), mm_process_engine);
         if (!grpc_status.ok()) {

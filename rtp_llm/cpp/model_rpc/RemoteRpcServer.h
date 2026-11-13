@@ -14,8 +14,9 @@ public:
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             mm_process_engine);
 
-    void setDeferCacheStore(bool defer) {
-        defer_cache_store_ = defer;
+    void deferServiceStart() override {
+        LocalRpcServer::deferServiceStart();
+        defer_cache_store_ = true;
     }
     void startDeferredServices() override;
 
@@ -26,7 +27,7 @@ public:
 private:
     void initLocalHostInfo();
     void initLocalPeerInfo();
-    void initCacheStore(const EngineInitParams& params, rtp_llm::ProposeModelEngineInitParams* propose_params);
+    void initCacheStore(const EngineInitParams& params);
 
 protected:
     std::string                 process_id_;

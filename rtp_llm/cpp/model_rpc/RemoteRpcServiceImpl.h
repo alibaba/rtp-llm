@@ -11,8 +11,6 @@ class RemoteRpcServiceImpl: public LocalRpcServiceImpl {
 public:
     RemoteRpcServiceImpl() {}
     ~RemoteRpcServiceImpl() {}
-    void deferServiceStart() override;
-    void startDeferredServices() override;
     grpc::Status init(const EngineInitParams&                                maga_init_params,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             mm_process_engine) override;
@@ -142,7 +140,6 @@ public:
 private:
     std::shared_ptr<PrefillBatchRpcServer> prefill_server_;
     std::shared_ptr<DecodeRpcServer>       decode_server_;
-    bool                                    defer_cache_store_{false};
 };
 
 }  // namespace rtp_llm
