@@ -1337,8 +1337,8 @@ class BuildPackagingContractTest(TestCase):
         self.assertIn("not SM100_ARM", profiles["py_ut_sm100"]["markexpr"])
 
         for name, expected_count in {
-            "py_ut_sm8x": 2972,
-            "py_ut_oss_sm8x": 2972,
+            "py_ut_sm8x": 2968,
+            "py_ut_oss_sm8x": 2968,
             "py_ut_sm9x": 526,
             "py_ut_sm100": 20,
             "py_ut_sm120": 118,
@@ -2078,7 +2078,7 @@ class BuildPackagingContractTest(TestCase):
         profiles = pyproject["tool"]["rtp_llm"]["pytest_ci"]["profiles"]
         expected_counts = {
             "smoke_h20_light_oss": 16,
-            "smoke_h20_full_oss": 58,
+            "smoke_h20_full_oss": 41,
             "smoke_sm8x_light_oss": 9,
             "smoke_sm8x_full_oss": 9,
             "smoke_sm100_oss": 12,
@@ -2112,28 +2112,39 @@ class BuildPackagingContractTest(TestCase):
             ).read_text()
             self.assertNotIn("@pytest.mark.timeout(7200)", suite_source)
 
-    def test_standalone_perf_pipeline_uses_native_pytest(self):
-        """Internal perf CI must not regress to Bazel-owned Python tests."""
-        perf_yaml = PROJECT_ROOT.parent / ".aoneci" / "perf.yaml"
-        if not perf_yaml.exists():
+    def test_main_perf_jobs_use_native_pytest(self):
+        """Retained Native perf jobs must keep pytest ownership after retirement."""
+        main_yaml = PROJECT_ROOT.parent / ".aoneci" / "main.yaml"
+        if not main_yaml.exists():
             return
 
-        source = perf_yaml.read_text()
-        self.assertNotIn("BAZEL_TEST_TARGET", source)
-        self.assertNotIn("basic_test.sh test", source)
-        self.assertNotIn("perf-a100:", source)
-        self.assertNotIn("perf-amd:", source)
-        self.assertIn('PYTEST_PROFILE: "perf_sm9x"', source)
-        self.assertIn('PYTEST_PROFILE: "perf_ppu_internal"', source)
-        self.assertIn("--remote-no-test-cache", source)
-        self.assertIn("--remote-concurrency=1", source)
+        source = main_yaml.read_text()
+        for job, profile in (
+            ("perf-test", "perf_sm9x"),
+            ("perf-ppu", "perf_ppu_internal"),
+        ):
+            with self.subTest(job=job):
+                match = re.search(
+                    rf"(?ms)^      {re.escape(job)}:\n(.*?)(?=^      \S|\Z)",
+                    source,
+                )
+                self.assertIsNotNone(match, f"missing Native performance job {job}")
+                job_source = match.group(1)
+                self.assertRegex(
+                    job_source,
+                    rf"\bPYTEST_PROFILE:\s*(?:\"{profile}\"|'{profile}'|{profile})(?=[,\s}}])",
+                )
+                self.assertNotIn("BAZEL_TEST_TARGET", job_source)
+                self.assertNotIn("basic_test.sh test", job_source)
+                self.assertIn("--remote", job_source)
+                if job == "perf-ppu":
+                    self.assertIn("--remote-concurrency=1", job_source)
 
-        main_source = (PROJECT_ROOT.parent / ".aoneci" / "main.yaml").read_text()
-        self.assertRegex(
-            main_source,
-            r"\bPYTEST_PROFILE:\s*(?:\"perf_ppu_internal\"|'perf_ppu_internal'|perf_ppu_internal)(?=[,\s}])",
-        )
-        self.assertIn("--remote-concurrency=1", main_source)
+        entry = (
+            PROJECT_ROOT.parent / "internal_source/ci/run_native_ci.sh"
+        ).read_text()
+        self.assertIn('pytest --rtp-ci-profile="${PYTEST_PROFILE}"', entry)
+        self.assertIn("--remote-no-cache --remote-no-test-cache", entry)
 
     def test_non_model_smokes_use_python_native_entrypoints(self):
         with open(PROJECT_ROOT / "pyproject.toml", "rb") as f:
