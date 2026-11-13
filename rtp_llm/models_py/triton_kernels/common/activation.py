@@ -11,20 +11,20 @@ def _silu_and_mul_kernel(
     output_ptr,
     input_ptr,
     # Tensor dimensions
-    N: tl.int32,
+    N: tl.int64,
     # Row strides for jumping between batches
-    input_row_stride: tl.int32,
-    output_row_stride: tl.int32,
+    input_row_stride: tl.int64,
+    output_row_stride: tl.int64,
     # Meta-parameter for tuning
     BLOCK_SIZE_N: tl.constexpr,
 ):
-    pid_b = tl.program_id(axis=0)  # Batch dimension
-    pid_n_block = tl.program_id(axis=1)  # N-dimension block
+    pid_b = tl.program_id(axis=0).to(tl.int64)  # Widen before row * stride.
+    pid_n_block = tl.program_id(axis=1).to(tl.int64)  # N-dimension block
 
     input_row_start_ptr = input_ptr + pid_b * input_row_stride
     output_row_start_ptr = output_ptr + pid_b * output_row_stride
 
-    n_offsets = pid_n_block * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    n_offsets = pid_n_block * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)
 
     value_ptrs = input_row_start_ptr + n_offsets
     gate_ptrs = input_row_start_ptr + N + n_offsets
