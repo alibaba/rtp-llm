@@ -5,6 +5,7 @@ from contextlib import nullcontext
 from unittest.mock import Mock, patch
 
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from rtp_llm.multimodal.kvcm.registered_transport import (
     RegisteredObjectTransport,
@@ -110,11 +111,26 @@ class RegisteredObjectTransportTest(unittest.TestCase):
         transport = RegisteredObjectTransport(
             Client, max_object_bytes=1024, device="cuda:0"
         )
-        source = torch.arange(1024).to(torch.uint8)
-        target = torch.empty_like(source)
-        transport.save_one("x", source)
-        transport.load_one("x", target)
-        self.assertTrue(torch.equal(source, target))
+        copies = []
+
+        class ObserveCopies(TorchDispatchMode):
+            def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+                if func == torch.ops.aten.copy_.default:
+                    dst, src = args[:2]
+                    if dst.is_cuda != src.is_cuda:
+                        host = src if dst.is_cuda else dst
+                        copies.append((dst.is_cuda, host.is_pinned(), host.data_ptr()))
+                return func(*args, **(kwargs or {}))
+
+        host_ptr = transport._host_staging.data_ptr()
+        with ObserveCopies():
+            for size in (1024, 17):
+                source = torch.arange(size).to(torch.uint8)
+                target = torch.empty_like(source)
+                transport.save_one("x", source)
+                self.assertIs(transport.load_one("x", target), target)
+                self.assertTrue(torch.equal(source, target))
+        self.assertEqual(copies, [(True, True, host_ptr), (False, True, host_ptr)] * 2)
         for bad in (
             torch.empty(1025, dtype=torch.uint8),
             torch.empty(0, dtype=torch.uint8),
@@ -127,6 +143,7 @@ class RegisteredObjectTransportTest(unittest.TestCase):
         transport.close()
         self.assertEqual(seen["client"].closed, 1)
         self.assertIsNone(transport._arena)
+        self.assertIsNone(transport._host_staging)
         with self.assertRaises(RuntimeError):
             transport.load_one("x", target)
 
@@ -158,6 +175,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         transport._closed = transport._poisoned = False
         transport._device = torch.device("cuda:0")
         transport._capacity = 16
+        transport._host_staging = torch.empty(16, dtype=torch.uint8)
         transport._arena = torch.empty(transport._GUARD_BYTES + 16, dtype=torch.uint8)
         transport._pool = object()
         transport._client = Mock()
@@ -231,7 +249,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
             self.assertIs(retained._pool, pool.return_value)
             with self.assertRaisesRegex(RuntimeError, "quarantined"):
                 RegisteredObjectTransport(factory, max_object_bytes=16, device="cuda:0")
-            allocate.assert_called_once()
+            self.assertEqual(allocate.call_count, 2)
             factory.assert_called_once()
 
     def test_sync_memops_failure_prevents_client_registration(self):

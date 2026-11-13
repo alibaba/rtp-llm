@@ -59,8 +59,13 @@ class RegisteredObjectTransport:
         with self._quarantine_lock:
             if self._quarantined_transports:
                 raise RuntimeError("GDR transport is quarantined; restart the worker")
-            try:
-                with cuda_graph_gate.operation(), torch.cuda.device(self._device):
+            with cuda_graph_gate.operation(), torch.cuda.device(self._device):
+                # Shared by reads and writes under _lock. Keep pageable codec
+                # buffers out of CUDA copies to the registered GPU allocation.
+                self._host_staging = torch.empty(
+                    max_object_bytes, dtype=torch.uint8, device="cpu", pin_memory=True
+                )
+                try:
                     self._pool = torch.cuda.MemPool()
                     with torch.cuda.use_mem_pool(self._pool):
                         self._arena = torch.empty(
@@ -70,10 +75,10 @@ class RegisteredObjectTransport:
                         )
                     _enable_sync_memops(self._arena)
                     self._client = factory(gpu_tensors=(self._arena,))
-            except Exception:
-                self._poisoned = True
-                self._quarantined_transports.append(self)
-                raise
+                except Exception:
+                    self._poisoned = True
+                    self._quarantined_transports.append(self)
+                    raise
         self.instance_id = self._client.instance_id
         self.instance_group = self._client.instance_group
 
@@ -111,10 +116,13 @@ class RegisteredObjectTransport:
         with self._lock, cuda_graph_gate.operation(), torch.cuda.device(self._device):
             transfer = self._view(buffer)
             try:
-                transfer.copy_(buffer, non_blocking=False)
-                torch.cuda.current_stream(self._device).synchronize()
+                host = self._host_staging[: buffer.numel()]
+                host.copy_(buffer)
+                stream = torch.cuda.current_stream(self._device)
+                transfer.copy_(host, non_blocking=True)
+                stream.synchronize()
                 self._client.save_one(key, transfer, **kwargs)
-                torch.cuda.current_stream(self._device).synchronize()
+                stream.synchronize()
             except Exception:
                 self._quarantine()
                 raise
@@ -124,8 +132,12 @@ class RegisteredObjectTransport:
             transfer = self._view(buffer)
             try:
                 self._client.load_one(key, transfer, **kwargs)
-                torch.cuda.current_stream(self._device).synchronize()
-                buffer.copy_(transfer, non_blocking=False)
+                stream = torch.cuda.current_stream(self._device)
+                stream.synchronize()
+                host = self._host_staging[: buffer.numel()]
+                host.copy_(transfer, non_blocking=True)
+                stream.synchronize()
+                buffer.copy_(host)
                 return buffer
             except Exception:
                 self._quarantine()
@@ -147,5 +159,6 @@ class RegisteredObjectTransport:
                 self._quarantine()
                 raise
             self._closed = True
+            self._host_staging = None
             self._arena = None
             self._pool = None
