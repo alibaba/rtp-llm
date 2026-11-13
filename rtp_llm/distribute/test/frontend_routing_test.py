@@ -218,6 +218,26 @@ class FrontendRoutingTest(unittest.TestCase):
             )
         self.assertEqual(ds.get_dp_addrs_from_world_info(world, pc), ["10.0.0.2:24001"])
 
+    def test_remote_leader_retries_transient_registry_failure(self):
+        configs = PyEnvConfigs()
+        pc = configs.parallelism_config
+        pc.world_size, pc.local_world_size, pc.world_rank = 2, 1, 1
+        pc.tp_size = 2
+        configs.server_config.ip = "10.0.0.3"
+        with patch.dict(os.environ, {"RTPLLM_ENABLE_SCR": "0"}, clear=True), patch.object(
+            ds, "get_master", return_value=("10.0.0.2", "24000")
+        ), patch.object(ds, "TCPStore") as store, patch.object(ds.time, "sleep") as sleep:
+            store.return_value.get.side_effect = [
+                RuntimeError("rank is still starting"),
+                b"10.0.0.2:24000",
+            ]
+            world = ds.get_frontend_world_info(
+                configs.server_config, configs.distribute_config, pc
+            )
+        self.assertEqual(ds.get_dp_addrs_from_world_info(world, pc), ["10.0.0.2:24001"])
+        self.assertEqual(store.call_count, 2)
+        sleep.assert_called_once()
+
     def test_restore_reuses_checkpointed_route_without_registry_lookup(self):
         configs = PyEnvConfigs()
         pc = configs.parallelism_config

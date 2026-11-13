@@ -66,12 +66,14 @@ TEST_F(ScrKmonitorLifecycleTest, DeferredDefaultModeStartsAutomaticReporter) {
     autil::EnvGuard manualMode("kmonitorManuallyMode", "false");
 
     ASSERT_TRUE(initKmonitorFactory());
+    EXPECT_TRUE(kmonitorReportsDeferredForScr());
     EXPECT_FALSE(kmonitor::KMonitorFactory::IsStarted());
     EXPECT_FALSE(kmonitor::KMonitorFactory::GetConfig()->manually_mode());
     EXPECT_FALSE(kmonitor::KMonitorFactory::GetWorker()->getMetricsSystem()->Started());
     EXPECT_FALSE(kmonitor::KMonitorFactory::GetWorker()->getMetricsSystem()->GetSink("FlumeSink"));
     ASSERT_TRUE(resumeKmonitorAfterScr());
 
+    EXPECT_FALSE(kmonitorReportsDeferredForScr());
     EXPECT_TRUE(kmonitor::KMonitorFactory::IsStarted());
     EXPECT_TRUE(kmonitor::KMonitorFactory::GetWorker()->getMetricsSystem()->Started());
     EXPECT_FALSE(kmonitor::KMonitorFactory::GetConfig()->manually_mode());

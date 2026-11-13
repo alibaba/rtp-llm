@@ -1160,8 +1160,8 @@ class ServerArgsSetTest(TestCase):
                 )
                 validate_resolved_config(configs, engine_config=engine_config)
 
-        # VIT_SEPARATION=ROLE implicitly replaces the parser-visible PDFUSION
-        # role. The final EngineConfig role is the ownership source of truth.
+        # Exercise the role passed by the standalone ViT launcher after role
+        # selection. Deployment-wide ViT separation alone leaves the PD role intact.
         configs = server_args.setup_args(
             [
                 "--enable_cuda_graph",
@@ -1176,6 +1176,8 @@ class ServerArgsSetTest(TestCase):
                 "64",
                 "--vit_separation",
                 "1",
+                "--role_type",
+                "VIT",
             ]
         )
         engine_config = EngineConfig.create(configs)

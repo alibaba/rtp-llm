@@ -126,8 +126,9 @@ class SingleGpuBackendRankTest(TestCase):
         py_env_configs.server_config.start_port = 20000
 
         def initialize_rank(
-            global_controller, configs, selected_world_rank, pipe_writer
+            global_controller, configs, selected_world_rank, pipe_writer, *, scr_manifest
         ):
+            self.assertIsNone(scr_manifest)
             set_parallelism_config(
                 configs.parallelism_config,
                 selected_world_rank,

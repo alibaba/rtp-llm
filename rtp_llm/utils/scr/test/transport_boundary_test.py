@@ -35,9 +35,15 @@ class ScrTransportBoundaryTest(unittest.TestCase):
                     "NCCL_IB_HCA": "mlx5_0",
                     "GLOO_SOCKET_IFNAME": "eth0",
                 }
+                if enabled == "1" and phase != "normal" and local_size == 1:
+                    env["RANK_SIZE"] = "2"
+                    env["RANK_ID"] = str(rank)
                 with patch.dict(os.environ, env, clear=True), patch(
                     "rtp_llm.distribute.distributed_server.get_master",
                     return_value=("192.0.2.10", "19000"),
+                ), patch(
+                    "rtp_llm.utils.scr.network.topology",
+                    return_value={0: "192.0.2.20", 1: "192.0.2.20"},
                 ), patch("rtp_llm.distribute.distributed_server.TCPStore") as store:
                     server = DistributedServer(configs, wait_for_workers=False)
                     server.regist()
@@ -57,7 +63,13 @@ class ScrTransportBoundaryTest(unittest.TestCase):
                         f"{rank_ip}:{server.worker_info.server_port}",
                     )
                     self.assertEqual(server.worker_info.ip, "192.0.2.20")
-                    self.assertEqual(dict(os.environ), env)
+                    expected_env = env.copy()
+                    if "RANK_SIZE" in env:
+                        expected_env.update(
+                            NCCL_SOCKET_IFNAME="scr_vxlan0",
+                            GLOO_SOCKET_IFNAME="scr_vxlan0",
+                        )
+                    self.assertEqual(dict(os.environ), expected_env)
 
     def test_dp_fanout_uses_loopback_only_for_single_node_templates(self):
         for nodes, enabled, phase in product(
@@ -67,6 +79,7 @@ class ScrTransportBoundaryTest(unittest.TestCase):
                 configs = PyEnvConfigs()
                 pc = configs.parallelism_config
                 pc.world_size, pc.local_world_size, pc.tp_size = 4, 4 // nodes, 2
+                pc.dp_size = 2
                 members = [
                     WorkerInfo(
                         ip=f"192.0.2.{10 + i // pc.local_world_size}",

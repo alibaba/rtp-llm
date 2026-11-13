@@ -14,7 +14,7 @@ py_library(
     ]),
     imports = ["./python_client/"],
     visibility = ["//visibility:public"],
-    deps = [":kmon_flume"],
+    deps = [":kmon_flume", "//rtp_llm:scr_lifecycle"],
 )
 
 py_test(

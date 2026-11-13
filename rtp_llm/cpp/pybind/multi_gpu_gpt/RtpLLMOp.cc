@@ -459,6 +459,7 @@ void RtpLLMOp::prepareRPCService(const EngineInitParams&                       m
 void RtpLLMOp::startRPCServerInternal(const EngineInitParams& maga_init_params) {
 #if USING_CUDA || USING_ROCM
     // Deferred startup runs on a new thread; bind its device before cache initialization.
+    // Use the PyTorch device registry so ROCm can use its CUDA-compatible device type.
     const int device_id = static_cast<int>(getDeviceId());
     const c10::DeviceGuard device_guard(c10::Device(c10::kCUDA, static_cast<c10::DeviceIndex>(device_id)));
     RTP_LLM_LOG_INFO("deferred RPC startup bound to device_id=%d", device_id);

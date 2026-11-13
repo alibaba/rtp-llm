@@ -261,10 +261,14 @@ class ScrKmonitorLifecycleTest(unittest.TestCase):
         for native in (
             SimpleNamespace(),
             SimpleNamespace(resume_kmonitor_after_scr=lambda: False),
+            SimpleNamespace(
+                resume_kmonitor_after_scr=mock.Mock(side_effect=RuntimeError("sink unavailable"))
+            ),
         ):
             with mock.patch.dict(sys.modules, {"libth_transformer": native}):
-                with self.assertRaisesRegex(RuntimeError, "did not start"):
+                with self.assertLogs(scr.LOGGER, level="ERROR") as messages:
                     scr._start_native_kmonitor("seed")
+                self.assertIn("native Kmonitor", messages.output[0])
 
 
 if __name__ == "__main__":
