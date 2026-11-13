@@ -56,6 +56,9 @@ def validate_master_launch(config, launch_env, *, local_election):
                 "FLEXLB_SYNC_CONSISTENCY_CONFIG",
                 "FLEXLB_ADVERTISED_IP",
                 "MOCK_MASTER_PORT",
+                "BIZ_NAME",
+                "DEPLOYMENT_NAME",
+                "ZONE_NAME",
             }
         )
     for source, keys in [

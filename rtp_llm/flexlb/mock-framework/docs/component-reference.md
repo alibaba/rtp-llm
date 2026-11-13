@@ -8,6 +8,8 @@
 
 `environment.master.config` 使用原生环境变量字符串。`FLEXLB_CONFIG` 是业务 JSON，`MODEL_SERVICE_CONFIG` 是路由 JSON。本地支持单 endpoint 组、P/D/V 分离角色和 gRPC。Runner 使用实验内的发现文件替换路由目标，保留服务 ID、组和角色信息。
 
+本地 Runner 负责写入 `FLEXLB_CONFIG.consistency` 和实验的部署身份。多个 Master JVM 使用不同的回环 IP，共用 HTTP 端口及其加 2 的 gRPC 端口。Mock Master 启动器通过 `flexlb.grpc.bind-address` 指定 gRPC 监听 IP，通过 `flexlb.consistency.advertised-ip` 指定 ZooKeeper 和主备转发使用的本机 IP。宿主机必须能绑定分配给各 JVM 的回环地址。
+
 P 使用 `mock.scheduler.mode: fifo` 时，Master 使用 NON_BATCH 交付。Master 通过 EnqueueBatch 或 EnqueueGroup 交付时，P 必须开启 `group` 模式。原生批量入口支持 DP rank 0。
 
 ## Engine 配置规则

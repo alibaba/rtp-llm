@@ -47,9 +47,6 @@ FLEXLB_CONFIG: |-
           "costEstimator": {
             "expression": "1.0 * running_size / max_running_size "
           }
-        },
-        "vit": {
-          "cacheAffinityEnabled": true
         }
       }
     },
@@ -79,16 +76,10 @@ FLEXLB_CONFIG: |-
     "grpcServer": {
       "executorCoreSize": 64,
       "executorMaxSize": 64,
-      "executorQueueSize": 1000,
-      "receiveBudgetBytes": 17179869184,
-      "maxReceivingRequests": 1016,
-      "maxReceivingControlRequests": 8
+      "executorQueueSize": 1000
     },
     "cacheMatching": {
       "type": "LOCAL_SYNC"
-    },
-    "engineGrpc": {
-      "kvCacheMaxInboundMessageBytes": 268435456
     }
   }
 MODEL_SERVICE_CONFIG: |-

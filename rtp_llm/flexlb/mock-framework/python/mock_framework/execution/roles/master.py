@@ -45,6 +45,7 @@ def _resolve_discovery(route_json, topology, *, require_engines):
                 raise ValueError(
                     "local Engine endpoints require grpc protocol and a discovery address"
                 )
+            endpoint["discovery"] = {"type": "static-env"}
             domain = endpoint["address"]
             if domain in hosts:
                 raise ValueError("Each Engine role needs a distinct discovery address")
@@ -83,6 +84,12 @@ def prepare_master_env(config, topology, directory, *, require_engines=True):
     route, hosts = _resolve_discovery(
         env["MODEL_SERVICE_CONFIG"], topology, require_engines=require_engines
     )
+    kvcm = route.get("kvcm")
+    if kvcm and "discovery" not in kvcm:
+        kvcm["discovery"] = {
+            "type": "static-env",
+            "hosts": [f"{kvcm['address']}:{kvcm.get('port', 6381)}"],
+        }
     discovery = directory / "discovery.json"
     write_json(discovery, hosts)
     route.pop("hosts", None)
@@ -119,19 +126,24 @@ class MasterRole:
         self.supervisor, self.topology = supervisor, topology
         self.records, self.monitoring = records, monitoring
         self.election_env = {}
+        self.consistency_config = None
         self._next = 0
         self._instances = {}
         self._lock = asyncio.Lock()
 
     def configure_election(self, connect):
+        deployment = "mock-" + uuid.uuid4().hex
+        self.consistency_config = {
+            "type": "ZOOKEEPER",
+            "connectString": connect,
+            "sessionTimeoutMs": 6000,
+            "connectionTimeoutMs": 6000,
+        }
         self.election_env = {
-            "HIPPO_ROLE": "mock-" + uuid.uuid4().hex,
-            "FLEXLB_SYNC_CONSISTENCY_CONFIG": json.dumps(
-                {
-                    "needConsistency": True,
-                    "zookeeperConfig": {"zkHost": connect, "zkTimeoutMs": 6000},
-                }
-            ),
+            "HIPPO_ROLE": deployment,
+            "BIZ_NAME": "mock",
+            "DEPLOYMENT_NAME": deployment,
+            "ZONE_NAME": "local",
             "MOCK_MASTER_PORT": str(
                 master_port(self.role_config["deployment"]["replicas"])
             ),
@@ -147,6 +159,12 @@ class MasterRole:
         if self.election_env:
             host = master_host(index)
             check_master_ports(host, int(self.election_env["MOCK_MASTER_PORT"]))
+            behavior = json.loads(env.get("FLEXLB_CONFIG", "{}"))
+            if "consistency" in behavior:
+                raise ExecutionError("Local runner assigns FLEXLB_CONFIG.consistency")
+            behavior.setdefault("schemaVersion", 3)
+            behavior["consistency"] = self.consistency_config
+            env["FLEXLB_CONFIG"] = json.dumps(behavior)
             env.update(self.election_env, FLEXLB_ADVERTISED_IP=host)
         return env
 

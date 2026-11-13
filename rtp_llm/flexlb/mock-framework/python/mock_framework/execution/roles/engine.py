@@ -33,7 +33,7 @@ class EngineRole:
             with socket.socket() as probe:
                 probe.bind(("127.0.0.1", 0))
                 port = probe.getsockname()[1]
-            if port not in self.used_ports:
+            if port <= 65534 and port not in self.used_ports:
                 self.used_ports.add(port)
                 return port
         raise ExecutionError("Cannot allocate a fresh Engine listener port")

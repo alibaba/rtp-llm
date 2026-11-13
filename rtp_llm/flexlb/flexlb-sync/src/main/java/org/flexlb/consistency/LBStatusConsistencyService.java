@@ -53,7 +53,10 @@ public class LBStatusConsistencyService implements MasterElectService {
     public void init() {
         log.info("start init LBStatusConsistencyService.");
         try {
-            localHostIp = InetAddress.getLocalHost().getHostAddress();
+            localHostIp =
+                    isNeedConsistency()
+                            ? zookeeperMasterElectService.getLocalIp()
+                            : InetAddress.getLocalHost().getHostAddress();
         } catch (UnknownHostException e) {
             throw new RuntimeException(e);
         }

@@ -45,8 +45,8 @@ public final class MasterMain {
         var directory = Path.of(required("MOCK_OUTPUT_DIR"));
         int port = Integer.parseInt(required("MOCK_MASTER_PORT"));
         String host = required("FLEXLB_ADVERTISED_IP");
-        var election = json.readTree(required("FLEXLB_SYNC_CONSISTENCY_CONFIG"));
-        if (!election.path("needConsistency").asBoolean())
+        var election = json.readTree(required("FLEXLB_CONFIG")).path("consistency");
+        if (!"ZOOKEEPER".equals(election.path("type").asText()))
             throw new IllegalArgumentException("Master requires ZooKeeper election");
         SpringProperties.setFlag(AbstractEnvironment.IGNORE_GETENV_PROPERTY_NAME);
         org.flexlb.OpenTelemetryBootstrap.configureFromEnvironment();
@@ -55,6 +55,10 @@ public final class MasterMain {
         var context =
                 application.run(
                         "--server.address=" + host,
+                        "--flexlb.monitor.provider=micrometer",
+                        "--flexlb.monitor.metric-whitelist=flexlb_",
+                        "--flexlb.grpc.bind-address=" + host,
+                        "--flexlb.consistency.advertised-ip=" + host,
                         "--server.port=" + port,
                         "--management.server.port=" + port,
                         "--flexlb.log.path=" + directory.resolve("logs"));
@@ -125,8 +129,6 @@ public final class MasterMain {
                                         port,
                                         "advertised_ip",
                                         host,
-                                        "FLEXLB_SYNC_CONSISTENCY_CONFIG",
-                                        election,
                                         "HIPPO_ROLE",
                                         required("HIPPO_ROLE")));
                 Runtime.getRuntime()
