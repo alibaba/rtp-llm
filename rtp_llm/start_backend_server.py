@@ -249,7 +249,7 @@ def local_rank_start(
         _start_scr_rank_arrival(
             backend_manager, py_env_configs, scr_manifest=scr_manifest, world_rank=world_rank
         )
-        # Phase 2: bind listeners only after the barrier released.
+        # Phase 2: start workers and transports, then bind listeners.
         backend_manager.start_service()
 
         logging.info("Backend server initialized successfully, sending ready status")

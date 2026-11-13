@@ -93,7 +93,7 @@ private:
                                                        const std::optional<std::vector<torch::Tensor>>& feature_hashes);
 
 public:
-    virtual void startDeferredServices() {}
+    virtual void startTransport() {}
 
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input,
                                        grpc::ServerContext*                     server_context = nullptr);
