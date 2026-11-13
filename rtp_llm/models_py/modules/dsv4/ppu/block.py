@@ -228,7 +228,6 @@ class Block(_BaseBlock):
             is_decode_role=is_decode_role,
             strategy=moe_strategy,
             n_physical_experts=n_physical_experts,
-            observer_factory=self._moe_observer,
             record_function_scope=_profiler.moe_record_function_scope,
         )
         self.ffn = (
@@ -372,9 +371,6 @@ class Block(_BaseBlock):
         the single authority; the DSpARK draft substitutes its non-causal
         fixed-block attention this way instead of copying the block body.
         """
-        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
-
-        _dbg_layer = _rt.should_record_layer(self.layer_id)
         mega_adapter = self._mega_csa_adapter or self._mega_hca_adapter
         use_mega_attention = (
             attn_fn is None
@@ -382,9 +378,8 @@ class Block(_BaseBlock):
             and mega_adapter.supports_decode_shape(x, attn_metadata)
         )
         if use_mega_attention:
-            # Fused HC/norm intermediates are not exposed by Mega. The shared
-            # residual record below remains available; DSV4_MEGA=0 restores
-            # the ordinary attention intermediate records for debugging.
+            # Fused HC/norm intermediates are not exposed by Mega;
+            # DSV4_MEGA=0 restores the ordinary attention path.
             x = mega_adapter.forward_attention_sublayer(
                 self, x, attn_metadata, kv_cache=kv_cache
             )
@@ -393,7 +388,7 @@ class Block(_BaseBlock):
             residual = x
             prepared = None
             fused_attn_pre = getattr(self.attn, "forward_decode_with_hc_pre", None)
-            if not _dbg_layer and attn_fn is None and callable(fused_attn_pre):
+            if attn_fn is None and callable(fused_attn_pre):
                 prepared = fused_attn_pre(
                     x, attn_metadata, self.attn_hc, self.attn_norm, kv_cache=kv_cache
                 )
@@ -406,10 +401,7 @@ class Block(_BaseBlock):
                     self.attn_norm,
                     tp_size=self.tp_size,
                     tp_rank=self.tp_rank,
-                    dbg_tag=f"L{self.layer_id:02d}_decode_attn_hc_pre" if _dbg_layer else None,
                 )
-                if _dbg_layer:
-                    _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
                 if attn_fn is not None:
                     attn_out = attn_fn(x_pre)
                 else:
@@ -418,16 +410,12 @@ class Block(_BaseBlock):
                         attn_metadata,
                         kv_cache=kv_cache,
                     )
-            if _dbg_layer:
-                _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_out", attn_out)
             x = self.attn_hc.post(attn_out, residual, post, comb)
-        if _dbg_layer:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_residual", x)
 
         # FFN path — MoE has no per-step state, reuse existing forward
         residual = x
         fused_ffn_pre = getattr(self.ffn, "forward_with_hc_pre", None)
-        if not _dbg_layer and callable(fused_ffn_pre):
+        if callable(fused_ffn_pre):
             fused = fused_ffn_pre(
                 x, input_ids, self.ffn_hc, self.ffn_norm,
                 active_token_mask=getattr(attn_metadata, "active_token_mask", None),
@@ -435,30 +423,25 @@ class Block(_BaseBlock):
             if fused is not None:
                 return fused
         x_pre, post, comb = self._hc_pre_norm(
-                    self.ffn_hc,
+            self.ffn_hc,
             x,
             self.ffn_norm,
             tp_size=self.tp_size,
             tp_rank=self.tp_rank,
-            dbg_tag=f"L{self.layer_id:02d}_decode_ffn_hc_pre" if _dbg_layer else None,
         )
-        if _dbg_layer:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
         active_token_mask = getattr(attn_metadata, "active_token_mask", None)
         ffn_kwargs = (
             {"active_token_mask": active_token_mask}
             if active_token_mask is not None else {}
         )
         fused_ffn_hc = getattr(self.ffn, "forward_with_hc", None)
-        if not _dbg_layer and callable(fused_ffn_hc):
+        if callable(fused_ffn_hc):
             fused = fused_ffn_hc(
                 x_pre, input_ids, self.ffn_hc, residual, post, comb, **ffn_kwargs
             )
             if fused is not None:
                 return fused
         ffn_out = self.ffn(x_pre, input_ids, is_decode_forward=True, **ffn_kwargs)
-        if _dbg_layer:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
         x = self.ffn_hc.post(ffn_out, residual, post, comb)
         return x
 
@@ -607,25 +590,6 @@ class Block(_BaseBlock):
         to ``int(start_pos)``), so the single-request case is bit-equal
         to the pre-batched behavior.
         """
-        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
-
-        # Master switch: when MOEDBG=0 the AND short-circuits so neither the
-        # layer_id compare nor any record_if_level call site below runs.
-        # By default keep the narrow trace from _record_tensor; use
-        # MOEDBG_LAYER/MOEDBG_ALL_LAYERS for wider bisection.
-        _dbg_layer = _rt.should_record_layer(self.layer_id)
-        dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
-        dbg_pos_mask = None
-        dbg_pos_name = None
-        dbg_positions = positions
-        cp_ctx = getattr(self.attn, "_cp_ctx", None)
-        if cp_ctx is not None and getattr(cp_ctx, "global_positions", None) is not None:
-            cp_positions = cp_ctx.global_positions
-            if cp_positions.numel() == positions.numel():
-                dbg_positions = cp_positions
-        if _dbg_layer and dbg_pos >= 0:
-            dbg_pos_mask = dbg_positions.to(torch.long) == int(dbg_pos)
-            dbg_pos_name = f"pos{dbg_pos}"
         # Attention path
         residual = x
         x_pre, post, comb = self._hc_pre_norm(
@@ -634,16 +598,7 @@ class Block(_BaseBlock):
             self.attn_norm,
             tp_size=self.tp_size,
             tp_rank=self.tp_rank,
-            dbg_tag=f"L{self.layer_id:02d}_attn_hc_pre" if _dbg_layer else None,
         )  # [T, dim], [T, hc, 1], [T, hc, hc]
-        if _dbg_layer:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_in", x_pre)
-            if dbg_pos_mask is not None:
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_attn_in_{dbg_pos_name}",
-                    x_pre[dbg_pos_mask].contiguous(),
-                )
 
         # PPU attention consumes flat tokens and per-token positions even when
         # the runtime KV-cache dtype flag is false.
@@ -653,24 +608,8 @@ class Block(_BaseBlock):
             kv_cache=kv_cache,
             block_tables_by_type=block_tables_by_type,
         )  # [T, dim]
-        if _dbg_layer:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_out", attn_out)
-            if dbg_pos_mask is not None:
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_attn_out_{dbg_pos_name}",
-                    attn_out[dbg_pos_mask].contiguous(),
-                )
         x = self.attn_hc.post(attn_out, residual, post, comb)  # [T, hc, dim]
         self._sync_after_first_cp_prefill_attention()
-        if _dbg_layer:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_residual", x)
-            if dbg_pos_mask is not None:
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_attn_residual_{dbg_pos_name}",
-                    x[dbg_pos_mask].contiguous(),
-                )
 
         # FFN path
         residual = x
@@ -680,40 +619,14 @@ class Block(_BaseBlock):
             self.ffn_norm,
             tp_size=self.tp_size,
             tp_rank=self.tp_rank,
-            dbg_tag=f"L{self.layer_id:02d}_ffn_hc_pre" if _dbg_layer else None,
         )  # [T, dim], ...
-        if _dbg_layer:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_in", x_pre)
-            if dbg_pos_mask is not None:
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_ffn_in_{dbg_pos_name}",
-                    x_pre[dbg_pos_mask].contiguous(),
-                )
         ffn_in_ids = (
             input_ids
             if input_ids is not None
             else torch.zeros(x.size(0), dtype=torch.long, device=x.device)
         )
-        if _dbg_layer and dbg_pos_mask is not None:
-            ffn_out = self.ffn(x_pre, ffn_in_ids, positions=dbg_positions)
-        else:
-            ffn_out = self.ffn(x_pre, ffn_in_ids)  # [T, dim]
-        if _dbg_layer:
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_out", ffn_out)
-            if dbg_pos_mask is not None:
-                _rt.record_if_level(
-                    2,
-                    f"L{self.layer_id:02d}_ffn_out_{dbg_pos_name}",
-                    ffn_out[dbg_pos_mask].contiguous(),
-                )
+        ffn_out = self.ffn(x_pre, ffn_in_ids)  # [T, dim]
         x = self.ffn_hc.post(ffn_out, residual, post, comb)  # [T, hc, dim]
-        if _dbg_layer and dbg_pos_mask is not None:
-            _rt.record_if_level(
-                2,
-                f"L{self.layer_id:02d}_ffn_residual_{dbg_pos_name}",
-                x[dbg_pos_mask].contiguous(),
-            )
         return x  # [T, hc, dim]
 
 

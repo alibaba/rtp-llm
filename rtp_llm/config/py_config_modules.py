@@ -211,13 +211,18 @@ class LoadConfig:
         self.force_cpu_load_weights: bool = False
         self.loader_recycle_handles: bool = True
         self.moe_pure_tp_preshard: bool = False
+        self.loader_drop_page_cache: bool = True
+        self.loader_drop_page_cache_threshold_mb: int = 2048
 
     def to_string(self):
         return (
             f"load_method: {self.load_method}\n"
             f"force_cpu_load_weights: {self.force_cpu_load_weights}\n"
             f"loader_recycle_handles: {self.loader_recycle_handles}\n"
-            f"moe_pure_tp_preshard: {self.moe_pure_tp_preshard}"
+            f"moe_pure_tp_preshard: {self.moe_pure_tp_preshard}\n"
+            f"loader_drop_page_cache: {self.loader_drop_page_cache}\n"
+            f"loader_drop_page_cache_threshold_mb: "
+            f"{self.loader_drop_page_cache_threshold_mb}"
         )
 
 
@@ -649,6 +654,23 @@ class JITConfig:
         )
 
 
+class HotHookConfig:
+    """RTP hot hook (debug injection runtime) configuration.
+
+    Python-only config: the hot hook is a pure-Python debugging facility, so
+    its switch deliberately avoids the C++ ConfigModules chain. A non-empty
+    ``config_path`` IS the switch — no separate master flag. The JSON it
+    points to carries both the hook spec and the loader-level sub-parameters
+    (hook_file / dump_dir / allow_local_mutation).
+    """
+
+    def __init__(self):
+        self.config_path: Optional[str] = None
+
+    def to_string(self):
+        return f"config_path: {self.config_path}"
+
+
 class DeepEPConfig:
     """
     Configuration for DeepEP / MoriEP settings.
@@ -728,6 +750,7 @@ class PyEnvConfigs:
         self.moe_config = MoeConfig()
         self.master_config: MasterConfig = MasterConfig()
         self.jit_config = JITConfig()
+        self.hot_hook_config = HotHookConfig()
         self.py_hw_kernel_config: HWKernelConfig = HWKernelConfig()
         self.all_reduce_backend: str = "auto"
         self.all_reduce_large_prefill: Optional[bool] = None
@@ -774,6 +797,8 @@ class PyEnvConfigs:
             "[moe_config]\n" + self.moe_config.to_string() + "\n\n"
             "[master_config]\n" + self.master_config.to_string() + "\n\n"
             "[jit_config]\n" + self.jit_config.to_string() + "\n\n"
+            + "[hot_hook_config]\n"
+            + self.hot_hook_config.to_string() + "\n\n"
             "[py_hw_kernel_config]\n" + self.py_hw_kernel_config.to_string() + "\n\n"
             "[sp_config]\n" + self.sp_config.to_string() + "\n\n"
             "[sampler_config]\n" + self.sampler_config.to_string() + "\n\n"

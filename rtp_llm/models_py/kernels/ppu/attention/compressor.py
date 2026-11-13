@@ -1,6 +1,5 @@
 """PPU reciprocal-square-root compressor kernels; shared validation stays upstream."""
 
-import os
 from typing import Optional
 
 import torch
@@ -9,10 +8,7 @@ import triton.language as tl
 
 from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
     _trap_invalid_kv_access, _FUSED_CONSTEXPR_BY_HEAD_DIM,
-    _fused_num_warps, _validate_fused_state_block_table,
-)
-from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
-    trap_invalid_kv_access_enabled, validate_slot_mapping,
+    _fused_num_warps,
 )
 
 
@@ -589,6 +585,9 @@ def run_fused_compress_kv_write(
     cu_seq_per_req: Optional[torch.Tensor] = None,  # [B+1] int64
     state_tokens_per_block: int,
     is_decode: bool = False,
+    # Large-EP Decode split kernel. The provider resolves the topology and the
+    # decode profile; this wrapper must never read EP_SIZE/TP_SIZE from env.
+    hca_split: bool = False,
 ) -> Optional[torch.Tensor]:
     """Boundary-token compress→norm→rope→fp8 quant→KV-pool store.
 
@@ -633,29 +632,6 @@ def run_fused_compress_kv_write(
         seq_start_per_req = positions
         cu_seq_per_req = positions
 
-    validate_slot_mapping(
-        "compressor.fused_compress.kv_slot_mapping",
-        kv_slot_mapping,
-        block_size=kv_block_size,
-        num_blocks=int(kv_cache.shape[0]),
-        negative_mode="skip_any",
-    )
-    _validate_fused_state_block_table(
-        site="compressor.fused_compress.state_block_table",
-        block_table=block_table,
-        token_to_req_indices=token_to_req_indices,
-        positions=positions,
-        state_block_size=state_block_size,
-        num_state_blocks=int(state_cache.shape[0]),
-        compress_ratio=compress_ratio,
-        overlap=overlap,
-        seq_start=seq_start,
-        n_raw=n_raw,
-        batched=batched,
-        seq_start_per_req=seq_start_per_req,
-        cu_seq_per_req=cu_seq_per_req,
-    )
-
     if (
         (disable_raw_path or (
             is_decode and batched
@@ -667,16 +643,15 @@ def run_fused_compress_kv_write(
         and compress_ratio == 128
         and not overlap
         and state_width == 512
-        and 0 < N <= 12 and os.environ.get("EP_SIZE") in ("16", "32")
-        and os.environ.get("TP_SIZE") == "1"
-        and os.environ.get("DSV4_PPU_HCA_SPLIT", "0") == "1"
+        and 0 < N <= 12
+        and hca_split
     ):
         from rtp_llm.models_py.kernels.ppu.attention.ppu_hca_split import hca_decode_split
 
         hca_decode_split(
             state_cache, token_to_req_indices, positions, block_table,
             rms_norm_weight, rms_norm_eps, cos_sin_cache, kv_slot_mapping,
-            kv_cache, state_tokens_per_block, trap_invalid_kv_access_enabled(),
+            kv_cache, state_tokens_per_block,
             raw_kv=kv_raw if batched else None,
             raw_score=score_raw if batched else None,
             ape=ape if batched else None,
@@ -732,7 +707,7 @@ def run_fused_compress_kv_write(
         NUM_STATE_BLOCKS=int(state_cache.shape[0]),
         NUM_KV_BLOCKS=int(kv_cache.shape[0]),
         BATCHED=batched,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        TRAP_INVALID_KV_ACCESS=True,
         STATE_RING_ENTRIES=state_ring_entries,
         # Preserve upstream CUDA rounding before the compressed KV quantizer.
         # Keep the previously validated reciprocal-sqrt path on PPU only.

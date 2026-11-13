@@ -442,7 +442,6 @@ class CompressorFP8(PoolBackedModule):
         self._cp_gather_stream: Optional[Any] = None
         self._kv_cache_sharded: bool = False
         self._profile_label: Optional[str] = None
-        self._dbg_prefix: Optional[str] = None
 
     def _cp_profile_name(self, profile_label: Optional[str]) -> str:
         label = profile_label or self._profile_label

@@ -1,4 +1,6 @@
+import json
 import os
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -7,6 +9,8 @@ import torch
 from safetensors.torch import save_file
 
 from rtp_llm.utils import ckpt_file_info
+from rtp_llm.utils import database as database_module
+from rtp_llm.utils.ckpt_file_info import CkptMetaCache
 from rtp_llm.utils.database import _LAYER_RE, CkptDatabase
 
 
@@ -338,6 +342,249 @@ class PageCacheShedTest(unittest.TestCase):
                 # Broken stays quiet: no retry, no raise.
                 info._note_bytes_read(ckpt_file_info._DROP_PAGE_CACHE_THRESHOLD)
                 self.assertEqual(fadvise.call_count, 1)
+
+
+class CkptMetaCacheTest(unittest.TestCase):
+    """Unit tests for the CkptMetaCache class on isolated instances."""
+
+    def test_get_put_roundtrip(self):
+        with tempfile.NamedTemporaryFile() as tmp:
+            cache = CkptMetaCache()
+            cache.put(tmp.name, {"a": 1})
+            self.assertEqual(cache.get(tmp.name), {"a": 1})
+
+    def test_get_miss_returns_none(self):
+        with tempfile.NamedTemporaryFile() as tmp:
+            cache = CkptMetaCache()
+            self.assertIsNone(cache.get(tmp.name))
+
+    def test_stat_change_invalidates(self):
+        with tempfile.NamedTemporaryFile() as tmp:
+            cache = CkptMetaCache()
+            cache.put(tmp.name, {"a": 1})
+            # Bump mtime to a strictly later value.
+            st = os.stat(tmp.name)
+            os.utime(tmp.name, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+            self.assertIsNone(cache.get(tmp.name))
+
+    def test_size_change_invalidates(self):
+        with tempfile.NamedTemporaryFile() as tmp:
+            cache = CkptMetaCache()
+            cache.put(tmp.name, {"a": 1})
+            tmp.write(b"x")
+            tmp.flush()
+            self.assertIsNone(cache.get(tmp.name))
+
+    def test_get_or_load_loads_once_and_shares_object(self):
+        with tempfile.NamedTemporaryFile() as tmp:
+            cache = CkptMetaCache()
+            calls = []
+
+            def loader(path):
+                calls.append(path)
+                return {"parsed": True}
+
+            first = cache.get_or_load(tmp.name, loader)
+            second = cache.get_or_load(tmp.name, loader)
+            self.assertEqual(first, {"parsed": True})
+            self.assertIs(first, second)
+            self.assertEqual(calls, [tmp.name])
+
+    def test_rewrite_during_parse_does_not_stick(self):
+        # A rewrite landing inside the parse window must be recorded under
+        # the PRE-parse stat, so the next get fails validation and re-parses
+        # instead of serving old content under the new file's identity.
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".safetensors") as tmp:
+            tmp.write("A")
+            tmp.flush()
+            cache = CkptMetaCache()
+            calls = []
+
+            def loader(path):
+                calls.append(path)
+                with open(path, "w") as file:
+                    file.write("B")
+                st = os.stat(path)
+                os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+                return {"v": "A-parsed"}
+
+            first = cache.get_or_load(tmp.name, loader)
+            self.assertEqual(first, {"v": "A-parsed"})
+            # The entry holds the old stat; the rewritten file misses and
+            # re-parses instead of hitting the stale entry.
+            second = cache.get_or_load(tmp.name, lambda p: {"v": "B-parsed"})
+            self.assertEqual(second, {"v": "B-parsed"})
+            self.assertEqual(len(calls), 1)
+
+    def test_put_none_is_skipped(self):
+        with tempfile.NamedTemporaryFile() as tmp:
+            cache = CkptMetaCache()
+            cache.put(tmp.name, None)
+            self.assertIsNone(cache.get(tmp.name))
+            # None put records no miss and caches nothing: a later real load
+            # still parses once.
+            value = cache.get_or_load(tmp.name, lambda p: {"v": 1})
+            self.assertEqual(value, {"v": 1})
+
+    def test_unstatable_path_is_silent(self):
+        cache = CkptMetaCache()
+        self.assertIsNone(cache.get("/nonexistent/path/file.safetensors"))
+        cache.put("/nonexistent/path/file.safetensors", {"a": 1})  # no raise
+        self.assertIsNone(cache.get("/nonexistent/path/file.safetensors"))
+
+    def test_stats_and_clear(self):
+        with tempfile.NamedTemporaryFile() as tmp:
+            cache = CkptMetaCache()
+            cache.put(tmp.name, {"a": 1})
+            cache.get(tmp.name)
+            cache.get("/nonexistent")  # miss, no stat entry
+            hits, misses = cache.stats()
+            self.assertEqual((hits, misses), (1, 1))
+            cache.clear()
+            self.assertEqual(cache.stats(), (0, 0))
+            self.assertIsNone(cache.get(tmp.name))
+
+
+class MetaCacheIntegrationTest(unittest.TestCase):
+    """CkptDatabase-level tests for the process-wide metadata caches.
+
+    Covers the dspark smoke scenario: target database scan -> target
+    cleanup_database (metadata rebind) -> draft database construction on the
+    SAME directory must hit the cache instead of re-reading shard headers.
+    """
+
+    def setUp(self):
+        ckpt_file_info._FILE_META_CACHE.clear()
+        database_module._INDEX_CACHE.clear()
+
+    @staticmethod
+    def _testdata_path():
+        return os.path.join(
+            os.getcwd(), "rtp_llm/utils/test/testdata/ckpt_database_testdata/"
+        )
+
+    @staticmethod
+    def _write_two_shard_fixture(tmp):
+        """A two-shard safetensors directory with model.safetensors.index.json."""
+        shard_dir = os.path.join(tmp, "two_shard_ckpt")
+        os.makedirs(shard_dir)
+        shard1 = os.path.join(shard_dir, "model-00001-of-00002.safetensors")
+        shard2 = os.path.join(shard_dir, "model-00002-of-00002.safetensors")
+        save_file({"w1": torch.zeros(2), "b1": torch.zeros(2)}, shard1)
+        save_file({"w2": torch.zeros(2), "b2": torch.zeros(2)}, shard2)
+        index = {
+            "weight_map": {
+                "w1": "model-00001-of-00002.safetensors",
+                "b1": "model-00001-of-00002.safetensors",
+                "w2": "model-00002-of-00002.safetensors",
+                "b2": "model-00002-of-00002.safetensors",
+            }
+        }
+        with open(os.path.join(shard_dir, "model.safetensors.index.json"), "w") as f:
+            json.dump(index, f)
+        return shard_dir
+
+    @staticmethod
+    def _counting_parse():
+        original = ckpt_file_info._parse_file_meta
+        calls = []
+
+        def wrapper(file):
+            calls.append(file)
+            return original(file)
+
+        return wrapper, calls
+
+    def test_second_database_hits_cache(self):
+        path = os.path.join(self._testdata_path(), "safetensor_testdata")
+        wrapper, calls = self._counting_parse()
+        with patch.object(ckpt_file_info, "_parse_file_meta", wrapper):
+            db_first = CkptDatabase(path)
+            db_second = CkptDatabase(path)
+        self.assertEqual(len(calls), 1)  # only the first construction parses
+        self.assertEqual(
+            len(db_second.pretrain_file_list), len(db_first.pretrain_file_list)
+        )
+        self.assertEqual(
+            db_second.get_pretrain_tensor_names(),
+            db_first.get_pretrain_tensor_names(),
+        )
+
+    def test_filter_independence_with_shared_meta(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shard_dir = self._write_two_shard_fixture(tmp)
+            db_a = CkptDatabase(shard_dir)
+            db_b = CkptDatabase(shard_dir)
+            self.assertEqual(len(db_a.pretrain_file_list), 2)
+            # Destructive in-place filter on one database must not affect the
+            # other even though they share cached metadata dicts.
+            db_a.filter_by_tensor_name_regexes([re.compile(r"w1")])
+            self.assertEqual(len(db_a.pretrain_file_list), 1)
+            self.assertEqual(len(db_b.pretrain_file_list), 2)
+
+    def test_cleanup_does_not_poison_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shard_dir = self._write_two_shard_fixture(tmp)
+            db_target = CkptDatabase(shard_dir)
+            # Simulate ModelLoader.cleanup_database (loader.py:615-656): it
+            # rebinds each CkptFileInfo.metadata to None and clears the file
+            # lists. The rebind must not touch the cached metadata dicts.
+            for ckpt_file in db_target.pretrain_file_list:
+                ckpt_file.close_safetensor_handle()
+                ckpt_file.metadata = None
+            db_target.pretrain_file_list.clear()
+            wrapper, calls = self._counting_parse()
+            with patch.object(ckpt_file_info, "_parse_file_meta", wrapper):
+                db_draft = CkptDatabase(shard_dir)
+            self.assertEqual(calls, [])  # draft reuses target's cached meta
+            self.assertEqual(len(db_draft.pretrain_file_list), 2)
+            for ckpt_file in db_draft.pretrain_file_list:
+                self.assertIsNotNone(ckpt_file.metadata)
+            self.assertEqual(
+                sorted(db_draft.get_pretrain_tensor_names()), ["b1", "b2", "w1", "w2"]
+            )
+
+    def test_cache_invalidates_on_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shard_dir = self._write_two_shard_fixture(tmp)
+            db_before = CkptDatabase(shard_dir)
+            self.assertIn("w1", db_before.get_pretrain_tensor_names())
+            # Rewrite shard 1 with different tensors AND a later mtime.
+            shard1 = os.path.join(shard_dir, "model-00001-of-00002.safetensors")
+            save_file({"renamed": torch.zeros(3)}, shard1)
+            st = os.stat(shard1)
+            os.utime(shard1, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+            db_after = CkptDatabase(shard_dir)
+            names = db_after.get_pretrain_tensor_names()
+            self.assertIn("renamed", names)
+            self.assertNotIn("w1", names)
+            self.assertIn("w2", names)
+
+    def test_index_json_cached(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shard_dir = self._write_two_shard_fixture(tmp)
+            calls = []
+            original = database_module._parse_index_json
+
+            def wrapper(path):
+                calls.append(path)
+                return original(path)
+
+            with patch.object(database_module, "_parse_index_json", wrapper):
+                db_first = CkptDatabase(shard_dir)
+                db_second = CkptDatabase(shard_dir)
+            # load_hf_meta + _parse_weight_style per construction: only the
+            # first parse is real, everything after hits the index cache.
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(db_second.pretrain_file_list), 2)
+
+    def test_bin_branch_cached(self):
+        path = os.path.join(self._testdata_path(), "bin_testdata")
+        wrapper, calls = self._counting_parse()
+        with patch.object(ckpt_file_info, "_parse_file_meta", wrapper):
+            CkptDatabase(path)
+            CkptDatabase(path)
+        self.assertEqual(len(calls), 1)  # torch.load branch also cached
 
 
 if __name__ == "__main__":

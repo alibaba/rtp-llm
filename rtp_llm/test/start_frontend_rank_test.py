@@ -163,7 +163,7 @@ class StartFrontendRankTest(unittest.TestCase):
                     )
                     role = "dash_sc" if is_dash_sc else "frontend"
                     install_hook.assert_called_with(
-                        f"{role}_rank_{local_rank}_server_{server_id}"
+                        f"{role}_rank_{local_rank}_server_{server_id}", child_config
                     )
                     if is_dash_sc:
                         self.assertIs(args[5], barrier.return_value)

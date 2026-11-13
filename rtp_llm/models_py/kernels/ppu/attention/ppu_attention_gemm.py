@@ -1,7 +1,6 @@
 """Qualified M890P decode tiles for the DSV4 attention projections."""
 
 from functools import lru_cache
-import os
 
 # (groups, N, K) -> M -> (block M, block N, warp M, warp N, stages).
 # Keep unmeasured shapes on the library's normal dispatch path.
@@ -40,18 +39,25 @@ def _config(tile, k, sms):
     return sms, bm, bn, 128, wm, wn, stages, get_smem_config(stages, k, bm, bn)
 
 
-def decode_attention_gemm_config(m, n, k, *, groups=1):
-    """Return None for unqualified geometry or a different SM allocation."""
+def decode_attention_gemm_config(
+    m, n, k, *, groups=1, ep_size=None, tp_size=None, profile="auto"
+):
+    """Return None for unqualified geometry or a different SM allocation.
+
+    ``ep_size`` / ``tp_size`` come from the model's parallelism config and
+    ``profile`` from ``DSV4_PPU_DECODE_ATTN_PROFILE``; kernels never read the
+    process environment for topology.
+    """
     tile = _TILES.get((groups, n, k), {}).get(m)
-    if tile is None and os.environ.get("EP_SIZE") in ("16", "32"):
+    if tile is None and ep_size in (16, 32):
         tile = _LARGE_EP_TILES.get((groups, n, k), {}).get(m)
     if (
         tile is None
-        and os.environ.get("EP_SIZE") in ("16", "32")
-        and os.environ.get("TP_SIZE") == "1"
-        and os.environ.get("DSV4_PPU_WOA_SMALL_TILE", "0") == "1"
+        and profile == "large_ep_full"
+        and ep_size in (16, 32)
+        and tp_size == 1
         and (groups, n, k) == (8, 1024, 4096)
-        and (m in (2, 6, 12) or (m == 4 and os.environ.get("EP_SIZE") == "16"))
+        and (m in (2, 6, 12) or (m == 4 and ep_size == 16))
     ):
         tile = (16, 64, 16, 16, 4)
     if tile is None:

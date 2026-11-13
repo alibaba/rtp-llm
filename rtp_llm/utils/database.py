@@ -11,9 +11,30 @@ from tqdm.auto import tqdm
 
 from rtp_llm.lora.lora_file import LoraCkpt
 from rtp_llm.utils import ckpt_file_info
-from rtp_llm.utils.ckpt_file_info import CkptFileInfo, FinetuneType
+from rtp_llm.utils.ckpt_file_info import CkptFileInfo, CkptMetaCache, FinetuneType
 
 _LAYER_RE = re.compile(r"(?:^|\.)(?:layers|h|blocks|layer)\.(\d+)\.")
+
+# Parsed model.safetensors.index.json cache: every CkptDatabase construction
+# reads the index up to three times (load_hf_meta / _parse_weight_style /
+# _parse_ft_weight_params); with target + eplb + draft databases on the same
+# checkpoint directory that is up to a dozen cold reads per model load.
+_INDEX_CACHE = CkptMetaCache()
+
+_HF_INDEX_NAME = "model.safetensors.index.json"
+
+
+def _parse_index_json(path: str) -> Any:
+    with open(path, "r") as reader:
+        return json.loads(reader.read())
+
+
+def _read_hf_index(ckpt_path: str) -> Optional[Dict[str, Any]]:
+    """Return the cached parsed index.json of ``ckpt_path`` (None when absent)."""
+    index = os.path.join(ckpt_path, _HF_INDEX_NAME)
+    if not os.path.exists(index):
+        return None
+    return _INDEX_CACHE.get_or_load(index, _parse_index_json)
 
 
 class BaseDatabase:
@@ -95,10 +116,6 @@ class CkptDatabase(BaseDatabase):
             self._parse_ft_weight_params(path) if self._is_ft_style else None
         )
 
-        logging.debug(
-            f"CkptDatabase all tensor names = {self.get_pretrain_tensor_names()}"
-        )
-
         for ckpt_file in self.pretrain_file_list:
             for tname in ckpt_file.metadata.keys():
                 self._tensor_index[tname] = ckpt_file
@@ -109,6 +126,23 @@ class CkptDatabase(BaseDatabase):
         for ckpt_file in self.finetune_file_list:
             for tname in ckpt_file.metadata.keys():
                 self._tensor_index[tname] = ckpt_file
+
+        # Lazy formatting: the previous f-string built the full tensor-name
+        # list (48 shards x ~1k names, multi-MB string) on every construction
+        # even when DEBUG was filtered out in production.
+        file_hits, file_misses = ckpt_file_info._FILE_META_CACHE.stats()
+        index_hits, index_misses = _INDEX_CACHE.stats()
+        logging.debug(
+            "CkptDatabase tensors=%d files=%d file_meta_cache(hits=%d misses=%d) "
+            "index_cache(hits=%d misses=%d)",
+            len(self._tensor_index),
+            len(self.pretrain_file_list),
+            file_hits,
+            file_misses,
+            index_hits,
+            index_misses,
+        )
+
         logging.info(
             f"CkptDatabase recycle_handles={self._recycle_handles} (asked={recycle_handles},"
             f" copy_out={ckpt_file_info.ROCM_COPY_OUT}, shards={len(self._file_max_layer)})"
@@ -182,9 +216,9 @@ class CkptDatabase(BaseDatabase):
 
     def load_hf_meta(self, path: str):
         # avoid consolidated.safetensors in Mistral-Nemo-Instruct-2407
-        index = os.path.join(path, "model.safetensors.index.json")
-        if os.path.exists(index):
-            files = set(json.load(open(index))["weight_map"].values())
+        meta_json = _read_hf_index(path)
+        if meta_json is not None:
+            files = set(meta_json["weight_map"].values())
             for f in files:
                 ckpt = CkptFileInfo(file_name=os.path.join(path, f))
                 self.pretrain_file_list.append(ckpt)
@@ -384,19 +418,14 @@ class CkptDatabase(BaseDatabase):
         self.lora_ckpt.dump_lora_info()
 
     def _parse_weight_style(self, ckpt_path: str):
-        if ckpt_path and os.path.exists(
-            os.path.join(ckpt_path, "model.safetensors.index.json")
-        ):
-            meta_file = os.path.join(ckpt_path, "model.safetensors.index.json")
-            logging.info(f"read weight style from: {meta_file}")
-            with open(meta_file, "r") as reader:
-                meta_json = json.loads(reader.read())
-                return meta_json.get("is_ft_style_weight", False)
-        else:
-            return False
+        meta_json = _read_hf_index(ckpt_path) if ckpt_path else None
+        if meta_json is not None:
+            logging.info(f"read weight style from: {os.path.join(ckpt_path, _HF_INDEX_NAME)}")
+            return meta_json.get("is_ft_style_weight", False)
+        return False
 
     def _parse_ft_weight_params(self, ckpt_path: str):
-        meta_file = os.path.join(ckpt_path, "model.safetensors.index.json")
-        with open(meta_file, "r") as reader:
-            meta_json = json.loads(reader.read())
-            return meta_json.get("__env__params__", None)
+        meta_json = _read_hf_index(ckpt_path)
+        if meta_json is None:
+            return None
+        return meta_json.get("__env__params__", None)

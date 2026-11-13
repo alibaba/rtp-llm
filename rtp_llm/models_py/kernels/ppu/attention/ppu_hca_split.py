@@ -14,9 +14,10 @@ def _hca_compress_columns(state, reqs, positions, table, compressed,
                           STATE_STRIDE: tl.constexpr, ROW_STRIDE: tl.constexpr,
                           TABLE_STRIDE: tl.constexpr, STATE_BLOCK: tl.constexpr,
                           RING: tl.constexpr, NUM_STATE_BLOCKS: tl.constexpr,
-                          TRAP: tl.constexpr, RAW: tl.constexpr,
+                          RAW: tl.constexpr,
                           RAW_KV_STRIDE: tl.constexpr, RAW_SCORE_STRIDE: tl.constexpr,
-                          APE_STRIDE: tl.constexpr):
+                          APE_STRIDE: tl.constexpr,
+                          TRAP_INVALID_KV_ACCESS: tl.constexpr):
     token = tl.program_id(0)
     position = tl.load(positions + token).to(tl.int64)
     if (position + 1) % 128 != 0:
@@ -35,7 +36,7 @@ def _hca_compress_columns(state, reqs, positions, table, compressed,
     block = tl.load(table + req * TABLE_STRIDE + (pos // STATE_BLOCK) % TABLE_STRIDE,
                     mask=use_cache, other=0).to(tl.int64)
     if tl.max((block >= NUM_STATE_BLOCKS).to(tl.int32), axis=0) != 0:
-        _trap_invalid_kv_access(TRAP)
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
     cols = tl.program_id(1) * 128 + tl.arange(0, 128)
     valid = use_cache & (block > 0)
     block = tl.where(valid, block, 0)
@@ -60,7 +61,8 @@ def _hca_compress_columns(state, reqs, positions, table, compressed,
 def _hca_normalize_store(compressed, positions, weight, cache_cs, slots, cache,
                          EPS: tl.constexpr, CS_STRIDE: tl.constexpr,
                          KV_BLOCK: tl.constexpr, KV_STRIDE: tl.constexpr,
-                         NUM_KV_BLOCKS: tl.constexpr, TRAP: tl.constexpr):
+                         NUM_KV_BLOCKS: tl.constexpr,
+                         TRAP_INVALID_KV_ACCESS: tl.constexpr):
     token = tl.program_id(0)
     position = tl.load(positions + token).to(tl.int64)
     if (position + 1) % 128 != 0:
@@ -70,7 +72,7 @@ def _hca_normalize_store(compressed, positions, weight, cache_cs, slots, cache,
         return
     block = slot // KV_BLOCK
     if block >= NUM_KV_BLOCKS:
-        _trap_invalid_kv_access(TRAP)
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
     cols = tl.arange(0, 512)
     value = tl.load(compressed + token * 512 + cols)
     w = tl.load(weight + cols)
@@ -100,7 +102,7 @@ def _hca_normalize_store(compressed, positions, weight, cache_cs, slots, cache,
 
 
 def hca_decode_split(state, reqs, positions, table, weight, eps, cs, slots, cache,
-                     state_tokens_per_block, trap, *, raw_kv=None, raw_score=None,
+                     state_tokens_per_block, *, raw_kv=None, raw_score=None,
                      ape=None, starts=None, cu=None):
     use_raw = raw_kv is not None
     if not use_raw:
@@ -110,9 +112,10 @@ def hca_decode_split(state, reqs, positions, table, weight, eps, cs, slots, cach
     _hca_compress_columns[(positions.numel(), 4)](
         state, reqs, positions, table, scratch, raw_kv, raw_score, ape, starts, cu,
         state.stride(0), state.stride(1),
-        table.stride(0), state_tokens_per_block, state.shape[1], state.shape[0], trap,
+        table.stride(0), state_tokens_per_block, state.shape[1], state.shape[0],
         use_raw, raw_kv.stride(0), raw_score.stride(0), ape.stride(0),
-        num_warps=4)
+        TRAP_INVALID_KV_ACCESS=True, num_warps=4)
     _hca_normalize_store[(positions.numel(),)](
         scratch, positions, weight, cs, slots, cache, eps, cs.stride(0),
-        cache.shape[1], cache.stride(0), cache.shape[0], trap, num_warps=4)
+        cache.shape[1], cache.stride(0), cache.shape[0],
+        TRAP_INVALID_KV_ACCESS=True, num_warps=4)

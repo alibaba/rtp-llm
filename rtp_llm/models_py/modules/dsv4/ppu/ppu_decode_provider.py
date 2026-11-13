@@ -39,10 +39,16 @@ class PpuDecodeProvider(PpuModuleProvider):
             **kwargs,
         )
 
-    def __init__(self, execution_options):
+    def __init__(
+        self, execution_options, *, ep_size=None, tp_size=None, attn_profile="auto"
+    ):
         super().__init__(execution_options)
         from rtp_llm.models_py.kernels.ppu.runtime import PpuStreamPool
 
+        self._ep_size = ep_size
+        self._tp_size = tp_size
+        self._attn_profile = attn_profile
+        self._hca_split = attn_profile == "large_ep_full"
         support = _check_execution_options(
             self.execution_options, DECODE_EXECUTION_OPTIONS
         )
@@ -125,6 +131,9 @@ class PpuDecodeProvider(PpuModuleProvider):
         for linear in (attention.wq_b, attention.wo_a, attention.wo_b):
             if type(linear) in (PpuFp8Linear, PpuWoAFp8Linear):
                 linear._decode_attention_gemm = self._decode_fusions
+                linear._attn_gemm_ep_size = self._ep_size
+                linear._attn_gemm_tp_size = self._tp_size
+                linear._attn_gemm_profile = self._attn_profile
         if attention.indexer is not None:
             attention.indexer.compressor._fuse_decode_queries = self._decode_fusions
             attention.indexer._fuse_query_slices = self._decode_fusions

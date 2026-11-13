@@ -18,7 +18,6 @@ import torch.nn.functional as F
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.dsv4 import _profiler
-from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.ppu.block import Block
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
 from rtp_llm.models_py.modules.dsv4.ppu.hc.factory import build_hc_head
@@ -177,7 +176,6 @@ class V4Transformer(_BaseV4Transformer):
                 platform_provider=self.platform_provider,
             )
 
-        self._dbg_step = 0
         self.register_buffer("_mtp_hidden_buffer", None, persistent=False)
         self.register_buffer("_mtp_last_hidden_buffer", None, persistent=False)
         self._mtp_hidden_valid_tokens = 0
@@ -310,26 +308,13 @@ class V4Transformer(_BaseV4Transformer):
             )
         self._propagate_cp_ctx(cp_ctx)
 
-        # Master switch: when MOEDBG=0 every record/begin/dump call site is
-        # skipped at the call site (no f-string formatting, no function-call
-        # overhead, no per-layer name allocation).  Read once per forward.
-        _rt_on = _rt.ENABLED
-        if _rt_on:
-            _rt.begin(seqlen=int(input_ids.size(-1)))
-            # begin() may suppress this forward (MOEDBG_MAX_SEQ); honour it.
-            if _rt._get_buf() is None:
-                _rt_on = False
         h = self._embed(input_ids)  # [B, S, d]
-        if _rt_on:
-            _rt.record("embed_out", h)
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, S, hc, d]
-        if _rt_on:
-            _rt.record("embed_hc_expanded", h)
 
         # Bridge to flat Block.forward(x:[T,hc,d], input_ids:[T], positions:[T],
         # cu_seqlens:[B+1]). Standalone tests run with B==1; we flatten before
-        # the loop and restore at the end so the hc_head_reduce / norm / rt
-        # record paths below see the original [B, S, hc, d] shape.
+        # the loop and restore at the end so the hc_head_reduce / norm paths
+        # below see the original [B, S, hc, d] shape.
         assert B == 1, (
             f"V4Transformer.forward standalone path expects B==1; got B={B}. "
             "Production inference goes through prefill/forward.py::forward_layers, "
@@ -360,48 +345,11 @@ class V4Transformer(_BaseV4Transformer):
                         kv_cache=kv_cache,
                         block_tables_by_type=block_tables_by_type,
                     )
-                    if _rt_on:
-                        _rt.record(f"layer{li:02d}_out", h_flat)
         h = h_flat.unsqueeze(0)  # [1, S, hc, d]
         h = self._hc_head_reduce(h)  # [B, S, d]
-        if _rt_on:
-            _rt.record("hc_reduced", h)
         # Framework RMSNorm wants 2D; collapse [B, S, d] → [B*S, d] and view back.
         bsz, seq, dim_ = h.shape
         h = self._norm(h.reshape(bsz * seq, dim_)).view(bsz, seq, -1)
-        if _rt_on:
-            _rt.record("final_norm", h)
-
-        if _rt_on:
-            extra: dict = {
-                "apply_lm_head": bool(apply_lm_head),
-                "input_ids_shape": tuple(input_ids.shape),
-                "input_ids": input_ids.detach().cpu(),
-                "start_pos": int(start_pos) if isinstance(start_pos, int) else -1,
-            }
-            if cp_ctx is not None:
-                extra.update(
-                    {
-                        "cp_size": cp_ctx.cp_size,
-                        "cp_rank": cp_ctx.cp_rank,
-                        "chunk_length": cp_ctx.chunk_length,
-                        "padded_seq_len": cp_ctx.padded_seq_len,
-                        "seq_len_full": cp_ctx.seq_len_full,
-                        "global_positions": cp_ctx.global_positions.detach().cpu(),
-                        "unpad_restore": cp_ctx.unpad_restore.detach().cpu(),
-                        "local_is_real": cp_ctx.local_is_real.detach().cpu(),
-                    }
-                )
-            else:
-                extra.update(
-                    {
-                        "cp_size": 1,
-                        "cp_rank": 0,
-                        "seq_len_full": int(S),
-                    }
-                )
-            _rt.dump(step=self._dbg_step, extra=extra)
-            self._dbg_step += 1
 
         if apply_lm_head:
             # Match h dtype to head_weight so F.linear works regardless of

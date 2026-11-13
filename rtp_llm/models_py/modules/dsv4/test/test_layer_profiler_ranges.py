@@ -170,7 +170,7 @@ class LayerProfilerRangeTest(unittest.TestCase):
             norm=lambda hidden: hidden,
         )
 
-        with patch.object(decode_forward._rt, "ENABLED", False), patch.object(
+        with patch.object(
             _profiler,
             "make_layer_forward_range",
             return_value=_logging_layer_range(events),
@@ -239,8 +239,6 @@ class LayerProfilerRangeTest(unittest.TestCase):
             _profiler,
             "make_layer_forward_range",
             return_value=_logging_layer_range(prefill_events),
-        ), patch.object(
-            decode_forward._rt, "ENABLED", False
         ):
             V4Transformer.forward(
                 prefill_model,
