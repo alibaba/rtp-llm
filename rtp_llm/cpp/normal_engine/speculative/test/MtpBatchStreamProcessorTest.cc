@@ -1177,9 +1177,10 @@ TEST_F(MtpBatchStreamProcessorTest, DSparkPrefillCommitRequiresTargetFeaturesAnd
 
     SpeculativeExecutionConfig zero_width_config = sp_config;
     zero_width_config.gen_num_per_cycle          = 0;
-    MtpBatchStreamProcessor zero_width(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, zero_width_config, false);
-    EXPECT_THROW(zero_width.validatePrefillDSparkCommitInput(model_input), std::exception);
+    EXPECT_THROW(
+        MtpBatchStreamProcessor(
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, zero_width_config, false),
+        std::exception);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, DSparkProposalSelectsGammaLogitsInBothAnchorModes) {
@@ -1301,6 +1302,24 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
     EXPECT_EQ(toVec<int32_t>(model_input.engram_token_windows),
               (std::vector<int32_t>{102, 101, 11, 10, 31, 102, 101, 11, 32, 31, 102, 101, 33, 32, 31, 102,
                                     22,  21,  20, -1, 41, 22,  21,  20, 42, 41, 22,  21,  43, 42, 41, 22}));
+
+    sp_config.sp_dspark_verify_tokens = 2;
+    MtpBatchStreamProcessor shorter_verify(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    auto shorter_prepare = proposal_input;
+    shorter_verify.expandDSparkTargetVerifyPositionIdsFromProposal(shorter_prepare);
+    EXPECT_EQ((std::vector<int32_t>{30, 40, 50, 31, 41, 51, 32, 42, 52, 122, 122, 122, 123, 123, 123, 124, 124, 124}),
+              toVec<int32_t>(shorter_prepare.combo_position_ids));
+
+    GptModelInputs shorter_target;
+    shorter_verify.prepareDSparkTargetVerifyModelInput(
+        round_state, shorter_target, proposals.narrow(1, 0, 2), host_holder);
+    EXPECT_EQ((std::vector<int32_t>{102, 31, 32, 22, 41, 42}), toVec<int32_t>(shorter_target.combo_tokens));
+    EXPECT_EQ((std::vector<int32_t>{3, 3}), toVec<int32_t>(shorter_target.input_lengths));
+    EXPECT_EQ((std::vector<int32_t>{0, 1, 2, 3, 4, 5}), toVec<int32_t>(shorter_target.lm_output_indexes));
+    shorter_verify.updateDecodePostDSparkCommitInput(
+        shorter_target, torch::zeros({6, 4}, torch::TensorOptions().device(torch::kCUDA)), 2);
+    EXPECT_EQ(shorter_target.last_hidden_states.size(0), 6);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGeometry) {
@@ -1371,11 +1390,10 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
 
-    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
-    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
-    GenerateStreamPtr stream3 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 3);
-    GenerateStreamPtr middle_stream =
-        createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 4);
+    GenerateStreamPtr stream1       = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    GenerateStreamPtr stream2       = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
+    GenerateStreamPtr stream3       = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 3);
+    GenerateStreamPtr middle_stream = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 4);
     middle_stream->setChunkSize(2);
     ASSERT_TRUE(middle_stream->isMiddleChunk());
 
@@ -1394,8 +1412,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     model_output.all_hidden_states = torch::zeros({7, 2}, torch::kFloat32);
 
     SamplerOutput sampler_output;
-    sampler_output.token_ids =
-        torch::tensor({1, -2, 2, 1, 2, 3, 3, 2, 1, 0, 1, 2}, torch::kInt32).reshape({4, 3});
+    sampler_output.token_ids = torch::tensor({1, -2, 2, 1, 2, 3, 3, 2, 1, 0, 1, 2}, torch::kInt32).reshape({4, 3});
 
     processor.updatePrefillPostDraftModelInput(stream_groups, model_input, model_output, sampler_output, holder);
 
@@ -1421,8 +1438,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     ResourceContext resource_context;
     auto            stream1 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1);
     auto            stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 2);
-    auto            middle_stream =
-        createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 0}, 3);
+    auto middle_stream      = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 0}, 3);
     stream1->setContextPositionIds(torch::tensor({100, 101, 102, 110, 111, 112}, torch::kInt32));
     stream2->setContextPositionIds(torch::tensor({200, 201, 202, 210, 211, 212, 220, 221, 222}, torch::kInt32));
     middle_stream->setContextPositionIds(
@@ -1431,12 +1447,11 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     ASSERT_TRUE(middle_stream->isMiddleChunk());
     auto           stream_groups = StreamGroups({stream1, stream2, middle_stream});
     GptModelInputs model_input;
-    model_input.input_lengths = torch::tensor({2, 3, 2}, torch::kInt32);
-    model_input.combo_tokens  = torch::tensor({10, 11, 20, 21, 22, 30, 31}, torch::kInt32);
-    model_input.combo_position_ids =
-        torch::tensor({100, 101, 102, 110, 111, 112, 200, 201, 202, 210, 211, 212,
-                       220, 221, 222, 300, 301, 302, 310, 311, 312},
-                      torch::kInt32);
+    model_input.input_lengths      = torch::tensor({2, 3, 2}, torch::kInt32);
+    model_input.combo_tokens       = torch::tensor({10, 11, 20, 21, 22, 30, 31}, torch::kInt32);
+    model_input.combo_position_ids = torch::tensor(
+        {100, 101, 102, 110, 111, 112, 200, 201, 202, 210, 211, 212, 220, 221, 222, 300, 301, 302, 310, 311, 312},
+        torch::kInt32);
     GptModelOutputs model_output;
     model_output.all_hidden_states = torch::zeros({7, 2}, torch::kFloat32);
     SamplerOutput sampler_output;
@@ -1444,9 +1459,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     TensorHolder holder;
     processor.updatePrefillPostDraftModelInput(stream_groups, model_input, model_output, sampler_output, holder);
     EXPECT_EQ((vector<int>{11, 12, 21, 22, 23, 31, 3}), toVec<int>(model_input.combo_tokens));
-    EXPECT_EQ((vector<int>{110, 111, 112, 112, 112, 112,
-                           210, 211, 212, 220, 221, 222, 222, 222, 222,
-                           310, 311, 312, 320, 321, 322}),
+    EXPECT_EQ((vector<int>{110, 111, 112, 112, 112, 112, 210, 211, 212, 220, 221,
+                           222, 222, 222, 222, 310, 311, 312, 320, 321, 322}),
               toVec<int>(model_input.combo_position_ids));
 }
 

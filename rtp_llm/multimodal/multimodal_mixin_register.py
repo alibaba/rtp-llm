@@ -20,6 +20,9 @@ def register_multimodal_mixin(name: Union[str, List[str]], multimodal_mixin: Any
 
 
 def get_multimodal_mixin_cls(name: str) -> Type[Any]:
+    if name == "minimax_m31_vl" and name not in _multimodal_mixin_factory:
+        import rtp_llm.multimodal.multimodal_mixins.minimax_m31_vl.minimax_m31_vl_mixin  # noqa: F401
+
     if name not in _multimodal_mixin_factory:
         # Mixins self-register on package import; with lazy model imports the
         # package may not have been pulled in yet, so load it on first miss.

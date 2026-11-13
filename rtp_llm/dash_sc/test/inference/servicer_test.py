@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import struct
 import unittest
 from unittest.mock import MagicMock, patch
@@ -389,6 +390,28 @@ class DeriveMaxTokenIdTest(unittest.TestCase):
 
 
 class BuildThinkRuntimeTest(unittest.TestCase):
+    def test_m31_shared_defaults_supply_dash_sc_token_boundaries(self) -> None:
+        from rtp_llm.server.server_args import server_args
+
+        tokenizer = _FakeTokenizer(
+            {
+                "<mm:think>": [101],
+                "</mm:think>": [102],
+                "<mm:think>\n</mm:think>": [101, 198, 102],
+            }
+        )
+        for model_type in ("minimax_m31", "minimax_m31_vl"):
+            with self.subTest(model_type=model_type), patch.dict(
+                os.environ, {}, clear=True
+            ):
+                env = server_args.setup_args(
+                    ["--model_type", model_type]
+                ).generate_env_config
+                runtime = build_think_runtime(tokenizer, env, model_type)
+                self.assertEqual(runtime.bos_tokens, (101,))
+                self.assertEqual(runtime.eos_tokens, (102,))
+                self.assertEqual(runtime.close_token_id, 102)
+
     def test_derives_eos_token_id_from_tokenizer(self) -> None:
         runtime = build_think_runtime(_FakeTokenizer({}), None, None)
 

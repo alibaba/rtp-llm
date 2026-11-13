@@ -219,6 +219,22 @@ class QuantizationConfig(ABC):
 
         if quant_config is None:
             return None
+        if quant_method == "mxfp8":
+            block_size = quant_config.get("weight_block_size", [1, 32])
+            if block_size != [1, 32]:
+                raise ValueError(
+                    "MXFP8 weight_block_size must be [1, 32], " f"got {block_size!r}"
+                )
+            result = Fp8MxBlockWiseQuantConfig(is_quanted=True)
+            ignored = (
+                quant_config.get("ignored_layers")
+                or quant_config.get("modules_to_not_convert")
+                or []
+            )
+            if ignored:
+                result.exclude_modules = set(ignored)
+            return result
+
         group_size = quant_config["group_size"] if "group_size" in quant_config else 0
         bits = quant_config["bits"] if "bits" in quant_config else 0
         if quant_method == "fp8":
@@ -551,6 +567,30 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8BlockWiseQuantConfig(**config)
+
+
+class Fp8MxBlockWiseQuantConfig(Fp8BlockWiseQuantConfig):
+    """Checkpoint MXFP8: E4M3 weights with UE8M0 scales per 1x32 values."""
+
+    def __init__(self, is_quanted: bool = True):
+        if not is_quanted:
+            raise ValueError("MXFP8 requires pre-quantized 1x32 checkpoint weights")
+        # C++ uses a supported alignment group; the actual MX block is 1x32.
+        super().__init__(bits=8, group_size=128, is_quanted=is_quanted)
+        self.mx_block_size = 32
+        self.weight_block_size = [1, 32]
+
+    @classmethod
+    def get_method(cls) -> str:
+        return "MXFP8"
+
+    @classmethod
+    def get_algo(cls) -> str:
+        return "fp8"
+
+    @classmethod
+    def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+        return cls(is_quanted=config.get("is_quanted", True))
 
 
 class CompressedTensorsQuantConfig(QuantizationConfig):

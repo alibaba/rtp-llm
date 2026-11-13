@@ -122,6 +122,69 @@ class PipelinePartitionArgumentsTest(TestCase):
                     server_args.setup_args(["--tp_size", "1"])
 
 
+class ThinkingModeArgumentsTest(TestCase):
+    def test_m31_defaults_reach_shared_frontend_config(self):
+        from rtp_llm.server.server_args import server_args
+
+        for model_type in ("minimax_m31", "minimax_m31_vl", "deepseek_v41"):
+            with (
+                self.subTest(model_type=model_type),
+                patch.dict(os.environ, {}, clear=True),
+            ):
+                config = server_args.setup_args(["--model_type", model_type])
+                env = config.generate_env_config
+                m31 = model_type.startswith("minimax_m31")
+                self.assertEqual(env.think_mode, "adaptive" if m31 else "disabled")
+                self.assertEqual(
+                    env.think_start_tag, "<mm:think>" if m31 else r"<think>\n"
+                )
+                self.assertEqual(
+                    env.think_end_tag, "</mm:think>" if m31 else "</think>\n\n"
+                )
+
+    def test_m31_explicit_deployment_thinking_is_preserved(self):
+        from rtp_llm.server.server_args import server_args
+
+        for model_type in ("minimax_m31", "minimax_m31_vl"):
+            for via_env in (False, True):
+                args = ["--model_type", model_type]
+                overrides = {
+                    "THINK_MODE": "disabled",
+                    "THINK_START_TAG": "<custom>",
+                    "THINK_END_TAG": "</custom>",
+                }
+                if not via_env:
+                    args += [
+                        "--think_mode",
+                        "disabled",
+                        "--think_start_tag",
+                        "<custom>",
+                        "--think_end_tag",
+                        "</custom>",
+                    ]
+                with (
+                    self.subTest(model_type=model_type, via_env=via_env),
+                    patch.dict(os.environ, overrides if via_env else {}, clear=True),
+                ):
+                    env = server_args.setup_args(args).generate_env_config
+                    self.assertEqual(env.think_mode, "disabled")
+                    self.assertEqual(env.think_start_tag, "<custom>")
+                    self.assertEqual(env.think_end_tag, "</custom>")
+
+    def test_explicit_cli_and_environment_disabled_are_preserved(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            default = server_args.setup_args([])
+            cli = server_args.setup_args(["--think_mode", "disabled"])
+        with patch.dict(os.environ, {"THINK_MODE": "disabled"}, clear=True):
+            env = server_args.setup_args([])
+
+        self.assertFalse(default.generate_env_config.think_mode_explicit)
+        self.assertTrue(cli.generate_env_config.think_mode_explicit)
+        self.assertTrue(env.generate_env_config.think_mode_explicit)
+
+
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {

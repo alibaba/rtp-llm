@@ -102,13 +102,14 @@ class Indexer(nn.Module):
 
     # TODO: fuse kernel here
     def _get_logits_head_gate(
-        self, x: torch.Tensor, q_scale: torch.Tensor
+        self, x: torch.Tensor, q_scale: Optional[torch.Tensor]
     ) -> torch.Tensor:
         x = x.float()
         weights = self.weights_proj(x)
         scale = self.softmax_scale * self.weights_scale
-        weights = weights.unsqueeze(-1) * q_scale * scale
-        return weights
+        if q_scale is None:
+            return (weights.unsqueeze(-1) * scale).to(torch.bfloat16)
+        return weights.unsqueeze(-1) * q_scale * scale
 
     def _get_q_k_bf16(
         self,
@@ -153,6 +154,7 @@ class Indexer(nn.Module):
         fmha_params: Any,
         attention_inputs: Any,
         cp_params: Optional[Any],
+        mx_weights: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None
@@ -162,8 +164,11 @@ class Indexer(nn.Module):
                 kv_cache,
                 fmha_params.slot_mapping,
                 cp_params.kv_restore_unpad_indices,
+                mx_weights,
             )
-        return self.indexer_op.quant_q_k(query, key, kv_cache, fmha_params.slot_mapping)
+        return self.indexer_op.quant_q_k(
+            query, key, kv_cache, fmha_params.slot_mapping, mx_weights
+        )
 
     def _compute_topk(
         self,
@@ -173,10 +178,11 @@ class Indexer(nn.Module):
         fmha_params: Any,
         attention_inputs: Any,
         cp_params: Optional[Any],
+        q_sf: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if not attention_inputs.is_prefill:
             return self.indexer_op._get_topk_paged(
-                q_fp8, weights, kv_cache, fmha_params, attention_inputs
+                q_fp8, weights, kv_cache, fmha_params, attention_inputs, q_sf
             )
         if self._prefill_cp_enabled():
             assert cp_params is not None
@@ -193,9 +199,10 @@ class Indexer(nn.Module):
                 cp_params.precomputed_ke,
                 cp_params.precomputed_lengths,
                 cp_params.precomputed_topk_off,
+                q_sf,
             )
         return self.indexer_op._get_topk_ragged(
-            q_fp8, weights, kv_cache, fmha_params, attention_inputs
+            q_fp8, weights, kv_cache, fmha_params, attention_inputs, q_sf
         )
 
     def forward(
@@ -210,17 +217,38 @@ class Indexer(nn.Module):
     ) -> torch.Tensor:
         if use_fast_path:
             key = self._get_k_bf16(hidden_states, fmha_params)
-            self.indexer_op.quant_k_only(key, kv_cache, fmha_params.slot_mapping)
+            self.indexer_op.quant_k_only(
+                key,
+                kv_cache,
+                fmha_params.slot_mapping,
+                mx=self.indexer_op._use_mx(key.device),
+            )
             return None
 
         if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None, "cp_params is required for sparse prefill CP"
 
         query, key = self._get_q_k_bf16(q_lora, hidden_states, fmha_params, cp_params)
+        mx = self.indexer_op._use_mx(query.device)
+        raw_weights = self._get_logits_head_gate(hidden_states, None) if mx else None
         q_fp8, q_scale = self._quantize_q_k(
-            query, key, kv_cache, fmha_params, attention_inputs, cp_params
+            query,
+            key,
+            kv_cache,
+            fmha_params,
+            attention_inputs,
+            cp_params,
+            raw_weights,
         )
-        weights = self._get_logits_head_gate(hidden_states, q_scale)
+        weights = (
+            raw_weights if mx else self._get_logits_head_gate(hidden_states, q_scale)
+        )
         return self._compute_topk(
-            q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params
+            q_fp8,
+            weights,
+            kv_cache,
+            fmha_params,
+            attention_inputs,
+            cp_params,
+            q_sf=q_scale if mx else None,
         )

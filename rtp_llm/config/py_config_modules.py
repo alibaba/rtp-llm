@@ -493,12 +493,25 @@ class GenerateEnvConfig:
         self.think_end_token_id: int = -1
         self.max_thinking_tokens: Optional[int] = None
         self.think_mode: str = "disabled"
+        self.think_mode_explicit: bool = False
         self.force_stop_words: bool = False
         self.stop_words_list: Optional[str] = None
         self.stop_words_str: Optional[str] = None
         self.think_start_tag: str = "<think>\n"
         self.think_terminate_token_id: int = 1
         self.generation_config_path: Optional[str] = None
+
+    def apply_model_defaults(self, model_type: str) -> None:
+        if model_type not in ("minimax_m31", "minimax_m31_vl"):
+            return
+        from rtp_llm.config.response_format import normalize_think_tag
+
+        if self.think_mode == "disabled" and not self.think_mode_explicit:
+            self.think_mode = "adaptive"
+        if normalize_think_tag(self.think_start_tag) == "<think>\n":
+            self.think_start_tag = "<mm:think>"
+        if normalize_think_tag(self.think_end_tag) == "</think>\n\n":
+            self.think_end_tag = "</mm:think>"
 
     def to_string(self):
         return (

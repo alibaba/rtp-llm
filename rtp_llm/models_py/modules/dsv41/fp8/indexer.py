@@ -28,6 +28,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
+    quantize_indexer_q_for_score,
+)
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv41.cp import (
@@ -489,7 +492,7 @@ class IndexerFP8(PoolBackedModule):
             T_cache = self._kv_block_table.shape[1] * self._kv_eb
             T_static = self._kv_cache_t if self._kv_cache_t > 0 else T_cache
             T_max = max(32, min(T_cache, T_static))
-            q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
+            q_fp8, w_fold, q_sf = quantize_indexer_q_for_score(
                 _as_bf16_contig(q), _as_bf16_contig(weights), freqs, self.rope_head_dim
             )
             ctx_lens_2d = compressed_len.view(bsz, q_len)
@@ -507,6 +510,7 @@ class IndexerFP8(PoolBackedModule):
                 ctx_lens_2d,
                 block_size=self._kv_eb,
                 max_ctx_len=T_max,
+                q_sf=q_sf,
             )
             score = logits.view(bsz, q_len, T_max)
             K_eff = min(K, T_max)
@@ -832,7 +836,7 @@ class IndexerFP8(PoolBackedModule):
             q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
             with record_function_range("dsv4.fp8.indexer.prefill.quant_q_rope"):
-                q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
+                q_fp8, w_fold, q_sf = quantize_indexer_q_for_score(
                     _as_bf16_contig(q_for_quant),
                     _as_bf16_contig(w_for_quant),
                     attention_inputs.freqs_cis_slice,
@@ -859,7 +863,9 @@ class IndexerFP8(PoolBackedModule):
                 ):
                     self._wait_prefill_k_cache_gather(indexer_k_pending)
                 indexer_k_pending = None
-            k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
+            k_scale_flat = k_scale_buf.view(
+                torch.int32 if q_sf is not None else torch.float32
+            ).squeeze(-1)
             q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
             w_score = w_fold.view(M, self.n_heads)
             score_chunk_rows = _fp8_prefill_score_chunk_rows()
@@ -878,6 +884,11 @@ class IndexerFP8(PoolBackedModule):
                         attention_inputs.ks[row_start:row_end],
                         attention_inputs.ke[row_start:row_end],
                         clean_logits=False,
+                        q_sf=(
+                            q_sf.view(M, self.n_heads)[row_start:row_end]
+                            if q_sf is not None
+                            else None
+                        ),
                     )
                 with record_function_range("dsv4.fp8.indexer.prefill.topk"):
                     _run_prefill_topk(
@@ -993,7 +1004,7 @@ class IndexerFP8(PoolBackedModule):
             q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
             with record_function_range("dsv4.fp8.indexer.prefill.quant_q_rope"):
-                q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
+                q_fp8, w_fold, q_sf = quantize_indexer_q_for_score(
                     _as_bf16_contig(q_for_quant),
                     _as_bf16_contig(w_for_quant),
                     attention_inputs.freqs_cis_slice,
@@ -1023,7 +1034,9 @@ class IndexerFP8(PoolBackedModule):
                 ):
                     self._wait_prefill_k_cache_gather(indexer_k_pending)
                 indexer_k_pending = None
-            k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
+            k_scale_flat = k_scale_buf.view(
+                torch.int32 if q_sf is not None else torch.float32
+            ).squeeze(-1)
             q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
             w_score = w_fold.view(M, self.n_heads)
             score_chunk_rows = _fp8_prefill_score_chunk_rows()
@@ -1042,6 +1055,11 @@ class IndexerFP8(PoolBackedModule):
                         attention_inputs.ks[row_start:row_end],
                         attention_inputs.ke[row_start:row_end],
                         clean_logits=False,
+                        q_sf=(
+                            q_sf.view(M, self.n_heads)[row_start:row_end]
+                            if q_sf is not None
+                            else None
+                        ),
                     )
                 with record_function_range("dsv4.fp8.indexer.prefill.topk"):
                     _run_prefill_topk(

@@ -198,7 +198,9 @@ class OpenaiEndpoint(object):
         base_format = renderer.get_reasoning_format()
         if config.thinking_mode == ThinkingMode.ENABLED:
             return base_format
-        think_start_tag = normalize_think_tag(self.generate_env_config.think_start_tag)
+        think_start_tag = normalize_think_tag(
+            renderer.generate_env_config.think_start_tag
+        )
         begin_ids = config.begin_think_token_ids or self.tokenizer.encode(
             think_start_tag, add_special_tokens=False
         )
@@ -357,7 +359,7 @@ class OpenaiEndpoint(object):
             config.max_new_tokens = request.max_tokens
         config.add_thinking_params(
             self.tokenizer,
-            self.generate_env_config,
+            renderer.generate_env_config,
             enable_thinking=(
                 None
                 if config.thinking_mode == ThinkingMode.ADAPTIVE

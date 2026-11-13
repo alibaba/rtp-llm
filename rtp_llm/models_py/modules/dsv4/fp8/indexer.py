@@ -41,6 +41,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_gather_triton import (
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
     indexer_q_fp8_quant_fold,
     indexer_q_rope_fp8_quant_fold,
+    quantize_indexer_q_for_score,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     INDEXER_ENTRY_BYTES,
@@ -596,7 +597,7 @@ class IndexerFP8(PoolBackedModule):
             T_static = self._kv_cache_t if self._kv_cache_t > 0 else T_cache
             T_max = max(32, min(T_cache, T_static))
 
-            q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
+            q_fp8, w_fold, q_sf = quantize_indexer_q_for_score(
                 _as_bf16_contig(q),
                 _as_bf16_contig(weights),
                 freqs,
@@ -621,6 +622,7 @@ class IndexerFP8(PoolBackedModule):
                 ctx_lens_2d,
                 block_size=self._kv_eb,
                 max_ctx_len=T_max,
+                q_sf=q_sf,
             )  # [B*q_len, T_max] fp32
             score = logits.view(bsz, q_len, T_max)
 
@@ -1088,7 +1090,7 @@ class IndexerFP8(PoolBackedModule):
             q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
             with record_function_range("dsv4.fp8.indexer.prefill.quant_q_rope"):
-                q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
+                q_fp8, w_fold, q_sf = quantize_indexer_q_for_score(
                     _as_bf16_contig(q_for_quant),
                     _as_bf16_contig(w_for_quant),
                     attention_inputs.freqs_cis_slice,
@@ -1096,9 +1098,7 @@ class IndexerFP8(PoolBackedModule):
                 )
             del q, weights, q_for_quant, w_for_quant
 
-            assert (
-                has_fp8_mqa_logits()
-            ), (
+            assert has_fp8_mqa_logits(), (
                 "FP8 prefill kernel stack unavailable — IndexerFP8 needs either "
                 "deep_gemm.fp8_mqa_logits or the group-128 Triton fallback"
             )
@@ -1139,7 +1139,9 @@ class IndexerFP8(PoolBackedModule):
                 indexer_k_pending = None
             # ``deep_gemm.fp8_mqa_logits`` expects k_scale as 1D fp32 contig:
             # view uint8 [T, 4] → fp32 [T, 1] → squeeze [T].
-            k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
+            k_scale_flat = k_scale_buf.view(
+                torch.int32 if q_sf is not None else torch.float32
+            ).squeeze(-1)
 
             q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
             w_score = w_fold.view(M, self.n_heads)
@@ -1164,6 +1166,11 @@ class IndexerFP8(PoolBackedModule):
                         attention_inputs.ks[row_start:row_end],
                         attention_inputs.ke[row_start:row_end],
                         clean_logits=False,
+                        q_sf=(
+                            q_sf.view(M, self.n_heads)[row_start:row_end]
+                            if q_sf is not None
+                            else None
+                        ),
                     )  # [chunk_rows, T] fp32
 
                 with record_function_range("dsv4.fp8.indexer.prefill.topk"):
@@ -1306,7 +1313,7 @@ class IndexerFP8(PoolBackedModule):
             q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
             with record_function_range("dsv4.fp8.indexer.prefill.quant_q_rope"):
-                q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
+                q_fp8, w_fold, q_sf = quantize_indexer_q_for_score(
                     _as_bf16_contig(q_for_quant),
                     _as_bf16_contig(w_for_quant),
                     attention_inputs.freqs_cis_slice,
@@ -1314,9 +1321,7 @@ class IndexerFP8(PoolBackedModule):
                 )
             del q, weights, q_for_quant, w_for_quant
 
-            assert (
-                has_fp8_mqa_logits()
-            ), (
+            assert has_fp8_mqa_logits(), (
                 "FP8 prefill kernel stack unavailable — IndexerFP8 needs either "
                 "deep_gemm.fp8_mqa_logits or the group-128 Triton fallback"
             )
@@ -1354,7 +1359,9 @@ class IndexerFP8(PoolBackedModule):
                 ):
                     self._wait_prefill_k_cache_gather(indexer_k_pending)
                 indexer_k_pending = None
-            k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
+            k_scale_flat = k_scale_buf.view(
+                torch.int32 if q_sf is not None else torch.float32
+            ).squeeze(-1)
 
             q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
             w_score = w_fold.view(M, self.n_heads)
@@ -1375,6 +1382,11 @@ class IndexerFP8(PoolBackedModule):
                         attention_inputs.ks[row_start:row_end],
                         attention_inputs.ke[row_start:row_end],
                         clean_logits=False,
+                        q_sf=(
+                            q_sf.view(M, self.n_heads)[row_start:row_end]
+                            if q_sf is not None
+                            else None
+                        ),
                     )
 
                 with record_function_range("dsv4.fp8.indexer.prefill.topk"):

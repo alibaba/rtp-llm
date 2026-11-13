@@ -195,9 +195,9 @@ std::optional<ErrorInfo> PrefillRpcServer::parseDownstreamError(const grpc::Stat
             }                                                                                                          \
         }                                                                                                              \
         auto status = prefill_context.closeGrpcStream(ErrorCodeToString(new_error_code));                              \
-        if (prefill_context.isRequestCancelled()) {                                                                     \
-            new_error_code = ErrorCode::CANCELLED;                                                                       \
-            new_error_msg  = "request is cancelled";                                                                    \
+        if (prefill_context.isRequestCancelled()) {                                                                    \
+            new_error_code = ErrorCode::CANCELLED;                                                                     \
+            new_error_msg  = "request is cancelled";                                                                   \
         } else if (!status.ok()) {                                                                                     \
             const auto& error_msg = status.error_message();                                                            \
             if (error_msg.find("Connect Failed") != std::string::npos) {                                               \
@@ -535,9 +535,9 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     } else {
         // Batch enqueue opens the stream before FetchResponse binds its ServerContext.
         prefill_context.client_stream = std::make_shared<CancellableDecodeClientStream>(
-            prefill_context.grpc_connection.stub.get(),
-            client_context,
-            [&prefill_context] { return prefill_context.isRequestCancelled(); });
+            prefill_context.grpc_connection.stub.get(), client_context, [&prefill_context] {
+                return prefill_context.isRequestCancelled();
+            });
     }
     auto&             client_stream = prefill_context.client_stream;
     GenerateRequestPB alloc_request = buildAllocateRequest(prefill_context);
@@ -895,6 +895,21 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                          && request_config.variable_num_beams().size() == 0
                          && request_config.num_return_sequences() <= 1 && request_config.can_use_pd_separation();
     if (!pd_separation) {
+        const auto& model_type  = maga_init_params_.model_config_.model_type;
+        const auto& parallelism = maga_init_params_.parallelism_config;
+        const auto& cp_config   = parallelism.prefill_cp_config;
+        const bool  cp_kv_cache_sharded =
+            cp_config.kv_cache_sharded && cp_config.is_enabled() && parallelism.tp_size > 1;
+        if (resolved_max_new_tokens > 1
+            && (parallelism.dp_size > 1 || cp_kv_cache_sharded || maga_init_params_.sp_config.type != SP_TYPE_NONE)
+            && (model_type == "minimax_m31" || model_type == "minimax_m31_vl")) {
+            return serializeErrorMsg(
+                std::to_string(request->request_id()),
+                ErrorInfo(
+                    ErrorCode::INVALID_PARAMS,
+                    "MiniMax-M3.1 PREFILL with DP>1, sharded CP KV cache or speculative execution requires PD-separable generation "
+                    "for multi-token requests"));
+        }
         return LocalRpcServer::GenerateStreamCall(server_context, request, writer);
     }
 

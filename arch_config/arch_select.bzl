@@ -48,6 +48,9 @@ _CUDA13_ARM_DEFERRED = ["flash_attn", "flash-attn-3"]
 # gracefully, so the other platforms resolve it to nothing.
 _DSV4_PLATFORM_ONLY = ["xgrammar"]
 
+# MiniMax M3.1 sparse Prefill runs only on the CUDA 13 SM100/SM103 lanes.
+_CUDA13_ONLY = ["fmha-sm100", "quack-kernels"]
+
 # Names with no PPU wheel in the vendor lock (CUDA/ROCm-only deps, or no
 # cp312 wheel). requirement() resolves them to an empty library on PPU.
 _PPU_LOCK_SKIPPED = [
@@ -73,6 +76,17 @@ def requirement(names):
             native.py_library(
                 name = name,
                 deps = select({
+                    "@rtp_llm//:using_cuda13_arm": [requirement_cuda13_arm(name)],
+                    "//conditions:default": [],
+                }),
+                visibility = ["//visibility:public"],
+            )
+            continue
+        if name in _CUDA13_ONLY:
+            native.py_library(
+                name = name,
+                deps = select({
+                    "@rtp_llm//:using_cuda13_x86": [requirement_gpu_cuda13(name)],
                     "@rtp_llm//:using_cuda13_arm": [requirement_cuda13_arm(name)],
                     "//conditions:default": [],
                 }),
@@ -155,8 +169,10 @@ def whl_deps():
             # source upstream is download.pytorch.org/whl/cu130).
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
-            # CI-built DeepGEMM: opt_glm5 with isolated SM120 GEMMs.
-            "deep_gemm==2.8.0+122e18b.cu132",
+            # MX FP8 MQA and NVFP4 MegaMoE on SM100/SM103.
+            "deep_gemm==2.8.2+522942a.cu132",
+            "fmha-sm100@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260722/fmha_sm100-0.1.1-py3-none-any.whl",
+            "quack-kernels==0.4.1",
             "flash-mla==1.0.0+9241ae3",
             "deep-ep==2.1.0+a56d615",
             "fast-hadamard-transform==1.1.0+e7706fa.cu132.torch2.11.cxx11abitrue",
@@ -180,8 +196,11 @@ def whl_deps():
         "@rtp_llm//:using_cuda13_arm": [
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
-            # DeepGEMM opt_glm5 + SM12x, CI-built against torch 2.11+cu130.
-            "deep_gemm==2.8.1+057ca59",
+            # MX FP8 MQA and NVFP4 MegaMoE on SM100/SM103.
+            "deep_gemm==2.8.2+522942a.cu132",
+            "fmha-sm100@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260722/fmha_sm100-0.1.1-py3-none-any.whl",
+            "quack-kernels==0.4.1",
+            "nvidia-cutlass-dsl==4.5.3",
             "flash-mla==1.0.0+2e5429f",
             "flash-mla-legacy==1.0.0+92fd68b.rtp1",
             "deep-ep==2.1.0+a56d615",
@@ -192,8 +211,7 @@ def whl_deps():
             "fastsafetensors==0.1.20+ali",
             "tilelang==0.1.15+cuda.gita35f8ddf",
             "apache-tvm-ffi==0.1.12",
-            # flash_attn / flash_attn_3 / fast_hadamard / nvidia_cutlass_dsl
-            # remain deferred.
+            # flash_attn / flash_attn_3 / fast_hadamard remain deferred.
         ],
         "@rtp_llm//:using_cuda12_9_x86": [
             # torch 2.8.0+cu129: the upstream wheel (http.bzl torch_2.8_py310_cuda

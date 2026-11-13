@@ -1259,6 +1259,34 @@ TEST_F(PPExecutorTest, CommonActiveCpAllowsOrdinaryDecodeWithReplicatedKv) {
     }
 }
 
+TEST_F(PPExecutorTest, CommonRejectsShortDSparkVerificationBeforeModelConstruction) {
+    bool model_constructed         = false;
+    PPExecutor::test_model_factory = [&model_constructed](const GptModelInitParams&) {
+        model_constructed = true;
+        return std::make_unique<RecordingDraftModel>();
+    };
+    for (int stage : {0, 1, 2}) {
+        auto params                              = makeStageParams(stage, SP_TYPE_DSPARK);
+        params.sp_config.sp_dspark_verify_tokens = params.sp_config.gen_num_per_cycle - 1;
+        for (bool warm_up : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "stage=" << stage << ", warm_up=" << warm_up);
+            model_constructed = false;
+            try {
+                PPExecutor executor(params, nullptr, warm_up);
+                FAIL() << "PP accepted shortened DSpARK verification";
+            } catch (const std::runtime_error& error) {
+                EXPECT_NE(std::string(error.what()).find("requires full speculative verification"), std::string::npos)
+                    << error.what();
+            }
+            EXPECT_FALSE(model_constructed);
+        }
+        for (const int64_t verify_tokens : {int64_t{0}, params.sp_config.gen_num_per_cycle}) {
+            params.sp_config.sp_dspark_verify_tokens = verify_tokens;
+            EXPECT_NO_THROW({ PPExecutor executor(params, nullptr, true); });
+        }
+    }
+}
+
 TEST_F(PPExecutorTest, CommonRejectsNonPositiveSpeculativeWidth) {
     auto params = makeMtpParams(3);
     for (const int64_t width : {-1, 0}) {

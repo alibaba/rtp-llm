@@ -449,8 +449,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             RTP_LLM_CHECK_WITH_INFO(width > 0, "DSpARK CUDA graph input hidden width must be positive, got %ld", width);
             graph_params.input_hidden_size = static_cast<size_t>(width);
         }
-        graph_params.model_data_type        = dtype;
-        graph_params.max_context_batch_size = params.concurrency_config.concurrency_limit;
+        graph_params.model_data_type            = dtype;
+        graph_params.max_context_batch_size     = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
         if (params.kv_cache_layer_layout.has_value()) {
@@ -479,10 +479,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // +---------------------------+--------------------------+----------------+----------+-------------------------+
         // | Embedding Model (prefill) | true                     | SP_TYPE_NONE   | -        | max_seq_len             |
         // | DSpARK proposal (decode)  | false                    | DSpARK         | 1        | gen_num_per_cycle + optional anchor |
-        // | DSpARK commit (decode)    | false                    | DSpARK         | 1        | gen_num_per_cycle + 1   |
+        // | DSpARK commit (decode)    | false                    | DSpARK         | 1        | verifySteps() + 1       |
         // | Draft commit (prefill)    | true                     | != SP_TYPE_NONE| 1        | gen_num_per_cycle + 1   |
         // | Normal Model (decode)     | false                    | SP_TYPE_NONE   | -        | 1 (default)             |
-        // | Target Model (verify)     | false                    | != SP_TYPE_NONE| 0        | gen_num_per_cycle + 1   |
+        // | Target Model (verify)     | false                    | != SP_TYPE_NONE| 0        | verifySteps() + 1       |
         // | Draft Model (decode)      | false                    | != SP_TYPE_NONE| 1        | 1 (default)             |
         // +---------------------------+--------------------------+----------------+----------+-------------------------+
         // clang-format on
@@ -491,14 +491,15 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_params.num_tokens_per_bs =
                 params.sp_config.gen_num_per_cycle + static_cast<int>(!params.sp_config.sp_dspark_sample_from_anchor);
         } else if (dspark_model_role_ == DSparkModelRole::COMMIT) {
-            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
+            graph_params.num_tokens_per_bs = params.sp_config.verifySteps() + 1;
         } else if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
             // for embedding model
             graph_params.num_tokens_per_bs = params.max_seq_len;
         } else if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
                    && (!params.model_id || is_prefill_cuda_graph_mode)) {
             // for target model verify and draft model prefill
-            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
+            graph_params.num_tokens_per_bs =
+                (is_prefill_cuda_graph_mode ? params.sp_config.gen_num_per_cycle : params.sp_config.verifySteps()) + 1;
         } else {
             graph_params.num_tokens_per_bs = 1;
         }

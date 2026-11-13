@@ -45,6 +45,47 @@ class GenericMoeLayer(nn.Module):
 
     _shared_mlp_cls = None
 
+    def _create_shared_expert(
+        self,
+        activation_type,
+        parallelism_config,
+        weights,
+        quant_config,
+        hw_kernel_config,
+    ):
+        return (self._shared_mlp_cls or DenseMLP)(
+            activation_type,
+            parallelism_config,
+            weights,
+            quant_config,
+            hw_kernel_config=hw_kernel_config,
+            linear_factory=self.linear_factory,
+        )
+
+    def _create_fused_moe(self, config_adapter, weights):
+        return FusedMoeFactory().create_fused_moe(config_adapter, weights)
+
+    def _moe_activation_args(self):
+        return "SiGLU", None
+
+    def _run_fused_moe(
+        self,
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        activation,
+        extra_expert_args,
+        skip_tp_allreduce,
+    ):
+        return self.fused_moe(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            extra_expert_args=extra_expert_args,
+            skip_tp_allreduce=skip_tp_allreduce,
+        )
+
     def __init__(
         self,
         config: ModelConfig,
@@ -92,7 +133,7 @@ class GenericMoeLayer(nn.Module):
             enable_cuda_graph=enable_cuda_graph,
         )
         config_adapter.has_shared_expert_gate = W.shared_expert_gate in weights
-        self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
+        self.fused_moe = self._create_fused_moe(config_adapter, weights)
         router = self.fused_moe.router
         router_tp_size = router.tp_collective_size
 
@@ -101,13 +142,12 @@ class GenericMoeLayer(nn.Module):
             config.moe_style == 2 and not self.fused_moe.includes_shared_expert
         )
         if self.add_shared_expert:
-            self.shared_expert = (self._shared_mlp_cls or DenseMLP)(
+            self.shared_expert = self._create_shared_expert(
                 config.activation_type,
                 parallelism_config,
                 weights,
                 quant_config,
-                hw_kernel_config=hw_kernel_config,
-                linear_factory=self.linear_factory,
+                hw_kernel_config,
             )
         else:
             self.shared_expert = None
@@ -223,12 +263,14 @@ class GenericMoeLayer(nn.Module):
         # path separately.  This is especially important for decode, where the
         # hidden dimension is small enough that collective launch latency
         # dominates the payload transfer.
-        experts_output = self.fused_moe(
-            hidden_states=hidden_states,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation="SiGLU",
-            skip_tp_allreduce=self.use_unified_tp_allreduce,
+        activation, extra_expert_args = self._moe_activation_args()
+        experts_output = self._run_fused_moe(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            activation,
+            extra_expert_args,
+            self.use_unified_tp_allreduce,
         )
         return experts_output
 
@@ -378,6 +420,8 @@ class GenericMoeDecoderLayer(nn.Module):
 class GenericMoeModel(GptModelBase):
     """Generic MoE model supporting Qwen3-MoE, internal model, and other MoE architectures."""
 
+    decoder_layer_cls = GenericMoeDecoderLayer
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -413,7 +457,7 @@ class GenericMoeModel(GptModelBase):
         )
         self.layers = nn.ModuleList(
             [
-                GenericMoeDecoderLayer(
+                self.decoder_layer_cls(
                     model_config,
                     parallelism_config,
                     weights.weights[idx],

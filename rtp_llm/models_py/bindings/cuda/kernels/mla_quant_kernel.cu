@@ -80,7 +80,8 @@ indexer_k_quant_and_cache_kernel(const scalar_t* __restrict__ k,            // [
                                  const int  quant_block_size,               // quantization block size
                                  const int  cache_block_size,               // cache block size
                                  const int  cache_stride,                   // stride for each token in kv_cache
-                                 const bool use_ue8m0                       // use ue8m0 scale format
+                                 const bool use_ue8m0,                      // use power-of-two scale
+                                 const bool use_mx_ue8m0                    // store four packed group-32 scales
 ) {
     constexpr int VEC_SIZE  = 4;
     const int64_t token_idx = blockIdx.x;
@@ -129,7 +130,13 @@ indexer_k_quant_and_cache_kernel(const scalar_t* __restrict__ k,            // [
     if (threadIdx.x == 0) {
         const int64_t dst_scale_idx = block_idx * cache_block_size * cache_stride + cache_block_size * head_dim
                                       + (block_offset * head_dim + head_dim_idx) * 4 / quant_block_size;
-        reinterpret_cast<float*>(kv_cache)[dst_scale_idx / 4] = scale;
+        if (use_mx_ue8m0) {
+            const int          exponent                                  = __float_as_int(scale) >> 23;
+            const unsigned int packed                                    = (unsigned int)exponent * 0x01010101u;
+            reinterpret_cast<unsigned int*>(kv_cache)[dst_scale_idx / 4] = packed;
+        } else {
+            reinterpret_cast<float*>(kv_cache)[dst_scale_idx / 4] = scale;
+        }
     }
 }
 
@@ -202,7 +209,8 @@ cp_gather_indexer_k_quant_cache_kernel(const char* __restrict__ kv_cache,  // [n
                                      quant_block_size,                                                                 \
                                      cache_block_size,                                                                 \
                                      cache_stride,                                                                     \
-                                     use_ue8m0);
+                                     use_ue8m0,                                                                        \
+                                     use_mx_ue8m0);
 
 void indexer_k_quant_and_cache(torch::Tensor&     k,                 // [num_tokens, head_dim]
                                torch::Tensor&     kv_cache,          // [num_blocks, block_size, cache_stride]
@@ -214,7 +222,8 @@ void indexer_k_quant_and_cache(torch::Tensor&     k,                 // [num_tok
     int  head_dim         = k.size(1);
     int  cache_block_size = kv_cache.size(1);
     int  cache_stride     = kv_cache.size(2);
-    bool use_ue8m0        = (scale_fmt == "ue8m0");
+    bool use_mx_ue8m0     = (scale_fmt == "mx_ue8m0");
+    bool use_ue8m0        = (scale_fmt == "ue8m0" || use_mx_ue8m0);
 
     // Validation checks
     TORCH_CHECK(k.device() == kv_cache.device(), "k and kv_cache must be on the same device");
