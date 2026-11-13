@@ -1,3 +1,4 @@
+import ctypes
 import threading
 import unittest
 from contextlib import nullcontext
@@ -5,7 +6,50 @@ from unittest.mock import Mock, patch
 
 import torch
 
-from rtp_llm.multimodal.kvcm.registered_transport import RegisteredObjectTransport
+from rtp_llm.multimodal.kvcm.registered_transport import (
+    RegisteredObjectTransport,
+    _enable_sync_memops,
+)
+
+
+class CudaRdmaSyncMemopsTest(unittest.TestCase):
+    def test_enables_and_checks_the_owned_allocation(self):
+        arena = Mock()
+        arena.data_ptr.return_value = 0x12340000
+        operations = []
+
+        def set_attribute(value, attribute, pointer):
+            self.assertEqual(
+                (value._obj.value, attribute, pointer), (1, 6, arena.data_ptr())
+            )
+            operations.append("set")
+            return 0
+
+        def get_attribute(value, attribute, pointer):
+            self.assertEqual((attribute, pointer), (6, arena.data_ptr()))
+            operations.append("get")
+            value._obj.value = 1
+            return 0
+
+        with patch("ctypes.CDLL") as load:
+            driver = load.return_value
+            driver.cuPointerSetAttribute.side_effect = set_attribute
+            driver.cuPointerGetAttribute.side_effect = get_attribute
+            _enable_sync_memops(arena)
+            self.assertEqual(operations, ["set", "get"])
+
+    def test_driver_errors_and_unset_attribute_are_rejected(self):
+        for set_result, get_result in ((1, 0), (0, 999), (0, 0)):
+            with self.subTest(set_result=set_result, get_result=get_result):
+                with patch("ctypes.CDLL") as load:
+                    driver = load.return_value
+                    driver.cuPointerSetAttribute.return_value = set_result
+                    # A successful query that leaves the value zero is unsafe too.
+                    driver.cuPointerGetAttribute.return_value = get_result
+                    with self.assertRaisesRegex(RuntimeError, "SYNC_MEMOPS"):
+                        _enable_sync_memops(Mock(data_ptr=lambda: 0x12340000))
+                    if set_result:
+                        driver.cuPointerGetAttribute.assert_not_called()
 
 
 class RegisteredObjectTransportTest(unittest.TestCase):
@@ -31,6 +75,20 @@ class RegisteredObjectTransportTest(unittest.TestCase):
 
             def __init__(self, gpu_tensors):
                 self.arena = gpu_tensors[0]
+                value = ctypes.c_uint()
+                driver = ctypes.CDLL("libcuda.so.1")
+                driver.cuPointerGetAttribute.argtypes = [
+                    ctypes.c_void_p,
+                    ctypes.c_int,
+                    ctypes.c_uint64,
+                ]
+                assert (
+                    driver.cuPointerGetAttribute(
+                        ctypes.byref(value), 6, self.arena.data_ptr()
+                    )
+                    == 0
+                )
+                assert value.value == 1, "arena exported before SYNC_MEMOPS"
                 seen["client"] = self
                 self.closed = 0
 
@@ -77,6 +135,11 @@ class RegisteredTransportFailureTest(unittest.TestCase):
     """Exercise failure ownership without claiming actual CUDA/RDMA coverage."""
 
     def setUp(self):
+        self.memops = patch(
+            "rtp_llm.multimodal.kvcm.registered_transport._enable_sync_memops"
+        )
+        self.enable_memops = self.memops.start()
+        self.addCleanup(self.memops.stop)
         self.quarantine = patch.object(
             RegisteredObjectTransport, "_quarantined_transports", []
         )
@@ -170,6 +233,17 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                 RegisteredObjectTransport(factory, max_object_bytes=16, device="cuda:0")
             allocate.assert_called_once()
             factory.assert_called_once()
+
+    def test_sync_memops_failure_prevents_client_registration(self):
+        self.enable_memops.side_effect = RuntimeError("SYNC_MEMOPS failed")
+        factory = Mock()
+        arena = torch.empty(65552, dtype=torch.uint8)
+        with patch("torch.cuda.MemPool"), patch(
+            "torch.cuda.use_mem_pool", return_value=nullcontext()
+        ), patch("torch.empty", return_value=arena):
+            with self.assertRaisesRegex(RuntimeError, "SYNC_MEMOPS"):
+                RegisteredObjectTransport(factory, max_object_bytes=16, device="cuda:0")
+        factory.assert_not_called()
 
 
 if __name__ == "__main__":

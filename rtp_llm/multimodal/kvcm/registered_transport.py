@@ -4,12 +4,35 @@ The wire payload uses PACE GDR. Serialization and SHA256 validation still run
 on CPU; this is not a claim that the tensor-tree codec is GPU-only.
 """
 
+import ctypes
 import logging
 import threading
 
 import torch
 
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
+
+
+def _enable_sync_memops(arena):
+    # GPUDirect mappings must remain consistent with CUDA copies of this
+    # allocation. DMA-BUF export alone does not enable SYNC_MEMOPS.
+    driver = ctypes.CDLL("libcuda.so.1")
+    attribute = 6  # CU_POINTER_ATTRIBUTE_SYNC_MEMOPS
+    pointer = arena.data_ptr()
+    setter = driver.cuPointerSetAttribute
+    setter.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint64]
+    setter.restype = ctypes.c_int
+    enabled = ctypes.c_uint(1)
+    result = setter(ctypes.byref(enabled), attribute, pointer)
+    if result != 0:
+        raise RuntimeError(f"CUDA SYNC_MEMOPS setup failed: {result}")
+    getter = driver.cuPointerGetAttribute
+    getter.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint64]
+    getter.restype = ctypes.c_int
+    actual = ctypes.c_uint()
+    result = getter(ctypes.byref(actual), attribute, pointer)
+    if result != 0 or actual.value != 1:
+        raise RuntimeError(f"CUDA SYNC_MEMOPS verification failed: {result}")
 
 
 class RegisteredObjectTransport:
@@ -45,6 +68,7 @@ class RegisteredObjectTransport:
                             dtype=torch.uint8,
                             device=self._device,
                         )
+                    _enable_sync_memops(self._arena)
                     self._client = factory(gpu_tensors=(self._arena,))
             except Exception:
                 self._poisoned = True
