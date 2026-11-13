@@ -291,8 +291,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                                     });
                         }
                     });
-                    if (transportDelayMs == 0L) { send.run(); }
-                    else { engineScheduler.schedule(send, transportDelayMs, TimeUnit.MILLISECONDS); }
+                    if (transportDelayMs == 0L) { send.run(); } else { engineScheduler.schedule(send, transportDelayMs, TimeUnit.MILLISECONDS); }
                     return future;
                 });
 
@@ -342,8 +341,10 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     private WorkerStatus publishEndpoint(
             RoleType role, JavaMockEngineCluster.FastRpcService svc) {
-        WorkerStatus status = WorkerStatus.createDiscovered(
-                role, "g1", "127.0.0.1", httpPort(svc.getGrpcPort()), svc.getGrpcPort(), null);
+        WorkerStatus status = endpointRegistry.currentOrDiscover(role,
+                "127.0.0.1:" + httpPort(svc.getGrpcPort()),
+                () -> WorkerStatus.createDiscovered(role, "g1", "127.0.0.1",
+                        httpPort(svc.getGrpcPort()), svc.getGrpcPort(), null));
         // Discovery and polling share the Engine's version sequence. A synthetic
         // version can collide with the first real response and hide completions.
         WorkerStatusResponse initial = statusResponse(role, workerStatus(svc, 0L));
@@ -399,6 +400,26 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         return (DecodeEndpoint) endpointRegistry.get(
                 RoleType.DECODE,
                 ipPortByEnginePort.get(decodeEngines.get(index).getGrpcPort()));
+    }
+
+    void setPrefillDiscovered(int index, boolean discovered) {
+        EndpointRegistry.Retirement retirement = null;
+        synchronized (pumpLock) {
+            var engine = prefillEngines.get(index);
+            var status = statusByPort.get(engine.getGrpcPort());
+            if (discovered) {
+                if (status == null) { registerEndpoint(RoleType.PREFILL, engine); }
+            } else if (status != null) {
+                status.lock.lock();
+                try {
+                    retirement = endpointRegistry.beginRetirement(RoleType.PREFILL, status.getIpPort(), status);
+                    statusByPort.remove(engine.getGrpcPort());
+                } finally { status.lock.unlock(); }
+            }
+        }
+        if (retirement != null) {
+            retirement.complete(cache, org.slf4j.LoggerFactory.getLogger(AutoTpmE2EHarness.class));
+        }
     }
 
     void setDecodeKvCapacity(int index, long available, long total) {
@@ -550,7 +571,10 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         synchronized (pumpLock) {
             while (!delayedStatuses.isEmpty() && delayedStatuses.getFirst().dueNanos() <= System.nanoTime()) {
                 var delayed = delayedStatuses.removeFirst();
-                schedulerRuntime.applyStatus(delayed.worker(), delayed.response());
+                if (endpointRegistry.isCurrentStatus(delayed.response().getRole(),
+                        delayed.worker().getIpPort(), delayed.worker()) && delayed.worker().isActiveGeneration()) {
+                    schedulerRuntime.applyStatus(delayed.worker(), delayed.response());
+                }
             }
             for (JavaMockEngineCluster.FastRpcService svc : services.values()) {
                 pumpEngine(svc);
@@ -572,13 +596,13 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     private void pumpEngine(JavaMockEngineCluster.FastRpcService svc) {
         WorkerStatus status = statusByPort.get(svc.getGrpcPort());
+        if (status == null) { return; }
         // Only the canonical applied cursor acknowledges completions. Rejected
         // or same-version snapshots leave records available for the next poll.
         EngineRpcService.WorkerStatusPB snapshot = workerStatus(
                 svc, status.appliedStatusCursor().latestFinishedTaskVersion());
         RoleType role = decodeEngines.contains(svc) ? RoleType.DECODE : RoleType.PREFILL;
-        if (transportDelayMs == 0L) { schedulerRuntime.applyStatus(status, statusResponse(role, snapshot)); }
-        else { delayedStatuses.addLast(new DelayedStatus(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(transportDelayMs),
+        if (transportDelayMs == 0L) { schedulerRuntime.applyStatus(status, statusResponse(role, snapshot)); } else { delayedStatuses.addLast(new DelayedStatus(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(transportDelayMs),
                 status, statusResponse(role, snapshot))); }
     }
 

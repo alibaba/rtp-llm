@@ -84,6 +84,16 @@ final class MockLruBlockCache {
         return matchPrefix(keys).size();
     }
 
+    /** Routing-index inspection must not refresh the engine's LRU recency. */
+    synchronized int peekPrefixHitBlocks(List<Long> keys) {
+        int hits = 0;
+        for (Long key : keys) {
+            if (!blocks.containsKey(key)) { break; }
+            hits++;
+        }
+        return hits;
+    }
+
     /**
      * Prefix match against ALL indexed keys, including ones referenced in-flight.
      *
