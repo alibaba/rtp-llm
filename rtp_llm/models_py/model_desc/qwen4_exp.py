@@ -81,8 +81,11 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa import (
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import Qwen4ExpQSAIndexer
 from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
+    PreparedWeightDict,
     Qwen4LinearFactory,
     mark_projection_for_restart,
+    WeightView,
+    record_projection_consumer,
     prepare_compute_weights,
     annotate_compute_inventory,
     summarize_compute_inventory,
@@ -1231,9 +1234,9 @@ class Qwen4ExpModel(Qwen35Model):
             )
             # Retain the same pinned owners in the weight/export inventory;
             # release pageable copies after this initialization scope finishes.
+            storage = getattr(self.weight, "_fp8_storage_owner", self.weight)
             for (index, _), shard in zip(shard_pairs, embedding.shards):
                 layer_weights[prefix + str(index)] = shard
-                storage = getattr(self.weight, "_fp8_storage_owner", self.weight)
                 storage.weights[layer_idx][prefix + str(index)] = shard
             conv_weight = layer_weights[W.qwen4_ple_conv_w]
             self.ple_layers[str(layer_idx)] = Qwen4ExpPLELayer(
@@ -1255,8 +1258,23 @@ class Qwen4ExpModel(Qwen35Model):
             )
 
             unit = self.ple_layers[str(layer_idx)]
-            mark_projection_for_restart(layer_weights, unit.key_projection)
-            mark_projection_for_restart(layer_weights, unit.value_projection)
+            if unit.pack_decode_projections():
+                for name, view in (
+                    (W.qwen4_ple_key_proj_w, unit.key_proj),
+                    (W.qwen4_ple_value_proj_w, unit.value_proj),
+                ):
+                    layer_weights[name] = view
+                    storage.weights[layer_idx][name] = view
+                    if isinstance(layer_weights, PreparedWeightDict):
+                        layer_weights.consumer_views[name] = WeightView(
+                            name, view, None, view, False, view._base
+                        )
+            record_projection_consumer(
+                layer_weights, W.qwen4_ple_key_proj_w, unit.key_projection
+            )
+            record_projection_consumer(
+                layer_weights, W.qwen4_ple_value_proj_w, unit.value_projection
+            )
 
     def _maybe_inject_speculative_fault(self, phase: str) -> None:
         """Invoke the private transaction test hook with actual phase and rank."""
