@@ -23,10 +23,6 @@ import triton
 import triton.language as tl
 import triton.language.extra.cuda.libdevice as libdevice
 
-from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
-    invalid_kv_access_validation_enabled,
-    trap_invalid_kv_access_enabled,
-)
 from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
     _round_e2m1,
     _round_power_of_two_scale,
@@ -38,7 +34,6 @@ def _enabled(tensor):
         tensor.is_cuda
         and torch.version.hip is None
         and torch.cuda.get_device_capability(tensor.device)[0] == 10
-        and not invalid_kv_access_validation_enabled()
     )
 
 
@@ -92,10 +87,11 @@ def _frequencies(freqs, device):
 
 
 @triton.jit
-def _trap():
-    tl.inline_asm_elementwise(
-        "trap; // dummy $0", "=r", [], dtype=tl.int32, is_pure=False, pack=1
-    )
+def _trap(TRAP_INVALID_KV_ACCESS: tl.constexpr):
+    if TRAP_INVALID_KV_ACCESS:
+        tl.inline_asm_elementwise(
+            "trap; // dummy $0", "=r", [], dtype=tl.int32, is_pure=False, pack=1
+        )
 
 
 @triton.jit
@@ -197,7 +193,7 @@ def _prefill_compress_main_kernel(
     ENTRIES: tl.constexpr,
     POOL_STRIDE,
     BLOCKS,
-    TRAP: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
     REDUCE_WIDTH: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -236,9 +232,8 @@ def _prefill_compress_main_kernel(
     tl.store(output + row * 512 + columns, latent)
     slot = tl.load(slots + row).to(tl.int64)
     if slot >= 0:
-        if TRAP:
-            if slot >= BLOCKS * ENTRIES:
-                _trap()
+        if slot >= BLOCKS * ENTRIES:
+            _trap(TRAP_INVALID_KV_ACCESS)
         rotated = _rope_bf16(latent, frequencies, position // RATIO * RATIO, 512)
         grouped = rotated.to(tl.float32).reshape((32, 16))
         maxima = tl.maximum(tl.max(tl.abs(grouped), 1), 6.0 * (2.0**-9))
@@ -267,14 +262,13 @@ def _prefill_state_store_kernel(
     SCORE_STRIDE: tl.constexpr,
     STATE_STRIDE: tl.constexpr,
     STATE_ROWS,
-    TRAP: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     slot = tl.load(slots + row).to(tl.int64)
     if slot >= 0:
-        if TRAP:
-            if slot >= STATE_ROWS:
-                _trap()
+        if slot >= STATE_ROWS:
+            _trap(TRAP_INVALID_KV_ACCESS)
         d = tl.arange(0, 512)
         tl.store(
             state + slot * STATE_STRIDE + d, tl.load(values + row * VALUE_STRIDE + d)
@@ -300,14 +294,13 @@ def _prefill_index_store_kernel(
     POOL_STRIDE,
     BLOCKS,
     NATIVE_NORM: tl.constexpr,
-    TRAP: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     slot = tl.load(slots + row).to(tl.int64)
     if slot >= 0:
-        if TRAP:
-            if slot >= BLOCKS * ENTRIES:
-                _trap()
+        if slot >= BLOCKS * ENTRIES:
+            _trap(TRAP_INVALID_KV_ACCESS)
         columns = tl.arange(0, 128)
         key = tl.load(projected + row * INPUT_STRIDE + columns).to(tl.float32)
         if NATIVE_NORM:
@@ -425,8 +418,8 @@ def compress_main(
         main_pool.shape[1],
         main_pool.stride(0),
         main_pool.shape[0],
-        trap_invalid_kv_access_enabled(),
-        min(128, 512 // min(1 << (count.bit_length() - 1), 16)),
+        TRAP_INVALID_KV_ACCESS=True,
+        REDUCE_WIDTH=min(128, 512 // min(1 << (count.bit_length() - 1), 16)),
         num_warps=4,
         enable_fp_fusion=False,
     )
@@ -457,7 +450,7 @@ def store_states(values, scores, state_slots, state_pool):
             scores.stride(0),
             state_pool.stride(0),
             state_pool.shape[0],
-            trap_invalid_kv_access_enabled(),
+            TRAP_INVALID_KV_ACCESS=True,
             num_warps=4,
         )
     return True
@@ -495,7 +488,7 @@ def store_index(projected, norm, eps, positions, freqs, index_pool, index_slots,
             index_pool.stride(0),
             index_pool.shape[0],
             norm.dtype == torch.bfloat16 and projected.is_contiguous(),
-            trap_invalid_kv_access_enabled(),
+            TRAP_INVALID_KV_ACCESS=True,
             num_warps=4,
             enable_fp_fusion=False,
         )

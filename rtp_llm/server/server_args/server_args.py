@@ -486,7 +486,9 @@ def init_all_group_args(
         py_env_configs.prefill_cp_config,
     )
     init_profile_debug_logging_group_args(
-        parser, py_env_configs.profiling_debug_logging_config
+        parser,
+        py_env_configs.profiling_debug_logging_config,
+        py_env_configs.hot_hook_config,
     )
     init_quantization_group_args(parser, py_env_configs.quantization_config)
     init_render_group_args(parser, py_env_configs.render_config)
@@ -541,6 +543,13 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
     configure_warmup(
         py_env_configs.runtime_config.warm_up,
         py_env_configs.runtime_config.model_warm_up,
+    )
+
+    from rtp_llm.utils.ckpt_file_info import configure_loader_page_cache
+
+    configure_loader_page_cache(
+        py_env_configs.load_config.loader_drop_page_cache,
+        py_env_configs.load_config.loader_drop_page_cache_threshold_mb,
     )
 
     return py_env_configs

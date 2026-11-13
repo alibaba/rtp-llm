@@ -111,17 +111,6 @@ class PpuHCUnit(TileLangHCUnit):
                     (*leading, self.hc_mult, self.hc_mult), dtype=torch.float32
                 ),
             )
-        if dbg_tag is not None:
-            from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
-
-            for name, tensor in (
-                ("input", x),
-                ("fn", self.fn),
-                ("scale", self.scale),
-                ("base", self.base),
-                ("norm_weight", weight),
-            ):
-                _rt.record_if_level(2, f"{dbg_tag}_fused_norm_{name}", tensor)
         with torch.inference_mode(), record_function_range(
             f"dsv4.hc.L{self.layer_id:02d}.{self.name}.pre_norm"
         ):
@@ -144,9 +133,6 @@ class PpuHCUnit(TileLangHCUnit):
                 norm_eps=norm.variance_epsilon,
             )
         self._check_pre_output(leading, y, post, comb)
-        if dbg_tag is not None:
-            for name, tensor in (("y", y), ("post", post), ("comb", comb)):
-                _rt.record_if_level(2, f"{dbg_tag}_fused_norm_{name}", tensor)
         return y, post, comb
 
     def prefill_fast_pre_norm(self, x, norm, *, tp_size, tp_rank):

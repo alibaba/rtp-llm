@@ -90,7 +90,7 @@ class V41QKVRopeCacheCudaTest(unittest.TestCase):
     def setUp(self):
         env = patch.dict(
             os.environ,
-            {"DSV41_FUSED_QKV_ROPE_CACHE": "1", "DSV4_TRAP_INVALID_KV_ACCESS": "1"},
+            {"DSV41_FUSED_QKV_ROPE_CACHE": "1"},
         )
         env.start()
         self.addCleanup(env.stop)

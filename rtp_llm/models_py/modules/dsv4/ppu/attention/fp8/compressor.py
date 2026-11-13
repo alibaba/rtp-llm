@@ -169,11 +169,6 @@ class CompressorFP8(_BaseCompressorFP8):
         self._cp_gather_stream: Optional[Any] = None
         self._kv_cache_sharded: bool = False
         self._profile_label: Optional[str] = None
-        # MOEDBG: caller (Attention / IndexerFP8) sets this to a name
-        # prefix like ``"L02_attn_cmp"`` before forward and clears after;
-        # _forward_prefill_body uses it as the rec name root. None / empty
-        # string suppresses recording.
-        self._dbg_prefix: Optional[str] = None
 
     def _launch(
         self,

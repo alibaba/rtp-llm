@@ -364,13 +364,11 @@ class JitCacheManager(FileSystemEventHandler):
 
     def _start_watch(self) -> bool:
         try:
-            # RTP_JIT_WATCHDOG_DEBUG=1 keeps the raw inotify event DEBUG
-            # stream available for incident diagnosis (event loss /
-            # IN_Q_OVERFLOW blind spots); every enabled component's rules
-            # would still gate the handler, only the log volume returns.
-            if os.environ.get("RTP_JIT_WATCHDOG_DEBUG", "0") != "1":
-                for name in NOISY_WATCHDOG_LOGGERS:
-                    logging.getLogger(name).setLevel(logging.WARNING)
+            # The inotify_buffer DEBUG stream is pure per-event noise in
+            # production; silence it unconditionally (re-enable temporarily on
+            # a debug branch when diagnosing event loss / IN_Q_OVERFLOW).
+            for name in NOISY_WATCHDOG_LOGGERS:
+                logging.getLogger(name).setLevel(logging.WARNING)
             self._observer = Observer()
             for item in self.scope.components:
                 item.local_dir.mkdir(parents=True, exist_ok=True)

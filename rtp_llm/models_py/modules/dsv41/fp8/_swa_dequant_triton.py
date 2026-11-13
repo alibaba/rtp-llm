@@ -28,9 +28,6 @@ from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41.fp8._swa_cp_byte_sliced import (
     CPByteSlicedSlotCompaction,
 )
-from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
-    trap_invalid_kv_access_enabled,
-)
 
 
 @dataclass
@@ -239,7 +236,7 @@ def dequantize_and_gather_k_cache(
         output_dim=HEAD_DIM,
         fp8_max=FP8_MAX,
         n_quant_blocks=NOPE_TILES,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        TRAP_INVALID_KV_ACCESS=True,
     )
 
 
@@ -426,7 +423,7 @@ def _launch_dequantize_and_gather_k_slots_unchecked(
         num_cache_blocks=int(num_cache_blocks),
         fp8_max=FP8_MAX,
         n_quant_blocks=NOPE_TILES,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        TRAP_INVALID_KV_ACCESS=True,
         CP_RANK_MAJOR_RAW=bool(cp_rank_major_raw),
     )
 
@@ -869,7 +866,7 @@ def try_gather_k_cache_packed_to_flat(
         scale_dim=SCALE_BYTES_PER_TOKEN,
         entry_bytes=ENTRY_BYTES,
         BATCH_BLOCK=batch_block,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        TRAP_INVALID_KV_ACCESS=True,
         num_warps=4,
     )
     return True
@@ -1257,7 +1254,7 @@ def dequantize_slots_to_bf16(
         token_data_size=TOKEN_DATA_SIZE,
         num_cache_blocks=int(pool_3d.shape[0]),
         n_quant_blocks=NOPE_TILES,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        TRAP_INVALID_KV_ACCESS=True,
     )
     return out
 

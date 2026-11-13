@@ -1,7 +1,6 @@
 import importlib
 import inspect
 import json
-import os
 import tempfile
 import textwrap
 import time
@@ -19,21 +18,14 @@ def _target(name: str) -> str:
 class HotHookRuntimeTest(unittest.TestCase):
     def setUp(self):
         hot_hook_runtime.reset_for_test()
-        self._old_env = dict(os.environ)
         self.tmpdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tmpdir.name)
         self.hook_file = self.root / "hooks.py"
         self.config_file = self.root / "config.json"
-        os.environ["RTP_HOT_HOOK"] = "1"
-        os.environ["RTP_HOT_HOOK_FILE"] = str(self.hook_file)
-        os.environ["RTP_HOT_HOOK_CONFIG"] = str(self.config_file)
-        os.environ["RTP_HOT_HOOK_DUMP_DIR"] = str(self.root / "dumps")
         importlib.reload(hot_hook_target)
 
     def tearDown(self):
         hot_hook_runtime.reset_for_test()
-        os.environ.clear()
-        os.environ.update(self._old_env)
         self.tmpdir.cleanup()
         importlib.reload(hot_hook_target)
 
@@ -41,17 +33,22 @@ class HotHookRuntimeTest(unittest.TestCase):
         self.hook_file.write_text(textwrap.dedent(source))
         time.sleep(0.02)
 
-    def _write_config(self, config: dict) -> None:
-        self.config_file.write_text(json.dumps(config, indent=2))
+    def _write_config(self, config: dict, *, allow_local_mutation=None) -> None:
+        merged = dict(config)
+        # Loader-level sub-parameters live inside the config JSON now.
+        merged.setdefault("hook_file", str(self.hook_file))
+        merged.setdefault("dump_dir", str(self.root / "dumps"))
+        if allow_local_mutation is not None:
+            merged["allow_local_mutation"] = allow_local_mutation
+        self.config_file.write_text(json.dumps(merged, indent=2))
         time.sleep(0.02)
 
-    def _install(self, config: dict, hooks: str) -> None:
+    def _install(self, config: dict, hooks: str, *, allow_local_mutation=None) -> None:
         self._write_hooks(hooks)
-        self._write_config(config)
-        self.assertTrue(hot_hook_runtime.install_if_enabled())
+        self._write_config(config, allow_local_mutation=allow_local_mutation)
+        self.assertTrue(hot_hook_runtime.install_from_config(str(self.config_file)))
 
-    def test_disabled_env_does_not_patch(self):
-        os.environ.pop("RTP_HOT_HOOK", None)
+    def test_missing_config_path_does_not_patch(self):
         self._write_hooks("def replace(ctx): return 99\n")
         self._write_config(
             {
@@ -60,7 +57,26 @@ class HotHookRuntimeTest(unittest.TestCase):
                 ]
             }
         )
-        self.assertFalse(hot_hook_runtime.install_if_enabled())
+        self.assertFalse(hot_hook_runtime.install_from_config(""))
+        self.assertFalse(hot_hook_runtime.install_from_config(None))
+        self.assertEqual(3, hot_hook_target.add(1, b=2))
+
+    def test_failed_first_install_leaves_runtime_disabled(self):
+        # A config whose hook_file cannot be loaded must not leave the
+        # runtime half-enabled (enabled=True with no hooks installed).
+        self._write_hooks("def replace(ctx): return 99\n")
+        self._write_config(
+            {
+                "function_hooks": [
+                    {"target": _target("add"), "replace": "replace"},
+                ],
+                "hook_file": str(self.root / "no_such_hook.py"),
+            }
+        )
+        self.assertFalse(hot_hook_runtime.install_from_config(str(self.config_file)))
+        runtime = hot_hook_runtime.runtime()
+        self.assertFalse(runtime.enabled)
+        self.assertEqual({}, runtime.config)
         self.assertEqual(3, hot_hook_target.add(1, b=2))
 
     def test_function_hooks_cover_before_after_replace_exception_and_methods(self):
@@ -236,7 +252,7 @@ class HotHookRuntimeTest(unittest.TestCase):
         notes = (self.root / "dumps" / "line_reload" / "notes.jsonl").read_text()
         self.assertIn(f":{other_line_no}", notes)
 
-    def test_line_hook_local_mutation_requires_explicit_env(self):
+    def test_line_hook_local_mutation_requires_explicit_config_flag(self):
         line_no = hot_hook_target.line_target.__code__.co_firstlineno + 2
         config = {
             "line_hooks": [
@@ -254,7 +270,7 @@ class HotHookRuntimeTest(unittest.TestCase):
         self._install(config, hooks)
         self.assertEqual(11, hot_hook_target.line_target(3))
 
-        os.environ["RTP_HOT_HOOK_ALLOW_LOCAL_MUTATION"] = "1"
+        self._write_config(config, allow_local_mutation=True)
         self.assertEqual(23, hot_hook_target.line_target(3))
 
 

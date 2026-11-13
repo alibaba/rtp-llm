@@ -26,9 +26,6 @@ import triton.language as tl
 from rtp_llm.models_py.modules.dsv41.fp8._swa_cp_byte_sliced import (
     CPByteSlicedSlotCompaction,
 )
-from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
-    trap_invalid_kv_access_enabled,
-)
 
 
 @triton.jit
@@ -197,7 +194,7 @@ def quantize_and_insert_k_cache(
         num_cache_blocks=int(k_cache.shape[0]),
         fp8_max=_FP8_MAX,
         n_quant_blocks=8,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        TRAP_INVALID_KV_ACCESS=True,
     )
 
 

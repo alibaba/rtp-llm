@@ -2036,6 +2036,7 @@ class BatchRecordArgsTest(TestCase):
     }
 
     def parse_profile_config(self, args, env, use_sys_argv=False):
+        from rtp_llm.config.py_config_modules import HotHookConfig
         from rtp_llm.ops import ProfilingDebugLoggingConfig
         from rtp_llm.server.server_args.profile_debug_logging_group_args import (
             init_profile_debug_logging_group_args,
@@ -2045,7 +2046,7 @@ class BatchRecordArgsTest(TestCase):
         config = ProfilingDebugLoggingConfig()
         parser = EnvArgumentParser()
         parser.set_root_config(config)
-        init_profile_debug_logging_group_args(parser, config)
+        init_profile_debug_logging_group_args(parser, config, HotHookConfig())
         argv = ["server", *args] if use_sys_argv else ["server"]
         with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv):
             parser.parse_args(None if use_sys_argv else args)
