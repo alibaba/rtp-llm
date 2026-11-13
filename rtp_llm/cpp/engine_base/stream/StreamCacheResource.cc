@@ -91,7 +91,7 @@ void traceLinearCacheLoaded(const LoadAsyncContext& context, const KVCacheManage
         }
         const auto& tags = sets[desc.group_set_id]->groupTags();
         for (size_t member = 0; member < tags.size(); ++member) {
-            if (!manager.cacheConfig().group(tags[member]).policy.prefill_borrow_tail
+            if (!manager.cacheConfig().groupByTagGlobal(tags[member]).policy.prefill_borrow_tail
                 || member >= desc.target_blocks.size()) {
                 continue;
             }
@@ -111,10 +111,11 @@ void traceLinearCacheLoaded(const LoadAsyncContext& context, const KVCacheManage
 void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
     // cache manager is null when warmup
-    const auto topology = resource_context_.cache_manager ?
-                              resource_context_.cache_manager->cacheConfig().topologyPtr() :
-                              warmupCacheTopology();
-    batch_kv_cache_resource_->initGroups(topology);
+    if (resource_context_.cache_manager) {
+        batch_kv_cache_resource_->initGroups(resource_context_.cache_manager->cacheConfig());
+    } else {
+        batch_kv_cache_resource_->initGroups(warmupCacheTopology());
+    }
     resource_released_ = false;
 }
 
@@ -124,7 +125,12 @@ bool StreamCacheResource::copyChunkKernelBlocks(int batch, const std::string& ta
     }
     const auto& context = resource_context_;
     const auto& config  = context.cache_manager->cacheConfig();
-    const auto& group   = config.group(tag);
+    if (config.moduleOfTag(tag) != 0) {
+        // Draft modules own independent pools and have no chunk-window kernel
+        // cache; only the main module participates in chunk borrowing.
+        return false;
+    }
+    const auto& group   = config.groupByTagGlobal(tag);
     const auto  tail    = static_cast<size_t>(stream_->seqLength() - 1) / group.seqSizePerBlock();
     const auto& ids     = batch_kv_cache_resource_->cacheResource(batch).blockIds(tag);
     if (ids.linearPrefillPlan()) {
@@ -147,9 +153,10 @@ bool StreamCacheResource::copyChunkKernelBlocks(int batch, const std::string& ta
         return false;
     }
     const bool reuse = reuseCache();
-    const int group_reserve =
-        config.linear_replay.containsGroup(static_cast<int>(config.topology().groupIdForTag(tag))) ?
-            0 : stream_->completeTokenIdsPtr()->getReserveStep();
+    // Replay covers main-module groups only; draft rows never carry a plan.
+    const bool replay_group =
+        config.moduleOfTag(tag) == 0 && config.linear_replay.containsGroup(static_cast<int>(config.groupIdForTagGlobal(tag)));
+    const int group_reserve = replay_group ? 0 : stream_->completeTokenIdsPtr()->getReserveStep();
     const auto banks =
         group.chunkCacheBlockCount(stream_->seqLength(), stream_->maxChunkSize(), reuse, group_reserve);
     if (banks == 0) {
@@ -166,7 +173,7 @@ bool StreamCacheResource::copyChunkKernelBlocks(int batch, const std::string& ta
 
 void StreamCacheResource::completeLinearPrefillChunk(int completed_tokens) {
     if (resource_context_.role_type != RoleType::PREFILL || !reuseCache()
-        || resource_context_.cache_manager->cacheConfig().reuse_cache_tail_blocks == std::numeric_limits<int>::max()) {
+        || resource_context_.cache_manager->cacheConfig().reuse_cache_tail_blocks() == std::numeric_limits<int>::max()) {
         return;
     }
     for (int batch = 0; batch < batch_kv_cache_resource_->batchSize(); ++batch) {
@@ -340,7 +347,7 @@ absl::Status StreamCacheResource::initKVBlock() {
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
 
     const bool disable_first_malloc_reuse =
-        resource_context_.cache_manager->cacheConfig().disable_decode_first_malloc_device_reuse;
+        resource_context_.cache_manager->cacheConfig().disable_decode_first_malloc_device_reuse();
     const bool is_decode_role  = (resource_context_.role_type == RoleType::DECODE);
     const bool is_first_malloc = (batch_kv_cache_resource_->curBlocksNum() == 0);
 
@@ -387,7 +394,7 @@ absl::Status StreamCacheResource::initKVBlock() {
     allocator_load_context_ = std::move(result.async_context);
     if (!allocator_load_context_) {
         traceLinearPrefillAllocation(*batch_kv_cache_resource_, stream_->streamId(),
-                                      resource_context_.cache_manager->cacheConfig().reuse_cache_tail_blocks);
+                                      resource_context_.cache_manager->cacheConfig().reuse_cache_tail_blocks());
     }
     return allocator_load_context_ ? absl::OkStatus() : prepareLinearReplayResources();
 }
@@ -514,7 +521,7 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     }
     if (malloc_status == MallocStatus::NONE) {
         traceLinearPrefillAllocation(*batch_kv_cache_resource_, stream_->streamId(),
-                                      resource_context_.cache_manager->cacheConfig().reuse_cache_tail_blocks);
+                                      resource_context_.cache_manager->cacheConfig().reuse_cache_tail_blocks());
         if (load_context && (load_success || load_context->localLoadSucceeded())) {
             traceLinearCacheLoaded(*load_context, *resource_context_.cache_manager,
                                     stream_->streamId(), stream_->initialReuseLength());
@@ -778,10 +785,11 @@ void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
     fake_inited_ = true;
     stream_->setIsFakeStream(true);
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
-    const auto topology = resource_context_.cache_manager ?
-                              resource_context_.cache_manager->cacheConfig().topologyPtr() :
-                              warmupCacheTopology();
-    batch_kv_cache_resource_->initGroups(topology);
+    if (resource_context_.cache_manager) {
+        batch_kv_cache_resource_->initGroups(resource_context_.cache_manager->cacheConfig());
+    } else {
+        batch_kv_cache_resource_->initGroups(warmupCacheTopology());
+    }
 
     reserved_blocks = std::max(1ul, reserved_blocks);
     batch_kv_cache_resource_->resizeBlocks(reserved_blocks, 0);

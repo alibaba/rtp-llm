@@ -18,6 +18,7 @@ from rtp_llm.models_py.model_desc.hidden_state_capture import (
 )
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
+from rtp_llm.models_py.utils.kvcache import ModuleLocalKVCache
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -56,7 +57,7 @@ class GptModelBase(nn.Module):
         self.layer_num: int = config.num_layers
         self.vocab_size: int = config.vocab_size
 
-        self.kv_cache: Optional[KVCache] = None
+        self.kv_cache: Optional[KVCache | ModuleLocalKVCache] = None
         self._linear_replay_cache = None
         self.device_type: DeviceType = get_device_type()
         self._mtp_aux_capture_layer_ids = tuple(
@@ -99,7 +100,10 @@ class GptModelBase(nn.Module):
         return self._capture_context.for_forward(requested)
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
-        self.kv_cache = init_resource.kv_cache
+        # Module-local tag view: Python addresses pools by canonical names
+        # while the engine keeps the module's published (e.g. ``mtp_``) tags.
+        kv_cache = init_resource.kv_cache
+        self.kv_cache = None if kv_cache is None else ModuleLocalKVCache(kv_cache)
         if self.kv_cache is not None:
             self._linear_replay_cache = next(
                 (

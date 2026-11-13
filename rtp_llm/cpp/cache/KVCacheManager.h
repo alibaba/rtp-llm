@@ -57,7 +57,7 @@ public:
     }
 
     const CacheConfig& cacheConfig() const;
-    const CacheConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
+    const CacheModuleConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
 
     // 显存管理和缓存分配
     MallocResult malloc(const MallocInfo& malloc_info);
@@ -102,20 +102,26 @@ public:
                        std::vector<TaggedBlockIdPair>& block_update_mapping);
 
     // 地址转换和缓冲区访问
-    BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id) const;
-    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
-    std::vector<BlockInfo>
-                  convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
-    BlockAddrInfo convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id) const;
-    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const;
+    BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id, size_t module_id = 0) const;
+    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id, size_t module_id = 0) const;
     std::vector<BlockInfo> convertIndexToBuffer(
-        int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
+        int block_index, int layer_id, int partition_count, int partition_id, size_t module_id = 0) const;
+    BlockAddrInfo
+    convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id, size_t module_id = 0) const;
+    std::vector<BlockInfo>
+    convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id, size_t module_id = 0) const;
+    std::vector<BlockInfo> convertIndexToBuffer(int                layer_id,
+                                                const std::string& group_tag,
+                                                int                block_id,
+                                                int                partition_count,
+                                                int                partition_id,
+                                                size_t             module_id = 0) const;
 
-    GroupedCacheLayerLayout allLayerCacheBase() const;
-
-    // for main model; grouped layout preserves layers that own multiple cache groups
+    // Per-module grouped layout built directly from the module's own pools.
+    GroupedCacheLayerLayout getModuleGroupedCacheLayerLayout(size_t module_id) const;
+    // for main model (module 0); grouped layout preserves layers that own multiple cache groups
     GroupedCacheLayerLayout getMainModelGroupedCacheLayerLayout() const;
-    // for mtp module
+    // for mtp module (module id + 1)
     GroupedCacheLayerLayout getMTPModuleGroupedCacheLayerLayout(int mtp_module_id) const;
 
     const std::map<std::string, std::vector<std::optional<torch_ext::LinearReplayLayerCache>>>&

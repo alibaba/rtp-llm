@@ -329,7 +329,7 @@ TEST_F(PerRankBlockTransferEngineCrcTest, MixedRpcBatchIsRejectedBeforeCopy) {
     engine_.reset();
     auto topology = makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, payload_),
                                       makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {1}, payload_)});
-    group_->initialize(0, topology, {"group0"}, makeTestBackingLayout(payload_, true));
+    group_->initialize(0, makeTestCacheConfig(*topology), {"group0"}, makeTestBackingLayout(payload_, true));
     auto                           ordinary = makeTestGroupSet(1, topology, {"group1"}, devices_, host_);
     const std::vector<GroupSetPtr> groups{group_, ordinary};
     engine_ = std::make_shared<PerRankBlockTransferEngine>(groups, false, DeviceHostCopyOptions{}, 8, 8, 1);
@@ -547,8 +547,8 @@ TEST_F(PerRankBlockTransferEngineCrcTest, PhysicalLayersWithReorderedTagsAndScal
     ASSERT_NO_FATAL_FAILURE(initialize(false, false, 3, 1, true));
     ASSERT_TRUE(group_->usesPhysicalPayloadGeometry());
     ASSERT_EQ(group_->groupTags(), (std::vector<std::string>{"group1", "group0"}));
-    ASSERT_EQ(group_->topologyPtr()->layerIdsForGroup("group0"), (std::vector<int>{0, 2, 4}));
-    ASSERT_EQ(group_->topologyPtr()->layerIdsForGroup("group1"), (std::vector<int>{1, 3, 5}));
+    ASSERT_EQ(group_->localLayerIdsForMember("group0"), (std::vector<int>{0, 2, 4}));
+    ASSERT_EQ(group_->localLayerIdsForMember("group1"), (std::vector<int>{1, 3, 5}));
     // 10 physical tiles rather than 9 logical tiles, with larger MTP layers.
     ASSERT_EQ(payload_, 312u);
     ASSERT_TRUE(execute(Tier::DEVICE, Tier::HOST)->success());

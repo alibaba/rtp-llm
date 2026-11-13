@@ -1,5 +1,7 @@
 #include <atomic>
 #include <future>
+#include <map>
+#include <set>
 #include <string>
 #include <thread>
 #include <gtest/gtest.h>
@@ -19,19 +21,39 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
 // Mock LayerBlockConverter for testing
 class MockLayerBlockConverter: public LayerBlockConverter {
 public:
-    std::vector<BlockInfo> convertIndexToBuffer(int, const std::string&, int, int, int) const override {
+    std::vector<BlockInfo> convertIndexToBuffer(int, const std::string&, int, int, int, size_t) const override {
         return {};
+    }
+
+    size_t moduleOfTag(const std::string& tag) const override {
+        const auto it = module_by_tag.find(tag);
+        if (it == module_by_tag.end()) {
+            RTP_LLM_FAIL("unknown cache tag %s", tag.c_str());
+        }
+        return it->second;
+    }
+
+    bool tagOwnsLayer(const std::string& tag, int layer_id) const override {
+        const auto it = owned_layers_by_tag.find(tag);
+        if (it == owned_layers_by_tag.end()) {
+            return false;
+        }
+        return it->second.count(layer_id) != 0;
     }
 
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
         return {};
     }
+
+    std::map<std::string, size_t>        module_by_tag{{"group0", 0}, {"group1", 1}};
+    std::map<std::string, std::set<int>> owned_layers_by_tag{{"group0", {0}}, {"group1", {0}}};
 };
 
 class P2PConnectorTest: public ::testing::Test {
@@ -62,7 +84,7 @@ protected:
         pd_sep_config.decode_polling_call_prefill_ms = 30;
 
         config_ = P2PConnectorConfig::create(
-            runtime_config, cache_store_config, parallelism_config, pd_sep_config, /*layer_all_num=*/2);
+            runtime_config, cache_store_config, parallelism_config, pd_sep_config, /*total_layer_num=*/2);
 
         mock_layer_block_converter_ = std::make_shared<MockLayerBlockConverter>();
 
@@ -325,6 +347,50 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
         EXPECT_GE(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
     }
+}
+
+// ==================== tag ownership mismatch rejection ====================
+
+TEST_F(P2PConnectorTest, ExecuteRead_RejectsTagLayerMismatch) {
+    FunctionRequestPB request;
+    auto*             p2p = request.mutable_p2p_request();
+    p2p->set_request_id(9001);
+    p2p->set_unique_key("mismatch_key");
+    p2p->set_deadline_ms(currentTimeMs() + 5000);
+    p2p->set_type(P2PConnectorBroadcastType::READ);
+    p2p->set_remote_tp_size(1);
+
+    auto* layer_block = p2p->add_layer_blocks();
+    layer_block->set_layer_id(1);
+    layer_block->set_cache_tag("group1");
+    layer_block->add_cache_keys(1);
+    layer_block->add_block_ids(0);
+
+    FunctionResponsePB response;
+    EXPECT_FALSE(connector_->executeFunction(request, response));
+    EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_NE(response.p2p_response().error_message().find("does not own"), std::string::npos);
+}
+
+TEST_F(P2PConnectorTest, ExecuteRead_RejectsUnknownTag) {
+    FunctionRequestPB request;
+    auto*             p2p = request.mutable_p2p_request();
+    p2p->set_request_id(9002);
+    p2p->set_unique_key("unknown_tag_key");
+    p2p->set_deadline_ms(currentTimeMs() + 5000);
+    p2p->set_type(P2PConnectorBroadcastType::READ);
+    p2p->set_remote_tp_size(1);
+
+    auto* layer_block = p2p->add_layer_blocks();
+    layer_block->set_layer_id(0);
+    layer_block->set_cache_tag("unknown_tag");
+    layer_block->add_cache_keys(1);
+    layer_block->add_block_ids(0);
+
+    FunctionResponsePB response;
+    EXPECT_FALSE(connector_->executeFunction(request, response));
+    EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_NE(response.p2p_response().error_message().find("not owned"), std::string::npos);
 }
 
 }  // namespace rtp_llm

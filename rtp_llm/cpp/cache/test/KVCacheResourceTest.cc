@@ -65,6 +65,30 @@ GroupBase makeResourceGroup(std::string tag, CacheGroupType type) {
     return group;
 }
 
+CacheModuleConfig makeSingleGroupModule(const std::string& tag, uint32_t kernel_seq) {
+    auto mha_spec                       = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, 8, tag);
+    mha_spec->kernel_seq_size_per_block = kernel_seq;
+    KVCacheSpecPtr    spec              = mha_spec;
+    CacheModuleConfig module;
+    module.dtype              = spec->memoryLayoutDType();
+    module.layer_num          = 1;
+    module.seq_size_per_block = spec->seq_size_per_block;
+    module.fromGroupedSpecs({spec}, {{0}}, {CacheGroupType::FULL}, {tag});
+    module.finalizeBlockNums(16, RuntimeConfig{});
+    return module;
+}
+
+CacheConfig makeTwoModuleConfig(const std::string& main_tag,
+                                uint32_t           main_kernel_seq,
+                                const std::string& mtp_tag,
+                                uint32_t           mtp_kernel_seq) {
+    CacheConfig config;
+    config.main_config = makeSingleGroupModule(main_tag, main_kernel_seq);
+    config.mtp_sub_configs.push_back(makeSingleGroupModule(mtp_tag, mtp_kernel_seq));
+    config.seq_size_per_block = config.main_config.seq_size_per_block;
+    return config;
+}
+
 }  // namespace
 
 TEST(GroupBlockIdsTest, CopyOwnsIdentityAndSharesHolders) {
@@ -162,7 +186,7 @@ TEST(KVCacheResourceTest, FailedReinitializationDoesNotPublishPartialRowsOrLayer
     // Inject a failure in the second row after the first temporary holder was built.
     bad_spec->kernel_seq_size_per_block = 0;
     EXPECT_ANY_THROW(resource.initGroups(replacement));
-    EXPECT_ANY_THROW(resource.initGroups(nullptr));
+    EXPECT_ANY_THROW(resource.initGroups(std::shared_ptr<const CacheTopology>()));
     EXPECT_EQ(resource.groupTags(), (std::vector<std::string>{"original"}));
     EXPECT_EQ(resource.groupBlockIds("original"), old_holder);
     EXPECT_EQ(resource.layerBlocks(), old_layers);
@@ -612,6 +636,202 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
     batch.moveBatchResource(0, std::move(moved));
     ASSERT_EQ(batch.cacheResource(0).groupNums(), 1);
     ASSERT_EQ(batch.cacheResource(0).kernelBlocks("group0"), (BlockIndicesType{6, 7}));
+}
+
+TEST(KVCacheResourceTest, ConfigInitGroups_BuildsTaggedRowsFromModuleIdentities) {
+    // Main (tag "full", kbp=4) + MTP sub (tag "mtp_full", kbp=2), each with local layer 0.
+    auto config = makeTwoModuleConfig("full", /*main_kernel_seq=*/2, "mtp_full", /*mtp_kernel_seq=*/4);
+
+    KVCacheResource resource;
+    resource.initGroups(config);
+
+    ASSERT_EQ(resource.groupNums(), 2);
+    ASSERT_EQ(resource.moduleNum(), 2u);
+    EXPECT_EQ(resource.groupTags(), (std::vector<std::string>{"full", "mtp_full"}));
+    EXPECT_EQ(resource.layerNum(), 1);
+    // Legacy overload returns only main module's layer 0 tags.
+    EXPECT_EQ(resource.groupTagsForLayer(0), (std::vector<std::string>{"full"}));
+    // Module-local overloads resolve each module's own layer 0 independently.
+    EXPECT_EQ(resource.groupTagsForLayer(0, 0), (std::vector<std::string>{"full"}));
+    EXPECT_EQ(resource.groupTagsForLayer(0, 1), (std::vector<std::string>{"mtp_full"}));
+
+    resource.mutableBlockIds("full").assign({1});
+    resource.mutableBlockIds("mtp_full").assign({1});
+
+    EXPECT_EQ(resource.blocks("full"), (BlockIndicesType{1}));
+    EXPECT_EQ(resource.kernelBlocks("full"), (BlockIndicesType{4, 5, 6, 7}));
+    EXPECT_EQ(resource.blocks("mtp_full"), (BlockIndicesType{1}));
+    EXPECT_EQ(resource.kernelBlocks("mtp_full"), (BlockIndicesType{2, 3}));
+
+    resource.mutableBlockIds("full").setAt(0, 5);
+    EXPECT_EQ(resource.blocks("full"), (BlockIndicesType{5}));
+    EXPECT_EQ(resource.kernelBlocks("full"), (BlockIndicesType{20, 21, 22, 23}));
+    EXPECT_EQ(resource.blocks("mtp_full"), (BlockIndicesType{1}));
+    EXPECT_EQ(resource.kernelBlocks("mtp_full"), (BlockIndicesType{2, 3}));
+
+    EXPECT_EQ(resource.blocksForLayer(0, "full"), (BlockIndicesType{5}));
+    EXPECT_EQ(resource.kernelBlocksForLayer(0, "full"), (BlockIndicesType{20, 21, 22, 23}));
+    // MTP tag requires module_id=1; the legacy overload (module_id=0) rejects it.
+    EXPECT_ANY_THROW(resource.blocksForLayer(0, "mtp_full"));
+    EXPECT_ANY_THROW(resource.kernelBlocksForLayer(0, "mtp_full"));
+    EXPECT_EQ(resource.blocksForLayer(0, "mtp_full", 1), (BlockIndicesType{1}));
+    EXPECT_EQ(resource.kernelBlocksForLayer(0, "mtp_full", 1), (BlockIndicesType{2, 3}));
+    // Convenience overload: blocks for the sole group of a module-local layer.
+    EXPECT_EQ(resource.blocksForLayer(0, 0u), (BlockIndicesType{5}));
+    EXPECT_EQ(resource.blocksForLayer(0, 1u), (BlockIndicesType{1}));
+    EXPECT_ANY_THROW(resource.blocksForLayer(0, "missing"));
+    EXPECT_ANY_THROW(resource.blocksForLayer(1, "full"));
+    // Out-of-range module rejects.
+    EXPECT_ANY_THROW(resource.groupTagsForLayer(0, 99));
+    EXPECT_ANY_THROW(resource.blocksForLayer(0, 99u));
+}
+
+TEST(KVCacheResourceTest, ConfigInitGroups_ReorderingChangesLayoutNotContent) {
+    // Config A: main = {full, kbp=4}, MTP = {mtp_full, kbp=2}
+    auto config_a = makeTwoModuleConfig("full", 2, "mtp_full", 4);
+
+    // Config B: main = {mtp_full, kbp=2}, MTP = {full, kbp=4} (swapped modules)
+    auto config_b = makeTwoModuleConfig("mtp_full", 4, "full", 2);
+
+    KVCacheResource resource_a;
+    resource_a.initGroups(config_a);
+    KVCacheResource resource_b;
+    resource_b.initGroups(config_b);
+
+    EXPECT_EQ(resource_a.groupTags(), (std::vector<std::string>{"full", "mtp_full"}));
+    EXPECT_EQ(resource_b.groupTags(), (std::vector<std::string>{"mtp_full", "full"}));
+
+    for (const auto& tag : {"full", "mtp_full"}) {
+        EXPECT_EQ(resource_a.blockIds(tag).kernelBlocksPerKvBlock(), resource_b.blockIds(tag).kernelBlocksPerKvBlock());
+    }
+
+    resource_a.mutableBlockIds("full").assign({3});
+    resource_b.mutableBlockIds("full").assign({3});
+    resource_a.mutableBlockIds("mtp_full").assign({7});
+    resource_b.mutableBlockIds("mtp_full").assign({7});
+
+    EXPECT_EQ(resource_a.kernelBlocks("full"), resource_b.kernelBlocks("full"));
+    EXPECT_EQ(resource_a.kernelBlocks("mtp_full"), resource_b.kernelBlocks("mtp_full"));
+    EXPECT_EQ(resource_a.kernelBlocks("full"), (BlockIndicesType{12, 13, 14, 15}));
+    EXPECT_EQ(resource_a.kernelBlocks("mtp_full"), (BlockIndicesType{14, 15}));
+}
+
+TEST(KVCacheResourceTest, ConfigInitGroups_FailedInitLeavesPriorRowsValid) {
+    auto config = makeTwoModuleConfig("full", 2, "mtp_full", 4);
+
+    KVCacheResource resource;
+    resource.initGroups(config);
+    resource.mutableBlockIds("full").assign({1, 2});
+    resource.mutableBlockIds("mtp_full").assign({3});
+    resource.setCacheKeys({100, 200});
+    resource.setDeviceReuseBlockNum(5);
+    const auto old_holder = resource.groupBlockIds("full");
+
+    // Corrupt the mtp module's spec in-place through the shared topology.
+    const auto& mtp_group = config.mtp_sub_configs[0].topology().group("mtp_full");
+    auto        mutable_spec =
+        std::const_pointer_cast<MHAKVCacheSpec>(std::dynamic_pointer_cast<const MHAKVCacheSpec>(mtp_group.spec));
+    mutable_spec->kernel_seq_size_per_block = 0;
+
+    EXPECT_ANY_THROW(resource.initGroups(config));
+
+    EXPECT_EQ(resource.groupTags(), (std::vector<std::string>{"full", "mtp_full"}));
+    EXPECT_EQ(resource.groupBlockIds("full"), old_holder);
+    EXPECT_EQ(resource.blocks("full"), (BlockIndicesType{1, 2}));
+    EXPECT_EQ(resource.blocks("mtp_full"), (BlockIndicesType{3}));
+    EXPECT_EQ(resource.cacheKeys(), (CacheKeysType{100, 200}));
+    EXPECT_EQ(resource.deviceReuseBlockNum(), 5u);
+}
+
+TEST(KVCacheResourceTest, ConfigInitGroups_DuplicateTagsPreservePublishedRowsAndLayers) {
+    for (bool materialize_layer_views : {true, false}) {
+        SCOPED_TRACE(materialize_layer_views);
+        KVCacheResource resource;
+        resource.initGroups(makeTwoModuleConfig("full", 2, "mtp_full", 4), materialize_layer_views);
+        resource.mutableBlockIds("full").assign({3});
+        resource.mutableBlockIds("mtp_full").assign({7});
+        const auto main_holder = resource.groupBlockIds("full");
+        const auto mtp_holder  = resource.groupBlockIds("mtp_full");
+
+        auto duplicate_config = makeTwoModuleConfig("other", 4, "other", 2);
+        EXPECT_ANY_THROW(resource.initGroups(duplicate_config, !materialize_layer_views));
+
+        EXPECT_EQ(resource.groupTags(), (std::vector<std::string>{"full", "mtp_full"}));
+        EXPECT_EQ(resource.groupBlockIds("full"), main_holder);
+        EXPECT_EQ(resource.groupBlockIds("mtp_full"), mtp_holder);
+        EXPECT_EQ(resource.kernelBlocksForLayer(0, "full"), (BlockIndicesType{12, 13, 14, 15}));
+        EXPECT_EQ(resource.kernelBlocksForLayer(0, "mtp_full", 1), (BlockIndicesType{14, 15}));
+    }
+}
+
+TEST(KVCacheResourceTest, ConfigInitGroups_CopiedAndMovedResourcesOutliveSetupConfig) {
+    for (bool materialize_layer_views : {true, false}) {
+        SCOPED_TRACE(materialize_layer_views);
+        KVCacheResource resource;
+        {
+            auto config = makeTwoModuleConfig("full", 2, "mtp_full", 4);
+            config.mtp_sub_configs.push_back(makeSingleGroupModule("mtp_second", 8));
+            resource.initGroups(config, materialize_layer_views);
+            resource.mutableBlockIds("full").assign({5});
+            resource.mutableBlockIds("mtp_full").assign({7});
+            resource.mutableBlockIds("mtp_second").assign({9});
+        }
+
+        KVCacheResource copy  = resource;
+        KVCacheResource moved = std::move(resource);
+        moved.mutableBlockIds("full").setAt(0, 6);
+        EXPECT_EQ(copy.blocks("full"), (BlockIndicesType{6}));
+        EXPECT_EQ(copy.groupBlockIds("full"), moved.groupBlockIds("full"));
+        moved                    = KVCacheResource{};
+        KVCacheResource survivor = std::move(copy);
+
+        EXPECT_EQ(survivor.moduleNum(), 3u);
+        EXPECT_EQ(survivor.layerNum(), 1);
+        EXPECT_EQ(survivor.groupTagsForLayer(0), (std::vector<std::string>{"full"}));
+        EXPECT_EQ(survivor.groupTagsForLayer(0, 1), (std::vector<std::string>{"mtp_full"}));
+        EXPECT_EQ(survivor.groupTagsForLayer(0, 2), (std::vector<std::string>{"mtp_second"}));
+        EXPECT_EQ(survivor.blocksForLayer(0, 0u), (BlockIndicesType{6}));
+        EXPECT_EQ(survivor.blocksForLayer(0, 1u), (BlockIndicesType{7}));
+        EXPECT_EQ(survivor.blocksForLayer(0, 2u), (BlockIndicesType{9}));
+        EXPECT_EQ(survivor.kernelBlocksForLayer(0, "full"), (BlockIndicesType{24, 25, 26, 27}));
+        EXPECT_EQ(survivor.kernelBlocksForLayer(0, "mtp_full", 1), (BlockIndicesType{14, 15}));
+        ASSERT_EQ(survivor.layerBlocks().size(), 1u);
+        EXPECT_EQ(survivor.layerBlocks()[0], survivor.groupBlockIds("full"));
+        EXPECT_ANY_THROW(survivor.blocksForLayer(0, "mtp_full"));
+        EXPECT_ANY_THROW(survivor.blocksForLayer(0, "full", 1));
+        EXPECT_ANY_THROW(survivor.groupTagsForLayer(1, 1));
+        EXPECT_ANY_THROW(survivor.groupTagsForLayer(0, 99));
+    }
+}
+
+TEST(BatchKVCacheResourceTest, ConfigInitGroups_DelegatesToEachResource) {
+    for (bool materialize_layer_views : {true, false}) {
+        SCOPED_TRACE(materialize_layer_views);
+        BatchKVCacheResource batch;
+        batch.resetBatchSize(2);
+        {
+            auto config = makeTwoModuleConfig("full", 2, "mtp_full", 4);
+            batch.initGroups(config, materialize_layer_views);
+        }
+
+        ASSERT_EQ(batch.groupNums(), 2);
+        for (int i = 0; i < 2; ++i) {
+            EXPECT_EQ(batch.cacheResource(i).groupTags(), (std::vector<std::string>{"full", "mtp_full"}));
+            EXPECT_EQ(batch.groupTagsForLayer(i, 0), (std::vector<std::string>{"full"}));
+            EXPECT_EQ(batch.groupTagsForLayer(i, 0, 1), (std::vector<std::string>{"mtp_full"}));
+        }
+
+        batch.setBatchBlocks(0, "full", {1});
+        batch.setBatchBlocks(1, "full", {2});
+        batch.setBatchBlocks(0, "mtp_full", {3});
+        batch.setBatchBlocks(1, "mtp_full", {4});
+
+        EXPECT_EQ(batch.kernelBlocksForLayer(0, 0, "full"), (BlockIndicesType{4, 5, 6, 7}));
+        EXPECT_EQ(batch.kernelBlocksForLayer(1, 0, "full"), (BlockIndicesType{8, 9, 10, 11}));
+        EXPECT_EQ(batch.kernelBlocksForLayer(0, 0, "mtp_full", 1), (BlockIndicesType{6, 7}));
+        EXPECT_EQ(batch.kernelBlocksForLayer(1, 0, "mtp_full", 1), (BlockIndicesType{8, 9}));
+        EXPECT_ANY_THROW(batch.blocksForLayer(0, 0, "mtp_full"));
+    }
 }
 
 }  // namespace test

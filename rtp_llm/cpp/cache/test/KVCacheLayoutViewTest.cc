@@ -275,7 +275,7 @@ TEST(KVCacheLayoutViewTest, AlignedSwaRingSharesFullStrideAcrossPrefillAndDecode
         group.policy.cp_slice = CpBlockSliceMode::EQUAL_BYTES;
         CacheConfig config;
         config.seq_size_per_block = 128;
-        config.layer_num          = 1;
+        config.main_config.layer_num = 1;
         config.setTopology({group}, {{0, {desc.tag}}});
         CPSlotMapper      mapper(0, cp_size, 128);
         std::vector<char> destination(full_stride);
@@ -283,7 +283,7 @@ TEST(KVCacheLayoutViewTest, AlignedSwaRingSharesFullStrideAcrossPrefillAndDecode
         block.addr       = destination.data();
         block.size_bytes = full_stride;
         for (uint32_t rank = 0; rank < cp_size; ++rank) {
-            const auto slices = mapper.sliceBlockForPeer(config, desc.tag, {block}, rank);
+            const auto slices = mapper.sliceBlockForPeer(config.main_config, desc.tag, {block}, rank);
             ASSERT_EQ(slices.size(), 1u);
             EXPECT_EQ(slices[0].size_bytes, prefill_spec->block_size_bytes());
             EXPECT_EQ(slices[0].addr, destination.data() + rank * prefill_spec->block_size_bytes());

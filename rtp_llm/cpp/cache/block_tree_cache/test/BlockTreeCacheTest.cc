@@ -169,7 +169,7 @@ void initializeTestGroupSet(const GroupSetPtr&                     group_set,
     for (const auto& group : topology->groups()) {
         group_tags.push_back(group.tag);
     }
-    group_set->initialize(group_set_id, topology, group_tags);
+    group_set->initialize(group_set_id, block_transfer_engine_test::makeTestCacheConfig(*topology), group_tags);
 }
 
 void initializeSingleMemberGroupSets(const std::vector<GroupSetPtr>&        group_sets,
@@ -200,7 +200,8 @@ void initializeSingleMemberGroupSets(const std::vector<GroupSetPtr>&        grou
     auto   topology     = block_transfer_engine_test::makeTestTopology(std::move(groups));
     size_t group_set_id = 0;
     for (const auto& tag : topology->groupTags()) {
-        group_sets[group_set_id]->initialize(group_set_id, topology, {tag});
+        group_sets[group_set_id]->initialize(
+            group_set_id, block_transfer_engine_test::makeTestCacheConfig(*topology), {tag});
         ++group_set_id;
     }
 }
@@ -3363,7 +3364,7 @@ TEST_F(BlockTreeCacheTest, ReorderedMembershipMapsBlocksByGroupId) {
                                                       block_transfer_engine_test::makeTestGroupBase(policy, {0}, 1)});
     auto device_pools = makeStructuralDevicePools(2, "reordered_membership");
     auto full         = std::make_shared<FullGroupSet>(device_pools, nullptr, nullptr);
-    full->initialize(0, topology, {"group1", "group0"});
+    full->initialize(0, block_transfer_engine_test::makeTestCacheConfig(*topology), {"group1", "group0"});
 
     std::vector<GroupSetPtr> group_sets = {full};
     auto                     cache      = makeBlockTreeCacheForTest(std::move(group_sets));

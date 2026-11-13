@@ -1184,6 +1184,37 @@ class AttentionFP8(nn.Module):
         work then all-gathers across ranks and strips padding."""
         self._cp_ctx = cp_ctx
 
+    def _resolved_pool_tag(self, attn_type: str) -> str:
+        """Framework tag for a canonical DSV4 pool tag.
+
+        MTP modules publish ``mtp_<tag>``; the kernels keep addressing pools by
+        canonical name.  Identity for the main module and for tags already
+        published as-is.
+        """
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import resolve_dsv4_tag
+
+        return resolve_dsv4_tag(self._kv_cache, attn_type)
+
+    def _pool_spec_for(self, attn_type: str) -> Optional[tuple]:
+        """Spec entry for ``attn_type``, tolerating an already-resolved tag."""
+        spec = self._pool_spec.get(attn_type)
+        if spec is None and attn_type.startswith("mtp_"):
+            spec = self._pool_spec.get(attn_type[len("mtp_") :])
+        return spec
+
+    def _pool_meta_get(self, mapping, attn_type: str):
+        """Lookup in a framework-populated ``{tag: value}`` dict.
+
+        The framework keys these dicts by the *published* tag, so an MTP module
+        stores ``mtp_swa_kv`` while the kernels still ask for ``swa_kv``.
+        """
+        if not mapping:
+            return None
+        resolved = self._resolved_pool_tag(attn_type)
+        if resolved in mapping:
+            return mapping[resolved]
+        return mapping.get(attn_type)
+
     def _pool_view(self, attn_type: str) -> Optional[torch.Tensor]:
         """Return a flat ``[total_slots, vec_dim]`` typed view of the
         framework BlockPool for this layer + cache tag, or ``None`` if
@@ -1192,7 +1223,7 @@ class AttentionFP8(nn.Module):
         no Python-side descriptor cache."""
         if self._kv_cache is None:
             return None
-        spec = self._pool_spec.get(attn_type)
+        spec = self._pool_spec_for(attn_type)
         if spec is None:
             return None
         # Polymorphic probe: build_paged_pool_specs sweeps every cache tag
@@ -1200,7 +1231,9 @@ class AttentionFP8(nn.Module):
         # layers that don't own this group — catching it tells the caller to
         # skip.  Not defensive bloat.
         try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
+            layer_kv = self._kv_cache.get_layer_cache(
+                self.layer_id, self._resolved_pool_tag(attn_type)
+            )
         except RuntimeError:
             return None
         base = layer_kv.kv_cache_base
@@ -1237,11 +1270,13 @@ class AttentionFP8(nn.Module):
         """
         if self._kv_cache is None:
             return None
-        spec = self._pool_spec.get(attn_type)
+        spec = self._pool_spec_for(attn_type)
         if spec is None:
             return None
         try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
+            layer_kv = self._kv_cache.get_layer_cache(
+                self.layer_id, self._resolved_pool_tag(attn_type)
+            )
         except RuntimeError:
             return None
         base = layer_kv.kv_cache_base
@@ -1268,7 +1303,9 @@ class AttentionFP8(nn.Module):
         if self._kv_cache is None:
             return None
         try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
+            layer_kv = self._kv_cache.get_layer_cache(
+                self.layer_id, self._resolved_pool_tag(attn_type)
+            )
         except RuntimeError:
             return None
         base = layer_kv.kv_cache_base
@@ -1337,12 +1374,14 @@ class AttentionFP8(nn.Module):
         this layer + cache tag.  Returns 0 if pool unavailable."""
         if self._kv_cache is None:
             return 0
-        spec = self._pool_spec.get(attn_type)
+        spec = self._pool_spec_for(attn_type)
         if spec is None:
             return 0
         # Polymorphic probe — see _pool_view for rationale.
         try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
+            layer_kv = self._kv_cache.get_layer_cache(
+                self.layer_id, self._resolved_pool_tag(attn_type)
+            )
         except RuntimeError:
             return 0
         base = layer_kv.kv_cache_base
@@ -1663,14 +1702,14 @@ class AttentionFP8(nn.Module):
             else:
                 kv_view = self._pool_view(kv_at) if kv_at is not None else None
             kv_bt = (
-                bt_by_type.get(kv_at)
+                self._block_tables_by_type.get(kv_at)
                 if (bt_by_type is not None and kv_at is not None)
                 else None
             )
             kv_eb = self._pool_entries_per_block(kv_at) if kv_at is not None else 0
             state_view = self._pool_view(state_at) if state_at is not None else None
             state_bt = (
-                bt_by_type.get(state_at)
+                self._block_tables_by_type.get(state_at)
                 if (bt_by_type is not None and state_at is not None)
                 else None
             )
@@ -2114,7 +2153,9 @@ class AttentionFP8(nn.Module):
         )
         from rtp_llm.models_py.modules.dsv4.kv_cache_utils import SWA_KV
 
-        slot_mapping = attn_metadata.pool_write_slot_mappings.get(SWA_KV)
+        slot_mapping = self._pool_meta_get(
+            attn_metadata.pool_write_slot_mappings, SWA_KV
+        )
         swa_pool_3d = self._pool_view_3d_fp8(SWA_KV)
         decode_write_swa_fp8(
             kv=kv,
@@ -2144,7 +2185,9 @@ class AttentionFP8(nn.Module):
         assert attn_metadata.decode_seq_start_per_req is not None
         assert attn_metadata.decode_cu_seq_per_req is not None
         state_slots = attn_metadata.compressor_state_slot_mappings.get(state_attn_type)
-        kv_slots = attn_metadata.pool_write_slot_mappings.get(kv_attn_type)
+        kv_slots = self._pool_meta_get(
+            attn_metadata.pool_write_slot_mappings, kv_attn_type
+        )
         assert state_slots is not None and kv_slots is not None
         from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
             CSA_KV,
@@ -2194,11 +2237,7 @@ class AttentionFP8(nn.Module):
         from rtp_llm.models_py.modules.dsv4.kv_cache_utils import SWA_KV
 
         swa_pool_3d = self._pool_view_3d_fp8(SWA_KV)
-        swa_pool_bt = (
-            attn_metadata.pool_block_tables.get(SWA_KV)
-            if attn_metadata.pool_block_tables
-            else None
-        )
+        swa_pool_bt = self._pool_meta_get(attn_metadata.pool_block_tables, SWA_KV)
         assert (
             swa_pool_3d is not None
             and swa_pool_bt is not None
@@ -2391,9 +2430,11 @@ class AttentionFP8(nn.Module):
         K_cmp = cmp_local_raw.shape[-1]
 
         swa_pool_3d = self._pool_view_3d_fp8(SWA_KV)
-        swa_pool_bt = attn_metadata.pool_block_tables.get(SWA_KV)
+        swa_pool_bt = self._pool_meta_get(attn_metadata.pool_block_tables, SWA_KV)
         cmp_pool_3d = self._pool_view_3d_fp8(cmp_attn_type)
-        cmp_pool_bt = attn_metadata.pool_block_tables.get(cmp_attn_type)
+        cmp_pool_bt = self._pool_meta_get(
+            attn_metadata.pool_block_tables, cmp_attn_type
+        )
         assert (
             swa_pool_3d is not None
             and cmp_pool_3d is not None

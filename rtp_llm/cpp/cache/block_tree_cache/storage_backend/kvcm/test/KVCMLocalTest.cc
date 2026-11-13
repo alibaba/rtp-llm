@@ -115,7 +115,8 @@ TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings
         KVCacheManager manager(manager_config, false, nullptr, config, singleRankConfig(), runtime);
         auto full = std::make_shared<FullGroupSet>(
             std::vector<DeviceBlockPoolPtr>{environment.device_pool}, nullptr, nullptr);
-        full->initialize(0, manager_config.topologyPtr(), {"default"});
+        auto manager_config_ptr = std::make_shared<CacheConfig>(manager_config);
+        full->initialize(0, manager_config_ptr, {"default"});
         manager.block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full});
         manager.block_tree_cache_->storage_backend_ = backend;
         auto reporter = std::make_shared<ControlOnlyReporter>();
@@ -305,8 +306,6 @@ TEST(KVCMLocalTest, InitRejectsMissingTopologyAndInvalidPoolShape) {
     };
 
     EXPECT_ANY_THROW(backend->init(nullptr, {}, resolver));
-    EXPECT_ANY_THROW(backend->init(environment.cache_config.topologyPtr(), {}, resolver));
-    EXPECT_ANY_THROW(backend->init(environment.cache_config.topologyPtr(), {{"default", nullptr}}, resolver));
 }
 
 TEST(KVCMLocalTest, InitRejectsInvalidQuarantineAbortRatio) {
@@ -374,7 +373,7 @@ TEST(KVCMLocalTest, GdrFallsBackToStandardRegistrationForHostPinnedPool) {
     old_pool->decRef(environment.block_id);
 
     auto host_config = std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfigForGroup(
-        environment.cache_config, environment.cache_config.topology().group(host_tag)));
+        environment.cache_config.main_config, environment.cache_config.topology().group(host_tag)));
     host_config->pool_name                 = "mixed_gdr_host_pinned";
     host_config->use_pinned_cpu_backing    = true;
     host_config->use_device_malloc_backing = false;
@@ -631,11 +630,7 @@ TEST(KVCMLocalTest, TP2DuplicateRankMatchReportsNoHitAndDoesNotDispatchPayload) 
     auto broadcast_manager =
         std::make_shared<BroadcastManager>(std::vector<std::string>{"unused-rank-0", "unused-rank-1"});
     auto backend = makeBackend(environment, parallelism_config, client_wrapper, std::move(broadcast_manager));
-    ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
-                              environment.pools_by_tag,
-                              [&](int layer_id, const std::string&, int block_id) {
-                                  return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
-                              }));
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 
     kv_cache_manager::Locations locations{kv_cache_manager::Location{
         kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "rank0_uri"},

@@ -525,7 +525,7 @@ void LoadAsyncContext::deferRelease(std::shared_ptr<BatchKVCacheResource> resour
                    self->onBackendRead(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "match-to-ready deadline exceeded"));
                }
                for (int batch = 0; batch < resource->batchSize(); ++batch) {
-                   for (const auto& tag : self->storage_backend_->topology().groupTags()) {
+                   for (const auto& tag : self->storage_backend_->cacheConfig().allGroupTags()) {
                        for (const auto block : resource->blocks(batch, tag)) {
                            if (!isNullBlockIdx(block)) {
                                self->storage_backend_->devicePool(tag)->decRef(block, DeviceBlockRefType::REQUEST);

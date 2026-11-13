@@ -365,7 +365,7 @@ inline CacheConfig makeCompactDsv4CacheConfig(uint32_t block_num, int cp_size = 
     parallelism.tp_size                            = cp_size;
     parallelism.prefill_cp_config.kv_cache_sharded = cp_size > 1;
     auto              config = CacheConfigCreator::createWarmupConfig(makeCompactDsv4ModelConfig(), parallelism, 0);
-    config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
+    config.main_config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
     config.finalizeBlockNums(block_num, RuntimeConfig{});
     return config;
 }
@@ -616,7 +616,7 @@ expectDsv4TierTopology(const std::shared_ptr<KVCacheManager>& manager, const Cac
     ASSERT_EQ(config.groupNums(), kDsv4GroupCount);
     ASSERT_EQ(publishedGroupTags(config.topology()), kDsv4Tags);
     ASSERT_EQ(publishedGroupTypes(config.topology()), kDsv4Types);
-    ASSERT_EQ(config.reuse_cache_tail_blocks, std::numeric_limits<int>::max());
+    ASSERT_EQ(config.reuse_cache_tail_blocks(), std::numeric_limits<int>::max());
 
     const auto coordinator_groups = manager->coordinator_manager_->cacheGroups();
     ASSERT_EQ(coordinator_groups.size(), static_cast<size_t>(kDsv4GroupCount));
@@ -872,7 +872,7 @@ inline bool fillGroupBlockPayload(const std::shared_ptr<KVCacheManager>& manager
     }
     // Preserve the fixture's original payload bytes; this row does not select a pool.
     const int   group_id  = static_cast<int>(std::distance(tags.begin(), pattern_row));
-    const auto& layer_ids = config.layerIdsForGroup(tag);
+    const auto layer_ids = config.layerIdsForGroup(tag);
     if (layer_ids.empty()) {
         return false;
     }
@@ -906,7 +906,7 @@ inline bool groupBlockPayloadMatches(const std::shared_ptr<KVCacheManager>& mana
     }
     // Preserve the fixture's original payload bytes; this row does not select a pool.
     const int   group_id  = static_cast<int>(std::distance(tags.begin(), pattern_row));
-    const auto& layer_ids = config.layerIdsForGroup(tag);
+    const auto layer_ids = config.layerIdsForGroup(tag);
     if (layer_ids.empty()) {
         return false;
     }

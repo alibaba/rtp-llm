@@ -19,6 +19,15 @@
 namespace rtp_llm {
 namespace {
 
+std::shared_ptr<const CacheConfig> wrapTopologyAsConfig(std::shared_ptr<const CacheTopology> topology) {
+    auto config                            = std::make_shared<CacheConfig>();
+    config->seq_size_per_block             = topology->groups().front().seqSizePerBlock();
+    config->main_config.seq_size_per_block = config->seq_size_per_block;
+    config->main_config.layer_num          = static_cast<uint32_t>(topology->layers().size());
+    config->setTopology(topology->groups(), topology->layers());
+    return config;
+}
+
 struct TestMatchMeta: StorageBackendMatchMeta {
     size_t remote_version{0};
 };
@@ -220,8 +229,9 @@ std::shared_ptr<const CacheTopology> makeTopology(std::vector<CacheGroupType> ty
 }
 
 void initBackend(ManualBackend& backend, const DeviceBlockPoolPtr& pool) {
-    RTP_LLM_CHECK(backend.init(
-        makeTopology(), {{"group_0", pool}}, [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }));
+    RTP_LLM_CHECK(backend.init(wrapTopologyAsConfig(makeTopology()),
+                               {{"group_0", pool}},
+                               [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }));
 }
 
 void initBackend(ManualBackend&                         backend,
@@ -232,8 +242,9 @@ void initBackend(ManualBackend&                         backend,
     for (size_t i = 0; i < pools.size(); ++i) {
         RTP_LLM_CHECK(pools_by_tag.emplace(topology->groupTags()[i], pools[i]).second);
     }
-    RTP_LLM_CHECK(backend.init(
-        topology, std::move(pools_by_tag), [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }));
+    RTP_LLM_CHECK(backend.init(wrapTopologyAsConfig(topology),
+                               std::move(pools_by_tag),
+                               [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }));
 }
 
 StorageRequest makeRequest(size_t key_count) {

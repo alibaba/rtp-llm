@@ -71,7 +71,7 @@ class HybridKVCacheSpecTest(TestCase):
 
         self.assertEqual(len(config.kv_cache_spec_descs), config.num_layers)
         for layer_descs in config.kv_cache_spec_descs:
-            self.assertEqual(layer_descs[0].tag, "default")
+            self.assertEqual(layer_descs[0].tag, "mtp_default")
             self.assertEqual(layer_descs[0].cache_type, KVCacheSpecType.MHA)
 
     def test_qwen_v2_mtp_inherits_single_group_for_sparse_flags(self):
@@ -88,7 +88,7 @@ class HybridKVCacheSpecTest(TestCase):
 
         self.assertEqual(len(config.kv_cache_spec_descs), 1)
         self.assertEqual(
-            [desc.tag for desc in config.kv_cache_spec_descs[0]], ["default"]
+            [desc.tag for desc in config.kv_cache_spec_descs[0]], ["mtp_default"]
         )
 
     def test_model_hooks_preserve_preset_descriptors(self):
@@ -104,9 +104,14 @@ class HybridKVCacheSpecTest(TestCase):
 
                 model_cls._post_build_model_config(config)
 
+                expected = (
+                    "mtp_preset"
+                    if model_cls in (QwenV2MTP, DeepSeekV3Mtp)
+                    else "preset"
+                )
                 self.assertEqual(
                     [desc.tag for desc in config.kv_cache_spec_descs[0]],
-                    ["preset"],
+                    [expected],
                 )
 
     def test_deepseek_v3_mtp_default_desc_matches_model_layers(self):
@@ -120,7 +125,7 @@ class HybridKVCacheSpecTest(TestCase):
 
         self.assertEqual(len(config.kv_cache_spec_descs), config.num_layers)
         for layer_descs in config.kv_cache_spec_descs:
-            self.assertEqual(layer_descs[0].tag, "default")
+            self.assertEqual(layer_descs[0].tag, "mtp_default")
             self.assertEqual(layer_descs[0].cache_type, KVCacheSpecType.MLA)
 
     def test_base_model_sparse_mla_still_declares_only_default_descriptor(self):
@@ -205,7 +210,7 @@ class HybridKVCacheSpecTest(TestCase):
 
         self.assertEqual(
             [desc.tag for desc in propose.kv_cache_spec_descs[0]],
-            ["default", "indexer_kv"],
+            ["mtp_default", "mtp_indexer_kv"],
         )
         self.assertEqual(
             propose.kv_cache_spec_descs[0][1].entry_elems,
@@ -229,7 +234,7 @@ class HybridKVCacheSpecTest(TestCase):
         Qwen3NextMTP._post_build_model_config(config)
 
         self.assertEqual(len(config.kv_cache_spec_descs), 1)
-        self.assertEqual(config.kv_cache_spec_descs[0][0].tag, "full")
+        self.assertEqual(config.kv_cache_spec_descs[0][0].tag, "mtp_full")
         self.assertEqual(
             config.kv_cache_spec_descs[0][0].cache_type, KVCacheSpecType.MHA
         )

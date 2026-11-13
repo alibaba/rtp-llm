@@ -118,10 +118,10 @@ private:
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
-    static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
-    static void            validateGroupTags(const LoadKVCacheContext& context, const CacheTopology& topology);
+    static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheConfig& cache_config);
+    static void            validateGroupTags(const LoadKVCacheContext& context, const CacheConfig& cache_config);
     static void            appendGroupBlockIds(const LoadKVCacheContext& context,
-                                               const CacheTopology&      topology,
+                                               const CacheConfig&        cache_config,
                                                BroadcastLoadRequestPB&   request);
     static std::string makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string
@@ -146,7 +146,7 @@ private:
                                                                size_t                  local_block_num,
                                                                size_t                  cache_key_count,
                                                                size_t                  reuse_block_size,
-                                                               bool                    use_hybrid,
+                                                               bool                    use_group_cache_transfer_policy,
                                                                size_t                  group_seq_size_per_block,
                                                                size_t                  base_seq_size_per_block,
                                                                int                     decode_cp_rank = 0,

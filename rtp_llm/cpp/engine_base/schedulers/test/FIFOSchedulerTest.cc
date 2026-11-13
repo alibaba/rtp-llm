@@ -336,17 +336,17 @@ private:
 
 static CacheConfig makeChunkedCpHybridCache(const std::vector<int>& linear_spans = {2048}) {
     CacheConfig config;
-    config.dtype                             = DataType::TYPE_FP16;
+    config.main_config.dtype                 = DataType::TYPE_FP16;
     config.seq_size_per_block                = 2048;
-    config.layer_num                         = linear_spans.size() + 1;
+    config.main_config.layer_num             = linear_spans.size() + 1;
     config.local_kv_cache_sharded = true;
-    std::vector<KVCacheSpecPtr>   specs      = {test::makeMhaSpec("full", 2048, config.dtype, 1, 1)};
+    std::vector<KVCacheSpecPtr>   specs      = {test::makeMhaSpec("full", 2048, config.main_config.dtype, 1, 1)};
     std::vector<std::vector<int>> layers     = {{0}};
     std::vector<CacheGroupType>   types      = {CacheGroupType::FULL};
     std::vector<std::string>      tags       = {"full"};
     for (size_t i = 0; i < linear_spans.size(); ++i) {
         tags.push_back("linear" + std::to_string(i));
-        specs.push_back(test::makeLinearSpec(tags.back(), linear_spans[i], config.dtype, 1, 1));
+        specs.push_back(test::makeLinearSpec(tags.back(), linear_spans[i], config.main_config.dtype, 1, 1));
         layers.push_back({static_cast<int>(i + 1)});
         types.push_back(CacheGroupType::LINEAR);
     }
@@ -1062,7 +1062,6 @@ TEST_F(FIFOSchedulerTest, testCpForceSinglePrefillConfig) {
 // ---------------------------------------------------------------------------
 // Helper used by the prefill-first cadence / KV-gate tests (Tasks 5–7)
 // ---------------------------------------------------------------------------
-
 
 static std::shared_ptr<GenerateStream> makeForceBatchStream(const std::vector<int>& ids,
                                                             int64_t                 group_id,
@@ -4045,16 +4044,16 @@ std::shared_ptr<GenerateStream> makeSingleStream(const ModelConfig&     model_co
 }  // namespace
 
 TEST_F(FIFOSchedulerTest, prefillOnlySingletonCanFillTokenBudget) {
-    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
-        test::makeSimpleMhaCacheConfig(1, 512, 32, rtp_llm::DataType::TYPE_FP16, 1, 4), 32);
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeSchedulerResources(test::makeSimpleMhaCacheConfig(1, 512, 32, rtp_llm::DataType::TYPE_FP16, 1, 4), 32);
     ASSERT_TRUE(cache_manager->init());
     model_config.max_seq_len               = 4096;
     runtime_config.max_generate_batch_size = 4;
     for (bool grouped : {false, true}) {
         for (int prompt_length : {4095, 4096}) {
             for (int budget : {0, 4094, 4095, 4096, 4097}) {
-                SCOPED_TRACE(::testing::Message() << "grouped=" << grouped << " length=" << prompt_length
-                                                 << " budget=" << budget);
+                SCOPED_TRACE(::testing::Message()
+                             << "grouped=" << grouped << " length=" << prompt_length << " budget=" << budget);
                 runtime_config.fifo_scheduler_config.max_batch_tokens_size = budget;
                 FIFOScheduler scheduler(runtime_config,
                                         model_config,
@@ -4089,8 +4088,8 @@ TEST_F(FIFOSchedulerTest, prefillOnlySingletonCanFillTokenBudget) {
 }
 
 TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix) {
-    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
-        test::makeSimpleMhaCacheConfig(1, 256, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeSchedulerResources(test::makeSimpleMhaCacheConfig(1, 256, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
     ASSERT_TRUE(cache_manager->init());
     runtime_config.max_generate_batch_size = 4;
     // Equal lengths reach the logical sum and rectangle together. Unequal lengths
@@ -4102,9 +4101,9 @@ TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix
             for (int width : {1, 3}) {
                 for (bool reuse_prefix : {false, true}) {
                     for (int delta : {-1, 0, 1}) {
-                        SCOPED_TRACE(::testing::Message() << "grouped=" << grouped << " max_new_tokens=" << max_new_tokens
-                                                         << " width=" << width << " reuse=" << reuse_prefix
-                                                         << " delta=" << delta);
+                        SCOPED_TRACE(::testing::Message()
+                                     << "grouped=" << grouped << " max_new_tokens=" << max_new_tokens
+                                     << " width=" << width << " reuse=" << reuse_prefix << " delta=" << delta);
                         runtime_config.fifo_scheduler_config.max_batch_tokens_size = 32 * (1 + width) + delta;
                         FIFOScheduler scheduler(runtime_config,
                                                 model_config,
@@ -4115,13 +4114,16 @@ TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix
                         auto first = makeStream(std::vector<int>(32, 1),
                                                 model_config, runtime_config, resource_context, max_new_tokens);
                         auto second = makeStream(std::vector<int>(width == 1 ? 32 : 16, 2),
-                                                 model_config, runtime_config, resource_context, max_new_tokens,
+                                                 model_config,
+                                                 runtime_config,
+                                                 resource_context,
+                                                 max_new_tokens,
                                                  max_new_tokens == 0 ? 1 : width);
                         vector<GenerateStreamPtr> streams = {first, second};
                         if (max_new_tokens == 0) {
                             for (int i = 1; i < width; ++i) {
-                                streams.push_back(makeStream(std::vector<int>(16, 2),
-                                                             model_config, runtime_config, resource_context, 0));
+                                streams.push_back(makeStream(
+                                    std::vector<int>(16, 2), model_config, runtime_config, resource_context, 0));
                             }
                         }
                         if (reuse_prefix) {
@@ -4137,13 +4139,14 @@ TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix
                         }
                         auto result = scheduler.schedule();
                         ASSERT_TRUE(result.ok());
-                        const size_t admitted = max_new_tokens == 0 ? 1 + width - (delta < 0 ? 1 : 0) :
-                                                                     (delta > 0 ? 2 : 1);
+                        const size_t admitted =
+                            max_new_tokens == 0 ? 1 + width - (delta < 0 ? 1 : 0) : (delta > 0 ? 2 : 1);
                         ASSERT_EQ(result->size(), admitted);
                         EXPECT_EQ(result->front().get(), first.get());
                         EXPECT_EQ(scheduler.waitingStreamsSize(), streams.size() - admitted);
                         for (size_t i = 0; i < streams.size(); ++i) {
-                            EXPECT_EQ(streams[i]->getStatus(), i < admitted ? StreamState::RUNNING : StreamState::WAITING);
+                            EXPECT_EQ(streams[i]->getStatus(),
+                                      i < admitted ? StreamState::RUNNING : StreamState::WAITING);
                             EXPECT_FALSE(streams[i]->hasError());
                         }
                     }
@@ -4154,8 +4157,8 @@ TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix
 }
 
 TEST_F(FIFOSchedulerTest, prefillTokenLimitsPreserveReserveAndAvoidOverflow) {
-    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
-        test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeSchedulerResources(test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
     ASSERT_TRUE(cache_manager->init());
     model_config.max_seq_len                                    = 8;
     runtime_config.max_generate_batch_size                      = 4;
@@ -4202,8 +4205,8 @@ TEST_F(FIFOSchedulerTest, prefillTokenLimitsPreserveReserveAndAvoidOverflow) {
 }
 
 TEST_F(FIFOSchedulerTest, fullBudgetPrefillOnlyDoesNotMixWithGeneration) {
-    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
-        test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeSchedulerResources(test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
     ASSERT_TRUE(cache_manager->init());
     model_config.max_seq_len                                  = 8;
     runtime_config.max_generate_batch_size                    = 2;
@@ -6180,15 +6183,12 @@ TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetPDFusionFourRoundPrefix) {
     verifyGlobalChunkBudgetFourRoundPrefix<PDFusionRatioScheduler>(RoleType::PDFUSION, "1/100");
 }
 
-static CacheConfig makeChunkCpGroupCacheConfig(size_t group_block_size,
-                                               bool   prefix_reuse,
-                                               size_t block_size,
-                                               bool   shared_chunk_state) {
+static CacheConfig
+makeChunkCpGroupCacheConfig(size_t group_block_size, bool prefix_reuse, size_t block_size, bool shared_chunk_state) {
     auto config = test::makeSimpleMhaCacheConfig(1, 64, block_size, DataType::TYPE_FP16, 1, 4);
     GroupBase swa;
     swa.tag       = "swa";
-    swa.spec      =
-        test::makeResolvedOpaqueSpec(true, swa.tag, DataType::TYPE_FP16, group_block_size, group_block_size);
+    swa.spec   = test::makeResolvedOpaqueSpec(true, swa.tag, DataType::TYPE_FP16, group_block_size, group_block_size);
     swa.policy    = defaultCacheGroupPolicy(CacheGroupType::SWA);
     swa.policy.enable_prefix_reuse = prefix_reuse;
     swa.policy.shared_chunk_state  = shared_chunk_state;
@@ -6295,16 +6295,14 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCyclicGroupBlocks) {
     };
     for (const auto& test_case : cases) {
         SCOPED_TRACE(test_case.name);
-        auto cache_config = makeChunkCpGroupCacheConfig(test_case.group_block_size,
-                                                        test_case.prefix_reuse,
-                                                        test_case.block_size,
-                                                        test_case.shared_chunk_state);
+        auto cache_config = makeChunkCpGroupCacheConfig(
+            test_case.group_block_size, test_case.prefix_reuse, test_case.block_size, test_case.shared_chunk_state);
         if (test_case.round_robin) {
             auto groups = cache_config.groups();
             groups.back().policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
             cache_config.setTopology(std::move(groups), cache_config.topology().layers());
         }
-        cache_config.reuse_cache_tail_blocks = test_case.tail_blocks;
+        cache_config.main_config.reuse_cache_tail_blocks = test_case.tail_blocks;
         ChunkSchedulerTestConfig config;
         config.seq_size_per_block = test_case.block_size;
         config.prefill_chunk_size = test_case.chunk_size;
@@ -6386,7 +6384,7 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCacheCompatibility) {
         auto cache_config = test_case.has_linear ?
                                 test::makeSimpleHybridMhaCacheConfig(4, 64, test_case.block_size, DataType::TYPE_FP16) :
                                 test::makeSimpleMhaCacheConfig(1, 64, test_case.block_size, DataType::TYPE_FP16);
-        cache_config.reuse_cache_tail_blocks = test_case.tail_blocks;
+        cache_config.main_config.reuse_cache_tail_blocks = test_case.tail_blocks;
         if (test_case.group_block_size > 0) {
             auto groups = cache_config.groups();
             for (auto& group : groups) {
@@ -6420,7 +6418,7 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillBorrowedLastNAdmissionIsLimitedToSup
             SCOPED_TRACE(testing::Message() << "N=" << n << " variant=" << variant);
             auto cache = test::makeSimpleHybridMhaCacheConfig(4, 128, 128, DataType::TYPE_FP16);
             cache.local_kv_cache_sharded = true;
-            cache.reuse_cache_tail_blocks = n;
+            cache.main_config.reuse_cache_tail_blocks = n;
             auto groups = cache.groups();
             for (auto& group : groups) {
                 if (group.policy.group_type != CacheGroupType::LINEAR) {
@@ -6499,7 +6497,7 @@ TEST_F(FIFOSchedulerTest, testShortMultimodalBudgetSplitPreservesLinearStateAndI
                              << "style=" << style << " chunk=" << chunk_size << " tail=" << tail_blocks);
                 auto cache                    = test::makeSimpleHybridMhaCacheConfig(4, 128, page, DataType::TYPE_FP16);
                 cache.local_kv_cache_sharded  = true;
-                cache.reuse_cache_tail_blocks = tail_blocks;
+                cache.main_config.reuse_cache_tail_blocks = tail_blocks;
                 auto cache_groups             = cache.groups();
                 for (auto& group : cache_groups) {
                     group.policy.prefill_borrow_tail = group.policy.group_type == CacheGroupType::LINEAR;
@@ -6510,7 +6508,7 @@ TEST_F(FIFOSchedulerTest, testShortMultimodalBudgetSplitPreservesLinearStateAndI
                 config.max_batch_tokens_size = 8192;
                 config.prefill_chunk_size    = chunk_size;
                 ChunkSchedulerTestEnv<FIFOScheduler> env(config, cache, makeChunkedCpParallelism());
-                env.model_config.num_layers                            = cache.layer_num;
+                env.model_config.num_layers                            = cache.layer_num();
                 env.model_config.has_positional_encoding               = true;
                 env.model_config.mm_model_config.is_multimodal         = true;
                 env.model_config.mm_model_config.mm_position_ids_style = style;
@@ -6555,7 +6553,7 @@ TEST_F(FIFOSchedulerTest, testShortMultimodalBudgetSplitPreservesLinearStateAndI
                 ASSERT_TRUE(
                     expectPrefillBatch(env.scheduler().schedule(), {preceding, stream}, {chunk_size - grant, grant}));
                 NormalBatchStreamProcessor processor(
-                    env.model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, false);
+                    env.model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, /*module_id=*/0, false);
                 vector<int>           previous_state(cache.groups().size(), 0);
                 vector<torch::Tensor> consumed_first;
                 for (const int start : {0, grant}) {

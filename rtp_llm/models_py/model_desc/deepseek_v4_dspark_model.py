@@ -34,7 +34,10 @@ from typing import Any, Optional, Tuple
 
 import torch
 
-from rtp_llm.config.cuda_graph import CudaGraphSelectionMode, GenerationPrefillCudaGraphUnsupportedBackend
+from rtp_llm.config.cuda_graph import (
+    CudaGraphSelectionMode,
+    GenerationPrefillCudaGraphUnsupportedBackend,
+)
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
@@ -59,7 +62,9 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     SWA_KV,
     as_attention_inputs_by_tag,
     build_block_tables_for_tags,
+    group_tags,
     primary_attention_inputs,
+    resolve_dsv4_tag,
 )
 from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
 from rtp_llm.models_py.modules.factory.attention.common import (
@@ -264,14 +269,20 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         ``{tag: PyAttentionInputs}`` mapping for the multi-group DSV4 cache, or
         a single ``PyAttentionInputs`` when the cache collapses to one group.
         """
+        swa_tag = resolve_dsv4_tag(self.kv_cache, SWA_KV)
         block_tables = build_block_tables_for_tags(
-            self.kv_cache, attention_inputs, (SWA_KV,)
+            self.kv_cache, attention_inputs, (swa_tag,)
         )
-        table = (block_tables or {}).get(SWA_KV)
+        table = (block_tables or {}).get(swa_tag)
         if table is None:
             raise RuntimeError(
-                "DSpark could not find the %s KV block table; available tags=%r"
-                % (SWA_KV, list(as_attention_inputs_by_tag(attention_inputs)))
+                "DSpark could not find the %s KV block table; "
+                "group_tags=%r, attention_inputs tags=%r"
+                % (
+                    SWA_KV,
+                    group_tags(self.kv_cache),
+                    list(as_attention_inputs_by_tag(attention_inputs)),
+                )
             )
         if int(table.shape[0]) < batch_size:
             raise RuntimeError(

@@ -27,7 +27,6 @@ public:
                                                                   int              cp_rank         = 0,
                                                                   int              cp_size         = 1);
 
-    /// @brief 将 KVCacheResource 的指定层转换为单个 LayerCacheBuffer
     static std::shared_ptr<LayerCacheBuffer> convertLayer(KVCacheResource& resource,
                                                           int              batch_id,
                                                           int              layer_id,
@@ -42,17 +41,17 @@ public:
                                                           int                start_block_idx,
                                                           int                block_count,
                                                           int                cp_rank,
-                                                          int                cp_size);
+                                                          int                cp_size,
+                                                          size_t             module_id = 0);
 
-    /// @brief Return whether the selected layer/tag window contains a transferable block.
-    /// Uses the same argument validation, CP key bounds, and start/count semantics as convertLayer().
     static bool hasTransferableBlocks(const KVCacheResource& resource,
                                       int                    layer_id,
                                       const std::string&     cache_tag,
                                       int                    start_block_idx,
                                       int                    block_count,
                                       int                    cp_rank,
-                                      int                    cp_size);
+                                      int                    cp_size,
+                                      size_t                 module_id = 0);
 
     /// @brief 将 LayerCacheBuffer 转换为 transfer 层需要的 KeyBlockInfoMap
     static transfer::KeyBlockInfoMap buildKeyBlockInfos(const std::shared_ptr<LayerBlockConverter>& converter,

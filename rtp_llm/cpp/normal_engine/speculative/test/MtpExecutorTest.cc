@@ -835,6 +835,8 @@ public:
         };
         configure_cache_model(score_cache_model_config);
         configure_cache_model(propose_cache_model_config);
+        // The draft declares module-scoped tags; the C++ side never renames.
+        test::declareModuleScopedTags(propose_cache_model_config);
 
         auto cache_sp_config              = sp_config;
         cache_sp_config.gen_num_per_cycle = 1;
@@ -1205,11 +1207,11 @@ TEST_F(MtpExecutorTest, LinearReplayGatherPreservesCancelledBatchRows) {
     auto linear      = test::makeLinearSpec("linear", 16, TYPE_FP16, 1, 1);
     auto full        = test::makeMhaSpec("full", 16, TYPE_FP16, 1, 1);
     auto config      = test::makeSingleLayerCacheConfig(linear, CacheGroupType::LINEAR, 16);
-    config.layer_num = 2;
+    config.main_config.layer_num = 2;
     config.fromGroupedSpecs(
         {linear, full}, {{0}, {1}}, {CacheGroupType::LINEAR, CacheGroupType::FULL}, {"linear", "full"});
     auto draft = test::makeSingleLayerCacheConfig(full, CacheGroupType::FULL, 16);
-    config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, 0, config.layer_num));
+    config.mtp_sub_configs.push_back(test::declareModuleScopedTags(std::move(draft.main_config)));
     config.finalizeBlockNums(16, RuntimeConfig{});
     const auto linear_group_id = static_cast<int>(config.topology().groupIdForTag("linear"));
     config.linear_replay = LinearReplayPlan::create({linear_group_id}, 2, 4, {1, 1}, {1, 1}, false, TYPE_FP16, 1);
@@ -1276,11 +1278,11 @@ TEST_F(MtpExecutorTest, LinearReplayAsyncDispatchPreservesAcceptedWindowAndPageT
     auto linear      = test::makeLinearSpec("linear", 16, TYPE_FP16, 1, 1);
     auto full        = test::makeMhaSpec("full", 16, TYPE_FP16, 1, 1);
     auto config      = test::makeSingleLayerCacheConfig(linear, CacheGroupType::LINEAR, 16);
-    config.layer_num = 2;
+    config.main_config.layer_num = 2;
     config.fromGroupedSpecs(
         {linear, full}, {{0}, {1}}, {CacheGroupType::LINEAR, CacheGroupType::FULL}, {"linear", "full"});
     auto draft = test::makeSingleLayerCacheConfig(full, CacheGroupType::FULL, 16);
-    config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, 0, config.layer_num));
+    config.mtp_sub_configs.push_back(test::declareModuleScopedTags(std::move(draft.main_config)));
     config.finalizeBlockNums(16, RuntimeConfig{});
     const auto linear_group_id = static_cast<int>(config.topology().groupIdForTag("linear"));
     config.linear_replay = LinearReplayPlan::create({linear_group_id}, 1, 4, {1, 1}, {1, 1}, false, TYPE_FP16, 1);
@@ -1304,10 +1306,11 @@ TEST_F(MtpExecutorTest, LinearReplayAsyncDispatchPreservesAcceptedWindowAndPageT
 
     const auto           cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     std::vector<int32_t> ids;
-    for (const auto& group : config.groups()) {
-        ids.push_back(stream->streamCacheResource().kvCache().blocks(0, group.tag).at(0));
+    const auto           all_tags = config.allGroupTags();
+    for (const auto& tag : all_tags) {
+        ids.push_back(stream->streamCacheResource().kvCache().blocks(0, tag).at(0));
     }
-    auto           table = torch::tensor(ids, cuda_i32).reshape({2, 1, 1});
+    auto           table = torch::tensor(ids, cuda_i32).reshape({static_cast<int64_t>(all_tags.size()), 1, 1});
     StreamGroups   streams({stream});
     TensorHolder   holder;
     GptModelInputs input;
@@ -1655,7 +1658,7 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
         auto full   = test::makeMhaSpec("full", 4, TYPE_FP16, 1, head_size);
         auto config = test::makeSingleLayerCacheConfig(full, CacheGroupType::FULL, 8);
         if (with_linear) {
-            config.layer_num = single_layer ? 1 : 2;
+            config.main_config.layer_num = single_layer ? 1 : 2;
             config.fromGroupedSpecs({test::makeLinearSpec("linear", 4, TYPE_FP16, 1, 1), full},
                                     {{0}, {single_layer ? 0 : 1}},
                                     {CacheGroupType::LINEAR, CacheGroupType::FULL},
@@ -1672,19 +1675,19 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
     };
     auto target = make_config(multiple_groups, 3);
     auto draft  = make_config(draft_has_linear, 1, true);
-    target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, 0, target.layer_num));
+    target.mtp_sub_configs.push_back(test::declareModuleScopedTags(std::move(draft.main_config)));
     target.finalizeBlockNums(8, RuntimeConfig{});
     if (multiple_groups && !draft_has_linear) {
-        EXPECT_TRUE(target.mtp_sub_configs[0]->layerIdsForGroup("linear").empty());
-        EXPECT_EQ(target.mtp_sub_configs[0]->groupNums(), 2);  // groups, including placeholder
+        EXPECT_EQ(target.mtp_sub_configs[0].groupNums(), 1);
+        EXPECT_EQ(target.mtp_sub_configs[0].groupTags(), (std::vector<std::string>{"mtp_full"}));
     }
 
     auto         components         = createMtpExecutorComponents(MtpExecutorTestConfig{}, &target);
     auto*        executor           = components.executor.get();
     const size_t target_stride      = multiple_groups ? 0 : 48;
     const size_t target_scale       = multiple_groups ? 0 : 12;
-    const size_t draft_stride       = multiple_groups ? 0 : 16;
-    const size_t draft_scale        = multiple_groups ? 0 : 4;
+    const size_t draft_stride       = draft_has_linear ? 0 : 16;
+    const size_t draft_scale        = draft_has_linear ? 0 : 4;
     bool         saw_target_prepare = false;
     bool         saw_draft_prepare  = false;
     components.fake_target_model->setInputObserver([&](const GptModelInputs& inputs) {
@@ -3907,13 +3910,13 @@ protected:
         auto config = test::makeSingleLayerCacheConfig(linear, CacheGroupType::LINEAR, 16);
         if (second_linear) {
             auto other       = test::makeLinearSpec("other_linear", 65536, TYPE_FP16, 1, 1);
-            config.layer_num = 3;
+            config.main_config.layer_num = 3;
             config.fromGroupedSpecs({linear, other, full},
                                     {{0}, {1}, {2}},
                                     {CacheGroupType::LINEAR, CacheGroupType::LINEAR, CacheGroupType::FULL},
                                     {"linear", "other_linear", "full"});
         } else {
-            config.layer_num = 2;
+            config.main_config.layer_num = 2;
             config.fromGroupedSpecs(
                 {linear, full}, {{0}, {1}}, {CacheGroupType::LINEAR, CacheGroupType::FULL}, {"linear", "full"});
         }
@@ -3927,7 +3930,7 @@ protected:
         ModelConfig model_config;
         model_config.max_seq_len                  = 131080;
         model_config.vocab_size                   = 4;
-        model_config.num_layers                   = config.layer_num;
+        model_config.num_layers                   = config.layer_num();
         model_config.attn_config.tokens_per_block = config.seq_size_per_block;
         // No pool allocation is needed to exercise the production guard.
         // An empty manager also keeps these synthetic logical rows from

@@ -172,6 +172,15 @@ GroupBase makeRpcGroup(std::string tag) {
     return group;
 }
 
+CacheConfig makeRpcCacheConfig(const CacheTopology& topology) {
+    CacheConfig config;
+    config.seq_size_per_block             = topology.groups().front().seqSizePerBlock();
+    config.main_config.seq_size_per_block = config.seq_size_per_block;
+    config.main_config.layer_num          = static_cast<uint32_t>(topology.layers().size());
+    config.setTopology(topology.groups(), topology.layers());
+    return config;
+}
+
 // Tokens per logical (cache-key sized) block, and the CP-scaled tokens per block
 // of a compacted fixed/state group under prefill CP=2 (cp.scale_seq_size).
 constexpr size_t kBaseSeqSizePerBlock    = 64;
@@ -606,7 +615,7 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsPreserveReceivedOrderAcrossTopologies) 
     full->set_tag("full");
     full->add_block_ids(10);
 
-    const auto blocks = DecodeRpcServer::decodeGroupBlockIds(request, *topology);
+    const auto blocks = DecodeRpcServer::decodeGroupBlockIds(request, makeRpcCacheConfig(*topology));
     EXPECT_EQ(blocks.orderedTags(), (std::vector<std::string>{"linear", "full"}));
     EXPECT_NE(blocks.orderedTags(), topology->groupTags());
     EXPECT_EQ(blocks.blocks("full"), (BlockIndicesType{10}));
@@ -615,7 +624,7 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsPreserveReceivedOrderAcrossTopologies) 
     auto reordered =
         CacheTopology::create({makeRpcGroup("full"), makeRpcGroup("linear")}, {{0, {"linear"}}, {1, {"full"}}});
     EXPECT_EQ(topology->groupTags(), reordered->groupTags());
-    const auto reordered_blocks = DecodeRpcServer::decodeGroupBlockIds(request, *reordered);
+    const auto reordered_blocks = DecodeRpcServer::decodeGroupBlockIds(request, makeRpcCacheConfig(*reordered));
     EXPECT_EQ(reordered_blocks.orderedTags(), (std::vector<std::string>{"linear", "full"}));
     EXPECT_EQ(reordered_blocks.blocks("full"), blocks.blocks("full"));
     EXPECT_EQ(DecodeRpcServer::makeTaggedRequestKey(42, 1, topology->group("full").tag),
@@ -664,7 +673,7 @@ TEST(DecodeRpcServerTest, ResourceRowsKeepTheirOwnOrderAndSharedLifetime) {
     auto sender_topology =
         CacheTopology::create({makeRpcGroup("full"), makeRpcGroup("linear")}, {{0, {"full", "linear"}}});
     BroadcastLoadRequestPB request;
-    DecodeRpcServer::appendGroupBlockIds(context, *sender_topology, request);
+    DecodeRpcServer::appendGroupBlockIds(context, makeRpcCacheConfig(*sender_topology), request);
     EXPECT_EQ(context.groupBlockIds().orderedTags(), (std::vector<std::string>{"linear", "full"}));
     EXPECT_EQ(request.tagged_group_block_ids(0).tag(), "linear");
     EXPECT_EQ(context.blockIdsForGroup("full").blocks(), (BlockIndicesType{11, NULL_BLOCK_IDX}));
@@ -673,7 +682,7 @@ TEST(DecodeRpcServerTest, ResourceRowsKeepTheirOwnOrderAndSharedLifetime) {
 TEST(DecodeRpcServerTest, EmptyTaggedBlockRowsAreRejected) {
     auto                   topology = CacheTopology::create({makeRpcGroup("full")}, {{0, {"full"}}});
     BroadcastLoadRequestPB request;
-    EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(request, *topology));
+    EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(request, makeRpcCacheConfig(*topology)));
 }
 
 TEST(DecodeRpcServerTest, TaggedBlockRowsRejectTopologyMismatchWithoutReplacingResult) {
@@ -686,7 +695,7 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsRejectTopologyMismatchWithoutReplacingR
     row->set_tag("full");
     row->add_block_ids(1);
 
-    EXPECT_ANY_THROW(previous = DecodeRpcServer::decodeGroupBlockIds(missing_tag, *topology));
+    EXPECT_ANY_THROW(previous = DecodeRpcServer::decodeGroupBlockIds(missing_tag, makeRpcCacheConfig(*topology)));
     EXPECT_EQ(previous.blocks("unchanged"), (BlockIndicesType{42}));
 
     BroadcastLoadRequestPB duplicate;
@@ -695,14 +704,14 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsRejectTopologyMismatchWithoutReplacingR
         duplicate_row->set_tag("full");
         duplicate_row->add_block_ids(i + 1);
     }
-    EXPECT_ANY_THROW(previous = DecodeRpcServer::decodeGroupBlockIds(duplicate, *topology));
+    EXPECT_ANY_THROW(previous = DecodeRpcServer::decodeGroupBlockIds(duplicate, makeRpcCacheConfig(*topology)));
     EXPECT_EQ(previous.blocks("unchanged"), (BlockIndicesType{42}));
 
     BroadcastLoadRequestPB unknown;
     auto*                  unknown_row = unknown.add_tagged_group_block_ids();
     unknown_row->set_tag("foreign");
     unknown_row->add_block_ids(1);
-    EXPECT_ANY_THROW(previous = DecodeRpcServer::decodeGroupBlockIds(unknown, *topology));
+    EXPECT_ANY_THROW(previous = DecodeRpcServer::decodeGroupBlockIds(unknown, makeRpcCacheConfig(*topology)));
     EXPECT_EQ(previous.blocks("unchanged"), (BlockIndicesType{42}));
 }
 
@@ -728,12 +737,12 @@ TEST(DecodeRpcServerTest, DenseContextSerializesOwnOrderAndPreservesEmptyRows) {
     auto linear  = std::make_shared<BlockIds>();
     auto context = makeLoadContext("request", {"peer"}, {}, {{{"linear", 0}, {"full", 1}}, {linear, full}}, 1);
     BroadcastLoadRequestPB request;
-    DecodeRpcServer::appendGroupBlockIds(context, *topology, request);
+    DecodeRpcServer::appendGroupBlockIds(context, makeRpcCacheConfig(*topology), request);
     ASSERT_EQ(request.tagged_group_block_ids_size(), 2);
     EXPECT_EQ(request.tagged_group_block_ids(0).tag(), "linear");
     EXPECT_EQ(request.tagged_group_block_ids(0).block_ids_size(), 0);
     EXPECT_EQ(request.tagged_group_block_ids(1).tag(), "full");
-    auto rows     = DecodeRpcServer::decodeGroupBlockIds(request, *topology);
+    auto rows     = DecodeRpcServer::decodeGroupBlockIds(request, makeRpcCacheConfig(*topology));
     auto received = makeLoadContext("received", {"peer"}, {}, std::move(rows), 1);
     EXPECT_EQ(received.groupBlockIds().orderedTags(), context.groupBlockIds().orderedTags());
     EXPECT_TRUE(received.blockIdsForGroup("linear").blocks().empty());
@@ -749,13 +758,13 @@ TEST(DecodeRpcServerTest, DenseContextTopologyFailureDoesNotPublishWireRows) {
     for (const auto& blocks : mismatched) {
         auto                   context = makeLoadContext("request", {"peer"}, {}, blocks, 1);
         BroadcastLoadRequestPB request;
-        EXPECT_ANY_THROW(DecodeRpcServer::appendGroupBlockIds(context, *topology, request));
+        EXPECT_ANY_THROW(DecodeRpcServer::appendGroupBlockIds(context, makeRpcCacheConfig(*topology), request));
         EXPECT_EQ(request.tagged_group_block_ids_size(), 0);
     }
     BroadcastLoadRequestPB request;
     request.add_tagged_group_block_ids()->set_tag("full");
     request.add_tagged_group_block_ids()->set_tag("");
-    EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(request, *topology));
+    EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(request, makeRpcCacheConfig(*topology)));
 }
 
 TEST(DecodeRpcServerTest, MtpCacheKeyUsesSharedBaseModelIdForEverySlot) {
@@ -1196,7 +1205,7 @@ TEST(DecodeRpcServerTest, HeterogeneousFullGroupUsesGlobalEndpointKeys) {
     const auto producer_plan = buildCacheStorePlan(policy,
                                                    /*total_logical_blocks=*/3,
                                                    /*reuse_block_size=*/0,
-                                                   /*use_hybrid=*/true,
+                                                   /*use_group_cache_transfer_policy=*/true,
                                                    /*cp_rank=*/0,
                                                    /*cp_size=*/1,
                                                    /*key_blocks_per_logical_block=*/2,
@@ -1205,7 +1214,7 @@ TEST(DecodeRpcServerTest, HeterogeneousFullGroupUsesGlobalEndpointKeys) {
                                                                  /*local_block_num=*/3,
                                                                  /*cache_key_count=*/6,
                                                                  /*reuse_block_size=*/0,
-                                                                 /*use_hybrid=*/true,
+                                                                 /*use_group_cache_transfer_policy=*/true,
                                                                  /*group_seq_size_per_block=*/2,
                                                                  /*base_seq_size_per_block=*/1);
 
@@ -1218,7 +1227,7 @@ TEST(DecodeRpcServerTest, HeterogeneousPartialBlockUsesLastAvailableKey) {
     const auto producer_plan = buildCacheStorePlan(policy,
                                                    /*total_logical_blocks=*/3,
                                                    /*reuse_block_size=*/0,
-                                                   /*use_hybrid=*/true,
+                                                   /*use_group_cache_transfer_policy=*/true,
                                                    /*cp_rank=*/0,
                                                    /*cp_size=*/1,
                                                    /*key_blocks_per_logical_block=*/2,
@@ -1227,7 +1236,7 @@ TEST(DecodeRpcServerTest, HeterogeneousPartialBlockUsesLastAvailableKey) {
                                                                  /*local_block_num=*/3,
                                                                  /*cache_key_count=*/5,
                                                                  /*reuse_block_size=*/0,
-                                                                 /*use_hybrid=*/true,
+                                                                 /*use_group_cache_transfer_policy=*/true,
                                                                  /*group_seq_size_per_block=*/2,
                                                                  /*base_seq_size_per_block=*/1);
 
@@ -1281,7 +1290,7 @@ TEST(DecodeRpcServerTest, CompactStateGroupLoadsGlobalTailKeysIntoCanonicalSlots
                                                           /*local_block_num=*/6,
                                                           /*cache_key_count=*/11,
                                                           /*reuse_block_size=*/0,
-                                                          /*use_hybrid=*/true,
+                                                          /*use_group_cache_transfer_policy=*/true,
                                                           kCompactSeqSizePerBlock,
                                                           kBaseSeqSizePerBlock);
 
@@ -1296,13 +1305,13 @@ TEST(DecodeRpcServerTest, CompactStateGroupLoadPlanMatchesProducerStorePlan) {
                                                                  /*local_block_num=*/6,
                                                                  /*cache_key_count=*/11,
                                                                  /*reuse_block_size=*/0,
-                                                                 /*use_hybrid=*/true,
+                                                                 /*use_group_cache_transfer_policy=*/true,
                                                                  kCompactSeqSizePerBlock,
                                                                  kBaseSeqSizePerBlock);
     const auto producer_plan = buildCacheStorePlan(policy,
                                                    /*total_logical_blocks=*/11,
                                                    /*reuse_block_size=*/0,
-                                                   /*use_hybrid=*/true,
+                                                   /*use_group_cache_transfer_policy=*/true,
                                                    /*cp_rank=*/1,
                                                    /*cp_size=*/2);
 
@@ -1317,7 +1326,7 @@ TEST(DecodeRpcServerTest, CompactStateGroupIgnoresSpeculativeReserveTailSlots) {
                                                           /*local_block_num=*/7,
                                                           /*cache_key_count=*/11,
                                                           /*reuse_block_size=*/0,
-                                                          /*use_hybrid=*/true,
+                                                          /*use_group_cache_transfer_policy=*/true,
                                                           kCompactSeqSizePerBlock,
                                                           kBaseSeqSizePerBlock);
 
@@ -1334,7 +1343,7 @@ TEST(DecodeRpcServerTest, CompactOneTailGroupLoadsOnlyTheLastCanonicalSlot) {
                                                           /*local_block_num=*/6,
                                                           /*cache_key_count=*/11,
                                                           /*reuse_block_size=*/0,
-                                                          /*use_hybrid=*/true,
+                                                          /*use_group_cache_transfer_policy=*/true,
                                                           kCompactSeqSizePerBlock,
                                                           kBaseSeqSizePerBlock);
 
@@ -1346,7 +1355,7 @@ TEST(DecodeRpcServerTest, CompactStateGroupWithSingleLogicalBlockLoadsKeyZero) {
                                                           /*local_block_num=*/1,
                                                           /*cache_key_count=*/1,
                                                           /*reuse_block_size=*/0,
-                                                          /*use_hybrid=*/true,
+                                                          /*use_group_cache_transfer_policy=*/true,
                                                           kCompactSeqSizePerBlock,
                                                           kBaseSeqSizePerBlock);
 
@@ -1360,7 +1369,7 @@ TEST(DecodeRpcServerTest, UnscaledSwaGroupKeepsLogicalTailPositions) {
                                                           /*local_block_num=*/5,
                                                           /*cache_key_count=*/5,
                                                           /*reuse_block_size=*/0,
-                                                          /*use_hybrid=*/true,
+                                                          /*use_group_cache_transfer_policy=*/true,
                                                           kBaseSeqSizePerBlock,
                                                           kBaseSeqSizePerBlock);
 
@@ -1378,7 +1387,7 @@ TEST(DecodeRpcServerTest, TailGroupReserveSlotsDoNotStarveTheLoad) {
                                                           /*local_block_num=*/4,
                                                           /*cache_key_count=*/3,
                                                           /*reuse_block_size=*/0,
-                                                          /*use_hybrid=*/true,
+                                                          /*use_group_cache_transfer_policy=*/true,
                                                           kBaseSeqSizePerBlock,
                                                           kBaseSeqSizePerBlock);
 
@@ -1396,7 +1405,7 @@ TEST(DecodeRpcServerTest, FullGroupKeepsWholeLogicalBlocksAfterReuse) {
                                                           /*local_block_num=*/5,
                                                           /*cache_key_count=*/4,
                                                           /*reuse_block_size=*/2,
-                                                          /*use_hybrid=*/false,
+                                                          /*use_group_cache_transfer_policy=*/false,
                                                           kBaseSeqSizePerBlock,
                                                           kBaseSeqSizePerBlock);
 
@@ -1444,7 +1453,7 @@ TEST(DecodeRpcServerTest, RankWithoutOwnedPagesHasNoRequiredLoads) {
                                                     /*local_block_num=*/0,
                                                     /*cache_key_count=*/1,
                                                     /*reuse_block_size=*/0,
-                                                    /*use_hybrid=*/true,
+                                                    /*use_group_cache_transfer_policy=*/true,
                                                     kBaseSeqSizePerBlock,
                                                     kBaseSeqSizePerBlock,
                                                     /*decode_cp_rank=*/1,
@@ -1459,7 +1468,7 @@ TEST(DecodeRpcServerTest, MissingCacheKeysYieldNoLoad) {
                                                     /*local_block_num=*/6,
                                                     /*cache_key_count=*/0,
                                                     /*reuse_block_size=*/0,
-                                                    /*use_hybrid=*/true,
+                                                    /*use_group_cache_transfer_policy=*/true,
                                                     kCompactSeqSizePerBlock,
                                                     kBaseSeqSizePerBlock)
                     .empty());

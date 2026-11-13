@@ -93,21 +93,21 @@ class CacheStoreAsyncWriterTest: public ::testing::Test {};
 
 static CacheConfig makeWriterTestCacheConfig(const std::string& tag, size_t kv_stride, uint32_t block_num = 1) {
     CacheConfig config;
-    config.dtype              = DataType::TYPE_BF16;
-    config.layer_num          = 1;
+    config.main_config.dtype     = DataType::TYPE_BF16;
+    config.main_config.layer_num = 1;
     config.seq_size_per_block = 1;
 
     AttentionConfigs attn_config;
     attn_config.kv_head_num   = 1;
-    attn_config.size_per_head = static_cast<int>(kv_stride / (2 * getTypeSize(config.dtype)));
+    attn_config.size_per_head = static_cast<int>(kv_stride / (2 * getTypeSize(config.dtype())));
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
     KVCacheSpecDesc desc;
     desc.tag        = tag;
     desc.cache_type = KVCacheSpecType::MultiHeadAttention;
-    desc.dtype      = config.dtype;
+    desc.dtype      = config.dtype();
     SpecBuildContext ctx;
-    ctx.dtype              = config.dtype;
+    ctx.dtype              = config.dtype();
     ctx.seq_size_per_block = 1;
     ctx.attn_config        = &attn_config;
     ctx.parallelism_config = &parallelism_config;
@@ -328,8 +328,7 @@ TEST_F(CacheStoreAsyncWriterTest, AsyncExecutionWithDeviceId) {
 
 TEST_F(CacheStoreAsyncWriterTest, SelectsRequestedMtpCacheConfig) {
     auto main_config = makeWriterTestCacheConfig("main", /*kv_stride=*/16);
-    main_config.mtp_sub_configs.push_back(
-        std::make_shared<CacheConfig>(makeWriterTestCacheConfig("draft", /*kv_stride=*/32)));
+    main_config.mtp_sub_configs.push_back(makeWriterTestCacheConfig("draft", /*kv_stride=*/32).main_config);
     auto cache_manager = std::make_shared<KVCacheManager>(main_config, /*warmup=*/true);
 
     CacheStoreAsyncWriter writer(
@@ -566,6 +565,53 @@ TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCa
     ASSERT_TRUE(cache_store->completeStore());
     EXPECT_EQ(cache_manager->freeBlocksNum(), initial_free_blocks);
     EXPECT_EQ(other_pool->freeBlocksNum(), other_free_before);
+}
+
+TEST_F(CacheStoreAsyncWriterTest, MtpWriteRetainsDraftPoolUntilStoreCallback) {
+    auto config = makeWriterTestCacheConfig("main", /*kv_stride=*/16, /*block_num=*/3);
+    config.mtp_sub_configs.push_back(makeWriterTestCacheConfig("mtp", /*kv_stride=*/32, /*block_num=*/3).main_config);
+    auto cache_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->coordinator_manager_->groupBlockPools().size(), 2u);
+    auto       main_pool         = cache_manager->coordinator_manager_->groupBlockPools().front();
+    auto       draft_pool        = cache_manager->coordinator_manager_->groupBlockPools().back();
+    const auto main_free_before  = main_pool->freeBlocksNum();
+    const auto draft_free_before = draft_pool->freeBlocksNum();
+    auto       allocated         = draft_pool->malloc(1);
+    ASSERT_TRUE(allocated.has_value());
+    const auto request_blocks = allocated.value();
+    draft_pool->incRef(request_blocks);
+
+    auto cache_store = std::make_shared<DelayedCacheStore>();
+    cache_manager->setCacheStore(cache_store);
+    torch_ext::PyCacheStoreInputs inputs;
+    inputs.input_lengths_host    = torch::tensor({1}, torch::kInt32);
+    inputs.prefix_lengths_host   = torch::tensor({0}, torch::kInt32);
+    inputs.publish_start_tokens  = torch::tensor({0}, torch::kInt32);
+    inputs.host_kv_cache_offset  = torch::tensor({request_blocks.front()}, torch::kInt32).reshape({1, 1});
+    inputs.request_id            = torch::tensor({int64_t{42}}, torch::kInt64);
+    inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
+    inputs.cache_keys            = torch::tensor({int64_t{7001}}, torch::kInt64).reshape({1, 1});
+
+    auto                    layout = cache_manager->getMTPModuleGroupedCacheLayerLayout(0);
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = layout.at("mtp", 0).kv_addr;
+    layer_cache.seq_size_per_block = 1;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "mtp";
+
+    CacheStoreAsyncWriter writer(/*device_id=*/-1, cache_manager, /*cache_model_id=*/7, /*mtp_cache_config_index=*/0);
+    writer.init(/*track_store_completions=*/false);
+    writer.write(inputs, layer_cache);
+    writer.waitAllDone();
+    draft_pool->decRef(request_blocks);
+    ASSERT_TRUE(cache_store->hasPendingStore());
+    EXPECT_EQ(main_pool->freeBlocksNum(), main_free_before);
+    EXPECT_EQ(draft_pool->freeBlocksNum() + 1, draft_free_before);
+
+    ASSERT_TRUE(cache_store->completeStore());
+    EXPECT_EQ(draft_pool->freeBlocksNum(), draft_free_before);
+    EXPECT_EQ(main_pool->freeBlocksNum(), main_free_before);
 }
 
 class CacheStoreAsyncWriterTpTest: public ::testing::TestWithParam<std::tuple<int, bool, bool>> {};

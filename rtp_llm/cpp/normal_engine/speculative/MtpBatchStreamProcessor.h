@@ -16,9 +16,42 @@ public:
                             const PDSepConfig&                 pd_sep_config,
                             const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                             const CacheConfig&                 cache_config,
+                            size_t                             module_id,
                             const SpeculativeExecutionConfig&  sp_config,
                             bool                               warm_up):
-        NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
+        NormalBatchStreamProcessor(
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, module_id, warm_up),
+        propose_step_(sp_config.gen_num_per_cycle),
+        vocab_size_(model_config.vocab_size),
+        is_dspark_(sp_config.type == SP_TYPE_DSPARK),
+        dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
+        dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor) {}
+
+    // Convenience for callers holding the merged CacheConfig: the draft
+    // module is the last sub-config when one is present.
+    MtpBatchStreamProcessor(const ModelConfig&                 model_config,
+                            const PDSepConfig&                 pd_sep_config,
+                            const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
+                            const CacheConfig&                 cache_config,
+                            const SpeculativeExecutionConfig&  sp_config,
+                            bool                               warm_up):
+        MtpBatchStreamProcessor(model_config,
+                                pd_sep_config,
+                                profiling_debug_logging_config,
+                                cache_config,
+                                cache_config.moduleCount() > 1 ? 1 : 0,
+                                sp_config,
+                                warm_up) {}
+
+    MtpBatchStreamProcessor(const ModelConfig&                 model_config,
+                            const PDSepConfig&                 pd_sep_config,
+                            const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
+                            const CacheModuleConfig&           cache_config,
+                            size_t                             seq_size_per_block,
+                            const SpeculativeExecutionConfig&  sp_config,
+                            bool                               warm_up):
+        NormalBatchStreamProcessor(
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, seq_size_per_block, warm_up),
         propose_step_(sp_config.gen_num_per_cycle),
         vocab_size_(model_config.vocab_size),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),

@@ -400,7 +400,7 @@ class KimiK31NativeMtpContractTest(unittest.TestCase):
 
     def test_native_layer_mapping_precision_and_cache_have_no_indexer(self):
         config = self.config()
-        self.assertIs(type(config), KimiK3ModelConfig)
+        self.assertIsInstance(config, KimiK3ModelConfig)
         self.assertTrue(config.is_mtp)
         self.assertEqual(config.num_layers, 1)
         self.assertEqual(config.k3_runtime_config.mtp_source_layer, 93)

@@ -6,6 +6,7 @@
 
 #include <cuda_runtime.h>
 
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
@@ -147,37 +148,37 @@ BlockTreeDiskBlockPoolPtr BenchmarkFixture::createDiskPool(size_t             pa
     return pool;
 }
 
-GroupSetPtr BenchmarkFixture::createFullGroupSet(std::vector<DeviceBlockPoolPtr>      device_pools,
-                                                 std::shared_ptr<HostBlockPool>       host_pool,
-                                                 BlockTreeDiskBlockPoolPtr            disk_pool,
-                                                 size_t                               group_set_id,
-                                                 std::shared_ptr<const CacheTopology> topology,
-                                                 const std::vector<std::string>&      group_tags) {
-    auto                     group_set = std::make_shared<FullGroupSet>(device_pools, host_pool, disk_pool);
-    group_set->initialize(group_set_id, std::move(topology), group_tags);
+GroupSetPtr BenchmarkFixture::createFullGroupSet(std::vector<DeviceBlockPoolPtr>    device_pools,
+                                                 std::shared_ptr<HostBlockPool>     host_pool,
+                                                 BlockTreeDiskBlockPoolPtr          disk_pool,
+                                                 size_t                             group_set_id,
+                                                 std::shared_ptr<const CacheConfig> cache_config,
+                                                 const std::vector<std::string>&    group_tags) {
+    auto group_set = std::make_shared<FullGroupSet>(device_pools, host_pool, disk_pool);
+    group_set->initialize(group_set_id, std::move(cache_config), group_tags);
     return group_set;
 }
 
-GroupSetPtr BenchmarkFixture::createSWAGroupSet(std::vector<DeviceBlockPoolPtr>      device_pools,
-                                                std::shared_ptr<HostBlockPool>       host_pool,
-                                                BlockTreeDiskBlockPoolPtr            disk_pool,
-                                                size_t                               group_set_id,
-                                                std::shared_ptr<const CacheTopology> topology,
-                                                const std::vector<std::string>&      group_tags,
-                                                size_t                               sliding_window_size,
-                                                size_t                               tokens_per_block) {
+GroupSetPtr BenchmarkFixture::createSWAGroupSet(std::vector<DeviceBlockPoolPtr>    device_pools,
+                                                std::shared_ptr<HostBlockPool>     host_pool,
+                                                BlockTreeDiskBlockPoolPtr          disk_pool,
+                                                size_t                             group_set_id,
+                                                std::shared_ptr<const CacheConfig> cache_config,
+                                                const std::vector<std::string>&    group_tags,
+                                                size_t                             sliding_window_size,
+                                                size_t                             tokens_per_block) {
     auto group_set =
         std::make_shared<SWAGroupSet>(sliding_window_size, tokens_per_block, device_pools, host_pool, disk_pool);
-    group_set->initialize(group_set_id, std::move(topology), group_tags);
+    group_set->initialize(group_set_id, std::move(cache_config), group_tags);
     return group_set;
 }
 
-std::shared_ptr<const CacheTopology>
-BenchmarkFixture::createTopology(const std::vector<std::pair<std::string, rtp_llm::CacheGroupType>>& group_specs,
-                                 const std::vector<size_t>& layer_stride_bytes_per_group,
-                                 size_t                     tokens_per_block,
-                                 const std::vector<size_t>& layer_counts_per_group,
-                                 const std::vector<size_t>& sliding_windows) {
+std::shared_ptr<const CacheConfig>
+BenchmarkFixture::createCacheConfig(const std::vector<std::pair<std::string, rtp_llm::CacheGroupType>>& group_specs,
+                                    const std::vector<size_t>& layer_stride_bytes_per_group,
+                                    size_t                     tokens_per_block,
+                                    const std::vector<size_t>& layer_counts_per_group,
+                                    const std::vector<size_t>& sliding_windows) {
     RTP_LLM_CHECK(tokens_per_block > 0);
     RTP_LLM_CHECK(group_specs.size() == layer_stride_bytes_per_group.size());
     RTP_LLM_CHECK(layer_counts_per_group.empty() || layer_counts_per_group.size() == group_specs.size());
@@ -214,7 +215,12 @@ BenchmarkFixture::createTopology(const std::vector<std::pair<std::string, rtp_ll
         groups.push_back(std::move(group_base));
     }
 
-    return CacheTopology::create(std::move(groups), std::move(layers));
+    auto config                            = std::make_shared<CacheConfig>();
+    config->seq_size_per_block             = tokens_per_block;
+    config->main_config.seq_size_per_block = tokens_per_block;
+    config->main_config.layer_num          = static_cast<uint32_t>(layers.size());
+    config->setTopology(std::move(groups), std::move(layers));
+    return config;
 }
 
 std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupSetPtr> group_sets,

@@ -56,7 +56,7 @@ Cuda3DBatchDeviceHostCopyStrategy::initializeCopy3DTemplates(const GroupSet& gro
     for (size_t member = 0; member < pools.size(); ++member) {
         const auto& pool       = pools[member];
         const auto& group_base = group.group(tags[member]);
-        const auto  layer_ids  = group.topologyPtr()->layerIdsForGroup(tags[member]);
+        const auto  layer_ids  = group.localLayerIdsForMember(tags[member]);
         if (!pool->getBaseAddress() || pool->deviceIndex() < 0 || group_base.kvScaleStrideBytes() != 0) {
             return {};
         }

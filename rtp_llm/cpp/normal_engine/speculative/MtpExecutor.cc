@@ -40,6 +40,7 @@
 #include <memory>
 #include <thread>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace rtp_llm {
@@ -107,8 +108,9 @@ bool MtpExecutor::hasLinearCacheSnapshotCapacity(const std::list<GenerateStreamP
                                                  int64_t                             physical_width,
                                                  int64_t                             kernel_width,
                                                  int64_t                             max_accept_length) {
-    const auto& groups = cache_config.topology().groups();
-    if (physical_width <= 0 || kernel_width <= 0 || max_accept_length <= 0 || group_types.size() != groups.size()) {
+    // Snapshot rows cover every module's groups in main-then-sub order.
+    if (physical_width <= 0 || kernel_width <= 0 || max_accept_length <= 0
+        || group_types.size() != static_cast<size_t>(cache_config.allGroupNums())) {
         return false;
     }
     for (const auto& stream : streams) {
@@ -119,30 +121,32 @@ bool MtpExecutor::hasLinearCacheSnapshotCapacity(const std::list<GenerateStreamP
         if (previous_length <= 0 || stream->kvCache().batchSize() == 0) {
             return false;
         }
-        for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
-            if (group_types[group_id] != CacheGroupType::LINEAR) {
-                continue;
-            }
-            const auto& group = groups[group_id];
-            // The rectangle includes padding from other groups/requests. Only
-            // this request's logical row is usable. Sparse checkpoint slots
-            // still count: the worker only swaps existing elements and the
-            // scheduler is the sole owner of vector-size changes.
-            const auto physical_size = stream->kvCache().blocks(0, group.tag).size();
-            const auto kernel_size   = stream->kvCache().kernelBlocks(0, group.tag).size();
-            const auto fits = [previous_length, max_accept_length](size_t span, size_t row_size, int64_t width) {
-                if (span == 0 || row_size > static_cast<uint64_t>(width)) {
+        size_t flat_group_id = 0;
+        for (size_t module_id = 0; module_id < cache_config.moduleCount(); ++module_id) {
+            for (const auto& group : cache_config.moduleConfig(module_id).groups()) {
+                if (group_types[flat_group_id++] != CacheGroupType::LINEAR) {
+                    continue;
+                }
+                // The rectangle includes padding from other groups/requests. Only
+                // this request's logical row is usable. Sparse checkpoint slots
+                // still count: the worker only swaps existing elements and the
+                // scheduler is the sole owner of vector-size changes.
+                const auto physical_size = stream->kvCache().blocks(0, group.tag).size();
+                const auto kernel_size   = stream->kvCache().kernelBlocks(0, group.tag).size();
+                const auto fits = [previous_length, max_accept_length](size_t span, size_t row_size, int64_t width) {
+                    if (span == 0 || row_size > static_cast<uint64_t>(width)) {
+                        return false;
+                    }
+                    const uint64_t base = static_cast<uint64_t>(previous_length - 1) / span;
+                    // For every actual length <= the published upper bound and
+                    // accepted length <= max_accept_length, both swaps touch at
+                    // most base + max_accept_length - 1. Subtraction avoids overflow.
+                    return base < row_size && static_cast<uint64_t>(max_accept_length) <= row_size - base;
+                };
+                if (!fits(group.seqSizePerBlock(), physical_size, physical_width)
+                    || !fits(group.kernelSeqSizePerBlock(), kernel_size, kernel_width)) {
                     return false;
                 }
-                const uint64_t base = static_cast<uint64_t>(previous_length - 1) / span;
-                // For every actual length <= the published upper bound and
-                // accepted length <= max_accept_length, both swaps touch at
-                // most base + max_accept_length - 1. Subtraction avoids overflow.
-                return base < row_size && static_cast<uint64_t>(max_accept_length) <= row_size - base;
-            };
-            if (!fits(group.seqSizePerBlock(), physical_size, physical_width)
-                || !fits(group.kernelSeqSizePerBlock(), kernel_size, kernel_width)) {
-                return false;
             }
         }
     }
@@ -642,7 +646,7 @@ void MtpExecutor::maybePrintModelInput(const GptModelInputs& model_input, const 
     }
 }
 
-static void applyCacheStrideToModelInput(GptModelInputs& model_input, const CacheConfig& cache_config) {
+static void applyCacheStrideToModelInput(GptModelInputs& model_input, const CacheModuleConfig& cache_config) {
     model_input.kv_block_stride_bytes = 0;
     model_input.kv_scale_stride_bytes = 0;
     if (cache_config.groupNums() == 1) {
@@ -883,10 +887,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     // variable beams may still increase sampler rows. Keep the safe dynamic growth path enabled.
     sampler_.reset(new Sampler(SamplerInitParams{initial_sampler_batch_size, false}));
 
-    // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
+    // Optional per-layer cache buffers for the main model.
     std::optional<GroupedCacheLayerLayout> kv_cache_layer_layout = std::nullopt;
     if (cache_manager && cache_manager->cacheConfig().groupNums() > 1) {
-        kv_cache_layer_layout = cache_manager->allLayerCacheBase();
+        kv_cache_layer_layout = cache_manager->getMainModelGroupedCacheLayerLayout();
     }
 
     // Cache-backed target and draft geometry comes from their own resolved configs.
@@ -953,15 +957,26 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     // when warmup, cache manager maybe nullptr
     const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
-    is_linear_attention_model_ =
-        cache_config.groupNums() > 0
-        && std::any_of(cache_config.topology().groups().begin(),
-                       cache_config.topology().groups().end(),
-                       [](const GroupBase& group) { return group.policy.group_type == CacheGroupType::LINEAR; });
+    // Linear attention may live in the main module (target) or in a draft
+    // sub-module; the K3.1 merged topology covered both.
+    is_linear_attention_model_ = false;
+    for (size_t module_id = 0; module_id < cache_config.moduleCount() && !is_linear_attention_model_; ++module_id) {
+        const auto& groups = cache_config.moduleConfig(module_id).groups();
+        is_linear_attention_model_ =
+            std::any_of(groups.begin(), groups.end(), [](const GroupBase& group) {
+                return group.policy.group_type == CacheGroupType::LINEAR;
+            });
+    }
+    // The batch stream processor gathers model inputs whose block tables carry
+    // every cache group the stream owns (main + MTP). The CacheConfig-aware
+    // constructor emits all tagged rows itself, so no merged topology is built
+    // here; the draft module only supplies per-module scalar metadata.
+    const size_t module_id = cache_config.moduleCount() > 1 ? 1 : 0;
     batch_stream_processor_.reset(new MtpBatchStreamProcessor(params.model_config_,
                                                               params.pd_sep_config,
                                                               params.profiling_debug_logging_config,
                                                               cache_config,
+                                                              module_id,
                                                               params.sp_config,
                                                               warm_up_));
 
@@ -1709,7 +1724,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                     {static_cast<int64_t>(batch_size), static_cast<int64_t>(propose_step_ + 1)});
                 ensureModelInputsOnCuda(model_input, "decode.prepare_dspark_target_verify");
             }
-            applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
+            applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig().main_config);
             tpSyncModelInputs(model_input, parallelism_config_);
             ensureModelInputsOnCuda(model_input, "decode.dspark_target_verify_after_tp_sync");
         }
@@ -2139,7 +2154,7 @@ MtpExecutor::PreparedTargetToken MtpExecutor::launchTargetVerifyPrepareAsync(con
     if (!useAsyncPrepare()) {
         return {};
     }
-    const auto& cache_cfg = cache_manager_->cacheConfig();
+    const auto& cache_cfg = cache_manager_->cacheConfig().main_config;
     // NOTE: combo_tokens never used in prepare stage, so it is safe to use shallow copy
     auto model_input_copy = model_input;
     model_input_copy.is_mtp_draft_update  = false;
@@ -2342,7 +2357,7 @@ absl::Status MtpExecutor::runDecodeAlignmentOnly(GptModelInputs& model_input) {
         }
     }
 
-    applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
+    applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig().main_config);
     model_input.is_target_verify = true;
     ensureModelInputsOnCuda(model_input, "decode.alignment_target_verify");
     forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET);
@@ -3044,7 +3059,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             execBroadcast({broadcast_tensors, 0});
         }
 
-        applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
+        applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig().main_config);
     }
 }
 
@@ -3339,6 +3354,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
 
     torch::Tensor next_kv_cache_block_id;
     torch::Tensor next_kv_cache_kernel_block_id;
+    std::vector<std::string> next_kv_cache_row_tags;
     if (useDeviceInput() && kv_cache_block_id.defined() && kv_cache_block_id.is_cuda()
         && kv_cache_kernel_block_id.defined() && kv_cache_kernel_block_id.is_cuda()) {
         RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id.dim() == 3 && kv_cache_block_id.size(1) == batch_size,
@@ -3348,23 +3364,45 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                                 "MTP kernel cache snapshot source must be [group,batch,blocks], batch=%ld",
                                 batch_size);
         const auto&                 cache_config = cache_manager_->cacheConfig();
-        const auto&                 groups       = cache_config.topology().groups();
         std::vector<CacheGroupType> group_types;
         std::vector<int64_t>        physical_spans;
         std::vector<int64_t>        kernel_spans;
         bool                        has_legacy_linear = false;
-        group_types.reserve(groups.size());
-        physical_spans.reserve(groups.size());
-        kernel_spans.reserve(groups.size());
-        for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
-            const auto& group = groups[group_id];
-            // Payload rows and topology IDs share canonical tag order.
-            // Only legacy LINEAR rows need swaps.
-            const bool legacy_linear = cache_config.isLegacyLinearGroup(static_cast<int>(group_id));
-            group_types.push_back(legacy_linear ? CacheGroupType::LINEAR : CacheGroupType::FULL);
-            has_legacy_linear |= legacy_linear;
-            physical_spans.push_back(static_cast<int64_t>(group.seqSizePerBlock()));
-            kernel_spans.push_back(static_cast<int64_t>(group.kernelSeqSizePerBlock()));
+        group_types.reserve(static_cast<size_t>(cache_config.allGroupNums()));
+        physical_spans.reserve(static_cast<size_t>(cache_config.allGroupNums()));
+        kernel_spans.reserve(static_cast<size_t>(cache_config.allGroupNums()));
+        size_t flat_group_id = 0;
+        // Snapshot rows cover every module's groups in main-then-sub order. The
+        // published tag vector is the snapshot's own row order; consumers must
+        // not infer it from a module-local topology.
+        for (size_t module_id = 0; module_id < cache_config.moduleCount(); ++module_id) {
+            for (const auto& group : cache_config.moduleConfig(module_id).groups()) {
+                // Payload rows and topology IDs share canonical tag order.
+                // Only legacy MAIN-module LINEAR rows need swaps; the replay
+                // plan never covers draft (sub) groups.
+                const bool legacy_linear =
+                    module_id == 0 ? cache_config.isLegacyLinearGroup(static_cast<int>(flat_group_id)) :
+                                     group.policy.group_type == CacheGroupType::LINEAR;
+                group_types.push_back(legacy_linear ? CacheGroupType::LINEAR : CacheGroupType::FULL);
+                has_legacy_linear |= legacy_linear;
+                physical_spans.push_back(static_cast<int64_t>(group.seqSizePerBlock()));
+                kernel_spans.push_back(static_cast<int64_t>(group.kernelSeqSizePerBlock()));
+                next_kv_cache_row_tags.push_back(group.tag);
+                ++flat_group_id;
+            }
+        }
+        RTP_LLM_CHECK_WITH_INFO(next_kv_cache_row_tags.size() == static_cast<size_t>(kv_cache_block_id.size(0))
+                                    && next_kv_cache_row_tags.size()
+                                           == static_cast<size_t>(kv_cache_kernel_block_id.size(0)),
+                                "MTP cache snapshot tag count %zu differs from physical rows %ld or kernel rows %ld",
+                                next_kv_cache_row_tags.size(),
+                                kv_cache_block_id.size(0),
+                                kv_cache_kernel_block_id.size(0));
+        std::unordered_set<std::string> unique_tags;
+        for (const auto& tag : next_kv_cache_row_tags) {
+            RTP_LLM_CHECK_WITH_INFO(!tag.empty() && unique_tags.insert(tag).second,
+                                    "MTP cache snapshot row tags must be non-empty and unique: tag=%s",
+                                    tag.c_str());
         }
         RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id.size(0) == static_cast<int64_t>(group_types.size())
                                     && kv_cache_kernel_block_id.size(0) == static_cast<int64_t>(group_types.size()),
@@ -3386,6 +3424,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
             // snapshot makes the next scheduler iteration join bookkeeping and
             // rebuild both tables from authoritative host state instead of
             // risking an out-of-range CUDA gather.
+            next_kv_cache_row_tags.clear();
             RTP_LLM_LOG_DEBUG("MTP cache snapshot capacity exhausted: physical_width=%ld kernel_width=%ld "
                               "batch=%ld; next round will synchronize and regather",
                               kv_cache_block_id.size(2),
@@ -3410,6 +3449,9 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
             next_kv_cache_block_id.defined() ? next_kv_cache_block_id.narrow(1, idx, 1) : torch::Tensor();
         state.next_kv_cache_kernel_block_id_gpu =
             next_kv_cache_kernel_block_id.defined() ? next_kv_cache_kernel_block_id.narrow(1, idx, 1) : torch::Tensor();
+        if (state.next_kv_cache_block_id_gpu.defined()) {
+            state.next_kv_cache_row_tags = next_kv_cache_row_tags;
+        }
         state.last_hidden_states_gpu = last_hidden_all.defined() ? last_hidden_all.narrow(0, idx, 1) : torch::Tensor();
 
         const auto next_batch_size = stream->nextBatchSize();

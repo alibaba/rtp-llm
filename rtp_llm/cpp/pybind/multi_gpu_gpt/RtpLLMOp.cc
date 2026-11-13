@@ -11,7 +11,6 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
-#include "rtp_llm/cpp/config/MTPModelConfigHelper.h"
 #include "rtp_llm/cpp/pybind/ConfigExtract.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
@@ -62,8 +61,6 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
     py::object   py_layers_weights     = sp_model.attr("weight").attr("weights");
     py::object   py_global_weights     = sp_model.attr("weight").attr("global_weights");
     auto         convert               = WeightsConverter(false, model_config.quant_algo);
-    auto         py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
-    const size_t weight_count          = py_layers_weights_vec.size();
     size_t       gen_num_per_cycle     = base_params.sp_config.gen_num_per_cycle;
 
     // Get py_eplb if available (from model)
@@ -72,10 +69,6 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         py_eplb = sp_model.attr("py_eplb");
     }
 
-    if (sp_type == SP_TYPE_DSPARK) {
-        // DSpARK is one multi-layer draft model: gen_num_per_cycle controls the
-        // width of its draft block, not the number of one-layer MTP modules, so
-        // it keeps the full checkpoint config instead of an MTP module plan.
         auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
         mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
                                                                           model_config,
@@ -100,57 +93,6 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                           std::move(*gpt_weight),
                                                                           py::none(),
                                                                           py_eplb)));
-        return std::move(
-            std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
-    }
-
-    if (gen_num_per_cycle > 1 && weight_count == 1) {
-        RTP_LLM_LOG_WARNING("duplicate py_layers_weights_vec from 1 to sp_config.gen_num_per_cycle: %ld",
-                            gen_num_per_cycle);
-    }
-    if (gen_num_per_cycle != weight_count && !(gen_num_per_cycle > 1 && weight_count == 1)) {
-        RTP_LLM_LOG_WARNING(
-            "sp_config.gen_num_per_cycle: %ld  != py_layers_weights_vec.size(): %ld", gen_num_per_cycle, weight_count);
-    }
-    const auto module_plan = buildMTPModuleConfigPlan(model_config, weight_count, gen_num_per_cycle, sp_type);
-    const auto model_num   = module_plan.module_configs.size();
-
-    for (size_t i = 0; i < model_num; i++) {
-        const auto source_layer = module_plan.source_layer_indices[i];
-        RTP_LLM_CHECK_WITH_INFO(source_layer < py_layers_weights_vec.size(),
-                                "missing MTP layer weight for module %zu source layer %zu",
-                                i,
-                                source_layer);
-        auto     layer_weigths = py_layers_weights_vec[source_layer];
-        py::list tmp;
-        tmp.append(layer_weigths);
-        auto gpt_weight = convert.createGptWeights(tmp, py_global_weights);
-        mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
-                                                                           module_plan.module_configs[i],
-                                                                           draft_parallelism,
-                                                                           base_params.runtime_config,
-                                                                           base_params.pd_sep_config,
-                                                                           base_params.concurrency_config,
-                                                                           base_params.fmha_config,
-                                                                           base_params.kv_cache_config,
-                                                                           base_params.profiling_debug_logging_config,
-                                                                           base_params.hw_kernel_config,
-                                                                           base_params.device_resource_config,
-                                                                           base_params.moe_config,
-                                                                           base_params.model_specific_config,
-                                                                           base_params.sp_config,
-                                                                           base_params.cache_store_config,
-                                                                           base_params.misc_config,
-                                                                           base_params.arpc_config,
-                                                                           base_params.grpc_config,
-                                                                           base_params.ffn_disaggregate_config,
-                                                                           base_params.vit_config,
-                                                                           std::move(*gpt_weight),
-                                                                           py::none(),
-                                                                           py_eplb)));
-        model_id++;
-    }
-
     return std::move(std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
 };
 

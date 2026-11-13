@@ -92,6 +92,7 @@ class ModelConfig(CppModelConfig):
         "enable_fp32_lm_head",
         "enable_output_vocab_pruning",
         "has_lm_head_bias",
+        "cache_tag_prefix",
         "tie_word_embeddings",
         "quantization",
         "mm_related_params",

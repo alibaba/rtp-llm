@@ -32,6 +32,7 @@
 namespace rtp_llm {
 namespace {
 using namespace block_tree_cache_test;
+using block_transfer_engine_test::makeTestCacheConfig;
 
 struct MultiRankBlockTransferRpcState {
     std::mutex                            mutex;
@@ -149,7 +150,10 @@ static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<
         std::vector<DeviceBlockPoolPtr>{device_pool}, block_transfer_engine_test::makeHostPool(256, 8), nullptr);
     auto topology = block_transfer_engine_test::makeTestTopology(
         {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256)});
-    full->initialize(0, topology, topology->groupTags(), block_transfer_engine_test::makeTestBackingLayout(256, false));
+    full->initialize(0,
+                     makeTestCacheConfig(*topology),
+                     topology->groupTags(),
+                     block_transfer_engine_test::makeTestBackingLayout(256, false));
     std::vector<GroupSetPtr> groups = {full};
     return makeBlockTreeCacheForTest(std::move(groups),
                                      BlockTreeCacheConfig{},
@@ -170,7 +174,7 @@ static BlockIdxType prepareDeviceTarget(const std::shared_ptr<FullGroupSet>& gro
     const DeviceBlockPoolPtr& device_pool = group->devicePools().front();
     auto                      topology    = block_transfer_engine_test::makeTestTopology(
         {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256)});
-    group->initialize(0, topology, topology->groupTags());
+    group->initialize(0, makeTestCacheConfig(*topology), topology->groupTags());
     const auto block = device_pool->malloc();
     if (!block.has_value()) {
         return NULL_BLOCK_IDX;
@@ -190,7 +194,7 @@ static void initializeBroadcastGroups(const std::vector<std::shared_ptr<FullGrou
     auto topology = block_transfer_engine_test::makeTestTopology(std::move(group_bases));
     size_t group_id = 0;
     for (const auto& tag : topology->groupTags()) {
-        groups[group_id]->initialize(group_id, topology, {tag});
+        groups[group_id]->initialize(group_id, makeTestCacheConfig(*topology), {tag});
         ++group_id;
     }
 }
@@ -1536,7 +1540,7 @@ static std::vector<GroupSetPtr> makeMixedIntegrityBroadcastGroups() {
     initializeBroadcastGroups({ordinary, protected_group});
     protected_group->initialize(
         1,
-        protected_group->topologyPtr(),
+        protected_group->cacheConfig(),
         protected_group->groupTags(),
         block_transfer_engine_test::makeTestBackingLayout(protected_group->payloadBytes(), true));
     return {ordinary, protected_group};

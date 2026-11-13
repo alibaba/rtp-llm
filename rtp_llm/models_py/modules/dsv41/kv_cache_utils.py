@@ -27,6 +27,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 
+from rtp_llm.models_py.utils.kvcache import canonical_cache_tag
+
 # ---------------------------------------------------------------------------
 # Canonical cache-group tags. These are the *consumer* side of the tags that
 # ``rtp_llm/models/dsv4_kv_cache.py`` (``CSA_KV_TAG`` ... ``SWA_KV_TAG``) hands
@@ -104,7 +106,11 @@ def as_attention_inputs_by_tag(
         if attention_inputs is None:
             return {}
     if isinstance(attention_inputs, Mapping):
-        return {str(tag): value for tag, value in attention_inputs.items()}
+        # The framework keys the mapping by the group's *published* tag
+        # (``mtp_swa_kv`` for a draft module); callers index by canonical tag.
+        return {
+            canonical_cache_tag(tag): value for tag, value in attention_inputs.items()
+        }
     tags = group_tags(kv_cache)
     tag = tags[0] if len(tags) == 1 else DEFAULT_TAG
     return {tag: attention_inputs}
@@ -256,7 +262,10 @@ def swa_region_for_layer(kv_cache, layer_id):
     if callable(owned_groups):
         return (
             DECODER_SWA_KV
-            if any(group.tag == DECODER_SWA_KV for group in owned_groups(layer_id))
+            if any(
+                canonical_cache_tag(group.tag) == DECODER_SWA_KV
+                for group in owned_groups(layer_id)
+            )
             else SWA_KV
         )
     try:
@@ -316,7 +325,7 @@ def create_tagged_cache_store_writer(kv_cache, attention_inputs):
 
     def write_layer(layer_id):
         for cache in kv_cache.get_layer_cache_groups(layer_id):
-            writer = writers.get(str(cache.tag))
+            writer = writers.get(canonical_cache_tag(cache.tag))
             if writer is not None:
                 writer(cache)
 
