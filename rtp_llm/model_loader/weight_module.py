@@ -16,6 +16,16 @@ from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, WeightStyle, identity, sp_id
 
 
+def _iter_weight_tensors(tensors):
+    # Keep recursion outside the conversion method so it cannot retain its
+    # result dictionary in a self-referencing closure.
+    for name, tensor in tensors.items():
+        if isinstance(tensor, dict):
+            yield from _iter_weight_tensors(tensor)
+        else:
+            yield name, tensor
+
+
 class WeightModule(ABC):
     _registry = weakref.WeakValueDictionary()
     _cache = weakref.WeakKeyDictionary()
@@ -183,18 +193,10 @@ class WeightModule(ABC):
         split_tensors = self._split(merged_tensors, load_config)
 
         processed_tensors = self._postprocess(split_tensors, device, load_config)
-        flat_res = {}
-
-        def __extract_tensor(tensors):
-            for k, v in tensors.items():
-                if isinstance(v, dict):
-                    __extract_tensor(v)
-                else:
-                    flat_res.update({k: v.to(device)})
-
-        __extract_tensor(processed_tensors)
-        shape_info = {k: (v.shape, v.dtype) for k, v in flat_res.items()}
-        return flat_res
+        return {
+            name: tensor.to(device)
+            for name, tensor in _iter_weight_tensors(processed_tensors)
+        }
 
     @torch.inference_mode()
     def update(
@@ -202,18 +204,10 @@ class WeightModule(ABC):
     ):
         split_tensors = self._split(tensor, load_config)
         processed_tensors = self._postprocess(split_tensors, device, load_config)
-        flat_res = {}
-
-        def __extract_tensor(tensors):
-            for k, v in tensors.items():
-                if isinstance(v, dict):
-                    __extract_tensor(v)
-                else:
-                    flat_res.update({k: v.to(device)})
-
-        __extract_tensor(processed_tensors)
-        shape_info = {k: (v.shape, v.dtype) for k, v in flat_res.items()}
-        return flat_res
+        return {
+            name: tensor.to(device)
+            for name, tensor in _iter_weight_tensors(processed_tensors)
+        }
 
     @torch.inference_mode()
     def load_lora(
@@ -249,17 +243,11 @@ class WeightModule(ABC):
             res = raw_loras
         else:
             res = self._split_lora(raw_loras, load_config)
-        flat_res = {}
-
-        def __extract_tensor(tensors):
-            for k, v in tensors.items():
-                if isinstance(v, dict):
-                    __extract_tensor(v)
-                elif v is not None:
-                    flat_res.update({k: v.contiguous().clone().to(device)})
-
-        __extract_tensor(res)
-        return flat_res
+        return {
+            name: tensor.contiguous().clone().to(device)
+            for name, tensor in _iter_weight_tensors(res)
+            if tensor is not None
+        }
 
     @abstractmethod
     def _load_raw_tensor(

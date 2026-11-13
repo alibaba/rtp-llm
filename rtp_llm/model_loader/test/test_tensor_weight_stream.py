@@ -1,7 +1,9 @@
 """CPU tests for tensor grouping and HF transforms; not engine parity tests."""
 
 import functools
+import gc
 import unittest
+import weakref
 from types import SimpleNamespace
 
 import torch
@@ -179,6 +181,20 @@ class TensorWeightStreamTest(unittest.TestCase):
         )
         for key in first:
             torch.testing.assert_close(first[key], restored[key], rtol=0, atol=0)
+
+    def test_converted_tensors_release_without_cyclic_gc(self):
+        loader = make_loader(generated=True)
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            converted = convert(loader, inputs())
+            refs = [weakref.ref(tensor) for tensor in converted.values()]
+            self.assertEqual(len(refs), 5)
+            del converted
+            self.assertTrue(all(ref() is None for ref in refs))
+        finally:
+            if gc_was_enabled:
+                gc.enable()
 
     def test_rejects_duplicate_even_after_group_is_emitted(self):
         source = inputs()
