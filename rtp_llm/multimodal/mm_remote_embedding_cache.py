@@ -26,6 +26,7 @@ from rtp_llm.multimodal.kvcm.tensor_object import (
     plan_object,
     unpack_object,
 )
+from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
 # Python 3.10 keeps future wait timeouts separate from built-in IO timeouts.
 _TIMEOUT_ERRORS = (TimeoutError, concurrent.futures.TimeoutError)
@@ -624,8 +625,11 @@ class MMRemoteEmbeddingCache:
 
         try:
             with self._observe_stage("write", "pack"):
-                for event in producer_events or ():
-                    event.synchronize()
+                # Host event synchronization is also forbidden during global
+                # CUDA Graph capture, even for a different producer stream.
+                with cuda_graph_gate.operation():
+                    for event in producer_events or ():
+                        event.synchronize()
                 buffer = pack_object(plan)
         except Exception as error:
             self.record(

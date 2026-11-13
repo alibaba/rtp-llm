@@ -31,6 +31,7 @@ from rtp_llm.multimodal.test.multimodal_process_engine_test import (
 )
 from rtp_llm.multimodal.test.remote_embedding_test_helpers import FakeClient, Store
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 from rtp_llm.utils.grpc_util import trans_from_tensor
 
 
@@ -875,6 +876,40 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(other.stats()["inflight_bytes"], 0)
         self.assertEqual(other.stats()["inflight_tasks"], 0)
         self.assertFalse(other._pending_writes)
+
+    def test_producer_wait_cannot_run_during_global_graph_capture(self):
+        store = Store()
+        remote = self.remote(store)
+        entered, waited = threading.Event(), threading.Event()
+        errors = []
+
+        class ProducerEvent:
+            def synchronize(self):
+                waited.set()
+
+        def submit():
+            entered.set()
+            try:
+                remote.submit_result(
+                    "capture-safe-snapshot",
+                    (torch.arange(12).reshape(3, 4), None),
+                    producer_events=(ProducerEvent(),),
+                )
+            except BaseException as error:
+                errors.append(error)
+
+        with cuda_graph_gate.capture():
+            worker = threading.Thread(target=submit)
+            worker.start()
+            self.assertTrue(entered.wait(2))
+            # CUDA event.synchronize itself must wait for capture to finish;
+            # guarding only the later tensor copy is too late.
+            self.assertFalse(waited.wait(0.1))
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(errors)
+        self.assertTrue(waited.is_set())
+        self.assertTrue(store.saved.wait(2))
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_deferred_gpu_snapshot_waits_for_producer_and_is_submitted_once(self):
