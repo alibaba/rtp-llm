@@ -26,4 +26,4 @@ addopts = "-p mock_framework.execution.test.support"
 pythonpath = ["python"]
 
 [tool.setuptools.package-data]
-"mock_framework.view" = ["page.html"]
+"mock_framework.view" = ["page.html", "grafana-frame.js"]

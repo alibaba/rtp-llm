@@ -501,6 +501,8 @@ HTTPServer(('127.0.0.1', port), Handler).serve_forever()
         binary.parent.mkdir(parents=True, exist_ok=True)
         binary.write_text("#!" + sys.executable + "\n" + script)
         binary.chmod(0o755)
+    (grafana.parent.parent / "public/views").mkdir(parents=True)
+    (grafana.parent.parent / "public/views/index.html").write_text("<body></body>")
     return prom, grafana.parent.parent
 
 

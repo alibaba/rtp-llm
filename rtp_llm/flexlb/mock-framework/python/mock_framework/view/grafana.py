@@ -3,8 +3,10 @@
 import base64
 import copy
 import json
+import shutil
 from datetime import datetime, timezone
 from html import escape
+from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -13,6 +15,36 @@ import yaml
 from ..dashboard import validate_dashboard
 
 DATASOURCE = {"type": "prometheus", "uid": "mock-prometheus"}
+
+
+def prepare_grafana_static_root(directory, grafana_home):
+    public = grafana_home / "public"
+    static_root = directory / "public"
+    views = static_root / "views"
+    views.mkdir(parents=True)
+    for path in public.iterdir():
+        if path.name != "views":
+            (static_root / path.name).symlink_to(path)
+    for path in (public / "views").iterdir():
+        if path.name != "index.html":
+            (views / path.name).symlink_to(path)
+    index = (public / "views/index.html").read_text(encoding="utf-8")
+    marker = "</body>"
+    if marker not in index:
+        raise ValueError("Grafana index template is missing </body>")
+    (views / "index.html").write_text(
+        index.replace(
+            marker,
+            '<script nonce="[[.Nonce]]" src="/public/mock-view.js"></script>\n'
+            + marker,
+            1,
+        ),
+        encoding="utf-8",
+    )
+    shutil.copyfile(
+        Path(__file__).with_name("grafana-frame.js"), static_root / "mock-view.js"
+    )
+    return static_root
 
 
 def prepare_dashboard(value):

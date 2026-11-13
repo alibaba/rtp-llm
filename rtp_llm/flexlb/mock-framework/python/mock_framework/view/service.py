@@ -15,7 +15,12 @@ from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 from ..execution.processes import ProcessIdentity, ProcessSupervisor
-from .grafana import instance_filters, post_annotations, provision
+from .grafana import (
+    instance_filters,
+    post_annotations,
+    prepare_grafana_static_root,
+    provision,
+)
 from .records import load_experiment_view, read_json
 
 
@@ -118,11 +123,15 @@ async def run_metrics_session(body, result, output, prometheus, grafana_home):
             f"http://127.0.0.1:{grafana_port}",
         )
         password = secrets.token_urlsafe(24)
+        static_root = prepare_grafana_static_root(
+            output / "grafana", grafana_home.resolve()
+        )
         config = output / "grafana/grafana.ini"
         config.write_text(
             f"""[server]
 http_addr = 127.0.0.1
 http_port = {grafana_port}
+static_root_path = {static_root}
 [paths]
 data = {output / 'grafana/data'}
 logs = {output / 'grafana/logs'}
