@@ -15,11 +15,6 @@ class LocalRpcServiceImpl: public RpcService::Service {
 public:
     LocalRpcServiceImpl() {}
     virtual ~LocalRpcServiceImpl() {}
-    virtual void deferServiceStart() {
-        if (local_server_) {
-            local_server_->deferServiceStart();
-        }
-    }
     virtual void updateRuntimeEndpoints(const RuntimeConfig& runtime_config) {
         if (local_server_) {
             local_server_->updateRuntimeEndpoints(runtime_config);
