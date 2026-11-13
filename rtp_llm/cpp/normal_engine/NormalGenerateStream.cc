@@ -194,6 +194,27 @@ GenerateOutputs NormalGenerateStream::materializeTerminalOutput(GenerateOutputs 
     return output;
 }
 
+torch::Tensor NormalGenerateStream::selectLogits(const torch::Tensor& logits) const {
+    const auto& select_tokens_id = generate_input_->generate_config->select_tokens_id;
+    if (select_tokens_id.empty()) {
+        return logits;
+    }
+    const auto out_of_bound_token_id =
+        std::find_if_not(select_tokens_id.begin(), select_tokens_id.end(), [this](int select_token_id) {
+            return select_token_id >= 0 && select_token_id < vocabSize();
+        });
+    if (out_of_bound_token_id != select_tokens_id.end()) {
+        RTP_LLM_LOG_WARNING("select_token_id out of bound, expected >= 0 and < vocab size [%d], found [%d]",
+                            vocabSize(),
+                            *out_of_bound_token_id);
+        return torch::empty({0, 0}, logits.options());
+    }
+    const auto select_indices =
+        torch::tensor(std::vector<int64_t>(select_tokens_id.begin(), select_tokens_id.end()), torch::kLong)
+            .to(logits.device());
+    return logits.index_select(1, select_indices);
+}
+
 GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
     size_t          output_len = seqLength() - last_output_pos_;
     GenerateOutputs generate_results;
@@ -201,6 +222,13 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     const auto&     all_probs_     = sampling_state_.all_probs;
     const auto&     softmax_probs_ = sampling_state_.softmax_probs;
     generate_results.request_id    = request_id_;
+
+    torch::Tensor logits_result;
+    if (finished_ && selected_logits_.defined()) {
+        logits_result = std::move(selected_logits_);
+    } else if (returnLogits() && update_info.logits.defined()) {
+        logits_result = selectLogits(update_info.logits);
+    }
 
     // CompleteTokenIds has already applied this step, so currentBatchSize is the output row count.
     for (int i = 0; i < currentBatchSize(); i++) {
@@ -210,29 +238,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
         // TODO(xinfei.sxf) optimize this copy : only copy last token
         complete_token_ids_->copyTokensTo(
             i, generate_output.output_ids.data_ptr<int32_t>(), last_output_pos_, output_len);
-        if (returnLogits() && update_info.logits.defined()) {
-            torch::Tensor logits_result;
-            const auto&   select_tokens_id = generate_input_->generate_config->select_tokens_id;
-            if (!select_tokens_id.empty()) {
-                auto out_of_bound_token_id =
-                    std::find_if_not(select_tokens_id.begin(), select_tokens_id.end(), [this](int select_token_id) {
-                        return select_token_id >= 0 && select_token_id < vocabSize();
-                    });
-                if (out_of_bound_token_id == select_tokens_id.end()) {
-                    auto select_indices =
-                        torch::tensor(std::vector<int64_t>(select_tokens_id.begin(), select_tokens_id.end()),
-                                      torch::kLong)
-                            .to(update_info.logits.device());
-                    logits_result = update_info.logits.index_select(1, select_indices);
-                } else {
-                    RTP_LLM_LOG_WARNING("select_token_id out of bound, expected >= 0 and < vocab size [%d], found [%d]",
-                                        vocabSize(),
-                                        *out_of_bound_token_id);
-                    logits_result = torch::empty({0, 0}, update_info.logits.options());
-                }
-            } else {
-                logits_result = update_info.logits;
-            }
+        if (logits_result.defined()) {
             if (logits_result.size(0) <= 1) {
                 generate_output.logits = logits_result.cpu().clone();
             } else {
@@ -495,6 +501,12 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             || (role == RoleType::DECODE && !update_info.update_remote_generate && iter_count_ == 1));
     const bool need_update = pd_sep_first_token || isStreaming() || finished_;
     if (!need_update) {
+        // Keep the requested step's logits when Decode buffers its token output.
+        const auto logits_index = generateConfig()->logits_index;
+        if (role == RoleType::DECODE && queryPdSep() && returnLogits() && update_info.logits.defined()
+            && logits_index && seqLength() - inputLength() == *logits_index) {
+            selected_logits_ = selectLogits(update_info.logits).to(torch::kCPU, false, true);
+        }
         return;
     }
 
