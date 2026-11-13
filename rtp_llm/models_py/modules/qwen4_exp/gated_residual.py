@@ -1,5 +1,8 @@
 """Qwen4 BF16 HC consumer with the existing residual/norm rounding order."""
 
+import logging
+import os
+
 import torch
 
 from rtp_llm.models_py.modules.base.common.fp8_linear import dense_projection
@@ -7,11 +10,50 @@ from rtp_llm.models_py.modules.hybrid.gated_residual import GatedResidual
 
 
 class Qwen4GatedResidual(GatedResidual):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, is_mtp=False, **kwargs):
         super().__init__(*args, **kwargs)
         self._hc_role = str(kwargs.get("role", "PDFUSION")).rsplit(".", 1)[-1]
+        self._decode_gr = None
+        if (
+            os.environ.get("RTP_QWEN4_FUSED_GR", "0") == "1"
+            and (not is_mtp or os.environ.get("RTP_QWEN4_FUSED_GR_MTP", "1") == "1")
+            and self._hc_role == "DECODE"
+            and self.hc_mult == 4
+            and all(
+                projection is None
+                for projection in (
+                    self.down_projection,
+                    self.up_projection,
+                    self.inject_projection,
+                )
+            )
+        ):
+            from .sm120_gr import DecodeGrMixer
+
+            self._decode_gr = DecodeGrMixer.create(
+                self.mix_down, self.mix_up, self.inject
+            )
+            if self._decode_gr is not None:
+                logging.info(
+                    "Qwen4 fused GR enabled: rank=%d role=%s is_mtp=%s write_gate=%s",
+                    (
+                        torch.distributed.get_rank()
+                        if torch.distributed.is_initialized()
+                        else -1
+                    ),
+                    self._hc_role,
+                    is_mtp,
+                    self.inject is not None,
+                )
 
     def _forward_normed(self, hyper_input, normed, *, down_input_scale=None):
+        if (
+            self._decode_gr is not None
+            and down_input_scale is None
+            and self._decode_gr.supports(normed)
+        ):
+            mixed, gates = self._decode_gr(normed, self.mix_down, self.inject)
+            return mixed, hyper_input, gates
         up = self.up_projection
         weight = self.mix_up if up is None else up.weight
         scale = None if up is None else up.scale

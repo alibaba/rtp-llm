@@ -3122,8 +3122,8 @@ rpds-py==0.30.0 \
     # via
     #   jsonschema
     #   referencing
-rtp-kernel==0.1.0+94fd20eb.cu132 \
-    --hash=sha256:84ecc314ba00b98653a5808de79b5e3bb58445fa288737019ecee96345510ffb
+rtp-kernel==0.1.0+960ac09d.cu132 \
+    --hash=sha256:338ed4cc574259f064e446184937c24fe87c22c363ac18d122b6c52a9eb3fe2d
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
 safetensors==0.7.0 \
     --hash=sha256:0071bffba4150c2f46cae1432d31995d77acfd9f8db598b5d1a2ce67e8440ad2 \

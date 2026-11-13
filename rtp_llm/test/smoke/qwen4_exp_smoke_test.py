@@ -1,9 +1,10 @@
-"""Real-model scenarios sharing one server per mixed FP8/NVFP4 TP2 profile.
+"""Real-model scenarios for single-service and P/D-separated Qwen4 profiles.
 
 Every cache restore scenario establishes its own fill/hit sequence. Uncached
 requests provide references without relying on unittest method ordering.
 """
 
+import copy
 import json
 import logging
 import os
@@ -77,17 +78,88 @@ def validate_generation(actual, expected_ids, output_tokens, vocab_size, specula
         ), "Non-speculative generation ran speculation"
 
 
-def execution_modes(smoke_args):
-    """Read the same explicit flags passed to the server, including plain decode."""
+def server_option(smoke_args, name, default=None):
     tokens = shlex.split(smoke_args)
+    value = default
+    for index, token in enumerate(tokens):
+        if token == name:
+            value = tokens[index + 1]
+        elif token.startswith(name + "="):
+            value = token.split("=", 1)[1]
+    return value
 
-    def option(name, default):
-        return tokens[tokens.index(name) + 1] if name in tokens else default
 
+def execution_modes(smoke_args):
     return (
-        option("--enable_cuda_graph", "0") == "1",
-        option("--sp_type", "none") == "mtp",
+        server_option(smoke_args, "--enable_cuda_graph", "0") == "1",
+        server_option(smoke_args, "--sp_type", "none") == "mtp",
     )
+
+
+def role_specs(smoke_args, gpu_ids, pd_separation):
+    if not pd_separation:
+        return {"main": {"args": smoke_args, "devices": []}}
+    if any(
+        int(server_option(smoke_args, flag, default)) != expected
+        for flag, default, expected in (
+            ("--tp_size", "1", 2),
+            ("--dp_size", "1", 1),
+            ("--pp_size", "1", 1),
+            ("--world_size", "2", 2),
+        )
+    ):
+        raise ValueError("Qwen4 P/D smoke requires TP2, DP1, PP1 per role")
+    if len(gpu_ids) < 4 or len(set(gpu_ids[:4])) != 4:
+        raise ValueError("Qwen4 P/D smoke requires four distinct reserved GPUs")
+    specs = {}
+    for role, devices in (("prefill", gpu_ids[:2]), ("decode", gpu_ids[2:4])):
+        # The server parser uses the last occurrence of an option.
+        args = (
+            smoke_args
+            + f" --role_type {role.upper()} --world_size 2 --local_world_size 2"
+        )
+        graph = (
+            "0"
+            if role == "prefill"
+            else server_option(smoke_args, "--enable_cuda_graph", "0")
+        )
+        args += " --enable_cuda_graph " + graph
+        specs[role] = {
+            "devices": list(devices),
+            "args": args,
+        }
+    return specs
+
+
+def routed_query(query, endpoint, pd_separation):
+    query = copy.deepcopy(query)
+    field = "generate_config" if endpoint == "/" else "extra_configs"
+    query.setdefault(field, {})["can_use_pd_separation"] = pd_separation
+    return query
+
+
+def historical_reuse(aux, pd_separation):
+    return aux["prefill_total_reuse_len" if pd_separation else "reuse_len"]
+
+
+def validate_gr_coverage(log, enabled, mtp_enabled):
+    observed = set(
+        re.findall(
+            r"Qwen4 fused GR enabled: rank=([01]) role=DECODE is_mtp=(True|False)", log
+        )
+    )
+    expected = (
+        {
+            (str(rank), mtp)
+            for rank in (0, 1)
+            for mtp in (("False", "True") if mtp_enabled else ("False",))
+        }
+        if enabled
+        else set()
+    )
+    assert (
+        observed == expected
+    ), f"GR admission coverage: expected {expected}, observed {observed}"
 
 
 class Qwen4SM120ScenariosTest(unittest.TestCase):
@@ -95,8 +167,6 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
     def setUpClass(cls):
         import requests
         from transformers import AutoTokenizer
-
-        from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
         fixture = (
             Path(__file__).parent / "data/model/qwen4_exp/q_r_qwen4_exp_fp8_full.json"
@@ -129,25 +199,118 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
         cls.graph_enabled, cls.mtp_enabled = execution_modes(smoke_args)
         if cls.mtp_enabled:
             smoke_args += " --sp_checkpoint_path " + shlex.quote(cls.model_path)
-        cls.server = MagaServerManager(
-            env_args={
-                "RTP_LLM_STREAM_ASYNC": "1",
-                "LOG_LEVEL": "INFO",
-                "FT_SERVER_TEST": "1",
-            },
-            role_name="qwen4_sm120_scenarios",
-            smoke_args_str=smoke_args,
+        cls.pd_separation = os.environ.get("QWEN4_SMOKE_PD", "0") == "1"
+        cls.gr_enabled = os.environ.get("RTP_QWEN4_FUSED_GR", "0") == "1"
+        cls.gr_mtp_enabled = (
+            cls.mtp_enabled and os.environ.get("RTP_QWEN4_FUSED_GR_MTP", "1") == "1"
         )
-        cls.addClassCleanup(cls.server.stop_server)
-        if not cls.server.start_server(
-            model_path=cls.model_path, model_type="qwen4_exp", timeout=900
-        ):
-            cls.dump_startup_failure()
-            raise RuntimeError("Qwen4 server did not become healthy")
+        if cls.gr_enabled and not cls.pd_separation:
+            raise ValueError("GR smoke coverage requires P/D separation")
+        cls.start_servers(smoke_args)
         cls.addClassCleanup(cls.write_coverage)
 
     @classmethod
-    def dump_startup_failure(cls):
+    def start_servers(cls, smoke_args):
+        from concurrent.futures import ThreadPoolExecutor
+
+        from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
+        from rtp_llm.test.utils.device_resource import get_gpu_ids
+        from rtp_llm.test.utils.maga_server_manager import MagaServerManager
+
+        specs = role_specs(
+            smoke_args,
+            list(get_gpu_ids()) if cls.pd_separation else [],
+            cls.pd_separation,
+        )
+        ports = {role: MagaServerManager.get_free_port() for role in specs}
+        common_env = {
+            "RTP_LLM_STREAM_ASYNC": "1",
+            "LOG_LEVEL": "INFO",
+            "FT_SERVER_TEST": "1",
+        }
+        if cls.pd_separation:
+
+            def endpoint(role):
+                return EndPoint(
+                    type="Vipserver",
+                    address=f"127.0.0.1:{ports[role]}",
+                    protocol="http",
+                    path="/",
+                )
+
+            route = ServiceRoute(
+                service_id="qwen4_smoke",
+                use_local=True,
+                role_endpoints=[
+                    GroupEndPoint(
+                        group="default",
+                        prefill_endpoint=endpoint("prefill"),
+                        decode_endpoint=endpoint("decode"),
+                    )
+                ],
+            )
+            common_env.update(
+                WORLD_SIZE="2",
+                LOCAL_WORLD_SIZE="2",
+                WORLD_RANK="0",
+                REMOTE_RPC_SERVER_IP="localhost",
+                MODEL_SERVICE_CONFIG=route.model_dump_json(),
+            )
+        cls.servers = {}
+        for role, spec in specs.items():
+            env = dict(common_env)
+            if cls.pd_separation:
+                env["REMOTE_SERVER_PORT"] = ports[
+                    "decode" if role == "prefill" else "prefill"
+                ]
+            manager = MagaServerManager(
+                env_args=env,
+                port=ports[role],
+                device_ids=spec["devices"],
+                role_name=f"qwen4_sm120_{role}",
+                smoke_args_str=spec["args"],
+            )
+            cls.servers[role] = manager
+            cls.addClassCleanup(manager.stop_server)
+        cls.server = cls.servers["prefill" if cls.pd_separation else "main"]
+        cls.graph_server = cls.servers["decode"] if cls.pd_separation else cls.server
+        with ThreadPoolExecutor(max_workers=len(specs)) as pool:
+            futures = {
+                role: pool.submit(
+                    manager.start_server,
+                    model_path=cls.model_path,
+                    model_type="qwen4_exp",
+                    timeout=1200,
+                )
+                for role, manager in cls.servers.items()
+            }
+            for role, future in futures.items():
+                if not future.result():
+                    cls.dump_startup_failure(cls.servers[role])
+                    raise RuntimeError(f"Qwen4 {role} server did not become healthy")
+        if cls.pd_separation:
+            from smoke.multi_inst_case_runner import _wait_tcp_port_ready
+
+            from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM
+
+            for role, port in ports.items():
+                stride = int(
+                    server_option(
+                        specs[role]["args"],
+                        "--worker_info_port_num",
+                        str(MIN_WORKER_INFO_PORT_NUM),
+                    )
+                )
+                for rank in range(2):
+                    _wait_tcp_port_ready(
+                        "127.0.0.1",
+                        int(port) + rank * stride + 1,
+                        120,
+                        f"{role} rank {rank} model RPC",
+                    )
+
+    @classmethod
+    def dump_startup_failure(cls, server):
         """Keep the live server ranks' stacks before the outer watchdog kills them."""
         import shutil
         import subprocess
@@ -158,15 +321,15 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
         dump_gpu_state(
             failure_context="Qwen4 server did not become healthy",
             log_path=str(cls.output_dir / "gpu_state_server_failed.log"),
-            server_pid=cls.server.server_pid,
+            server_pid=server.server_pid,
         )
         debugger = shutil.which("gdb")
-        pid = cls.server.server_pid
+        pid = server.server_pid
         if debugger is None or pid is None:
             return
         try:
             children = psutil.Process(pid).children(recursive=True)
-            log = Path(cls.server.log_file_path).read_text(errors="replace")
+            log = Path(server.log_file_path).read_text(errors="replace")
             ranks = set(re.findall(r"\[(\d+):\d+\] \[RANK [01]\]", log))
             for process in children:
                 if str(process.pid) not in ranks or not process.is_running():
@@ -203,7 +366,12 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
         (cls.output_dir / "qwen4_sm120_coverage.json").write_text(
             json.dumps(
                 {
-                    "profile": {"mtp": cls.mtp_enabled, "graph": cls.graph_enabled},
+                    "profile": {
+                        "mtp": cls.mtp_enabled,
+                        "graph": cls.graph_enabled,
+                        "pd_separation": cls.pd_separation,
+                        "fused_gr": cls.gr_enabled,
+                    },
                     "requests": cls.observed,
                     "target_graph_batches": cls.graph_batches,
                 },
@@ -211,11 +379,15 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
             )
         )
 
+    def reuse_len(self, result):
+        return historical_reuse(result["aux_info"], self.pd_separation)
+
     def url(self, endpoint):
         return f"http://127.0.0.1:{self.server.port}{endpoint}"
 
     def post(self, label, endpoint, query):
         label = self._testMethodName + "_" + label
+        query = routed_query(query, endpoint, self.pd_separation)
         response = self.session.post(self.url(endpoint), json=query, timeout=600)
         (self.output_dir / f"{label}.http.txt").write_text(response.text)
         response.raise_for_status()
@@ -269,8 +441,12 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
             words = actual["response"].split()
             self.assertGreaterEqual(len(words), output_tokens // 4)
             self.assertEqual(set(words), {"MAP"})
+        if self.pd_separation and output_tokens > 1:
+            self.assertTrue(
+                actual["aux_info"]["pd_sep"], "Request bypassed P/D routing"
+            )
         if not reuse:
-            self.assertEqual(actual["aux_info"]["reuse_len"], 0)
+            self.assertEqual(self.reuse_len(actual), 0)
         self.observed.append(
             {
                 "label": label,
@@ -352,15 +528,15 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
         fill = self.request("long_cache_fill", first, True, output_tokens=1)
         self.assertEqual(fill["output_ids"][0], baseline["output_ids"][0][:1])
         warm = self.request("long_cache_hit", first, True)
-        self.assertGreaterEqual(warm["aux_info"]["reuse_len"], PAGE_SIZE)
-        self.assertEqual(warm["aux_info"]["reuse_len"] % PAGE_SIZE, 0)
+        self.assertGreaterEqual(self.reuse_len(warm), PAGE_SIZE)
+        self.assertEqual(self.reuse_len(warm) % PAGE_SIZE, 0)
         self.assert_same_tokens(baseline, warm)
 
         other = self.request("changed_suffix_uncached", second, False)
         fill = self.request("changed_suffix_cache_fill", second, True, output_tokens=1)
         self.assertEqual(fill["output_ids"][0], other["output_ids"][0][:1])
         reused = self.request("changed_suffix_cache_hit", second, True)
-        self.assertGreaterEqual(reused["aux_info"]["reuse_len"], PAGE_SIZE)
+        self.assertGreaterEqual(self.reuse_len(reused), PAGE_SIZE)
         self.assert_same_tokens(other, reused)
         self.assert_same_tokens(
             baseline, self.request("long_after_changed_suffix", first, True)
@@ -381,7 +557,7 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
 
     def set_log_level(self, level):
         response = self.session.post(
-            f"http://127.0.0.1:{self.server.port}/set_log_level",
+            f"http://127.0.0.1:{self.graph_server.port}/set_log_level",
             json={"log_level": level},
             timeout=10,
         )
@@ -389,7 +565,7 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
 
     def test_05_graph_execution_mode(self):
         # Observe this request only: warmup and earlier scenarios cannot satisfy it.
-        offset = Path(self.server.log_file_path).stat().st_size
+        offset = Path(self.graph_server.log_file_path).stat().st_size
         first, _ = self.long_prompts()
         # Only the replay observation needs DEBUG; all correctness and timing
         # scenarios run at INFO without the debug kernel synchronization.
@@ -398,7 +574,7 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
             self.request("graph_probe", first, False)
         finally:
             self.set_log_level("INFO")
-        with Path(self.server.log_file_path).open("rb") as reader:
+        with Path(self.graph_server.log_file_path).open("rb") as reader:
             reader.seek(offset)
             runtime = reader.read().decode(errors="replace")
         replay = re.findall(
@@ -412,6 +588,35 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
             )
         else:
             self.assertFalse(replay, "Eager target replayed an MTP CUDA graph")
+
+        if self.pd_separation:
+            decode_log = Path(self.graph_server.log_file_path).read_text(
+                errors="replace"
+            )
+            validate_gr_coverage(decode_log, self.gr_enabled, self.gr_mtp_enabled)
+            if self.gr_enabled:
+                rank_pids = dict(
+                    re.findall(
+                        r"\[process-(\d+)\].*Qwen4 fused GR enabled: rank=([01])",
+                        decode_log,
+                    )
+                )
+                self.assertEqual(set(rank_pids.values()), {"0", "1"})
+                for pid in rank_pids:
+                    rows = {
+                        int(n)
+                        for n in re.findall(
+                            rf"\[process-{pid}\].*SM120 GR workspace prepared: rows=(\d+)",
+                            decode_log,
+                        )
+                    }
+                    self.assertIn(
+                        4 if self.mtp_enabled else 1, rows, "No target GR workspace"
+                    )
+                    if self.gr_mtp_enabled:
+                        self.assertIn(1, rows, "No draft GR workspace")
+            prefill_log = Path(self.server.log_file_path).read_text(errors="replace")
+            self.assertNotIn("Qwen4 fused GR enabled:", prefill_log)
 
     @staticmethod
     def image_part(color):
@@ -475,7 +680,7 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
         self.media_request("cache_fill", parts, question, reuse=True, max_tokens=1)
         reused = self.media_request("cache_hit", parts, question, reuse=True)
         self.assertEqual(self.answer(reference), self.answer(reused))
-        self.assertGreaterEqual(reused["aux_info"]["reuse_len"], PAGE_SIZE)
+        self.assertGreaterEqual(self.reuse_len(reused), PAGE_SIZE)
         reversed_result = self.media_request(
             "reverse_images", parts[::-1], question, reuse=True
         )
@@ -540,7 +745,7 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
             max_tokens=OUTPUT_TOKENS,
             ignore_eos=True,
         )
-        self.assertGreaterEqual(reused["aux_info"]["reuse_len"], PAGE_SIZE)
+        self.assertGreaterEqual(self.reuse_len(reused), PAGE_SIZE)
         self.assertEqual(self.answer(reused), self.answer(actual))
 
     def test_10_concurrent_text_image_and_repeated_new_media(self):

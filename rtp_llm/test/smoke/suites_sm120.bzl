@@ -83,6 +83,8 @@ def sm120_suites():
                 name = "qwen4_exp_mixed_tp2_mtp_ipc_graph_sm120",
                 main = "qwen4_exp_smoke_test.py",
                 smoke_args = _QWEN4_SMOKE_ARGS,
+                gpu_count = 4,
+                test_envs = {"QWEN4_SMOKE_PD": "1", "RTP_QWEN4_FUSED_GR": "0"},
                 gpu_type = ["RTX_5000_PRO_CU13"],
                 data = ["//rtp_llm:sdk", ":smoke_framework_srcs", "data/model/qwen4_exp/q_r_qwen4_exp_fp8_full.json"],
                 deps = ["//rtp_llm:transformers"],
@@ -90,7 +92,22 @@ def sm120_suites():
         ],
     )
 
-# Mixed FP8/NVFP4 TP2 with MTP, CUDA Graph and IPC AllReduce.
+    # Explicit deployment qualification: main does not install the optional GR package.
+    custom_smoke_test(
+        name = "qwen4_exp_mixed_tp2_mtp_ipc_graph_fused_gr_sm120",
+        main = "qwen4_exp_smoke_test.py",
+        smoke_args = _QWEN4_SMOKE_ARGS,
+        gpu_count = 4,
+        test_envs = {"QWEN4_SMOKE_PD": "1", "RTP_QWEN4_FUSED_GR": "1", "RTP_QWEN4_FUSED_GR_MTP": "1"},
+        tags = ["requires_optional_gr"],
+        gpu_type = ["RTX_5000_PRO_CU13"],
+        data = ["//rtp_llm:sdk", ":smoke_framework_srcs", "data/model/qwen4_exp/q_r_qwen4_exp_fp8_full.json"],
+        deps = ["//rtp_llm:transformers"],
+    )
+
+# TP2 P/D roles use the original smoke defaults and mixed FP8/NVFP4 recipe.
+# Only GR projections retain source BF16; A/B differ only in the fusion flag.
+_QWEN4_QUANTIZATION = '{"method":"modelopt_fp4","bits":4,"group_size":16,"is_quanted":false,"model_recipe":"qwen4_fp8_nvfp4","gr_storage":"source_bf16"}'
 _QWEN4_SMOKE_ARGS = (
     "--act_type BF16 --tp_size 2"
     + " --reserver_runtime_mem_mb 4096 --max_seq_len 32768"
@@ -98,4 +115,6 @@ _QWEN4_SMOKE_ARGS = (
     + " --moe_strategy nvfp4_cutlass"
     + " --sp_type mtp --sp_model_type qwen4_exp_mtp --gen_num_per_cycle 3"
     + " --enable_cuda_graph 1 --all_reduce_backend sm120_ipc"
+    + " --quantization '" + _QWEN4_QUANTIZATION + "'"
+    + " --sp_quantization '" + _QWEN4_QUANTIZATION + "'"
 )

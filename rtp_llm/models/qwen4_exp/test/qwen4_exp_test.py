@@ -374,6 +374,31 @@ class Qwen4ExpTest(unittest.TestCase):
                 self.config.quant_config.mtp_dense_storage, "source_bf16_shared_vocab"
             )
 
+    def test_gr_storage_survives_target_and_draft_finalization(self):
+        from rtp_llm.models.qwen4_exp.qwen4_exp_mtp import Qwen4ExpMTP
+
+        self.config._qwen4_fp8_source = True
+        self.config.quantization = json.dumps(
+            dict(
+                method="modelopt_fp4",
+                bits=4,
+                group_size=16,
+                is_quanted=False,
+                model_recipe=QWEN4_FP8_NVFP4_RECIPE,
+                gr_storage="source_bf16",
+            )
+        )
+        for model, is_mtp in ((Qwen4Exp, False), (Qwen4ExpMTP, True)):
+            self.config.is_mtp = is_mtp
+            for _ in range(2):
+                model._configure_precision_recipe(self.config)
+                self.assertEqual(
+                    getattr(self.config.quant_config, "gr_storage", None), "source_bf16"
+                )
+                self.assertEqual(self.config._qwen4_dense_storage, "fp8")
+                self.assertEqual(self.config.dense_weight_dtype, "fp8")
+                self.assertEqual(self.config.expert_weight_dtype, "fp4")
+
     def tearDown(self):
         self._temp_dir.cleanup()
 
@@ -398,6 +423,8 @@ class Qwen4ExpTest(unittest.TestCase):
             dict(mixed_attention=True),
             dict(dense_storage="bf16_from_fp8"),
             dict(mtp_dense_storage="bf16_from_fp8"),
+            dict(gr_storage="fp8"),
+            dict(gr_storage=None),
         ):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.config.quantization = json.dumps(dict(base, **changes))

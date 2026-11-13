@@ -138,6 +138,16 @@ class RuntimeSnapshotTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "positive integer"):
             self.config().qwen4_ple_prefetch_mb = True
 
+    def test_gr_precision_survives_spawn_and_cannot_change_after_freeze(self):
+        config = self.config()
+        config.quant_config = SimpleNamespace(gr_storage="source_bf16")
+        parallelism = SimpleNamespace(get_attn_tp_size=lambda: 2)
+        snapshot = freeze_runtime_config(config, parallelism)
+        self.assertEqual(snapshot, pickle.loads(pickle.dumps(snapshot)))
+        config.quant_config.gr_storage = "inherit"
+        with self.assertRaisesRegex(RuntimeError, "configuration changed"):
+            freeze_runtime_config(config, parallelism)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -613,6 +613,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             hc_mult=config.hc_mult,
             norm_eps=config.layernorm_eps,
             role=getattr(self, "_execution_role", "PDFUSION"),
+            is_mtp=bool(getattr(config, "is_mtp", False)),
             weight_scales=tuple(
                 weights.get(name + FP8_STORAGE_SCALE_SUFFIX)
                 for name in (
@@ -630,6 +631,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             hc_mult=config.hc_mult,
             norm_eps=config.layernorm_eps,
             role=getattr(self, "_execution_role", "PDFUSION"),
+            is_mtp=bool(getattr(config, "is_mtp", False)),
             weight_scales=tuple(
                 weights.get(name + FP8_STORAGE_SCALE_SUFFIX)
                 for name in (
@@ -1327,6 +1329,7 @@ class Qwen4ExpModel(Qwen35Model):
             hc_mult=model_config.hc_mult,
             norm_eps=model_config.layernorm_eps,
             role=getattr(self.parallelism_config, "role_type", "PDFUSION"),
+            is_mtp=bool(getattr(model_config, "is_mtp", False)),
             weight_scales=(
                 weights.global_weights.get(
                     W.qwen4_hc_mixer_mix_down + FP8_STORAGE_SCALE_SUFFIX

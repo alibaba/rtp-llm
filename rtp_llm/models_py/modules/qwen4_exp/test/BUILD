@@ -247,6 +247,14 @@ models_py_test(
     testlib = "//rtp_llm/models_py/standalone:auto_model",
 )
 
+# Host admission checks and optional DeepGEMM SM120 numerical/Graph tests.
+models_py_test(
+    name = "gated_residual_sm120_test",
+    src = "parity/gated_residual_sm120_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    testlib = "//rtp_llm/models_py/standalone:auto_model",
+)
+
 models_py_test(
     name = "gated_residual_bf16_test",
     src = "parity/gated_residual_bf16_test.py",

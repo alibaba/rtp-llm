@@ -150,6 +150,7 @@ class Qwen4RuntimeSnapshot:
     dense_storage: str
     vocab_storage: str
     mtp_dense_storage: str
+    gr_storage: str
 
 
 def freeze_runtime_config(config, parallelism):
@@ -186,6 +187,7 @@ def freeze_runtime_config(config, parallelism):
             getattr(config, "_qwen4_dense_storage", "fp8"),
         ),
         getattr(config, "_qwen4_mtp_dense_storage_mode", "inherit"),
+        getattr(config.quant_config, "gr_storage", "inherit"),
     )
     previous = getattr(config, "_qwen4_runtime_snapshot", None)
     if previous is not None and previous != snapshot:
@@ -263,6 +265,7 @@ def build_qwen4_quant_config(quantization, source_fp8):
             )
         return ModelOptFp4Config(
             dense_storage=dense_storage,
+            gr_storage=getattr(requested, "gr_storage", "inherit"),
             mtp_dense_storage=mtp_dense_storage,
             bits=4,
             group_size=16,

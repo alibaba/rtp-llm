@@ -12,6 +12,51 @@ from rtp_llm.utils.model_weight import CkptWeightInfo, W
 
 class Qwen4MoeFp4Test(unittest.TestCase):
 
+    def test_gr_bf16_preserves_only_gr_projections(self):
+        from rtp_llm.model_loader.fp8_weight import Fp8StorageWeight
+
+        layer_names = (
+            W.qwen4_hc_attn_mix_down,
+            W.qwen4_hc_attn_mix_up,
+            W.qwen4_hc_attn_inject,
+            W.qwen4_hc_mlp_mix_down,
+            W.qwen4_hc_mlp_mix_up,
+            W.qwen4_hc_mlp_inject,
+        )
+        global_names = (W.qwen4_hc_mixer_mix_down, W.qwen4_hc_mixer_mix_up)
+        layer_gr = [AtomicWeight(n, [CkptWeightInfo(n)]) for n in layer_names]
+        global_gr = [AtomicWeight(n, [CkptWeightInfo(n)]) for n in global_names]
+        other_names = (W.embedding, W.lm_head, W.qwen4_mtp_fc_hidden_w)
+        other = [AtomicWeight(n, [CkptWeightInfo(n)]) for n in other_names]
+        cfg = MoeConfig(expert_num=1)
+        routed = MoeWeight(
+            [
+                MoeAtomicWeight(n, [CkptWeightInfo(n)], config=cfg)
+                for n in (W.moe_w1, W.moe_w2, W.moe_gate)
+            ],
+            config=cfg,
+        )
+        recipe = ModelOptFp4Config(
+            bits=4,
+            group_size=16,
+            is_quanted=False,
+            model_recipe=QWEN4_FP8_NVFP4_RECIPE,
+            gr_storage="source_bf16",
+        )
+        converted = Qwen4MoeFp4WeightInfo(
+            [*global_gr, *other], [[*layer_gr, routed]]
+        ).to_quant_weight_info(recipe)
+        for original, actual in zip(layer_gr, converted.layer_weights[0]):
+            self.assertIs(actual, original)
+        for original, actual in zip(global_gr, converted.weights):
+            self.assertIs(actual, original)
+        for actual in converted.weights[len(global_gr) :]:
+            self.assertIsInstance(actual, Fp8StorageWeight)
+        children = converted.layer_weights[0][-1].sub_weights
+        self.assertIsInstance(children[W.moe_gate], Fp8StorageWeight)
+        for name in (W.moe_w1, W.moe_w2):
+            self.assertIsInstance(children[name], OnlineModelOptFp4MoeWeight)
+
     def test_explicit_storage_overrides_recipe_without_changing_other_descriptors(self):
         from rtp_llm.model_loader.fp8_weight import Fp8StorageWeight
 

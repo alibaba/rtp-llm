@@ -38,6 +38,56 @@ def quantized(value):
 
 
 class FullFp8StorageTest(unittest.TestCase):
+    def test_gr_bf16_recipe_loads_original_values_and_keeps_other_dense_fp8(self):
+        from rtp_llm.config.quant_config import QWEN4_FP8_NVFP4_RECIPE
+        from rtp_llm.models.qwen4_exp.moe_fp4 import Qwen4MoeFp4WeightInfo
+
+        original = torch.linspace(-1, 1, 256).reshape(16, 16).bfloat16()
+
+        class Source(_Source):
+            def load_tensor(self, name, data_type=torch.float16):
+                return [original.to(data_type)]
+
+        config = SimpleNamespace(
+            tp_size=1,
+            dp_size=1,
+            ep_size=1,
+            merge_lora=False,
+            compute_dtype=torch.bfloat16,
+            exported_device=SimpleNamespace(
+                maybe_rewrite_weight_by_key=lambda key, value, **kw: value
+            ),
+            use_swizzleA=False,
+        )
+        for storage in ("inherit", "source_bf16"):
+            recipe = ModelOptFp4Config(
+                bits=4,
+                group_size=16,
+                is_quanted=False,
+                model_recipe=QWEN4_FP8_NVFP4_RECIPE,
+                gr_storage=storage,
+            )
+            names = (W.qwen4_hc_mixer_mix_up, W.qwen4_mtp_fc_hidden_w)
+            descriptors = (
+                Qwen4MoeFp4WeightInfo(
+                    [AtomicWeight(n, [CkptWeightInfo(n)]) for n in names], []
+                )
+                .to_quant_weight_info(recipe)
+                .weights
+            )
+            for name, descriptor in zip(names, descriptors):
+                with self.subTest(storage=storage, name=name):
+                    loaded = descriptor.load(Source(), None, "cpu", config)
+                    if storage == "source_bf16" and name == names[0]:
+                        self.assertEqual(set(loaded), {name})
+                        self.assertEqual(loaded[name].dtype, torch.bfloat16)
+                        torch.testing.assert_close(
+                            loaded[name], original, rtol=0, atol=0
+                        )
+                    else:
+                        self.assertEqual(loaded[name].dtype, torch.float8_e4m3fn)
+                        self.assertIn(name + FP8_STORAGE_SCALE_SUFFIX, loaded)
+
     def test_small_parameters_keep_source_values_without_fp8_copies(self):
         tensors = {
             W.linear_attn_alog: torch.linspace(-2, 3, 48).bfloat16(),

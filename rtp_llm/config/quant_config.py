@@ -840,6 +840,9 @@ class ModelOptFp4Config(QuantizationConfig):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
         self.model_recipe = kwargs.get("model_recipe", None)
         self.dense_storage = kwargs.get("dense_storage", "fp8")
+        self.gr_storage = kwargs.get("gr_storage", "inherit")
+        if self.gr_storage not in ("inherit", "source_bf16"):
+            raise ValueError("Qwen4 gr_storage must be inherit or source_bf16")
         self.mtp_dense_storage = kwargs.get("mtp_dense_storage", "inherit")
         qwen4_recipe = self.model_recipe == QWEN4_FP8_NVFP4_RECIPE
         if self.model_recipe is not None and not qwen4_recipe:

@@ -17,9 +17,9 @@ flash-mla-legacy==1.0.0+92fd68b.rtp1
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.
 deep-ep==2.1.0+a56d615
 
-# Unified rtp_kernel built from cuda_extension feat/port-nvfp4-xqa@94fd20eb
-# against torch 2.11+cu130; NVFP4 mm only (no XQA wrappers).
-rtp-kernel==0.1.0+94fd20eb.cu132
+# Unified rtp_kernel built from cuda_extension opt/gr-mixer-sm120-20261112@960ac09d
+# against torch 2.11+cu130; NVFP4 mm and SM120 fused GR mixer.
+rtp-kernel==0.1.0+960ac09d.cu132
 
 # fastsafetensors / fast_safetensors rebuilt against torch 2.11+cu130
 fastsafetensors==0.1.20+ali

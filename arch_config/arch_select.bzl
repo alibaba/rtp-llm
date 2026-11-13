@@ -163,9 +163,9 @@ def whl_deps():
             "flash_attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1",
             "flashinfer-python==0.6.9+8c4f4dcf",
             "flashinfer-cubin==0.6.9+8c4f4dcf",
-            # Unified rtp_kernel from cuda_extension feat/port-nvfp4-xqa@94fd20eb;
-            # NVFP4 mm only (no XQA wrappers).
-            "rtp-kernel==0.1.0+94fd20eb.cu132",
+            # Unified rtp_kernel from cuda_extension opt/gr-mixer-sm120-20261112@960ac09d;
+            # NVFP4 mm and SM120 fused GR mixer.
+            "rtp-kernel==0.1.0+960ac09d.cu132",
             # fastsafetensors / fast_safetensors rebuilt against torch 2.11+cu130
             # (oss://rtp-maga/0502/).  Project name `fast-safetensors`; import name
             # `fast_safetensors`.  Required by --load_method fastsafetensors smokes.
@@ -187,7 +187,7 @@ def whl_deps():
             "deep-ep==2.1.0+a56d615",
             "flashinfer-python==0.6.9+8c4f4dcf",
             "flashinfer-cubin==0.6.9+8c4f4dcf",
-            "rtp-kernel==0.1.0+94fd20eb.cu132",
+            "rtp-kernel==0.1.0+960ac09d.cu132",
             "fast-safetensors==0.7.3+torch2.11.cu130",
             "fastsafetensors==0.1.20+ali",
             "tilelang==0.1.15+cuda.gita35f8ddf",
