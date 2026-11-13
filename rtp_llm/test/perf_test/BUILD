@@ -216,6 +216,7 @@ py_test(
             "--vit_separation", "2",
             "--load_method", "scratch",
             "--act_type", "BF16",
+            "--quantization", "MXFP8",
             "--enable_fp32_lm_head", "0",
             "--seq_size_per_block", "128",
             "--kernel_seq_size_per_block", "128",
@@ -227,7 +228,7 @@ py_test(
             "--fake_balance_expert", "0",
             "--warm_up", "0",
         ],
-        env = {"GPU_COUNT": "8"},
+        env = {"GPU_COUNT": "8", "QWEN4_GDN_BACKEND": "flashinfer"},
         exec_properties = {"gpu": "SM103_CU13", "gpu_count": "8"},
         tags = ["manual"],
     )

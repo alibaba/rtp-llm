@@ -9,6 +9,12 @@ from typing import Iterator
 import requests
 import torch
 
+from rtp_llm.models_py.utils.cutlass import setup_cutlass_import_path
+
+# FlashInfer resolves its CuTe kernels when imported.
+if torch.version.cuda is not None:
+    setup_cutlass_import_path()
+
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import str_to_bool
 

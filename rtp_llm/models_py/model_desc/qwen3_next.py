@@ -497,7 +497,9 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
         metadata: Optional[CausalConv1dMetadata] = None,
-    ) -> torch.Tensor:
+        *,
+        fused_qkv_heads: Optional[tuple[int, int]] = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # cu_seqlen_without_padding = attn_inputs.cu_seqlens_device[
         #     : attn_inputs.input_lengths.size(0) + 1
         # ]
@@ -517,8 +519,9 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             seq_size_per_block=seq_size_per_block,
             prefix_lengths=attn_inputs.prefix_lengths_device,
             metadata=metadata,
-        ).transpose(0, 1)
-        return out
+            fused_qkv_heads=fused_qkv_heads,
+        )
+        return out if fused_qkv_heads is not None else out.transpose(0, 1)
 
     def _fla(
         self,
@@ -674,6 +677,20 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             )
         return attn_out.squeeze_(0)
 
+    def _conv_and_fla(
+        self, mixed_qkv, b, a, kv_cache_tensor, seq_size_per_block, inputs, meta
+    ):
+        mixed_qkv = self._conv1d(
+            mixed_qkv,
+            kv_cache_tensor,
+            seq_size_per_block,
+            inputs,
+            metadata=meta.get_prefill_conv1d_meta(),
+        )
+        return self._fla(
+            mixed_qkv, b, a, kv_cache_tensor, seq_size_per_block, inputs, meta
+        )
+
     def forward(
         self,
         mixed_qkv: torch.Tensor,
@@ -690,14 +707,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 kv_cache.kv_cache_base.shape[0], -1
             )
             seq_size_per_block = kv_cache.seq_size_per_block
-        mixed_qkv = self._conv1d(
-            mixed_qkv,
-            kv_cache_tensor,
-            seq_size_per_block,
-            attn_inputs,
-            metadata=attn_meta.get_prefill_conv1d_meta(),
-        )
-        attn_out = self._fla(
+        attn_out = self._conv_and_fla(
             mixed_qkv,
             b,
             a,

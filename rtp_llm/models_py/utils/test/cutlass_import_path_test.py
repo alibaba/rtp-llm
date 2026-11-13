@@ -4,7 +4,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -72,6 +72,49 @@ class CutlassImportPathTest(unittest.TestCase):
 
     def test_base_compiler_remains_available_without_cuda13(self):
         self.check_compiler(with_cu13=False)
+
+    def test_new_cutlass_wheel_layout(self):
+        for merged in (False, True):
+            with self.subTest(merged=merged), tempfile.TemporaryDirectory() as temp:
+                site = Path(temp)
+                files = {
+                    "cu13": "cu13/lib/libcute_dsl_runtime.so",
+                    "base": "dsl_packages/cutlass/_mlir/ir.py",
+                    "core": "dsl_packages/cutlass/__init__.py",
+                }
+                distributions = {}
+                for part, name in files.items():
+                    package = (site if merged else site / part) / "nvidia_cutlass_dsl"
+                    (package / "dsl_packages").mkdir(parents=True, exist_ok=True)
+                    path = package / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(part)
+                    distributions[f"nvidia-cutlass-dsl-libs-{part}"] = Mock(
+                        locate_file=Mock(return_value=package)
+                    )
+                with (
+                    patch.object(torch.version, "cuda", "13.0"),
+                    patch.object(sys, "path", sys.path.copy()),
+                    patch.object(
+                        cutlass_import_path.metadata,
+                        "distribution",
+                        side_effect=distributions.__getitem__,
+                    ),
+                ):
+                    cutlass_import_path._cutlass_dsl_package_paths.cache_clear()
+                    try:
+                        cutlass_import_path.setup_cutlass_import_path()
+                        cutlass_import_path.setup_cutlass_import_path()
+                        paths, overlay = cutlass_import_path._cutlass_dsl_package_paths(
+                            "13"
+                        )
+                        self.assertEqual(overlay is None, merged)
+                        self.assertEqual(sys.path.count(paths[0]), 1)
+                        package = Path(paths[0]).parent
+                        for part, name in files.items():
+                            self.assertEqual((package / name).read_text(), part)
+                    finally:
+                        cutlass_import_path._cutlass_dsl_package_paths.cache_clear()
 
 
 if __name__ == "__main__":

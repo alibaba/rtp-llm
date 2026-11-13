@@ -536,13 +536,10 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
         )
         if self.layer_type == HybridAttentionType.LINEAR:
             from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_adapter import (
-                Qwen4Sm120GdnPrefill,
+                install_qwen4_gdn_backends,
             )
 
-            native = self.self_attn.prefill_gdn
-            self.self_attn.prefill_gdn = Qwen4Sm120GdnPrefill(
-                native.linear_attn_config, native.parallelism_config, native.weights
-            )
+            install_qwen4_gdn_backends(self.self_attn)
             from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm import (
                 Qwen4PrefillGatedNorm,
             )

@@ -6,7 +6,12 @@ import unittest
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_fn
+from rtp_llm.models_py.triton_kernels.causal_conv1d import (
+    causal_conv1d_fn,
+    prepare_causal_conv1d_metadata,
+)
+from rtp_llm.models_py.triton_kernels.common.scatter_qkv import scatter_qkv
+from rtp_llm.models_py.triton_kernels.fla.exact_qk_norm import fused_l2norm_qk_exact
 
 logging.basicConfig(
     level="INFO",
@@ -58,6 +63,45 @@ def causal_conv1d_ref(
 
 
 class TestCausalConv1dPrefill(unittest.TestCase):
+    def test_fused_qkv_norm_and_conv_cache(self):
+        if torch.version.hip or torch.cuda.get_device_capability()[0] != 10:
+            self.skipTest("Fused convolution is enabled on SM10x")
+        torch.manual_seed(918)
+        key_heads, value_heads = 16, 128
+        dim = (2 * key_heads + value_heads) * 128
+        device = "cuda"
+        x = torch.randn(2053, dim + 32, device=device, dtype=torch.bfloat16)[:, :dim]
+        weight = torch.randn(dim, 4, device=device, dtype=torch.bfloat16) * 0.1
+        cu = torch.tensor([0, 37, 2053], device=device, dtype=torch.int32)
+        prefix = torch.tensor([0, 128], device=device, dtype=torch.int32)
+        block_map = torch.arange(1, 41, device=device, dtype=torch.int32).view(2, 20)
+        reference_cache = torch.randn(41, 3, dim, device=device, dtype=torch.bfloat16)
+        fused_cache = reference_cache.clone()
+        meta = prepare_causal_conv1d_metadata(cu, device=device)
+
+        def run(cache, heads):
+            return causal_conv1d_fn(
+                x.T,
+                weight,
+                None,
+                cache.transpose(1, 2),
+                cu,
+                block_map,
+                prefix,
+                128,
+                metadata=meta,
+                fused_qkv_heads=heads,
+            )
+
+        q, k, v = scatter_qkv(
+            run(reference_cache, None).T, key_heads, value_heads, 128, 128
+        )
+        q, k = fused_l2norm_qk_exact(q, k)
+        actual = run(fused_cache, (key_heads, value_heads))
+        for lhs, rhs in zip(actual, (q, k, v)):
+            torch.testing.assert_close(lhs, rhs, rtol=0, atol=0)
+        torch.testing.assert_close(fused_cache, reference_cache, rtol=0, atol=0)
+
     # without KVCache
     def test_basic(self):
         device = "cuda"

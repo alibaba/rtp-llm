@@ -49,10 +49,9 @@ FLASHINFER_069_ANNOTATIONS = {
 }
 
 # rules_python omits RECORD by default; retain it for the compiler integrity check.
-CUDA13_ANNOTATIONS = dict(FLASHINFER_069_ANNOTATIONS)
-CUDA13_ANNOTATIONS["nvidia-cutlass-dsl-libs-cu13"] = package_annotation(
-    data = [":dist_info"],
-)
+CUDA13_ANNOTATIONS = {
+    "nvidia-cutlass-dsl-libs-cu13": package_annotation(data = [":dist_info"]),
+}
 
 def pip_deps():
     pip_parse(
@@ -127,7 +126,7 @@ def pip_deps():
 
     pip_parse(
         name = "pip_cuda13_arm_torch",
-        annotations = FLASHINFER_069_ANNOTATIONS,
+        annotations = CUDA13_ANNOTATIONS,
         requirements_lock = "@rtp_pip_deps//:requirements_lock_cuda13_arm.txt",
         python_interpreter = "/opt/conda310/bin/python3",
         extra_pip_args = PIP_EXTRA_ARGS + PIP_INDEX_ARGS,

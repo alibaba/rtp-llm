@@ -161,8 +161,8 @@ def whl_deps():
             "deep-ep==2.1.0+a56d615",
             "fast-hadamard-transform==1.1.0+e7706fa.cu132.torch2.11.cxx11abitrue",
             "flash_attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1",
-            "flashinfer-python==0.6.9+8c4f4dcf",
-            "flashinfer-cubin==0.6.9+8c4f4dcf",
+            "flashinfer-python[cu13]==0.7.4",
+            "flashinfer-cubin@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.4/flashinfer_cubin-0.7.4-py3-none-any.whl",
             # Unified rtp_kernel from cuda_extension feat/port-nvfp4-xqa@94fd20eb;
             # NVFP4 mm only (no XQA wrappers).
             "rtp-kernel==0.1.0+94fd20eb.cu132",
@@ -173,8 +173,6 @@ def whl_deps():
             "fastsafetensors==0.1.20+ali",
             "tilelang==0.1.15",
             "apache-tvm-ffi==0.1.12",
-            "nvidia-cutlass-dsl==4.4.2",
-            "nvidia-cutlass-dsl-libs-cu13==4.4.2",
             # flash_attn_3 remains deferred for torch2.11+cu130.
         ],
         "@rtp_llm//:using_cuda13_arm": [
@@ -185,8 +183,8 @@ def whl_deps():
             "flash-mla==1.0.0+2e5429f",
             "flash-mla-legacy==1.0.0+92fd68b.rtp1",
             "deep-ep==2.1.0+a56d615",
-            "flashinfer-python==0.6.9+8c4f4dcf",
-            "flashinfer-cubin==0.6.9+8c4f4dcf",
+            "flashinfer-python[cu13]==0.7.4",
+            "flashinfer-cubin@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.4/flashinfer_cubin-0.7.4-py3-none-any.whl",
             "rtp-kernel==0.1.0+94fd20eb.cu132",
             "fast-safetensors==0.7.3+torch2.11.cu130",
             "fastsafetensors==0.1.20+ali",
