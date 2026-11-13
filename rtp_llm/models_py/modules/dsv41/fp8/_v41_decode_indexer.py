@@ -328,43 +328,6 @@ def _compact_logits_bounded_kernel(
         )
 
 
-@triton.jit
-def _zero_missing_page_logits_kernel(
-    logits,
-    lengths,
-    table,
-    request_ids,
-    QUERY_LEN: tl.constexpr,
-    ENTRIES: tl.constexpr,
-    CAPACITY: tl.constexpr,
-    TABLE_COLS: tl.constexpr,
-    LOGIT_STRIDE: tl.constexpr,
-    PAGE_TILE: tl.constexpr,
-):
-    """Keep zero-K semantics without copying the valid packed score rows."""
-    row = tl.program_id(0)
-    request = row // QUERY_LEN if request_ids is None else tl.load(request_ids + row)
-    length = tl.minimum(tl.load(lengths + row), CAPACITY)
-    pages = tl.cdiv(length, ENTRIES)
-    offsets = tl.arange(0, PAGE_TILE)
-    entries = tl.arange(0, ENTRIES)
-    for start in tl.range(0, pages, PAGE_TILE):
-        columns = start + offsets
-        blocks = tl.load(
-            table + request * TABLE_COLS + columns,
-            (columns < pages) & (columns < TABLE_COLS),
-            other=0,
-        )
-        missing = (columns < pages) & (blocks <= 0)
-        if tl.sum(missing.to(tl.int32), 0) > 0:
-            tokens = columns[:, None] * ENTRIES + entries[None, :]
-            tl.store(
-                logits + row * LOGIT_STRIDE + tokens,
-                0.0,
-                missing[:, None] & (tokens < length),
-            )
-
-
 def is_supported(
     device: torch.device,
     block_size: int,
@@ -484,6 +447,12 @@ def score_decode_indexer(
     same per-row lengths may use it; before handing the result to any
     unbounded reader (e.g. a full-row torch.topk fallback) the caller must
     restore the padding, as attention_v41 does with a masked_fill_.
+
+    With pad_invisible=False and preserved score dtype, packed pages use
+    DeepGEMM's logits directly when DSV41_DIRECT_INDEXER_LOGITS=1. Real queries
+    must have allocated pages throughout their visible prefix. Dummy-page
+    scores retain DeepGEMM's raw values; this path does not promise zero scores
+    for block<=0 entries.
 
     Pool and block table must come from the same KV source layer. Pool is the
     contiguous, unpadded uint8 [blocks,typed_entries_per_block,68] view over
@@ -608,22 +577,8 @@ def score_decode_indexer(
         and not pad_invisible
         and os.environ.get("DSV41_DIRECT_INDEXER_LOGITS", "1") == "1"
     ):
-        # Packed pages already have the logical column layout. Only missing
-        # pages need correction: DG reads reserved page zero, whose bytes are
-        # not part of the allocator's zero-K contract. Never mutate KV here.
-        _zero_missing_page_logits_kernel[(b * s,)](
-            logits,
-            lengths,
-            safe_table,
-            None if metadata is None else metadata.paged.request_ids,
-            s,
-            block_size,
-            max_ctx_len,
-            safe_table.shape[1],
-            logits.stride(0),
-            128,
-            num_warps=8,
-        )
+        # Packed pages already have the logical column layout. Length-bounded
+        # consumers can read the allocated visible prefix without a copy.
         return logits
     # The native scorer uses an owner-expanded table for packed queries.
     # Compaction must inspect the same per-query pages rather than row//S.

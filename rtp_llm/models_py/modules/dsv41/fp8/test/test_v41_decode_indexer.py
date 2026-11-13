@@ -221,7 +221,8 @@ def _check_unallocated_table_rows(logical, ratio):
     case["block_table"][1, 2] = -99
     keys[0, :logical] = 0
     keys[1, 2 * logical : 3 * logical] = 0
-    output = fused.score_decode_indexer(**case)
+    with patch.dict(os.environ, {"DSV41_DIRECT_INDEXER_LOGITS": "0"}):
+        output = fused.score_decode_indexer(**case)
     assert_logits_and_topk(output, reference(case, keys), case)
     assert torch.count_nonzero(output[:6, :logical]).item() == 0
     assert torch.count_nonzero(output[6:, 2 * logical : 3 * logical]).item() == 0
@@ -244,9 +245,8 @@ def _check_elided_padding(
     logical, ratio, capacity, preserve, poison_table, physical=128
 ):
     """pad_invisible=False keeps visible columns bitwise identical and every
-    bounded decode selector output-identical. The elision itself (padding left
-    untouched) is proven deterministically by the graph-replay staleness
-    check, not by allocator contents."""
+    bounded decode selector output-identical, without inspecting undefined
+    columns beyond each row's causal length."""
     if not torch.cuda.is_available() or not fused.is_supported(
         torch.device("cuda"), physical
     ):
@@ -261,9 +261,15 @@ def _check_elided_padding(
         keys[0, :logical] = 0
         keys[1, 2 * logical : 3 * logical] = 0
     kwargs = dict(case, preserve_score_dtype=preserve)
-    padded = fused.score_decode_indexer(**kwargs)
-    elided = fused.score_decode_indexer(**kwargs, pad_invisible=False)
+    # Visible zero-K holes belong to the compact compatibility path. Direct
+    # scoring requires the real request's visible prefix to be allocated.
+    with patch.dict(
+        os.environ, {"DSV41_DIRECT_INDEXER_LOGITS": "0" if poison_table else "1"}
+    ):
+        padded = fused.score_decode_indexer(**kwargs)
+        elided = fused.score_decode_indexer(**kwargs, pad_invisible=False)
     visible = _visible_mask(case, capacity)
+    assert torch.isfinite(elided[visible]).all()
     assert torch.equal(elided[visible], padded[visible])
     assert torch.isneginf(padded[~visible]).all()
     lengths = case["context_lens"].flatten().contiguous()
@@ -284,10 +290,10 @@ def _check_elided_padding(
     del padded, elided
 
 
-def _check_graph_replay_elided(logical, ratio, physical=128):
+def _check_graph_replay_elided(logical, ratio, physical=128, poison_table=False):
     """Replayed elided scoring with growing/shrinking/zero lengths keeps the
-    bounded selection identical to freshly padded scoring, while the padding
-    stays undefined (never -inf-filled) across replays."""
+    bounded selection identical to freshly padded scoring. Undefined padding
+    is never used as evidence or passed to an unbounded selector."""
     if not torch.cuda.is_available() or not fused.is_supported(
         torch.device("cuda"), physical
     ):
@@ -305,14 +311,14 @@ def _check_graph_replay_elided(logical, ratio, physical=128):
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         output = fused.score_decode_indexer(**kwargs, pad_invisible=False)
-    # Step 0 grows lengths, step 1 shrinks them (undefined padding),
-    # step 2 regrows with an unallocated table row, step 3 zeroes all rows.
+    # Direct replays retain a fully allocated visible prefix. The compact
+    # compatibility run also regrows with a hole; both exercise zero lengths.
     starts_by_step = [(0, 901), (11, 40), (300, 1801), (0, 0)]
     prev_lengths = None
-    checked_stale = 0
+    shrinking_rows = 0
     for step, starts in enumerate(starts_by_step):
         updated, _ = make_case(2, 6, 2053, physical, logical, ratio, seed=71 + step)
-        if step == 2:
+        if step == 2 and poison_table:
             updated["block_table"][0, 0] = 0
         for key in ("q", "weights", "freqs_cis", "pool", "block_table"):
             case[key].copy_(updated[key])
@@ -321,32 +327,83 @@ def _check_graph_replay_elided(logical, ratio, physical=128):
             + torch.arange(6, device="cuda")[None]
         )
         case["context_lens"].copy_(((positions + 1) // ratio).int())
+        if step == 3:
+            case["context_lens"].zero_()
         graph.replay()
         lengths = case["context_lens"].flatten().contiguous()
         if prev_lengths is not None:
-            # Elision proof: after a shrink, the columns that just became
-            # padding are NOT -inf-filled. Their contents are whatever the
-            # graph pool's overlapping capture-time intermediates leave
-            # behind (bounded readers must ignore them); only a regressed
-            # PAD_INVISIBLE=True kernel would write -inf there.
-            for row in range(lengths.numel()):
-                new_len = int(lengths[row])
-                if new_len < int(prev_lengths[row]):
-                    assert not torch.isneginf(output[row, new_len:]).all()
-                    checked_stale += 1
+            shrinking_rows += int((lengths < prev_lengths).sum())
         reference = fused.score_decode_indexer(**kwargs)
         visible = _visible_mask(case, 2053)
+        assert torch.isfinite(output[visible]).all()
         assert torch.equal(output[visible], reference[visible])
         assert torch.equal(
             selector.select_tokens(output, lengths, 512),
             selector.select_tokens(reference, lengths, 512),
         )
         prev_lengths = lengths.clone()
-    assert checked_stale > 0, "no shrinking row: elision proof never ran"
+    assert shrinking_rows > 0, "graph replay never exercised shorter live lengths"
     del output, graph
 
 
 class V41DecodeIndexerTest(unittest.TestCase):
+    def test_direct_allocated_prefix_returns_native_scores_without_postprocessing(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _indexer_score
+
+        for entries in (64, 128):
+            with self.subTest(entries=entries):
+                batch, span, capacity = 2, 4, 2053
+                rows = batch * span
+                payload = torch.empty(batch, span, 32, 64, dtype=torch.int8)
+                scales = torch.empty(batch, span, 32, dtype=torch.int32)
+                weights = torch.zeros(batch, span, 32, dtype=torch.bfloat16)
+                pool = torch.empty(2, entries, 68, dtype=torch.uint8)
+                table = torch.ones(batch, 33, dtype=torch.int32)
+                lengths = torch.tensor(
+                    [0, 1, entries, entries + 1, 513, 1025, 2052, capacity],
+                    dtype=torch.int32,
+                )
+                paged = SimpleNamespace(lengths=lengths[:, None])
+                plan = fused.DecodeIndexerMetadata(lengths, table, paged)
+                # Native DG can return a tensor with an aligned row stride.
+                # Direct consumers must preserve that tensor and honor lengths.
+                storage = torch.zeros(rows, capacity + 16, dtype=torch.bfloat16)
+                native = storage[:, :capacity]
+                with patch.dict(
+                    os.environ, {"DSV41_DIRECT_INDEXER_LOGITS": "1"}
+                ), patch.object(fused, "is_supported", return_value=True), patch.object(
+                    _indexer_score, "fp8_fp4_paged_indexer_score", return_value=native
+                ) as score, patch.object(
+                    fused, "_prepare_paged_metadata_kernel"
+                ) as prepare, patch.object(
+                    fused, "_compact_logits_kernel"
+                ) as compact, patch.object(
+                    fused, "_compact_logits_bounded_kernel"
+                ) as bounded, patch.object(
+                    torch, "empty", side_effect=AssertionError("unexpected score copy")
+                ):
+                    actual = fused.score_decode_indexer(
+                        q=None,
+                        weights=weights,
+                        freqs_cis=None,
+                        pool=pool,
+                        block_table=table,
+                        context_lens=lengths.view(batch, span),
+                        max_ctx_len=capacity,
+                        logical_entries_per_block=entries,
+                        preserve_score_dtype=True,
+                        pad_invisible=False,
+                        metadata=plan,
+                        prepared_query=(payload, scales, weights),
+                    )
+                self.assertIs(actual, native)
+                self.assertEqual(actual.stride(), (capacity + 16, 1))
+                score.assert_called_once()
+                self.assertIs(score.call_args.kwargs["metadata"], paged)
+                prepare.__getitem__.assert_not_called()
+                compact.__getitem__.assert_not_called()
+                bounded.__getitem__.assert_not_called()
+
     def test_actual_decode_pool_builder_preserves_both_indexer_groups(self):
         from rtp_llm.models_py.modules.dsv41.decode.forward import (
             build_paged_pool_specs,
@@ -451,8 +508,6 @@ class V41DecodeIndexerTest(unittest.TestCase):
         narrow[:, :4096].copy_(wide[:, :4096])
         narrow[:, 4096:].copy_(wide[:, 8192:8448])
         packed_case = dict(case, pool=narrow.view(-1, 64, 68))
-        case["block_table"][0, 0] = 0
-        case["block_table"][1, 2] = -7
         before = packed_case["pool"].clone()
         with patch.dict(os.environ, {"DSV41_DIRECT_INDEXER_LOGITS": "1"}):
             actual = fused.score_decode_indexer(
@@ -462,6 +517,7 @@ class V41DecodeIndexerTest(unittest.TestCase):
             **case, preserve_score_dtype=True, pad_invisible=False
         )
         visible = _visible_mask(case, 2053)
+        self.assertTrue(torch.isfinite(actual[visible]).all().item())
         torch.testing.assert_close(actual[visible], expected[visible], rtol=0, atol=0)
         torch.testing.assert_close(packed_case["pool"], before, rtol=0, atol=0)
         with patch.dict(os.environ, {"DSV41_DIRECT_INDEXER_LOGITS": "0"}):
@@ -469,6 +525,29 @@ class V41DecodeIndexerTest(unittest.TestCase):
                 **packed_case, preserve_score_dtype=True, pad_invisible=False
             )
         torch.testing.assert_close(actual[visible], fallback[visible], rtol=0, atol=0)
+
+        # Missing real pages retain their zero-K semantics only in the explicit
+        # compact fallback. Do not pass this fixture to the direct contract.
+        case["block_table"][0, 0] = 0
+        case["block_table"][1, 2] = -7
+        with patch.dict(os.environ, {"DSV41_DIRECT_INDEXER_LOGITS": "0"}):
+            legacy_holes = fused.score_decode_indexer(
+                **case, preserve_score_dtype=True, pad_invisible=False
+            )
+            packed_holes = fused.score_decode_indexer(
+                **packed_case, preserve_score_dtype=True, pad_invisible=False
+            )
+        torch.testing.assert_close(
+            packed_holes[visible], legacy_holes[visible], rtol=0, atol=0
+        )
+        self.assertEqual(
+            torch.count_nonzero(packed_holes[:4, :64][visible[:4, :64]]).item(), 0
+        )
+        self.assertEqual(
+            torch.count_nonzero(packed_holes[4:, 128:192][visible[4:, 128:192]]).item(),
+            0,
+        )
+        torch.testing.assert_close(packed_case["pool"], before, rtol=0, atol=0)
 
     def test_pad_invisible_elision_keeps_visible_columns_and_bounded_selectors(self):
         for logical, ratio, capacity, preserve, poison in [
@@ -489,8 +568,13 @@ class V41DecodeIndexerTest(unittest.TestCase):
 
     def test_pad_invisible_elision_graph_replay_length_changes(self):
         for physical, logical, ratio in [(128, 64, 2), (128, 128, 1), (64, 64, 2)]:
-            with self.subTest(physical=physical, logical=logical, ratio=ratio):
-                _check_graph_replay_elided(logical, ratio, physical)
+            for direct in ("1", "0"):
+                with self.subTest(
+                    physical=physical, logical=logical, ratio=ratio, direct=direct
+                ), patch.dict(os.environ, {"DSV41_DIRECT_INDEXER_LOGITS": direct}):
+                    _check_graph_replay_elided(
+                        logical, ratio, physical, poison_table=direct == "0"
+                    )
 
     def test_fused_metadata_rejects_unsupported_inputs_before_launch(self):
         keys = fused.DecodeIndexerKeys(
