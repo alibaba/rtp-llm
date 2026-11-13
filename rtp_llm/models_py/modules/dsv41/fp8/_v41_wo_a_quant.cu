@@ -36,7 +36,7 @@ static void instantiate_v41_wo_a() {
                                                                     cutlass::float_e4m3_t,
                                                                     cutlass::float_e4m3_t,
                                                                     cutlass::float_e4m3_t,
-                                                                    epilogue::operators::QuantizeToFP8>);
+                                                                    v41::WoAQuantOperator>);
     auto large = reinterpret_cast<void*>(&v41_wo_a_group32_epilogue<cute::UMMA::Major::K,
                                                                     cute::UMMA::Major::K,
                                                                     32,
@@ -66,7 +66,7 @@ static void instantiate_v41_wo_a() {
                                                                     cutlass::float_e4m3_t,
                                                                     cutlass::float_e4m3_t,
                                                                     cutlass::float_e4m3_t,
-                                                                    epilogue::operators::QuantizeToFP8>);
+                                                                    v41::WoAQuantOperator>);
 }
 
 using SmallStorage = layout::SM100FP8FP4GemmSharedStorage<11,
