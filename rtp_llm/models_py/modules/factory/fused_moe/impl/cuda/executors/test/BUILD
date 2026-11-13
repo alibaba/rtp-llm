@@ -387,3 +387,9 @@ py_test(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
 )
+
+py_test(
+    name = "nvfp4_hybrid_executor_test",
+    srcs = ["nvfp4_hybrid_executor_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:auto_model"],
+)
