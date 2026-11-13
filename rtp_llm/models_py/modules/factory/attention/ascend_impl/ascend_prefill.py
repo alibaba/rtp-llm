@@ -126,8 +126,17 @@ class AscendPrefillImpl(FMHAImplBase):
 
         self.params.positions_d = positions_d
         self.params.slot_mapping = slot_mapping
-        # Graph path derives plain positions only; MRoPE prefill graphs are
-        # not supported.
+        # Graph-mode MRoPE: read the three-axis positions from the captured
+        # combo_position_ids buffer ([T*3] flat on device) when present —
+        # same contract as the decode path (AscendGraphRunner allocates the
+        # buffer at capture and refreshes it at replay via copyTensorSlice).
+        combo = getattr(self.attn_inputs, "combo_position_ids", None)
+        if combo is not None and combo.numel() > 0:
+            if combo.dim() == 1:
+                combo = combo.reshape(-1, 3)
+            if combo.dim() == 2 and combo.size(1) == 3:
+                self.params.mrope_positions_d = combo.to(torch.int64)
+                return
         self.params.mrope_positions_d = None
 
     def prepare(self, attn_inputs):
