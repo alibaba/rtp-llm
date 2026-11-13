@@ -3,6 +3,7 @@
 from typing import Any, Collection, Dict, List
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.qwen4_exp_config import resolve_decode_communication_mode
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.qwen4_exp.qwen4_exp import Qwen4Exp
@@ -211,6 +212,12 @@ class Qwen4ExpMTP(Qwen4Exp):
                 # target checkpoint keys declared above, without FP8 scales.
                 return ()
             raise ValueError("qwen4_exp MTP vocabulary storage is incompatible")
+        # Shared embedding layout is owned by the target. ModelFactory builds
+        # independent draft options, so inherit this policy before draft load
+        # freezes its snapshot (the other draft options remain independent).
+        draft_model_config.qwen4_decode_communication_mode = (
+            resolve_decode_communication_mode(target_config)
+        )
         names = (W.embedding, W.lm_head)
         if (
             getattr(target_config, "_qwen4_full_fp8_nvfp4", False) is True

@@ -28,6 +28,7 @@ def ple_eos_token_id(config):
 class Qwen4ModelConfig(ModelConfig):
     _python_fields = ModelConfig._python_fields | {
         "qwen4_ple_prefetch_mb",
+        "qwen4_decode_communication_mode",
         "linear_attn_norm_activation",
     }
 
@@ -53,9 +54,27 @@ class Qwen4ModelConfig(ModelConfig):
         self._qwen4_ple_prefetch_mb = value
 
     def _validate_ple_budget(self, value: int) -> None:
-        options = Qwen4Options(value)
+        Qwen4Options(value)
         snapshot = getattr(self, "_qwen4_runtime_snapshot", None)
-        if snapshot is not None and options != snapshot.options:
+        if snapshot is not None and value != snapshot.options.ple_prefetch_mb:
+            raise RuntimeError(
+                "qwen4_exp resource options are frozen after model loading"
+            )
+
+    @property
+    def qwen4_decode_communication_mode(self) -> str:
+        """Decode layout/communication policy; vocab_parallel_ipc requires restart for embedding updates."""
+        return resolve_decode_communication_mode(self)
+
+    @qwen4_decode_communication_mode.setter
+    def qwen4_decode_communication_mode(self, value: str) -> None:
+        self._validate_decode_communication_mode(value)
+        self._qwen4_decode_communication_mode = value
+
+    def _validate_decode_communication_mode(self, value):
+        Qwen4Options(decode_communication_mode=value)
+        snapshot = getattr(self, "_qwen4_runtime_snapshot", None)
+        if snapshot is not None and value != snapshot.options.decode_communication_mode:
             raise RuntimeError(
                 "qwen4_exp resource options are frozen after model loading"
             )
@@ -64,18 +83,43 @@ class Qwen4ModelConfig(ModelConfig):
         model_override_args = json.loads(json_model_override_args)
         if "qwen4_ple_prefetch_mb" in model_override_args:
             self._validate_ple_budget(model_override_args["qwen4_ple_prefetch_mb"])
+        if "qwen4_decode_communication_mode" in model_override_args:
+            self._validate_decode_communication_mode(
+                model_override_args["qwen4_decode_communication_mode"]
+            )
         super().apply_override_args(json_model_override_args)
         if "qwen4_ple_prefetch_mb" in model_override_args:
             self.qwen4_ple_prefetch_mb = model_override_args["qwen4_ple_prefetch_mb"]
+        if "qwen4_decode_communication_mode" in model_override_args:
+            self.qwen4_decode_communication_mode = model_override_args[
+                "qwen4_decode_communication_mode"
+            ]
 
 
 @dataclass(frozen=True)
 class Qwen4Options:
     ple_prefetch_mb: int = 256
+    decode_communication_mode: str = "vocab_parallel_ipc"
 
     def __post_init__(self):
+        if self.decode_communication_mode not in ("default", "vocab_parallel_ipc"):
+            raise ValueError(
+                "qwen4_decode_communication_mode must be default or vocab_parallel_ipc"
+            )
         if type(self.ple_prefetch_mb) is not int or self.ple_prefetch_mb <= 0:
             raise ValueError("qwen4_ple_prefetch_mb must be a positive integer")
+
+
+def resolve_decode_communication_mode(config):
+    snapshot = getattr(config, "_qwen4_runtime_snapshot", None)
+    if snapshot is not None:
+        return snapshot.options.decode_communication_mode
+    mode = getattr(
+        config,
+        "_qwen4_decode_communication_mode",
+        Qwen4Options.decode_communication_mode,
+    )
+    return Qwen4Options(decode_communication_mode=mode).decode_communication_mode
 
 
 @dataclass(frozen=True)
@@ -154,7 +198,9 @@ class Qwen4RuntimeSnapshot:
 
 def freeze_runtime_config(config, parallelism):
     snapshot = Qwen4RuntimeSnapshot(
-        Qwen4Options(config.qwen4_ple_prefetch_mb),
+        Qwen4Options(
+            config.qwen4_ple_prefetch_mb, resolve_decode_communication_mode(config)
+        ),
         CheckpointGeometry.from_config(config),
         (
             "NVFP4"

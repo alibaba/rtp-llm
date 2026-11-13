@@ -44,7 +44,7 @@ class Qwen4ExpQSAConstructionTest(TestCase):
                         qwen4_exp.Qwen4ExpDecoderLayer, "_build_residual_modules"
                     ),
                     patch(
-                        "rtp_llm.models_py.modules.qwen4_exp.tp_reduce.install_target_graph_all_reduce"
+                        "rtp_llm.models_py.modules.qwen4_exp.tp_reduce.install_tp_all_reduce"
                     ),
                 ):
                     layer = qwen4_exp.Qwen4ExpDecoderLayer(

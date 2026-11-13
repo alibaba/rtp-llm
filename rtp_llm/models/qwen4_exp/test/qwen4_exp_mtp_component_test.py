@@ -277,6 +277,23 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "matching dense storage"):
             Qwen4ExpMTP.speculative_weight_alias_names(target, draft)
 
+    def test_shared_embedding_inherits_target_decode_policy(self):
+        from rtp_llm.config.qwen4_exp_config import freeze_runtime_config
+
+        # An explicit legacy layout must override the draft's automatic IPC default.
+        draft = self.config
+        target = Qwen4Exp.__new__(Qwen4Exp)
+        target.model_config = Qwen4Exp.create_config(self._temp_dir.name)
+        target.model_config.qwen4_decode_communication_mode = "default"
+        parallelism = SimpleNamespace(get_attn_tp_size=lambda: 2)
+        with mock.patch.dict("os.environ", {}, clear=True):
+            freeze_runtime_config(target.model_config, parallelism)
+            Qwen4ExpMTP.speculative_weight_alias_names(target, draft)
+            snapshot = freeze_runtime_config(draft, parallelism)
+        self.assertEqual(snapshot.options.decode_communication_mode, "default")
+        self.assertTrue(snapshot.is_mtp_draft)
+        self.assertEqual(snapshot.geometry.ple_layer_ids, ())
+
     def test_rejects_nonfinal_target_hidden_source(self):
         config = self._config()
         config["text_config"]["mtp"]["mtp_use_hidden_state_from_layer"] = 17
