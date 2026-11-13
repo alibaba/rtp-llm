@@ -8,6 +8,7 @@ from rtp_llm.config.qwen4_exp_config import (
     build_qwen4_quant_config,
     freeze_runtime_config,
     resolve_qwen4_parallelism,
+    uses_decode_vocab_shard,
     validate_qwen4_runtime,
 )
 from rtp_llm.model_factory_register import register_model
@@ -33,6 +34,15 @@ class Qwen4Exp(Qwen35Moe):
     """
 
     _model_config_cls = Qwen4ModelConfig
+
+    def _resident_fingerprint(self):
+        fingerprint = super()._resident_fingerprint()
+        fingerprint["qwen4_embedding_layout"] = (
+            "vocabulary_v1"
+            if uses_decode_vocab_shard(self.model_config, self.parallelism_config)
+            else "hidden"
+        )
+        return fingerprint
 
     @classmethod
     def _parse_mm_config(cls, config_json, config):

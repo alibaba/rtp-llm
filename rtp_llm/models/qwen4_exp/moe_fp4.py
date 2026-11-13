@@ -1,5 +1,7 @@
 """Complete official-FP8 to dense-FP8/routed-NVFP4 weight recipe."""
 
+import copy
+
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.config.qwen4_exp_config import is_qwen4_precision_recipe
 from rtp_llm.model_loader.ffn_weight import MoeWeight
@@ -25,6 +27,7 @@ class Qwen4MoeFp4WeightInfo(ModelWeightInfo):
                 "Qwen4 requires the complete FP8/NVFP4 recipe from official FP8 source"
             )
         from rtp_llm.model_loader.fp8_weight import Fp8StorageWeight
+        from rtp_llm.models.qwen4_exp.qwen4_exp_weight import Qwen4VocabWeight
 
         storage = (
             self._dense_storage
@@ -66,5 +69,10 @@ class Qwen4MoeFp4WeightInfo(ModelWeightInfo):
             preserve_source = source_bf16
             if weight.name in (W.embedding, W.lm_head):
                 preserve_source = vocab_storage == "source_bf16"
-            globals_.append(weight if preserve_source else Fp8StorageWeight(weight))
+            if isinstance(weight, Qwen4VocabWeight):
+                weight = copy.copy(weight)
+                weight.fp8_storage = not preserve_source
+                globals_.append(weight)
+            else:
+                globals_.append(weight if preserve_source else Fp8StorageWeight(weight))
         return ModelWeightInfo(globals_, layers)

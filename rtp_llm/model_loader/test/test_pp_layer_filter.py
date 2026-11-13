@@ -57,7 +57,11 @@ def make_loader(
     task_type=TaskType.LANGUAGE_MODEL,
     misc_weights_info=None,
 ) -> ModelLoader:
-    weights_info = MagicMock(is_attn_model=False, layer_range=load_config.layer_range)
+    weights_info = MagicMock(
+        is_attn_model=False,
+        layer_range=load_config.layer_range,
+        embedding_vocab_size=None,
+    )
     weights_info.create_load_config.return_value = load_config
     with patch.object(ModelLoader, "create_eplb", return_value=(None, None)), patch(
         "rtp_llm.device.get_current_device"
@@ -509,6 +513,7 @@ class LayerScopedLoadingTest(unittest.TestCase):
                 )
                 loader._weights_info.create_dynamic_weights.return_value = []
                 embedding = torch.ones(4, 4)
+                loader._weights_info.embedding_vocab_size = 7
                 lm_head = torch.full((4, 4), 2.0)
                 globals_ = {W.embedding: embedding} if owns_embedding else {}
                 if owns_lm_head and not owns_embedding:
@@ -516,6 +521,10 @@ class LayerScopedLoadingTest(unittest.TestCase):
                 weights = MagicMock(global_weights=globals_)
                 weights.steal_global_weight.return_value = globals_.get(W.lm_head)
                 loader._load_dynamic_weights(weights, "cpu")
+                if owns_embedding:
+                    self.assertEqual(
+                        loader._weights_info.model_config.embedding_size, 7
+                    )
                 if not owns_lm_head:
                     weights.steal_global_weight.assert_not_called()
                     weights.set_global_weight.assert_not_called()

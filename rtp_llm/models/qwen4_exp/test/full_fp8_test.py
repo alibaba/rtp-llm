@@ -38,6 +38,118 @@ def quantized(value):
 
 
 class FullFp8StorageTest(unittest.TestCase):
+    def test_recipe_keeps_direct_vocab_descriptor_and_column_scales(self):
+        from rtp_llm.config.quant_config import QWEN4_FP8_NVFP4_RECIPE
+        from rtp_llm.models.qwen4_exp.moe_fp4 import Qwen4MoeFp4WeightInfo
+        from rtp_llm.models.qwen4_exp.qwen4_exp_weight import Qwen4VocabWeight
+
+        original = Qwen4VocabWeight(
+            W.embedding, [CkptWeightInfo("embedding")], vocab_size=4, hidden_size=8
+        )
+        recipe = ModelOptFp4Config(
+            bits=4,
+            group_size=16,
+            is_quanted=False,
+            model_recipe=QWEN4_FP8_NVFP4_RECIPE,
+        )
+        config = SimpleNamespace(
+            tp_size=2, tp_rank=1, merge_lora=False, compute_dtype=torch.bfloat16
+        )
+        for storage in ("fp8", "source_bf16"):
+            descriptor = (
+                Qwen4MoeFp4WeightInfo([original], [], vocab_storage=storage)
+                .to_quant_weight_info(recipe)
+                .weights[0]
+            )
+            loaded = descriptor.load(_Source(), None, "cpu", config)
+            self.assertEqual(tuple(loaded[W.embedding].shape), (2, 8))
+            if storage == "fp8":
+                self.assertEqual(loaded[W.embedding].dtype, torch.float8_e4m3fn)
+                self.assertEqual(
+                    loaded[W.embedding + FP8_STORAGE_SCALE_SUFFIX].numel(), 2
+                )
+                self.assertEqual(
+                    set(loaded), {W.embedding, *descriptor.additional_output_names}
+                )
+            else:
+                torch.testing.assert_close(
+                    loaded[W.embedding],
+                    torch.arange(32).reshape(4, 8).bfloat16()[2:] - 16,
+                    rtol=0,
+                    atol=0,
+                )
+        # Building the FP8 recipe must not mutate a reused BF16 descriptor.
+        self.assertEqual(
+            original.load(_Source(), None, "cpu", config)[W.embedding].dtype,
+            torch.bfloat16,
+        )
+
+    def test_decode_vocab_load_and_update_use_final_row_shards(self):
+        from rtp_llm.models.qwen4_exp.qwen4_exp_weight import Qwen4VocabWeight
+
+        original = torch.arange(40).reshape(5, 8).bfloat16() - 13
+        original[-1, -1] = 512
+
+        class Source(_Source):
+            def load_tensor(self, name, data_type=torch.float16):
+                return [original.to(data_type)]
+
+        quantized_halves = [quantized(part) for part in original.chunk(2, dim=1)]
+        fp8_reference = torch.cat(
+            [part[0].view(torch.uint8) for part in quantized_halves], dim=1
+        )
+        scales = torch.cat([part[1] for part in quantized_halves])
+        for fp8 in (False, True):
+            descriptor = Qwen4VocabWeight(
+                W.embedding,
+                [CkptWeightInfo("embedding")],
+                vocab_size=5,
+                hidden_size=8,
+                fp8_storage=fp8,
+            )
+            for rank in (0, 1):
+                config = SimpleNamespace(
+                    tp_size=2,
+                    tp_rank=rank,
+                    merge_lora=False,
+                    compute_dtype=torch.bfloat16,
+                )
+                loaded = descriptor.load(Source(), None, "cpu", config)
+                rows = loaded[W.embedding]
+                self.assertEqual(tuple(rows.shape), (3, 8))
+                count = 3 if rank == 0 else 2
+                start = 3 * rank
+                if fp8:
+                    torch.testing.assert_close(
+                        rows[:count].view(torch.uint8),
+                        fp8_reference[start : start + count],
+                        rtol=0,
+                        atol=0,
+                    )
+                    torch.testing.assert_close(
+                        loaded[W.embedding + FP8_STORAGE_SCALE_SUFFIX],
+                        scales,
+                        rtol=0,
+                        atol=0,
+                    )
+                    with self.assertRaises(PermissionError):
+                        descriptor.update(original, "cpu", config)
+                else:
+                    torch.testing.assert_close(
+                        rows[:count], original[start : start + count], rtol=0, atol=0
+                    )
+                    updated = descriptor.update(original * 2, "cpu", config)[
+                        W.embedding
+                    ]
+                    torch.testing.assert_close(
+                        updated[:count],
+                        original[start : start + count] * 2,
+                        rtol=0,
+                        atol=0,
+                    )
+                if count < 3:
+                    self.assertEqual(rows[count:].float().count_nonzero().item(), 0)
+
     def test_small_parameters_keep_source_values_without_fp8_copies(self):
         tensors = {
             W.linear_attn_alog: torch.linspace(-2, 3, 48).bfloat16(),

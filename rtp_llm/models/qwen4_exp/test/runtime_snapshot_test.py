@@ -26,6 +26,44 @@ class RuntimeSnapshotTest(unittest.TestCase):
         config._qwen4_indexer_kv_heads = 1
         return config
 
+    def test_decode_mode_defaults_to_ipc_and_survives_spawn(self):
+        config = self.config()
+        snapshot = freeze_runtime_config(
+            config, SimpleNamespace(get_attn_tp_size=lambda: 2)
+        )
+        self.assertEqual(
+            snapshot.options.decode_communication_mode, "vocab_parallel_ipc"
+        )
+        self.assertEqual(snapshot, pickle.loads(pickle.dumps(snapshot)))
+        with self.assertRaisesRegex(RuntimeError, "frozen"):
+            config.qwen4_decode_communication_mode = "default"
+
+    def test_explicit_decode_mode_override_is_frozen(self):
+        config = self.config()
+        config.apply_override_args('{"qwen4_decode_communication_mode":"default"}')
+        snapshot = freeze_runtime_config(
+            config, SimpleNamespace(get_attn_tp_size=lambda: 2)
+        )
+        self.assertEqual(snapshot.options.decode_communication_mode, "default")
+        with self.assertRaisesRegex(RuntimeError, "frozen"):
+            config.qwen4_decode_communication_mode = "vocab_parallel_ipc"
+
+    def test_invalid_decode_override_does_not_mutate_other_options(self):
+        config = self.config()
+        for mode in (None, True, "ipc", "1"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(
+                ValueError, "decode_communication_mode"
+            ):
+                config.apply_override_args(
+                    json.dumps(
+                        {
+                            "qwen4_ple_prefetch_mb": 512,
+                            "qwen4_decode_communication_mode": mode,
+                        }
+                    )
+                )
+            self.assertEqual(config.qwen4_ple_prefetch_mb, 256)
+
     def test_final_override_snapshot_survives_pickle_and_is_immutable(self):
         config = self.config()
         config.qwen4_ple_prefetch_mb = 512

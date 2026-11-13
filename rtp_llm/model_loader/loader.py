@@ -944,7 +944,12 @@ class ModelLoader:
     def _apply_loaded_shapes(self, weight: ModelWeights):
         embedding_weight = weight.global_weights.get(W.embedding, None)
         if embedding_weight != None:
-            self._weights_info.model_config.embedding_size = embedding_weight.shape[0]
+            # Descriptor metadata also survives resident attach: tensor Python
+            # attributes do not survive the out-of-process storage round trip.
+            self._weights_info.model_config.embedding_size = (
+                getattr(self._weights_info, "embedding_vocab_size", None)
+                or embedding_weight.shape[0]
+            )
             logging.info(
                 f"embedding_size is {self._weights_info.model_config.embedding_size}, vocab size is {self._weights_info.model_config.vocab_size}"
             )

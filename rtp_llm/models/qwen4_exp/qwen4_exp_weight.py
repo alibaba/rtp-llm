@@ -2,11 +2,13 @@ from typing import Any, Collection, Dict, List, Optional, Union
 
 import torch
 
+from rtp_llm.config.qwen4_exp_config import uses_decode_vocab_shard
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.qwen3_next.qwen3_next_weight import Qwen35MoeWeight
 from rtp_llm.ops import HybridAttentionType
+from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
 
 # Verified against Qwen/Qwen3.8-Flash-Next model.safetensors.index.json; the
@@ -55,6 +57,67 @@ _PLE_WEIGHTS = (
 )
 
 _PLE_NGRAM_SHARD_KEY = "ple_embedding.ngram_embedding.shard_{s}.weight"
+
+
+class Qwen4VocabWeight(AtomicWeight):
+    """Load the final vocabulary shard; no initialization-time redistribution.
+
+    FP8 retains the former hidden-shard quantization scales, computed from the
+    full source before selecting rows. This changes storage, not lookup values.
+    """
+
+    supports_fastsafetensors_iteration = False
+
+    def __init__(self, *args, vocab_size, hidden_size, fp8_storage=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+        self.fp8_storage = fp8_storage
+
+    @property
+    def additional_output_names(self):
+        return (self.name + FP8_STORAGE_SCALE_SUFFIX,) if self.fp8_storage else ()
+
+    def _split(self, tensor, load_config):
+        full = tensor if isinstance(tensor, torch.Tensor) else tensor[self.name]
+        if (
+            load_config.tp_size != 2
+            or load_config.tp_rank not in (0, 1)
+            or tuple(full.shape) != (self.vocab_size, self.hidden_size)
+            or full.dtype != torch.bfloat16
+        ):
+            raise ValueError("decode vocabulary requires complete BF16 weights and TP2")
+        rows = (self.vocab_size + 1) // 2
+        start = load_config.tp_rank * rows
+        count = min(rows, self.vocab_size - start)
+        local = full.new_zeros((rows, self.hidden_size))
+        local[:count].copy_(full[start : start + count])
+        if not self.fp8_storage:
+            return {self.name: local}
+        # Compute one maximum per original hidden slice. Do not quantize the
+        # entire full vocabulary or exchange shards between ranks.
+        scales = torch.stack(
+            [
+                part.float().abs().amax().clamp_min(1e-12) / 448.0
+                for part in full.chunk(2, dim=1)
+            ]
+        )
+        values = local.float().reshape(rows, 2, self.hidden_size // 2)
+        packed = (values / scales.reshape(1, 2, 1)).clamp(-448, 448)
+        return {
+            self.name: packed.to(torch.float8_e4m3fn).reshape(rows, self.hidden_size),
+            self.name + FP8_STORAGE_SCALE_SUFFIX: scales,
+        }
+
+    def _postprocess(self, tensor, device, load_config):
+        return tensor
+
+    def update(self, *args, **kwargs):
+        if self.fp8_storage:
+            raise PermissionError(
+                "FP8 storage parameters require a service restart to update"
+            )
+        return super().update(*args, **kwargs)
 
 
 class Qwen4ExpPleNgramWeight(AtomicWeight):
@@ -220,8 +283,13 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
     which keeps us bit-exact with upstream.
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, model_config, parallelism_config, *args, **kwargs):
+        super().__init__(model_config, parallelism_config, *args, **kwargs)
+        self.embedding_vocab_size = (
+            model_config.vocab_size
+            if uses_decode_vocab_shard(model_config, parallelism_config)
+            else None
+        )
         self._moe_only_fp4 = bool(
             getattr(self.model_config, "_qwen4_full_fp8_nvfp4", False)
         )
@@ -397,13 +465,20 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
                 )
             )
 
+    def _embedding_weight(self, source):
+        if self.embedding_vocab_size is not None:
+            return Qwen4VocabWeight(
+                W.embedding,
+                [CkptWeightInfo(source, identity)],
+                vocab_size=self.embedding_vocab_size,
+                hidden_size=self.model_config.hidden_size,
+            )
+        return AtomicWeight(W.embedding, [CkptWeightInfo(source, identity)])
+
     def _create_global_weights(self) -> List[WeightModule]:
         mixer = self.prefix + "hyper_connection_mixer."
         return [
-            AtomicWeight(
-                W.embedding,
-                [CkptWeightInfo(self.prefix + "embed_tokens.weight", identity)],
-            ),
+            self._embedding_weight(self.prefix + "embed_tokens.weight"),
             AtomicWeight(W.lm_head, [CkptWeightInfo("lm_head.weight", identity)]),
             # The mixer's own norm is the model's final norm; there is no
             # separate `norm.weight` in this checkpoint. Stored raw, see the

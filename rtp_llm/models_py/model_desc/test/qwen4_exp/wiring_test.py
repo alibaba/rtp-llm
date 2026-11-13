@@ -226,6 +226,48 @@ class Qwen4ExpModelConstructionTest(TestCase):
         self.assertFalse(model._capture_mtp_target_hidden)
         self.assertEqual(model.hyper_connection_mixer.hc_hidden_size, hc_hidden)
 
+    def test_decode_vocab_keeps_loaded_owner_with_ipc_fallback(self):
+        from rtp_llm.models_py.modules.qwen4_exp import decode_communication
+
+        config = ModelConfig()
+        config.num_layers = 0
+        config.hidden_size = _HIDDEN
+        config.vocab_size = 16
+        config.hc_mult = _HC
+        config.layernorm_eps = _EPS
+        config.capture_aux_hidden_layer_ids = None
+        norm, down, up, _ = _hc_weights(0)
+        loaded = torch.zeros(8, _HIDDEN, dtype=torch.bfloat16)
+        weights = self._FakeModelWeights(loaded, norm, down, up)
+        base_init = qwen4_exp.Qwen35Model.__init__
+
+        def base_with_embedding(model, *args, **kwargs):
+            base_init(model, *args, **kwargs)
+            # This fixture has no decoder layers; supply the first-stage
+            # embedding consumer that a nonempty production model constructs.
+            model.embed_tokens = nn.Module()
+            model.embed_tokens.weight = loaded
+
+        with (
+            patch.object(qwen4_exp.Qwen35Model, "__init__", base_with_embedding),
+            patch(
+                "rtp_llm.config.qwen4_exp_config.uses_decode_vocab_shard",
+                return_value=True,
+            ),
+            patch.object(
+                decode_communication, "prepare_decode_reduce", return_value=None
+            ),
+        ):
+            model = qwen4_exp.Qwen4ExpModel(
+                config, ParallelismConfig(), weights, MoeConfig(), 0
+            )
+        self.assertIsInstance(
+            model.embed_tokens, decode_communication.DecodeVocabEmbedding
+        )
+        self.assertIs(model.embed_tokens.weight, loaded)
+        self.assertIs(weights.global_weights[W.embedding], loaded)
+        self.assertEqual(model.embed_tokens.vocab_size, 16)
+
 
 class Qwen4ExpAttentionTagRoutingTest(TestCase):
     """The PLE layer owns three cache regions, so attention must be tag-routed.

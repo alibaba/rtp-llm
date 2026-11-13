@@ -4,7 +4,7 @@ import re
 from contextvars import ContextVar
 
 # Forward references for type hints
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -1042,6 +1042,10 @@ class ModelWeights:
                 "If 'data' is a dictionary, its values must be PyTorch tensors."
             )
         original_global_tensor = self.global_weights[name]
+        if getattr(original_global_tensor, "_rtp_requires_restart_for_update", False):
+            raise PermissionError(
+                f"global weight {name!r} requires a service restart to update"
+            )
         # Use the check_data method to validate shape, device, and dtype
         self.check_data(original_global_tensor, data)
         with torch.inference_mode():
