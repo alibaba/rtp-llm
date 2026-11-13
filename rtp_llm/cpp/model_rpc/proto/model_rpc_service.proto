@@ -424,6 +424,8 @@ enum ErrorCodePB {
     P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE = 25;
     INVALID_PARAMS = 26;
     EXECUTION_EXCEPTION = 27;
+    // Added on main after the feature branch froze its wire enum at 26.
+    LOAD_KV_CACHE_FAILED = 28;
 }
 
 // transfer between prefill and decode
