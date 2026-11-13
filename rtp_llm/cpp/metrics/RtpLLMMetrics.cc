@@ -1225,6 +1225,12 @@ void fillKmonitorConfig(kmonitor::MetricsConfig& metricsConfig, const KmonParam&
 
 }  // namespace
 
+bool kmonitorReportsDeferredForScr() {
+    // Startup sets this before constructing reporters. Release publishes the
+    // updated config before any periodic reporter can register or emit metrics.
+    return kmonitorTransportDeferred.load(std::memory_order_acquire);
+}
+
 bool initKmonitorFactory() {
     KmonParam param;
     param.init();
@@ -1267,8 +1273,8 @@ bool initKmonitorFactory() {
 
 void stopKmonitorFactory() {
     stopKmonServiceStatus();
-    kmonitorTransportDeferred = false;
     kmonitor::KMonitorFactory::Shutdown();
+    kmonitorTransportDeferred = false;
 }
 
 bool resumeKmonitorAfterScr() {

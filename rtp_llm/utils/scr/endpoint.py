@@ -15,16 +15,17 @@ ENDPOINT_MANIFEST_ENV = "RTP_LLM_SCR_ENDPOINT_MANIFEST"
 _MANIFEST_UNSET = object()
 
 
-def _read_manifest() -> dict[str, Any] | None:
+def _read_manifest() -> tuple[dict[str, Any] | None, bool]:
     value = os.environ.get(ENDPOINT_MANIFEST_ENV, "").strip()
     if not value:
-        return None
+        return None, False
     # Inline manifests routinely exceed NAME_MAX.  Never stat JSON as a path.
-    raw = value if value.startswith("{") else Path(value).read_text()
+    inline = value.startswith("{")
+    raw = value if inline else Path(value).read_text()
     manifest = json.loads(raw)
     if not isinstance(manifest, dict):
         raise ValueError("SCR endpoint manifest must be a JSON object")
-    return manifest
+    return manifest, inline
 
 
 def read_restore_manifest(generation: str) -> dict[str, Any] | None:
@@ -33,8 +34,12 @@ def read_restore_manifest(generation: str) -> dict[str, Any] | None:
     Controllers may atomically replace the file with phase=restore.  CRIU does
     not update Python's os.environ when restoring a process into a new Pod.
     """
-    manifest = _read_manifest()
+    manifest, inline = _read_manifest()
     if manifest is not None:
+        # CRIU preserves inline environment values from the seed. A restore
+        # manifest must come from a path the controller can atomically replace.
+        if inline and is_restore_phase(manifest):
+            raise ValueError("SCR restore endpoint manifest must be a file path")
         actual = str(manifest.get("generation", ""))
         if generation and actual and actual != generation:
             raise RuntimeError(

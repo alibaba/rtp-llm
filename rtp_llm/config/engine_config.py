@@ -32,7 +32,6 @@ from rtp_llm.ops import (
     RoleType,
     RuntimeConfig,
     SpeculativeExecutionConfig,
-    VitSeparation,
 )
 from rtp_llm.utils.scr import network
 from rtp_llm.utils.scr.network import cache_store_advertise_ip
@@ -46,13 +45,8 @@ def resolve_pd_role_type(py_env_configs) -> RoleType:
     the engine would take VIT-only code paths (and skip the PD role setup) while
     the launcher still treats it as a prefill/decode worker.
     """
-    launcher_role = py_env_configs.role_config.role_type
-    if (
-        py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
-        and launcher_role == RoleType.VIT
-    ):
-        return RoleType.VIT
-    return launcher_role
+    # The launcher applies the legacy PDFUSION-to-VIT default before spawning.
+    return py_env_configs.role_config.role_type
 
 
 @dataclass

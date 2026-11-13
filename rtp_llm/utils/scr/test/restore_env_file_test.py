@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from rtp_llm.utils.scr import runtime_fixup as runtime
 from rtp_llm.utils.scr import template_utils as scr
@@ -18,10 +18,13 @@ class ScrRestoreEnvFileTest(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.path = Path(directory.name) / "envs.json"
+        self.local_probe = MagicMock()
+        self.local_probe.__enter__.return_value = self.local_probe
         for context in (
             patch.object(runtime, "RESTORE_ENV_FILE", str(self.path)),
             patch.object(runtime, "_restore_env_provider", None),
             patch.object(runtime, "_runtime_identity", None),
+            patch.object(runtime.socket, "socket", return_value=self.local_probe),
             patch.dict(
                 os.environ,
                 {"RequestedIP": "192.0.2.10", "HIPPO_SLAVE_IP": "192.0.2.100"},
@@ -36,6 +39,13 @@ class ScrRestoreEnvFileTest(unittest.TestCase):
         ):
             context.start()
             self.addCleanup(context.stop)
+
+    def test_file_cannot_override_with_an_ip_outside_the_namespace(self):
+        self.publish({"RequestedIP": "192.0.2.20"})
+        self.local_probe.bind.side_effect = OSError("address not available")
+        with self.assertRaisesRegex(ValueError, "RequestedIP is not local"):
+            runtime.fixup_runtime_after_restore("same-seed", Mock())
+        self.assertEqual(os.environ["RequestedIP"], "192.0.2.10")
 
     def publish(self, values):
         temporary = self.path.with_suffix(".tmp")

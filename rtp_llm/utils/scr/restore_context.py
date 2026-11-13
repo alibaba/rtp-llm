@@ -44,6 +44,14 @@ class RestoreContext:
         # connections are first initialized after this barrier. Only the
         # existing multi-node topology needs the external transport gate.
         require_transport = is_restore_phase(manifest) and current.num_nodes > 1
+        if current.num_nodes == 1 and network.local_comm_enabled(
+            parallelism_config.world_size,
+            parallelism_config.local_world_size,
+            current.num_nodes,
+        ):
+            # Peer RPC stays on loopback even if the seed declared an inline
+            # manifest. CacheStore advertisement uses the refreshed Pod IP.
+            manifest = None
         restored = resolve_world_info(
             current,
             generation=self.generation,

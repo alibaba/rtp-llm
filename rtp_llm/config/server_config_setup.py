@@ -299,7 +299,11 @@ def set_parallelism_config(
         world_rank: World rank to apply (local_rank = world_rank % local_world_size, etc.). Default 0.
     """
     world_size = parallelism_config.world_size
-    need_local = world_size > 1 and parallelism_config.local_world_size == 1
+    need_local = (
+        world_size > 1
+        and parallelism_config.local_world_size == 1
+        and os.environ.get("LOCAL_WORLD_SIZE") != "1"
+    )
     if need_local:
         if torch.cuda.is_available():
             n = min(torch.cuda.device_count(), world_size)

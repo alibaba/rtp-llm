@@ -71,7 +71,7 @@ bool installSighandler() {
     // ignores SIGPIPE at startup, but native libraries loaded later can restore
     // the default disposition.
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
-        return false;
+        RTP_LLM_LOG_WARNING("could not ignore SIGPIPE during native signal setup");
     }
 
     struct sigaction action;

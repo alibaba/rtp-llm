@@ -21,18 +21,6 @@ from rtp_llm.utils.scr.lifecycle import (
     get_template_lifecycle,
     template_phase_active,
 )
-from rtp_llm.utils.scr.template_utils import (
-    ScrParticipantManifest,
-    arrive_scr_checkpoint_barrier,
-    arrive_scr_template_barrier,
-    build_scr_participant_manifest,
-    configure_scr_environment,
-    epsilon_backend_mode,
-    get_scr_barrier_return_time,
-    is_scr_enabled,
-    is_scr_template_phase_active,
-    register_for_scr,
-)
 
 __all__ = [
     "CallbackHook",
@@ -50,3 +38,13 @@ __all__ = [
     "register_for_scr",
     "template_phase_active",
 ]
+
+
+def __getattr__(name: str):
+    # Metrics can import the lifecycle without loading the Epsilon adapter
+    # and its distributed/torch dependencies.
+    if name not in __all__:
+        raise AttributeError(name)
+    from rtp_llm.utils.scr import template_utils
+
+    return getattr(template_utils, name)

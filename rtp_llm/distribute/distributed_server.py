@@ -245,43 +245,61 @@ def get_frontend_world_info(
     current = get_world_info(server_config, distribute_config, parallelism_config)
     pc = parallelism_config
     present = {member.world_rank for member in current.members}
+    layout = RankLayout.from_parallelism_config(pc)
     leaders = dict.fromkeys(
-        member.world_rank // pc.tp_size * pc.tp_size for member in current.members
+        member.world_rank // pc.tp_size * pc.tp_size
+        for member in current.members
+        if layout.coord_of(member.world_rank).pp == 0
     )
     missing = [rank for rank in leaders if rank not in present]
     if not missing:
         return current
-    master_ip, master_port = get_master(distribute_config, pc)
-    timeout = distribute_config.dist_comm_timeout
-    store = TCPStore(
-        host_name=master_ip,
-        port=int(master_port or server_config.start_port) - 1,
-        world_size=None,
-        is_master=False,
-        wait_for_workers=False,
-        **({"timeout": timedelta(seconds=timeout)} if timeout is not None else {}),
-    )
+    budget = distribute_config.gang_timeout_min * 60
+    if distribute_config.dist_comm_timeout is not None:
+        budget = min(budget, distribute_config.dist_comm_timeout)
+    deadline = time.monotonic() + budget
     members = list(current.members)
-    for rank in missing:
-        address = store.get(
-            DistributedServer.REGISTRY_RANK_ADDRESS_KEY + str(rank)
-        ).decode("utf-8")
-        ip, port = split_ip_port(address)
-        if not ip or not 0 < int(port) < 65535:
-            raise ValueError(
-                f"Invalid registered TP leader address for rank {rank}: {address!r}"
+    # A frontend with no route cannot serve its DP lane. Wait for the actual
+    # registration within the configured budget instead of publishing an empty route.
+    while missing:
+        try:
+            master_ip, master_port = get_master(distribute_config, pc)
+            timeout = timedelta(seconds=max(0.001, min(3, deadline - time.monotonic())))
+            store = TCPStore(
+                host_name=master_ip,
+                port=int(master_port or server_config.start_port) - 1,
+                is_master=False,
+                wait_for_workers=False,
+                timeout=timeout,
             )
-        members.append(
-            WorkerInfo(
-                ip=ip,
-                local_rank=rank % pc.local_world_size,
-                world_rank=rank,
-                name=f"rank_{rank}",
-                server_port=int(port),
-                worker_info_port_num=0,
-                remote_server_port=distribute_config.remote_server_port,
-            )
-        )
+            for rank in missing[:]:
+                address = store.get(
+                    DistributedServer.REGISTRY_RANK_ADDRESS_KEY + str(rank)
+                ).decode("utf-8")
+                ip, port = split_ip_port(address)
+                if not ip or not 0 < port < 65535:
+                    raise ValueError(
+                        f"Invalid registered TP leader address for rank {rank}: {address!r}"
+                    )
+                members.append(
+                    WorkerInfo(
+                        ip=ip,
+                        local_rank=rank % pc.local_world_size,
+                        world_rank=rank,
+                        name=f"rank_{rank}",
+                        server_port=port,
+                        worker_info_port_num=0,
+                        remote_server_port=distribute_config.remote_server_port,
+                    )
+                )
+                missing.remove(rank)
+        except (OSError, RuntimeError) as exc:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"Timed out discovering frontend TP leaders {missing}"
+                ) from exc
+            time.sleep(min(remaining, distribute_config.gang_sleep_time))
     return WorldInfo(
         members, current.master, current.self, current.num_nodes, current.initialized
     )

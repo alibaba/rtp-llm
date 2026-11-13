@@ -48,8 +48,15 @@ def _start_native_kmonitor(generation: str) -> None:
     if extension is None:
         return
     start = getattr(extension, "resume_kmonitor_after_scr", None)
-    if start is None or not start():
-        raise RuntimeError("native Kmonitor did not start after SCR identity fixup")
+    # Identity fixup remains mandatory. A monitoring sink failure must
+    # have the same availability impact as it does during ordinary startup.
+    try:
+        if start is not None and start():
+            return
+    except Exception:
+        LOGGER.exception("native Kmonitor failed after SCR identity fixup")
+        return
+    LOGGER.error("native Kmonitor did not start after SCR identity fixup")
 
 
 get_template_lifecycle().register(
@@ -568,7 +575,7 @@ def _synchronize_cuda(device: Any | None = None) -> None:
 
 
 def _prepare_cuda_for_arrival(device: Any | None = None) -> None:
-    """Synchronize registered GPU state, or explicitly record a CPU skip."""
+    """Quiesce initialized CUDA work even if there are no KV tensors to register."""
 
     with _registration_lock:
         gpu_state_registered = any(
@@ -582,7 +589,7 @@ def _prepare_cuda_for_arrival(device: Any | None = None) -> None:
         raise RuntimeError(
             "GPU KV state is registered but torch CUDA is not initialized"
         )
-    if not gpu_state_registered:
+    if not cuda_initialized:
         LOGGER.debug("sCR arrival CUDA prepare skipped for CPU-only participant")
         return
     _synchronize_cuda(device)
@@ -661,6 +668,7 @@ def _scr_timeouts() -> tuple[int, int]:
         # The external shim may override the Python argument with SCR_TIMEOUT.
         # Therefore all supplied timeout aliases must agree; otherwise the
         # caller cannot know which budget the provider will actually use.
+        # The controller must publish one budget consistently across aliases.
         names = (canonical,) + aliases
         supplied = [(name, os.environ[name]) for name in names if name in os.environ]
         if not supplied:
@@ -1054,6 +1062,8 @@ def arrive_scr_checkpoint_barrier(
         # does not perform an unnecessary second synchronize.
         _scr_prepare_local.skip_next = True
         try:
+            # Provider discovery above may load native modules that set signals.
+            ignore_sigpipe("before Epsilon snapshot arrival")
             result = adapter.snapshot_arrival(
                 worker_id=worker_id,
                 worker_num=worker_num,
