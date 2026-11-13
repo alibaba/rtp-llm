@@ -12,6 +12,10 @@ MODE='torch_bf16_v1'
 world=32 if os.environ.get('RTP_LLM_RL_WORLD32')=='1' else 72
 if world==32 and os.environ.get('RTP_LLM_RL_WORLD72')=='1':
  raise RuntimeError('Qwen3.8 world32 and world72 are mutually exclusive')
+batch_tokens=int(os.environ.get('RTP_MAX_BATCH_TOKENS_SIZE','8192')) if world==32 else 8192
+if batch_tokens<=0:
+ raise RuntimeError('Qwen3.8 requires a positive prefill token budget')
+ep_padded_tokens=world*((max(8192,batch_tokens)+7)//8)
 expected={
  'RTP_ARM_BF16_ROPE_BACKEND':MODE,
  'RTP_LLM_RL_MODE':'1',f'RTP_LLM_RL_WORLD{world}':'1',
@@ -20,7 +24,7 @@ expected={
  'RTP_RL_BORROW_SINGLETON_HF_SOURCES':'1',
  'WORLD_SIZE':str(world),'LOCAL_WORLD_SIZE':'4','TP_SIZE':'8','DP_SIZE':str(world//8),
  'EP_SIZE':str(world),'FFN_SP_SIZE':'8','PP_SIZE':'1',
- 'RTP_NCCL_EP_REFERENCE_MAX_PADDED_TOKENS':str(world//8*8192),
+ 'RTP_NCCL_EP_REFERENCE_MAX_PADDED_TOKENS':str(ep_padded_tokens),
  'PYTORCH_ALLOC_CONF':'backend:native,expandable_segments:False',
 }
 if any(os.environ.get(key)!=value for key,value in expected.items()):

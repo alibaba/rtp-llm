@@ -14,7 +14,9 @@ ulimit -c 0
 export RTP_LLM_RL_MODE=1 RTP_LLM_RL_WORLD32=1 RTP_LLM_RL_START_PAUSED=1 RTP_LLM_RL_METADATA_BOOTSTRAP=1
 unset RTP_LLM_RL_WORLD72 RTP_LLM_RL_Q36_EP4 PYTORCH_CUDA_ALLOC_CONF
 export RTP_FIXED_PHYSICAL_EP_LAYOUT=balanced_v1 RTP_RL_BORROW_SINGLETON_HF_SOURCES=1
-export RTP_NCCL_EP_REFERENCE_MAX_PADDED_TOKENS=32768 RTP_ARM_BF16_ROPE_BACKEND=torch_bf16_v1
+export RTP_MAX_BATCH_TOKENS_SIZE="${RTP_MAX_BATCH_TOKENS_SIZE:-8192}"
+export RTP_NCCL_EP_REFERENCE_MAX_PADDED_TOKENS="${RTP_NCCL_EP_REFERENCE_MAX_PADDED_TOKENS:-32768}"
+export RTP_ARM_BF16_ROPE_BACKEND=torch_bf16_v1
 export WORLD_SIZE=32 LOCAL_WORLD_SIZE=4 TP_SIZE=8 DP_SIZE=4 EP_SIZE=32 FFN_SP_SIZE=8 PP_SIZE=1
 export RTP_WORLD_SIZE=32 RTP_LOCAL_WORLD_SIZE=4 RTP_TP_SIZE=8 RTP_DP_SIZE=4 RTP_EP_SIZE=32 RTP_FFN_SP_SIZE=8
 export WORLD_RANK="$RTP_WORLD_RANK"
@@ -51,6 +53,13 @@ uuids=[UUID(x.removeprefix('GPU-')) for x in e['CUDA_VISIBLE_DEVICES'].split(','
 if len(uuids)!=4 or len(set(uuids))!=4:raise ValueError('exactly four physical GPU UUIDs required')
 if not re.fullmatch(r'[a-f0-9]{64}',e['RTP_RL_NATIVE_LIBRARY_SHA256']):raise ValueError('invalid native SHA256')
 if e.get('RTP_LLM_RL_WORLD32_LOCAL_EXPERTS') not in ('0','1'):raise ValueError('select the expert wire format explicitly')
+batch_tokens = int(e['RTP_MAX_BATCH_TOKENS_SIZE'])
+if batch_tokens <= 0:raise ValueError('max batch tokens must be positive')
+# Each attention TP group shards its local tokens across eight ranks before
+# the 32-rank gather. A standalone prefill can use the full 8192-token context.
+required_ep_tokens = 32 * ((max(8192, batch_tokens) + 7) // 8)
+if int(e['RTP_NCCL_EP_REFERENCE_MAX_PADDED_TOKENS']) != required_ep_tokens:
+    raise ValueError(f'EP padded-token cap must match the prefill budget ({required_ep_tokens})')
 for key in ('RTP_RL_BOOTSTRAP_POLICY_MANIFEST','RTP_PHY2LOG_PATH','RLLM_Q38_NCCL_LIBRARY_PATH'):
     if not Path(e[key]).is_file():raise ValueError(f'missing pinned input {key}')
 if not (Path(e['RTP_MODEL_PATH'])/'config.json').is_file():raise ValueError('mounted model metadata is absent')
@@ -66,10 +75,16 @@ args=("$RTP_PYTHON" -m qwen38_world72_entrypoint
   --frontend_server_count 0 --frontend_pre_stop_drain_seconds 0 --dash_sc_grpc_pre_stop_drain_seconds 0 --backend_post_frontend_drain_seconds 0
   --batch_invariant false --enable_fp32_lm_head false --max_seq_len 8192 --kv_cache_mem_mb "${RTP_KV_CACHE_MEM_MB:-4096}"
   --ssm_state_dtype fp32 --seq_size_per_block 8192 --kernel_seq_size_per_block 64
-  --max_context_batch_size "${RTP_MAX_CONTEXT_BATCH_SIZE:-8}" --max_batch_tokens_size 8192
+  --max_context_batch_size "${RTP_MAX_CONTEXT_BATCH_SIZE:-8}" --max_batch_tokens_size "$RTP_MAX_BATCH_TOKENS_SIZE"
   --concurrency_limit "${RTP_CONCURRENCY_LIMIT:-8}" --enable_mixed_continuous_batching false --pdfusion_coord_mode off
   --reuse_cache false --enable_device_cache false --enable_remote_cache false
   --warm_up false --enable_cuda_graph false --enable_native_cuda_graph false)
+if [[ -n "${RTP_PDFUSION_SCHEDULER_MODE+x}" ]]; then
+  args+=(--pdfusion_scheduler_mode "$RTP_PDFUSION_SCHEDULER_MODE")
+fi
+if [[ -n "${RTP_DECODE_PREFILL_RATIO+x}" ]]; then
+  args+=(--decode_prefill_ratio "$RTP_DECODE_PREFILL_RATIO")
+fi
 if [[ "${1:-}" == --print-command && "$#" == 1 ]]; then printf '%q ' "${args[@]}"; printf '\n'; exit 0; fi
 [[ "$#" == 0 ]]
 cd "$RTP_SOURCE"
