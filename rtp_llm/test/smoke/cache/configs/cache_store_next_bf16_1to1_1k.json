@@ -1,0 +1,39 @@
+{
+  "case_id": "cache_store_next_bf16_1to1_1k",
+  "layout": "next",
+  "dtype": "bf16",
+  "source_tp": 1,
+  "target_tp": 1,
+  "tokens": 1024,
+  "block_tokens": 128,
+  "seed": 2026100806,
+  "layers": 4,
+  "heads": 8,
+  "kv_heads": 2,
+  "head_dim": 32,
+  "pool_blocks": 11,
+  "deadline_ms": 30000,
+  "process_timeout_seconds": 90,
+  "linear_key_heads": 4,
+  "linear_value_heads": 8,
+  "linear_head_dim": 16,
+  "conv_kernel": 4,
+  "layer_tags": [
+    "linear",
+    "linear",
+    "linear",
+    "full"
+  ],
+  "linear_pool_blocks": 3,
+  "model_source": {
+    "model": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+    "original": {
+      "layers": 48,
+      "heads": 16,
+      "kv_heads": 2,
+      "head_dim": 256,
+      "full_attention_interval": 4
+    },
+    "weights_loaded": false
+  }
+}

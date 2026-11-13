@@ -1,0 +1,452 @@
+{
+  "case_id": "cache_store_dsv4_fp8_2to2_1k",
+  "model_source": {
+    "model": "deepseek-ai/DeepSeek-V4-Flash",
+    "metadata_url": "https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/raw/main/config.json",
+    "metadata": {
+      "num_hidden_layers": 43,
+      "num_attention_heads": 64,
+      "num_key_value_heads": 1,
+      "head_dim": 512,
+      "index_head_dim": 128,
+      "sliding_window": 128,
+      "compress_ratios": [
+        0,
+        0,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        128,
+        4,
+        0
+      ]
+    },
+    "overrides": {
+      "layers": 4,
+      "heads": 8,
+      "kv_heads": 1,
+      "head_dim": 32,
+      "indexer_head_dim": 16,
+      "block_tokens": 256,
+      "fixed_pool_blocks": 3,
+      "hca_state_pool_blocks": 2,
+      "fixed_pool_use_host_memory": true
+    }
+  },
+  "backend": "tcp",
+  "layout": "dsv4",
+  "source_tp": 2,
+  "target_tp": 2,
+  "source_cp": 1,
+  "tokens": 1024,
+  "seed": 2026100807,
+  "layers": 4,
+  "heads": 8,
+  "kv_heads": 1,
+  "head_dim": 32,
+  "block_tokens": 256,
+  "dtype": "fp8",
+  "indexer_head_dim": 16,
+  "fixed_pool_use_host_memory": true,
+  "fixed_pool_blocks": 3,
+  "hca_state_pool_blocks": 2,
+  "deadline_ms": 15000,
+  "process_timeout_seconds": 65,
+  "expected_layer_tags": [
+    [
+      "swa_kv"
+    ],
+    [
+      "swa_kv"
+    ],
+    [
+      "csa_kv",
+      "indexer_kv",
+      "indexer_state",
+      "csa_state",
+      "swa_kv"
+    ],
+    [
+      "hca_kv",
+      "hca_state",
+      "swa_kv"
+    ]
+  ],
+  "production_layer_descs": [
+    [
+      {
+        "tag": "swa_kv",
+        "dtype": "uint8",
+        "entry_elems": 584,
+        "entry_dtype": "uint8",
+        "cache_type": 4,
+        "is_state_cache": true,
+        "entry_count_mode": 2,
+        "compression_ratio": 128,
+        "block_stride_bytes_alignment": 576,
+        "state_ring_include_gen_num_per_cycle": true,
+        "block_stride_alignment_min_entries": 128,
+        "reuse": {},
+        "cp": {
+          "align_payload": true,
+          "prefill_slice_layout": 2,
+          "slice": 1,
+          "scale_seq_size": true
+        },
+        "memory": {
+          "placement": 2
+        },
+        "capacity": {
+          "charge_to_paged_budget": false,
+          "explicit_block_num": 3
+        }
+      }
+    ],
+    [
+      {
+        "tag": "swa_kv",
+        "dtype": "uint8",
+        "entry_elems": 584,
+        "entry_dtype": "uint8",
+        "cache_type": 4,
+        "is_state_cache": true,
+        "entry_count_mode": 2,
+        "compression_ratio": 128,
+        "block_stride_bytes_alignment": 576,
+        "state_ring_include_gen_num_per_cycle": true,
+        "block_stride_alignment_min_entries": 128,
+        "reuse": {},
+        "cp": {
+          "align_payload": true,
+          "prefill_slice_layout": 2,
+          "slice": 1,
+          "scale_seq_size": true
+        },
+        "memory": {
+          "placement": 2
+        },
+        "capacity": {
+          "charge_to_paged_budget": false,
+          "explicit_block_num": 3
+        }
+      }
+    ],
+    [
+      {
+        "tag": "csa_kv",
+        "dtype": "uint8",
+        "entry_elems": 584,
+        "entry_dtype": "uint8",
+        "cache_type": 3,
+        "is_state_cache": false,
+        "entry_count_mode": 1,
+        "compression_ratio": 4,
+        "block_stride_bytes_alignment": 576
+      },
+      {
+        "tag": "indexer_kv",
+        "dtype": "uint8",
+        "entry_elems": 132,
+        "entry_dtype": "uint8",
+        "cache_type": 3,
+        "is_state_cache": false,
+        "entry_count_mode": 1,
+        "compression_ratio": 4
+      },
+      {
+        "tag": "indexer_state",
+        "dtype": "fp32",
+        "entry_elems": 64,
+        "entry_dtype": "fp32",
+        "cache_type": 4,
+        "is_state_cache": true,
+        "entry_count_mode": 2,
+        "compression_ratio": 4,
+        "state_ring_overlap": 1,
+        "state_ring_include_gen_num_per_cycle": true,
+        "block_stride_alignment_min_entries": 128,
+        "reuse": {},
+        "cp": {
+          "align_payload": true,
+          "prefill_slice_layout": 1,
+          "slice": 2,
+          "scale_seq_size": true
+        },
+        "memory": {
+          "placement": 2
+        },
+        "capacity": {
+          "charge_to_paged_budget": false,
+          "explicit_block_num": 3
+        }
+      },
+      {
+        "tag": "csa_state",
+        "dtype": "fp32",
+        "entry_elems": 128,
+        "entry_dtype": "fp32",
+        "cache_type": 4,
+        "is_state_cache": true,
+        "entry_count_mode": 2,
+        "compression_ratio": 4,
+        "state_ring_overlap": 1,
+        "state_ring_include_gen_num_per_cycle": true,
+        "block_stride_alignment_min_entries": 128,
+        "reuse": {},
+        "cp": {
+          "align_payload": true,
+          "prefill_slice_layout": 1,
+          "slice": 2,
+          "scale_seq_size": true
+        },
+        "memory": {
+          "placement": 2
+        },
+        "capacity": {
+          "charge_to_paged_budget": false,
+          "explicit_block_num": 3
+        }
+      },
+      {
+        "tag": "swa_kv",
+        "dtype": "uint8",
+        "entry_elems": 584,
+        "entry_dtype": "uint8",
+        "cache_type": 4,
+        "is_state_cache": true,
+        "entry_count_mode": 2,
+        "compression_ratio": 128,
+        "block_stride_bytes_alignment": 576,
+        "state_ring_include_gen_num_per_cycle": true,
+        "block_stride_alignment_min_entries": 128,
+        "reuse": {},
+        "cp": {
+          "align_payload": true,
+          "prefill_slice_layout": 2,
+          "slice": 1,
+          "scale_seq_size": true
+        },
+        "memory": {
+          "placement": 2
+        },
+        "capacity": {
+          "charge_to_paged_budget": false,
+          "explicit_block_num": 3
+        }
+      }
+    ],
+    [
+      {
+        "tag": "hca_kv",
+        "dtype": "uint8",
+        "entry_elems": 584,
+        "entry_dtype": "uint8",
+        "cache_type": 3,
+        "is_state_cache": false,
+        "entry_count_mode": 1,
+        "compression_ratio": 128,
+        "block_stride_bytes_alignment": 576
+      },
+      {
+        "tag": "hca_state",
+        "dtype": "fp32",
+        "entry_elems": 64,
+        "entry_dtype": "fp32",
+        "cache_type": 4,
+        "is_state_cache": true,
+        "entry_count_mode": 2,
+        "compression_ratio": 128,
+        "capacity": {
+          "explicit_block_num": 2,
+          "charge_to_paged_budget": false
+        },
+        "tail": {
+          "active_tail_blocks": 1,
+          "validate_tail_blocks": false
+        },
+        "state_ring_include_gen_num_per_cycle": true,
+        "block_stride_alignment_min_entries": 128,
+        "reuse": {
+          "enable_prefix_reuse": false
+        },
+        "cp": {
+          "align_payload": true,
+          "prefill_slice_layout": 1,
+          "slice": 2,
+          "scale_seq_size": true
+        },
+        "memory": {
+          "placement": 2
+        }
+      },
+      {
+        "tag": "swa_kv",
+        "dtype": "uint8",
+        "entry_elems": 584,
+        "entry_dtype": "uint8",
+        "cache_type": 4,
+        "is_state_cache": true,
+        "entry_count_mode": 2,
+        "compression_ratio": 128,
+        "block_stride_bytes_alignment": 576,
+        "state_ring_include_gen_num_per_cycle": true,
+        "block_stride_alignment_min_entries": 128,
+        "reuse": {},
+        "cp": {
+          "align_payload": true,
+          "prefill_slice_layout": 2,
+          "slice": 1,
+          "scale_seq_size": true
+        },
+        "memory": {
+          "placement": 2
+        },
+        "capacity": {
+          "charge_to_paged_budget": false,
+          "explicit_block_num": 3
+        }
+      }
+    ]
+  ],
+  "layer_compress_ratios": [
+    0,
+    0,
+    4,
+    128
+  ],
+  "sliding_window": 128,
+  "gen_num_per_cycle": 0,
+  "logical_blocks": 4,
+  "pool_blocks": 7,
+  "gpu_count": 4,
+  "signature_algorithm": "fnv1a64",
+  "config_adapter": {
+    "kind": "production_AST_metadata_functions_with_test_protocol_objects",
+    "functions": [
+      {
+        "source": "rtp_llm/models/dsv4_kv_cache.py",
+        "functions": [
+          "_make_dsv4_desc",
+          "_is_host_resident",
+          "_use_host_pinned_memory",
+          "apply_dsv4_explicit_pool_blocks",
+          "build_dsv4_kv_cache_spec_descs",
+          "resolve_dsv4_tokens_per_block"
+        ],
+        "source_sha256": "135960d083d109f57c327556ad26561828d28876df5bd1b26a2a6df66dbb5abe"
+      },
+      {
+        "source": "rtp_llm/models/deepseek_v4.py",
+        "functions": [
+          "_dsv4_fixed_pool_use_host_memory",
+          "_dsv4_pool_blocks"
+        ],
+        "source_sha256": "2c352b624753f8e163a78443092c4ceb0406e634b2c774fb2fd02660ccd54e57"
+      },
+      {
+        "source": "github-opensource/rtp_llm/models/deepseek_v4.py",
+        "functions": [
+          "_build_dsv4_kv_cache_config"
+        ],
+        "source_sha256": "2c352b624753f8e163a78443092c4ceb0406e634b2c774fb2fd02660ccd54e57"
+      }
+    ],
+    "metadata_projection": "Flash config cache fields; original DeepSeekV4._build_dsv4_kv_cache_config; no model loader",
+    "native_builder": "CacheConfigCreator::createConfig -> SpecBuilder -> CompressedKVCacheSpec/FixedStateCacheSpec"
+  },
+  "independent_group_layout": {
+    "swa_kv": {
+      "entry_bytes": 584,
+      "entries": 128,
+      "payload_bytes": 74752,
+      "stride_bytes": 74880,
+      "tail_blocks": 2,
+      "host": true
+    },
+    "csa_kv": {
+      "entry_bytes": 584,
+      "entries": 64,
+      "payload_bytes": 37376,
+      "stride_bytes": 37440,
+      "tail_blocks": 0,
+      "host": false
+    },
+    "indexer_kv": {
+      "entry_bytes": 132,
+      "entries": 64,
+      "payload_bytes": 8448,
+      "stride_bytes": 8448,
+      "tail_blocks": 0,
+      "host": false
+    },
+    "indexer_state": {
+      "entry_bytes": 256,
+      "entries": 8,
+      "payload_bytes": 2048,
+      "stride_bytes": 2048,
+      "tail_blocks": 2,
+      "host": true
+    },
+    "csa_state": {
+      "entry_bytes": 512,
+      "entries": 8,
+      "payload_bytes": 4096,
+      "stride_bytes": 4096,
+      "tail_blocks": 2,
+      "host": true
+    },
+    "hca_kv": {
+      "entry_bytes": 584,
+      "entries": 2,
+      "payload_bytes": 1168,
+      "stride_bytes": 1728,
+      "tail_blocks": 0,
+      "host": false
+    },
+    "hca_state": {
+      "entry_bytes": 256,
+      "entries": 128,
+      "payload_bytes": 32768,
+      "stride_bytes": 32768,
+      "tail_blocks": 1,
+      "host": true
+    }
+  },
+  "descriptor_projection": "0|swa_kv|4|584|uint8|1|2|128|0|1|576|128|-1|3|0|2|-1|-1|1|1|1|2\n1|swa_kv|4|584|uint8|1|2|128|0|1|576|128|-1|3|0|2|-1|-1|1|1|1|2\n2|csa_kv|3|584|uint8|0|1|4|0|0|576|0|-1|-1|-1|-1|-1|-1|-1|-1|-1|-1\n2|indexer_kv|3|132|uint8|0|1|4|0|0|0|0|-1|-1|-1|-1|-1|-1|-1|-1|-1|-1\n2|indexer_state|4|64|fp32|1|2|4|1|1|0|128|-1|3|0|2|-1|-1|2|1|1|1\n2|csa_state|4|128|fp32|1|2|4|1|1|0|128|-1|3|0|2|-1|-1|2|1|1|1\n2|swa_kv|4|584|uint8|1|2|128|0|1|576|128|-1|3|0|2|-1|-1|1|1|1|2\n3|hca_kv|3|584|uint8|0|1|128|0|0|576|0|-1|-1|-1|-1|-1|-1|-1|-1|-1|-1\n3|hca_state|4|64|fp32|1|2|128|0|1|0|128|0|2|0|2|1|0|2|1|1|1\n3|swa_kv|4|584|uint8|1|2|128|0|1|576|128|-1|3|0|2|-1|-1|1|1|1|2"
+}
