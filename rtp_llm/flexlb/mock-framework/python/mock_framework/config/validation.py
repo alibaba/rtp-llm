@@ -141,6 +141,8 @@ def compatible(source, expected):
             return "values" in source and compatible(
                 source["values"], expected["values"]
             )
+        if "values" in source:
+            return False
         if not set(expected.get("required", ())) <= set(source.get("required", ())):
             return False
         for name, definition in source.get("properties", {}).items():

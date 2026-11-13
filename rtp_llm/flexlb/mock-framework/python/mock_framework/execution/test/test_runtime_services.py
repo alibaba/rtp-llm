@@ -123,6 +123,8 @@ def test_client_start_fails_without_endpoints(tmp_path):
         assert errors == []
         assert runtime.supervisor.children == ()
 
+    asyncio.run(exercise())
+
 
 def test_topology_write_failure_after_launch_still_reaps_process(tmp_path, monkeypatch):
     from mock_framework.execution import environment

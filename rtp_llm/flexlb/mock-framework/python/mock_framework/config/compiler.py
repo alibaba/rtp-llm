@@ -208,13 +208,13 @@ def _compile_step(raw, registry, ids, previous):
     if type(background) is not bool:
         raise ConfigError(f"{step_id}.background: expected a boolean")
     result_type = definition.returns
-    if result_type.get("variants") == [
+    if isinstance(args, dict) and result_type.get("variants") == [
         {"type": "number"},
         {"type": "array", "items": {"type": "number"}},
     ]:
-        result_type = result_type["variants"][
-            1 if args.get("mode", "interval") == "series" else 0
-        ]
+        mode = args.get("mode", "interval")
+        if not isinstance(mode, Reference):
+            result_type = result_type["variants"][1 if mode == "series" else 0]
     previous[step_id] = None if background else result_type
     return Step(
         id=step_id,

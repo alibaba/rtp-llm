@@ -587,6 +587,12 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(
                         args={"targets": {"ref": "steps.a"}, "mode": "kill"},
                     ),
                     step(
+                        "removed",
+                        "engine/scale",
+                        args={"direction": "in", "role": "prefill", "count": 1},
+                        expect={"count": 1},
+                    ),
+                    step(
                         "restored",
                         "master/restart",
                         args={"targets": {"ref": "steps.a"}},
@@ -634,7 +640,7 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(
     restored = json.loads((current / "endpoints.json").read_text())
     assert original["rpc"] == restored["rpc"] and original["http"] == restored["http"]
     assert len(json.loads((first / "discovery.json").read_text())["p-domain"]) == 1
-    assert len(json.loads((current / "discovery.json").read_text())["p-domain"]) == 2
+    assert len(json.loads((current / "discovery.json").read_text())["p-domain"]) == 1
     process = [
         item
         for item in logs(output)

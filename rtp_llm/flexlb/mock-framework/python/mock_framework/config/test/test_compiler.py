@@ -237,6 +237,13 @@ def test_nullable_reference_preserves_both_possible_types():
     assert not compatible(schema(list[str] | None), schema(list[str]))
 
 
+def test_dictionary_result_cannot_supply_named_arguments():
+    from mock_framework.config.validation import compatible
+    from mock_framework.execution.metrics import MetricArgs
+
+    assert not compatible(schema(dict[str, int]), schema(MetricArgs))
+
+
 def test_typed_records_inside_result_collections_remain_referenceable_values():
     import asyncio
 

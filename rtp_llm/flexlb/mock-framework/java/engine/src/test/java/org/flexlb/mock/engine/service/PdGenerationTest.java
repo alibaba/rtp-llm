@@ -873,6 +873,18 @@ class PdGenerationTest {
         }
     }
 
+    @Test void prefillCanFinishAtItsContextLimit() throws Exception {
+        try (var p = node("prefill", 16, 0, Map.of("settings", Map.of("max_seq_len", 4)));
+                var d = node("decode", 16, 0)) {
+            var request = input(d, 100, 3, 100, 3000, true).toBuilder();
+            request.getGenerateConfigBuilder().setIgnoreEos(true).setMinNewTokens(50);
+            try (var call = new Call(p, request.build())) {
+                call.output(1, true, 1);
+                assertEquals("completed", call.next());
+            }
+        }
+    }
+
     private Harness node(String role, int blocks, int millis) throws Exception { return node(role, blocks, millis, Map.of()); }
 
     private Harness node(String role, int blocks, int millis, Map<String, Object> models) throws Exception {

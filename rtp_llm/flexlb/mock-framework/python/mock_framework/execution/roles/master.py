@@ -141,15 +141,18 @@ class MasterRole:
             ),
         }
 
-    def _prepare_env(self, index, directory, engines):
+    def _prepare_env(self, identity, directory, engines):
         env = prepare_master_env(
             self.role_config["config"],
             engines,
             directory,
-            require_engines=index < self.role_config["deployment"]["replicas"],
+            require_engines=(
+                identity.generation == 0
+                and identity.index < self.role_config["deployment"]["replicas"]
+            ),
         )
         if self.election_env:
-            host = master_host(index)
+            host = master_host(identity.index)
             check_master_ports(host, int(self.election_env["MOCK_MASTER_PORT"]))
             env.update(self.election_env, FLEXLB_ADVERTISED_IP=host)
         return env
@@ -207,7 +210,7 @@ class MasterRole:
             identity,
             self.launch_config,
             configure=lambda directory: self._prepare_env(
-                identity.index, directory, engines_at_start
+                identity, directory, engines_at_start
             ),
         )
         if endpoint is None and self.election_env:

@@ -88,8 +88,7 @@ final class DecodeRpcServer implements AutoCloseable {
                 if (frame.getStage() == RemoteStage.LOAD && call.stage == Stage.ALLOCATED) {
                     startLoad(call);
                 } else if (frame.getStage() == RemoteStage.PREFILL_COMPLETE && call.stage == Stage.LOADED) {
-                    if (!frame.getClientId().equals(call.client) || call.input.getGenerateConfig().getMinNewTokens() > 1
-                            || call.input.getGenerateConfig().getIgnoreEos() && call.input.getGenerateConfig().getMaxNewTokens() != 1)
+                    if (!frame.getClientId().equals(call.client))
                         throw Status.FAILED_PRECONDITION.withDescription("Invalid Prefill-only completion").asRuntimeException();
                     call.stage = Stage.FINISHING;
                     engine.updateRequest(call.request, RtpControl.PREFILL_COMPLETE);
