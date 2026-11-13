@@ -265,6 +265,9 @@ test:cuda13 --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bi
 test:cuda13 --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib64:/opt/conda310/lib/python3.10/site-packages/torch/lib
 test:cuda13 --test_env=RAYON_NUM_THREADS=8
 test:cuda13 --test_env=TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
+# Triton 3.6 selects a separate assembler for SM100+; QSA's direct FP8-to-BF16
+# conversion requires the CUDA 13.2 toolchain rather than the bundled ptxas.
+test:cuda13 --test_env=TRITON_PTXAS_BLACKWELL_PATH=/usr/local/cuda/bin/ptxas
 
 test:cuda12_9 --test_env=DG_JIT_CPP_STANDARD=20
 test:cuda12_9 --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc

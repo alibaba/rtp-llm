@@ -10,13 +10,9 @@ import torch
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.models_py.distributed.rank_layout import Group, RankLayout
-from rtp_llm.ops import (
-    ParallelismConfig,
-    PrefillCPConfig,
-    RoleType,
-    SpeculativeType,
-)
+from rtp_llm.ops import ParallelismConfig, PrefillCPConfig, RoleType, SpeculativeType
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
+from rtp_llm.utils.triton_toolchain import configure_sm120_triton_ptxas
 
 RUN_AFFINITY_TIMEOUT_SEC = 10
 
@@ -218,8 +214,7 @@ def _apply_auto_deepep_config(
         is_multi_gpu = stage_size > 1
         stage_group = layout.group_of(Group.STAGE, parallelism_config.world_rank)
         is_multi_node = (
-            min(stage_group) // local_world_size
-            != max(stage_group) // local_world_size
+            min(stage_group) // local_world_size != max(stage_group) // local_world_size
         )
     else:
         is_single_gpu = world_size == 1
@@ -590,9 +585,13 @@ def load_gpu_nic_affinity() -> bool:
 
 
 def setup_cuda_device_and_accl_env(local_rank: int) -> None:
-    """Apply CUDA device and ACCL env side effects (same as ParallelInfo.from_params)."""
+    """Set the rank's CUDA device, startup compiler, and ACCL environment."""
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
+        if torch.version.hip is None and torch.cuda.get_device_capability(
+            local_rank
+        ) == (12, 0):
+            configure_sm120_triton_ptxas()
 
     if os.environ.get("ACCL_SELECT_PATH") == "1":
         select_port = str(local_rank % 2)

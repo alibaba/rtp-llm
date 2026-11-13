@@ -33,6 +33,12 @@ py_test(
 )
 
 py_test(
+    name = "triton_toolchain_test",
+    srcs = ["triton_toolchain_test.py"],
+    deps = ["//rtp_llm:triton_toolchain"],
+)
+
+py_test(
     name = "jit_cache_compile_test",
     size = "large",
     srcs = ["jit_cache_compile_test.py"],

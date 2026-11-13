@@ -61,6 +61,13 @@ models_py_test(
 )
 
 models_py_test(
+    name = "chunk_optimizations_test",
+    src = "chunk_optimizations_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    testlib = "//rtp_llm/models_py/standalone:auto_model",
+)
+
+models_py_test(
     name = "chunk_paged_gqa_test",
     src = "chunk_paged_gqa_test.py",
     gpu = "RTX_5000_PRO_CU13",

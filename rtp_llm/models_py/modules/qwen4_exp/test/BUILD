@@ -507,6 +507,7 @@ test_suite(
         "//rtp_llm/models_py/kernels/cuda/qsa/test:draft_qsa_metadata_test",
         ":fp8_kv_test",
         "//rtp_llm/models_py/kernels/cuda/qsa/test:chunk_paged_gqa_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:chunk_optimizations_test",
         "//rtp_llm/models_py/kernels/cuda/qsa/test:indexer_tensorcore_test",
         ":prefill_preflight_test",
         "//rtp_llm/models_py/kernels/cuda/qsa/test:grouped_fp8_test",

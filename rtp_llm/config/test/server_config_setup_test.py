@@ -3,6 +3,7 @@ import io
 import os
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import TestCase
@@ -14,6 +15,7 @@ from rtp_llm.config.server_config_setup import (
     configure_kv_cache_event_host_ip_port,
     set_parallelism_config,
     setup_and_configure_server,
+    setup_cuda_device_and_accl_env,
 )
 from rtp_llm.ops import CPRotateMethod, NcclCommConfig, RoleType
 from rtp_llm.server.server_args.server_args import setup_args
@@ -29,6 +31,70 @@ _PINNED_DEVICES = {
 
 def _jit_env(**values):
     return {**_PINNED_DEVICES, "MODEL_TYPE": "fake_model", **values}
+
+
+class CudaStartupToolchainTest(TestCase):
+    def test_sm120_selects_compiler_after_setting_the_local_device(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            compiler = Path(temporary) / "ptxas"
+            compiler.write_text(
+                "#!/bin/sh\nprintf 'Cuda compilation tools, release 13.2, V13.2.51\\n'\n"
+            )
+            compiler.chmod(0o755)
+            selected_devices = []
+
+            def device_capability(rank):
+                self.assertEqual(selected_devices, [rank])
+                return (12, 0)
+
+            with (
+                patch.dict(
+                    os.environ, _jit_env(TRITON_PTXAS_PATH=str(compiler)), clear=True
+                ),
+                patch("torch.cuda.is_available", return_value=True),
+                patch("torch.cuda.set_device", side_effect=selected_devices.append),
+                patch(
+                    "torch.cuda.get_device_capability", side_effect=device_capability
+                ),
+                patch("torch.version.hip", None),
+            ):
+                setup_cuda_device_and_accl_env(3)
+
+                self.assertEqual(
+                    os.environ.get("TRITON_PTXAS_BLACKWELL_PATH"), str(compiler)
+                )
+
+    def test_other_platforms_keep_the_existing_compiler_environment(self):
+        for cuda_available, hip, capability in (
+            (False, None, None),
+            (True, "6.4", None),
+            (True, None, (9, 0)),
+            (True, None, (10, 0)),
+            (True, None, (12, 1)),
+        ):
+            with (
+                self.subTest(
+                    cuda_available=cuda_available, hip=hip, capability=capability
+                ),
+                patch.dict(os.environ, _jit_env(), clear=True),
+                patch("torch.cuda.is_available", return_value=cuda_available),
+                patch("torch.cuda.set_device"),
+                patch(
+                    "torch.cuda.get_device_capability",
+                    side_effect=(
+                        AssertionError("capability queried on CPU/ROCm")
+                        if capability is None
+                        else None
+                    ),
+                    return_value=capability,
+                ),
+                patch("torch.version.hip", hip),
+            ):
+                before = dict(os.environ)
+
+                setup_cuda_device_and_accl_env(0)
+
+                self.assertEqual(dict(os.environ), before)
 
 
 class ServerConfigPortLayoutTest(TestCase):

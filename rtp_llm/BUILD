@@ -170,12 +170,14 @@ py_library(
         "utils/**/*.py",
     ], exclude = _JIT_CACHE_SRCS + _JIT_CACHE_ENV_SRCS + [
         "utils/warmup.py",
+        "utils/triton_toolchain.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
     ]),
     data = glob(["utils/moe_luts/*"]),
     deps = [
         ":jit_cache_env",
+        ":triton_toolchain",
         ":torch",
         ":safetensors",
         #":decord",
@@ -190,6 +192,11 @@ py_library(
 py_library(
     name = "warmup",
     srcs = ["utils/warmup.py"],
+)
+
+py_library(
+    name = "triton_toolchain",
+    srcs = ["utils/triton_toolchain.py"],
 )
 
 py_library(

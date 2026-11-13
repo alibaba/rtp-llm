@@ -84,8 +84,9 @@ def main_kv_scale_view(cache, scale, *, kv_heads, page_size):
     """Validate the native per-token/head K/V dequant scale layout.
 
     The fused native writer currently casts to E4M3 and writes unit scales.
-    Readers consume the stored scale rather than assuming that value, so PD
-    copies and future scaled writers preserve the same cache contract.
+    Generic readers consume the stored scale, preserving scaled cache support.
+    The native prefill caller can explicitly declare unity for the whole cache
+    to specialize away scale reads in the SM120 chunk kernel.
     No tensor contents are read back during capture.
     """
     if cache.dtype == torch.bfloat16:
@@ -291,6 +292,7 @@ def sparse_paged_gqa_attn(
     selected_has_count: bool = False,
     fp16_pv: bool = False,
     validate_selected: bool = True,
+    kv_scale_is_unity: bool = False,
     _validated_plan=None,
 ) -> torch.Tensor:
     """Attend to request-local token indices in a paged main MHA cache.
@@ -312,6 +314,9 @@ def sparse_paged_gqa_attn(
         validate_selected: eager value checks. The model's trusted indexer
             path may skip these after its paged-geometry preflight; shape,
             dtype, strides and device checks still run here.
+        kv_scale_is_unity: producer guarantee that the whole FP8 cache,
+            including reused prefixes, was directly cast without scaling.
+            The SM120 chunk kernel can then omit scale reads and multiplies.
     """
     if q.dim() != 4 or q.dtype != torch.bfloat16 or not q.is_cuda:
         raise ValueError("q must be a rank-4 BF16 CUDA tensor")
@@ -484,6 +489,7 @@ def sparse_paged_gqa_attn(
             scale=scale_view,
             selected_has_count=selected_has_count,
             output_gate=output_gate,
+            unit_scale=kv_scale_is_unity,
         )
     splits = min(8, triton.next_power_of_2(triton.cdiv(selected_width, block_k)))
     from rtp_llm.models_py.kernels.cuda.qsa.grouped_sparse_paged_fmha import (

@@ -84,6 +84,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             else FusedRopeKVCacheDecodeOp
         )
         self.rope_kvcache_impl = rope_writer_cls(attn_configs)
+        # Native RTP writers directly cast FP8 and publish unit K/V scales.
+        # This format also applies to cached prefixes from the same engine.
+        self._main_kv_scale_is_unity = True
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
@@ -899,6 +902,10 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                     page_size=page_size,
                     kv_head_num=self.kv_head_num,
                     validate_selected=not trusted_selected,
+                    kv_scale_is_unity=(
+                        getattr(self, "_main_kv_scale_is_unity", False)
+                        and kv_cache.kv_cache_base.dtype == torch.float8_e4m3fn
+                    ),
                     **self._paged_kv_scale_args(kv_cache),
                 )
             outputs.append(
