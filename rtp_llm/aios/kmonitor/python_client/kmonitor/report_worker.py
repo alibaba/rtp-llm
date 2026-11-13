@@ -90,7 +90,9 @@ class ReportWorker(object):
             for metric_name, metric in self.metrics.items():
                 reported_data = metric.fetch_reported_data()
                 for data_point in reported_data:
-                    event = self.render_event(metric_name, timestamp, data_point)
+                    event = self.render_event(
+                        data_point.metric_name or metric_name, timestamp, data_point
+                    )
                     events.append(event)
         return events
 
