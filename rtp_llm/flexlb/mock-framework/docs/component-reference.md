@@ -8,6 +8,8 @@
 
 `environment.master.config` 使用原生环境变量字符串。`FLEXLB_CONFIG` 是业务 JSON，`MODEL_SERVICE_CONFIG` 是路由 JSON。本地支持单 endpoint 组、P/D/V 分离角色和 gRPC。Runner 使用实验内的发现文件替换路由目标，保留服务 ID、组和角色信息。
 
+Runner 为本轮 Master 写入 `FLEXLB_CONFIG.consistency`，连接实验内的 ZooKeeper。同一轮的 Master 副本和重启进程共用部署身份，实际下发的配置和部署 ID 可在 `effective-config.json` 查看。
+
 P 使用 `mock.scheduler.mode: fifo` 时，Master 使用 NON_BATCH 交付。Master 通过 EnqueueBatch 或 EnqueueGroup 交付时，P 必须开启 `group` 模式。原生批量入口支持 DP rank 0。
 
 ## Engine 配置规则

@@ -10,8 +10,12 @@ import org.flexlb.config.RoutingConfig.EstimatorType;
 import org.flexlb.config.RoutingConfig.PrefillConfig;
 import org.flexlb.util.PriorityNormalizer;
 
-/** Cross-field validation for the public configuration contract. */
+/**
+ * Validates the structure and supported values of the public FlexLB configuration.
+ */
 final class FlexlbConfigValidator {
+    private FlexlbConfigValidator() {
+    }
 
     static void validateDocumentShape(JsonNode document) {
         JsonNode scheduler = document.path("scheduler");
@@ -44,6 +48,63 @@ final class FlexlbConfigValidator {
         }
     }
 
+    static void validate(FlexlbConfig config) {
+        require(config.getEngineGrpc() != null, "engineGrpc", "is required");
+        require(config.getEngineGrpc().getKvCacheMaxInboundMessageBytes() > 0,
+                "engineGrpc.kvCacheMaxInboundMessageBytes", "must be positive");
+        positive(config.getEngineGrpc().getExecutorThreads(), "engineGrpc.executorThreads");
+        positive(config.getEngineGrpc().getExecutorQueueCapacity(), "engineGrpc.executorQueueCapacity");
+        positive(config.getEngineGrpc().getEventLoopThreads(), "engineGrpc.eventLoopThreads");
+        require(config.getSchemaVersion() == FlexlbConfig.CURRENT_SCHEMA_VERSION,
+                "schemaVersion", "must equal " + FlexlbConfig.CURRENT_SCHEMA_VERSION);
+        require(config.getCacheMatching() != null, "cacheMatching", "is required");
+        if (config.getCacheMatching() instanceof KvcmCacheMatchingConfig kvcm) {
+            require(kvcm.getGlobalKvsHostCount() == 0 && !kvcm.isEnableP2p(),
+                    "cacheMatching", "globalKvsHostCount must be 0 and enableP2p false without remote KV loading");
+            positive(kvcm.getRequestTimeoutMs(), "cacheMatching.requestTimeoutMs");
+            positive(kvcm.getLeaderRefreshIntervalMs(), "cacheMatching.leaderRefreshIntervalMs");
+            require(kvcm.getMedium() != null && !kvcm.getMedium().isEmpty() && kvcm.getMedium().stream().allMatch("hbm"::equals),
+                    "cacheMatching.medium", "only local hbm residency is supported");
+        }
+        require(config.getScheduler() != null, "scheduler", "is required");
+        require(config.getScheduler().getType() != null, "scheduler.type", "is required");
+        validateNettyMemoryReporter(config.getScheduler().getNettyMemoryReporter());
+        require(config.getDispatcher() != null, "dispatcher", "is required");
+        require(config.getRouter() != null, "router", "is required");
+        require(config.getWorkerRegistry() != null, "workerRegistry", "is required");
+        require(config.getObservability() != null, "observability", "is required");
+
+        if (!config.isDirect()) {
+            validateQueue(config.queueScheduler());
+        }
+        config.getDispatcher().validateFor(config.getScheduler());
+        validateRequestLifecycle(config.getRequestLifecycle());
+        validateRouting(config.getRouter());
+        validateWorkerRegistry(config.getWorkerRegistry());
+        validateObservability(config.getObservability());
+        require(config.getConsistency() != null, "consistency", "is required");
+        if (config.getConsistency() instanceof ZookeeperConsistencyConfig zookeeper) {
+            require(zookeeper.getConnectString() != null && !zookeeper.getConnectString().isBlank(),
+                    "consistency.connectString", "must not be blank for ZOOKEEPER");
+            positive(zookeeper.getSessionTimeoutMs(), "consistency.sessionTimeoutMs");
+            positive(zookeeper.getConnectionTimeoutMs(), "consistency.connectionTimeoutMs");
+            positive(zookeeper.getMasterRefreshIntervalMs(), "consistency.masterRefreshIntervalMs");
+        }
+        FlexlbConfig.GrpcServerConfig grpc = config.getGrpcServer();
+        require(grpc != null, "grpcServer", "is required");
+        nonNegative(grpc.getExecutorCoreSize(), "grpcServer.executorCoreSize");
+        positive(grpc.getExecutorMaxSize(), "grpcServer.executorMaxSize");
+        positive(grpc.getExecutorQueueSize(), "grpcServer.executorQueueSize");
+        nonNegative(grpc.getReceiveBudgetBytes(), "grpcServer.receiveBudgetBytes");
+        nonNegative(grpc.getMaxReceivingRequests(), "grpcServer.maxReceivingRequests");
+        nonNegative(grpc.getMaxReceivingControlRequests(), "grpcServer.maxReceivingControlRequests");
+        positive(grpc.getReceiveTimeoutMs(), "grpcServer.receiveTimeoutMs");
+        positive(grpc.getShutdownQuietPeriodMs(), "grpcServer.shutdownQuietPeriodMs");
+        nonNegative(grpc.getPermitKeepAliveTimeMs(), "grpcServer.permitKeepAliveTimeMs");
+        require(grpc.getExecutorMaxSize() >= grpc.getExecutorCoreSize(),
+                "grpcServer.executorMaxSize", "must be at least executorCoreSize");
+    }
+
     private static void validateEstimatorShape(JsonNode estimator) {
         if (!estimator.isObject()) {
             return;
@@ -56,6 +117,18 @@ final class FlexlbConfigValidator {
             rejectFieldsExcept(estimator,
                     "router.roles.prefill.executionTimeEstimator", "type");
         }
+    }
+
+    private static void rejectFieldsExcept(
+            JsonNode object, String path, String... allowed) {
+        java.util.Set<String> names = java.util.Set.of(allowed);
+        object.fieldNames().forEachRemaining(field -> {
+            if (!names.contains(field)) {
+                throw new ConfigValidationException(
+                        path + "." + field,
+                        "is not supported by the active mode");
+            }
+        });
     }
 
     private static void validateOrderingShape(JsonNode ordering) {
@@ -100,67 +173,6 @@ final class FlexlbConfigValidator {
         }
     }
 
-    private static void rejectFieldsExcept(
-            JsonNode object, String path, String... allowed) {
-        java.util.Set<String> names = java.util.Set.of(allowed);
-        object.fieldNames().forEachRemaining(field -> {
-            if (!names.contains(field)) {
-                throw new ConfigValidationException(
-                        path + "." + field,
-                        "is not supported by the active mode");
-            }
-        });
-    }
-
-    static void validate(FlexlbConfig config) {
-        require(config.getEngineGrpc() != null, "engineGrpc", "is required");
-        require(config.getEngineGrpc().getKvCacheMaxInboundMessageBytes() > 0,
-                "engineGrpc.kvCacheMaxInboundMessageBytes", "must be positive");
-        positive(config.getEngineGrpc().getExecutorThreads(), "engineGrpc.executorThreads");
-        positive(config.getEngineGrpc().getExecutorQueueCapacity(), "engineGrpc.executorQueueCapacity");
-        positive(config.getEngineGrpc().getEventLoopThreads(), "engineGrpc.eventLoopThreads");
-        require(config.getSchemaVersion() == FlexlbConfig.CURRENT_SCHEMA_VERSION,
-                "schemaVersion", "must equal " + FlexlbConfig.CURRENT_SCHEMA_VERSION);
-        require(config.getCacheMatching() != null, "cacheMatching", "is required");
-        if (config.getCacheMatching() instanceof KvcmCacheMatchingConfig kvcm) {
-            require(kvcm.getGlobalKvsHostCount() == 0 && !kvcm.isEnableP2p(),
-                    "cacheMatching", "globalKvsHostCount must be 0 and enableP2p false without remote KV loading");
-            positive(kvcm.getRequestTimeoutMs(), "cacheMatching.requestTimeoutMs");
-            positive(kvcm.getLeaderRefreshIntervalMs(), "cacheMatching.leaderRefreshIntervalMs");
-            require(kvcm.getMedium() != null && !kvcm.getMedium().isEmpty() && kvcm.getMedium().stream().allMatch("hbm"::equals),
-                    "cacheMatching.medium", "only local hbm residency is supported");
-        }
-        require(config.getScheduler() != null, "scheduler", "is required");
-        require(config.getScheduler().getType() != null, "scheduler.type", "is required");
-        validateNettyMemoryReporter(config.getScheduler().getNettyMemoryReporter());
-        require(config.getDispatcher() != null, "dispatcher", "is required");
-        require(config.getRouter() != null, "router", "is required");
-        require(config.getWorkerRegistry() != null, "workerRegistry", "is required");
-        require(config.getObservability() != null, "observability", "is required");
-
-        if (!config.isDirect()) {
-            validateQueue(config.queueScheduler());
-        }
-        config.getDispatcher().validateFor(config.getScheduler());
-        validateRequestLifecycle(config.getRequestLifecycle());
-        validateRouting(config.getRouter());
-        validateWorkerRegistry(config.getWorkerRegistry());
-        validateObservability(config.getObservability());
-        FlexlbConfig.GrpcServerConfig grpc = config.getGrpcServer();
-        require(grpc != null, "grpcServer", "is required");
-        nonNegative(grpc.getExecutorCoreSize(), "grpcServer.executorCoreSize");
-        positive(grpc.getExecutorMaxSize(), "grpcServer.executorMaxSize");
-        positive(grpc.getExecutorQueueSize(), "grpcServer.executorQueueSize");
-        nonNegative(grpc.getReceiveBudgetBytes(), "grpcServer.receiveBudgetBytes");
-        nonNegative(grpc.getMaxReceivingRequests(), "grpcServer.maxReceivingRequests");
-        nonNegative(grpc.getMaxReceivingControlRequests(), "grpcServer.maxReceivingControlRequests");
-        positive(grpc.getReceiveTimeoutMs(), "grpcServer.receiveTimeoutMs");
-        positive(grpc.getShutdownQuietPeriodMs(), "grpcServer.shutdownQuietPeriodMs");
-        nonNegative(grpc.getPermitKeepAliveTimeMs(), "grpcServer.permitKeepAliveTimeMs");
-        require(grpc.getExecutorMaxSize() >= grpc.getExecutorCoreSize(),
-                "grpcServer.executorMaxSize", "must be at least executorCoreSize");
-    }
-
     private static void validateNettyMemoryReporter(NettyMemoryReporterConfig memory) {
         String path = "scheduler.nettyMemoryReporter";
         require(memory != null, path, "is required");
@@ -172,6 +184,16 @@ final class FlexlbConfigValidator {
                 path + ".autoCapture.cooldownMs", "must be at least 1000 ms");
         require(!capture.isEnabled() || memory.isEnabled(),
                 path + ".autoCapture.enabled", "requires nettyMemoryReporter.enabled=true");
+    }
+
+    private static void require(boolean condition, String field, String message) {
+        if (!condition) {
+            throw new ConfigValidationException(field, message);
+        }
+    }
+
+    private static void positive(long value, String field) {
+        require(value > 0, field, "must be greater than zero");
     }
 
     private static void validateQueue(SchedulerConfig queue) {
@@ -220,6 +242,20 @@ final class FlexlbConfigValidator {
                     "scheduler.ordering.preemption",
                     "is supported only with PRIORITY");
         }
+    }
+
+    private static void nonNegative(long value, String field) {
+        require(value >= 0, field, "must be non-negative");
+    }
+
+    private static void range(long value, long minimum, long maximum, String field) {
+        require(value >= minimum && value <= maximum, field,
+                "must be in [" + minimum + ", " + maximum + "]");
+    }
+
+    private static void range(double value, double minimum, double maximum, String field) {
+        require(Double.isFinite(value) && value >= minimum && value <= maximum, field,
+                "must be finite and in [" + minimum + ", " + maximum + "]");
     }
 
     private static void validateRouting(RoutingConfig routing) {
@@ -345,32 +381,5 @@ final class FlexlbConfigValidator {
                             && !cacheHit.getTheoryLog().getPath().isBlank(),
                     "observability.cacheHit.theoryLog.path", "must not be blank");
         }
-    }
-
-    private static void positive(long value, String field) {
-        require(value > 0, field, "must be greater than zero");
-    }
-
-    private static void nonNegative(long value, String field) {
-        require(value >= 0, field, "must be non-negative");
-    }
-
-    private static void range(long value, long minimum, long maximum, String field) {
-        require(value >= minimum && value <= maximum, field,
-                "must be in [" + minimum + ", " + maximum + "]");
-    }
-
-    private static void range(double value, double minimum, double maximum, String field) {
-        require(Double.isFinite(value) && value >= minimum && value <= maximum, field,
-                "must be finite and in [" + minimum + ", " + maximum + "]");
-    }
-
-    private static void require(boolean condition, String field, String message) {
-        if (!condition) {
-            throw new ConfigValidationException(field, message);
-        }
-    }
-
-    private FlexlbConfigValidator() {
     }
 }

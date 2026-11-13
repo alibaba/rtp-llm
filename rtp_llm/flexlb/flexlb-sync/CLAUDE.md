@@ -147,7 +147,7 @@ received from workers. See `GrpcCacheStatusCheckRunner`.
 
 This module reads configuration from:
 - `FLEXLB_CONFIG`: Load balance strategy, timeouts, batch settings
-- `FLEXLB_SYNC_CONSISTENCY_CONFIG`: ZooKeeper connection, master election
+- `FLEXLB_CONFIG.consistency`: ZooKeeper connection, master election
 - `MODEL_SERVICE_CONFIG`: Backend worker endpoints
 
 Configuration is injected via `ConfigService` interface (implementation in flexlb-common).

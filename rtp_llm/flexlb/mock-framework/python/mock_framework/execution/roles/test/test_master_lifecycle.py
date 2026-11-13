@@ -469,7 +469,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path):
         )
         for node in masters
     ]
-    for key in ("HIPPO_ROLE", "FLEXLB_SYNC_CONSISTENCY_CONFIG", "server_port"):
+    for key in ("deployment_id", "FLEXLB_CONFIG", "server_port"):
         assert all(
             config[key] == effective_configs[0][key] for config in effective_configs
         )

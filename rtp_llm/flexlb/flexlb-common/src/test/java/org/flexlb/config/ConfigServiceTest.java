@@ -18,6 +18,9 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Verifies parsing, validation, and updates of the FlexLB configuration.
+ */
 class ConfigServiceTest {
     @Test
     void shutdownQuietPeriodUsesConfigDefaultsOverridesAndValidation() {
@@ -197,6 +200,21 @@ class ConfigServiceTest {
         assertThrows(ConfigValidationException.class, () -> new ConfigService(Map.of()));
         assertThrows(ConfigValidationException.class,
                 () -> new ConfigService(Map.of(ConfigService.FLEXLB_CONFIG_ENV, "   ")));
+    }
+
+    @Test
+    void parses_and_validates_consistency_configuration() {
+        assertEquals(NoConsistencyConfig.class, ConfigTestFixtures.parse("{}").getConsistency().getClass());
+        var config = (ZookeeperConsistencyConfig) ConfigTestFixtures.parse("""
+                {"consistency":{"type":"ZOOKEEPER","connectString":"localhost:2181","sessionTimeoutMs":6000}}
+                """).getConsistency();
+        assertEquals("localhost:2181", config.getConnectString());
+        assertEquals(6000, config.getSessionTimeoutMs());
+        assertEquals(30000, config.getConnectionTimeoutMs());
+        assertInvalid("{\"consistency\":{\"type\":\"ZOOKEEPER\"}}", "consistency.connectString");
+        assertInvalid("""
+                {"consistency":{"type":"ZOOKEEPER","connectString":"localhost:2181","connectionTimeoutMs":0}}
+                """, "consistency.connectionTimeoutMs");
     }
 
     @Test

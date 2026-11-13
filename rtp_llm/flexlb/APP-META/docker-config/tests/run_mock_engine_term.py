@@ -141,7 +141,6 @@ def main():
             "prefill_endpoint": {"address": "p-domain", "protocol": "grpc"},
             "decode_endpoint": {"address": "d-domain", "protocol": "grpc"}}]})}
         launch_env = dict(os.environ, **master_environment(config, engines, root))
-        launch_env["FLEXLB_SYNC_CONSISTENCY_CONFIG"] = '{"needConsistency":false}'
         launch_env["APP_NAME"] = "FlexLB"
         bin_dir = root / "bin"
         bin_dir.mkdir()

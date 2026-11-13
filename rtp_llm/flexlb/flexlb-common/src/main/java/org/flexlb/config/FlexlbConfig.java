@@ -12,28 +12,20 @@ import lombok.Setter;
 @Getter
 @Setter
 public final class FlexlbConfig {
-
     public static final int CURRENT_SCHEMA_VERSION = 3;
 
     private int schemaVersion = CURRENT_SCHEMA_VERSION;
+
     private CacheMatchingConfig cacheMatching = new LocalSyncCacheMatchingConfig();
     private SchedulerConfig scheduler = new SchedulerConfig();
     private DispatcherConfig dispatcher = new DispatcherConfig();
     private RequestLifecycleConfig requestLifecycle = new RequestLifecycleConfig();
     private RoutingConfig router = new RoutingConfig();
     private WorkerRegistryConfig workerRegistry = new WorkerRegistryConfig();
+    private ConsistencyConfig consistency = new NoConsistencyConfig();
     private ObservabilityConfig observability = new ObservabilityConfig();
     private GrpcServerConfig grpcServer = new GrpcServerConfig();
     private EngineGrpcConfig engineGrpc = new EngineGrpcConfig();
-
-    @Getter
-    @Setter
-    public static final class EngineGrpcConfig {
-        private int kvCacheMaxInboundMessageBytes = 128 * 1024 * 1024;
-        private int executorThreads = 32;
-        private int executorQueueCapacity = 10_000;
-        private int eventLoopThreads = 8;
-    }
 
     @JsonIgnore
     private final InternalRuntimeSettings internalRuntime = new InternalRuntimeSettings();
@@ -44,8 +36,9 @@ public final class FlexlbConfig {
     }
 
     @JsonIgnore
-    public boolean isQueue() {
-        return scheduler.getType() == SchedulerConfig.Type.QUEUE;
+    public boolean allowsPreemption(VictimStage stage) {
+        return isPriorityOrdering() && scheduler.getOrdering().getPreemption() != null
+                && scheduler.getOrdering().getPreemption().allows(stage);
     }
 
     @JsonIgnore
@@ -56,21 +49,22 @@ public final class FlexlbConfig {
     }
 
     @JsonIgnore
-    public boolean allowsPreemption(VictimStage stage) {
-        return isPriorityOrdering() && scheduler.getOrdering().getPreemption() != null
-                && scheduler.getOrdering().getPreemption().allows(stage);
-    }
-
-    /** Resolve the QUEUE decision policy from its single configuration owner. */
-    @JsonIgnore
-    public DecisionPolicyConfig decisionPolicy() {
-        return queueScheduler().getDecision();
+    public boolean isQueue() {
+        return scheduler.getType() == SchedulerConfig.Type.QUEUE;
     }
 
     @JsonIgnore
     public boolean isSingleDecision() {
         return isQueue() && queueScheduler().getDecision().getType()
                 == DecisionPolicyConfig.Type.SINGLE;
+    }
+
+    @JsonIgnore
+    public SchedulerConfig queueScheduler() {
+        if (isQueue()) {
+            return scheduler;
+        }
+        throw new IllegalStateException("queue scheduler configuration is not active");
     }
 
     @JsonIgnore
@@ -89,12 +83,10 @@ public final class FlexlbConfig {
                 "fixed-window decision configuration is not active");
     }
 
+    /** Resolve the QUEUE decision policy from its single configuration owner. */
     @JsonIgnore
-    public SchedulerConfig queueScheduler() {
-        if (isQueue()) {
-            return scheduler;
-        }
-        throw new IllegalStateException("queue scheduler configuration is not active");
+    public DecisionPolicyConfig decisionPolicy() {
+        return queueScheduler().getDecision();
     }
 
     @JsonIgnore
@@ -104,6 +96,18 @@ public final class FlexlbConfig {
             return ordering;
         }
         throw new IllegalStateException("priority ordering configuration is not active");
+    }
+
+    /**
+     * Configures the Master client transport to Engines.
+     */
+    @Getter
+    @Setter
+    public static final class EngineGrpcConfig {
+        private int kvCacheMaxInboundMessageBytes = 128 * 1024 * 1024;
+        private int executorThreads = 32;
+        private int executorQueueCapacity = 10_000;
+        private int eventLoopThreads = 8;
     }
 
     @Getter

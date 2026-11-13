@@ -323,12 +323,17 @@ Local file discovery uses `MODEL_SERVICE_CONFIG.discovery_file`, pointing to a
 JSON mapping of service domains to HTTP host:port lists. Production discovery
 providers continue to resolve their service domains.
 
-Master configuration uses `FLEXLB_CONFIG`, `MODEL_SERVICE_CONFIG`,
-`FLEXLB_SYNC_CONSISTENCY_CONFIG`, and `LOG_LEVEL`. Spring does not bind environment
+Master configuration uses `FLEXLB_CONFIG`, `MODEL_SERVICE_CONFIG`, and `LOG_LEVEL`. Spring does not bind environment
 variables. Configure ports, RPC transport and logging with their standard
 command-line properties, such as `--server.port` and
 `--flexlb.engine-grpc.enqueue-timeout-ms`.
-HA currently retains `HIPPO_ROLE` as its existing election group identifier.
+ZooKeeper election defaults to `FLEXLB_CONFIG.consistency.type=NONE`.
+Set `"consistency": {"type": "ZOOKEEPER", "connectString": "zk:2181"}` to enable it.
+All replicas in one election group must share the same deployment identity. Use
+`SPECTRUM_WORKSPACE_ID`, `SPECTRUM_APPLICATION_NAME`, and `SPECTRUM_DEPLOYMENT_NAME`,
+or `BIZ_NAME`, `DEPLOYMENT_NAME`, and `ZONE_NAME`. When migrating an existing
+deployment, compare the resulting ZooKeeper path with the previous one before
+rolling replicas. If the path changes, switch the entire election group together.
 
 The gRPC server executor, shutdown quiet period and HTTP/2 keepalive policy are configured in `FLEXLB_CONFIG`:
 
@@ -527,7 +532,7 @@ own request. This does not provide cross-node deduplication for frontend retries
   cost formulas/admission thresholds under `router.roles`.
 - **Traffic group selection**: `router.groupSelector` inside the same document.
 - **Backend topology**: `MODEL_SERVICE_CONFIG`.
-- **ZooKeeper consistency**: `FLEXLB_SYNC_CONSISTENCY_CONFIG`.
+- **ZooKeeper consistency**: `FLEXLB_CONFIG.consistency`.
 
 ## Monitoring
 

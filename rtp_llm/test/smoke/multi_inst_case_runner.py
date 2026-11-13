@@ -175,7 +175,6 @@ class SeparatedCaseRunner(CaseRunner):
                 "FLEXLB_LOG_PATH": str(log_dir),
                 "FLEXLB_CONFIG": json.dumps(config),
                 "MODEL_SERVICE_CONFIG": json.dumps(route),
-                "FLEXLB_SYNC_CONSISTENCY_CONFIG": '{"needConsistency":false}',
                 "RTP_LLM_TRACE_CONFIG": '{"enabled":false}',
             }
         )

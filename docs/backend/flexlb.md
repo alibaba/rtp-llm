@@ -74,24 +74,9 @@ FlexLB requires some environment variables to be set:
 
 ```bash
 # Load balancing configuration
-export WHALE_MASTER_CONFIG='{
-    "deploy":"DISAGGREGATED",
-    "loadBalanceStrategy":"ROUND_ROBIN_LOWEST_CONCURRENCY",
-    "prefillBatchWaitTimeMs":100,
-    "kvCache":"LOCAL_STATIC",
-    "staticCacheBlockSize":500,
-    "batchSize":1,
-    "prefillLbTimeoutMs":300,
-    "prefillGenerateTimeoutMs": 5000,
-    "enableGrpcPrefillMaster": false
-}'
-
-# ZooKeeper consistency configuration
-# Set needConsistency to true if you want to test with ZooKeeper (requires ZK on localhost:2181)
-export FLEXLB_SYNC_CONSISTENCY_CONFIG='{
-    "needConsistency":false,
-    "masterElectType":"ZOOKEEPER",
-    "zookeeperConfig":{"zkHost":"127.0.0.1:2181","zkTimeoutMs":10000}
+export FLEXLB_CONFIG='{
+    "requestLifecycle": {"request": {"timeoutMs": 60000}},
+    "consistency": {"type": "NONE"}
 }'
 
 # Backend model service configuration
@@ -106,6 +91,10 @@ export MODEL_SERVICE_CONFIG='{
     "service_id": "aigc.text-generation.generation.engine_service"
 }'
 ```
+
+ZooKeeper election defaults to `NONE`. To enable it, add
+`"consistency": {"type": "ZOOKEEPER", "connectString": "127.0.0.1:2181"}`
+to `FLEXLB_CONFIG` and set the deployment identity shared by the Master replicas.
 
 ### 1. Build FlexLB
 

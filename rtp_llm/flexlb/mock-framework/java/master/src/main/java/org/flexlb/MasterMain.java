@@ -1,6 +1,7 @@
 package org.flexlb;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.flexlb.config.DeploymentIdentity;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.mock.protocol.ControlServer;
 import org.flexlb.mock.protocol.Role;
@@ -45,9 +46,6 @@ public final class MasterMain {
         var directory = Path.of(required("MOCK_OUTPUT_DIR"));
         int port = Integer.parseInt(required("MOCK_MASTER_PORT"));
         String host = required("FLEXLB_ADVERTISED_IP");
-        var election = json.readTree(required("FLEXLB_SYNC_CONSISTENCY_CONFIG"));
-        if (!election.path("needConsistency").asBoolean())
-            throw new IllegalArgumentException("Master requires ZooKeeper election");
         SpringProperties.setFlag(AbstractEnvironment.IGNORE_GETENV_PROPERTY_NAME);
         org.flexlb.OpenTelemetryBootstrap.configureFromEnvironment();
         var application = new SpringApplication(Application.class);
@@ -55,12 +53,16 @@ public final class MasterMain {
         var context =
                 application.run(
                         "--server.address=" + host,
+                        "--flexlb.advertised-ip=" + host,
                         "--server.port=" + port,
                         "--management.server.port=" + port,
                         "--flexlb.log.path=" + directory.resolve("logs"));
         try {
             var lifecycle = context.getBean(ApplicationLifecycle.class);
             var consistency = context.getBean(LBStatusConsistencyService.class);
+            if (!consistency.isNeedConsistency())
+                throw new IllegalArgumentException("Master requires ZooKeeper election");
+            var deploymentId = context.getBean(DeploymentIdentity.class).getDeploymentId();
             var workers = context.getBean(WorkerDirectory.class);
             lifecycle.online();
             long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(30);
@@ -125,10 +127,8 @@ public final class MasterMain {
                                         port,
                                         "advertised_ip",
                                         host,
-                                        "FLEXLB_SYNC_CONSISTENCY_CONFIG",
-                                        election,
-                                        "HIPPO_ROLE",
-                                        required("HIPPO_ROLE")));
+                                        "deployment_id",
+                                        deploymentId));
                 Runtime.getRuntime()
                         .addShutdownHook(
                                 new Thread(

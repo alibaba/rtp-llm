@@ -124,14 +124,18 @@ class MasterRole:
         self._lock = asyncio.Lock()
 
     def configure_election(self, connect):
+        native = json.loads(self.role_config["config"]["FLEXLB_CONFIG"])
+        native["consistency"] = {
+            "type": "ZOOKEEPER",
+            "connectString": connect,
+            "sessionTimeoutMs": 6000,
+            "connectionTimeoutMs": 6000,
+        }
         self.election_env = {
-            "HIPPO_ROLE": "mock-" + uuid.uuid4().hex,
-            "FLEXLB_SYNC_CONSISTENCY_CONFIG": json.dumps(
-                {
-                    "needConsistency": True,
-                    "zookeeperConfig": {"zkHost": connect, "zkTimeoutMs": 6000},
-                }
-            ),
+            "FLEXLB_CONFIG": json.dumps(native, ensure_ascii=False),
+            "SPECTRUM_WORKSPACE_ID": "mock",
+            "SPECTRUM_APPLICATION_NAME": "flexlb",
+            "SPECTRUM_DEPLOYMENT_NAME": uuid.uuid4().hex,
             "MOCK_MASTER_PORT": str(
                 master_port(self.role_config["deployment"]["replicas"])
             ),
