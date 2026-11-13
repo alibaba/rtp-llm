@@ -73,25 +73,39 @@ class LanguageCppEngine(BaseEngine):
             self.token_processor,
             self.mm_process_engine,
         )
+        self._service_started = False
 
     @timer_wrapper(description="start async engine")
     @override
     def _start(self) -> None:
         start_time = time.time()
+        # Phase 1: build engine state.  Listeners start in start_service(),
+        # which every deployment calls right after its startup barrier.
         self.rtp_llm_op_.start()
         consume_s = time.time() - start_time
         logging.info(f"start rtp_llm_op_ took {consume_s:.2f}s")
-        # Start HTTP server for language model tasks
-        if (
-            self.config.task_type == TaskType.LANGUAGE_MODEL
-            and self.world_info is not None
-        ):
+
+    def gpu_cache_tensors(self):
+        return self.rtp_llm_op_.gpu_cache_tensors()
+
+    def start_service(self) -> None:
+        """Phase 2: bind the RPC/HTTP listeners after the startup barrier."""
+        if self._service_started:
+            return
+        self.rtp_llm_op_.start_service()
+        if self.config.task_type == TaskType.LANGUAGE_MODEL and self.world_info is not None:
             self.rtp_llm_op_.ft_op.start_http_server(
                 self.model.model_weights_loader,
                 self.world_info,
                 self.tokenizer,
                 None,  # chat_renderer is not needed for HTTP server startup
             )
+        self._service_started = True
+
+    def update_runtime_endpoints(self, runtime_config, world_info) -> None:
+        """Apply restore-time endpoint discovery before deferred listeners start."""
+        self.world_info = world_info
+        self.rtp_llm_op_.update_runtime_endpoints(runtime_config)
 
     @override
     def _stop(self) -> None:

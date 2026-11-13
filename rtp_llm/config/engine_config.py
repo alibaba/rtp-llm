@@ -34,6 +34,25 @@ from rtp_llm.ops import (
     SpeculativeExecutionConfig,
     VitSeparation,
 )
+from rtp_llm.utils.scr import network
+from rtp_llm.utils.scr.network import cache_store_advertise_ip
+
+
+def resolve_pd_role_type(py_env_configs) -> RoleType:
+    """Return the engine PD role for this process.
+
+    ``VIT_SEPARATION=ROLE`` only says that VIT runs as its own role somewhere in
+    the deployment.  A prefill or decode container must keep its own role, or
+    the engine would take VIT-only code paths (and skip the PD role setup) while
+    the launcher still treats it as a prefill/decode worker.
+    """
+    launcher_role = py_env_configs.role_config.role_type
+    if (
+        py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
+        and launcher_role == RoleType.VIT
+    ):
+        return RoleType.VIT
+    return launcher_role
 
 
 @dataclass
@@ -194,15 +213,11 @@ class EngineConfig:
 
         derive_grammar_compile_threads(grammar_config, parallelism_config)
 
-        # Setup pd_sep_config role_type based on vit_separation
-        if (
-            py_env_configs.vit_config.vit_separation
-            == VitSeparation.VIT_SEPARATION_ROLE
-        ):
-            pd_sep_config.role_type = RoleType.VIT
-        else:
-            # role_config.role_type property automatically converts string to RoleType enum
-            pd_sep_config.role_type = py_env_configs.role_config.role_type
+        # Setup pd_sep_config role_type.  VIT_SEPARATION=ROLE describes the
+        # deployment, not this process: only the container that actually runs
+        # the VIT role reports RoleType.VIT.  A prefill/decode container keeps
+        # its own role even when the flag is set for the whole deployment.
+        pd_sep_config.role_type = resolve_pd_role_type(py_env_configs)
 
         # Mirror role into parallelism_config so model construction can read it
         # via parallelism_config.role_type instead of os.environ["ROLE_TYPE"].
@@ -261,7 +276,10 @@ class EngineConfig:
 
 
 def update_worker_addrs(
-    runtime_config: RuntimeConfig, parallelism_config: ParallelismConfig, world_info
+    runtime_config: RuntimeConfig,
+    parallelism_config: ParallelismConfig,
+    world_info,
+    real_ip_by_vip: dict[str, str] | None = None,
 ) -> None:
     """Update worker addresses in runtime_config based on gang info."""
     if world_info is None:
@@ -272,6 +290,9 @@ def update_worker_addrs(
         return
     worker_addrs = []
     worker_grpc_addrs = []
+    advertise_ip = cache_store_advertise_ip(world_info, parallelism_config)
+    if network.enabled(parallelism_config) and real_ip_by_vip is None:
+        raise ValueError("SCR VIP CacheStore requires a current VIP-to-real-IP mapping")
     local_rank = parallelism_config.local_rank
     for member in world_info.members:
         if (
@@ -281,8 +302,13 @@ def update_worker_addrs(
             )
             == parallelism_config.dp_rank
         ):
+            cache_ip = (
+                real_ip_by_vip[member.ip]
+                if real_ip_by_vip is not None
+                else advertise_ip or member.ip
+            )
             worker_addrs.append(
-                f"{member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}"
+                f"{cache_ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}"
             )
             worker_grpc_addrs.append(f"{member.ip}:{member.rpc_server_port}")
             logging.info(

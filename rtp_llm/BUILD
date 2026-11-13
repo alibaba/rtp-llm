@@ -172,6 +172,8 @@ py_library(
         "utils/warmup.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
+        "utils/scr/test/*.py",
+        "utils/scr/test/**/*.py",
     ]),
     data = glob(["utils/moe_luts/*"]),
     deps = [
@@ -373,6 +375,7 @@ py_library(
     srcs = glob([
         "vipserver/*.py",
     ]),
+    deps = [":requests"],
 )
 
 filegroup(

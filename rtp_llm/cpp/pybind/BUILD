@@ -132,6 +132,7 @@ cc_library(
     ],
     deps = [
         "//rtp_llm/cpp/api_server:http_api_server",
+        "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/model_rpc:model_rpc_server",
         "//rtp_llm/cpp/models:logits_processor",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
@@ -139,6 +140,7 @@ cc_library(
         "//rtp_llm/cpp/telemetry",
         "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
         ":config_extract",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:signal_utils",
         "//:rtp_compute_ops",
         "@xgrammar//:xgrammar",

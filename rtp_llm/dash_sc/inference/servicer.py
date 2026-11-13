@@ -1770,6 +1770,10 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             f"invalid {field_name}: grammar validation or compilation failed",
         )
 
+    def restore_fixup(self, context) -> None:
+        """Refresh the pod IP used by the request_id factory after a restore."""
+        self._ip = context.pod_ip
+
     def _record_and_report_chunk(
         self,
         record: GrpcAccessRecord,

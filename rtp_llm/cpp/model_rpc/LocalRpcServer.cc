@@ -262,14 +262,6 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     }
     RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s", maga_init_params_.misc_config.aux_string.c_str());
     propose_maga_init_params_ = propose_params.get();
-    if (maga_init_params_.parallelism_config.tp_rank == 0
-        && !maga_init_params_.runtime_config.worker_grpc_addrs.empty()) {
-        tp_broadcaster_ = std::make_shared<BroadcastManager>(maga_init_params_.runtime_config.worker_grpc_addrs);
-        if (!tp_broadcaster_->init()) {
-            RTP_LLM_LOG_WARNING("failed to init TP broadcaster");
-            tp_broadcaster_.reset();
-        }
-    }
 
     const auto mm_decision = resolveAndLogMMProcessorKind(maga_init_params.model_config_.mm_model_config.is_multimodal,
                                                           maga_init_params.vit_config.vit_separation,
@@ -289,7 +281,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         pybind11::gil_scoped_release release;
         RTP_LLM_CHECK_WITH_INFO(!PyGILState_Check(),
                                 "running engine init with gil held may cause program hang, please check");
-        engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
+        engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params), /*defer_loop_start=*/true));
     }
     if (mm_kind == MMProcessorKind::LOCAL) {
         mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
@@ -304,6 +296,35 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     }
 
     return grpc::Status::OK;
+}
+
+void LocalRpcServer::updateRuntimeEndpoints(const RuntimeConfig& runtime_config) {
+    if (services_started_) {
+        RTP_LLM_FAIL("runtime endpoints can only be updated before services start");
+    }
+    maga_init_params_.runtime_config.worker_addrs      = runtime_config.worker_addrs;
+    maga_init_params_.runtime_config.worker_grpc_addrs = runtime_config.worker_grpc_addrs;
+}
+
+void LocalRpcServer::startServices() {
+    if (services_started_) {
+        return;
+    }
+    // Open the multimodal RDMA reader before starting the engine loop.
+    if (mm_processor_) {
+        mm_processor_->startTransport();
+    }
+    RTP_LLM_CHECK_WITH_INFO(engine_ != nullptr, "RPC engine is missing");
+    THROW_IF_STATUS_ERROR(engine_->startLoop());
+    if (maga_init_params_.parallelism_config.tp_rank == 0
+        && !maga_init_params_.runtime_config.worker_grpc_addrs.empty()) {
+        tp_broadcaster_ = std::make_shared<BroadcastManager>(maga_init_params_.runtime_config.worker_grpc_addrs);
+        if (!tp_broadcaster_->init()) {
+            RTP_LLM_LOG_WARNING("failed to init TP broadcaster");
+            tp_broadcaster_.reset();
+        }
+    }
+    services_started_ = true;
 }
 
 grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorInfo error_info) {

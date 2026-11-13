@@ -110,6 +110,28 @@ public:
         int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
 
     GroupedCacheLayerLayout allLayerCacheBase() const;
+    // SCR: every owning GPU KV allocation, including speculative caches, must be
+    // registered with the checkpoint so a restore rebinds the captured device memory.
+    std::vector<torch::Tensor> gpuCacheTensors() const {
+        std::vector<torch::Tensor> tensors;
+        if (!coordinator_manager_) {
+            return tensors;
+        }
+        const auto layout = coordinator_manager_->allLayerCacheBase();
+        for (const auto& group_config : layout.topology().groups()) {
+            for (const auto& buffer : layout.group(group_config.tag).layers()) {
+                // Pinned-host groups (CacheMemoryPlacement::HOST_PINNED) are not
+                // device state; registering them would make the checkpoint
+                // consumer reject the whole KV hint.
+                for (const auto* tensor : {&buffer.kv_addr, &buffer.kv_scale_addr}) {
+                    if (tensor->defined() && tensor->is_cuda()) {
+                        tensors.push_back(*tensor);
+                    }
+                }
+            }
+        }
+        return tensors;
+    }
 
     // for main model; grouped layout preserves layers that own multiple cache groups
     GroupedCacheLayerLayout getMainModelGroupedCacheLayerLayout() const;

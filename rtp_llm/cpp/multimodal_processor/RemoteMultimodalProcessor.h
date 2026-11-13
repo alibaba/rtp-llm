@@ -24,7 +24,9 @@ public:
     RemoteMultimodalProcessor(const MMModelConfig&         mm_model_config,
                               int64_t                      max_seq_len,
                               kmonitor::MetricsReporterPtr metrics_reporter = nullptr):
-        RemoteMultimodalProcessor(mm_model_config, max_seq_len, grpcOnlyTransportConfig(), metrics_reporter) {}
+        RemoteMultimodalProcessor(mm_model_config, max_seq_len, grpcOnlyTransportConfig(), metrics_reporter) {
+        startTransport();
+    }
 
     RemoteMultimodalProcessor(const MMModelConfig&         mm_model_config,
                               int64_t                      max_seq_len,
@@ -32,7 +34,14 @@ public:
                               kmonitor::MetricsReporterPtr metrics_reporter = nullptr,
                               int                          device_id        = -1):
         MultimodalProcessor(py::none(), mm_model_config, max_seq_len, metrics_reporter),
-        output_transport_(createMMRemoteOutputTransport(transport_config, metrics_reporter, device_id)) {}
+        transport_config_(transport_config),
+        device_id_(device_id) {}
+
+    void startTransport() override {
+        if (!output_transport_) {
+            output_transport_ = createMMRemoteOutputTransport(transport_config_, metrics_reporter_, device_id_);
+        }
+    }
 
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
                                                       std::string                                 ip_port    = "",
@@ -87,6 +96,8 @@ private:
     }
 
     std::unique_ptr<MMRemoteOutputTransport> output_transport_;
+    MMTransportConfig                       transport_config_;
+    int                                     device_id_;
 };
 
 }  // namespace rtp_llm

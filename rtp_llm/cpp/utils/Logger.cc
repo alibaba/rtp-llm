@@ -14,14 +14,47 @@
  * limitations under the License.
  */
 
+#include <arpa/inet.h>
+#include <atomic>
 #include <filesystem>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
+#include <vector>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "autil/NetUtil.h"
 
 namespace rtp_llm {
+
+namespace {
+// One immutable override covers every Logger, including lazy instances created
+// after restore. The constructor-cached IP remains the normal-startup fallback.
+// Publication is a single atomic pointer swap, so the logging path never takes
+// a reference count; the storage keeps every published string alive for the
+// process lifetime (restores are rare and bounded).
+std::mutex                                      runtime_ip_mutex;
+std::vector<std::unique_ptr<const std::string>> runtime_ip_storage;
+std::atomic<const std::string*>                 runtime_ip{nullptr};
+}  // namespace
+
+void Logger::refreshRuntimeIdentity(const std::string& ip) {
+    in_addr ipv4;
+    in6_addr ipv6;
+    if (ip.find('\0') != std::string::npos
+        || (inet_pton(AF_INET, ip.c_str(), &ipv4) != 1 && inet_pton(AF_INET6, ip.c_str(), &ipv6) != 1)) {
+        throw std::invalid_argument("SCR logger runtime IP must be a numeric IP address");
+    }
+    std::lock_guard<std::mutex> lock(runtime_ip_mutex);
+    runtime_ip_storage.push_back(std::make_unique<const std::string>(ip));
+    runtime_ip.store(runtime_ip_storage.back().get(), std::memory_order_release);
+}
+
+std::string Logger::runtimeIp() const {
+    const auto* current = runtime_ip.load(std::memory_order_acquire);
+    return current ? *current : ip_;
+}
 
 bool initLogger(std::string log_file_path) {
     std::cerr << "initLogger log_file_path: " << log_file_path << std::endl;

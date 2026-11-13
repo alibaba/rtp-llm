@@ -864,15 +864,11 @@ PrefillBatchRpcServer::~PrefillBatchRpcServer() {
     }
 }
 
-grpc::Status PrefillBatchRpcServer::init(const EngineInitParams&                                maga_init_params,
-                                         std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                                         py::object                                             mm_process_engine) {
-    auto ret = PrefillRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
-    if (!ret.ok()) {
-        return ret;
+void PrefillBatchRpcServer::startServices() {
+    PrefillRpcServer::startServices();
+    if (!priority_cancel_executor_) {
+        initThreadPools();
     }
-    initThreadPools();
-    return grpc::Status::OK;
 }
 
 // ---------------------------------------------------------------------------

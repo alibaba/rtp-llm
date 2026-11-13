@@ -5,18 +5,19 @@ using namespace std;
 
 namespace rtp_llm {
 
-grpc::Status RemoteRpcServer::init(const EngineInitParams&                                maga_init_params,
-                                   std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                                   py::object                                             mm_process_engine) {
-    rtp_llm::ProposeModelEngineInitParams* propose_params_ptr = propose_params ? propose_params.get() : nullptr;
-    auto ret = LocalRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
-    if (!ret.ok()) {
-        return ret;
+void RemoteRpcServer::startServices() {
+    if (!resource_.cache_store) {
+        // Resolve host/peer identity only after the controller releases the
+        // template barrier. This keeps the source host's identity and
+        // cache-store TCP/RDMA resources out of the restored service.
+        initLocalHostInfo();
+        initLocalPeerInfo();
+        initCacheStore(maga_init_params_);
     }
-    initLocalHostInfo();
-    initLocalPeerInfo();
-    initCacheStore(maga_init_params, propose_params_ptr);
-    return grpc::Status::OK;
+    // ACCL RDMA initialization calls setenv/unsetenv; finish it before starting
+    // the engine. On glibc 2.32, concurrent getenv can traverse an environment
+    // pointer array freed by setenv. Both stages must remain after the SCR barrier.
+    LocalRpcServer::startServices();
 }
 
 void RemoteRpcServer::initLocalHostInfo() {
@@ -56,8 +57,7 @@ void RemoteRpcServer::initLocalPeerInfo() {
     RTP_LLM_LOG_INFO("%s", worker_grpc_info.c_str());
 }
 
-void RemoteRpcServer::initCacheStore(const EngineInitParams&                init_params,
-                                     rtp_llm::ProposeModelEngineInitParams* propose_params) {
+void RemoteRpcServer::initCacheStore(const EngineInitParams& init_params) {
     RTP_LLM_LOG_INFO("init_params.role_type : %d", init_params.pd_sep_config.role_type);
 
     if (init_params.pd_sep_config.role_type != RoleType::PREFILL
@@ -84,14 +84,12 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
                      params.listen_port,
                      params.rdma_listen_port,
                      params.rdma_mode);
-    cache_store_ = NormalCacheStore::createNormalCacheStore(params);
-    RTP_LLM_CHECK_WITH_INFO(cache_store_ != nullptr, "cache store init failed");
+    auto cache_store = NormalCacheStore::createNormalCacheStore(params);
+    RTP_LLM_CHECK_WITH_INFO(cache_store != nullptr, "cache store init failed");
+    cache_manager->setCacheStore(cache_store);
+    cache_manager->regUserMr(init_params.model_id, cache_store);
+    resource_.cache_store = std::move(cache_store);
     RTP_LLM_LOG_INFO("cache store init success");
-
-    cache_manager->setCacheStore(cache_store_);
-    cache_manager->regUserMr(maga_init_params_.model_id, cache_store_);
-
-    resource_.cache_store = std::dynamic_pointer_cast<NormalCacheStore>(cache_store_);
 }
 
 }  // namespace rtp_llm
