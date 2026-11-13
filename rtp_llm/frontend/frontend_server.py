@@ -764,7 +764,33 @@ class FrontendServer(object):
         complete_response = await self._collect_complete_response_and_record_access_log(
             req, res
         )
+        self._record_awi_reuse(raw_request, complete_response)
         return ORJSONResponse(content=complete_response)
+
+    @staticmethod
+    def _record_awi_reuse(raw_request: RawRequest, complete_response: Any) -> None:
+        """Record the engine-reported KV reuse for this exact HTTP request."""
+        try:
+            headers = extract_request_headers(getattr(raw_request, "headers", None))
+            external_id = headers.get("x-awi-request-id")
+            if not external_id or not isinstance(complete_response, dict):
+                return
+            aux_info = complete_response.get("aux_info")
+            if isinstance(aux_info, dict):
+                reuse_len = aux_info.get("reuse_len", 0)
+            else:
+                reuse_len = getattr(aux_info, "reuse_len", 0)
+            from rtp_llm.awi_telemetry import get_telemetry
+
+            get_telemetry().record(
+                "reuse",
+                {
+                    "request_id": str(external_id),
+                    "hit_tokens": max(0, int(reuse_len or 0)),
+                },
+            )
+        except Exception:  # noqa: BLE001 - observation must not block data
+            logging.debug("awi reuse observation failed", exc_info=True)
 
     async def awi_generate(self, req: Dict[str, Any], raw_request: RawRequest):
         import zlib

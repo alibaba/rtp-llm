@@ -25,6 +25,7 @@ CORRELATION_HEADER_NAMES = (
     "x-dashscope-requestid",
     "x-request-id",
     "dashscope-request-id",
+    "x-awi-request-id",
 )
 TRACE_HEADER_NAMES = (
     "x-trace-id",
