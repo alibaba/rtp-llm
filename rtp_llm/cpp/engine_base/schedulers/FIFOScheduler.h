@@ -103,7 +103,8 @@ private:
     // finalized. FIFOSchedulerBase::evaluateWaitingStreams() is left untouched for the other
     // FIFOSchedulerBase subclasses.
     void admitWaitingStreams(std::list<GenerateStreamPtr>&       waiting_streams,
-                             const std::list<GenerateStreamPtr>& already_admitted_streams);
+                             const std::list<GenerateStreamPtr>& already_admitted_streams,
+                             bool                                allow_admission = true);
 
     void cancelGroups(StreamGroupQueue& group_queue);
     void evaluateWaitingGroupQueue();

@@ -717,8 +717,9 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testOrdinaryCacheCompletionDoesNotMixIntoRun
     auto isolated_result = scheduler->schedule();
     ASSERT_TRUE(isolated_result.ok());
     ASSERT_EQ(isolated_result.value().size(), 2);
-    EXPECT_EQ(ordinary_loading->getStatus(), StreamState::LOADING_CACHE);
-    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 1);
+    EXPECT_EQ(ordinary_loading->getStatus(), StreamState::WAITING);
+    EXPECT_TRUE(scheduler->loading_cache_streams_.empty());
+    EXPECT_EQ(scheduler->cache_ready_streams_.size(), 1);
 
     group_stream_1->reportEvent(StreamEvents::GenerateDone);
     group_stream_2->reportEvent(StreamEvents::GenerateDone);
@@ -1301,6 +1302,48 @@ TEST_F(FIFOSchedulerAsyncCacheTest, ContinuingDecodeRetainsSerialSchedulerOwners
     EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
     EXPECT_TRUE(scheduler->executing_prefill_streams_.empty());
     EXPECT_EQ(scheduler->running_streams_.size(), 1);
+    ASSERT_TRUE(scheduler->stop().ok());
+    ASSERT_TRUE(scheduler->finalizeStop().ok());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, ContinuingDecodeMaintainsPendingStreams) {
+    auto scheduler    = createScheduler(1, 0, 0, true);
+    auto continuation = createStream({1, 2, 3}, false, false, 3);
+    ASSERT_TRUE(scheduler->enqueue(continuation).ok());
+    ASSERT_EQ(scheduler->schedule()->size(), 1);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    continuation->setIsContextStream(false);
+    scheduler->completePrefillExecution();
+    ASSERT_EQ(scheduler->schedule()->front(), continuation);
+
+    auto cancelled = createStream();
+    ASSERT_TRUE(scheduler->enqueue(cancelled).ok());
+    cancelled->reportError(ErrorCode::CANCELLED, "controlled cancellation");
+
+    auto timed_out                          = createStream();
+    timed_out->generateConfig()->timeout_ms = 1;
+    timed_out->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds() - 1000000);
+    ASSERT_TRUE(scheduler->enqueue(timed_out).ok());
+
+    auto completed = createStream();
+    completed->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(completed->moveToNext(), StreamState::RUNNING);
+    ASSERT_GT(completed->curBlocksNum(), 0);
+    completed->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completed_prefill_streams_.push_back(completed);
+
+    auto result = scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->size(), 1);
+    EXPECT_EQ(result->front(), continuation);
+    EXPECT_EQ(cancelled->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(timed_out->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(timed_out->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_EQ(completed->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(completed->curBlocksNum(), 0);
+    EXPECT_TRUE(scheduler->completed_prefill_streams_.empty());
+    EXPECT_TRUE(scheduler->waiting_streams_.empty());
+    EXPECT_FALSE(scheduler->beginPrefillExecution());
     ASSERT_TRUE(scheduler->stop().ok());
     ASSERT_TRUE(scheduler->finalizeStop().ok());
 }

@@ -336,7 +336,8 @@ bool FIFOScheduler::waitPredicate() {
 }
 
 void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_streams,
-                                        const list<GenerateStreamPtr>& already_admitted_streams) {
+                                        const list<GenerateStreamPtr>& already_admitted_streams,
+                                        bool                           allow_admission) {
     RTP_LLM_PROFILE_FUNCTION();
     last_admitted_context_batch_size_ = 0;
     last_admitted_context_token_size_ = 0;
@@ -396,6 +397,10 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
                     addStreamToNewState(stream, new_state);
                     candidates->erase(current);
                 }
+                continue;
+            }
+
+            if (!allow_admission) {
                 continue;
             }
 
@@ -676,6 +681,24 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
 
+    // Completed Prefill work may finish while a local Decode continuation owns
+    // the running lane. Finalize terminal streams before waiting for that lane.
+    for (auto it = completed_prefill_streams_.begin(); it != completed_prefill_streams_.end();) {
+        auto& stream = *it;
+        if (!stream->checkTimeoutAndHasError() && !stream->hasEvent(StreamEvents::GenerateDone)) {
+            ++it;
+            continue;
+        }
+        const auto state      = stream->getStatus();
+        const auto next_state = stream->moveToNext();
+        if (next_state != state) {
+            addStreamToNewState(stream, next_state);
+            it = completed_prefill_streams_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
     if (running_streams_.empty() && !completed_prefill_streams_.empty()) {
         running_streams_.splice(running_streams_.end(), completed_prefill_streams_);
         // A continuing fallback batch keeps an isolated boundary.
@@ -713,7 +736,13 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
                 // The current normal lane (including completed cache loads)
                 // drains to an isolated group boundary.
                 prefer_group_next_ = true;
+                admitWaitingStreams(waiting_streams_, new_streams_, false);
             }
+        } else {
+            // Keep cache completion and cancellation moving without admitting
+            // ordinary requests into the isolated continuation/group batch.
+            evaluateAndUpdateStreams(loading_cache_streams_);
+            admitWaitingStreams(waiting_streams_, new_streams_, false);
         }
     } else {
         // Poll cache loads that were admitted by the NORMAL lane before choosing
