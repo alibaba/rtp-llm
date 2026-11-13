@@ -95,6 +95,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
@@ -691,6 +692,44 @@ def forward_layers(
                         torch.cuda.memory_reserved() / 2**30,
                     )
                     torch.cuda.reset_peak_memory_stats()
+                    # Conditional mid-prefill allocator reclaim at huge-prefill
+                    # layer boundaries. n37 capacity wave-A died MID-prefill
+                    # (2.5 GiB request in _prefill_query right after L20
+                    # selection) with device free 2.52 GiB, 9.48 GiB
+                    # reserved-but-unallocated fragmented below the request
+                    # size, and a fully cached 39.99 GiB monolith only freed
+                    # during unwind: the OOM dump shows expandable_segments
+                    # parses to False on this ROCm build, so cached segments
+                    # cannot be split/reshaped and hipMalloc could not grow.
+                    # The entry reclaim (free>=48 GiB gate before the 39.99
+                    # GiB embedding/HC expansion) cannot cover this mid-layer
+                    # mode. Here: when device free drops below a floor that
+                    # exceeds the observed intra-layer transient growth
+                    # (~12.4 GiB from the L20 boundary to the deepest point)
+                    # and the caching allocator holds releasable segments,
+                    # empty_cache() returns whole free segments to the device
+                    # so the next large transient reserves a fresh contiguous
+                    # segment. Fires at most once per layer (<=40 per prefill);
+                    # each firing costs ~0.1-1s against a ~6900s window.
+                    free_b, _total_b = torch.cuda.mem_get_info()
+                    cached_b = (
+                        torch.cuda.memory_reserved()
+                        - torch.cuda.memory_allocated()
+                    )
+                    if free_b < 24 * 2**30 and cached_b >= 2 * 2**30:
+                        _rc_t0 = time.perf_counter()
+                        torch.cuda.empty_cache()
+                        free_after_b, _ = torch.cuda.mem_get_info()
+                        logging.info(
+                            "[awi][reclaim] mid-prefill layer %02d: device "
+                            "free %.2f->%.2f GiB (cached %.2f GiB released) "
+                            "in %.2fs",
+                            layer_idx,
+                            free_b / 2**30,
+                            free_after_b / 2**30,
+                            cached_b / 2**30,
+                            time.perf_counter() - _rc_t0,
+                        )
                 if layer_idx == 19 and ced_requested:
                     ced_tail = CEDPlan.create(
                         v4,
