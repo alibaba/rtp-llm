@@ -384,6 +384,11 @@ void AwiService::generate(const std::unique_ptr<http_server::HttpResponseWriter>
             // this, all 31 growing prefixes stay strongly referenced and the
             // cache fills before the final request can be admitted.
             for (int64_t end = fill_chunk; end < fill_limit; end += fill_chunk) {
+                // Release the previous fill stream before creating the next
+                // one.  Assigning after creation would briefly keep two
+                // helper streams resident and, with a finite concurrency
+                // slot, deadlock the scheduler at the next prefix.
+                held_fill.reset();
                 auto fill_input          = std::make_shared<GenerateInput>();
                 fill_input->request_id   = request_counter_->incAndReturn();
                 fill_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
