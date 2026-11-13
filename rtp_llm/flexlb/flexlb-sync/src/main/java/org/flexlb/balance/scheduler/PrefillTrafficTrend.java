@@ -24,6 +24,8 @@ public final class PrefillTrafficTrend {
     private long probeStarted = -1;
     private double graceQpsCeiling;
     private double graceTpsCeiling;
+    /** Last observation published by observe; volatile so diagnostics can read it lock-free. */
+    private volatile Snapshot latest;
 
     public PrefillTrafficTrend(PrefillQueueSheddingConfig.RecoveryConfig config) {
         this.config = config;
@@ -115,6 +117,12 @@ public final class PrefillTrafficTrend {
             if (iterator.next().at > nowMs - 2 * window) { break; }
             samples.removeFirst();
         }
+        latest = result;
         return result;
+    }
+
+    /** Latest published snapshot; null before the first observation. */
+    public Snapshot latestSnapshot() {
+        return latest;
     }
 }

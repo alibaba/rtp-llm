@@ -93,6 +93,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private final ArrayDeque<Plan> completedPlans = new ArrayDeque<>();
     /** Published by the decision thread; timeout readers never acquire the queue lock. */
     private volatile Map<String, Object> waitDiagnostics = Map.of("cause", "waiting for placement");
+    /** Per-pool trend snapshots published by the decision thread; lock-free read-only view. */
+    private volatile Map<String, PrefillTrafficTrend.Snapshot> publishedTrafficTrends = Map.of();
     private final ExecutorService planners;
     private final Thread decisionThread;
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -147,6 +149,11 @@ final class GlobalQueueCoordinator implements AutoCloseable {
 
     Map<String, Object> waitDiagnostics() {
         return waitDiagnostics;
+    }
+
+    /** Read-only per-pool prefill traffic snapshot; readers never take the queue lock. */
+    Map<String, PrefillTrafficTrend.Snapshot> prefillTrafficSnapshot() {
+        return publishedTrafficTrends;
     }
 
     /** Enqueue without selecting an endpoint on the ingress thread. */
@@ -647,6 +654,22 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 : pools.entrySet()) {
             shedPool(pool.getKey(), pool.getValue(), nowMs);
         }
+        publishTrafficTrends();
+    }
+
+    /** Decision-thread publication of the per-pool trend snapshots for diagnostics. */
+    private void publishTrafficTrends() {
+        if (trafficTrends.isEmpty()) {
+            return;
+        }
+        Map<String, PrefillTrafficTrend.Snapshot> snapshot = new LinkedHashMap<>();
+        for (Map.Entry<String, PrefillTrafficTrend> entry : trafficTrends.entrySet()) {
+            PrefillTrafficTrend.Snapshot latest = entry.getValue().latestSnapshot();
+            if (latest != null) {
+                snapshot.put(entry.getKey(), latest);
+            }
+        }
+        publishedTrafficTrends = Collections.unmodifiableMap(snapshot);
     }
 
     private void expireQueuedRequest(GlobalQueueEntry entry, long nowMs) {
