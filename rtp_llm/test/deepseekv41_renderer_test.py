@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from transformers import PreTrainedTokenizerFast
 
 from rtp_llm.config.exceptions import FtRuntimeException
+from rtp_llm.config.generate_config import ThinkingMode
 from rtp_llm.dash_sc.codec import DashScParameterError, parse_request_controls
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
@@ -121,6 +122,18 @@ class V41RequestTest(unittest.TestCase):
             arguments = "".join(call.parameters for call in emitted)
             with self.subTest(split=split):
                 self.assertEqual(json.loads(arguments), {"key": "value"})
+
+
+    def test_configured_disabled_think_mode_stays_disabled(self):
+        renderer = DeepseekV41Renderer.__new__(DeepseekV41Renderer)
+        renderer.think_mode = "disabled"
+        renderer.default_thinking_mode = ThinkingMode.DISABLED
+        request = ChatCompletionRequest.model_validate_json(
+            json.dumps({"messages": [{"role": "user", "content": "hi"}]})
+        )
+        self.assertFalse(renderer.in_think_mode(request))
+        renderer.default_thinking_mode = ThinkingMode.ENABLED
+        self.assertTrue(renderer.in_think_mode(request))
 
 
 class V41OfficialEncodingTest(unittest.TestCase):

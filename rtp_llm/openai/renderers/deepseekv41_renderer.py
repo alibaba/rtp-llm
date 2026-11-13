@@ -9,6 +9,7 @@ from collections.abc import Mapping
 
 from rtp_llm.config.dsv41_config import V41Config
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.generate_config import ThinkingMode
 from rtp_llm.openai.api_datatype import (
     DeltaMessage,
     FinisheReason,
@@ -142,8 +143,6 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
         return request.model_dump(mode="json", exclude_unset=True, exclude_none=True)
 
     def resolve_thinking_mode(self, request):
-        from rtp_llm.config.generate_config import ThinkingMode
-
         return (
             ThinkingMode.ENABLED
             if self.in_think_mode(request)
@@ -152,7 +151,13 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
 
     def in_think_mode(self, request):
         try:
-            return resolve_thinking(self._request_dict(request), self.think_mode)[0]
+            # think_mode is the configured string ("disabled"/"adaptive"/"enabled").
+            # resolve_thinking expects a bool default; passing the raw string made
+            # every non-empty mode truthy and silently enabled thinking.
+            default_thinking = (
+                self.default_thinking_mode != ThinkingMode.DISABLED
+            )
+            return resolve_thinking(self._request_dict(request), default_thinking)[0]
         except (TypeError, ValueError) as error:
             raise FtRuntimeException(
                 ExceptionType.INVALID_PARAMS, str(error)
