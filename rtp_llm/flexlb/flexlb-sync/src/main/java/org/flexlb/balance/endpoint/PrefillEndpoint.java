@@ -119,7 +119,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
             }
         }
         if (balance != null) { ownership.enableTokenWorkload(balance.getMaxPendingComputeTokens(), this::engineQueueAllowsAdmission,
-                balance.isEnableWindow() ? balance.getWindowMs() : 0L); }
+                balance.isEnableWindow() ? balance.getWindowMs() : 0L);
+            ownership.configureComputeAdmission(balance.isEnforcePendingComputeLimit(), balance.getMaxColdWindowComputeTokens());
+        }
         var shedding = config.isQueue() ? config.queueScheduler().getPrefillQueueShedding() : null;
         ownership.enforceColdTokenLimit(shedding != null && shedding.getDeadlineBudget() != null);
 

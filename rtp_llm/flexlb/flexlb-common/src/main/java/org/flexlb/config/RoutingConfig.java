@@ -39,10 +39,18 @@ public final class RoutingConfig {
         /** Above this percentage, the largest reusable prefix wins without a TTFT cap. */
         private double minPrefixHitPercent = 50.0;
         /** Legacy token backpressure when Engine queue admission is disabled or telemetry is unknown.
-         * Also bounds cold work when deadlineBudget shedding is enabled; hot affinity is unchanged.
+         * Also bounds cold work when deadlineBudget shedding is enabled.
+         * enforcePendingComputeLimit retains this waterline for every request.
          */
         private long maxPendingComputeTokens = 2_000_000L;
-        /** Include recently completed uncached tokens in ranking only; disabled by default. */
+        /** Opt-in: retain the pending-work waterline for hot and cold requests even with low Engine waiting. */
+        private boolean enforcePendingComputeLimit = false;
+        /** Opt-in cold admission budget: completed window work plus outstanding and new work.
+         * Requires enableWindow; active only after a cache-hit completion in that window.
+         * Null keeps completed history as ranking-only evidence.
+         */
+        private Long maxColdWindowComputeTokens;
+        /** Include recently completed uncached tokens; ranking-only unless cold window admission is configured. */
         private boolean enableWindow = false;
         private long windowMs = 10_000L;
         /** Actual Engine waiting-stream watermark; not an inflight or unobserved-dispatch quota.

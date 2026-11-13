@@ -262,6 +262,10 @@ final class FlexlbConfigValidator {
         var balance = prefill.getTokenBalance();
         if (balance != null) {
             positive(balance.getWindowMs(), "router.roles.prefill.tokenBalance.windowMs");
+            if (balance.getMaxColdWindowComputeTokens() != null) {
+                positive(balance.getMaxColdWindowComputeTokens(), "router.roles.prefill.tokenBalance.maxColdWindowComputeTokens");
+                require(balance.isEnableWindow(), "router.roles.prefill.tokenBalance.maxColdWindowComputeTokens", "requires enableWindow");
+            }
             range(balance.getMinPrefixHitPercent(), 0, RoutingConfig.PERCENTAGE_SCALE,
                     "router.roles.prefill.tokenBalance.minPrefixHitPercent");
             positive(balance.getMaxPendingComputeTokens(),

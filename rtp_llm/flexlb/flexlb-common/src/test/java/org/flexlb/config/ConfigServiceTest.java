@@ -1,7 +1,5 @@
 package org.flexlb.config;
 
-import org.flexlb.config.ConfigTestSupport;
-
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
@@ -21,6 +19,19 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConfigServiceTest {
+    @Test
+    void coldWindowAdmissionIsExplicitAndRequiresCompletedHistory() {
+        var balance = new RoutingConfig.TokenBalanceConfig();
+        org.junit.jupiter.api.Assertions.assertFalse(balance.isEnforcePendingComputeLimit());
+        org.junit.jupiter.api.Assertions.assertNull(balance.getMaxColdWindowComputeTokens());
+        for (String fields : java.util.List.of("\"maxColdWindowComputeTokens\":0,\"enableWindow\":true", "\"maxColdWindowComputeTokens\":100")) {
+            assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse(
+                    "{\"router\":{\"roles\":{\"prefill\":{\"tokenBalance\":{" + fields + "}}}}}"));
+        }
+        var parsed = ConfigTestFixtures.parse("{\"router\":{\"roles\":{\"prefill\":{\"tokenBalance\":{\"maxColdWindowComputeTokens\":100,\"enableWindow\":true,\"enforcePendingComputeLimit\":true}}}}}");
+        assertEquals(100L, parsed.getRouter().getRoles().getPrefill().getTokenBalance().getMaxColdWindowComputeTokens());
+    }
+
     @Test
     void shutdownQuietPeriodUsesConfigDefaultsOverridesAndValidation() {
         assertEquals(5000L, ConfigTestFixtures.parse("{}").getGrpcServer().getShutdownQuietPeriodMs());

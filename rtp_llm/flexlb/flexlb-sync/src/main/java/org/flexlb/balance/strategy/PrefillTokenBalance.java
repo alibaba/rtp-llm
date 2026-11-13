@@ -13,6 +13,13 @@ public final class PrefillTokenBalance {
         return !cacheFirst || hit == maxHit;
     }
 
+    /** A single oversized request may start when idle; it must not starve forever.
+     * Planned work is included by selectors and omitted by the serialized admission owner.
+     */
+    public static boolean withinColdWindow(PrefillTokenWorkload.Snapshot work, long computeTokens, Long limit) {
+        return limit == null || work.score() + computeTokens <= Math.max(limit, computeTokens);
+    }
+
     public static boolean hasCapacity(long pendingTokens, long limit) {
         return pendingTokens < limit;
     }

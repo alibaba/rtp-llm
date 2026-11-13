@@ -1,18 +1,16 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.dao.master.WorkerStatusTestSupport;
-
-import org.flexlb.balance.scheduler.SchedulingTestConfig;
-
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.Test;
@@ -35,8 +33,8 @@ import java.util.function.ToLongFunction;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -51,6 +49,37 @@ class PrefillStateSnapshotTest {
             Comparator.comparingLong(RequestRoute::requestId));
     private final PrefillState state = new PrefillState(lock, waiting, clock::get);
     private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
+
+    @Test
+    void coldWindowExpiryPublishesCapacityEvenWhenNoRequestsComplete() {
+        var work = mock(org.flexlb.balance.strategy.PrefillTokenWorkload.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(state, "tokenWorkload", work);
+        state.configureComputeAdmission(false, 100L);
+        when(work.snapshot()).thenReturn(new org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot(100L, 0L, 0L));
+        when(work.hasRecentCacheHit()).thenReturn(true);
+        assertEquals(100L, state.coldWindowComputeLimit());
+        reconcile(Map.of(), Map.of(), unused -> 0L);
+        when(work.snapshot()).thenReturn(new org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot(0L, 0L, 0L));
+        when(work.hasRecentCacheHit()).thenReturn(false);
+        assertNull(state.coldWindowComputeLimit(), "pure cold traffic regains ordinary admission after hot traffic disappears");
+        assertTrue(reconcile(Map.of(), Map.of(), unused -> 0L).capacityReleased(), "heartbeat must wake requests blocked only by time");
+        assertFalse(reconcile(Map.of(), Map.of(), unused -> 0L).capacityReleased());
+    }
+
+    @Test
+    void coldWindowDoesNotCapPureColdTrafficWithoutRecentReuse() {
+        state.enableTokenWorkload(100_000L, () -> true, 10_000L);
+        state.configureEngineQueueAdmission(() -> EngineQueueAdmission.State.AVAILABLE);
+        state.configureComputeAdmission(false, 100L);
+        var leases = new java.util.ArrayList<PrefillState.RouteReservation>();
+        for (int i = 0; i < 3; i++) {
+            var route = item(4400 + i); when(route.coldTokenBalance()).thenReturn(true);
+            var lease = state.reserveUnqueuedRoute(route, 1, 256).reservation();
+            assertNotNull(lease); leases.add(lease);
+        }
+        leases.forEach(lease -> state.release(lease, null));
+        assertEquals(0L, state.tokenWorkload().pendingTokens());
+    }
 
     @ParameterizedTest
     @CsvSource({"0,256", "6,256", "10,256", "11,0", "1000,0"})
@@ -168,6 +197,58 @@ class PrefillStateSnapshotTest {
         var replacement = state.reserveUnqueuedRoute(item(89), 1, 2).reservation();
         assertNotNull(replacement);
         state.release(replacement, null);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void explicitComputeWaterlineCannotBeBypassedByHotCacheOrLowEngineWaiting(boolean batch) {
+        state.enableTokenWorkload(90L, () -> true);
+        state.configureEngineQueueAdmission(() -> EngineQueueAdmission.State.AVAILABLE);
+        state.configureComputeAdmission(true, null);
+        var first = item(4201);
+        var next = item(4202);
+        if (batch) {
+            var permit = generation.tryAcquireHandoff();
+            var lease = state.reserveUnqueuedBatch(first, 4201, 256, permit).reservation();
+            assertNotNull(lease);
+            var secondPermit = generation.tryAcquireHandoff();
+            try { assertNull(state.reserveUnqueuedBatch(next, 4202, 256, secondPermit).reservation()); }
+            finally { secondPermit.close(); }
+            state.release(lease, null).generationHandoff().close();
+        } else {
+            var lease = state.reserveUnqueuedRoute(first, 1, 256).reservation();
+            assertNotNull(lease);
+            assertNull(state.reserveUnqueuedRoute(next, 1, 256).reservation());
+            state.release(lease, null);
+        }
+        var recovered = state.reserveUnqueuedRoute(next, 1, 256).reservation();
+        assertNotNull(recovered);
+        state.release(recovered, null);
+        assertEquals(0L, state.tokenWorkload().pendingTokens());
+    }
+
+    @Test
+    void coldWindowCommitRechecksWorkWithoutDoubleCountingItsOwnPlan() {
+        state.enableTokenWorkload(100_000L, () -> true, 10_000L);
+        state.configureEngineQueueAdmission(() -> EngineQueueAdmission.State.AVAILABLE);
+        state.configureComputeAdmission(false, 150L);
+        var workload = (org.flexlb.balance.strategy.PrefillTokenWorkload) org.springframework.test.util.ReflectionTestUtils.getField(state, "tokenWorkload");
+        workload.complete(0L, true);
+        var first = item(4301); var second = item(4302);
+        when(first.coldTokenBalance()).thenReturn(true);
+        when(second.coldTokenBalance()).thenReturn(true);
+        try (var plan = state.planTokenWork(100L)) {
+            var lease = state.reserveUnqueuedRoute(first, 1, 256).reservation();
+            assertNotNull(lease, "the route's soft plan must not count as another admission");
+            assertNull(state.reserveUnqueuedRoute(second, 1, 256).reservation());
+            var hot = state.reserveUnqueuedRoute(item(4303), 1, 256).reservation();
+            assertNotNull(hot, "cold window is not a steady hot-throughput cap");
+            state.release(hot, null); state.release(lease, null);
+        }
+        var recovered = state.reserveUnqueuedRoute(second, 1, 256).reservation();
+        assertNotNull(recovered, "cancellation returns unused budget");
+        state.release(recovered, null);
+        assertEquals(0L, state.tokenWorkload().score());
     }
 
     @Test
@@ -456,16 +537,14 @@ class PrefillStateSnapshotTest {
         lock.lock();
         try {
             assertSame(failure, assertThrows(IllegalStateException.class, () -> {
-                if (batch) { reservation.owner.commitLocked(new PrefillState.CommitPlan(PrefillState.CommitKind.BATCH, List.of(selected), java.util.List.of(), reservation, new long[]{10L}, failed, clock.get()), null); }
-                else { state.commitLocked(new PrefillState.CommitPlan(PrefillState.CommitKind.QUEUED, List.of(selected), java.util.List.of(), null, new long[]{10L}, failed, clock.get()), pin); }
+                if (batch) { reservation.owner.commitLocked(new PrefillState.CommitPlan(PrefillState.CommitKind.BATCH, List.of(selected), java.util.List.of(), reservation, new long[]{10L}, failed, clock.get()), null); } else { state.commitLocked(new PrefillState.CommitPlan(PrefillState.CommitKind.QUEUED, List.of(selected), java.util.List.of(), null, new long[]{10L}, failed, clock.get()), pin); }
             }));
             assertEquals(List.of(selected, failed), waitingItems());
             assertEquals(2, state.admissionSummary(0, 0L).occupiedRequests());
             assertNoWork(state.committedSnapshot(), 1L, 2L);
         } finally {
             lock.unlock();
-            if (reservation != null) { EndpointTestSupport.preparation(reservation).close(); }
-            else { pin.close(); }
+            if (reservation != null) { EndpointTestSupport.preparation(reservation).close(); } else { pin.close(); }
         }
         assertEquals(0, state.captureQueueCounters().batchSlots());
     }

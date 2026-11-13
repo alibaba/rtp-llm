@@ -97,6 +97,45 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
+    void explicitComputeAdmissionPreservesCacheLeaderAndColdWindowPlans() {
+        registry.close();
+        var balance = new RoutingConfig.TokenBalanceConfig();
+        balance.setEnforcePendingComputeLimit(true);
+        balance.setMaxPendingComputeTokens(1000L);
+        balance.setEnableWindow(true);
+        balance.setMaxColdWindowComputeTokens(1500L);
+        config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
+        registry = StrategyTestSupport.endpointRegistry(SchedulingTestConfig.configService(config));
+        publish("10.0.0.1", 8080);
+        var worker = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
+        updateEngineQueue(worker, 0, 0);
+        strategy = new CostBasedPrefillStrategy(registry, cache, reporter, cacheReporter,
+                SchedulingTestConfig.configService(config));
+        var set = new PrefillCandidateSet(); set.reset(1);
+        set.addCandidate(worker.ipPort(), worker, new RouteProjection.Candidate(RouteProjection.Candidate.State.MODELED,
+                1, 1, RouteProjection.Candidate.InitialHeadDisposition.NONE, "", null, 900, 900), 0);
+        var route = mock(RequestRoute.class);
+        when(route.requestId()).thenReturn(123450L); when(route.seqLen()).thenReturn(1000L);
+        var lease = worker.ownership.reserveUnqueuedRoute(route, 1, 0).reservation();
+        assertNotNull(lease);
+        assertEquals(-1, strategy.selectBestCandidate(set, 1, RoleType.PREFILL, null, 1000),
+                "low Engine waiting cannot override the explicit pending-work cap, even for a hot leader");
+        worker.ownership.release(lease, null);
+        assertEquals(0, strategy.selectBestCandidate(set, 1, RoleType.PREFILL, null, 1000));
+        var work = (PrefillTokenWorkload) org.springframework.test.util.ReflectionTestUtils.getField(worker.ownership, "tokenWorkload");
+        work.complete(0, true);
+        try (var first = select()) {
+            assertEquals(worker, first.prefillEp());
+            var second = StrategyTestSupport.select(strategy, context.data().getRequest(), context.data().getSchedulingMetadata(), RoleType.PREFILL, null);
+            assertEquals(PlacementResult.Status.BLOCKED, second.status(), "soft plans must consume the advisory cold window before admission");
+            assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission(null));
+        }
+        assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission(null));
+        try (var recovered = select()) { assertEquals(worker, recovered.prefillEp()); }
+        assertEquals(0L, worker.ownership.tokenWorkload().plannedTokens());
+    }
+
+    @Test
     void selectionDoesNotOwnTheRequestDeadline() {
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(
                 50, System.currentTimeMillis() - 1L));

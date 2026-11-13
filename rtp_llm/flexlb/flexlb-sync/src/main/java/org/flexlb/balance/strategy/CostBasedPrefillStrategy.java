@@ -570,6 +570,9 @@ public class CostBasedPrefillStrategy {
             if (!PrefillTokenBalance.eligible(candidates.cacheHit(i), maxHit, cacheFirst)) { continue; }
             var work = candidates.endpoint(i).ownership.tokenWorkload();
             if (candidates.endpoint(i) == excluded || work.pendingTokens() + work.plannedTokens() > tokenBalance.getHotspotRescue().getMaxIdlePendingTokens()) { continue; }
+            if (tokenBalance.isEnforcePendingComputeLimit() && !PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())) { continue; }
+            if (!cacheFirst && !PrefillTokenBalance.withinColdWindow(work,
+                    Math.max(0L, seqLen - candidates.cacheHit(i)), candidates.endpoint(i).ownership.coldWindowComputeLimit())) { continue; }
             scores[i] = cacheFirst ? 0.0 : work.score() + Math.max(0L, seqLen);
             minimum = Math.min(minimum, scores[i]);
         }
@@ -593,7 +596,9 @@ public class CostBasedPrefillStrategy {
             // Preserve a busy cache leader by parking globally, where existing HIT_RATE shedding applies.
             if (candidates.endpoint(i).engineQueueAdmissionBlocked()
                     || !PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())
-                    && (deadlineBudgetEnabled && !cacheFirst || !candidates.endpoint(i).engineQueueAllowsAdmission())) { continue; }
+                    && (tokenBalance.isEnforcePendingComputeLimit() || deadlineBudgetEnabled && !cacheFirst || !candidates.endpoint(i).engineQueueAllowsAdmission())) { continue; }
+            if (!cacheFirst && !PrefillTokenBalance.withinColdWindow(work,
+                    Math.max(0L, seqLen - candidates.cacheHit(i)), candidates.endpoint(i).ownership.coldWindowComputeLimit())) { continue; }
             scores[i] = cacheFirst ? 0.0 : work.score() + Math.max(0L, seqLen);
             minimum = Math.min(minimum, scores[i]);
         }
@@ -684,8 +689,9 @@ public class CostBasedPrefillStrategy {
             for (int i = 0; i < candidates.size(); i++) {
                 var endpoint = candidates.endpoint(i);
                 var work = endpoint.ownership.tokenWorkload();
-                if (PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())
-                        || !deadlineBudgetEnabled && endpoint.engineQueueAllowsAdmission()) {
+                if ((PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())
+                        || !tokenBalance.isEnforcePendingComputeLimit() && !deadlineBudgetEnabled && endpoint.engineQueueAllowsAdmission())
+                        && PrefillTokenBalance.withinColdWindow(work, Math.max(0L, request.getSeqLen()), endpoint.ownership.coldWindowComputeLimit())) {
                     accepting++;
                     // Count the whole matching pool, including request-count and token-full workers.
                     if (enoughAcceptingWorkers(accepting, discovery.registeredCount())) {
