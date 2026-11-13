@@ -854,6 +854,8 @@ message TransferRoutePB {
     // Prefill's stage-local layers for this PP route. Empty for the TP-only path.
     repeated uint32 prefill_layer_ids = 10;
     uint64 slice_payload_bytes = 11;
+    // Emit SSM and convolution segments in the same order on both peers.
+    bool segment_linear_state = 12;
 }
 
 message P2PShardLayoutPB {
@@ -1005,7 +1007,7 @@ message SideChannelTensorPB {
 }
 
 // Side-channel payload: replaces fixed first_token/reuse/SP/position_ids fields
-// Keys: "propose_tokens", "propose_probs", "propose_hidden", "position_ids"
+// Also carries "mtp_indexer_topk" for the first MTP Decode step.
 message SideChannelPayloadPB {
     map<string, SideChannelTensorPB> tensors = 1;
     // Scalar fields that don't fit tensor format
