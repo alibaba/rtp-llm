@@ -94,10 +94,11 @@ class Step:
         stage = "arguments"
         records.emit(event="step_started")
         try:
-            args = resolve_refs(self.args, results, context.globals())
+            case_globals = context.globals()
+            args = resolve_refs(self.args, results, case_globals)
             arguments = definition.arguments(args)
             expected = (
-                resolve_refs(self.expect.comparisons, results, context.globals())
+                resolve_refs(self.expect.comparisons, results, case_globals)
                 if self.expect
                 else None
             )
