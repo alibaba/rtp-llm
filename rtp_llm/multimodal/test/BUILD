@@ -1,3 +1,9 @@
+py_test(
+    name = "dns_error_test",
+    srcs = ["dns_error_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
 filegroup(
     name = "testdata",
     srcs = glob([

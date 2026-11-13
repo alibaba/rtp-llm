@@ -6,6 +6,7 @@ import contextvars
 import json
 import logging
 import re
+import socket
 import threading
 import time
 from contextlib import contextmanager
@@ -27,6 +28,8 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
 from rtp_llm.multimodal.mm_error_messages import (
     MediaDownloadError,
     MMErr,
+    dns_error_code,
+    find_dns_error,
     media_domain,
     raise_mm,
 )
@@ -394,12 +397,22 @@ def _download_http_content(
         raise failure(
             "timeout", MMErr.DL_TIMEOUT, ExceptionType.MM_DOWNLOAD_FAILED
         ) from None
+    except socket.gaierror as error:
+        raise failure("dns_error", MMErr.DNS_FAILED, dns_error_code(error)) from None
     except requests.exceptions.ConnectionError as error:
         # Response.iter_content wraps urllib3's read timeout in ConnectionError.
         if error.args and isinstance(error.args[0], ReadTimeoutError):
             raise failure(
                 "read_timeout", MMErr.DL_TIMEOUT, ExceptionType.MM_DOWNLOAD_FAILED
             ) from None
+        dns_error = find_dns_error(error)
+        if dns_error is not None:
+            code = (
+                ExceptionType.MM_DOWNLOAD_FAILED
+                if isinstance(error, requests.exceptions.ProxyError)
+                else dns_error_code(dns_error)
+            )
+            raise failure("dns_error", MMErr.DNS_FAILED, code) from None
         raise failure(
             "connection_error", MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED
         ) from None
