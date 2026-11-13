@@ -246,6 +246,8 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             rank_id=0,
             timeout_keep_alive=5,
             shutdown_timeout=10,
+            frontend_pre_stop_drain_seconds=0,
+            pre_stop_drain_headroom_seconds=0,
         )
         app_owner.grpc_client = None
         app_owner.create_app = Mock(
@@ -273,6 +275,14 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             ), \
             patch("rtp_llm.frontend.frontend_app.gc.collect"), \
             patch("rtp_llm.frontend.frontend_app.gc.freeze"):
+            with self.assertRaisesRegex(RuntimeError, "SCR restore failed"):
+                app_owner.start(
+                    on_prebind=Mock(side_effect=RuntimeError("SCR restore failed"))
+                )
+            socket_factory.assert_not_called()
+            server.run.assert_not_called()
+            events.clear()
+
             app_owner.start(on_prebind=prebind)
 
         self.assertLess(events.index("prebind"), events.index("bind"))
