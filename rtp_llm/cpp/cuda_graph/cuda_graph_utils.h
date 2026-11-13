@@ -80,6 +80,8 @@ public:
 
 public:
     py::object               attn_pyobj_{py::none()};
+    bool                     requires_host_metadata_{true};
+    bool                     capture_attention_prepare_{false};
     at::Tensor               decoder_layer_hidden_states_;
     at::Tensor               mtp_target_hidden_states_;
     torch_ext::PyModelInputs py_model_inputs_;

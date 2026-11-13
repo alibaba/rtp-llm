@@ -181,9 +181,9 @@ struct MulticastBarrier {
         } else {
             asm volatile("multimem.red.relaxed.sys.global.add.u32 [%0], %1;" ::"l"(&mc->flag), "r"(1u) : "memory");
         }
-        const uint32_t current = window + n * WorldSize;
-        uint64_t poll_start = 0;
-        uint32_t polls = 0;
+        const uint32_t current    = window + n * WorldSize;
+        uint64_t       poll_start = 0;
+        uint32_t       polls      = 0;
         while (load_word<ReleaseAcquire>(&local->flag) - current < WorldSize) {
             check_collective_poll_timeout(poll_start, polls);
         }
@@ -233,8 +233,8 @@ __global__ void all_gather_staging_kernel(const __grid_constant__ Params p) {
         const uint32_t local_vid = vid - src_rank * p.value_vecs;
         auto*          src       = p.workspace + phase_offset + src_rank * p.slot_bytes;
         Vector         value;
-        uint64_t poll_start = 0;
-        uint32_t polls = 0;
+        uint64_t       poll_start = 0;
+        uint32_t       polls      = 0;
         do {
             load_vector<true>(value, src, local_vid);
             if (value.words[0] == 0 || value.words[1] == 0 || value.words[2] == 0 || value.words[3] == 0)
@@ -287,9 +287,9 @@ __global__ void all_gather_fp8_staging_kernel(const __grid_constant__ Params p) 
     auto*          src_meta = reinterpret_cast<uint32_t*>(src + meta_offset);
     const Vector   zero     = {};
     for (uint32_t vid = tid; vid < p.total_vecs; vid += step) {
-        Vector value;
+        Vector   value;
         uint64_t poll_start = 0;
-        uint32_t polls = 0;
+        uint32_t polls      = 0;
         do {
             load_vector<true>(value, src, vid);
             if ((value.words[0] & value.words[1] & value.words[2] & value.words[3] & 0x80000000u) == 0)
@@ -396,11 +396,10 @@ void check_indices(int64_t count, int64_t step) {
                 "Custom all-gather exceeds 32-bit indexing range");
 }
 
-Params make_params(const torch::Tensor& input, torch::Tensor& output, int64_t rank, bool fp8) {
-    const auto type = fp8 ? at::kByte : at::kBFloat16;
+Params make_params(const torch::Tensor& input, torch::Tensor& output, int64_t rank, at::ScalarType type) {
     TORCH_CHECK(input.is_cuda() && input.dim() == 2 && input.scalar_type() == type && input.is_contiguous(),
                 "Custom all-gather requires a contiguous CUDA ",
-                fp8 ? "uint8" : "BF16",
+                type == at::kByte ? "uint8" : "BF16",
                 " [rows,K] input");
     TORCH_CHECK(input.size(0) > 0 && input.size(1) > 0, "Custom all-gather requires nonempty shards");
     check_tensor(input, input, type, "input");
@@ -540,7 +539,7 @@ void custom_all_gather_staging(const torch::Tensor& input,
                                int64_t              rank,
                                int64_t              blocks,
                                int64_t              threads) {
-    auto                       p = make_params(input, output, rank, false);
+    auto                       p = make_params(input, output, rank, at::kBFloat16);
     const c10::cuda::CUDAGuard guard(input.device());
     const int                  sms = check_launch(p, blocks, threads, true, false);
     bind_staging(p, input, workspace, counters, workspace_mc_ptr, sms, false);
@@ -557,7 +556,9 @@ void custom_all_gather_direct(const torch::Tensor& input,
                               int64_t              rank,
                               int64_t              blocks,
                               int64_t              threads) {
-    auto                       p = make_params(input, output, rank, false);
+    // The direct multicast path also transports packed quantized bytes.
+    const auto                 type = input.scalar_type() == at::kByte ? at::kByte : at::kBFloat16;
+    auto                       p    = make_params(input, output, rank, type);
     const c10::cuda::CUDAGuard guard(input.device());
     const int                  sms = check_launch(p, blocks, threads, false, false);
     bind_direct(p, input, output, semaphores, output_mc_ptr, semaphore_mc_ptr, sms);
@@ -576,7 +577,7 @@ void custom_all_gather_fp8_staging(const torch::Tensor& values,
                                    int64_t              rank,
                                    int64_t              blocks,
                                    int64_t              threads) {
-    auto p = make_params(values, output_values, rank, true);
+    auto p = make_params(values, output_values, rank, at::kByte);
     bind_scales(p, values, scales, output_scales);
     const c10::cuda::CUDAGuard guard(values.device());
     const int                  sms = check_launch(p, blocks, threads, true, true);
@@ -600,7 +601,7 @@ void custom_all_gather_fp8_direct(const torch::Tensor& values,
                                   int64_t              rank,
                                   int64_t              blocks,
                                   int64_t              threads) {
-    auto p = make_params(values, output_values, rank, true);
+    auto p = make_params(values, output_values, rank, at::kByte);
     bind_scales(p, values, scales, output_scales);
     const c10::cuda::CUDAGuard guard(values.device());
     const int                  sms = check_launch(p, blocks, threads, false, true);

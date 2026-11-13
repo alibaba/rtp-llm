@@ -1,32 +1,37 @@
 """K3 MLA with expanded prefill and absorbed paged attention."""
 
-import os
-
 import torch
 
+from rtp_llm.config.attention_workspace import validate_kv_workspace_bytes
 from rtp_llm.config.cuda_graph import CudaGraphSelectionMode
+from rtp_llm.models_py.distributed.collective_torch import get_mla_dcp
 from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
+    MlaKVCacheWriteOp,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_page_rr_cache_gather import (
+    MlaPageRRCacheGather,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.page_rr_mla_metadata import (
+    PageRRMlaMetadata,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
-from rtp_llm.models_py.triton_kernels.mla.lse_merge import merge_attention_states_in_place
+from rtp_llm.models_py.modules.factory.attention.mla_prefill_plan import (
+    Bf16MlaWorkspaceBudget,
+    plan_prefix_chunks,
+)
+from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
 from rtp_llm.models_py.triton_kernels.common.activation import (
     concat_and_cast_mha_k,
     quantize_fp8,
     quantize_kv_fp8,
     quantize_qkv_fp8,
 )
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
-    MlaKVCacheWriteOp,
+from rtp_llm.models_py.triton_kernels.mla.lse_merge import (
+    merge_attention_states_in_place,
 )
-from rtp_llm.models_py.modules.factory.attention.mla_prefill_plan import plan_prefix_chunks
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_page_rr_cache_gather import MlaPageRRCacheGather
-from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
-from rtp_llm.utils.model_weight import W
 from rtp_llm.ops import KvCacheDataType, RoleType, compute_ops
-from rtp_llm.models_py.distributed.collective_torch import get_mla_dcp
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.page_rr_mla_metadata import (
-    PageRRMlaMetadata,
-)
-
+from rtp_llm.utils.model_weight import W
 
 _BF16_FLASH_MLA_WORKSPACES = {}
 _PAGED_MLA_WORKSPACES = {}
@@ -44,14 +49,20 @@ def _bf16_flash_mla_workspace(device):
 class KimiK3MlaImpl(MlaImplBase):
     """Expanded prompt prefill; paged Decode, Target Verify and MTP updates."""
 
-    cuda_graph_selection_modes = frozenset({
-        CudaGraphSelectionMode.EAGER, CudaGraphSelectionMode.DECODE_GRAPH,
-    })
+    cuda_graph_selection_modes = frozenset(
+        {
+            CudaGraphSelectionMode.EAGER,
+            CudaGraphSelectionMode.DECODE_GRAPH,
+        }
+    )
 
     @staticmethod
     def _uses_paged_attention(inputs):
-        return (inputs.is_target_verify or inputs.is_mtp_draft_update
-                or not inputs.is_prefill)
+        return (
+            inputs.is_target_verify
+            or inputs.is_mtp_draft_update
+            or not inputs.is_prefill
+        )
 
     @staticmethod
     def support(attn_configs, inputs):
@@ -59,26 +70,45 @@ class KimiK3MlaImpl(MlaImplBase):
 
     @classmethod
     def support_parallelism_config(cls, parallelism):
-        return (parallelism is not None and parallelism.tp_size > 1
-                and parallelism.prefill_cp_config.kv_cache_sharded
-                and not parallelism.prefill_cp_config.is_enabled())
+        return (
+            parallelism is not None
+            and parallelism.tp_size > 1
+            and parallelism.prefill_cp_config.kv_cache_sharded
+            and not parallelism.prefill_cp_config.is_enabled()
+        )
 
     def __init__(
-        self, attn_configs, inputs, weights, cos_sin_cache=None,
-        fmha_config=None, quant_config=None, max_seq_len=0,
-        is_cuda_graph=False, parallelism_config=None,
+        self,
+        attn_configs,
+        inputs,
+        weights,
+        cos_sin_cache=None,
+        fmha_config=None,
+        quant_config=None,
+        max_seq_len=0,
+        is_cuda_graph=False,
+        parallelism_config=None,
+        prefill_kv_workspace_budget_bytes=6 * 1024**3,
     ):
+        self.prefill_kv_workspace_budget_bytes = validate_kv_workspace_bytes(
+            prefill_kv_workspace_budget_bytes, allow_unbounded=True
+        )
         self._paged = self._uses_paged_attention(inputs)
         if is_cuda_graph and not self._paged:
             raise ValueError("K3 ordinary prefill requires eager planning")
         parallelism = parallelism_config
-        if not (parallelism.tp_size > 1
-                and parallelism.prefill_cp_config.kv_cache_sharded):
+        if not (
+            parallelism.tp_size > 1 and parallelism.prefill_cp_config.kv_cache_sharded
+        ):
             raise ValueError("K3 MLA requires Page-RR: TP > 1 and sharded KV cache")
         if parallelism.prefill_cp_config.is_enabled():
             raise ValueError("MLA Page-RR requires Query CP disabled")
         super().__init__(
-            attn_configs, inputs, weights, None, fmha_config,
+            attn_configs,
+            inputs,
+            weights,
+            None,
+            fmha_config,
             quant_config=quant_config,
             max_seq_len=max_seq_len,
             is_cuda_graph=is_cuda_graph,
@@ -95,8 +125,10 @@ class KimiK3MlaImpl(MlaImplBase):
         self.fp8_compute = attn_configs.mla_fp8_compute
         self.q_replicated = parallelism.role_type == RoleType.DECODE
         self.page_rr_metadata = PageRRMlaMetadata(
-            int(self.attn_configs.tokens_per_block), int(self.token_per_block),
-            int(parallelism.tp_size), int(parallelism.tp_rank),
+            int(self.attn_configs.tokens_per_block),
+            int(self.token_per_block),
+            int(parallelism.tp_size),
+            int(parallelism.tp_rank),
         )
         if self._paged:
             self._init_paged(inputs)
@@ -106,10 +138,13 @@ class KimiK3MlaImpl(MlaImplBase):
         self.prepare(inputs)
 
     def _init_prefill(self):
-        if (self.num_heads <= 0
-                or (self.qk_rope_head_dim + self.qk_nope_head_dim, self.v_head_dim)
-                != (192, 128)):
-            raise ValueError("K3 expanded MLA requires positive heads and QK/V dimensions 192/128")
+        if self.num_heads <= 0 or (
+            self.qk_rope_head_dim + self.qk_nope_head_dim,
+            self.v_head_dim,
+        ) != (192, 128):
+            raise ValueError(
+                "K3 expanded MLA requires positive heads and QK/V dimensions 192/128"
+            )
         self.scale = (
             1.0 / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5
         ) * self.softmax_extra_scale
@@ -125,11 +160,14 @@ class KimiK3MlaImpl(MlaImplBase):
         )
         self.prefill_wrapper = None
         if self.kv_cache_type == KvCacheDataType.FP8:
-            from rtp_llm.models_py.modules.kimi_k3.tokenspeed_prefill import TokenspeedMlaPrefill
+            from rtp_llm.models_py.modules.kimi_k3.tokenspeed_prefill import (
+                TokenspeedMlaPrefill,
+            )
 
             self.prefill_wrapper = TokenspeedMlaPrefill(self.num_heads, self.scale)
         self.kv_cache_write_op = MlaKVCacheWriteOp(
-            kv_cache_dtype=self.kv_cache_type, fp8_compute=self.fp8_compute,
+            kv_cache_dtype=self.kv_cache_type,
+            fp8_compute=self.fp8_compute,
         )
 
     def _init_paged(self, inputs):
@@ -141,7 +179,8 @@ class KimiK3MlaImpl(MlaImplBase):
         parallelism = self.parallelism_config
         self.query_heads = (
             self.num_heads * parallelism.tp_size
-            if self.q_replicated else self.num_heads
+            if self.q_replicated
+            else self.num_heads
         )
         self.batch = inputs.input_lengths.numel()
         self.tokens = inputs.physical_token_count
@@ -153,9 +192,14 @@ class KimiK3MlaImpl(MlaImplBase):
         projection = next(w[W.mla_kc] for w in self.weights if W.mla_kc in w)
         if projection.shape[0] != self.query_heads:
             raise ValueError("K3 MLA KC heads do not match the configured query layout")
-        if ((self.kv_lora_rank, self.qk_nope_head_dim, self.qk_rope_head_dim)
-                != (512, 128, 64) or self.token_per_block not in (64, 128)):
-            raise ValueError("Native MLA requires latent512/NoPE128/PE64 and page64 or page128")
+        if (self.kv_lora_rank, self.qk_nope_head_dim, self.qk_rope_head_dim) != (
+            512,
+            128,
+            64,
+        ) or self.token_per_block not in (64, 128):
+            raise ValueError(
+                "Native MLA requires latent512/NoPE128/PE64 and page64 or page128"
+            )
         if self.fp8_compute and self.token_per_block != 128:
             raise ValueError("K3 FP8 MLA requires 128-token kernel pages")
         operand_dtype = torch.float8_e4m3fn if self.fp8_compute else torch.bfloat16
@@ -165,27 +209,46 @@ class KimiK3MlaImpl(MlaImplBase):
                 512 * 1024 * 1024, dtype=torch.uint8, device=device
             )
         self._paged_workspace = _PAGED_MLA_WORKSPACES[workspace_key]
-        if self._paged_workspace.dtype != torch.uint8 or not self._paged_workspace.is_cuda:
+        if (
+            self._paged_workspace.dtype != torch.uint8
+            or not self._paged_workspace.is_cuda
+        ):
             raise ValueError("K3 MLA workspace must be a CUDA uint8 tensor")
-        self.scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** -0.5 * self.softmax_extra_scale
+        self.scale = (
+            self.qk_nope_head_dim + self.qk_rope_head_dim
+        ) ** -0.5 * self.softmax_extra_scale
         # Prefill and paged attention share the unit-scale FP8 cache contract.
         self._q_scale = 1.0
         self._kv_scale_value = 1.0
-        self._kv_scale = torch.full((), self._kv_scale_value, dtype=torch.float32, device=device)
+        self._kv_scale = torch.full(
+            (), self._kv_scale_value, dtype=torch.float32, device=device
+        )
         self._query_buffer = None
         self._absorbed_query_buffer = None
         if self.fp8_compute:
-            shape = (self.tokens, self.query_heads, self.kv_lora_rank + self.qk_rope_head_dim)
-            self._absorbed_query_buffer = torch.empty(shape, dtype=torch.bfloat16, device=device)
-            self._query_buffer = torch.empty(shape, dtype=torch.float8_e4m3fn, device=device)
-        self.page_rr_communicator = get_mla_dcp(self.attn_configs, device, operand_dtype)
+            shape = (
+                self.tokens,
+                self.query_heads,
+                self.kv_lora_rank + self.qk_rope_head_dim,
+            )
+            self._absorbed_query_buffer = torch.empty(
+                shape, dtype=torch.bfloat16, device=device
+            )
+            self._query_buffer = torch.empty(
+                shape, dtype=torch.float8_e4m3fn, device=device
+            )
+        self.page_rr_communicator = get_mla_dcp(
+            self.attn_configs, device, operand_dtype
+        )
 
     def support_cuda_graph(self):
         return self._paged
 
     def prepare(self, inputs, forbid_realloc=False):
         if self._uses_paged_attention(inputs) != self._paged:
-            raise ValueError("K3 MLA instance cannot switch between prefill and paged attention")
+            raise ValueError(
+                "K3 MLA instance cannot switch between prefill and paged attention"
+            )
         if self._paged:
             self._prepare_paged(inputs, forbid_realloc)
         else:
@@ -205,13 +268,19 @@ class KimiK3MlaImpl(MlaImplBase):
             if kv_cache is None:
                 raise ValueError("K3 MLA requires a dense paged KV cache")
             query = self._absorb_query_and_write_cache(
-                q, compressed_kv, k_pe, kv_cache.kv_cache_base,
-                self.page_rr_metadata.slot_mapping, self.weights[layer_id][W.mla_kc],
+                q,
+                compressed_kv,
+                k_pe,
+                kv_cache.kv_cache_base,
+                self.page_rr_metadata.slot_mapping,
+                self.weights[layer_id][W.mla_kc],
             )
         else:
             query = q
             if self._replicated_query_head_start is not None:
-                query = q.narrow(1, self._replicated_query_head_start, self.num_heads).contiguous()
+                query = q.narrow(
+                    1, self._replicated_query_head_start, self.num_heads
+                ).contiguous()
             self.kv_cache_write_op.forward(
                 compressed_kv, k_pe, kv_cache, self.fmha_params
             )
@@ -252,10 +321,29 @@ class KimiK3MlaImpl(MlaImplBase):
         self._prefix_q_offsets = mla_params.q_offsets_host
         self._prefix_lens = tuple(mla_params.prefix_lens_host)
         q_lens = tuple(mla_params.q_lens_host)
-        budget_gib = float(os.environ.get(
-            "RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB", "6.0"
-        ))
         fp8 = self.kv_cache_type == KvCacheDataType.FP8
+        shared_budget = (
+            self.prefill_kv_workspace_budget_bytes
+            if (
+                not fp8
+                and self.prefill_kv_workspace_budget_bytes
+                and torch.cuda.get_device_capability()[0] == 10
+            )
+            else None
+        )
+        self._require_packed_prefill_kv = shared_budget is not None
+        workspace_budget = None
+        budget_gib = 0.0
+        if shared_budget is None:
+            budget_gib = self.prefill_kv_workspace_budget_bytes / 1024**3
+        else:
+            workspace_budget = Bf16MlaWorkspaceBudget(
+                shared_budget,
+                self._page_rr_adapter.shard_size,
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+                query_rows=int(mla_params.attn_inputs.physical_token_count),
+            )
         self._prefix_plan = plan_prefix_chunks(
             q_lens,
             self._prefix_lens,
@@ -268,6 +356,7 @@ class KimiK3MlaImpl(MlaImplBase):
             ),
             budget_gib=budget_gib,
             pack_requests=not fp8,
+            workspace_budget=workspace_budget,
         )
         self.block_table = mla_params.attn_inputs.kv_cache_kernel_block_id_device
 
@@ -276,7 +365,8 @@ class KimiK3MlaImpl(MlaImplBase):
             if kv_cache is None:
                 raise ValueError("MLA Page-RR prefix reuse requires a paged KV cache")
             cache = kv_cache.kv_cache_base.view(
-                -1, self._page_rr_adapter.kernel_page_tokens,
+                -1,
+                self._page_rr_adapter.kernel_page_tokens,
                 self.kv_lora_rank + self.qk_rope_head_dim,
             )
             restored = self._page_rr_adapter.read_prefix(
@@ -305,31 +395,39 @@ class KimiK3MlaImpl(MlaImplBase):
         from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
 
         return LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_kv_b_w, W.mla_kv_b_s,
-            None, self.quant_config,
+            self.weights[layer_id],
+            W.mla_kv_b_w,
+            W.mla_kv_b_s,
+            None,
+            self.quant_config,
         )
 
-    def _project_kv(self, projection, compressed_kv, k_pe):
+    def _project_kv(self, projection, compressed_kv, k_pe, *, require_packed=False):
         """Project K/V into the optional packed layout around the RoPE gap."""
         left, middle, right = (
-            self.qk_nope_head_dim, self.qk_rope_head_dim, self.v_head_dim
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
         )
         head_splits = (left, middle, right)
         if projection.supports_skip_head_mid(compressed_kv, head_splits):
-            packed = projection.forward_skip_head_mid(
-                compressed_kv, head_splits
-            ).view(-1, self.num_heads, left + middle + right)
-            packed[..., left : left + middle].copy_(
-                k_pe.view(-1, 1, middle)
+            packed = projection.forward_skip_head_mid(compressed_kv, head_splits).view(
+                -1, self.num_heads, left + middle + right
             )
+            packed[..., left : left + middle].copy_(k_pe.view(-1, 1, middle))
             return packed[..., : left + middle], packed[..., -right:]
 
-        projected = projection(compressed_kv).view(
-            -1, self.num_heads, left + right
-        )
+        if require_packed:
+            raise RuntimeError(
+                "The shared prefill KV budget requires BF16 skip-head-mid KV-up"
+            )
+        projected = projection(compressed_kv).view(-1, self.num_heads, left + right)
         key = concat_and_cast_mha_k(
-            projected[..., :left], k_pe.view(-1, 1, middle),
-            self.num_heads, left, middle,
+            projected[..., :left],
+            k_pe.view(-1, 1, middle),
+            self.num_heads,
+            left,
+            middle,
         )
         return key, projected[..., left:]
 
@@ -343,17 +441,15 @@ class KimiK3MlaImpl(MlaImplBase):
 
         # Current Q attends causally to current K/V. Historical K/V is merged
         # from separate noncausal calls, so none of it is expanded here.
-        current_k, current_v = self._project_kv(
-            projection, compressed_kv, k_pe
-        )
-        q_fp8, current_k_fp8, current_v_fp8 = quantize_qkv_fp8(
-            q, current_k, current_v
-        )
+        current_k, current_v = self._project_kv(projection, compressed_kv, k_pe)
+        q_fp8, current_k_fp8, current_v_fp8 = quantize_qkv_fp8(q, current_k, current_v)
         # The FP8 operands own separate storage. Release the expanded BF16
         # K/V before TokenSpeed allocates its attention workspace.
         del current_k, current_v
         output, output_lse = self.prefill_wrapper.run_partial(
-            q_fp8, current_k_fp8, current_v_fp8,
+            q_fp8,
+            current_k_fp8,
+            current_v_fp8,
             qo_indptr=self.qo_indptr,
             kv_indptr=self.qo_indptr,
             max_q=self.fmha_params.max_q,
@@ -369,24 +465,30 @@ class KimiK3MlaImpl(MlaImplBase):
             if q_len == 0:
                 continue
             descriptor = self._page_rr_adapter.build_prefix_chunk_descriptor(
-                (owner,), (segment.start,), (segment.length,),
+                (owner,),
+                (segment.start,),
+                (segment.length,),
                 feature_width=self.kv_lora_rank + self.qk_rope_head_dim,
             )
-            restored = self._page_rr_adapter.read_prefix_chunk(
-                cache, self.block_table, descriptor
-            ).to(torch.bfloat16)
-            # As in the feat Page-RR path, project from a contiguous
-            # compressed-KV buffer. The sliced cache record has row stride
-            # kv_lora_rank + qk_rope_head_dim and cannot enter FP8 quant.
-            latent = torch.empty(
-                (segment.length, self.kv_lora_rank),
-                dtype=torch.bfloat16, device=q.device,
+            latent, suffix = self._page_rr_adapter.read_prefix_chunk(
+                cache,
+                self.block_table,
+                descriptor,
+                split_out=(
+                    torch.empty(
+                        (segment.length, self.kv_lora_rank),
+                        dtype=torch.bfloat16,
+                        device=q.device,
+                    ),
+                    torch.empty(
+                        (segment.length, self.qk_rope_head_dim),
+                        dtype=torch.bfloat16,
+                        device=q.device,
+                    ),
+                ),
             )
-            latent.copy_(restored[:, :self.kv_lora_rank])
-            suffix = restored[:, self.kv_lora_rank:]
             key, value = self._project_kv(projection, latent, suffix)
             del latent, suffix
-            del restored
             key_fp8, value_fp8 = quantize_kv_fp8(key, value)
             del key, value
             q_indptr = torch.tensor((0, q_len), dtype=torch.int32, device=q.device)
@@ -394,21 +496,26 @@ class KimiK3MlaImpl(MlaImplBase):
                 (0, segment.length), dtype=torch.int32, device=q.device
             )
             partial, partial_lse = self.prefill_wrapper.run_partial(
-                q_fp8.narrow(0, q_start, q_len), key_fp8, value_fp8,
-                qo_indptr=q_indptr, kv_indptr=kv_indptr,
-                max_q=q_len, max_k=segment.length, causal=False,
+                q_fp8.narrow(0, q_start, q_len),
+                key_fp8,
+                value_fp8,
+                qo_indptr=q_indptr,
+                kv_indptr=kv_indptr,
+                max_q=q_len,
+                max_k=segment.length,
+                causal=False,
             )
             merge_attention_states_in_place(
                 output.narrow(0, q_start, q_len),
                 output_lse.narrow(0, q_start, q_len),
-                partial, partial_lse,
+                partial,
+                partial_lse,
             )
             del key_fp8, value_fp8
             del q_indptr, kv_indptr, partial, partial_lse
         return output.view(-1, self.num_heads, self.v_head_dim)
 
-    def _run_bf16_partial(self, q, k, v, qo_indptr, kv_indptr, *,
-                          max_q, max_k, causal):
+    def _run_bf16_partial(self, q, k, v, qo_indptr, kv_indptr, *, max_q, max_k, causal):
         import flash_mla  # noqa: F401 -- registers the stable Torch operators
 
         dense_prefill_fwd = getattr(torch.ops.flash_mla, "dense_prefill_fwd", None)
@@ -418,26 +525,37 @@ class KimiK3MlaImpl(MlaImplBase):
 
         output = torch.empty(
             (q.shape[0], self.num_heads, self.v_head_dim),
-            dtype=torch.bfloat16, device=q.device,
+            dtype=torch.bfloat16,
+            device=q.device,
         )
         lse = torch.empty(
-            (self.num_heads, q.shape[0]), dtype=torch.float32, device=q.device,
+            (self.num_heads, q.shape[0]),
+            dtype=torch.float32,
+            device=q.device,
         ).transpose(0, 1)
         dense_prefill_fwd(
             _bf16_flash_mla_workspace(q.device),
-            q, k, v, qo_indptr, kv_indptr, output, lse,
-            int(causal), self.scale,
-            max_q, max_k, True,
+            q,
+            k,
+            v,
+            qo_indptr,
+            kv_indptr,
+            output,
+            lse,
+            int(causal),
+            self.scale,
+            max_q,
+            max_k,
+            True,
         )
-        return output, lse.contiguous()
+        return output, lse
 
     def _forward_bf16_chunked(self, q, compressed_kv, k_pe, kv_cache, layer_id):
         plan = self._prefix_plan
         if kv_cache is None:
             raise ValueError("chunked BF16 MLA requires a paged draft KV cache")
         projection = self._make_kv_b_proj(layer_id)
-        splits = (self.qk_nope_head_dim, self.qk_rope_head_dim,
-                  self.v_head_dim)
+        splits = (self.qk_nope_head_dim, self.qk_rope_head_dim, self.v_head_dim)
         if not projection.supports_skip_head_mid(compressed_kv, splits):
             raise RuntimeError(
                 "chunked BF16 MLA requires packed KV-up projection: "
@@ -450,40 +568,53 @@ class KimiK3MlaImpl(MlaImplBase):
                 f"weight_transpose_contiguous={projection.weight.T.is_contiguous()}"
             )
         cache = kv_cache.kv_cache_base.view(
-            -1, self.token_per_block,
+            -1,
+            self.token_per_block,
             self.kv_lora_rank + self.qk_rope_head_dim,
         )
 
         # Reuse one packed KV workspace for current-query and historical-prefix
         # projections, matching feat/k3_dev's FlashMLA forward workspace.
-        capacity = max(segment.length for segment in plan.slices)
-        packed_capacity = max(q.shape[0], capacity)
+        packed_capacity = max(q.shape[0], plan.max_expanded_kv_tokens)
         packed_buffer = torch.empty(
             (packed_capacity, self.num_heads * sum(splits)),
-            dtype=torch.bfloat16, device=q.device,
+            dtype=torch.bfloat16,
+            device=q.device,
         )
         current_packed = packed_buffer.narrow(0, 0, compressed_kv.shape[0])
-        projection.forward_skip_head_mid(
-            compressed_kv, splits, output=current_packed
-        )
+        projection.forward_skip_head_mid(compressed_kv, splits, output=current_packed)
         current_shaped = current_packed.view(
             compressed_kv.shape[0], self.num_heads, sum(splits)
         )
-        current_shaped[..., splits[0]:splits[0] + splits[1]].copy_(
+        current_shaped[..., splits[0] : splits[0] + splits[1]].copy_(
             k_pe.view(-1, 1, splits[1])
         )
-        current_k = current_shaped[..., :-self.v_head_dim]
-        current_v = current_shaped[..., -self.v_head_dim:]
+        current_k = current_shaped[..., : -self.v_head_dim]
+        current_v = current_shaped[..., -self.v_head_dim :]
         max_q = self.fmha_params.max_q
         output, output_lse = self._run_bf16_partial(
-            q, current_k, current_v, self.qo_indptr, self.qo_indptr,
-            max_q=max_q, max_k=max_q, causal=True,
+            q,
+            current_k,
+            current_v,
+            self.qo_indptr,
+            self.qo_indptr,
+            max_q=max_q,
+            max_k=max_q,
+            causal=True,
         )
+        output_lse = output_lse.contiguous()
         del current_k, current_v, current_shaped, current_packed
         canonical = output.float() if plan.requires_fp32_accumulator else output
 
+        capacity = plan.max_expanded_kv_tokens
         latent_buffer = torch.empty(
-            (capacity, self.kv_lora_rank), dtype=torch.bfloat16,
+            (capacity, self.kv_lora_rank),
+            dtype=torch.bfloat16,
+            device=q.device,
+        )
+        rope_buffer = torch.empty(
+            (capacity, self.qk_rope_head_dim),
+            dtype=torch.bfloat16,
             device=q.device,
         )
         for segment in plan.slices:
@@ -494,42 +625,44 @@ class KimiK3MlaImpl(MlaImplBase):
                 continue
             length = segment.length
             latent = latent_buffer.narrow(0, 0, length)
+            rope = rope_buffer.narrow(0, 0, length)
             packed = packed_buffer.narrow(0, 0, length)
             shaped = packed.view(length, self.num_heads, sum(splits))
             descriptor = self._page_rr_adapter.build_prefix_chunk_descriptor(
-                (owner,), (segment.start,), (length,),
+                (owner,),
+                (segment.start,),
+                (length,),
                 feature_width=self.kv_lora_rank + self.qk_rope_head_dim,
             )
-            restored = self._page_rr_adapter.read_prefix_chunk(
-                cache, self.block_table, descriptor
+            self._page_rr_adapter.read_prefix_chunk(
+                cache,
+                self.block_table,
+                descriptor,
+                split_out=(latent, rope),
             )
-            latent.copy_(restored[:, :self.kv_lora_rank])
-            # skip-head-mid leaves the RoPE columns untouched. Fill
-            # them from the restored PageRR view before KV-up, so a
-            # separate full-prefix RoPE buffer never overlaps the
-            # restored pages and the packed projection workspace.
-            shaped[..., splits[0]:splits[0] + splits[1]].copy_(
-                restored[:, self.kv_lora_rank:].view(length, 1, splits[1])
+            # skip-head-mid leaves the RoPE columns untouched.
+            shaped[..., splits[0] : splits[0] + splits[1]].copy_(
+                rope.view(length, 1, splits[1])
             )
-            del restored
-            projection.forward_skip_head_mid(
-                latent, splits, output=packed
-            )
+            projection.forward_skip_head_mid(latent, splits, output=packed)
             q_part = q.narrow(0, q_start, q_len)
-            q_indptr = torch.tensor((0, q_len), dtype=torch.int32,
-                                    device=q.device)
-            kv_indptr = torch.tensor((0, length), dtype=torch.int32,
-                                     device=q.device)
+            q_indptr = torch.tensor((0, q_len), dtype=torch.int32, device=q.device)
+            kv_indptr = torch.tensor((0, length), dtype=torch.int32, device=q.device)
             partial, partial_lse = self._run_bf16_partial(
-                q_part, shaped[..., :-self.v_head_dim],
-                shaped[..., -self.v_head_dim:],
-                q_indptr, kv_indptr, max_q=q_len, max_k=length,
+                q_part,
+                shaped[..., : -self.v_head_dim],
+                shaped[..., -self.v_head_dim :],
+                q_indptr,
+                kv_indptr,
+                max_q=q_len,
+                max_k=length,
                 causal=False,
             )
             merge_attention_states_in_place(
                 canonical.narrow(0, q_start, q_len),
                 output_lse.narrow(0, q_start, q_len),
-                partial, partial_lse,
+                partial,
+                partial_lse,
             )
         return canonical.to(torch.bfloat16)
 
@@ -540,11 +673,16 @@ class KimiK3MlaImpl(MlaImplBase):
             compressed_kv, k_pe, kv_cache
         )
         key, value = self._project_kv(
-            self._make_kv_b_proj(layer_id), compressed_kv, k_pe
+            self._make_kv_b_proj(layer_id),
+            compressed_kv,
+            k_pe,
+            require_packed=self._require_packed_prefill_kv,
         )
         del compressed_kv, k_pe
         output, _ = self._run_bf16_partial(
-            q, key, value,
+            q,
+            key,
+            value,
             self.qo_indptr,
             self._bf16_kv_indptr,
             max_q=self.fmha_params.max_q,
@@ -559,22 +697,14 @@ class KimiK3MlaImpl(MlaImplBase):
                 return self._forward_bf16_chunked(
                     q, compressed_kv, k_pe, kv_cache, layer_id
                 )
-            return self._forward_bf16_full(
-                q, compressed_kv, k_pe, kv_cache, layer_id
-            )
+            return self._forward_bf16_full(q, compressed_kv, k_pe, kv_cache, layer_id)
         if self._prefix_plan.chunked:
-            return self._forward_fp8_chunked(
-                q, compressed_kv, k_pe, kv_cache, layer_id
-            )
+            return self._forward_fp8_chunked(q, compressed_kv, k_pe, kv_cache, layer_id)
         compressed_kv, k_pe = self._reuse_kv_cache_indexed_batched(
             compressed_kv, k_pe, kv_cache
         )
-        k, v = self._project_kv(
-            self._make_kv_b_proj(layer_id), compressed_kv, k_pe
-        )
-        q_fp8, k_fp8, v_fp8 = quantize_qkv_fp8(
-            q, k, v
-        )
+        k, v = self._project_kv(self._make_kv_b_proj(layer_id), compressed_kv, k_pe)
+        q_fp8, k_fp8, v_fp8 = quantize_qkv_fp8(q, k, v)
         del k, v
         return self.prefill_wrapper.run(q_fp8, k_fp8, v_fp8, self.fmha_params).view(
             -1, self.num_heads, self.v_head_dim
@@ -587,38 +717,60 @@ class KimiK3MlaImpl(MlaImplBase):
         cache_dtype = torch.float8_e4m3fn if self.fp8_compute else torch.bfloat16
         if cache.dtype != cache_dtype:
             raise ValueError(f"MLA cache requires {cache_dtype} storage")
-        if q.shape[1:] != (self.query_heads, self.qk_nope_head_dim + self.qk_rope_head_dim):
+        if q.shape[1:] != (
+            self.query_heads,
+            self.qk_nope_head_dim + self.qk_rope_head_dim,
+        ):
             raise ValueError("Unexpected K3 MLA query layout")
         if slot_mapping.numel() != q.shape[0] or slot_mapping.dtype != torch.int64:
             raise ValueError("K3 MLA requires one int64 cache slot per physical query")
         if self.fp8_compute:
-            if (self._query_buffer is None or self._absorbed_query_buffer is None
-                    or q.shape[0] > self._query_buffer.shape[0]):
+            if (
+                self._query_buffer is None
+                or self._absorbed_query_buffer is None
+                or q.shape[0] > self._query_buffer.shape[0]
+            ):
                 raise ValueError("FP8 MLA query exceeds reserved graph buffer")
-            absorbed_q = self._absorbed_query_buffer[:q.shape[0]]
+            absorbed_q = self._absorbed_query_buffer[: q.shape[0]]
             # As in feat/k3_dev's TokenSpeed path, write both parts into the
             # graph-stable BF16 query before quantization. This avoids a cat
             # allocation and its full-query copy on every Verify replay.
-            absorbed_q[..., self.kv_lora_rank:].copy_(q[..., self.qk_nope_head_dim:])
+            absorbed_q[..., self.kv_lora_rank :].copy_(q[..., self.qk_nope_head_dim :])
             torch.bmm(
-                q[..., :self.qk_nope_head_dim].transpose(0, 1), k_weight,
-                out=absorbed_q[..., :self.kv_lora_rank].transpose(0, 1),
+                q[..., : self.qk_nope_head_dim].transpose(0, 1),
+                k_weight,
+                out=absorbed_q[..., : self.kv_lora_rank].transpose(0, 1),
             )
             compute_ops.concat_and_cache_mla(
-                kv, k_pe, cache.view(-1, self.token_per_block, self.kv_lora_rank + self.qk_rope_head_dim),
-                slot_mapping, "fp8", self._kv_scale,
+                kv,
+                k_pe,
+                cache.view(
+                    -1, self.token_per_block, self.kv_lora_rank + self.qk_rope_head_dim
+                ),
+                slot_mapping,
+                "fp8",
+                self._kv_scale,
             )
             return quantize_fp8(
-                absorbed_q, self._q_scale, self._query_buffer[:q.shape[0]],
+                absorbed_q,
+                self._q_scale,
+                self._query_buffer[: q.shape[0]],
             )
-        latent_q = torch.bmm(q[..., :self.qk_nope_head_dim].transpose(0, 1), k_weight)
+        latent_q = torch.bmm(q[..., : self.qk_nope_head_dim].transpose(0, 1), k_weight)
         absorbed_q = torch.empty(
             (q.shape[0], self.query_heads, self.kv_lora_rank + self.qk_rope_head_dim),
-            dtype=q.dtype, device=q.device,
+            dtype=q.dtype,
+            device=q.device,
         )
         compute_ops.mla_decode_q_concat_cache_insert(
-            latent_q.transpose(0, 1), q[..., self.qk_nope_head_dim:], kv, k_pe,
-            absorbed_q, cache.view(-1, self.token_per_block, self.kv_lora_rank + self.qk_rope_head_dim),
+            latent_q.transpose(0, 1),
+            q[..., self.qk_nope_head_dim :],
+            kv,
+            k_pe,
+            absorbed_q,
+            cache.view(
+                -1, self.token_per_block, self.kv_lora_rank + self.qk_rope_head_dim
+            ),
             slot_mapping,
         )
         return absorbed_q
@@ -671,7 +823,16 @@ class KimiK3MlaImpl(MlaImplBase):
         )
         output = torch.empty(
             (self.tokens, self.num_heads, weights[W.mla_vc].shape[-1]),
-            dtype=torch.bfloat16, device=query.device,
+            dtype=torch.bfloat16,
+            device=query.device,
         )
         torch.bmm(merged, weights[W.mla_vc], out=output.transpose(0, 1))
         return output
+
+    @property
+    def requires_host_metadata(self):
+        return not self._paged
+
+    @property
+    def can_capture_cuda_graph_prepare(self):
+        return self._paged

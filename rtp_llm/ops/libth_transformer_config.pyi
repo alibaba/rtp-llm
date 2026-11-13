@@ -1287,6 +1287,7 @@ class PrefillCPConfig:
     comm_buffer_size: int
     method: CPRotateMethod
     prefill_cp_size: int
+    preserve_tp_layout: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:

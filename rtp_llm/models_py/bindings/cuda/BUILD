@@ -223,7 +223,11 @@ cc_library(
     srcs = [
         "RegisterCudaOps.cc",
     ],
-    copts = copts() + ["-fno-strict-aliasing"],
+    copts = copts() + ["-fno-strict-aliasing"] + select({
+        "@//:using_cuda13_x86": ["-DRTP_MEGA_TOPK"],
+        "@//:using_cuda13_arm": ["-DRTP_MEGA_TOPK"],
+        "//conditions:default": [],
+    }),
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":bf16_gemm_op",
@@ -233,8 +237,16 @@ cc_library(
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base",
     ] + select({
-        "@//:using_cuda13_x86": ["//rtp_llm/models_py/bindings/cuda/kernels:attn_res"],
-        "@//:using_cuda13_arm": ["//rtp_llm/models_py/bindings/cuda/kernels:attn_res"],
+        "@//:using_cuda13_x86": [
+            "//rtp_llm/models_py/bindings/cuda/kernels:attn_res",
+            "//rtp_llm/models_py/bindings/cuda/kernels:mega_topk",
+            "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp4_quant",
+        ],
+        "@//:using_cuda13_arm": [
+            "//rtp_llm/models_py/bindings/cuda/kernels:attn_res",
+            "//rtp_llm/models_py/bindings/cuda/kernels:mega_topk",
+            "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp4_quant",
+        ],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

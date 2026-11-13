@@ -43,9 +43,7 @@ class KimiK3AttentionResidual(nn.Module):
         shared_delta: Optional[torch.Tensor] = None,
         metadata=None,
     ):
-        from rtp_llm.models_py.triton_kernels.common.activation import (
-            attn_res_fp8,
-        )
+        from rtp_llm.models_py.triton_kernels.common.activation import attn_res_fp8
 
         return attn_res_fp8(
             prefix_sum,
@@ -73,7 +71,16 @@ class KimiK3AttentionResidual(nn.Module):
         num_blocks: Optional[int] = None,
         block_write_idx: int = -1,
         metadata=None,
-    ) -> torch.Tensor:
+        also_quantize: bool = False,
+        quantize_nvfp4: bool = False,
+        split_nvfp4_quant: bool = False,
+        rowwise_nvfp4: bool = False,
+        decode_head_gate_columns: int = 0,
+    ):
+        if quantize_nvfp4 and output_norm_weight is None:
+            raise ValueError("AttnRes NVFP4 requires output RMSNorm")
+        if rowwise_nvfp4 and (not quantize_nvfp4 or also_quantize):
+            raise ValueError("Rowwise NVFP4 AttnRes requires a packed output")
         if self._verify_fp8 and getattr(metadata, "is_target_verify", False):
             return self.forward_fp8(
                 prefix_sum,
@@ -128,7 +135,58 @@ class KimiK3AttentionResidual(nn.Module):
 
             if not hasattr(rtp_llm_ops, "attn_res"):
                 raise RuntimeError("Native AttnRes requires the CUDA 13 RTP build")
-            output = torch.empty_like(prefix_sum)
+            # DSA's local Indexer head-gate GEMM also consumes the normalized BF16.
+            packet_only = rowwise_nvfp4 and not decode_head_gate_columns
+            output = prefix_sum if packet_only else torch.empty_like(prefix_sum)
+            fp8 = None
+            kwargs = {}
+            decode_packet = None
+            if decode_head_gate_columns:
+                from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_comm_fusion import (
+                    DsaDecodeActivation,
+                )
+
+                decode_packet = DsaDecodeActivation.empty(
+                    output,
+                    decode_head_gate_columns,
+                    rowwise=rowwise_nvfp4,
+                )
+                packet, fp8, _ = decode_packet.views()
+            elif also_quantize:
+                from rtp_llm.models_py.distributed.collective_torch import Fp8Activation
+
+                rows, width = output.shape
+                fp8 = Fp8Activation(
+                    torch.empty_like(output, dtype=torch.float8_e4m3fn),
+                    torch.empty(
+                        (width // 512, (rows + 3) // 4 * 4),
+                        dtype=torch.int32,
+                        device=output.device,
+                    ),
+                )
+            if fp8 is not None:
+                kwargs.update(fp8_output=fp8.values, fp8_scales=fp8.scale_wire)
+            if quantize_nvfp4:
+                from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_comm_fusion import (
+                    PackedNvfp4Activation,
+                )
+
+                if decode_packet is None:
+                    packet = PackedNvfp4Activation.empty(
+                        *output.shape,
+                        output.device,
+                        rowwise=rowwise_nvfp4,
+                    )
+                if rowwise_nvfp4:
+                    kwargs.update(nvfp4_packet=packet.wire, nvfp4_rowwise=True)
+                else:
+                    if not split_nvfp4_quant:
+                        kwargs["nvfp4_packet"] = packet.wire
+                    num_sms = torch.cuda.get_device_properties(
+                        prefix_sum.device
+                    ).multi_processor_count
+                    amax_partials = output.new_empty(num_sms, dtype=torch.float32)
+                    kwargs["amax_partials"] = amax_partials
             rtp_llm_ops.attn_res(
                 prefix_sum,
                 delta,
@@ -142,11 +200,32 @@ class KimiK3AttentionResidual(nn.Module):
                 self.eps,
                 0.0 if output_norm_eps is None else float(output_norm_eps),
                 shared_delta=shared_delta,
+                **kwargs,
             )
-            return output
+            if quantize_nvfp4 and split_nvfp4_quant and not rowwise_nvfp4:
+                # Give large prefill packets a packing grid independent of AttnRes.
+                from rtp_llm.models_py.triton_kernels.common.nvfp4 import (
+                    quantize_nvfp4_from_partials,
+                )
+                from rtp_llm.models_py.utils.module_profiler import profile_scope
+
+                with profile_scope("RTP::attention.attn_res_nvfp4_packet_quant"):
+                    quantize_nvfp4_from_partials(output, amax_partials, packet=packet)
+            if decode_packet is not None:
+                return decode_packet
+            if quantize_nvfp4:
+                return (output, fp8, packet) if fp8 is not None else packet
+            return (output, fp8) if fp8 is not None else output
+        if quantize_nvfp4:
+            raise ValueError(
+                "Packed AttnRes NVFP4 requires native SM10x BF16 [M,7168] input"
+            )
+        if shared_delta is not None:
+            if delta is None:
+                raise ValueError("AttnRes shared delta requires routed output")
+            delta = delta + shared_delta
         if delta is not None:
-            # Match MoE's BF16 routed + shared, then prefix + MoE rounding.
-            prefix_sum.add_(delta if shared_delta is None else delta + shared_delta)
+            prefix_sum.add_(delta)
         if block_write_idx >= 0:
             block_residual[:, block_write_idx].copy_(prefix_sum)
         if active_blocks == 0:

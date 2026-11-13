@@ -2205,15 +2205,20 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("comm_buffer_size", &PrefillCPConfig::comm_buffer_size)
         .def_readwrite("kv_cache_sharded", &PrefillCPConfig::kv_cache_sharded)
         .def_readwrite("prefill_cp_size", &PrefillCPConfig::prefill_cp_size)
+        .def_readwrite("preserve_tp_layout", &PrefillCPConfig::preserve_tp_layout)
         .def("to_string", &PrefillCPConfig::to_string)
         .def("is_enabled", &PrefillCPConfig::is_enabled)
         .def("is_prefill_enabled", &PrefillCPConfig::is_prefill_enabled)
         .def(py::pickle(
             [](const PrefillCPConfig& self) {
-                return py::make_tuple(self.method, self.comm_buffer_size, self.kv_cache_sharded, self.prefill_cp_size);
+                return py::make_tuple(self.method,
+                                      self.comm_buffer_size,
+                                      self.kv_cache_sharded,
+                                      self.prefill_cp_size,
+                                      self.preserve_tp_layout);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 4)
+                if (t.size() != 2 && t.size() != 4 && t.size() != 5)
                     throw std::runtime_error("Invalid state!");
                 PrefillCPConfig c;
                 try {
@@ -2222,6 +2227,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     if (t.size() >= 4) {
                         c.kv_cache_sharded = t[2].cast<bool>();
                         c.prefill_cp_size  = t[3].cast<int64_t>();
+                    }
+                    if (t.size() == 5) {
+                        c.preserve_tp_layout = t[4].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PrefillCPConfig unpickle error: ") + e.what());

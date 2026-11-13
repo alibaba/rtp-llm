@@ -1493,19 +1493,35 @@ def _load_custom_ag_kernels(fp8):
 
 
 def create_custom_all_gather(
-    group, device, *, max_m: int, k: int, fp8: bool, staging_only: bool = True
+    group,
+    device,
+    *,
+    max_m: int,
+    k: int,
+    fp8: bool,
+    staging_only: bool = True,
+    packed_bytes: Optional[int] = None,
 ):
     """Return a workspace or collectively retain the existing AG backend.
 
     All capability, allocation and multicast mapping checks finish here. Forward
     must never rendezvous or make a rank-local choice to fall back to NCCL.
     max_m is the gathered output capacity (TP times the per-rank input rows).
+    packed_bytes reserves a direct-only uint8 packet capacity per rank.
     """
     world_size = group.size()
     if world_size not in (2, 4, 8, 16) or k != 7168:
         return None
     if max_m <= 0 or max_m % world_size:
         raise ValueError("custom AG capacity must be positive and divisible by TP size")
+    if packed_bytes is not None and (
+        type(packed_bytes) is not int
+        or fp8
+        or staging_only
+        or packed_bytes <= 0
+        or packed_bytes % 16
+    ):
+        raise ValueError("Packed AG requires direct mode and 16-byte aligned capacity")
     if torch.cuda.is_current_stream_capturing():
         raise RuntimeError("Custom AG must be configured before CUDA Graph capture")
     failure = ""
@@ -1525,6 +1541,7 @@ def create_custom_all_gather(
             k,
             fp8,
             staging_only,
+            packed_bytes,
             props.multi_processor_count,
             _nvlink_fabric(str(props.uuid)),
         )
@@ -1578,15 +1595,21 @@ def create_custom_all_gather(
         slot_bytes = local_staging_m * k * 2
     storage = {}
     try:
-        storage["staging"] = symm.empty(
-            2 * world_size * slot_bytes, dtype=torch.uint8, device=device
-        )
+        if packed_bytes is None:
+            storage["staging"] = symm.empty(
+                2 * world_size * slot_bytes, dtype=torch.uint8, device=device
+            )
         storage["semaphores"] = symm.empty(
             (props.multi_processor_count, 128), dtype=torch.uint8, device=device
         )
-        storage["values"] = symm.empty(
-            (max_m, k), dtype=torch.uint8 if fp8 else torch.bfloat16, device=device
-        )
+        if packed_bytes is not None:
+            storage["values"] = symm.empty(
+                world_size * packed_bytes, dtype=torch.uint8, device=device
+            )
+        else:
+            storage["values"] = symm.empty(
+                (max_m, k), dtype=torch.uint8 if fp8 else torch.bfloat16, device=device
+            )
         if fp8:
             storage["scales"] = symm.empty(
                 ((max_m + 3) // 4 * 4) * groups, dtype=torch.int32, device=device
@@ -1620,7 +1643,8 @@ def create_custom_all_gather(
                 failure or "peer mapping failed",
             )
             return None
-    storage["staging"].zero_()
+    if "staging" in storage:
+        storage["staging"].zero_()
     storage["semaphores"].zero_()
     torch.cuda.synchronize(device)
     dist.barrier(group=group)
@@ -1628,11 +1652,12 @@ def create_custom_all_gather(
         kernels, storage, handles, counters, group.rank(), fp8, world_size
     )
     logging.info(
-        "[CUSTOM_AG] enabled TP%d max_m=%d k=%d fp8=%s workspace=%.3f MiB",
+        "[CUSTOM_AG] enabled TP%d max_m=%d k=%d fp8=%s packed_bytes=%s workspace=%.3f MiB",
         world_size,
         max_m,
         k,
         fp8,
+        packed_bytes,
         sum(t.numel() * t.element_size() for t in storage.values()) / (1 << 20),
     )
     return workspace
@@ -1675,7 +1700,7 @@ class CustomAllGather:
         return tensor if tensor.data_ptr() % 16 == 0 else tensor.clone()
 
     def all_gather(self, local_input, *, staging=True):
-        if self.fp8:
+        if self.fp8 or self.storage["values"].ndim != 2:
             raise TypeError("BF16 AG requires a BF16 workspace")
         m = local_input.shape[0] * self.world_size
         if not 0 < m <= self.storage["values"].shape[0]:
@@ -1705,6 +1730,44 @@ class CustomAllGather:
                 blocks,
                 threads,
             )
+        return output
+
+    def can_gather_packed(self, size: int) -> bool:
+        buffer = self.storage["values"]
+        return (
+            not self.fp8
+            and buffer.ndim == 1
+            and buffer.dtype == torch.uint8
+            and size % 16 == 0
+            and 0 < size * self.world_size <= buffer.numel()
+        )
+
+    def all_gather_packed(self, local_packet: torch.Tensor) -> torch.Tensor:
+        size = local_packet.numel()
+        if (
+            local_packet.ndim != 1
+            or local_packet.dtype != torch.uint8
+            or not local_packet.is_contiguous()
+            or local_packet.device != self.storage["values"].device
+            or size % 16
+        ):
+            raise ValueError(
+                "Packed AG requires a contiguous vector-aligned uint8 packet on the configured device"
+            )
+        if not self.can_gather_packed(size):
+            raise ValueError("Packed AG exceeds configured capacity")
+        output = self.storage["values"][: size * self.world_size]
+        blocks = min(max(8, (size + 16383) // 16384), self.counters.numel())
+        self.direct_kernel(
+            self._aligned(local_packet).view(1, size),
+            output.view(self.world_size, size),
+            self.storage["semaphores"],
+            self.pointers["values"],
+            self.pointers["semaphores"],
+            self.rank,
+            blocks,
+            256,
+        )
         return output
 
     def all_gather_fp8(self, values, wire, *, staging=True):
@@ -1901,7 +1964,9 @@ class MlaDcpCommunicator:
     """Communication state shared by serial MLA layers in one TP group.
 
     Q is contiguous [local_heads,T,D]; partial O/LSE are [T,all_heads,L]
-    and [T,all_heads]. combine returns BF16 [local_heads,T,L]. LSE is base-2.
+    and [T,all_heads]. combine returns BF16 [local_heads,T,D], with D defaulting
+    to the latent dimension or explicitly selecting a projected output width.
+    LSE is base-2.
     The local MLA adapter supplies O=0/LSE=-inf for empty shards.
     """
 
@@ -1956,13 +2021,23 @@ class MlaDcpCommunicator:
         all_gather_into(local_q.view(wire_dtype), output.view(wire_dtype), Group.TP)
         return output
 
-    def combine(self, partial_o, partial_lse, local_seq_lens):
+    def combine(
+        self,
+        partial_o,
+        partial_lse,
+        local_seq_lens,
+        *,
+        output_dim: Optional[int] = None,
+    ):
         import triton
 
         tokens, heads, dim = partial_o.shape
+        expected_dim = self.latent_dim if output_dim is None else output_dim
         if (
             heads != self.heads
-            or dim != self.latent_dim
+            or dim != expected_dim
+            or dim <= 0
+            or dim % 2
             or partial_o.dtype != torch.bfloat16
             or not partial_o.is_contiguous()
             or partial_lse.shape != (tokens, heads)

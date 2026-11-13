@@ -158,7 +158,12 @@ class ModelFactory:
             or sp_type == SpeculativeType.DSPARK
         ):
             model_type = propose_model_config.model_type
-            if model_type in ("deepseek-v3-mtp", "mixtbstars-mtp", "kimi_k3_mtp"):
+            if model_type in (
+                "deepseek-v3-mtp",
+                "mixtbstars-mtp",
+                "kimi_k3_mtp",
+                "kimi_k31_mtp",
+            ):
                 logging.warning(
                     f"create sp model type is {model_type}, so change the sp type to mtp"
                 )
@@ -225,10 +230,15 @@ class ModelFactory:
                     "disable ROCm swizzleA for BF16 qwen_3_dspark propose model"
                 )
 
+            propose_parallelism_config = engine_config.parallelism_config
+            if hasattr(model_cls, "speculative_parallelism_config"):
+                propose_parallelism_config = model_cls.speculative_parallelism_config(
+                    propose_parallelism_config
+                )
             gpt_model = model_cls.from_config(
                 model_config=propose_model_config,
                 runtime_config=engine_config.runtime_config,
-                parallelism_config=engine_config.parallelism_config,
+                parallelism_config=propose_parallelism_config,
                 hw_kernel_config=propose_hw_kernel_config,
                 kv_cache_config=engine_config.kv_cache_config,
                 fmha_config=engine_config.fmha_config,
@@ -438,6 +448,9 @@ class ModelFactory:
             model_config: ModelConfig containing model information
         """
         finalize_pp_partition(engine_config.parallelism_config, model_config.num_layers)
+        configure_parallelism = getattr(model_config, "configure_parallelism", None)
+        if configure_parallelism is not None:
+            configure_parallelism(engine_config.parallelism_config)
 
         # Finalize scheduler config based on ModelConfig (only once, for main model)
         finalize_scheduler_config(

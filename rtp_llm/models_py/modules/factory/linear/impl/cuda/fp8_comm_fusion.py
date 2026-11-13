@@ -14,8 +14,14 @@ from rtp_llm.models_py.distributed.collective_torch import (
 
 class Fp8CollectiveProjection:
     def __init__(
-        self, group, device, *, max_m: int, hidden_size: int,
-        enable_ag: bool = True, enable_rs: bool = True,
+        self,
+        group,
+        device,
+        *,
+        max_m: int,
+        hidden_size: int,
+        enable_ag: bool = True,
+        enable_rs: bool = True,
         decode_staging: bool = False,
     ):
         import torch.distributed._symmetric_memory as symm
@@ -32,13 +38,22 @@ class Fp8CollectiveProjection:
             raise ValueError("FP8 collective capacity must be divisible by TP size")
         if self.hidden_size % 512:
             raise ValueError("FP8 collective hidden size must be 512-aligned")
-        if enable_ag and not decode_staging and not callable(getattr(symm, "_pipelined_multi_all_gather_and_consume", None)):
+        if (
+            enable_ag
+            and not decode_staging
+            and not callable(
+                getattr(symm, "_pipelined_multi_all_gather_and_consume", None)
+            )
+        ):
             raise RuntimeError("PyTorch FP8 AllGather consumer pipeline unavailable")
         self.custom_ag = None
         if enable_ag:
             if decode_staging:
                 self.custom_ag = create_custom_all_gather(
-                    group, self.device, max_m=self.max_m, k=self.hidden_size,
+                    group,
+                    self.device,
+                    max_m=self.max_m,
+                    k=self.hidden_size,
                     fp8=True,
                 )
                 if self.custom_ag is None:
@@ -50,14 +65,27 @@ class Fp8CollectiveProjection:
                 ag_bytes = local_m * self.hidden_size + groups * aligned_local_m * 4
                 symm.get_symm_mem_workspace(group.group_name, min_size=ag_bytes)
                 self.custom_ag = create_custom_all_gather(
-                    group, self.device, max_m=min(self.max_m, 4095 * self.world_size),
-                    k=self.hidden_size, fp8=True, staging_only=False,
+                    group,
+                    self.device,
+                    max_m=min(self.max_m, 4095 * self.world_size),
+                    k=self.hidden_size,
+                    fp8=True,
+                    staging_only=False,
                 )
         self.rs_workspace = None
         self.deep_gemm = None
         self.push_rs = None
         if enable_rs:
-            if not decode_staging:
+            if decode_staging:
+                self.push_rs = create_push_reduce_scatter(
+                    group,
+                    self.device,
+                    max_m=self.max_m if decode_staging else min(self.max_m, 512),
+                    n=self.hidden_size,
+                )
+                if self.push_rs is None and decode_staging:
+                    raise RuntimeError("Decode BF16 push ReduceScatter is unavailable")
+            else:
                 import deep_gemm
 
                 if not callable(getattr(deep_gemm, "fp8_gemm_rs_nt", None)):
@@ -68,13 +96,12 @@ class Fp8CollectiveProjection:
                     group, max_m=self.max_m, n=self.hidden_size, device=self.device
                 )
                 self.deep_gemm = deep_gemm
-            self.push_rs = create_push_reduce_scatter(
-                group, self.device,
-                max_m=self.max_m if decode_staging else min(self.max_m, 512),
-                n=self.hidden_size,
-            )
-            if self.push_rs is None and decode_staging:
-                raise RuntimeError("Decode BF16 push ReduceScatter is unavailable")
+                self.push_rs = create_push_reduce_scatter(
+                    group,
+                    self.device,
+                    max_m=min(self.max_m, 512),
+                    n=self.hidden_size,
+                )
 
     def can_run_ag(self, local_rows: int) -> bool:
         return 0 < local_rows and local_rows * self.world_size <= self.max_m
@@ -88,7 +115,9 @@ class Fp8CollectiveProjection:
             if not getattr(metadata, "is_target_verify", False):
                 return False
             if not self.can_run_ag(hidden.shape[0]):
-                raise RuntimeError("Decode FP8 AllGather exceeds its initialized capacity")
+                raise RuntimeError(
+                    "Decode FP8 AllGather exceeds its initialized capacity"
+                )
             return True
         if not self.can_run_ag(hidden.shape[0]):
             return False
@@ -110,7 +139,9 @@ class Fp8CollectiveProjection:
             if not getattr(metadata, "is_target_verify", False):
                 return False
             if not self.can_run_rs(rows):
-                raise RuntimeError("Decode FP8 ReduceScatter exceeds its initialized capacity")
+                raise RuntimeError(
+                    "Decode FP8 ReduceScatter exceeds its initialized capacity"
+                )
             return True
         return (
             self.can_run_rs(rows)
@@ -121,15 +152,20 @@ class Fp8CollectiveProjection:
 
     def reduce_scatter_bf16(self, partial):
         if partial.dtype != torch.bfloat16 or not self.can_run_rs(partial.shape[0]):
-            raise ValueError("Decode push ReduceScatter requires configured BF16 [M,H] partials")
+            raise ValueError(
+                "Decode push ReduceScatter requires configured BF16 [M,H] partials"
+            )
         if partial.shape[1] != self.hidden_size or partial.device != self.device:
-            raise ValueError("Decode push ReduceScatter has incompatible shape or device")
+            raise ValueError(
+                "Decode push ReduceScatter has incompatible shape or device"
+            )
         partial = partial.contiguous()
         if partial.data_ptr() % 16:
             partial = partial.clone()
         output = torch.empty(
             (partial.shape[0] // self.world_size, self.hidden_size),
-            dtype=torch.bfloat16, device=self.device,
+            dtype=torch.bfloat16,
+            device=self.device,
         )
         if self.push_rs is not None and (self.decode_staging or partial.shape[0] < 512):
             self.push_rs.reduce_scatter(partial, output)
@@ -172,7 +208,9 @@ class Fp8CollectiveProjection:
         values_wire = values.view(torch.uint8)
         if self.custom_ag is not None and (self.decode_staging or local_m < 4096):
             gathered_values, gathered_scales = self.custom_ag.all_gather_fp8(
-                values, scale_wire, staging=self.decode_staging or local_m < 128,
+                values,
+                scale_wire,
+                staging=self.decode_staging or local_m < 128,
             )
             return projection.forward_quantized(gathered_values, gathered_scales)
         gathered = torch.empty(

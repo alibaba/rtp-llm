@@ -136,6 +136,27 @@ bool streamAsyncReplayPrepEnabled() {
     return enabled;
 }
 
+// A tagged model opts in only when every backend declares the capability.
+bool allAttentionImplsHaveCapability(const py::object& impl, const char* capability, bool expected = true) {
+    if (!impl || impl.is_none()) {
+        return false;
+    }
+    if (py::isinstance<py::dict>(impl)) {
+        const auto impls = impl.cast<py::dict>();
+        if (impls.size() == 0) {
+            return false;
+        }
+        for (auto item : impls) {
+            if (!allAttentionImplsHaveCapability(
+                    py::reinterpret_borrow<py::object>(item.second), capability, expected)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return py::hasattr(impl, capability) && impl.attr(capability).cast<bool>() == expected;
+}
+
 void callPrepareCudaGraph(py::object attn_pyobj, PyModelInputs& inputs) {
     if (!attn_pyobj || attn_pyobj.is_none()) {
         return;
@@ -469,12 +490,12 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 
     const size_t graph_idx =
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
-    auto&      py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
-    auto       attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
-    const bool has_tagged_cache = !inputs.attention_inputs_by_tag.empty();
-    const int  selected_graph_batch_size =
+    auto&       py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
+    const auto& attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
+    const bool  has_tagged_cache = !inputs.attention_inputs_by_tag.empty();
+    const int   selected_graph_batch_size =
         is_prefill_cuda_graph_mode_ ? static_cast<int>(py_model_inputs_.attention_inputs.input_lengths.numel()) :
-                                       state.current_real_graph_bs;
+                                        state.current_real_graph_bs;
     const bool has_padded_rows     = state.current_batch_size < selected_graph_batch_size;
     const bool rectangular_prefill = is_target_verify_ || usesFixedCapacityMtpDraftPrefillCudaGraph();
     const int  sp_batch_size =
@@ -900,7 +921,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // NOTE: we do H2H after D2D copies to let GPU finish the D2D copies as soon as possible,
     // so that the GPU can start the kernel launch as soon as possible.
 
-    {
+    if (graph_instances_[graph_idx].mem_hold_.requires_host_metadata_) {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(host_mirror_copy)");
 
         // H2H copies (common to both modes)
@@ -1163,7 +1184,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // (MtpExecutor::decodeStep) and from the engine main thread (PyWrappedModel::forward),
     // neither of which holds the GIL on entry. pybind11's attr() and call operator construct
     // a Python args tuple via PyTuple_New, which segfaults without the GIL.
-    {
+    if (!graph_instances_[graph_idx].mem_hold_.capture_attention_prepare_) {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(prepare_cuda_graph)");
         if (pending_host_mirror_d2h) {
             // Wait for the async D2H metadata copies above so the CPU-side
@@ -2151,15 +2172,28 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
 
     // WarmUp twice (params already prepared in attn impl __init__/create_params when instance was created)
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
-    auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
+    auto& mem_hold   = graph_instances_[key].mem_hold_;
+    auto  attn_pyobj = mem_hold.attn_pyobj_;
+    // Prefill roles also consume host lengths outside the attention backend.
+    mem_hold.requires_host_metadata_ = isEmbeddingStylePrefillCudaGraph() || isGenerationPrefillCudaGraph()
+                                       || !allAttentionImplsHaveCapability(attn_pyobj, "requires_host_metadata", false);
+    mem_hold.capture_attention_prepare_ =
+        !mem_hold.requires_host_metadata_
+        && allAttentionImplsHaveCapability(attn_pyobj, "can_capture_cuda_graph_prepare");
     try {
         // Run the same backend that will be captured for this exact key.  In
         // particular, static torch.compile/Triton specializations must be
         // materialized before graphCaptureBegin rather than during capture.
         ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+        if (mem_hold.capture_attention_prepare_) {
+            callPrepareCudaGraph(attn_pyobj, inputs);
+        }
         py_forward_method_(inputs, attn_pyobj);
         if (!py_after_warmup_method_.is_none()) {
             py_after_warmup_method_(inputs);
+        }
+        if (mem_hold.capture_attention_prepare_) {
+            callPrepareCudaGraph(attn_pyobj, inputs);
         }
         py_forward_method_(inputs, attn_pyobj);
         if (!py_after_warmup_method_.is_none()) {
@@ -2200,6 +2234,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             cuda_graph::GraphNcclCaptureContext capture_ctx;
             CudaGraphCaptureGuard               capture_guard(&capture_ctx);
             try {
+                if (mem_hold.capture_attention_prepare_) {
+                    callPrepareCudaGraph(attn_pyobj, inputs);
+                }
                 auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
                 outputs             = py_outputs_obj.cast<PyModelOutputs>();
             } catch (const py::error_already_set& e) {

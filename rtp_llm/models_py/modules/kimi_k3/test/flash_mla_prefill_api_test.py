@@ -129,9 +129,10 @@ class FlashMlaPrefillApiTest(unittest.TestCase):
         self.assertEqual(lse.strides, (1, 7))
         self.assertEqual(lse.dtype, self.torch.float32)
         self.assertIs(lse.device, self.device)
-        self.assertIs(returned_lse, lse.contiguous_result)
+        self.assertIs(returned_lse, lse)
+        self.assertIsNone(lse.contiguous_result)
         self.assertEqual(returned_lse.shape, lse.shape)
-        self.assertEqual(returned_lse.strides, (3, 1))
+        self.assertEqual(returned_lse.strides, (1, 7))
         self.assertEqual(
             (causal_arg, scale, max_q, max_k, varlen),
             (int(causal), self.model.scale, 13, 29, True),

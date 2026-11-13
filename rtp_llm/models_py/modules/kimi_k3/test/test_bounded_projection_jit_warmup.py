@@ -2,10 +2,10 @@
 
 import ast
 import math
-import os
 import sys
 import types
 import unittest
+from dataclasses import dataclass
 from functools import lru_cache, partial
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -26,6 +26,7 @@ DEPENDENCIES = dict(
     kda=PREFIX + "factory.attention.cuda_kda_impl",
     fla="fla.modules.l2norm",
     mla=PREFIX + "kimi_k3.mla_jit_warmup",
+    dsa=PREFIX + "kimi_k3.dsa_jit_warmup",
     directed=PREFIX + "kimi_k3.bounded_projection_jit_warmup",
 )
 WEIGHT_KEYS = NS(mla_kv_b_w="kv_up", mla_kv_b_s="kv_scale")
@@ -119,6 +120,7 @@ class Model(NS):
             parallelism_config=NS(tp_size=8),
             config=NS(
                 max_seq_len=1048576,
+                prefill_kv_workspace_budget_bytes=6 * 1024**3,
                 gen_num_per_cycle=4,
                 attn_config=NS(nope_head_dim=128, rope_head_dim=64, v_head_dim=128),
             ),
@@ -234,17 +236,24 @@ class BoundedProjectionWarmupTest(unittest.TestCase):
         self.assertIs(specs[1][1].weight_scales, scales[0])
         self.assertIs(specs[2][1].weight_scales, scales[1])
 
-    def _prepare(self, budget, dtype, seq, batch, fp8=False, supported=True, **opts):
+    def _prepare(
+        self, budget_bytes, dtype, seq, batch, fp8=False, supported=True, **opts
+    ):
         weight = Tensor((3072 if fp8 else 1024, 512), dtype=FP8 if fp8 else BF16)
         linear = CudaF16Linear if opts.get("native") else CudaFp8GEMMLinear
         projection = linear(weight, supported=supported)
-        model = Model(cache_dtype=dtype, max_seq_len=seq)
+        model = Model(
+            cache_dtype=dtype,
+            max_seq_len=seq,
+            prefill_kv_workspace_budget_bytes=budget_bytes,
+        )
         sample = mock.Mock(side_effect=lambda maximum, *_, **__: (1, maximum))
 
         bf16 = mock.Mock(wraps=self.warmup._warmup_bf16)
         plan = source_module(
             ROOT.parent / "factory/attention/mla_prefill_plan.py",
-            ["plan_expanded_kv_capacity"],
+            ["Bf16MlaWorkspaceBudget", "plan_expanded_kv_capacity"],
+            dataclass=dataclass,
         )
         dense = NS(
             _get_deep_gemm_num_sms=lambda *_: 152,
@@ -256,8 +265,6 @@ class BoundedProjectionWarmupTest(unittest.TestCase):
             plan=plan,
             dense=dense,
             switch=NS(model_warm_up_enabled=lambda: True),
-        ), mock.patch.dict(
-            os.environ, {"RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB": budget}
         ), mock.patch.multiple(
             self.warmup,
             _fp8_projections=lambda _: (),
@@ -285,20 +292,18 @@ class BoundedProjectionWarmupTest(unittest.TestCase):
             self.assertEqual(
                 self.warmup._projection_rows(model, NS(is_decode_role=decode)), expected
             )
-        # Budget, cache dtype, max sequence, batch, FP8 projection, skip support, max M.
+        # Budget bytes, cache dtype, sequence, batch, FP8, skip support, max M.
         cases = {
-            "budget": ("1.0", BF16, 1000000, 2, False, True, 419430),
-            "fp8_skip": ("6.0", FP8, 1048576, 1, True, True, 559240),
-            "fp8_fallback": ("6.0", FP8, 1048576, 1, True, False, 559240),
-            "cache_precision": ("1.0", FP8, 1000000, 2, False, True, 279620),
-            "zero_budget": ("0", BF16, 500, 2, False, True, 1007),
-            "request_clamp": ("1.0", BF16, 1000, 3, False, True, 3007),
+            "fp8_skip": (6 * 1024**3, FP8, 1048576, 1, True, True, 559240),
+            "fp8_fallback": (6 * 1024**3, FP8, 1048576, 1, True, False, 559240),
+            "cache_precision": (1024**3, FP8, 1000000, 2, False, True, 279620),
+            "request_clamp": (1024**3, BF16, 1000, 3, False, True, 3007),
         }
         for case, (*args, expected) in cases.items():
             with self.subTest(case=case):
                 self.assertEqual(self._prepare(*args)[0], expected)
         self.assertIsNone(
-            self._prepare("unparsed", BF16, 1000000, 2, supported=False, free=0)[0]
+            self._prepare(6 * 1024**3, BF16, 1000000, 2, supported=False, free=0)[0]
         )
         for native, capability, k_major, sms in (
             (True, 10, True, 152),
@@ -307,13 +312,26 @@ class BoundedProjectionWarmupTest(unittest.TestCase):
         ):
             with self.subTest(native=native, capability=capability):
                 observed = self._prepare(
-                    "6.0", BF16, 1048576, 1, native=native, capability=capability
+                    6 * 1024**3, BF16, 1048576, 1, native=native, capability=capability
                 )[1]
                 self.assertEqual(
                     (observed["k_major"], observed["num_sms"]), (k_major, sms)
                 )
         with self.assertRaisesRegex(RuntimeError, "needs at least"):
-            self._prepare("6.0", FP8, 1048576, 1, True, False, free=0)
+            self._prepare(6 * 1024**3, FP8, 1048576, 1, True, False, free=0)
+
+    def test_bf16_budget_covers_expanded_and_compressed_inputs(self):
+        budget = 1024**3
+        # 4 heads * (128 + 64 + 128) * 2 = 2560 expanded bytes/token;
+        # latent + RoPE retain (512 + 64) * 2 = 1152 bytes/token.
+        bytes_per_token = 4 * sum(SPLITS) * 2 + (512 + SPLITS[1]) * 2
+        rows = self._prepare(budget, BF16, 1000000, 2)[0]
+        self.assertEqual(rows, 289262)
+        self.assertLessEqual(rows * bytes_per_token, budget)
+        self.assertGreater((rows + 1) * bytes_per_token, budget)
+
+    def test_zero_budget_preserves_legacy_unbounded_request_limit(self):
+        self.assertEqual(self._prepare(0, BF16, 500, 2)[0], 1007)
 
     def test_launch_routes_and_scratch_memory_guards(self):
         with dependencies(torch=metadata_torch()):
@@ -417,6 +435,47 @@ class BoundedProjectionWarmupTest(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "directed compile failed"):
                 startup.warmup_kimi_k3_kernel_jit(object(), object())
+
+    def test_plain_k3_warmup_does_not_import_dsa_dependencies(self):
+        projection, mla, replay = mock.Mock(), mock.Mock(), mock.Mock()
+        with dependencies(
+            mla=NS(warmup_kimi_k3_mla_jit=mla),
+            directed=NS(warmup_kimi_k3_projection_jit=projection),
+            dsa=None,
+        ):
+            startup = source_module(
+                ROOT / "kernel_jit_warmup.py",
+                ["warmup_kimi_k3_kernel_jit"],
+                torch=metadata_torch(),
+                model_warm_up_enabled=lambda: True,
+                _warmup_replay=replay,
+            )
+            model, resource = NS(dsa_workspace=None), object()
+            startup.warmup_kimi_k3_kernel_jit(model, resource)
+        for stage in (projection, mla, replay):
+            stage.assert_called_once_with(model, resource)
+
+    def test_dsa_compile_failure_prevents_successful_startup(self):
+        projection, mla, replay = mock.Mock(), mock.Mock(), mock.Mock()
+        dsa = mock.Mock(side_effect=RuntimeError("DSA compile failed"))
+        with dependencies(
+            mla=NS(warmup_kimi_k3_mla_jit=mla),
+            directed=NS(warmup_kimi_k3_projection_jit=projection),
+            dsa=NS(warmup_kimi_k31_dsa_jit=dsa),
+        ):
+            startup = source_module(
+                ROOT / "kernel_jit_warmup.py",
+                ["warmup_kimi_k3_kernel_jit"],
+                torch=metadata_torch(),
+                model_warm_up_enabled=lambda: True,
+                _warmup_replay=replay,
+            )
+            model, resource = NS(dsa_workspace=object()), object()
+            with self.assertRaisesRegex(RuntimeError, "DSA compile failed"):
+                startup.warmup_kimi_k3_kernel_jit(model, resource)
+        for stage in (projection, mla, dsa):
+            stage.assert_called_once_with(model, resource)
+        replay.assert_not_called()
 
 
 if __name__ == "__main__":

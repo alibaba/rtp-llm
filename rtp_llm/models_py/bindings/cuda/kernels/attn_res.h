@@ -13,4 +13,9 @@ void attn_res(at::Tensor&               prefix,
               int64_t                   block_write_idx,
               double                    eps,
               double                    output_norm_eps,
-              std::optional<at::Tensor> shared_delta = std::nullopt);
+              std::optional<at::Tensor> shared_delta  = std::nullopt,
+              std::optional<at::Tensor> fp8_output    = std::nullopt,
+              std::optional<at::Tensor> fp8_scales    = std::nullopt,
+              std::optional<at::Tensor> amax_partials = std::nullopt,
+              std::optional<at::Tensor> nvfp4_packet  = std::nullopt,
+              bool                      nvfp4_rowwise = false);

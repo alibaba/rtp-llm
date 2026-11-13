@@ -13,8 +13,12 @@ if TYPE_CHECKING:
 
 
 @torch.compile(backend="inductor")
-def gate_sigmoid_mul(attn_out: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-    return attn_out * gate.sigmoid()
+def gate_sigmoid_mul(
+    attn_out: torch.Tensor, gate: torch.Tensor, valid_mask: torch.Tensor | None = None
+) -> torch.Tensor:
+    result = attn_out * gate.sigmoid()
+    return result if valid_mask is None else torch.where(valid_mask[:, None], result, 0)
+
 
 @triton.jit
 def _silu_and_mul_kernel(
@@ -1274,8 +1278,14 @@ def store_group128(values, out, scales, token, M, K: tl.constexpr, BLOCK: tl.con
 
 
 def is_fp8_attn_res_supported(
-    prefix_sum, block_residual, norm_weight, projection_weight,
-    output_norm_weight, delta, active_blocks, block_write_idx,
+    prefix_sum,
+    block_residual,
+    norm_weight,
+    projection_weight,
+    output_norm_weight,
+    delta,
+    active_blocks,
+    block_write_idx,
 ):
     if (
         not prefix_sum.is_cuda
@@ -1546,6 +1556,7 @@ def attn_res_fp8(
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # adapted from sglang/python/sglang/srt/layers/attention/utils.py
 
+
 @triton.jit
 def concat_and_cast_mha_k_kernel(
     k_ptr,
@@ -1639,12 +1650,7 @@ def concat_and_cast_mha_k(k_nope, k_pe, num_heads, nope_dim, rope_dim):
         num_heads,
         nope_dim + rope_dim,
     )
-    if (
-        is_cuda()
-        and (num_heads == 128)
-        and (nope_dim == 128)
-        and (rope_dim == 64)
-    ):
+    if is_cuda() and (num_heads == 128) and (nope_dim == 128) and (rope_dim == 64):
         k = k_nope.new_empty(*k_shape)
         # Keep the compiled binding dependency local to its native dispatch.
         from rtp_llm.ops.compute_ops import rtp_llm_ops
@@ -1658,8 +1664,8 @@ def concat_and_cast_mha_k(k_nope, k_pe, num_heads, nope_dim, rope_dim):
     else:
         # Fallback to PyTorch native operations for non-power-of-2 dimensions
         k = k_nope.new_empty(*k_shape)
-        k[..., : nope_dim] = k_nope
-        k[..., nope_dim :] = k_pe
+        k[..., :nope_dim] = k_nope
+        k[..., nope_dim:] = k_pe
     return k
 
 
@@ -1669,18 +1675,17 @@ def _is_triton_compatible(num_heads, nope_dim, rope_dim):
     def is_power_of_2(n):
         return n > 0 and (n & (n - 1)) == 0
 
-    compatible = (
-        is_power_of_2(nope_dim)
-        and is_power_of_2(rope_dim)
-        and num_heads > 0
-    )
+    compatible = is_power_of_2(nope_dim) and is_power_of_2(rope_dim) and num_heads > 0
     return compatible
 
 
 # FP8 activation quantization and fused pointwise producers.
 
+
 @triton.jit
-def _store_group128(values, out, scales, row, rows, width: tl.constexpr, block: tl.constexpr):
+def _store_group128(
+    values, out, scales, row, rows, width: tl.constexpr, block: tl.constexpr
+):
     columns = tl.arange(0, block)
     # The existing quantizer observes the BF16 result of the pointwise op.
     values = values.to(tl.bfloat16).to(tl.float32)
@@ -1704,7 +1709,9 @@ def _store_group128(values, out, scales, row, rows, width: tl.constexpr, block: 
     )
     packs = tl.arange(0, block // 512)
     aligned_rows = tl.cdiv(rows, 4) * 4
-    tl.store(scales + packs * aligned_rows + row, packed, packs < triton.cdiv(width, 512))
+    tl.store(
+        scales + packs * aligned_rows + row, packed, packs < triton.cdiv(width, 512)
+    )
     if row == 0:
         padding = rows + tl.arange(0, 4)
         tl.store(
@@ -1719,6 +1726,7 @@ def _store_group128(values, out, scales, row, rows, width: tl.constexpr, block: 
 def _sigmoid_mul_group128_kernel(
     x,
     gate,
+    valid_rows,
     out,
     scales,
     rows,
@@ -1726,15 +1734,15 @@ def _sigmoid_mul_group128_kernel(
     x_row_stride: tl.constexpr,
     gate_row_stride: tl.constexpr,
     block: tl.constexpr,
+    masked: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     columns = tl.arange(0, block)
-    a = tl.load(x + row * x_row_stride + columns, columns < width, other=0.0).to(
-        tl.float32
-    )
-    b = tl.load(
-        gate + row * gate_row_stride + columns, columns < width, other=0.0
-    ).to(tl.float32)
+    valid = columns < width
+    if masked:
+        valid = valid & tl.load(valid_rows + row)
+    a = tl.load(x + row * x_row_stride + columns, valid, other=0.0).to(tl.float32)
+    b = tl.load(gate + row * gate_row_stride + columns, valid, other=0.0).to(tl.float32)
     # Match BF16 eager gating: sigmoid rounds before the multiply, then the
     # grouped quantizer observes the BF16 product.
     sigmoid_bf16 = tl.sigmoid(b).to(tl.bfloat16).to(tl.float32)
@@ -1742,7 +1750,11 @@ def _sigmoid_mul_group128_kernel(
 
 
 def sigmoid_mul_per_token_group_quant_fp8(
-    x: torch.Tensor, gate: torch.Tensor
+    x: torch.Tensor,
+    gate: torch.Tensor,
+    *,
+    valid_rows: torch.Tensor | None = None,
+    out: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return grouped E4M3 values and packed UE8M0 scales for ``x*sigmoid(gate)``.
 
@@ -1760,26 +1772,46 @@ def sigmoid_mul_per_token_group_quant_fp8(
     rows, width = x.shape
     if width == 0 or width % 128:
         raise ValueError("FP8 sigmoid-mul width must be divisible by 128")
+    if valid_rows is not None and (
+        valid_rows.shape != (rows,)
+        or valid_rows.dtype != torch.bool
+        or valid_rows.device != x.device
+        or not valid_rows.is_contiguous()
+    ):
+        raise ValueError("FP8 sigmoid-mul requires a contiguous CUDA bool row mask")
 
-    out = torch.empty((rows, width), device=x.device, dtype=torch.float8_e4m3fn)
-    scale_wire = torch.empty(
-        ((width + 511) // 512, (rows + 3) // 4 * 4),
-        device=x.device,
-        dtype=torch.int32,
-    )
+    scale_shape = ((width + 511) // 512, (rows + 3) // 4 * 4)
+    if out is None:
+        values = torch.empty((rows, width), device=x.device, dtype=torch.float8_e4m3fn)
+        scale_wire = torch.empty(scale_shape, device=x.device, dtype=torch.int32)
+    else:
+        values, scale_wire = out
+        if (
+            values.shape != x.shape
+            or scale_wire.shape != scale_shape
+            or values.dtype != torch.float8_e4m3fn
+            or scale_wire.dtype != torch.int32
+            or values.device != x.device
+            or scale_wire.device != x.device
+            or not values.is_contiguous()
+            or not scale_wire.is_contiguous()
+        ):
+            raise ValueError("invalid caller-owned FP8 values or packed scales")
     if rows:
         _sigmoid_mul_group128_kernel[(rows,)](
             x,
             gate,
-            out,
+            x if valid_rows is None else valid_rows,
+            values,
             scale_wire,
             rows,
             width,
             x.stride(0),
             gate.stride(0),
             max(512, triton.next_power_of_2(width)),
+            valid_rows is not None,
         )
-    return out, scale_wire.T[:rows, :]
+    return values, scale_wire.T[:rows, :]
 
 
 @triton.jit(do_not_specialize=["rows"])
@@ -1815,10 +1847,7 @@ def _rmsnorm_sigmoid_gate_group128_kernel(
         other=0.0,
     ).to(tl.float32)
     b = tl.load(
-        gate
-        + row * gate_row_stride
-        + head * gate_head_stride
-        + dim * gate_dim_stride,
+        gate + row * gate_row_stride + head * gate_head_stride + dim * gate_dim_stride,
         valid,
         other=0.0,
     ).to(tl.float32)
@@ -1845,7 +1874,7 @@ def rmsnorm_sigmoid_gate_per_token_group_quant_fp8(
     weight: torch.Tensor,
     eps: float,
     *,
-    valid_rows: Optional[torch.Tensor] = None,
+    valid_rows: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fuse per-head RMSNorm, sigmoid gate and group128 E4M3 production.
 
@@ -1853,7 +1882,9 @@ def rmsnorm_sigmoid_gate_per_token_group_quant_fp8(
     layout as ``sigmoid_mul_per_token_group_quant_fp8``.
     """
     if x.ndim != 3 or gate.shape != x.shape or x.shape[-1] != 128:
-        raise ValueError("FP8 gated RMSNorm requires matching [tokens, heads, 128] inputs")
+        raise ValueError(
+            "FP8 gated RMSNorm requires matching [tokens, heads, 128] inputs"
+        )
     if weight.shape != (128,):
         raise ValueError("FP8 gated RMSNorm requires a 128-element weight")
     if x.dtype != torch.bfloat16 or gate.dtype != x.dtype or weight.dtype != x.dtype:
@@ -1904,6 +1935,7 @@ def _quantize_strided_group128_kernel(
     rows,
     row_stride: tl.constexpr,
     block_rows: tl.constexpr,
+    fp32_scale: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64) * block_rows + tl.arange(0, block_rows)
     column = tl.arange(0, 128)
@@ -1913,31 +1945,76 @@ def _quantize_strided_group128_kernel(
         other=0,
     ).to(tl.float32)
     amax = tl.maximum(tl.max(tl.abs(values), axis=1), 1.0e-4)
-    scale = tl.exp2(tl.ceil(tl.log2(tl.maximum(amax / 448.0, 1.0e-10))))
+    if fp32_scale:
+        # Same power-of-two scale as the native UE8M0 quantizer, without
+        # materializing packed exponent bytes just to unpack them later.
+        bits = (amax * (1.0 / 448.0)).to(tl.int32, bitcast=True)
+        exponent = ((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0).to(tl.int32)
+        scale = (exponent << 23).to(tl.float32, bitcast=True)
+    else:
+        scale = tl.exp2(tl.ceil(tl.log2(tl.maximum(amax / 448.0, 1.0e-10))))
     quantized = tl.minimum(tl.maximum(values / scale[:, None], -448.0), 448.0)
     tl.store(out + row[:, None] * 128 + column[None, :], quantized, row[:, None] < rows)
 
-    exponent = (scale.to(tl.int32, bitcast=True) >> 23) & 255
-    packed = tl.where(row < rows, exponent | 0x7F7F7F00, 0x7F7F7F7F)
-    tl.store(scales + row, packed, row < ((rows + 3) // 4) * 4)
+    if fp32_scale:
+        tl.store(scales + row, scale, row < rows)
+    else:
+        exponent = (scale.to(tl.int32, bitcast=True) >> 23) & 255
+        packed = tl.where(row < rows, exponent | 0x7F7F7F00, 0x7F7F7F7F)
+        tl.store(scales + row, packed, row < ((rows + 3) // 4) * 4)
 
 
-def quantize_strided_group128_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize a row-strided BF16 [M,128] view without a staging copy."""
+def quantize_strided_group128_fp8(
+    x: torch.Tensor,
+    *,
+    out: torch.Tensor | None = None,
+    out_scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize BF16 [M,128]; an optional FP32 [M] destination bypasses packing."""
     if x.ndim != 2 or x.shape[1] != 128 or x.stride(1) != 1 or x.stride(0) < 128:
         raise ValueError("FP8 strided group128 input must be row-strided [M,128]")
     if not x.is_cuda or x.dtype != torch.bfloat16:
         raise ValueError("FP8 strided group128 input must be CUDA BF16")
     rows = x.shape[0]
-    out = torch.empty((rows, 128), dtype=torch.float8_e4m3fn, device=x.device)
-    scale_wire = torch.empty(
-        (1, triton.cdiv(rows, 4) * 4), dtype=torch.int32, device=x.device
-    ).T
-    if rows:
-        _quantize_strided_group128_kernel[(triton.cdiv(rows, 4),)](
-            x, out, scale_wire, rows, x.stride(0), 4, num_warps=4
+    if out is None:
+        out = torch.empty((rows, 128), dtype=torch.float8_e4m3fn, device=x.device)
+    elif (
+        out.shape != x.shape
+        or out.dtype != torch.float8_e4m3fn
+        or out.device != x.device
+        or not out.is_contiguous()
+    ):
+        raise ValueError(
+            "group128 quantization requires a matching contiguous E4M3 output"
         )
-    return out, scale_wire[:rows]
+    if out_scale is None:
+        scales = torch.empty(
+            (1, triton.cdiv(rows, 4) * 4), dtype=torch.int32, device=x.device
+        ).T
+    else:
+        if (
+            out_scale.shape != (rows,)
+            or out_scale.dtype != torch.float32
+            or out_scale.device != x.device
+            or not out_scale.is_contiguous()
+        ):
+            raise ValueError(
+                "group128 quantization requires a contiguous FP32 [M] scale output"
+            )
+        scales = out_scale
+    if rows:
+        block_rows = 16 if out_scale is not None else 4
+        _quantize_strided_group128_kernel[(triton.cdiv(rows, block_rows),)](
+            x,
+            out,
+            scales,
+            rows,
+            x.stride(0),
+            block_rows,
+            out_scale is not None,
+            num_warps=4,
+        )
+    return out, scales[:rows] if out_scale is None else scales
 
 
 @triton.jit
@@ -1952,8 +2029,14 @@ def _convert_fp8(X, Y, source, offsets, N, INV_SCALE: tl.constexpr):
 
 @triton.jit(do_not_specialize=["N", "SHAPE", "STRIDES"])
 def _quantize(
-    X, Y, N, INV_SCALE: tl.constexpr, BLOCK: tl.constexpr,
-    SHAPE, STRIDES, CONTIGUOUS: tl.constexpr,
+    X,
+    Y,
+    N,
+    INV_SCALE: tl.constexpr,
+    BLOCK: tl.constexpr,
+    SHAPE,
+    STRIDES,
+    CONTIGUOUS: tl.constexpr,
 ):
     offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     if CONTIGUOUS:
@@ -1968,24 +2051,37 @@ def _quantize(
 
 
 def quantize_fp8(
-    x: torch.Tensor, scale: float = 1.0, out: Optional[torch.Tensor] = None,
+    x: torch.Tensor,
+    scale: float = 1.0,
+    out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     if not math.isfinite(scale) or scale <= 0:
         raise ValueError("FP8 MLA scale must be finite and positive")
     if x.dtype not in (torch.bfloat16, torch.float16, torch.float32):
-        raise TypeError(f"FP8 MLA quantizer requires floating activations, got {x.dtype}")
+        raise TypeError(
+            f"FP8 MLA quantizer requires floating activations, got {x.dtype}"
+        )
     if out is None:
         out = torch.empty(x.shape, dtype=torch.float8_e4m3fn, device=x.device)
-    if (out.shape != x.shape or out.dtype != torch.float8_e4m3fn
-            or out.device != x.device or not out.is_contiguous()):
+    if (
+        out.shape != x.shape
+        or out.dtype != torch.float8_e4m3fn
+        or out.device != x.device
+        or not out.is_contiguous()
+    ):
         raise ValueError("FP8 MLA quantization output buffer mismatch")
     if x.numel():
         # Runtime tuples avoid exact-shape specialization. Triton may still
         # keep a bounded set of tuple alignment variants for strided layouts.
         _quantize[(triton.cdiv(x.numel(), 1024),)](
-            x, out, x.numel(), 1.0 / scale, 1024,
+            x,
+            out,
+            x.numel(),
+            1.0 / scale,
+            1024,
             () if x.is_contiguous() else tuple(x.shape),
-            () if x.is_contiguous() else tuple(x.stride()), x.is_contiguous(),
+            () if x.is_contiguous() else tuple(x.stride()),
+            x.is_contiguous(),
         )
     return out
 
@@ -2135,8 +2231,9 @@ def quantize_kv_fp8(k, v):
         if x.dtype not in (torch.bfloat16, torch.float16, torch.float32):
             raise TypeError("FP8 MLA quantizer requires floating activations")
     out_k, out_v = (
-        torch.empty_like(x, dtype=torch.float8_e4m3fn,
-                         memory_format=torch.contiguous_format)
+        torch.empty_like(
+            x, dtype=torch.float8_e4m3fn, memory_format=torch.contiguous_format
+        )
         for x in (k, v)
     )
     block = 1024
@@ -2146,11 +2243,27 @@ def quantize_kv_fp8(k, v):
         # The existing Q/K/V kernel accepts an empty Q partition. Reuse its
         # K and V branches so long historical prefixes need only one launch.
         _quantize_qkv[(k_blocks + v_blocks,)](
-            k, k, v, out_k, out_k, out_v,
-            0, k.numel(), v.numel(), 0, k_blocks,
-            tuple(k.shape[1:]), tuple(k.shape[1:]), tuple(v.shape[1:]),
-            tuple(k.stride()), tuple(k.stride()), tuple(v.stride()),
-            k.is_contiguous(), k.is_contiguous(), v.is_contiguous(),
-            1.0, block,
+            k,
+            k,
+            v,
+            out_k,
+            out_k,
+            out_v,
+            0,
+            k.numel(),
+            v.numel(),
+            0,
+            k_blocks,
+            tuple(k.shape[1:]),
+            tuple(k.shape[1:]),
+            tuple(v.shape[1:]),
+            tuple(k.stride()),
+            tuple(k.stride()),
+            tuple(v.stride()),
+            k.is_contiguous(),
+            k.is_contiguous(),
+            v.is_contiguous(),
+            1.0,
+            block,
         )
     return out_k, out_v

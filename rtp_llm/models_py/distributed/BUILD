@@ -9,6 +9,7 @@ py_library(
     name = "collective_torch",
     srcs = [
         "collective_torch.py",
+        "zigzag_row_exchange.py",
         "collective_utils.py",
         "canonical_p2p.py",
         "flashinfer_all_reduce.py",

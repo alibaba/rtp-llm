@@ -80,3 +80,11 @@ py_test(
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13"},
 )
+
+py_test(
+    name = "dynamic_nvfp4_linear_test",
+    srcs = ["dynamic_nvfp4_linear_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)

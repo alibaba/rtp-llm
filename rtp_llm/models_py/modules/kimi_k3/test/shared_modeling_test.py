@@ -37,6 +37,8 @@ def capture(run):
 
 class _Attention(nn.Module):
     _fp8_collective = None
+    _fp8_input_collective = None
+    supports_fp8_activation = True
 
     def forward(self, hidden, *args):
         return hidden * 0.125
@@ -103,6 +105,7 @@ class SharedModelingTest(unittest.TestCase):
         model = KimiK3MtpModel.__new__(KimiK3MtpModel)
         nn.Module.__init__(model)
         model.tp_size, model.tp_rank = tp, tp - 1
+        model._query_layout = None
         # Full TP input extent; the production method selects this rank's rows.
         physical_rows = rows * tp
         embedding = self.random(physical_rows, 7168 + 16)[:, :7168]
@@ -191,7 +194,11 @@ class SharedModelingTest(unittest.TestCase):
                 return values
 
         class Norm(nn.Module):
-            def forward(self, output, gate):
+            def forward(self, output, gate, *, row_indices=None, out=None):
+                if row_indices is not None or out is not None:
+                    raise AssertionError(
+                        "Non-CP KDA must keep the ordinary norm layout"
+                    )
                 return output
 
         for is_prefill, tp, rows, packed_width in (
@@ -213,8 +220,16 @@ class SharedModelingTest(unittest.TestCase):
                 strided_fp8_forget=not is_prefill,
                 strided_fp8_prefill_forget=True,
             )
-            inputs = SimpleNamespace(is_prefill=is_prefill, valid_token_mask=None)
-            metadata = SimpleNamespace(is_target_verify=not is_prefill)
+            inputs = SimpleNamespace(
+                is_prefill=is_prefill,
+                is_mtp_draft_update=False,
+                valid_token_mask=None,
+            )
+            metadata = SimpleNamespace(
+                is_target_verify=not is_prefill,
+                query_layout=None,
+                outer_layout=None,
+            )
             graph, output = capture(lambda: module(None, None, None, inputs, metadata))
             graph.replay()
             self.assertTrue(projection.quantized)
@@ -345,7 +360,9 @@ class SharedModelingTest(unittest.TestCase):
             layers.append(layer)
         final = self.residual()
         inputs = SimpleNamespace(is_prefill=False, is_mtp_draft_update=False)
-        metadata = SimpleNamespace(is_target_verify=True)
+        metadata = SimpleNamespace(
+            is_target_verify=True, query_layout=None, outer_layout=None
+        )
         for rows in (1, 8, 16, 32):
             hidden, bank = self.random(rows, 7168), self.random(rows, 2, 7168)
             original = hidden.clone()

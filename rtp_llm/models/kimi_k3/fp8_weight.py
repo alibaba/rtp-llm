@@ -4,12 +4,10 @@ from typing import Dict
 
 import torch
 
-from rtp_llm.model_loader.per_block_fp8_quant_weight import (
-    LoadQuantPerBlockFp8Weight,
-)
-from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import per_block_cast_to_fp8
+from rtp_llm.model_loader.per_block_fp8_quant_weight import LoadQuantPerBlockFp8Weight
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
+from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import per_block_cast_to_fp8
 from rtp_llm.utils.model_weight import W, transpose_slice_k, transpose_slice_v
 
 
@@ -36,17 +34,23 @@ class KimiK3LoadFp8Weight(LoadQuantPerBlockFp8Weight):
         quant_config,
         *,
         derive_mla=False,
+        layer_id=-1,
         replicate_q_weights=False,
+        projection_tp_size=None,
+        projection_tp_rank=None,
     ):
         if src_weight_info.name not in self.w8a8_weight_list:
             raise ValueError(
                 f"not a K3 FP8 attention projection: {src_weight_info.name}"
             )
         super().__init__(src_weight_info, quant_config, name=src_weight_info.name)
+        self.layer_id = layer_id
         self.tp_ranges = None
         self.source = src_weight_info
         self.derive_mla = derive_mla
         self.replicate_q_weights = replicate_q_weights
+        self.projection_tp_size = projection_tp_size
+        self.projection_tp_rank = projection_tp_rank
         if derive_mla:
             for name in (W.mla_kc, W.mla_vc):
                 self.sub_weights[name] = AtomicWeight(name, [])
@@ -60,10 +64,13 @@ class KimiK3LoadFp8Weight(LoadQuantPerBlockFp8Weight):
             raise ValueError("K3 online FP8 does not support load-time LoRA merging")
         raw = self.source._load_raw_tensor(tensor_source, layer_id, device, load_config)
         # K3 dense source weights are [in,out]; quantized storage is [out,in].
-        matrix = raw[self.source.name].T.contiguous()
+        matrix = self._prepare_matrix(raw[self.source.name].T.contiguous())
         self.use_ue8m0 = is_deep_gemm_e8m0_used()
         weight, scale = self._quantize_matrix(matrix, use_ue8m0=self.use_ue8m0)
         return {self.kernel.name: weight, self.scale.name: scale}
+
+    def _prepare_matrix(self, matrix):
+        return matrix
 
     @staticmethod
     def _quantize_matrix(matrix, *, use_ue8m0):
@@ -89,7 +96,16 @@ class KimiK3LoadFp8Weight(LoadQuantPerBlockFp8Weight):
 
     def _split(self, tensor, load_config):
         weight, scale = tensor[self.kernel.name], tensor[self.scale.name]
-        parallel, rank = load_config.tp_size, load_config.tp_rank
+        parallel = (
+            load_config.tp_size
+            if self.projection_tp_size is None
+            else self.projection_tp_size
+        )
+        rank = (
+            load_config.tp_rank
+            if self.projection_tp_rank is None
+            else self.projection_tp_rank
+        )
         if not 0 <= rank < parallel:
             raise ValueError(f"invalid K3 FP8 TP rank: {rank}/{parallel}")
         supported = (1, 2, 4, 8, 16)
@@ -178,8 +194,7 @@ class KimiK3LoadFp8Weight(LoadQuantPerBlockFp8Weight):
             width = weight.shape[axis]
             if width % parallel or (width // parallel) % 128:
                 raise ValueError(
-                    f"unaligned K3 FP8 shard: {name}, {width=}, "
-                    f"TP={parallel}"
+                    f"unaligned K3 FP8 shard: {name}, {width=}, " f"TP={parallel}"
                 )
             local = width // parallel
             self.tp_ranges = {
@@ -241,18 +256,18 @@ class KimiK3LoadFp8Weight(LoadQuantPerBlockFp8Weight):
                 window = local_heads
                 span = window * (cfg.nope_head_dim + cfg.v_head_dim)
                 begin = load_config.tp_rank * span
-                vc_rows = dense[begin:begin + span].view(
+                vc_rows = dense[begin : begin + span].view(
                     window, cfg.nope_head_dim + cfg.v_head_dim, dense.shape[1]
                 )
                 result[W.mla_vc] = (
-                    vc_rows[:, cfg.nope_head_dim:, :].permute(0, 2, 1).contiguous()
+                    vc_rows[:, cfg.nope_head_dim :, :].permute(0, 2, 1).contiguous()
                 )
                 # Ordinary prefill still expands only this rank's KV heads.
                 # KC above keeps all heads; retain local KV-B and its scales.
-                weight = weight[begin:begin + span].clone(
+                weight = weight[begin : begin + span].clone(
                     memory_format=torch.contiguous_format
                 )
-                scale = scale[begin // 128:(begin + span) // 128].clone(
+                scale = scale[begin // 128 : (begin + span) // 128].clone(
                     memory_format=torch.contiguous_format
                 )
                 self.tp_ranges = {
@@ -271,3 +286,67 @@ class KimiK3LoadFp8Weight(LoadQuantPerBlockFp8Weight):
         result[self.kernel.name] = weight
         result[self.scale.name] = scale
         return result
+
+
+class KimiK31LoadAttentionFp8Weight(KimiK3LoadFp8Weight):
+    """Quantize external projections while retaining native BF16 KC/VC."""
+
+    w8a8_weight_list = {
+        name: KimiK3LoadFp8Weight.w8a8_weight_list[name]
+        for name in (
+            K3W.KDA_INPUT,
+            W.linear_attn_f_b_w,
+            W.linear_attn_out_w,
+            W.mla_fusedqkrope_w,
+            W.mla_q_b_w,
+            W.attn_o_w,
+        )
+    }
+
+    def _prepare_matrix(self, matrix):
+        if self.kernel.name != W.mla_fusedqkrope_w:
+            return matrix
+        cfg = self.source.config
+        parallel = self.projection_tp_size
+        if parallel is None or parallel <= 0 or cfg.head_num % parallel:
+            raise ValueError(
+                "K3.1 FP8 input requires explicit projection head ownership"
+            )
+        gate_rows = cfg.head_num // parallel * cfg.v_head_dim
+        qkv_rows = matrix.shape[0] - gate_rows
+        if qkv_rows <= 0:
+            raise ValueError("K3.1 FP8 input is missing Q/KV latent rows")
+        padding = (-qkv_rows) % 128
+        if not padding:
+            return matrix
+        # The replicated physical suffix must not share a scale block with
+        # the rank-local gate. Runtime drops this zero gap after the GEMM.
+        return torch.cat(
+            (
+                matrix[:qkv_rows],
+                matrix.new_zeros((padding, matrix.shape[1])),
+                matrix[qkv_rows:],
+            ),
+            dim=0,
+        )
+
+
+class KimiK31LoadIndexerFp8Weight(KimiK3LoadFp8Weight):
+    """Reuse K3 static block quantization; retain all replicated Indexer heads."""
+
+    w8a8_weight_list = {
+        W.mla_indexer_qb_w: W.mla_indexer_qb_s,
+        W.mla_indexer_k_w: W.mla_indexer_k_s,
+    }
+
+    def _split(self, tensor, load_config):
+        self.tp_ranges = {
+            "axis": 0,
+            "parallel": "replicated",
+            "replicated": [(0, tensor[self.kernel.name].shape[0])],
+        }
+        # Own exact quantized storage independently of loader staging.
+        return {
+            name: value.clone(memory_format=torch.contiguous_format)
+            for name, value in tensor.items()
+        }

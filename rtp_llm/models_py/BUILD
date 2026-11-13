@@ -213,7 +213,7 @@ cc_binary(
 
 py_library(
     name = "modules",
-    srcs = glob([
+    srcs = ["mla_routes.py"] + glob([
         "modules/*.py",
         "modules/**/*.py",
     ], exclude = _DSV4_PPU_MODULES + ["modules/qwen4_exp/test/**"]) + select({
@@ -242,10 +242,10 @@ py_library(
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
         # cuda13 locks ship flashinfer-python and deep-ep.
-        "@//:using_cuda13_x86": flashinfer + deep + ["//rtp_llm:nvidia-cutlass-dsl"] + [
+        "@//:using_cuda13_x86": flashinfer + deep + ["//rtp_llm:nvidia-cutlass-dsl", "@k31_native_mqa//:mqa"] + [
             cuda13_x86_requirement(name) for name in kda_prefill
         ],
-        "@//:using_cuda13_arm": flashinfer + deep + ["//rtp_llm:nvidia-cutlass-dsl"] + [
+        "@//:using_cuda13_arm": flashinfer + deep + ["//rtp_llm:nvidia-cutlass-dsl", "@k31_native_mqa_arm//:mqa"] + [
             cuda13_arm_requirement(name) for name in kda_prefill
         ],
         "@//:using_cuda12": flashinfer + deep,
@@ -466,4 +466,10 @@ filegroup(
         "kernels/ppu/**/*.py",
     ], exclude = ["**/test/**", "**/tests/**"]) + [":ppu_jit_sources", "//rtp_llm:models/deepseek_v4.py"],
     visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "dsa_kv_chunk_plan_sources",
+    srcs = ["modules/factory/attention/cuda_mla_impl/dsa_kv_chunk_plan.py"],
+    visibility = ["//rtp_llm/models_py/modules/factory/attention/cuda_mla_impl/test:__pkg__"],
 )

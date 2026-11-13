@@ -8,7 +8,6 @@ DSV4's bounded BF16 grid. These samples do not establish exhaustive coverage.
 from __future__ import annotations
 
 import logging
-import os
 import time
 
 
@@ -92,6 +91,7 @@ def _kv_up_projections(model):
 
 def _kv_up_rows(model, init_resource, layer, projection, splits, current_rows):
     from rtp_llm.models_py.modules.factory.attention.mla_prefill_plan import (
+        Bf16MlaWorkspaceBudget,
         plan_expanded_kv_capacity,
     )
 
@@ -106,10 +106,25 @@ def _kv_up_rows(model, init_resource, layer, projection, splits, current_rows):
         return maximum
     n = projection.weight.shape[0]
     heads = n // (splits[0] + splits[2])
-    budget = float(os.environ.get("RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB", "6.0"))
     for cache in model.kv_cache.get_layer_cache_groups(layer):
         # This is the same producer+attention storage recipe as K3 MLA.
         factor = 3 if str(cache.kv_cache_base.dtype) == "torch.float8_e4m3fn" else 2
+        shared_budget = (
+            (model.config.prefill_kv_workspace_budget_bytes or None)
+            if factor == 2
+            else None
+        )
+        if shared_budget is not None:
+            workspace = Bf16MlaWorkspaceBudget(
+                shared_budget,
+                int(model.parallelism_config.tp_size),
+                projection.weight.shape[1],
+                splits[1],
+            )
+            capacity = workspace.full_projection_capacity(heads * sum(splits) * 2)
+            maximum = max(maximum, min(capacity, request_bound))
+            continue
+        budget = model.config.prefill_kv_workspace_budget_bytes / 1024**3
         _, capacity = plan_expanded_kv_capacity(
             (0,),
             (1,),
