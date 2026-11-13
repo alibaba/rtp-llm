@@ -30,7 +30,7 @@ class GatedResidualBf16Test(unittest.TestCase):
         kwargs = dict(hc_mult=4, norm_eps=1e-6, role="PREFILL")
         baseline = GatedResidual(*weights, **kwargs)
         candidate = Qwen4GatedResidual(*weights, **kwargs)
-        for rows in (7, 4093, 8192, 16384):
+        for rows in (7, 64, 1024, 1025, 4093, 8192, 16384):
             x = random(rows, 10240)
             s = random(rows, 2560)
             g = random(rows, 4)

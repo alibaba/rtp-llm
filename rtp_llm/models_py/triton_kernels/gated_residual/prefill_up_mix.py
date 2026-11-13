@@ -14,7 +14,10 @@ def try_fp8_prefill_up_mix(x, weight, scale, normed, branches):
         and torch.version.hip is None
         and x.ndim >= 2
         and x.shape[-1] == 320
-        and (4093 <= x.numel() // 320 <= 4096 or x.numel() // 320 == 12288)
+        and (
+            4093 <= x.numel() // 320 <= 4096
+            or x.numel() // 320 in (6144, 8192, 12288, 16384, 24576, 32768, 49152)
+        )
         and branches == 4
         and x.dtype == torch.bfloat16
         and weight.shape == (10240, 320)
