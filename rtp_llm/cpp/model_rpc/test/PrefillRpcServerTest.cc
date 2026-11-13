@@ -1478,23 +1478,34 @@ TEST_F(PrefillRpcServerTest, allocateRequestCarriesStagePeerGroupsUnderPp) {
     EXPECT_EQ(alloc_request.stage_peer_groups(3).peer_addrs(1), "w7:1:2");
 }
 
-TEST_F(PrefillRpcServerTest, allocateRequestCarriesKvShardCountWithoutQueryCP) {
-    GenerateInputPB request;
-    request.set_request_id(1);
-    request.add_token_ids(10);
-    auto context                              = makeContext(&request);
-    context->prefill_worker_cache_store_addrs = {"rank0:1", "rank1:1"};
-
-    TestPrefillRpcServer server;
-    server.setPrefillKvShardsForTest(2);
-    auto config                   = test::makeSimpleHybridMhaCacheConfig(4, 8, 64, DataType::TYPE_FP16);
-    config.local_kv_cache_sharded = true;
-    server.setCacheLayoutForTest(config);
-    auto alloc_request = server.buildAllocateRequest(*context);
-
-    EXPECT_EQ(alloc_request.prefill_cp_size(), 2);
-    EXPECT_EQ(alloc_request.prefill_tp_size(), 2);
-    EXPECT_EQ(alloc_request.peer_addrs_size(), 2);
+TEST_F(PrefillRpcServerTest, allocateRequestSeparatesKvShardsAndAttentionTpForEveryStage) {
+    for (int pp_size : {1, 2}) {
+        for (bool query_cp : {false, true}) {
+            SCOPED_TRACE(pp_size);
+            SCOPED_TRACE(query_cp);
+            GenerateInputPB request;
+            request.set_request_id(1);
+            request.add_token_ids(10);
+            auto context = makeContext(&request);
+            for (int rank = 0; rank < 2 * pp_size; ++rank) {
+                context->prefill_worker_cache_store_addrs.push_back("rank" + std::to_string(rank) + ":1");
+            }
+            TestPrefillRpcServer server;
+            server.setPrefillKvShardsForTest(2);
+            auto& pc   = server.maga_init_params_.parallelism_config;
+            pc.pp_size = pp_size;
+            pc.pp_stage_layer_counts.assign(pp_size, 4 / pp_size);
+            pc.prefill_cp_config.method   = query_cp ? CPRotateMethod::ALL_GATHER : CPRotateMethod::DISABLED;
+            auto config                   = test::makeSimpleHybridMhaCacheConfig(4, 8, 64, DataType::TYPE_FP16);
+            config.local_kv_cache_sharded = true;
+            server.setCacheLayoutForTest(config);
+            const auto alloc_request = server.buildAllocateRequest(*context);
+            EXPECT_EQ(alloc_request.prefill_cp_size(), 2);
+            EXPECT_EQ(alloc_request.prefill_tp_size(), query_cp ? 1 : 2);
+            EXPECT_EQ(alloc_request.peer_addrs_size(), 2 * pp_size);
+            EXPECT_EQ(alloc_request.stage_peer_groups_size(), pp_size > 1 ? pp_size : 0);
+        }
+    }
 }
 
 TEST_F(PrefillRpcServerTest, allocateRequestDoesNotAdvertiseRawShardingWithoutPhysicalLayout) {

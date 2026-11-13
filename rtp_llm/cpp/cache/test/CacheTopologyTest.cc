@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 
 namespace rtp_llm {
 namespace {
@@ -94,6 +95,9 @@ TEST(CacheTopologyTest, ResolvesLinearTransferFromLocalGeometryAndPreservesItOnC
     EXPECT_EQ(layout.history_rows, 3u);
     EXPECT_EQ(spec->k_block_size_bytes(), 4096u);
     EXPECT_EQ(spec->v_block_size_bytes(), 768u);
+    const auto* linear_spec = dynamic_cast<const LinearKVCacheSpec*>(spec.get());
+    ASSERT_NE(linear_spec, nullptr);
+    EXPECT_EQ(linear_spec->transferSegmentBytes(), (std::vector<size_t>{4096, 64, 64, 128, 64, 64, 128, 64, 64, 128}));
     auto plan = layout.plan(spec->k_block_size_bytes(), spec->v_block_size_bytes(), 4, {2, 2, 1, 1}, 1);
     plan.validateSlices();
     EXPECT_EQ(plan.source_bytes, 2432u);
@@ -103,6 +107,11 @@ TEST(CacheTopologyTest, ResolvesLinearTransferFromLocalGeometryAndPreservesItOnC
     EXPECT_EQ(clone->fingerprint(), spec->fingerprint());
     clone->tp_transfer.mode = TpCacheTransferMode::LEGACY;
     EXPECT_NE(clone->fingerprint(), spec->fingerprint());
+    desc.tp_transfer_mode = TpCacheTransferMode::LEGACY;
+    const auto legacy     = SpecBuilder::build(desc, context);
+    EXPECT_EQ(legacy->tp_transfer.q_row_bytes, 0u);
+    EXPECT_EQ(dynamic_cast<const LinearKVCacheSpec*>(legacy.get())->transferSegmentBytes(),
+              linear_spec->transferSegmentBytes());
     desc.tp_transfer_mode = TpCacheTransferMode::MHA_HEADS;
     EXPECT_ANY_THROW(SpecBuilder::build(desc, context));
     desc.tp_transfer_mode = TpCacheTransferMode::REPLICATED;

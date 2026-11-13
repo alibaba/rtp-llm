@@ -645,13 +645,15 @@ TEST(DecodeRpcServerTest, PpLoadRequestCarriesStagePeerGroups) {
     const GroupBlockIds               block_ids_by_group;
     const std::vector<StagePeerGroup> groups = {{{0, 2}, {"prefill-0", "prefill-1"}, false},
                                                 {{2, 2}, {"prefill-2", "prefill-3"}, true}};
-    const auto                        load_context =
+    auto                              load_context =
         makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2, /*reuse=*/0, groups);
+    load_context.prefill_tp_size = 2;
 
     const auto request = server.buildBroadcastLoadRequest(load_context);
 
     // PP routing ignores the flat peer list and ships the stage groups instead.
     EXPECT_EQ(request.prefill_cp_size(), 2);
+    EXPECT_EQ(request.prefill_tp_size(), 2);
     EXPECT_EQ(request.peer_addrs_size(), 0);
     ASSERT_EQ(request.stage_peer_groups_size(), 2);
     EXPECT_EQ(request.stage_peer_groups(0).layer_begin(), 0);
@@ -1116,8 +1118,13 @@ public:
         return is_dspark;
     }
 
+    bool isMTPEagle() override {
+        return is_mtp;
+    }
+
     int  enqueue_count = 0;
     bool is_dspark     = false;
+    bool is_mtp        = false;
 };
 
 class HandoffRpcService: public RpcService::Service {
@@ -2302,6 +2309,56 @@ protected:
     DecodeRpcServer                    server_;
 };
 
+TEST_F(DecodeRpcLoadRoutingTest, TypedReplicatedGroupsLoadTargetAndDraftFromOwnerPeer) {
+    for (bool with_mtp : {false, true}) {
+        auto spec                        = test::makeResolvedOpaqueSpec(false, "default", DataType::TYPE_UINT8, 64, 4);
+        spec->tp_transfer.mode           = TpCacheTransferMode::REPLICATED;
+        auto config                      = test::makeSingleGroupCacheConfig(spec, CacheGroupType::FULL, 4, 8);
+        config.use_opaque_kv_cache_store = true;
+        if (with_mtp) {
+            auto draft = test::makeSingleGroupCacheConfig(spec->clone(), CacheGroupType::FULL, 1, 8);
+            draft.use_opaque_kv_cache_store = true;
+            config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, 0, config.layer_num));
+        }
+        ASSERT_TRUE(initReceiver(false, config));
+        std::unique_ptr<ProposeModelEngineInitParams> propose;
+        if (with_mtp) {
+            auto module                      = std::make_unique<EngineInitParams>();
+            module->model_id                 = 29;
+            module->model_config_.num_layers = 1;
+            auto modules                     = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+            modules->push_back(std::move(module));
+            propose = std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_MTP, 1, std::move(modules));
+            std::dynamic_pointer_cast<HandoffEngine>(server_.engine_)->is_mtp = true;
+        }
+        server_.propose_maga_init_params_ = propose.get();
+        auto request                      = makeRequest(false);
+        request.add_peer_addrs("unused-replica:3:4");
+        request.set_prefill_tp_size(2);
+        grpc::ServerContext     context;
+        BroadcastLoadResponsePB response;
+        ASSERT_TRUE(server_.RemoteLoad(&context, &request, &response).ok());
+        ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR);
+        EXPECT_EQ(response.loaded_cache_block_count(), 1);
+        ASSERT_EQ(store_->calls.size(), 1u);
+        EXPECT_EQ(store_->calls[0].peer, "prefill-whole");
+        const auto& buffers = store_->calls[0].buffers;
+        ASSERT_EQ(buffers.size(), with_mtp ? 5u : 4u);
+        for (size_t index = 0; index < buffers.size(); ++index) {
+            const bool draft = index == 4;
+            const auto key   = makeCacheKey(draft ? 29 : 17, "101", draft ? 0 : index, "default");
+            const auto parts = cache_manager_->convertIndexToBuffer(index, "default", 2);
+            ASSERT_EQ(parts.size(), 1u);
+            ASSERT_EQ(buffers[index]->getBlocksCount(), 1u);
+            const auto block = buffers[index]->getBlock("kv_" + key);
+            ASSERT_NE(block, nullptr);
+            EXPECT_EQ(block->addr.get(), parts[0].addr);
+            EXPECT_EQ(block->len, parts[0].size_bytes);
+        }
+        server_.propose_maga_init_params_ = nullptr;
+    }
+}
+
 TEST_F(DecodeRpcLoadRoutingTest, SymmetricLegacyLinearLoadsOnlyItsOwningTpPeer) {
     for (int rank = 0; rank < 2; ++rank) {
         auto config                            = test::makeSimpleLinearCacheConfig(4, 8, 4, DataType::TYPE_BF16);
@@ -2486,17 +2543,23 @@ TEST_F(DecodeRpcLoadRoutingTest, SingleStageReceiverUsesPrefillStagesWithoutRela
     EXPECT_TRUE(store_->calls.empty());
 }
 
-TEST(DecodeRpcServerTest, SourceAttentionTpIsIndependentOfPhysicalKvShards) {
+TEST(DecodeRpcServerTest, SourceTopologyIsPreservedByEveryLoadRequestBuilder) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
     const std::vector<std::string> peers{"prefill-0", "prefill-1", "prefill-2", "prefill-3"};
-    auto context            = makeLoadContext("request", peers, {101}, GroupBlockIds{}, /*prefill_cp_size=*/4);
-    context.prefill_tp_size = 1;
-
-    const auto request = server.constructRemoteLoadRequestForMla(context, /*index=*/0, peers);
-    EXPECT_EQ(request.prefill_cp_size(), 4);
-    EXPECT_EQ(request.prefill_tp_size(), 1);
-    EXPECT_EQ(request.peer_addrs_size(), 4);
+    for (int attention_tp : {1, 4}) {
+        auto context            = makeLoadContext("request", peers, {101}, GroupBlockIds{}, /*prefill_cp_size=*/4);
+        context.prefill_tp_size = attention_tp;
+        const auto common       = server.buildBroadcastLoadRequest(context);
+        for (const auto& request : {server.constructRemoteLoadRequestForMla(context, 0, peers),
+                                    server.constructRemoteLoadRequest(context, 0, peers),
+                                    common}) {
+            EXPECT_EQ(request.prefill_cp_size(), 4);
+            EXPECT_EQ(request.prefill_tp_size(), attention_tp);
+            EXPECT_EQ(request.peer_addrs_size(), 4);
+            EXPECT_EQ(request.SerializeAsString(), common.SerializeAsString());
+        }
+    }
 }
 
 }  // namespace rtp_llm

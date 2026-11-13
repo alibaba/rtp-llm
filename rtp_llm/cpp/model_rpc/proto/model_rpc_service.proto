@@ -464,10 +464,10 @@ message GenerateRequestPB {
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
     repeated StagePeerGroupPB stage_peer_groups = 12;
-    // Physical Prefill KV shard count. Query CP may remain disabled.
-    // Zero from older senders means one unsharded source.
+    // Physical Prefill KV shards per PP stage, independent of Query CP.
+    // Zero leaves Decode's configured Prefill-CP fallback in effect.
     int32 prefill_cp_size = 13;
-    // Attention head sharding can differ from the physical KV shard count.
+    // Prefill attention TP: one means replicated heads, even with multiple KV shards.
     int32 prefill_tp_size = 14;
 }
 

@@ -557,11 +557,13 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
     const auto cp_mapper = engine_->resourceContext().cache_manager->cpSlotMapper();
     if (cp_mapper && cp_mapper->isSharded()) {
         const auto shard_count = cp_mapper->cpSize();
-        RTP_LLM_CHECK_WITH_INFO(alloc_request.peer_addrs_size() == shard_count,
-                                "sharded Prefill KV requires one rank-ordered cache-store peer per TP rank, "
-                                "got peers=%d shards=%d",
+        const auto stage_count = std::max<int64_t>(1, maga_init_params_.parallelism_config.pp_size);
+        RTP_LLM_CHECK_WITH_INFO(alloc_request.peer_addrs_size() == shard_count * stage_count,
+                                "sharded Prefill KV requires one cache-store peer per shard in each PP stage, "
+                                "got peers=%d shards=%d stages=%ld",
                                 alloc_request.peer_addrs_size(),
-                                shard_count);
+                                shard_count,
+                                stage_count);
         alloc_request.set_prefill_cp_size(static_cast<int32_t>(shard_count));
     }
     return alloc_request;
