@@ -1,0 +1,251 @@
+name: Create PR To Upstream Repo
+
+on:
+  workflow_run:
+    workflows: ["rtp-llm unit tests"]
+    types:
+      - completed
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  UPSTREAM_REPO: "alibaba/rtp-llm"
+
+jobs:
+  create_pr:
+    if: github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'workflow_dispatch'
+    runs-on: cpu-only
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+        ref: ${{ github.event.workflow_run.head_branch }}
+
+    - name: Get branch information
+      id: branch_info
+      run: |
+        # Get the branch that triggered the test workflow
+        SOURCE_BRANCH="${{ github.event.workflow_run.head_branch }}"
+        echo "source_branch=${SOURCE_BRANCH}" >> ${GITHUB_OUTPUT}
+        
+        # Get the commit SHA
+        COMMIT_SHA="${{ github.event.workflow_run.head_sha }}"
+        SHORT_SHA=$(echo "$COMMIT_SHA" | cut -c1-7)
+        echo "short_sha=${SHORT_SHA}" >> ${GITHUB_OUTPUT}
+
+    - name: Check out gh-pages branch
+      uses: actions/checkout@v3
+      with:
+        ref: gh-pages
+        path: gh-pages
+
+    - name: Check test results for failures
+      id: check_test_results
+      run: |
+        SOURCE_BRANCH="${{ steps.branch_info.outputs.source_branch }}"
+        SHORT_SHA="${{ steps.branch_info.outputs.short_sha }}"
+        
+        # Filter out special characters from path (same as run_tests.yaml)
+        target_subdir=$(echo "${SOURCE_BRANCH}/${SHORT_SHA}" | tr -d '#?&=% ')
+        
+        RESULT_FILE="gh-pages/${target_subdir}/_sources/summary.md.txt"
+        
+        echo "Checking test results at: ${RESULT_FILE}"
+        
+        if [ ! -f "${RESULT_FILE}" ]; then
+          echo "Test result file not found: ${RESULT_FILE}"
+          echo "has_failures=true" >> ${GITHUB_OUTPUT}
+          echo "reason=Result file not found" >> ${GITHUB_OUTPUT}
+          exit 0
+        fi
+        
+        # Check if there are any FAIL/FAILED in the results
+        if grep -qi "FAILED" "${RESULT_FILE}"; then
+          echo "Found FAILED in test results"
+          grep -i "FAILED" "${RESULT_FILE}" || true
+          echo "has_failures=true" >> ${GITHUB_OUTPUT}
+          echo "reason=Tests contain failures" >> ${GITHUB_OUTPUT}
+        else
+          echo "No failures found in test results"
+          echo "has_failures=false" >> ${GITHUB_OUTPUT}
+          echo "reason=All tests passed" >> ${GITHUB_OUTPUT}
+        fi
+
+    - name: Remove CI commit in current branch if present
+      if: steps.check_test_results.outputs.has_failures == 'false'
+      env:
+        GITHUB_TOKEN: ${{ secrets.PUSH_TO_MAIN }}
+      run: |
+        current_branch=$(git rev-parse --abbrev-ref HEAD)
+        echo "Current branch: $current_branch"
+        main_commit_id=$(git rev-parse origin/main)
+        main_commit_msg=$(git log -1 --pretty=%B origin/main)
+
+        echo "Main latest commit: $main_commit_id"
+        echo "Main commit message: $main_commit_msg"
+
+        if echo "$main_commit_msg" | grep -q "\[CI\]\[AMD\] add workflows"; then
+          echo "Detected CI commit."
+
+          # 获取 main 上一个 commit（即 CI commit 的 parent）
+          parent_commit=$(git rev-parse "${main_commit_id}^")
+
+          # 检查当前分支是否包含这次 CI commit
+          if git merge-base --is-ancestor "$main_commit_id" HEAD; then
+            echo "Branch includes CI commit. Rebasing to remove it..."
+
+            # 使用 rebase --onto 从 CI commit 的父节点重新挂接
+            git rebase --onto "$parent_commit" "$main_commit_id"
+
+            # 强制推送，彻底覆盖历史
+            git push origin HEAD:$current_branch --force
+            echo "Successfully removed CI commit and pushed."
+          else
+            echo "Branch does not include CI commit. Nothing to do."
+          fi
+        else
+          echo "Main's latest commit does not match CI pattern."
+        fi
+
+    - name: Get original PR information
+      id: get_original_pr
+      if: steps.check_test_results.outputs.has_failures == 'false'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # Get the PR that triggered the test workflow
+        pr_number="${{ github.event.workflow_run.pull_requests[0].number }}"
+        
+        if [ -n "${pr_number}" ] && [ "${pr_number}" != "null" ]; then
+          echo "Found original PR #${pr_number}"
+          
+          # Get PR details
+          pr_info=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${pr_number}")
+          
+          pr_title=$(echo "${pr_info}" | jq -r '.title')
+          pr_body=$(echo "${pr_info}" | jq -r '.body // ""')
+          
+          echo "pr_title=${pr_title}" >> ${GITHUB_OUTPUT}
+          # Save PR body to a file to handle multiline content
+          echo "${pr_body}" > /tmp/pr_body.txt
+          
+          echo "Original PR title: ${pr_title}"
+          echo "Original PR body saved"
+        else
+          echo "⚠️ No original PR found, will use default title and body"
+          echo "pr_title=" >> ${GITHUB_OUTPUT}
+        fi
+
+    - name: Check if PR already exists
+      id: check_pr
+      if: steps.check_test_results.outputs.has_failures == 'false'
+      env:
+        GITHUB_TOKEN: ${{ secrets.PUSH_TO_MAIN }}
+      run: |
+        SOURCE_BRANCH="${{ steps.branch_info.outputs.source_branch }}"
+        ENCODED_SOURCE_BRANCH=$(echo -n "${SOURCE_BRANCH}" | jq -sRr '@uri')
+        BASE_BRANCH="main"
+        UPSTREAM_REPO="${{ env.UPSTREAM_REPO }}"
+        
+        # Check if PR already exists in upstream repo for this branch from forked repo
+        # Note: head format for cross-repo PRs is "owner:branch", not "owner/repo:branch"
+        FORK_OWNER="${{ github.repository_owner }}"
+        
+        echo "Checking for existing PR: ${FORK_OWNER}:${SOURCE_BRANCH} -> ${UPSTREAM_REPO}:${BASE_BRANCH}"
+        
+        pr_exists=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          "https://api.github.com/repos/${UPSTREAM_REPO}/pulls?head=${FORK_OWNER}:${ENCODED_SOURCE_BRANCH}&base=${BASE_BRANCH}&state=open" \
+          | jq length)
+        
+        echo "pr_exists=${pr_exists}" >> ${GITHUB_OUTPUT}
+        
+        if [ "$pr_exists" -gt 0 ]; then
+          echo "✓ PR already exists (count: ${pr_exists})"
+        else
+          echo "✓ No existing PR found, will create new one"
+        fi
+
+    - name: Create Pull Request
+      if: steps.check_test_results.outputs.has_failures == 'false' && steps.check_pr.outputs.pr_exists == '0'
+      env:
+        GITHUB_TOKEN: ${{ secrets.PUSH_TO_MAIN }}
+      run: |
+        SOURCE_BRANCH="${{ steps.branch_info.outputs.source_branch }}"
+        BASE_BRANCH="main" # the target branch in upstream repo
+        SHORT_SHA="${{ steps.branch_info.outputs.short_sha }}"
+        UPSTREAM_REPO="${{ env.UPSTREAM_REPO }}"
+        FORK_OWNER="${{ github.repository_owner }}"
+        
+        # Use original PR title and body if available
+        ORIGINAL_PR_TITLE="${{ steps.get_original_pr.outputs.pr_title }}"
+        
+        if [ -n "${ORIGINAL_PR_TITLE}" ]; then
+          # Use original PR information
+          PR_TITLE="${ORIGINAL_PR_TITLE}"
+          if [ -f /tmp/pr_body.txt ]; then
+            PR_BODY=$(cat /tmp/pr_body.txt)
+          else
+            PR_BODY=""
+          fi
+          echo "Using original PR title: ${PR_TITLE}"
+        else
+          # Fallback to default title and body
+          PR_TITLE="[AMD] PR from ${SOURCE_BRANCH}"
+          PR_BODY="## Automated PR after successful unit tests of Branch  ${SOURCE_BRANCH}"
+          echo "Using default PR title: ${PR_TITLE}"
+        fi
+        
+        # Create the PR in upstream repo (from forked repo)
+        # Note: head format is "fork_owner:branch" for cross-repository PRs
+        # URL encode the branch name to handle special characters like #
+        ENCODED_SOURCE_BRANCH=$(echo -n "${SOURCE_BRANCH}" | jq -sRr '@uri')
+        
+        # Properly escape JSON values to avoid shell parsing issues
+        TITLE_JSON=$(echo "${PR_TITLE}" | jq -Rs .)
+        BODY_JSON=$(echo "${PR_BODY}" | jq -Rs .)
+        # PR creation API expects plain head (owner:branch); do NOT URL-encode here
+        HEAD_VALUE="${FORK_OWNER}:${SOURCE_BRANCH}"
+        
+        response=$(curl -s -X POST \
+          -H "Authorization: token ${GITHUB_TOKEN}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          "https://api.github.com/repos/${UPSTREAM_REPO}/pulls" \
+          -d "$(jq -n \
+            --argjson title "${TITLE_JSON}" \
+            --argjson body "${BODY_JSON}" \
+            --arg head "${HEAD_VALUE}" \
+            --arg base "${BASE_BRANCH}" \
+            '{title: $title, body: $body, head: $head, base: $base}')")
+        
+        # Check if PR was created successfully
+        pr_number=$(echo "${response}" | jq -r '.number')
+        if [ "${pr_number}" != "null" ] && [ -n "${pr_number}" ]; then
+          echo "Successfully created PR #${pr_number}"
+          echo "PR URL: https://github.com/${UPSTREAM_REPO}/pull/${pr_number}"
+        else
+          echo "Failed to create PR"
+          echo "Response: ${response}"
+          exit 1
+        fi
+
+    - name: Skip PR creation - Test failures detected
+      if: steps.check_test_results.outputs.has_failures == 'true'
+      run: |
+        echo "Skipping PR creation: ${{ steps.check_test_results.outputs.reason }}"
+        echo "Branch: ${{ steps.branch_info.outputs.source_branch }}"
+        echo "Commit: ${{ steps.branch_info.outputs.short_sha }}"
+
+    - name: Skip PR creation - PR already exists
+      if: steps.check_test_results.outputs.has_failures == 'false' && steps.check_pr.outputs.pr_exists != '0'
+      run: |
+        UPSTREAM_REPO="${{ env.UPSTREAM_REPO }}"
+        BASE_BRANCH="main"
+        FORK_OWNER="${{ github.repository_owner }}"
+        echo "PR already exists for branch ${FORK_OWNER}:${{ steps.branch_info.outputs.source_branch }} -> ${UPSTREAM_REPO}:${BASE_BRANCH}, skipping creation"
+
