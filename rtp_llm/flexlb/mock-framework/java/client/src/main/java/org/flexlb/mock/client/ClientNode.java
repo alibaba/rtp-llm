@@ -52,16 +52,16 @@ public final class ClientNode implements AutoCloseable {
         this.imageToken = imageToken; this.physicalBlockSize = physicalBlockSize; this.cacheKeySeed = seed;
         this.prefillCpSize = prefillCpSize;
         this.id = id; this.topology = topology; this.directory = directory;
-        api = new ControlServer(new InetSocketAddress("127.0.0.1", 0)).route("client/start", Start.class, Ack.class, this::start)
-            .route("client/stop", Empty.class, Summary.class, this::stop)
-            .route("worker/prepare", ClientReplayPlan.class, Ack.class, this::prepare)
+        api = new ControlServer(new InetSocketAddress("127.0.0.1", 0)).route("client/start", Start.class, Ack.class, this::startReplay)
+            .route("client/stop", Empty.class, Summary.class, this::stopReplay)
+            .route("worker/prepare", ClientReplayPlan.class, Ack.class, this::prepareWorker)
             .route("worker/begin", Begin.class, Ack.class, this::begin)
             .route("worker/halt", Sequence.class, Ack.class, this::halt)
             .route("worker/state", Sequence.class, State.class, this::state)
             .metrics(metrics::scrape).start();
     }
 
-    public synchronized Ack prepare(ClientReplayPlan args) throws Exception {
+    public synchronized Ack prepareWorker(ClientReplayPlan args) throws Exception {
         if (closed || worker != null && (args.sequence() <= worker.plan.sequence() || !worker.state().done()))
             throw new IllegalStateException("Previous Client playback has not ended or stale prepare");
         var playback = directory.resolve("playback/" + args.sequence());
@@ -72,15 +72,15 @@ public final class ClientNode implements AutoCloseable {
         return new Ack(true);
     }
 
-    public Ack begin(Begin args) { worker(args.sequence()).begin(args.start_epoch_ms()); return new Ack(true); }
+    public Ack begin(Begin args) { requireWorker(args.sequence()).begin(args.start_epoch_ms()); return new Ack(true); }
 
-    public Ack halt(Sequence args) { worker(args.sequence()).halt(); return new Ack(true); }
+    public Ack halt(Sequence args) { requireWorker(args.sequence()).halt(); return new Ack(true); }
 
     public State state(Sequence args) {
-        return worker(args.sequence()).state();
+        return requireWorker(args.sequence()).state();
     }
 
-    public Ack start(Start args) throws Exception {
+    public Ack startReplay(Start args) throws Exception {
         ReplayCoordinator created;
         synchronized (this) {
             if (!id.equals("client-0") || closed) throw new IllegalStateException("Start must target live client-0");
@@ -143,7 +143,7 @@ public final class ClientNode implements AutoCloseable {
 
     public String url() { return api.url(); }
 
-    public Summary stop(Empty args) throws Exception {
+    public Summary stopReplay(Empty args) throws Exception {
         ReplayCoordinator current;
         synchronized (this) {
             if (!id.equals("client-0")) throw new IllegalStateException("Stop must target client-0");
@@ -191,7 +191,7 @@ public final class ClientNode implements AutoCloseable {
         return result.get("result");
     }
 
-    private ReplayWorker worker(long expected) {
+    private ReplayWorker requireWorker(long expected) {
         var current = worker;
         if (current == null || expected != current.plan.sequence()) throw new IllegalStateException("Stale/unknown worker command");
         return current;

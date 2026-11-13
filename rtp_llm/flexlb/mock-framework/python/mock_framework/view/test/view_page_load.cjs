@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
-const source = fs.readFileSync(process.argv[2], 'utf8').split('<script>')[1].split('</script>')[0].replace(/load\(\);\s*$/, '');
+const source = fs.readFileSync(process.argv[2], 'utf8').split('<script>')[1].split('</script>')[0].replace(/loadExperiment\(\);\s*$/, '');
 (async () => {
 for (const includeVit of [false, true]) {
 for (const initiallyReady of [true, false]) {
@@ -26,7 +26,7 @@ for (const initiallyReady of [true, false]) {
   const body = {name:'test',describe:'',result:{status:'ERROR',cleanup_errors:['saved cleanup error']},start:1000,end:2000,gates:[],events:[],warnings:[],effective:{},
    collection:{complete:true},metrics:initiallyReady?ready:{status:'starting',url:null}};
   const context = vm.createContext({document,URL,URLSearchParams,setTimeout(){},fetch:async url=>({ok:true,json:async()=>url==='/api/experiment'?body:ready})});
-  await vm.runInContext(source+'\nload()',context);
+  await vm.runInContext(source+'\nloadExperiment()',context);
   assert.match(elements.get('notice').textContent,/saved cleanup error/);
   if(!initiallyReady) {
    assert.equal(frameLoads.length,0);

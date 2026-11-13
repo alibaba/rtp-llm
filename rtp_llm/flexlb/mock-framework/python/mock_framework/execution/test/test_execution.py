@@ -340,7 +340,7 @@ def test_step_lists_rpc_addresses_from_one_topology_snapshot():
             {"role": "prefill", "rpc": "p:1"},
         ]
     )
-    runtime = SimpleNamespace(topology=SimpleNamespace(active=active))
+    runtime = SimpleNamespace(topology=SimpleNamespace(list_active_endpoints=active))
     context = StepContext(runtime, records=None, query_time="", deadline=0)
     assert context.list_rpc_addresses() == {
         "masters": ["m:1"],

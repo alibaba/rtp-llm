@@ -15,7 +15,7 @@ from ..dashboard import validate_dashboard
 DATASOURCE = {"type": "prometheus", "uid": "mock-prometheus"}
 
 
-def dashboard(value):
+def prepare_dashboard(value):
     validate_dashboard(value)
     result = copy.deepcopy(value)
     result.pop("annotation_steps", None)
@@ -64,7 +64,7 @@ def provision(
         raise ValueError("view.annotation_steps contains duplicate or unknown Step IDs")
     for path in ("dashboards", "provisioning/dashboards", "provisioning/datasources"):
         (directory / path).mkdir(parents=True)
-    value = dashboard(value)
+    value = prepare_dashboard(value)
     variables = value.setdefault("templating", {}).setdefault("list", [])
     if any(variable.get("name") == "annotation_steps" for variable in variables):
         raise ValueError("annotation_steps is a reserved View variable")
@@ -203,7 +203,7 @@ def instance_filters(url, start, end, view):
     return {name: sorted(addresses) for name, addresses in options.items()}
 
 
-def annotations(url, password, events, cancelled):
+def post_annotations(url, password, events, cancelled):
     authorization = "Basic " + base64.b64encode(("admin:" + password).encode()).decode()
     for event in events:
         if cancelled.is_set():

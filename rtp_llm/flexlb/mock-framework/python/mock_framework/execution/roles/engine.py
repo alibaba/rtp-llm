@@ -89,7 +89,7 @@ class EngineRole:
         async with self.lock:
             if role not in ENGINE_ROLES:
                 raise ExecutionError("scale_in requires an Engine role")
-            candidates = self.topology.active(role)
+            candidates = self.topology.list_active_endpoints(role)
             known = {item["rpc"]: item for item in candidates}
             if targets is not None:
                 if (
@@ -154,7 +154,7 @@ class EngineRole:
                 float(duration(self.launch_by_role[role]["startup_timeout"])) * count
                 for role, count in counts.items()
             )
-            await self.supervisor.guard(
+            await self.supervisor.run_until_process_failure(
                 self._start_instances(counts, INITIAL_START_CONCURRENCY), timeout
             )
 
@@ -207,7 +207,7 @@ class EngineRole:
                 await self.monitoring.wait_for_baseline(
                     [
                         item["id"]
-                        for item in self.topology.active()
+                        for item in self.topology.list_active_endpoints()
                         if item["rpc"] in result
                     ]
                 )

@@ -80,7 +80,7 @@ final class PrefillRpcServer implements AutoCloseable {
             var execution = engine.status(latestFinished);
             var tasks = new ArrayList<>(execution.tasks());
             sessions.values().stream().filter(session -> session.request == null)
-                .forEach(session -> tasks.add(RpcMessages.pending(session.input)));
+                .forEach(session -> tasks.add(RpcMessages.createPendingTask(session.input)));
             return new EngineScheduler.Status(tasks, execution.finished(), execution.finishedVersion());
         }
     }
@@ -380,7 +380,7 @@ final class PrefillRpcServer implements AutoCloseable {
 
     private static long rpcDeadline() {
         var deadline = Context.current().getDeadline();
-        return deadline == null ? Long.MAX_VALUE : RpcMessages.after(System.nanoTime(), deadline.timeRemaining(TimeUnit.NANOSECONDS));
+        return deadline == null ? Long.MAX_VALUE : RpcMessages.addNanosClamped(System.nanoTime(), deadline.timeRemaining(TimeUnit.NANOSECONDS));
     }
 
     private record Fence(long expires, boolean preempted) {}
@@ -447,7 +447,7 @@ final class PrefillRpcServer implements AutoCloseable {
             synchronized (executionLock) {
                 if (ended) return;
                 if (request != null) { engine.abortRequest(request, failure); return; }
-                var task = RpcMessages.pending(input);
+                var task = RpcMessages.createPendingTask(input);
                 finished.add(new EngineScheduler.Task(id, task.batchId(), task.inputLength(), 0, task.priority(),
                     EngineScheduler.ReportedPhase.PENDING, 0, 0, 0, System.currentTimeMillis(), failure));
                 ended = true;

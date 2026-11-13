@@ -70,7 +70,9 @@ class ClientRole:
 
     def _coordinator(self):
         nodes = [
-            node for node in self.topology.active("client") if node["id"] == "client-0"
+            node
+            for node in self.topology.list_active_endpoints("client")
+            if node["id"] == "client-0"
         ]
         if len(nodes) != 1:
             raise ExecutionError("Expected exactly one client-0 coordinator")
@@ -80,10 +82,12 @@ class ClientRole:
         return await invoke(self._coordinator(), operation, args, timeout)
 
     async def start_playback(self, body, timeout):
-        clients = self.topology.active("client")
+        clients = self.topology.list_active_endpoints("client")
         if not clients or body["total_concurrency"] < len(clients):
             raise ExecutionError("Need at least one concurrency slot per Client")
-        available = {node["rpc"] for node in self.topology.active("master")}
+        available = {
+            node["rpc"] for node in self.topology.list_active_endpoints("master")
+        }
         if not available or "masters" in body and set(body["masters"]) - available:
             raise ExecutionError("Unknown Master address")
         if self.pending:
@@ -117,7 +121,7 @@ class ClientRole:
         validate(result["errors"], schema(list[str]), "client/stop.errors")
         if not result["clients"] and not result["errors"] and not self.pending:
             return {}
-        clients = self.topology.active("client")
+        clients = self.topology.list_active_endpoints("client")
         if (
             result["errors"]
             or set(result["clients"]) != {node["control"] for node in clients}

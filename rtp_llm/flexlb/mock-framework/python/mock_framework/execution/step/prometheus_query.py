@@ -25,6 +25,6 @@ class QueryResult:
 async def prometheus_query(ctx: StepContext, args: PrometheusQueryArgs) -> QueryResult:
     """Execute raw PromQL at the fixed step time without rewriting it."""
     return QueryResult(
-        await metrics.instant(ctx, args.promql, metrics.epoch(ctx.query_time)),
+        await metrics.query_instant(ctx, args.promql, metrics.epoch(ctx.query_time)),
         ctx.query_time,
     )

@@ -19,7 +19,7 @@ class EndpointRegistry:
         self._active = {}
         self._publish_discovery = None
 
-    def active(self, role=None):
+    def list_active_endpoints(self, role=None):
         return copy.deepcopy(
             [
                 node
@@ -31,8 +31,8 @@ class EndpointRegistry:
     def set_discovery_publisher(self, publish):
         self._publish_discovery = publish
 
-    def publish(self, *, engine_changed=False):
-        snapshot = self.active()
+    def publish_topology(self, *, engine_changed=False):
+        snapshot = self.list_active_endpoints()
         write_json(self.directory / "topology.json", snapshot)
         if engine_changed and self._publish_discovery is not None:
             self._publish_discovery(snapshot)
@@ -58,17 +58,19 @@ class EndpointRegistry:
                     "Instance RPC address is missing or already active"
                 )
             self._active[instance_id] = copy.deepcopy(endpoint)
-        self.publish(engine_changed=endpoint is not None and role in ENGINE_ROLES)
+        self.publish_topology(
+            engine_changed=endpoint is not None and role in ENGINE_ROLES
+        )
 
     def retire(self, instance_id):
         if instance_id not in self._active:
             raise ExecutionError(f"Unknown active instance: {instance_id}")
         endpoint = self._active.pop(instance_id)
-        self.publish(engine_changed=endpoint["role"] in ENGINE_ROLES)
+        self.publish_topology(engine_changed=endpoint["role"] in ENGINE_ROLES)
 
     def clear(self):
         self._active.clear()
-        self.publish()
+        self.publish_topology()
 
 
 class RunEnvironment:
@@ -112,9 +114,9 @@ class RunEnvironment:
         )
 
     async def start(self):
-        self.topology.publish()
+        self.topology.publish_topology()
         if self.monitoring:
-            await self.supervisor.guard(
+            await self.supervisor.run_until_process_failure(
                 self.monitoring.start(), self.monitoring.startup_timeout
             )
         connect = await self.zookeeper.start()
@@ -127,7 +129,7 @@ class RunEnvironment:
         await self.masters.start()
         await self.clients.start()
         if self.monitoring:
-            await self.supervisor.guard(
+            await self.supervisor.run_until_process_failure(
                 self.monitoring.wait_for_baseline(), self.monitoring.startup_timeout
             )
 

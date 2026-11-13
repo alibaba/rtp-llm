@@ -59,7 +59,7 @@ async def client_query_requests(
     """Read a sealed playback; filters limit returned details, never completeness validation."""
     directories = playback_directories(
         ctx.records.directory,
-        ctx.runtime.topology.active(),
+        ctx.runtime.topology.list_active_endpoints(),
         args.targets,
         args.playback,
     )

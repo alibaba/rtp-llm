@@ -17,7 +17,7 @@ public final class EvidenceCrashProbe {
             master.output = (id, response) -> response.onNext(BackendRpcClientTest.token(id, 1, false));
             new ObjectMapper().writeValue(topology.toFile(), List.of(master.endpoint(),
                 Map.of("id", "client-0", "role", "client", "control", client.url(), "rpc", "client:1")));
-            client.start(InputFixture.plan(root, null, 20, 1, 2, 32, 30000, 30000));
+            client.startReplay(InputFixture.plan(root, null, 20, 1, 2, 32, 30000, 30000));
             Path path = root.resolve("components/client-0/playback/1/requests.jsonl");
             long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(8);
             while (!Files.readString(path).contains("\"FIRST_TOKEN\"") && System.nanoTime() < deadline) Thread.sleep(20);

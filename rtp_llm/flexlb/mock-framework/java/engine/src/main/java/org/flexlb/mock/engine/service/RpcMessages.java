@@ -22,22 +22,22 @@ final class RpcMessages {
             input.getGenerateConfig().getIsStreaming());
     }
 
-    static EngineScheduler.Task pending(GenerateInputPB input) {
+    static EngineScheduler.Task createPendingTask(GenerateInputPB input) {
         return new EngineScheduler.Task(input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
             input.getTokenIdsCount(), 0, input.getPriority(), EngineScheduler.ReportedPhase.PENDING, 0, 0, -1, -1, null);
     }
 
     static long deadline(GenerateInputPB input, long started, long rpcDeadline) {
         int timeout = input.getGenerateConfig().getTimeoutMs();
-        return Math.min(rpcDeadline, timeout <= 0 ? Long.MAX_VALUE : after(started, TimeUnit.MILLISECONDS.toNanos(timeout)));
+        return Math.min(rpcDeadline, timeout <= 0 ? Long.MAX_VALUE : addNanosClamped(started, TimeUnit.MILLISECONDS.toNanos(timeout)));
     }
 
-    static long after(long now, long nanos) {
+    static long addNanosClamped(long now, long nanos) {
         try { return Math.addExact(now, nanos); }
         catch (ArithmeticException overflow) { return nanos < 0 ? Long.MIN_VALUE : Long.MAX_VALUE; }
     }
 
-    static TaskInfoPB task(EngineScheduler.Task task) {
+    static TaskInfoPB toTaskInfo(EngineScheduler.Task task) {
         var result = TaskInfoPB.newBuilder().setRequestId(task.requestId()).setBatchId(task.batchId())
             .setInputLength(task.inputLength()).setPrefixLength(task.prefixLength()).setPriority(task.priority())
             .setDpRank(0).setPhase(switch (task.phase()) {

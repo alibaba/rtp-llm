@@ -87,21 +87,21 @@ class StepDefinition:
     args: dict
     returns: dict
 
-    def arguments(self, value):
+    def build_arguments(self, value):
         where = self.name + ".args"
         validate(value, self.args, where)
         return _construct(self.argument_type, value, where)
 
-    async def call(self, context, arguments):
+    async def run_with_arguments(self, context, arguments):
         """Execute arguments already prepared by the Runner; validate the returned value."""
         result = await self.handler(context, arguments)
         result = to_record_value(result)
         validate(result, self.returns, self.name + ".result")
         return result
 
-    async def invoke(self, context, value):
+    async def run_with_raw_args(self, context, value):
         """Validate raw arguments and execute a standalone interface call."""
-        return await self.call(context, self.arguments(value))
+        return await self.run_with_arguments(context, self.build_arguments(value))
 
 
 def register_step(name, *, effect, unit=""):

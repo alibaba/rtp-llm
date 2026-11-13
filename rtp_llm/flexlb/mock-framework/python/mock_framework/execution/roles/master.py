@@ -190,7 +190,9 @@ class MasterRole:
     async def _start_instance(self, identity, *, expected_address=None):
         def engine_endpoints():
             return [
-                node for node in self.topology.active() if node["role"] in ENGINE_ROLES
+                node
+                for node in self.topology.list_active_endpoints()
+                if node["role"] in ENGINE_ROLES
             ]
 
         engines_at_start = engine_endpoints()
@@ -251,7 +253,9 @@ class MasterRole:
             return result
 
     def _select_endpoints(self, targets):
-        available = {item["rpc"]: item for item in self.topology.active("master")}
+        available = {
+            item["rpc"]: item for item in self.topology.list_active_endpoints("master")
+        }
         addresses = sorted(available) if targets is None else targets
         if not addresses or set(addresses) - available.keys():
             raise ExecutionError("Master targets are empty or unknown")
@@ -294,7 +298,9 @@ class MasterRole:
         return result
 
     def _select_addresses(self, targets, *, active):
-        available = {node["rpc"] for node in self.topology.active("master")}
+        available = {
+            node["rpc"] for node in self.topology.list_active_endpoints("master")
+        }
         candidates = available if active else self._instances.keys() - available
         addresses = sorted(candidates) if targets is None else targets
         if (

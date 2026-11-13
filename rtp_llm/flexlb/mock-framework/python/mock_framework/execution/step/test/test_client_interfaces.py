@@ -20,7 +20,7 @@ def context():
         {"id": "client-1", "role": "client", "rpc": "c:2", "control": "http://c:2"},
     ]
     topology = SimpleNamespace(
-        active=lambda role=None: [
+        list_active_endpoints=lambda role=None: [
             item for item in nodes if role is None or item["role"] == role
         ]
     )
@@ -66,9 +66,9 @@ def test_start_requires_collecting_previous_playback(monkeypatch):
     monkeypatch.setattr(client_runtime, "invoke", invoke)
     ctx = context()
     start = StepRegistry.standard().get("client/start/playback")
-    assert asyncio.run(start.invoke(ctx, args()))
+    assert asyncio.run(start.run_with_raw_args(ctx, args()))
     with pytest.raises(ExecutionError, match="previous"):
-        asyncio.run(start.invoke(ctx, args()))
+        asyncio.run(start.run_with_raw_args(ctx, args()))
     assert len(calls) == 1
 
 
@@ -80,7 +80,9 @@ def test_unknown_start_response_is_still_cleaned_up(monkeypatch):
     ctx = context()
     with pytest.raises(OSError):
         asyncio.run(
-            StepRegistry.standard().get("client/start/playback").invoke(ctx, args())
+            StepRegistry.standard()
+            .get("client/start/playback")
+            .run_with_raw_args(ctx, args())
         )
     assert ctx.runtime.clients.pending
 
@@ -112,7 +114,7 @@ def test_stop_collects_all_original_clients_without_task_id(monkeypatch, tmp_pat
     ctx.runtime.clients.pending = True
     ctx.records.directory = tmp_path
     result = asyncio.run(
-        StepRegistry.standard().get("client/stop/playback").invoke(ctx, {})
+        StepRegistry.standard().get("client/stop/playback").run_with_raw_args(ctx, {})
     )
     assert set(result) == {"c:1", "c:2"} and not ctx.runtime.clients.pending
     assert calls == [("http://c:1", "client/stop", {}, ctx.timeout)]
@@ -137,7 +139,9 @@ def test_stop_does_not_hide_missing_workers_or_execution_errors(monkeypatch, bad
     monkeypatch.setattr(client_runtime, "invoke", invoke)
     with pytest.raises(ExecutionError):
         asyncio.run(
-            StepRegistry.standard().get("client/stop/playback").invoke(context(), {})
+            StepRegistry.standard()
+            .get("client/stop/playback")
+            .run_with_raw_args(context(), {})
         )
 
 
@@ -156,7 +160,9 @@ def test_stop_does_not_hide_missing_workers_or_execution_errors(monkeypatch, bad
 )
 def test_invalid_plans_fail_at_python_boundary(changes):
     with pytest.raises(ConfigError):
-        StepRegistry.standard().get("client/start/playback").arguments(args() | changes)
+        StepRegistry.standard().get("client/start/playback").build_arguments(
+            args() | changes
+        )
 
 
 def test_qps_reuses_metric_aggregation_and_measures_issued_not_finished(monkeypatch):
@@ -226,7 +232,9 @@ def test_master_selection_is_forwarded_without_freezing_default_discovery(
     if selection is not None:
         values["masters"] = selection
     assert asyncio.run(
-        StepRegistry.standard().get("client/start/playback").invoke(ctx, values)
+        StepRegistry.standard()
+        .get("client/start/playback")
+        .run_with_raw_args(ctx, values)
     )
     assert calls[0].get("masters") == selection
     if selection is None:
@@ -243,7 +251,7 @@ def test_unknown_master_selection_is_rejected_before_start(monkeypatch):
         asyncio.run(
             StepRegistry.standard()
             .get("client/start/playback")
-            .invoke(ctx, args() | {"masters": ["master:1", "missing:2"]})
+            .run_with_raw_args(ctx, args() | {"masters": ["master:1", "missing:2"]})
         )
     assert not ctx.runtime.clients.pending
 
@@ -256,12 +264,12 @@ def test_missing_or_invalid_input_source_fails_contract(source):
     value = args()
     value["requests_file"] = source
     with pytest.raises(ConfigError):
-        StepRegistry.standard().get("client/start/playback").arguments(value)
+        StepRegistry.standard().get("client/start/playback").build_arguments(value)
 
 
 def test_removed_inline_input_is_rejected():
     with pytest.raises(ConfigError):
-        StepRegistry.standard().get("client/start/playback").arguments(
+        StepRegistry.standard().get("client/start/playback").build_arguments(
             args() | {"requests": [{"token_ids": [1], "max_new_tokens": 2}]}
         )
 
@@ -275,7 +283,9 @@ def test_non_file_source_is_rejected_before_marking_client_pending(tmp_path):
     value["requests_file"] = str(directory)
     with pytest.raises(ExecutionError, match="regular file"):
         asyncio.run(
-            StepRegistry.standard().get("client/start/playback").invoke(ctx, value)
+            StepRegistry.standard()
+            .get("client/start/playback")
+            .run_with_raw_args(ctx, value)
         )
     assert not ctx.runtime.clients.pending
 
@@ -295,7 +305,9 @@ def test_replay_speed_replaces_qps_and_is_forwarded_without_timestamp_conversion
     values.pop("qps")
     values["replay_speed"] = 5
     assert asyncio.run(
-        StepRegistry.standard().get("client/start/playback").invoke(ctx, values)
+        StepRegistry.standard()
+        .get("client/start/playback")
+        .run_with_raw_args(ctx, values)
     )
     assert calls[0]["replay_speed"] == 5 and "qps" not in calls[0]
 
@@ -314,7 +326,9 @@ def test_warmup_is_forwarded_with_either_rate(monkeypatch, rate):
     values.pop("qps")
     values.update(rate, warmup={"duration": "1.25s", "rate_scale": 0.25})
     assert asyncio.run(
-        StepRegistry.standard().get("client/start/playback").invoke(ctx, values)
+        StepRegistry.standard()
+        .get("client/start/playback")
+        .run_with_raw_args(ctx, values)
     )
     assert calls[0]["warmup"] == {"duration_ms": 1250, "rate_scale": 0.25}
     assert all(calls[0][name] == value for name, value in rate.items())
@@ -334,7 +348,7 @@ def test_warmup_is_forwarded_with_either_rate(monkeypatch, rate):
 )
 def test_invalid_warmup_fails_at_python_boundary(warmup):
     with pytest.raises(ConfigError):
-        StepRegistry.standard().get("client/start/playback").arguments(
+        StepRegistry.standard().get("client/start/playback").build_arguments(
             args() | {"warmup": warmup}
         )
 
@@ -354,7 +368,7 @@ def test_playback_requires_exactly_one_finite_positive_rate(rate):
     values.pop("qps")
     values.update(rate)
     with pytest.raises(ConfigError):
-        StepRegistry.standard().get("client/start/playback").arguments(values)
+        StepRegistry.standard().get("client/start/playback").build_arguments(values)
 
 
 def test_shared_requests_resolve_independently_of_case_directory(monkeypatch, tmp_path):
@@ -372,5 +386,7 @@ def test_shared_requests_resolve_independently_of_case_directory(monkeypatch, tm
     monkeypatch.setattr(ctx.runtime.clients, "start_playback", start)
     values = args() | {"requests_file": "data/traffic/example.mckidx"}
     assert asyncio.run(
-        StepRegistry.standard().get("client/start/playback").invoke(ctx, values)
+        StepRegistry.standard()
+        .get("client/start/playback")
+        .run_with_raw_args(ctx, values)
     )

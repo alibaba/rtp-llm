@@ -12,15 +12,15 @@ class _PhaseTasks:
     def __init__(self):
         self._background = {}
 
-    def start(self, step_id, operation):
+    def start_background(self, step_id, operation):
         self._background[step_id] = asyncio.create_task(operation, name=step_id)
 
-    def check(self):
+    def raise_background_errors(self):
         for task in self._background.values():
             if task.done():
                 task.result()
 
-    async def run(self, operation):
+    async def run_foreground(self, operation):
         pending = {task for task in self._background.values() if not task.done()}
         if not pending:
             return await operation
@@ -30,7 +30,7 @@ class _PhaseTasks:
                 _, pending = await asyncio.wait(
                     pending | {foreground}, return_when=asyncio.FIRST_COMPLETED
                 )
-                self.check()
+                self.raise_background_errors()
                 pending.discard(foreground)
             return await foreground
         finally:
@@ -38,14 +38,14 @@ class _PhaseTasks:
                 foreground.cancel()
             await asyncio.gather(foreground, return_exceptions=True)
 
-    async def finish(self):
+    async def wait_for_background(self):
         pending = {task for task in self._background.values() if not task.done()}
         while pending:
             _, pending = await asyncio.wait(
                 pending, return_when=asyncio.FIRST_COMPLETED
             )
-            self.check()
-        self.check()
+            self.raise_background_errors()
+        self.raise_background_errors()
 
     async def close(self):
         for task in self._background.values():
@@ -78,7 +78,7 @@ async def run_case(case, launch, directory):
             tasks = _PhaseTasks()
             try:
                 for step in phase.steps:
-                    tasks.check()
+                    tasks.raise_background_errors()
                     deadline = (
                         min(
                             phase_deadline,
@@ -96,10 +96,10 @@ async def run_case(case, launch, directory):
                         results=results,
                     )
                     if step.background:
-                        tasks.start(step.id, step.run(context))
+                        tasks.start_background(step.id, step.run(context))
                     else:
-                        await tasks.run(step.run(context))
-                await tasks.finish()
+                        await tasks.run_foreground(step.run(context))
+                await tasks.wait_for_background()
                 phase_status = "PASS"
             except GateFailure:
                 phase_status = "FAIL"

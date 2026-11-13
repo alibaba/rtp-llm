@@ -564,7 +564,7 @@
         value === null || value === undefined
           ? "未采集"
           : JSON.stringify(value, null, 2);
-      function focus(from, to, title) {
+      function showTimeRange(from, to, title) {
         selection = { from, to, title };
         $("focus").textContent =
           title + " · " + format(from) + " — " + format(to);
@@ -604,11 +604,11 @@
           .querySelectorAll(".gate")
           .forEach((card) => card.setAttribute("aria-pressed", "false"));
       }
-      function reset() {
+      function showFullExperiment() {
         clearGateSelection();
-        focus(experiment.start, experiment.end, "完整实验");
+        showTimeRange(experiment.start, experiment.end, "完整实验");
       }
-      function value(gate) {
+      function formatGateActual(gate) {
         if (!Object.hasOwn(gate, "actual")) return "未取得结果";
         if (Object.hasOwn(gate.expect, "count") && Array.isArray(gate.actual))
           return gate.actual.length + " 个";
@@ -665,7 +665,7 @@
         const title = document.createElement("span");
         title.textContent = gate.title;
         const actual = document.createElement("strong");
-        actual.textContent = value(gate);
+        actual.textContent = formatGateActual(gate);
         const expected = document.createElement("small");
         expected.textContent = "预期 " + expectation(gate);
         const status = document.createElement("small");
@@ -682,7 +682,7 @@
               item.setAttribute("aria-pressed", String(item === card)),
             );
           const range = gate.from !== null && gate.to !== null;
-          focus(
+          showTimeRange(
             range ? gate.from : gate.point - 2000,
             range ? gate.to : gate.point + 2000,
             gate.title,
@@ -741,7 +741,7 @@
             Array.from(select.options).forEach((option) => {
               option.selected = values.includes(option.value);
             });
-            focus(selection.from, selection.to, selection.title);
+            showTimeRange(selection.from, selection.to, selection.title);
           };
           select.onchange = () => {
             let values = Array.from(
@@ -782,7 +782,8 @@
             " / " +
             state.steps.length +
             " 个 Step";
-          if (reload) focus(selection.from, selection.to, selection.title);
+          if (reload)
+            showTimeRange(selection.from, selection.to, selection.title);
         };
         for (const step of state.steps) {
           const label = document.createElement("label"),
@@ -834,7 +835,7 @@
           showAnnotations(state.annotations);
         }
         if (ready && (changed || !$("grafana").hasAttribute("src")))
-          focus(selection.from, selection.to, selection.title);
+          showTimeRange(selection.from, selection.to, selection.title);
       }
       async function refreshMetrics() {
         try {
@@ -851,7 +852,7 @@
           });
         }
       }
-      async function load() {
+      async function loadExperiment() {
         try {
           const response = await fetch("/api/experiment");
           if (!response.ok)
@@ -939,7 +940,7 @@
             button.append(time, document.createTextNode(event.text));
             button.onclick = () => {
               clearGateSelection();
-              focus(
+              showTimeRange(
                 event.timeEnd !== null && event.timeEnd !== undefined
                   ? event.time
                   : event.time - 2000,
@@ -963,7 +964,7 @@
             format(experiment.start) +
             " — " +
             format(experiment.end);
-          $("reset").onclick = reset;
+          $("reset").onclick = showFullExperiment;
           showMetrics(experiment.metrics);
           if (experiment.metrics.status !== "unavailable")
             setTimeout(refreshMetrics, 2000);
@@ -973,7 +974,7 @@
           $("notice").textContent = error.message;
         }
       }
-      load();
+      loadExperiment();
     </script>
   </body>
 </html>

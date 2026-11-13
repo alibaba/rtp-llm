@@ -143,8 +143,8 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
                 .setDpSize(1).setDpRank(0).setTpSize(config.cpSize()).setPrecision("FP16")
                 .setStatusVersion(version).setMaxSeqLen(config.maxSeqLen()).setMaxBatchTokensSize(config.maxBatchTokens())
                 .setTotalKvCache(tokens(snapshot.totalBlocks())).setAvailableKvCache(tokens(snapshot.availableBlocks()))
-                .addAllRunningTaskInfo(tasks.tasks().stream().map(RpcMessages::task).toList())
-                .addAllFinishedTaskList(tasks.finished().stream().map(RpcMessages::task).toList()).setLatestFinishedVersion(tasks.finishedVersion())
+                .addAllRunningTaskInfo(tasks.tasks().stream().map(RpcMessages::toTaskInfo).toList())
+                .addAllFinishedTaskList(tasks.finished().stream().map(RpcMessages::toTaskInfo).toList()).setLatestFinishedVersion(tasks.finishedVersion())
                 .build();
             return new StatusResult<>(result, collectedAtNanos);
         });

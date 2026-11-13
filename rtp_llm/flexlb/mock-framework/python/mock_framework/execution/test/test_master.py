@@ -518,7 +518,7 @@ def adapter_context():
     from mock_framework.execution.roles.master import MasterRole
 
     endpoints = SimpleNamespace(
-        active=lambda role=None: [
+        list_active_endpoints=lambda role=None: [
             item for item in topology if role is None or item["role"] == role
         ]
     )

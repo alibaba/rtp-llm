@@ -89,7 +89,7 @@ def load_experiment_view(directory):
 
     warnings = []
 
-    def optional(name, kind):
+    def read_optional_json(name, kind):
         try:
             value = read_json(directory / name)
             if not isinstance(value, kind):
@@ -99,7 +99,7 @@ def load_experiment_view(directory):
             warnings.append(str(error).removeprefix(str(directory) + "/"))
             return None
 
-    def lines(name):
+    def read_json_lines(name):
         try:
             text = (directory / name).read_text(encoding="utf-8")
         except (OSError, UnicodeError) as error:
@@ -120,7 +120,7 @@ def load_experiment_view(directory):
                 warnings.append(f"{name}:{number}: {error}")
         return rows
 
-    configuration = optional("configuration.json", dict)
+    configuration = read_optional_json("configuration.json", dict)
     case = configuration.get("case", {}) if configuration else {}
     if not isinstance(case, dict):
         warnings.append("configuration.json: case must be an object")
@@ -143,7 +143,7 @@ def load_experiment_view(directory):
     windows, events, annotations = {}, [], {}
     processes, playback, master_queries = {}, [], []
     role_names = ("client", "master", "prefill", "decode", "vit", "zookeeper")
-    for number, event in lines("events.jsonl"):
+    for number, event in read_json_lines("events.jsonl"):
         try:
             kind = event["event"]
             if kind in ("process_started", "process_ready", "process_stopped"):
@@ -225,7 +225,7 @@ def load_experiment_view(directory):
         ) as error:
             warnings.append(f"events.jsonl:{number}: {error}")
     gates = []
-    for number, gate in lines("gates.jsonl"):
+    for number, gate in read_json_lines("gates.jsonl"):
         try:
             point = milliseconds(gate["query_time"])
             if not all(
@@ -275,7 +275,7 @@ def load_experiment_view(directory):
         )
         source = None
     effective = {
-        path.parent.name: optional(str(path.relative_to(directory)), dict)
+        path.parent.name: read_optional_json(str(path.relative_to(directory)), dict)
         for path in sorted(directory.glob("components/*/effective-config.json"))
     }
     environment = case.get("environment")
@@ -297,11 +297,11 @@ def load_experiment_view(directory):
         roles[role] = {"state": state, "instances": instances}
     roles["client"]["playback"] = playback
     roles["master"]["observations"] = master_queries
-    collection = optional("prometheus/collection.json", dict)
+    collection = read_optional_json("prometheus/collection.json", dict)
     if collection is not None and type(collection.get("complete")) is not bool:
         warnings.append("prometheus/collection.json: complete must be a boolean")
         collection = None
-    versions = optional("git-state.json", list)
+    versions = read_optional_json("git-state.json", list)
     return {
         "name": case.get("name") or case.get("id") or directory.name,
         "describe": case.get("describe", ""),

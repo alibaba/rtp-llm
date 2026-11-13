@@ -210,7 +210,9 @@ while True: time.sleep(1)
                     },
                     directory,
                 )
-                await supervisor.guard(_wait_file(directory / "ready"), 5)
+                await supervisor.run_until_process_failure(
+                    _wait_file(directory / "ready"), 5
+                )
             async with asyncio.timeout(15):
                 assert await group.close() == []
             assert all((output / name / "exited").exists() for name in names)
@@ -236,7 +238,7 @@ class Empty:
 @register_step("test/client_progress", effect="read")
 async def progress(ctx, args: Empty) -> int:
     successes = 0
-    for node in ctx.runtime.topology.active():
+    for node in ctx.runtime.topology.list_active_endpoints():
         if node["role"] == "client":
             value = await invoke(node["control"], "worker/state", {"sequence": 1}, 1)
             successes += value["outcomes"]["success"]

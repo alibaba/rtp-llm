@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 from ..execution.processes import ProcessIdentity, ProcessSupervisor
-from .grafana import annotations, instance_filters, provision
+from .grafana import instance_filters, post_annotations, provision
 from .records import load_experiment_view, read_json
 
 
@@ -159,8 +159,10 @@ check_for_plugin_updates = false
             output / "prometheus",
             zero_exit=True,
         )
-        await supervisor.guard(wait_for_http_ready(prom_url + "/-/ready"), 60)
-        filters = await supervisor.guard(
+        await supervisor.run_until_process_failure(
+            wait_for_http_ready(prom_url + "/-/ready"), 60
+        )
+        filters = await supervisor.run_until_process_failure(
             asyncio.to_thread(
                 instance_filters, prom_url, body["start"], body["end"], view
             ),
@@ -197,10 +199,12 @@ check_for_plugin_updates = false
             env,
             output / "grafana",
         )
-        await supervisor.guard(wait_for_http_ready(grafana_url + "/api/health"), 60)
-        await supervisor.guard(
+        await supervisor.run_until_process_failure(
+            wait_for_http_ready(grafana_url + "/api/health"), 60
+        )
+        await supervisor.run_until_process_failure(
             asyncio.to_thread(
-                annotations, grafana_url, password, body["annotations"], cancelled
+                post_annotations, grafana_url, password, body["annotations"], cancelled
             ),
             60,
         )
@@ -212,7 +216,7 @@ check_for_plugin_updates = false
             "filters": filters,
             "annotations": annotation_selection,
         }
-        await supervisor.guard(asyncio.Event().wait(), None)
+        await supervisor.run_until_process_failure(asyncio.Event().wait(), None)
     except Exception as error:
         failure = f"{type(error).__name__}: {error}"
         logging.error("Metrics unavailable: %s; logs: %s", failure, output)

@@ -42,14 +42,14 @@ async def client_query_success_rate(
         return sum(client.outcomes["success"] for client in clients) / finished
 
     millis = metrics.counter_window_ms(ctx, args)
-    labels, targets = metrics.scope(ctx, args, "client")
+    labels, targets = metrics.select_metric_targets(ctx, args, "client")
     name = "mock_client_requests_finished_total"
     success = f'{name}{{{labels},outcome="success"}}'
     total = f"{name}{{{labels}}}"
     expression = (
         f"sum(increase({success}[{millis}ms])) / sum(increase({total}[{millis}ms]))"
     )
-    value = await metrics.evaluate(
+    value = await metrics.query_metric_window(
         ctx,
         args,
         expression,

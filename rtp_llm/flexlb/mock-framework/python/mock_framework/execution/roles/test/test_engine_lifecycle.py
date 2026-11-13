@@ -153,12 +153,12 @@ def no_children(output):
 )
 def test_scale_rejects_invalid_arguments(args):
     with pytest.raises(ConfigError):
-        StepRegistry.standard().get("engine/scale").arguments(args)
+        StepRegistry.standard().get("engine/scale").build_arguments(args)
 
 
 def test_scale_in_accepts_count_above_start_limit():
     step = StepRegistry.standard().get("engine/scale")
-    assert step.arguments({"direction": "in", "count": 1025}).count == 1025
+    assert step.build_arguments({"direction": "in", "count": 1025}).count == 1025
 
 
 def test_initial_engine_start_shares_slots_across_roles(tmp_path, monkeypatch):
@@ -223,7 +223,7 @@ def test_initial_engine_start_shares_slots_across_roles(tmp_path, monkeypatch):
         assert set(starts[:INITIAL_START_CONCURRENCY]) == set(ENGINE_ROLES)
         assert ready[0] != ("prefill", 0)
         for role in ENGINE_ROLES:
-            assert [node["id"] for node in topology.active(role)] == [
+            assert [node["id"] for node in topology.list_active_endpoints(role)] == [
                 f"{role}-{i}" for i in range(count)
             ]
 
@@ -240,7 +240,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
             len(
                 {
                     owner.supervisor.child(node["id"]).pid
-                    for node in owner.topology.active()
+                    for node in owner.topology.list_active_endpoints()
                     if node["role"] in ("prefill", "decode", "vit")
                 }
             )
@@ -249,7 +249,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
         original = ctx.list_rpc_addresses()["prefill"]
         first = next(
             item
-            for item in owner.topology.active("prefill")
+            for item in owner.topology.list_active_endpoints("prefill")
             if item["rpc"] == original[0]
         )
         original_files = {
@@ -340,7 +340,8 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
                 == item["rpc"]
             )
             assert (folder / "ready.json").exists() == (
-                item["id"] in {node["id"] for node in owner.topology.active()}
+                item["id"]
+                in {node["id"] for node in owner.topology.list_active_endpoints()}
             )
         # Exercise real TCP request traffic after removal and subsequent creation.
         classpath = os.pathsep.join(
@@ -484,7 +485,7 @@ def test_partial_scale_failure_is_not_replayed_or_reported_as_success(
             try:
                 await engine_scale(ctx, EngineScaleArgs(direction="in", count=2))
             except ExecutionError:
-                assert len(ctx.runtime.topology.active("prefill")) == (
+                assert len(ctx.runtime.topology.list_active_endpoints("prefill")) == (
                     0 if operation == "stop_after_exit" else 1
                 )
                 raise

@@ -8,4 +8,6 @@ from .step_registry import register_step
 async def engine_query_prefill_tps_with_cache(
     ctx: StepContext, args: MetricArgs
 ) -> float | list[float]:
-    return await metrics.gauge(ctx, args, "prefill", "rtp_llm_context_tps_with_cache")
+    return await metrics.query_gauge(
+        ctx, args, "prefill", "rtp_llm_context_tps_with_cache"
+    )

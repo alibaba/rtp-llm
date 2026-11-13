@@ -115,7 +115,7 @@ def context():
         records=SimpleNamespace(emit=lambda **event: None),
         runtime=SimpleNamespace(
             topology=SimpleNamespace(
-                active=lambda role=None: [
+                list_active_endpoints=lambda role=None: [
                     node for node in nodes if role is None or node["role"] == role
                 ]
             )
@@ -137,7 +137,7 @@ def test_hit_rate_aggregates_counters_before_division_and_uses_one_query_time(
             ]
         return [QuerySample({}, 0.76, at)]
 
-    monkeypatch.setattr(metrics, "instant", instant)
+    monkeypatch.setattr(metrics, "query_instant", instant)
     assert (
         asyncio.run(
             engine_query_cache_hit_rate(
@@ -170,7 +170,7 @@ def test_missing_insufficient_or_duplicate_instance_history_fails_before_aggrega
             for port, count in zip(ports, counts)
         ]
 
-    monkeypatch.setattr(metrics, "instant", instant)
+    monkeypatch.setattr(metrics, "query_instant", instant)
     with pytest.raises(ExecutionError, match="coverage"):
         asyncio.run(engine_query_cache_hit_rate(context(), metrics.MetricArgs()))
     assert len(calls) == 1
@@ -178,7 +178,7 @@ def test_missing_insufficient_or_duplicate_instance_history_fails_before_aggrega
 
 def test_explicit_target_scope_and_default_sixty_second_interval():
     ctx = context()
-    selector, targets = metrics.scope(
+    selector, targets = metrics.select_metric_targets(
         ctx, metrics.MetricArgs(targets=["127.0.0.1:1002"]), "prefill"
     )
     assert targets == ["127.0.0.1:1002"] and "1001" not in selector
@@ -187,7 +187,9 @@ def test_explicit_target_scope_and_default_sixty_second_interval():
         60000,
     )
     with pytest.raises(ExecutionError):
-        metrics.scope(ctx, metrics.MetricArgs(targets=["old:1"]), "prefill")
+        metrics.select_metric_targets(
+            ctx, metrics.MetricArgs(targets=["old:1"]), "prefill"
+        )
     with pytest.raises(ValueError):
         metrics.MetricArgs(targets=[])
 
@@ -196,9 +198,9 @@ def test_metric_scope_uses_current_instances_and_rejects_removed_addresses():
     ctx = context()
     ctx.nodes.pop(0)
     args = metrics.MetricArgs(range=["-60s", "0s"])
-    assert metrics.scope(ctx, args, "prefill")[1] == ["127.0.0.1:1002"]
+    assert metrics.select_metric_targets(ctx, args, "prefill")[1] == ["127.0.0.1:1002"]
     with pytest.raises(ExecutionError):
-        metrics.scope(
+        metrics.select_metric_targets(
             ctx,
             metrics.MetricArgs(targets=["127.0.0.1:1001"], range=["-60s", "0s"]),
             "prefill",
@@ -225,7 +227,7 @@ def test_success_rate_aggregates_all_terminals_without_a_request_count_floor(
         # Even one successful terminal in the interval is sufficient.
         return [QuerySample({}, 1.0, at)]
 
-    monkeypatch.setattr(metrics, "instant", instant)
+    monkeypatch.setattr(metrics, "query_instant", instant)
     assert (
         asyncio.run(
             client_query_success_rate(
@@ -266,7 +268,7 @@ def test_success_rate_rejects_zero_terminal_nan_and_invalid_ratios(monkeypatch, 
             ]
         return [QuerySample({}, value, at)]
 
-    monkeypatch.setattr(metrics, "instant", instant)
+    monkeypatch.setattr(metrics, "query_instant", instant)
     with pytest.raises(ExecutionError, match="terminal observations|finite sample"):
         asyncio.run(
             client_query_success_rate(
@@ -284,7 +286,7 @@ def test_success_rate_rejects_a_missing_outcome_series(monkeypatch):
         ports = (1001,) if 'outcome="timeout"' in expression else (1001, 1002)
         return [QuerySample({"instance": f"127.0.0.1:{port}"}, 2, at) for port in ports]
 
-    monkeypatch.setattr(metrics, "instant", instant)
+    monkeypatch.setattr(metrics, "query_instant", instant)
     with pytest.raises(ExecutionError, match="coverage"):
         asyncio.run(
             client_query_success_rate(
@@ -309,7 +311,7 @@ def test_success_rate_requires_an_explicit_valid_window(args):
     from mock_framework.execution.step.step_registry import StepRegistry
 
     with pytest.raises(ConfigError):
-        StepRegistry.standard().get("client/query/success_rate").arguments(args)
+        StepRegistry.standard().get("client/query/success_rate").build_arguments(args)
 
 
 def test_success_rate_from_stop_counts_only_the_selected_playback():
@@ -329,10 +331,12 @@ def test_success_rate_from_stop_counts_only_the_selected_playback():
         "outcomes": {"success": 999, "error": 1, "timeout": 0, "cancelled": 0},
     }
     result = {"127.0.0.1:1001": summary}
-    assert asyncio.run(step.invoke(None, {"playback_result": result})) == 0.999
+    assert (
+        asyncio.run(step.run_with_raw_args(None, {"playback_result": result})) == 0.999
+    )
     summary["unsent"] = 1
     with pytest.raises(ExecutionError, match="unsent"):
-        asyncio.run(step.invoke(None, {"playback_result": result}))
+        asyncio.run(step.run_with_raw_args(None, {"playback_result": result}))
 
 
 def test_success_rate_window_keeps_selected_clients_and_fixed_end(monkeypatch):
@@ -349,11 +353,13 @@ def test_success_rate_window_keeps_selected_clients_and_fixed_end(monkeypatch):
             return [QuerySample({"instance": "127.0.0.1:1002"}, 2, at)]
         return [QuerySample({}, 0.75, at)]
 
-    monkeypatch.setattr(metrics, "instant", instant)
+    monkeypatch.setattr(metrics, "query_instant", instant)
     result = asyncio.run(
         StepRegistry.standard()
         .get("client/query/success_rate")
-        .invoke(ctx, {"targets": ["127.0.0.1:1002"], "range": ["-40s", "-20s"]})
+        .run_with_raw_args(
+            ctx, {"targets": ["127.0.0.1:1002"], "range": ["-40s", "-20s"]}
+        )
     )
     assert result == 0.75
     assert all(at == metrics.epoch(ctx.query_time) - 20 for _, at in calls)
@@ -413,7 +419,7 @@ def test_series_checks_every_point_and_each_instances_history(monkeypatch):
             ]
         return [[QuerySample({}, v, t) for v, t in zip((0.9, 0.7), (end - 1, end))]]
 
-    monkeypatch.setattr(metrics, "instant", instant)
+    monkeypatch.setattr(metrics, "query_instant", instant)
     monkeypatch.setattr(metrics, "series_query", series)
     values = asyncio.run(
         engine_query_cache_hit_rate(
@@ -454,7 +460,7 @@ def test_latency_interval_uses_request_weights_and_merges_histogram_buckets(
             ]
         return [QuerySample({}, 0.25, at)]
 
-    monkeypatch.setattr(metrics, "instant", instant)
+    monkeypatch.setattr(metrics, "query_instant", instant)
     assert (
         asyncio.run(client_query_ttft(ctx, LatencyArgs(range=["-30s", "0s"]))) == 0.25
     )
@@ -499,7 +505,7 @@ def test_prefill_priority_is_summed_before_time_average_and_coverage_is_per_work
             ]
         return [[QuerySample({}, 30, end)]]
 
-    monkeypatch.setattr(metrics, "instant", instant)
+    monkeypatch.setattr(metrics, "query_instant", instant)
     monkeypatch.setattr(metrics, "series_query", series)
     result = asyncio.run(
         engine_query_prefill_tps(
@@ -522,6 +528,6 @@ def test_prefill_gauge_rejects_a_missing_worker_after_priority_aggregation(monke
     async def instant(ctx, expression, at):
         return [QuerySample({"instance": "127.0.0.1:1001"}, 4, at)]
 
-    monkeypatch.setattr(metrics, "instant", instant)
+    monkeypatch.setattr(metrics, "query_instant", instant)
     with pytest.raises(ExecutionError, match="coverage"):
         asyncio.run(engine_query_prefill_tps(ctx, metrics.MetricArgs()))

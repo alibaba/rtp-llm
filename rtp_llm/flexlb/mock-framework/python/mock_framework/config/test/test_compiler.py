@@ -237,7 +237,7 @@ def test_typed_records_inside_result_collections_remain_referenceable_values():
 
     registry = StepRegistry((records,))
     assert asyncio.run(
-        registry.get("extension/records").invoke(None, {"threshold": 4})
+        registry.get("extension/records").run_with_raw_args(None, {"threshold": 4})
     ) == {"records": [{"threshold": 4}]}
 
 
@@ -333,7 +333,7 @@ def test_union_preserves_nested_constructor_failure():
     with pytest.raises(
         ConfigError, match=r"extension/choice\.args\.item: value must be positive"
     ):
-        interface.arguments({"item": {"value": 0}})
+        interface.build_arguments({"item": {"value": 0}})
 
 
 def test_registered_actions_are_functions_and_compiled_steps_share_only_the_definition(

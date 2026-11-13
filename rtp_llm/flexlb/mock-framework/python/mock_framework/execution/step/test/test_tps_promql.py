@@ -31,19 +31,19 @@ def test_tps_queries_preserve_sparse_priorities_and_unequal_batch_weights(
             return [QuerySample({"instance": i}, 8, at) for i in ("a", "b")]
         return [QuerySample({}, 0, at)]
 
-    monkeypatch.setattr(metrics, "instant", instant)
+    monkeypatch.setattr(metrics, "query_instant", instant)
     ctx = SimpleNamespace(
         query_time="1970-01-01T00:00:17.500Z",
         runtime=SimpleNamespace(
             monitoring=SimpleNamespace(interval=1),
             topology=SimpleNamespace(
-                active=lambda role: [{"rpc": i} for i in ("a", "b")]
+                list_active_endpoints=lambda role: [{"rpc": i} for i in ("a", "b")]
             ),
         ),
         records=SimpleNamespace(emit=lambda **event: None),
     )
     asyncio.run(
-        metrics.gauge(
+        metrics.query_gauge(
             ctx,
             metrics.MetricArgs(range=["-8s", "0s"]),
             "prefill",

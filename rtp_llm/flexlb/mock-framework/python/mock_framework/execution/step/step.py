@@ -94,7 +94,7 @@ class Step:
         try:
             addresses = context.list_rpc_addresses()
             args = resolve_refs(self.args, results, addresses)
-            arguments = definition.arguments(args)
+            arguments = definition.build_arguments(args)
             expected = (
                 resolve_refs(self.expect.comparisons, results, addresses)
                 if self.expect
@@ -116,8 +116,8 @@ class Step:
             budget = context.timeout
             stage = "invoke"
             invoked = True
-            actual = await runtime.supervisor.guard(
-                definition.call(context, arguments), budget
+            actual = await runtime.supervisor.run_until_process_failure(
+                definition.run_with_arguments(context, arguments), budget
             )
             returned = True
             stage = "expect"
@@ -134,7 +134,9 @@ class Step:
                 stage = "wait_after"
                 records.emit(event="wait_started", duration=self.wait_after)
                 budget = context.timeout
-                await runtime.supervisor.guard(asyncio.sleep(wait), budget)
+                await runtime.supervisor.run_until_process_failure(
+                    asyncio.sleep(wait), budget
+                )
             results[self.id] = actual
             records.emit(
                 event="step_finished",
@@ -183,7 +185,7 @@ class StepContext:
         return remaining
 
     def list_rpc_addresses(self):
-        nodes = self.runtime.topology.active()
+        nodes = self.runtime.topology.list_active_endpoints()
         return {
             name: sorted(item["rpc"] for item in nodes if item["role"] == role)
             for name, role in [

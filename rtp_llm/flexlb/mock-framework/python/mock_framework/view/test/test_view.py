@@ -13,7 +13,7 @@ from mock_framework.config import compile_case
 from mock_framework.execution.step.step_registry import StepRegistry
 from mock_framework.execution.step_trace import StepTrace
 from mock_framework.execution.test.helpers import FRAMEWORK
-from mock_framework.view.grafana import dashboard, provision
+from mock_framework.view.grafana import prepare_dashboard, provision
 from mock_framework.view.records import gate_text, load_experiment_view
 from mock_framework.view.service import make_http_handler, serve
 
@@ -246,12 +246,12 @@ def test_dashboard_rebinds_nested_panels_without_mutating_the_source_or_future_v
         ],
     }
     original = deepcopy(source)
-    adapted = dashboard(source)
+    adapted = prepare_dashboard(source)
     panel = adapted["panels"][0]["panels"][0]
     assert panel["targets"][0]["datasource"]["uid"] == "mock-prometheus"
     panel["datasource"]["uid"] = "mutated"
     assert (
-        dashboard(source)["panels"][0]["panels"][0]["datasource"]["uid"]
+        prepare_dashboard(source)["panels"][0]["panels"][0]["datasource"]["uid"]
         == "mock-prometheus"
     )
     assert source == original
@@ -284,7 +284,7 @@ def test_dashboard_preserves_nested_panel_expressions():
             }
         ],
     }
-    adapted = dashboard(source)
+    adapted = prepare_dashboard(source)
     target = adapted["panels"][0]["panels"][0]["targets"][0]
     assert target["expr"] == expression
     assert target["datasource"]["type"] == "prometheus"
@@ -705,7 +705,7 @@ def test_annotation_html_escapes_saved_values_and_preserves_line_breaks(monkeypa
         return io.BytesIO(b"{}")
 
     monkeypatch.setattr(grafana, "urlopen", post)
-    grafana.annotations(
+    grafana.post_annotations(
         "http://localhost",
         "unused",
         [

@@ -93,7 +93,7 @@ class RequestJournalTest {
              var one = new ClientNode("client-1", topology, directory.resolve("client-1"))) {
             new com.fasterxml.jackson.databind.ObjectMapper().writeValue(topology.toFile(), List.of(master.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
-            zero.start(InputFixture.plan(directory, null, 100, 10, 4, 16, 3000, 1000));
+            zero.startReplay(InputFixture.plan(directory, null, 100, 10, 4, 16, 3000, 1000));
             PlaybackTest.eventually(() -> one.state(new ClientProtocol.Sequence(1)).issued() > 0);
             var workerField = ClientNode.class.getDeclaredField("worker"); workerField.setAccessible(true);
             var journalField = ClientNode.ReplayWorker.class.getDeclaredField("journal"); journalField.setAccessible(true);
@@ -101,7 +101,7 @@ class RequestJournalTest {
             var journal = (RequestJournal) journalField.get(workerField.get(one));
             ((FileChannel) channelField.get(journal)).close();
             PlaybackTest.eventually(() -> zero.state(new ClientProtocol.Sequence(1)).done());
-            var result = zero.stop(new ClientProtocol.Empty());
+            var result = zero.stopReplay(new ClientProtocol.Empty());
             assertFalse(result.errors().isEmpty()); assertEquals(2, result.clients().size());
             assertTrue(result.clients().values().stream().allMatch(ClientProtocol.State::done));
             assertTrue(result.clients().values().stream().allMatch(s -> s.unsent() > 0));

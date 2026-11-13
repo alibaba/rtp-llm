@@ -23,7 +23,7 @@ def test_only_engine_changes_publish_discovery_with_an_isolated_snapshot(
             nodes[0]["rpc"] = "corrupted"
 
     topology.set_discovery_publisher(publish)
-    topology.publish()
+    topology.publish_topology()
     assert received == []
     endpoint = {
         "id": f"{role}-0",
@@ -34,11 +34,11 @@ def test_only_engine_changes_publish_discovery_with_an_isolated_snapshot(
     }
     topology.register(f"{role}-0", role, endpoint["control"], endpoint)
     endpoint["extra"]["value"] = 2
-    topology.active()[0]["extra"]["value"] = 3
-    assert topology.active("master") == []
-    assert topology.active()[0]["extra"]["value"] == 1
+    topology.list_active_endpoints()[0]["extra"]["value"] = 3
+    assert topology.list_active_endpoints("master") == []
+    assert topology.list_active_endpoints()[0]["extra"]["value"] == 1
     assert received[-1][0]["rpc"] == "corrupted"
-    assert topology.active()[0]["rpc"] == "127.0.0.1:1001"
+    assert topology.list_active_endpoints()[0]["rpc"] == "127.0.0.1:1001"
     assert (
         json.loads((tmp_path / "topology.json").read_text())[0]["rpc"]
         == "127.0.0.1:1001"
@@ -67,7 +67,7 @@ def test_only_engine_changes_publish_discovery_with_an_isolated_snapshot(
     assert len(received) == 1
     topology.retire(f"{role}-0")
     assert len(received) == 2 and received[-1] == []
-    assert topology.active() == []
+    assert topology.list_active_endpoints() == []
     assert json.loads((tmp_path / "topology.json").read_text()) == []
     assert not (tmp_path / "topology-history.json").exists()
 
@@ -85,7 +85,7 @@ def test_topology_rejects_endpoint_without_identity_field(tmp_path, field):
     del endpoint[field]
     with pytest.raises(ExecutionError, match="endpoints differ from assigned identity"):
         topology.register("client-0", "client", control, endpoint)
-    assert topology.active() == []
+    assert topology.list_active_endpoints() == []
 
 
 def test_client_start_fails_without_endpoints(tmp_path):
@@ -117,7 +117,7 @@ def test_client_start_fails_without_endpoints(tmp_path):
                 ExecutionError, match=r"client-0: missing endpoints[.]json"
             ):
                 await runtime.start()
-            assert runtime.topology.active("client") == []
+            assert runtime.topology.list_active_endpoints("client") == []
         finally:
             errors = await runtime.close()
         assert errors == []
@@ -310,7 +310,7 @@ def test_health_failure_at_teardown_still_fails_without_a_process_exit(tmp_path)
             {"components": {}},
             SimpleNamespace(directory=tmp_path, emit=lambda **event: None),
         )
-        runtime.supervisor.fail("Engine membership differs")
+        runtime.supervisor.report_process_failure("Engine membership differs")
         assert await runtime.close() == ["Engine membership differs"]
 
     asyncio.run(exercise())

@@ -31,7 +31,7 @@ def epoch(value):
     return parsed.timestamp()
 
 
-async def instant(ctx, expression, at):
+async def query_instant(ctx, expression, at):
     monitor = ctx.runtime.monitoring
     if monitor is None:
         raise ExecutionError("This Case needs a runner-managed Prometheus")
@@ -54,8 +54,10 @@ def query_window(ctx, args):
     return end + float(stop), int(millis)
 
 
-def scope(ctx, args, role):
-    available = {item["rpc"] for item in ctx.runtime.topology.active(role)}
+def select_metric_targets(ctx, args, role):
+    available = {
+        item["rpc"] for item in ctx.runtime.topology.list_active_endpoints(role)
+    }
     targets = sorted(available) if args.targets is None else args.targets
     if not targets or set(targets) - available:
         raise ExecutionError(f"No known {role} metric targets or unknown address")
@@ -97,7 +99,7 @@ def _check_history(name, targets, series):
 
 async def query_counter(ctx, args, role, numerator, denominator=None, *, kind=None):
     millis = counter_window_ms(ctx, args)
-    labels, targets = scope(ctx, args, role)
+    labels, targets = select_metric_targets(ctx, args, role)
     numerator_labels = labels + (f",kind={json.dumps(kind)}" if kind else "")
     histories = [(numerator, numerator_labels, targets)]
 
@@ -110,7 +112,7 @@ async def query_counter(ctx, args, role, numerator, denominator=None, *, kind=No
         expression += " / " + aggregate(denominator, labels)
     else:
         expression += " / " + str(Decimal(millis) / 1000)
-    return await evaluate(ctx, args, expression, histories)
+    return await query_metric_window(ctx, args, expression, histories)
 
 
 def sample_period(ctx):
@@ -154,7 +156,7 @@ async def series_query(ctx, expression, start, end, step):
     return values
 
 
-async def evaluate(ctx, args, expression, histories):
+async def query_metric_window(ctx, args, expression, histories):
     at, millis = query_window(ctx, args)
     start = at - millis / 1000
     if args.mode == "series":
@@ -168,11 +170,11 @@ async def evaluate(ctx, args, expression, histories):
 
     if args.mode == "interval":
         for name, labels, targets in histories:
-            counts = await instant(
+            counts = await query_instant(
                 ctx, f"count_over_time({history_range(ctx, name, labels, millis)})", at
             )
             _check_history(name, targets, [[sample] for sample in counts])
-        values = await instant(ctx, expression, at)
+        values = await query_instant(ctx, expression, at)
         if len(values) != 1 or not math.isfinite(values[0].value):
             raise ExecutionError("Metric query must return one finite sample")
         return values[0].value
@@ -197,21 +199,21 @@ async def evaluate(ctx, args, expression, histories):
     return [p.value for p in points]
 
 
-async def gauge(ctx, args, role, name):
+async def query_gauge(ctx, args, role, name):
     _, millis = query_window(ctx, args)
-    labels, targets = scope(ctx, args, role)
+    labels, targets = select_metric_targets(ctx, args, role)
     worker = f"sum by(instance)({name}{{{labels}}})"
     expression = (
         f"sum(avg_over_time({history_range(ctx, worker, None, millis)}))"
         if args.mode == "interval"
         else f"sum({worker})"
     )
-    return await evaluate(ctx, args, expression, [(worker, None, targets)])
+    return await query_metric_window(ctx, args, expression, [(worker, None, targets)])
 
 
-async def latency(ctx, args, name):
+async def query_latency(ctx, args, name):
     millis = counter_window_ms(ctx, args)
-    labels, targets = scope(ctx, args, "client")
+    labels, targets = select_metric_targets(ctx, args, "client")
     if args.statistic == "mean":
         histories = [(name + suffix, labels, targets) for suffix in ("_sum", "_count")]
         expression = f"sum(increase({name}_sum{{{labels}}}[{millis}ms])) / sum(increase({name}_count{{{labels}}}[{millis}ms]))"
@@ -219,4 +221,4 @@ async def latency(ctx, args, name):
         histories = [(name + "_bucket", labels, targets)]
         quantile = {"p95": 0.95, "p99": 0.99}[args.statistic]
         expression = f"histogram_quantile({quantile}, sum by(le)(increase({name}_bucket{{{labels}}}[{millis}ms])))"
-    return await evaluate(ctx, args, expression, histories)
+    return await query_metric_window(ctx, args, expression, histories)

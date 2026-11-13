@@ -129,13 +129,13 @@ class IndexedTrafficReaderTest {
             json.writeValue(directory.resolve("topology.json").toFile(),
                 List.of(Map.of("role", "client", "control", client.url())));
             var error = assertThrows(IOException.class, () ->
-                client.start(new Start(null, path.toString(), 1.0, null, 1, 4, 1000, 1000)));
+                client.startReplay(new Start(null, path.toString(), 1.0, null, 1, 4, 1000, 1000)));
             assertTrue(error.getMessage().contains("fallback_max_output_tokens"));
             var plan = json.readTree(directory.resolve("worker/coordinator/1/plan.json").toFile());
             assertEquals(path.toString(), plan.path("config").path("requests_file").asText());
             assertFalse(plan.has("count"));
             assertFalse(plan.has("sha256"));
-            assertFalse(client.stop(new Empty()).errors().isEmpty());
+            assertFalse(client.stopReplay(new Empty()).errors().isEmpty());
             assertFalse(Files.exists(directory.resolve("worker/playback")));
         }
     }
@@ -151,9 +151,9 @@ class IndexedTrafficReaderTest {
              var one = new ClientNode("client-1", topology, oneDirectory)) {
             json.writeValue(topology.toFile(), List.of(backend.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
-            zero.start(new Start(List.of(PlaybackTest.master(backend)), source.toString(), null, 2.0, 4, 8, 3000, 1000, false, null, new Warmup(20, 0.25)));
+            zero.startReplay(new Start(List.of(PlaybackTest.master(backend)), source.toString(), null, 2.0, 4, 8, 3000, 1000, false, null, new Warmup(20, 0.25)));
             PlaybackTest.eventually(() -> zero.state(new Sequence(1)).done() && one.state(new Sequence(1)).done());
-            var summary = zero.stop(new Empty());
+            var summary = zero.stopReplay(new Empty());
             assertTrue(summary.errors().isEmpty(), summary.toString());
             assertEquals(3, zero.state(new Sequence(1)).issued());
             assertEquals(2, one.state(new Sequence(1)).issued());

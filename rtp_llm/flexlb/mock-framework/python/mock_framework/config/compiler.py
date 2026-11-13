@@ -76,7 +76,7 @@ _GLOBALS = {
 }
 
 
-def _reference(value, expected, where, *, previous):
+def _compile_reference(value, expected, where, *, previous):
     fields(value, {"ref"}, {"ref"}, where=where)
     parts = text(value["ref"], where + ".ref").split(".")
     if any(not _ID.fullmatch(part) for part in parts):
@@ -106,7 +106,7 @@ def _reference(value, expected, where, *, previous):
 
 def _argument(value, spec, previous, where):
     return validate(
-        value, spec, where, reference=partial(_reference, previous=previous)
+        value, spec, where, reference=partial(_compile_reference, previous=previous)
     )
 
 
@@ -120,7 +120,7 @@ def _has_reference(value):
     return False
 
 
-def _expectation(raw, definition, previous):
+def _compile_expectation(raw, definition, previous):
     fields(raw, {"eq", "count", "gte", "lte"}, where="expect")
     if set(raw) not in ({"eq"}, {"count"}, {"gte"}, {"lte"}, {"gte", "lte"}):
         raise ConfigError("expect needs eq, count, or gte/lte")
@@ -151,7 +151,7 @@ def _expectation(raw, definition, previous):
     return Expect(result)
 
 
-def _identity(value, ids):
+def _register_id(value, ids):
     text(value, "id")
     if not _ID.fullmatch(value) or value in ids:
         raise ConfigError(f"Invalid or duplicate id: {value}")
@@ -159,7 +159,7 @@ def _identity(value, ids):
     return value
 
 
-def _view_path(value, directory, shared_root):
+def _resolve_dashboard_path(value, directory, shared_root):
     value = text(value, "view")
     if "://" in value:
         raise ConfigError("Only local/shared paths are supported")
@@ -188,19 +188,21 @@ def _compile_step(raw, registry, ids, previous):
         {"id", "describe", "interface"},
         where="step",
     )
-    step_id = _identity(raw["id"], ids)
+    step_id = _register_id(raw["id"], ids)
     description = text(raw["describe"], "step.describe")
     definition = registry.get(raw["interface"])
     args = _argument(raw.get("args", {}), definition.args, previous, step_id + ".args")
     if not _has_reference(args):
-        definition.arguments(args)
+        definition.build_arguments(args)
     within = raw.get("within")
     if within is not None:
         duration(within, positive=True)
     wait_after = raw.get("wait_after", "0s")
     duration(wait_after)
     expect = (
-        _expectation(raw["expect"], definition, previous) if "expect" in raw else None
+        _compile_expectation(raw["expect"], definition, previous)
+        if "expect" in raw
+        else None
     )
     background = raw.get("background", False)
     if type(background) is not bool:
@@ -233,7 +235,7 @@ def _compile_phase(raw, registry, ids, previous):
         {"id", "describe", "timeout", "steps"},
         where="phase",
     )
-    phase_id = _identity(raw["id"], ids)
+    phase_id = _register_id(raw["id"], ids)
     description = text(raw["describe"], "phase.describe")
     duration(raw["timeout"], positive=True)
     if not isinstance(raw["steps"], list) or not raw["steps"]:
@@ -258,7 +260,7 @@ def compile_case(
     registry = registry or StepRegistry.standard()
     ids = {"globals", "steps"}
     previous = {}
-    case_id = _identity(raw["id"], ids)
+    case_id = _register_id(raw["id"], ids)
     description = text(raw["describe"], "describe")
     name = text(raw["name"], "name") if "name" in raw else None
     environment = compile_environment(raw["environment"], directory=path.parent)
@@ -271,7 +273,7 @@ def compile_case(
     data_root = framework if shared_root is None else Path(shared_root).resolve()
     view = framework / "views/default.json"
     if "view" in raw:
-        view = _view_path(raw["view"], path.parent, shared_root)
+        view = _resolve_dashboard_path(raw["view"], path.parent, shared_root)
     return CompiledCase(
         id=case_id,
         describe=description,

@@ -65,16 +65,18 @@ class ProcessSupervisor:
             if not roles or identity.role in roles
         )
 
-    def fail(self, message):
+    def report_process_failure(self, message):
         if not self.closing and not self.failure.done():
             self.failure.set_result(message)
 
     async def _monitor(self, process_name, child):
         code = await child.wait()
         if process_name not in self._expected:
-            self.fail(f"Component {process_name} exited unexpectedly with code {code}")
+            self.report_process_failure(
+                f"Component {process_name} exited unexpectedly with code {code}"
+            )
 
-    async def guard(self, operation, timeout):
+    async def run_until_process_failure(self, operation, timeout):
         task = asyncio.create_task(operation)
         try:
             async with asyncio.timeout(timeout):
@@ -288,7 +290,7 @@ async def start_instance(
             raise ExecutionError(f"Invalid readiness file for {instance_id}")
         return value["url"]
 
-    control = await supervisor.guard(
+    control = await supervisor.run_until_process_failure(
         await_ready(), float(duration(launch_config["startup_timeout"]))
     )
     records.emit(

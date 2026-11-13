@@ -45,7 +45,7 @@ class ZooKeeperRole:
                 raise ExecutionError("Invalid ZooKeeper readiness address")
             return value["connect"]
 
-        connect = await self.supervisor.guard(
+        connect = await self.supervisor.run_until_process_failure(
             await_ready(), float(duration(launch_config["startup_timeout"]))
         )
         self.records.emit(

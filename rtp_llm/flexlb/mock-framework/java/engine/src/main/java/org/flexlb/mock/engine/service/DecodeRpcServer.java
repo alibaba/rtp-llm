@@ -236,7 +236,7 @@ final class DecodeRpcServer implements AutoCloseable {
             this.response = response;
             rpcCompleted=trackRequest.get();
             rpcDeadline = context.getDeadline() == null ? Long.MAX_VALUE
-                : RpcMessages.after(started, context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
+                : RpcMessages.addNanosClamped(started, context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
             delivery = new GenerateResponseStream(transport, deadlines, TimeUnit.MINUTES.toMillis(10), ignored -> {});
             delivery.attach(response, () -> {
                 boolean expired = context.getDeadline() != null && context.getDeadline().isExpired();

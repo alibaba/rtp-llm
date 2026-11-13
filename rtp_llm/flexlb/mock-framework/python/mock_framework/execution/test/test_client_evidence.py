@@ -211,16 +211,18 @@ def test_query_defaults_to_all_clients_and_limits_details_not_counts(
     ]
     ctx = SimpleNamespace(
         records=SimpleNamespace(directory=tmp_path),
-        runtime=SimpleNamespace(topology=SimpleNamespace(active=lambda: topology)),
+        runtime=SimpleNamespace(
+            topology=SimpleNamespace(list_active_endpoints=lambda: topology)
+        ),
     )
     query = StepRegistry.standard().get("client/query/requests")
-    result = asyncio.run(query.invoke(ctx, {"limit": 1}))
+    result = asyncio.run(query.run_with_raw_args(ctx, {"limit": 1}))
     assert (
         result["matched"] == 2 and result["truncated"] and len(result["records"]) == 1
     )
     assert result["outcomes"]["timeout"] == 1
     result = asyncio.run(
-        query.invoke(
+        query.run_with_raw_args(
             ctx,
             {
                 "targets": ["c:1"],
@@ -234,13 +236,15 @@ def test_query_defaults_to_all_clients_and_limits_details_not_counts(
         result["matched"] == 1
         and result["records"][0]["request_id"] == 9007199254740994
     )
-    assert asyncio.run(query.invoke(ctx, {"request_ids": [1]}))["matched"] == 0
+    assert (
+        asyncio.run(query.run_with_raw_args(ctx, {"request_ids": [1]}))["matched"] == 0
+    )
     with pytest.raises(ExecutionError):
-        asyncio.run(query.invoke(ctx, {"targets": ["missing"]}))
+        asyncio.run(query.run_with_raw_args(ctx, {"targets": ["missing"]}))
     path = tmp_path / "components/client-1/playback/1/requests.jsonl"
     path.write_bytes(path.read_bytes()[:-2])
     with pytest.raises(ExecutionError):
-        asyncio.run(query.invoke(ctx, {"limit": 0, "request_ids": [1]}))
+        asyncio.run(query.run_with_raw_args(ctx, {"limit": 0, "request_ids": [1]}))
 
 
 def test_stop_uses_rpc_summary_while_request_query_requires_files(
@@ -257,13 +261,15 @@ def test_stop_uses_rpc_summary_while_request_query_requires_files(
 
     monkeypatch.setattr(client_runtime, "invoke", invoke)
     result = asyncio.run(
-        StepRegistry.standard().get("client/stop/playback").invoke(ctx, {})
+        StepRegistry.standard().get("client/stop/playback").run_with_raw_args(ctx, {})
     )
     assert set(result) == {"c:1", "c:2"} and not ctx.runtime.clients.pending
     assert list(tmp_path.iterdir()) == []
     with pytest.raises(ExecutionError, match="No Client playback"):
         asyncio.run(
-            StepRegistry.standard().get("client/query/requests").invoke(ctx, {})
+            StepRegistry.standard()
+            .get("client/query/requests")
+            .run_with_raw_args(ctx, {})
         )
 
 
