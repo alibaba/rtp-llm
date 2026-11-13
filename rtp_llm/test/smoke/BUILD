@@ -114,6 +114,7 @@ ppu_suites()
 test_suite(
     name = "maga_model_smoke_light",
     tests = [
+        ":scr_checkpoint_steady_state_test",
         ":smoke_h20_dense",
         ":smoke_h20_eagle",
         ":smoke_sm8x_basic",
@@ -198,6 +199,61 @@ smoke_test(
         "SMOKE_ASSERT_VIT_CACHE_AFFINITY": "1",
         "SMOKE_AFFINITY_RECHECK_DELAY_SECONDS": "125",
     },
+)
+
+py_library(
+    name = "scr_checkpoint_probe",
+    srcs = ["scr_checkpoint_probe.py"],
+    deps = ["//rtp_llm:psutil"],
+)
+
+py_library(
+    name = "scr_checkpoint_worker",
+    srcs = ["scr_checkpoint_worker.py"],
+    deps = [":scr_checkpoint_probe"],
+)
+
+py_test(
+    name = "scr_checkpoint_probe_test",
+    srcs = ["scr_checkpoint_probe_test.py"],
+    env = {"GPU_COUNT": "0", "PYTHONNOUSERSITE": "1"},
+    deps = [":scr_checkpoint_probe"],
+)
+
+cc_binary(
+    name = "libscr_pinned_probe.so",
+    srcs = ["scr_pinned_probe.cc"],
+    linkshared = True,
+    linkopts = ["-ldl", "-pthread"],
+    deps = ["@local_config_cuda//cuda:cupti_headers"],
+)
+
+py_test(
+    name = "scr_pinned_probe_test",
+    srcs = ["scr_pinned_probe_test.py"],
+    data = [
+        ":libscr_pinned_probe.so",
+        "@local_config_cuda//cuda:cupti_dsos",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    env = {"GPU_COUNT": "1", "PYTHONNOUSERSITE": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    tags = ["H20_CU13", "manual"],
+    deps = [":scr_checkpoint_probe"],
+)
+
+custom_smoke_test(
+    name = "scr_checkpoint_steady_state_test",
+    main = "scr_checkpoint_steady_state_test.py",
+    smoke_args = "--tp_size 4 --dp_size 1 --world_size 4 --act_type FP16 --warm_up 0 --max_seq_len 1024 --kv_cache_mem_mb 64",
+    gpu_type = ["H20_CU13"],
+    tags = ["scr_checkpoint"],
+    data = [
+        "//rtp_llm:sdk",
+        ":libscr_pinned_probe.so",
+        "@local_config_cuda//cuda:cupti_dsos",
+    ],
+    deps = [":scr_checkpoint_worker"],
 )
 
 custom_smoke_test(
