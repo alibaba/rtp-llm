@@ -350,7 +350,8 @@ py_library(
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,
-        "@//:using_ppu": flashinfer + ["flash-mla", "fast-hadamard-transform"],
+        # internal_deps() already supplies PPU FlashInfer and FlashMLA.
+        "@//:using_ppu": ["apache-tvm-ffi", "fast-hadamard-transform"],
         "//conditions:default": []
     }) + select({
         "@//:using_cuda13_x86": rtp_kernel,
