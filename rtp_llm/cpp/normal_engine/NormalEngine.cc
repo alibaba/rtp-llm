@@ -872,6 +872,7 @@ void NormalEngine::loop() {
                 THROW_IF_STATUS_ERROR(trySaveStepError());
             }
         } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("normal engine step exception: %s", e.what());
             // A peer may close its TP broadcast socket after stop() clears
             // running_ but before this rank returns from its current step.
             // Treat that exception as part of shutdown; an exception during

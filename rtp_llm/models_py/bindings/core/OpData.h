@@ -47,6 +47,11 @@ struct GptModelInputs {
     // scheduling redesign no longer populates it (stays undefined).
     torch::Tensor lm_output_lengths;        // [total_batch_size]
     torch::Tensor prefix_lengths;           // [context_batch_size]
+    // Optional CPU metadata captured before MTP target verification. ROCm
+    // attention preparation needs host lengths, while the model still consumes
+    // the device tensors above. These mirrors are valid only for this input.
+    torch::Tensor mtp_prefix_lengths_host;
+    torch::Tensor mtp_input_lengths_host;
     // First token of this request's FULL cache-store write; zero on its first chunk.
     torch::Tensor cache_store_publish_start_tokens;  // [context_batch_size], optional
     torch::Tensor sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention

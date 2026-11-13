@@ -3063,6 +3063,17 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                               (model_input.sequence_lengths.defined() ?
                                    toCudaInt32WithHostHold(model_input.sequence_lengths, buffer_holder_) :
                                    torch::Tensor());
+#if !USING_CUDA
+    // The post-rejection draft prefill reuses this exact prefix. Materialize
+    // its host metadata now, before the draft/target GPU forwards, so ROCm's
+    // Python attention adapter does not synchronize the full target tail when
+    // it prepares the draft prefill input.
+    const bool    use_host_metadata_mirror = useStreamAsync() || useAsyncDeviceState();
+    torch::Tensor spec_prefix_lengths_host;
+    if (use_host_metadata_mirror && spec_prefix_lengths.defined()) {
+        spec_prefix_lengths_host = spec_prefix_lengths.cpu().contiguous();
+    }
+#endif
     // prefix_lengths belongs to the eventual target verify input. Draft decode
     // attention metadata must be driven only by sequence_lengths.
     model_input.prefix_lengths = torch::empty({0}, cuda_i32);
@@ -3220,6 +3231,15 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
         model_input.input_lengths  = std::move(input_lengths);
         model_input.prefix_lengths = spec_prefix_lengths;
+#if !USING_CUDA
+        if (use_host_metadata_mirror) {
+            model_input.mtp_prefix_lengths_host = std::move(spec_prefix_lengths_host);
+            model_input.mtp_input_lengths_host =
+                torch::full({static_cast<int64_t>(batch_size)},
+                            static_cast<int64_t>(tokens_per_batch),
+                            torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
+        }
+#endif
         model_input.combo_tokens   = draft_token_ids_t.reshape({(int64_t)(batch_size * (propose_step_ + 1))});
         // Non-driver ranks have no stream-local device state, but their TP
         // prefix tensor still supplies the target position receiver's shape
