@@ -2186,17 +2186,27 @@ class AttentionV41FP8(AttentionFP8):
                             # logits via return_bf16). Key-axis slicing kept:
                             # ~64 MiB bf16 product temporaries per 65536-key
                             # slice, logits buffer ~1 GiB at chunk_rows=8.
-                            q_chunk16 = q_chunk.to(torch.bfloat16)
+                            t_rows, n_heads, sel_dim = q_chunk.shape
+                            q_chunk16 = q_chunk.to(torch.bfloat16).reshape(
+                                t_rows * n_heads, sel_dim
+                            )
                             logits = torch.empty(
-                                (q_chunk.shape[0], q_chunk.shape[1], key_count),
+                                (t_rows, n_heads, key_count),
                                 dtype=torch.float32,
                                 device=q_chunk.device,
                             )
                             for k0 in range(0, key_count, 65536):
                                 k1 = min(k0 + 65536, key_count)
-                                logits[:, :, k0:k1] = torch.matmul(
+                                # Flattened 2-D bf16 mm (M = t*h): rocBLAS's
+                                # best-tested MFMA path. The 3-D broadcast
+                                # bf16 matmul (batch=n_heads, M=t_rows)
+                                # hard-crashed every rank ~3 min into the
+                                # n35 1M prefill (silent rank death, no OOM
+                                # dump, no python traceback) at the first
+                                # key_count>65536 selection layers.
+                                logits[:, :, k0:k1] = torch.mm(
                                     q_chunk16, keys[k0:k1].t()
-                                )
+                                ).view(t_rows, n_heads, k1 - k0)
                             logits.relu_()
                         else:
                             logits = torch.einsum(
