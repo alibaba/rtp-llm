@@ -57,6 +57,7 @@ from rtp_llm.dash_sc.inference.servicer import (
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.frontend.frontend_request_metrics import FrontendRequestMetrics
 from rtp_llm.metrics import AccMetrics, GaugeMetrics
+from rtp_llm.multimodal.mm_error_messages import MMErr
 from rtp_llm.ops import RoleType
 from rtp_llm.server.master_client import MasterClient
 from rtp_llm.utils.base_model_datatypes import (
@@ -157,6 +158,22 @@ class _MultiStreamVisitor:
 
 
 class DashErrorSpecForFtExceptionTest(unittest.TestCase):
+    def test_dns_input_error_uses_explicit_400_status_instead_of_engine_abort(self):
+        # The prefill RPC reconstructs the typed ViT error from numeric details.
+        error = FtRuntimeException(ExceptionType(902), MMErr.DNS_FAILED)
+        spec = _dash_error_spec_for_ft_exception(error)
+        self.assertEqual(spec.status_code, 400)
+        self.assertEqual(spec.status_name, "InvalidParameter")
+        self.assertEqual(spec.finish_reason, LLMFinishReason.USE_PARAMETER_STATUS)
+
+    def test_upstream_download_failure_uses_explicit_503_instead_of_engine_abort(self):
+        error = FtRuntimeException(ExceptionType.MM_DOWNLOAD_FAILED, MMErr.DNS_FAILED)
+        spec = _dash_error_spec_for_ft_exception(error)
+        self.assertEqual(spec.status_code, 503)
+        self.assertEqual(spec.status_name, "ServiceUnavailable")
+        self.assertEqual(spec.finish_reason, LLMFinishReason.USE_PARAMETER_STATUS)
+        self.assertEqual(spec.error_no, DASH_ERROR_INTERNAL.error_no)
+
     def test_non_default_exception_groups(self) -> None:
         cases = (
             (ExceptionType.INVALID_PARAMS, DASH_ERROR_BAD_REQUEST),
@@ -661,6 +678,36 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status_code"], 500)
         self.assertIn("backend down", payload["status_message"])
         self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.INNER_ENGINE_ERROR)
+
+    async def test_media_download_errors_preserve_explicit_public_status(self) -> None:
+        for exception_type, status, name in (
+            (ExceptionType.MM_WRONG_FORMAT_ERROR, 400, "InvalidParameter"),
+            (ExceptionType.MM_DOWNLOAD_FAILED, 503, "ServiceUnavailable"),
+        ):
+            with self.subTest(exception_type=exception_type):
+
+                class _DownloadFailureVisitor:
+                    async def enqueue(self, _gi):
+                        raise FtRuntimeException(exception_type, MMErr.DNS_FAILED)
+
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        self._minimal_request(),
+                        [1, 2],
+                        SamplingParams(),
+                        OtherParams(),
+                        _DownloadFailureVisitor(),
+                        rtp_llm_request_id=1,
+                    )
+                )
+                self.assertEqual(len(chunks), 1)
+                self.assertFalse(chunks[0].error_message)
+                _, payload = _dash_error_payload(chunks[0])
+                self.assertEqual(payload["status_code"], status)
+                self.assertEqual(payload["status_name"], name)
+                self.assertEqual(
+                    _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+                )
 
     async def test_ft_exception_sets_access_backend_error_code(self) -> None:
         req = self._minimal_request()

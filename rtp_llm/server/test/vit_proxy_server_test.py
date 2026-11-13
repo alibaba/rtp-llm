@@ -13,6 +13,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalOutputPB,
     ReleaseEmbeddingPB,
 )
+from rtp_llm.multimodal.mm_error_messages import MediaDownloadError, MMErr
 from rtp_llm.multimodal.mm_process_engine import vit_source_request_id
 from rtp_llm.server.request_headers import VIT_SOURCE_REQUEST_ID_METADATA
 from rtp_llm.server.vit_proxy_server import (
@@ -25,6 +26,33 @@ from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
 
 
 class VitWorkerRequestIdTest(TestCase):
+    @patch("rtp_llm.server.vit_rpc_server.trans_mm_input", return_value=[])
+    def test_dns_input_error_keeps_invalid_argument_status_and_details(self, _convert):
+        engine = MagicMock()
+        engine.get_embedding_result.side_effect = MediaDownloadError(
+            ExceptionType.MM_WRONG_FORMAT_ERROR,
+            MMErr.DNS_FAILED,
+            "dns_error",
+            None,
+            "kb-prod.dsbj.com",
+            1.0,
+            0,
+        )
+        servicer = MultimodalRpcServer.__new__(MultimodalRpcServer)
+        servicer.engine = engine
+        servicer._rdma = None
+        context = MagicMock()
+        context.time_remaining.return_value = None
+        context.abort.side_effect = RuntimeError("RPC aborted")
+        with self.assertRaisesRegex(RuntimeError, "RPC aborted"):
+            servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), context)
+        context.abort.assert_called_once_with(
+            grpc.StatusCode.INVALID_ARGUMENT,
+            f"[MM_WRONG_FORMAT_ERROR] {MMErr.DNS_FAILED}",
+        )
+        _, value = context.set_trailing_metadata.call_args.args[0][0]
+        self.assertEqual(ErrorDetailsPB.FromString(value).error_code, 902)
+
     @patch("rtp_llm.server.vit_rpc_server.trans_mm_input", return_value=[])
     def test_invalid_image_has_invalid_argument_status_and_typed_details(
         self, _convert

@@ -7,6 +7,12 @@ filegroup(
 )
 
 py_test(
+    name = "dns_error_test",
+    srcs = ["dns_error_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "multimodal_image_load_test",
     srcs = [
         "multimodal_image_load_test.py",

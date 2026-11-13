@@ -40,6 +40,7 @@ from rtp_llm.dash_sc.codec import (
     DASH_ERROR_CAPACITY,
     DASH_ERROR_INTERNAL,
     DASH_ERROR_INVALID_OUTPUT,
+    DASH_ERROR_MEDIA_DOWNLOAD,
     DASH_ERROR_RESOURCE_EXHAUSTED,
     DASH_ERROR_TIMEOUT,
     DASH_ERROR_TOO_LONG,
@@ -66,12 +67,12 @@ from rtp_llm.dash_sc.grpc_metrics import (
     report_chunk,
     report_frontend_rpc_done,
 )
-from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.inference.grammar_validator import (
     GrammarCheckUnavailable,
     GrammarCompilationError,
     GrammarValidator,
 )
+from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
 from rtp_llm.frontend.frontend_request_metrics import FrontendRequestMetrics
 from rtp_llm.frontend.request_id_generator import generate_request_id
@@ -371,6 +372,11 @@ def _dash_error_mapping_for_ft_exception(
     """
 
     exception_type = exc.exception_type
+    if exception_type == ExceptionType.MM_DOWNLOAD_FAILED:
+        # A failed upstream media fetch is service unavailability, not an
+        # engine abort. This also covers temporary/proxy DNS failures while
+        # permanent media-host lookup failures use MM_WRONG_FORMAT_ERROR/400.
+        return _DashFtErrorMapping(DASH_ERROR_MEDIA_DOWNLOAD)
     raw_reason = getattr(
         exc,
         "admission_reject_reason",
