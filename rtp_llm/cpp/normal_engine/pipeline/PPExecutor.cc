@@ -10,6 +10,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include <ATen/record_function.h>
 #include <c10/core/InferenceMode.h>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -40,6 +41,16 @@ namespace rtp_llm {
 PPExecutor::ModelFactory PPExecutor::test_model_factory = nullptr;
 
 namespace {
+
+mtp::DraftInputLayout readPPDraftInputLayout() {
+    const char* layout = std::getenv("RTP_LLM_PP_DRAFT_INPUT_LAYOUT");
+    if (layout == nullptr || std::strcmp(layout, "compact") == 0) {
+        return mtp::DraftInputLayout::COMPACT;
+    }
+    RTP_LLM_CHECK_WITH_INFO(
+        std::strcmp(layout, "fixed") == 0, "RTP_LLM_PP_DRAFT_INPUT_LAYOUT must be compact or fixed, got %s", layout);
+    return mtp::DraftInputLayout::FIXED_WIDTH;
+}
 
 /** Sampling can return before its input-copy stream finishes reading the pinned host buffers. */
 void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inputs) {
@@ -171,25 +182,10 @@ PPExecutionPlan PPExecutor::receivePlan(torch::Tensor& plan_payload) {
         RTP_LLM_LOG_INFO("received pipeline shutdown sentinel from previous stage");
     }
 
-    /** Copy MM inputs to CUDA for local execution; forward the original CPU payload. */
-    auto& model_input = plan.model_input;
-    if (model_input.multimodal_features) {
-        for (auto& tensor : *model_input.multimodal_features) {
-            buffer_holder_.hold_host(tensor);
-            tensor = tensor.to(torch::kCUDA, true);
-        }
-    }
-    if (model_input.mm_extra_input) {
-        for (auto& tensor : *model_input.mm_extra_input) {
-            buffer_holder_.hold_host(tensor);
-            tensor = tensor.to(torch::kCUDA, true);
-        }
-    }
     return plan;
 }
 
 void PPExecutor::asyncSendExecutionResult(const PPExecutionResult& result, PPTickets& tickets) {
-    RTP_LLM_PROFILE_SCOPE("executor.pp.send_result");
     asyncSendObject(pp_serialization::serializeExecutionResult(result), tickets, kPPResultGroupName);
 }
 
@@ -323,12 +319,12 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     is_dspark_(params.sp_config.type == SP_TYPE_DSPARK),
     propose_step_(params.sp_config.gen_num_per_cycle),
     position_id_len_factor_(params.model_config_.attn_config.rope_config.index_factor),
+    track_dspark_cache_store_(is_dspark_ && role_type_ == RoleType::PREFILL && !warm_up_),
+    draft_input_layout_(readPPDraftInputLayout()),
     parallelism_config_(params.parallelism_config),
     pp_layout_(RankLayout::fromParallelismConfig(parallelism_config_)),
     slots_(parallelism_config_.pp_size + 1),
     recv_stream_(cuda_graph::graphGetStreamFromPool(false)),
-    track_dspark_cache_store_(is_dspark_ && role_type_ == RoleType::PREFILL && isLastStage() && !warm_up_),
-    dspark_cache_store_sync_stream_(cuda_graph::graphGetStreamFromPool(true)),
     profile_step_start_(std::move(profile_step_start)),
     profile_step_finish_(std::move(profile_step_finish)),
     metrics_reporter_(params.metrics_reporter),
@@ -338,10 +334,6 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
         isFirstStage() && isStageRoot() && !warm_up_ ? metrics_reporter_ : nullptr)) {
     validateConfig(params);
 
-    if (track_dspark_cache_store_ && parallelism_config_.tp_size > 1) {
-        dspark_cache_store_status_ =
-            torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    }
     if (!warm_up_) {
         transport_ = std::make_unique<TorchDistributedPPTransport>(pp_layout_.prevRank(), pp_layout_.nextRank());
     }
@@ -538,18 +530,22 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
                                  params.sp_config.tree_decode_config,
                                  isFirstStage() && isStageRoot() && !warm_up_ ? metrics_reporter_ : nullptr);
     if (!warm_up_ && isFirstStage() && isStageRoot()) {
-        result_thread_ = std::thread(&PPExecutor::resultLoop, this);
+        result_recv_thread_ = std::thread(&PPExecutor::resultRecvLoop, this);
+    }
+    if (!warm_up_ && isLastStage() && isStageRoot()) {
+        result_send_thread_ = std::thread(&PPExecutor::resultSendLoop, this);
     }
     cudaProfilerBegin();
 }
 
 PPExecutor::~PPExecutor() {
     if (isFirstStage() && isStageRoot()) {
-        requestResultStop();
-        if (result_thread_.joinable()) {
-            result_thread_.join();
+        requestResultRecvStop();
+        if (result_recv_thread_.joinable()) {
+            result_recv_thread_.join();
         }
     }
+    stopResultSender();
     /** Finish local model-buffer consumers before destroying the models. */
     last_compute_done_.synchronize();
     cudaProfilerEnd();
@@ -557,7 +553,35 @@ PPExecutor::~PPExecutor() {
 
 void PPExecutor::waitLastRun() {
     RTP_LLM_PROFILE_SCOPE("executor.pp.wait_last_batch");
-    last_compute_done_.synchronize();
+    if (result_send_thread_.joinable()) {
+        /** Wait for CPU result processing as well as GPU completion before reusing batch state and buffers. */
+        std::unique_lock<std::mutex> lock(result_send_mutex_);
+        result_send_cv_.wait(lock, [this] { return !result_send_task_; });
+    } else {
+        last_compute_done_.synchronize();
+    }
+}
+
+void PPExecutor::drainCacheStorePublication() {
+    if (!track_dspark_cache_store_) {
+        return;
+    }
+    RTP_LLM_PROFILE_SCOPE("executor.pp.cache_publication");
+    const auto drain = [this](ModelBase* model, const char* role) {
+        if (model == nullptr) {
+            return;
+        }
+        const auto error = model->waitCacheStorePublication();
+        if (!error.empty()) {
+            RTP_LLM_LOG_ERROR("PP DSpARK %s cache-store publication failed: pp_rank=%ld tp_rank=%ld error=%s",
+                              role,
+                              parallelism_config_.pp_rank,
+                              parallelism_config_.tp_rank,
+                              error.c_str());
+        }
+    };
+    drain(model_.get(), "target");
+    drain(draft_commit_model_.get(), "draft");
 }
 
 void PPExecutor::releaseAllModelBuffers() {
@@ -571,6 +595,19 @@ void PPExecutor::releaseAllModelBuffers() {
     }
     if (draft_commit_model_) {
         draft_commit_model_->releaseBuffers();
+    }
+}
+
+void PPExecutor::ensureModelInputOnGpu(GptModelInputs& model_input) {
+    /** Keep CPU multimodal tensors alive until their asynchronous H2D copies finish. */
+    for (auto* tensors : {&model_input.multimodal_features, &model_input.mm_extra_input}) {
+        if (!tensors->has_value()) {
+            continue;
+        }
+        for (auto& tensor : tensors->value()) {
+            buffer_holder_.hold_host(tensor);
+            tensor = tensor.to(torch::kCUDA, /*non_blocking=*/true);
+        }
     }
 }
 
@@ -703,7 +740,6 @@ absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&       
 }
 
 void PPExecutor::advanceSamplingStates(const PPSamplingPlan& sampling_plan, PPExecutionResult& result) {
-    RTP_LLM_PROFILE_SCOPE("executor.pp.update_sampling_states");
     const auto stream_count = sampling_plan.request_ids.size(0);
 
     const auto* request_ids      = sampling_plan.request_ids.data_ptr<RequestId>();
@@ -881,41 +917,20 @@ PPSamplingOutput PPExecutor::sampleTokens(const PPExecutionPlan&  plan,
         auto       inputs        = batch_stream_processor_->gatherSamplerInputs(
             plan.sampling_plan, plan.output_config, model_output.logits, sampling_states_);
         holdSamplerInputHostBuffers(buffer_holder_, inputs);
+        if (inputs.cum_log_probs.defined()) {
+            /** Accumulate scores on CUDA to defer their D2H copy until result submission. */
+            inputs.cum_log_probs = inputs.cum_log_probs.to(model_output.logits.device(), /*non_blocking=*/true);
+        }
         output.sampler_output  = sampler_->forward(inputs);
         output.sample_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     return output;
 }
 
-void PPExecutor::finishDSparkPrefillCachePublication(const GptModelInputs&    model_input,
-                                                     std::vector<ErrorInfo>& request_errors) {
-    if (!track_dspark_cache_store_ || model_input.skip_lm_head) {
-        return;
-    }
-
-    RTP_LLM_PROFILE_SCOPE("executor.pp.cache_publication");
-    const auto error = mtp::finishDSparkCachePublication(model_.get(),
-                                                         draft_commit_model_.get(),
-                                                         parallelism_config_,
-                                                         dspark_cache_store_sync_stream_,
-                                                         dspark_cache_store_status_);
-    if (error.empty() || !isStageRoot()) {
-        return;
-    }
-
-    /** Preserve earlier row errors and send the normal result so stage 0 can finish
-     * its in-flight requests without committing tokens from this failed batch. */
-    for (auto& request_error : request_errors) {
-        if (!request_error.hasError()) {
-            request_error = ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, error);
-        }
-    }
-}
-
 PPDraftOutput PPExecutor::runDraftStep(const PPExecutionPlan&  plan,
                                        const GptModelOutputs&  target_output,
                                        const PPSamplingOutput& sampling_output) {
-    /** Draft execution changes flags and may rewrite the layout for CP. Preserve the original batch attributes. */
+    /** Preserve batch dimensions and verify mode before draft preparation changes the input layout. */
     const bool is_verify                = plan.model_input.is_target_verify;
     const bool should_cache_draft_probs = !plan.model_input.is_fake_stream && !plan.model_input.skip_lm_head;
     const auto request_batch_size       = plan.model_input.input_lengths.numel();
@@ -927,7 +942,6 @@ PPDraftOutput PPExecutor::runDraftStep(const PPExecutionPlan&  plan,
     const auto& target_hidden_states    = target_output.all_hidden_states;
     const bool  cp_enabled              = parallelism_config_.prefill_cp_config.is_enabled();
 
-    /** Sampler outputs and synchronized draft tokens are already on CUDA. */
     auto to_i32_flat = [request_batch_size](const torch::Tensor& tokens) {
         return tokens.to(torch::kInt32, /*non_blocking=*/true).reshape({request_batch_size}).contiguous();
     };
@@ -939,93 +953,92 @@ PPDraftOutput PPExecutor::runDraftStep(const PPExecutionPlan&  plan,
     draft_input.pd_separation = draft_input.pd_separation && !draft_input.skip_lm_head;
     draft_input.skip_lm_head  = false;
 
-    /** 1. Prepare draft inputs and synchronize shared fields across ranks. */
+    /** 1. Run draft prefill/COMMIT and sample the first MTP/EAGLE proposal token. */
     {
-        RTP_LLM_PROFILE_SCOPE("executor.pp.draft_prepare");
+        RTP_LLM_PROFILE_SCOPE("executor.pp.draft_prefill");
         if (is_dspark_) {
+            /** COMMIT consumes target features; synchronize the sampled anchor later with PROPOSE inputs. */
             batch_stream_processor_->prepareDSparkCommitInput(draft_input, target_hidden_states, cp_enabled);
-        } else if (isStageRoot()) {
-            if (is_verify) {
-                batch_stream_processor_->prepareDraftPrefillAfterVerify(draft_input,
-                                                                        target_hidden_states,
-                                                                        verify_output,
-                                                                        draft_input_layout_,
-                                                                        hidden_states_d_t,
-                                                                        buffer_holder_);
-            } else {
-                batch_stream_processor_->prepareDraftPrefillAfterTargetPrefill(
-                    draft_input, target_hidden_states, sampler_output.token_ids, draft_next_position_ids, buffer_holder_);
-            }
-        }
-
-        /** Draft preparation may clear its verify flag; synchronization follows the original batch mode. */
-        if (!is_verify) {
-            /** CP and DSpARK features are rank-local and must not be overwritten by the root's broadcast. */
-            if (cp_enabled || is_dspark_) {
-                draft_input.last_hidden_states = torch::Tensor();
-            }
-            tpSyncModelInputs(draft_input, parallelism_config_);
-            if (cp_enabled || is_dspark_) {
+            forwardDraftModel(*draft_commit_model_, draft_input);
+        } else {
+            if (isStageRoot()) {
+                if (is_verify) {
+                    batch_stream_processor_->prepareDraftPrefillAfterVerify(draft_input,
+                                                                            target_hidden_states,
+                                                                            verify_output,
+                                                                            draft_input_layout_,
+                                                                            hidden_states_d_t,
+                                                                            buffer_holder_);
+                } else {
+                    batch_stream_processor_->prepareDraftPrefillAfterTargetPrefill(draft_input,
+                                                                                   target_hidden_states,
+                                                                                   sampler_output.token_ids,
+                                                                                   draft_next_position_ids,
+                                                                                   buffer_holder_);
+                }
+            } else if (is_verify && draft_input_layout_ == mtp::DraftInputLayout::FIXED_WIDTH) {
+                /** Fixed-width rejection sync skips shape exchange; allocate peer buffers for its CUDA broadcasts. */
+                const auto cuda_i32            = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
+                draft_input.is_target_verify   = false;
+                draft_input.combo_tokens       = torch::empty({request_batch_size * (propose_step_ + 1)}, cuda_i32);
+                draft_input.lm_output_indexes  = torch::empty({request_batch_size}, cuda_i32);
                 draft_input.last_hidden_states = target_hidden_states;
             }
-        } else if (!is_dspark_) {
-            broadcastPostRejectionInputs(draft_input);
-        }
-    }
 
-    /** 2. Run draft prefill/COMMIT and sample the first MTP/EAGLE proposal token. */
-    {
-        RTP_LLM_PROFILE_SCOPE(is_dspark_ ? "executor.pp.dspark_commit" : "executor.pp.draft_prefill");
-        auto* draft_prefill_model = is_dspark_ ? draft_commit_model_.get() : draft_model_.get();
-        RTP_LLM_CHECK_WITH_INFO(draft_prefill_model != nullptr,
-                                "PP %s model is not initialized",
-                                is_dspark_ ? "DSpARK commit" : "draft prefill");
-        auto draft_prefill_output = forwardDraftModel(*draft_prefill_model, draft_input);
-        /** DSpARK handles CP inside the KV commit; proposals use committed KV, so no last-hidden gathering is needed. */
-        if (!is_dspark_ && isStageRoot()) {
-            auto draft_sample  = fast_topk_sampler_->forward(draft_prefill_output.logits, 1);
-            auto draft_tokens  = to_i32_flat(draft_sample.token_ids);
-            proposed_token_ids = draft_tokens.unsqueeze(1);
+            if (is_verify) {
+                broadcastPostRejectionInputs(draft_input);
+            } else {
+                /** Broadcast tokens and metadata without replacing each rank's CP hidden states. */
+                draft_input.last_hidden_states = cp_enabled ? torch::Tensor() : draft_input.last_hidden_states;
+                tpSyncModelInputs(draft_input, parallelism_config_);
+                draft_input.last_hidden_states = cp_enabled ? target_hidden_states : draft_input.last_hidden_states;
+            }
 
-            if (role_type_ == RoleType::PREFILL || propose_step_ > 1) {
-                /** Draft continuation needs each request's last MTP hidden row (pre-hc_head for DeepSeek V4).
-                 * Without CP, the override replaces all_hidden_states with all-token MTP hidden states when available;
-                 * lm_output_indexes selects each request's last row from all_hidden_states.
-                 * With CP, the MTP buffer is rank-local; the MTP last-hidden buffer holds gathered per-request rows. */
-                torch::Tensor draft_last_hidden_states;
-                if (cp_enabled) {
-                    draft_last_hidden_states = draft_model_->getMtpLastHiddenStates(request_batch_size);
-                    RTP_LLM_CHECK_WITH_INFO(draft_last_hidden_states.defined()
-                                                && draft_last_hidden_states.dim() == 2
-                                                && draft_last_hidden_states.size(0) == draft_tokens.size(0),
-                                            "PP CP draft last hidden states must be a 2-D tensor with %ld rows "
-                                            "(one per request)",
-                                            request_batch_size);
-                } else {
-                    mtp::maybeOverrideLastHiddenWithMtpBuffer(
-                        draft_prefill_output, *draft_model_, draft_input.combo_tokens.numel());
-                    const auto& hidden_states = draft_prefill_output.all_hidden_states;
-                    const auto  indexes = draft_input.lm_output_indexes.to(hidden_states.device(), torch::kLong);
-                    draft_last_hidden_states = hidden_states.index_select(0, indexes);
-                }
+            auto draft_prefill_output = forwardDraftModel(*draft_model_, draft_input);
 
-                if (role_type_ == RoleType::PREFILL) {
-                    output.proposals.all_probs = draft_sample.all_probs.unsqueeze(1);
-                    output.hidden_states       = std::move(draft_last_hidden_states);
-                } else {
-                    batch_stream_processor_->prepareDraftDecodeAfterPrefill(
-                        draft_input, draft_last_hidden_states, draft_tokens);
+            if (isStageRoot()) {
+                auto draft_sample  = fast_topk_sampler_->forward(draft_prefill_output.logits, 1);
+                auto draft_tokens  = to_i32_flat(draft_sample.token_ids);
+                proposed_token_ids = draft_tokens.unsqueeze(1);
+
+                if (role_type_ == RoleType::PREFILL || propose_step_ > 1) {
+                    /** Continue from each request's last draft hidden state, before hc_head on DeepSeek V4.
+                     * CP supplies gathered last rows; otherwise select them from the full draft output. */
+                    torch::Tensor draft_last_hidden_states;
+                    if (cp_enabled) {
+                        draft_last_hidden_states = draft_model_->getMtpLastHiddenStates(request_batch_size);
+                        RTP_LLM_CHECK_WITH_INFO(draft_last_hidden_states.defined()
+                                                    && draft_last_hidden_states.dim() == 2
+                                                    && draft_last_hidden_states.size(0) == draft_tokens.size(0),
+                                                "PP CP draft last hidden states must be a 2-D tensor with %ld rows "
+                                                "(one per request)",
+                                                request_batch_size);
+                    } else {
+                        mtp::maybeOverrideLastHiddenWithMtpBuffer(
+                            draft_prefill_output, *draft_model_, draft_input.combo_tokens.numel());
+                        const auto& hidden_states = draft_prefill_output.all_hidden_states;
+                        const auto  indexes = draft_input.lm_output_indexes.to(hidden_states.device(), torch::kLong);
+                        draft_last_hidden_states = hidden_states.index_select(0, indexes);
+                    }
+
+                    if (role_type_ == RoleType::PREFILL) {
+                        output.proposals.all_probs = draft_sample.all_probs.unsqueeze(1);
+                        output.hidden_states       = std::move(draft_last_hidden_states);
+                    } else {
+                        batch_stream_processor_->prepareDraftDecodeAfterPrefill(
+                            draft_input, draft_last_hidden_states, draft_tokens);
+                    }
                 }
             }
         }
     }
 
-    /** 3. Return the P-side handoff; further proposal generation belongs to the decode side. */
+    /** 2. Return the P-side handoff; further proposal generation belongs to the decode side. */
     if (role_type_ == RoleType::PREFILL) {
         return output;
     }
 
-    /** 4. Generate DSpARK proposals or the remaining MTP/EAGLE draft tokens. */
+    /** 3. Generate DSpARK proposals or the remaining MTP/EAGLE draft tokens. */
     {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.pp.draft_decode(is_dspark=%d)", static_cast<int>(is_dspark_));
         if (is_dspark_) {
@@ -1041,27 +1054,24 @@ PPDraftOutput PPExecutor::runDraftStep(const PPExecutionPlan&  plan,
                 auto       draft_temperature = batch_stream_processor_->prepareDSparkDraftTemperature(
                     sampling_plan, draft_output.logits.device(), buffer_holder_);
                 output.proposals = speculative_sampler_->sampleDSparkDraft(draft_output.logits,
-                                                                            round_state.anchors,
-                                                                            draft_temperature,
-                                                                            dspark_markov_w1_,
-                                                                            dspark_markov_w2_,
-                                                                            draft_vocab_size_);
+                                                                           round_state.anchors,
+                                                                           draft_temperature,
+                                                                           dspark_markov_w1_,
+                                                                           dspark_markov_w2_,
+                                                                           draft_vocab_size_);
                 if (should_cache_draft_probs) {
                     const auto* request_ids = sampling_plan.request_ids.data_ptr<RequestId>();
                     for (int64_t request_idx = 0; request_idx < batch_size; ++request_idx) {
-                        dspark_q_.insert_or_assign(request_ids[request_idx],
-                                                   output.proposals.all_probs[request_idx]);
+                        dspark_q_.insert_or_assign(request_ids[request_idx], output.proposals.all_probs[request_idx]);
                     }
                 }
             }
         } else if (propose_step_ > 1) {
-            /** Batch/KV layout stays fixed. Sync once and advance locally to avoid
-             * repacking and transferring unchanged inputs at every decode step. */
+            /** Root updates tokens, hidden states and lengths after prefill; synchronize them before decode. */
             tpSyncModelInputs(draft_input, parallelism_config_);
 
             std::vector<torch::Tensor> draft_token_columns;
             draft_token_columns.reserve(propose_step_);
-            /** The synchronized decode input carries the first proposal on every TP rank. */
             draft_token_columns.push_back(to_i32_flat(draft_input.combo_tokens));
             for (int64_t step = 1; step < propose_step_; ++step) {
                 auto draft_output = forwardDraftModel(*draft_model_, draft_input);
@@ -1072,11 +1082,7 @@ PPDraftOutput PPExecutor::runDraftStep(const PPExecutionPlan&  plan,
                 draft_token_columns.push_back(draft_tokens);
                 const bool has_next_step = step + 1 < propose_step_;
                 if (has_next_step) {
-                    mtp::advanceDraftInput(draft_input,
-                                           draft_output.all_hidden_states,
-                                           draft_tokens,
-                                           position_id_len_factor_,
-                                           buffer_holder_);
+                    mtp::advanceDraftInput(draft_input, draft_output.all_hidden_states, draft_tokens);
                 }
             }
             if (isStageRoot()) {
@@ -1100,8 +1106,8 @@ absl::Status PPExecutor::finish() {
     if (isFirstStage() && isStageRoot()) {
         /** An empty terminal plan still synchronizes the first stage and propagates down every PP lane. */
         RETURN_IF_STATUS_ERROR(processImpl(empty_output, 0, true));
-        if (result_thread_.joinable()) {
-            result_thread_.join();
+        if (result_recv_thread_.joinable()) {
+            result_recv_thread_.join();
         }
     } else {
         /** Local stop may precede the terminal plan; keep serving upstream until it has been processed. */
@@ -1109,6 +1115,7 @@ absl::Status PPExecutor::finish() {
             RETURN_IF_STATUS_ERROR(process(empty_output));
         }
     }
+    stopResultSender();
     for (auto& slot : slots_) {
         waitAll(slot.plan_sends);
         waitAll(slot.activation_sends);
@@ -1141,8 +1148,8 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
                                && std::any_of(schedule_output.streams.begin(),
                                               schedule_output.streams.end(),
                                               [](const auto& stream) { return !stream->isFakeStream(); });
-    auto                           tps_active_guard      = tps_reporter_.makeActiveGuard(report_active);
-    auto                           wall_tps_active_guard = wall_tps_reporter_.makeActiveGuard(report_active);
+    auto                           tps_guard      = tps_reporter_.makeActiveGuard(report_active);
+    auto                           wall_tps_guard = wall_tps_reporter_.makeActiveGuard(report_active);
     RtpLLMExecutorMetricsCollector executor_collector;
     executor_collector.pp_rank = parallelism_config_.pp_rank;
 
@@ -1155,12 +1162,12 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
     /** 1. Build or receive the plan and retain its CPU payload for forwarding. */
     PPExecutionPlan plan;
     torch::Tensor   plan_payload;
-    StreamGroups    scheduled_stream_groups;
+    StreamGroups    stream_groups;
     if (isFirstStage()) {
-        scheduled_stream_groups = StreamGroups(streams);
+        stream_groups = StreamGroups(streams);
         /** PP input preparation covers the complete execution plan. */
         const auto start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto       plan_status   = buildPlan(scheduled_stream_groups, schedule_output.finished_request_ids, shutdown);
+        auto       plan_status   = buildPlan(stream_groups, schedule_output.finished_request_ids, shutdown);
         RETURN_IF_STATUS_OR_ERROR(plan_status);
         plan                                     = std::move(plan_status.value());
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -1184,22 +1191,7 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
         asyncSendPlan(plan_payload, pending_plan_sends);
     }
 
-    if (isLastStage() && isStageRoot()) {
-        for (const auto request_id : plan.finished_request_ids) {
-            sampling_states_.erase(request_id);
-            dspark_q_.erase(request_id);
-        }
-    }
-
-    auto& model_input = plan.model_input;
-
-    std::optional<GrammarPrefetchContext> grammar_prefetch;
-    if (isLastStage() && isStageRoot() && !model_input.skip_run && !model_input.skip_lm_head
-        && !model_input.is_fake_stream) {
-        RTP_LLM_PROFILE_SCOPE("executor.pp.grammar_prefetch");
-        grammar_prefetch = batch_stream_processor_->prepareLogitsProcessorsAsync(plan.sampling_plan, sampling_states_);
-    }
-
+    auto&      model_input  = plan.model_input;
     const bool prefill_only = model_input.skip_lm_head;
 
     /** 3. Wait on this slot's previous sends before reusing it. CUDA waits order subsequent operations on the current
@@ -1215,32 +1207,48 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
     }
     inflight.plan_sends = std::move(pending_plan_sends);
 
-    /** 4. Run the batch. */
-    if (model_input.skip_run) {
-        waitLastRun();
-        reapCompletedActivationSends();
-        releaseAllModelBuffers();
-    } else {
+    /** 4. Overlap the next activation receive with the previous batch's GPU work and CPU result processing. */
+    PPIntermediateTensors input_tensors;
+    PPPendingResult       pending_result;
+    if (!model_input.skip_run) {
         if (profile_step_start_) {
             profile_step_start_();
         }
-
         collectExecutorMetrics(model_input, plan.is_decode, plan.sampling_plan.sequence_lengths, executor_collector);
-
-        PPIntermediateTensors input_tensors;
         if (!isFirstStage()) {
             const auto start_time_us              = autil::TimeUtility::currentTimeInMicroSeconds();
             input_tensors                         = receiveTensors();
             executor_collector.activation_wait_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         }
-        {
-            const auto start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-            waitLastRun();
-            executor_collector.last_run_wait_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        }
-        reapCompletedActivationSends();
-        releaseAllModelBuffers();
+    }
+    {
+        const auto start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        waitLastRun();
+        executor_collector.last_run_wait_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+    /** Drain the previous batch before writer reuse, even on empty rounds.
+     * Log failures locally and let D-side KV load determine whether decode can proceed. */
+    drainCacheStorePublication();
+    reapCompletedActivationSends();
+    releaseAllModelBuffers();
 
+    if (isLastStage() && isStageRoot()) {
+        for (const auto request_id : plan.finished_request_ids) {
+            sampling_states_.erase(request_id);
+            dspark_q_.erase(request_id);
+        }
+    }
+
+    mtp::DSparkCacheStoreDrainGuard cache_store_drain_guard{
+        track_dspark_cache_store_, model_.get(), draft_commit_model_.get()};
+    if (!model_input.skip_run) {
+        ensureModelInputOnGpu(model_input);
+        std::optional<GrammarPrefetchContext> grammar_prefetch;
+        if (isLastStage() && isStageRoot() && !prefill_only && !model_input.is_fake_stream) {
+            RTP_LLM_PROFILE_SCOPE("executor.pp.grammar_prefetch");
+            grammar_prefetch =
+                batch_stream_processor_->prepareLogitsProcessorsAsync(plan.sampling_plan, sampling_states_);
+        }
         if (cache_manager_) {
             RTP_LLM_PROFILE_SCOPE("executor.pp.kv_cache_update");
             if (model_input.kv_cache_update_mapping.defined()) {
@@ -1261,8 +1269,6 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
             model_inputs_logger_->log(model_input, ModelInputsModelRole::NORMAL, model_->model_id_);
         }
 
-        mtp::DSparkCacheStoreDrainGuard cache_store_drain_guard{
-            track_dspark_cache_store_, model_.get(), draft_commit_model_.get()};
         GptModelOutputs model_output;
         {
             /** Keep target CP field updates and upstream activations out of draft inputs. */
@@ -1308,31 +1314,13 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
                 draft_output = runDraftStep(plan, model_output, sampling_output);
             }
 
-            PPExecutionResult execution_result;
             if (isStageRoot()) {
-                batch_stream_processor_->fillExecutionResult(
-                    plan, model_output, sampling_output, draft_output, execution_result);
-            } else {
-                /** Non-root ranks skip fillExecutionResult, so they must wait for their local GPU work here. */
-                cudaSyncAndCheck();
-            }
-            /** Cache publication needs a separate wait; collect its errors before advancing sampling state. */
-            finishDSparkPrefillCachePublication(model_input, execution_result.request_errors);
-            cache_store_drain_guard.disarm();
-
-            if (isStageRoot()) {
-                if (!model_input.is_fake_stream && !prefill_only) {
-                    advanceSamplingStates(plan.sampling_plan, execution_result);
-                    /** Errors terminate requests; retire last-stage state without waiting for finished IDs. */
-                    eraseFailedRequestStates(execution_result);
-                }
-                const auto start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-                asyncSendExecutionResult(execution_result, inflight.execution_result_sends);
-                executor_collector.send_result_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+                pending_result =
+                    batch_stream_processor_->submitExecutionResult(plan, model_output, sampling_output, draft_output);
             }
         }
         last_compute_done_.record(cuda_graph::graphGetCurrentStream());
-        if (!isFirstStage() && isStageRoot()) {
+        if (!isFirstStage() && !isLastStage() && isStageRoot()) {
             reportStageMetrics(executor_collector);
         }
         if (profile_step_finish_) {
@@ -1341,57 +1329,120 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
     }
 
     if (isFirstStage() && isStageRoot() && !model_input.skip_run) {
-        enqueueResultTask({std::move(scheduled_stream_groups),
-                           schedule_time_us,
-                           std::move(executor_collector),
-                           std::move(tps_active_guard),
-                           std::move(wall_tps_active_guard)});
+        enqueueResultRecvTask({std::move(stream_groups),
+                               schedule_time_us,
+                               std::move(executor_collector),
+                               std::move(tps_guard),
+                               std::move(wall_tps_guard)});
+    } else if (isLastStage() && isStageRoot() && !model_input.skip_run) {
+        enqueueResultSendTask(
+            {std::move(plan), std::move(pending_result), current_slot_, std::move(executor_collector)});
     }
-
     current_slot_ = (current_slot_ + 1) % slots_.size();
 
     if (model_input.shutdown) {
         stopped_ = true;
         if (isFirstStage() && isStageRoot()) {
-            requestResultStop();
+            requestResultRecvStop();
         }
     }
+    cache_store_drain_guard.disarm();
     return absl::OkStatus();
 }
 
-void PPExecutor::enqueueResultTask(ResultTask task) {
+void PPExecutor::enqueueResultSendTask(ResultSendTask task) {
     {
-        std::lock_guard<std::mutex> lock(result_mutex_);
-        result_tasks_.push_back(std::move(task));
+        std::lock_guard<std::mutex> lock(result_send_mutex_);
+        result_send_task_.emplace(std::move(task));
     }
-    result_cv_.notify_one();
+    result_send_cv_.notify_one();
 }
 
-void PPExecutor::resultLoop() {
+void PPExecutor::resultSendLoop() {
+    at::DisableRecordFunctionGuard record_function_guard;
+    cuda_graph::setDevice(static_cast<int>(recv_stream_.device_index()));
+    c10::InferenceMode inference_guard(true);
+    while (true) {
+        {
+            std::unique_lock<std::mutex> lock(result_send_mutex_);
+            result_send_cv_.wait(lock, [this] { return result_send_stop_ || result_send_task_.has_value(); });
+            /** Drain queued results before stopping so the first stage can finish its pending receives. */
+            if (!result_send_task_) {
+                return;
+            }
+        }
+
+        /** Keep waitLastRun() blocked until sampling state and send tickets are ready for the next batch. */
+        processResultAndSend(*result_send_task_);
+
+        {
+            std::lock_guard<std::mutex> lock(result_send_mutex_);
+            result_send_task_.reset();
+        }
+        result_send_cv_.notify_all();
+    }
+}
+
+void PPExecutor::processResultAndSend(ResultSendTask& task) {
+    last_compute_done_.synchronize();
+    const auto& plan   = task.plan;
+    auto&       result = task.pending.result;
+    batch_stream_processor_->finishExecutionResult(plan, task.pending);
+    if (!plan.model_input.is_fake_stream && !plan.model_input.skip_lm_head) {
+        advanceSamplingStates(plan.sampling_plan, result);
+        eraseFailedRequestStates(result);
+    }
+    const auto start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    asyncSendExecutionResult(result, slots_[task.slot].execution_result_sends);
+    task.executor_collector.send_result_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    reportStageMetrics(task.executor_collector);
+}
+
+void PPExecutor::stopResultSender() {
+    if (result_send_thread_.joinable()) {
+        {
+            std::lock_guard<std::mutex> lock(result_send_mutex_);
+            result_send_stop_ = true;
+        }
+        result_send_cv_.notify_one();
+        result_send_thread_.join();
+    }
+}
+
+void PPExecutor::enqueueResultRecvTask(ResultRecvTask task) {
+    {
+        std::lock_guard<std::mutex> lock(result_recv_mutex_);
+        result_recv_tasks_.push_back(std::move(task));
+    }
+    result_recv_cv_.notify_one();
+}
+
+void PPExecutor::resultRecvLoop() {
+    at::DisableRecordFunctionGuard record_function_guard;
     cuda_graph::setDevice(static_cast<int>(recv_stream_.device_index()));
     /** Inference mode is thread-local; dispatch updates tensors created by the engine thread. */
     c10::InferenceMode inference_guard(true);
     while (true) {
         {
-            ResultTask task;
+            ResultRecvTask task;
             {
-                std::unique_lock<std::mutex> lock(result_mutex_);
-                result_cv_.wait(lock, [this] { return result_stop_ || !result_tasks_.empty(); });
-                if (result_tasks_.empty()) {
+                std::unique_lock<std::mutex> lock(result_recv_mutex_);
+                result_recv_cv_.wait(lock, [this] { return result_recv_stop_ || !result_recv_tasks_.empty(); });
+                if (result_recv_tasks_.empty()) {
                     return;
                 }
-                task = std::move(result_tasks_.front());
-                result_tasks_.pop_front();
-                result_processing_ = true;
+                task = std::move(result_recv_tasks_.front());
+                result_recv_tasks_.pop_front();
+                result_recv_processing_ = true;
             }
             receiveAndProcessResult(task.stream_groups, task.schedule_time_us, task.executor_collector);
             /** Drain must include stream and guard cleanup; destroy the task before marking it idle. */
         }
         {
-            std::lock_guard<std::mutex> lock(result_mutex_);
-            result_processing_ = false;
+            std::lock_guard<std::mutex> lock(result_recv_mutex_);
+            result_recv_processing_ = false;
         }
-        result_cv_.notify_all();
+        result_recv_cv_.notify_all();
     }
 }
 
@@ -1399,11 +1450,7 @@ void PPExecutor::receiveAndProcessResult(const StreamGroups&             stream_
                                          int64_t                         schedule_time_us,
                                          RtpLLMExecutorMetricsCollector& executor_collector) {
     /** Fake batches still complete the PP round trip before their result is discarded. */
-    PPExecutionResult result;
-    {
-        RTP_LLM_PROFILE_SCOPE("executor.pp.recv_result");
-        result = pp_serialization::deserializeExecutionResult(receiveObject(kPPResultGroupName));
-    }
+    auto result = pp_serialization::deserializeExecutionResult(receiveObject(kPPResultGroupName));
     if (stream_groups.isFakeStream()) {
         RTP_LLM_LOG_DEBUG("PP fake batch completed: dp_rank=%ld", parallelism_config_.dp_rank);
         return;
@@ -1417,7 +1464,6 @@ void PPExecutor::receiveAndProcessResult(const StreamGroups&             stream_
     collectTokenCounts(stream_groups, result, token_counts_by_priority, sp_collector);
 
     {
-        RTP_LLM_PROFILE_SCOPE("executor.pp.dispatch_result");
         const auto start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         batch_stream_processor_->dispatchExecutionResult(stream_groups, result);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -1428,16 +1474,16 @@ void PPExecutor::receiveAndProcessResult(const StreamGroups&             stream_
 }
 
 void PPExecutor::drainPendingResults() {
-    std::unique_lock<std::mutex> lock(result_mutex_);
-    result_cv_.wait(lock, [this] { return result_tasks_.empty() && !result_processing_; });
+    std::unique_lock<std::mutex> lock(result_recv_mutex_);
+    result_recv_cv_.wait(lock, [this] { return result_recv_tasks_.empty() && !result_recv_processing_; });
 }
 
-void PPExecutor::requestResultStop() {
+void PPExecutor::requestResultRecvStop() {
     {
-        std::lock_guard<std::mutex> lock(result_mutex_);
-        result_stop_ = true;
+        std::lock_guard<std::mutex> lock(result_recv_mutex_);
+        result_recv_stop_ = true;
     }
-    result_cv_.notify_all();
+    result_recv_cv_.notify_all();
 }
 
 bool PPExecutor::updateEplbConfig(const EPLBConfig& config) {

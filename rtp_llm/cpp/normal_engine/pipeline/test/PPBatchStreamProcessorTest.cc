@@ -5,7 +5,7 @@
  *   2. Sampling preparation: request-state lifetime, PD history replay and verification Q.
  *   3. Sampler inputs: history reconstruction, candidate prefixes, parameters and processor routing.
  *   4. SP model inputs: target verification, draft preparation, positions and Engram windows.
- *   5. Result assembly: sampled tokens, optional outputs and request-local errors.
+ *   5. Result submission and CPU assembly: sampled tokens, optional outputs and request-local errors.
  *   6. Dispatch: stream updates, token budgets, linear KV mappings and inflight cleanup.
  *
  * Add cases beside the interface they exercise; keep ordinary, speculative and PD variants together.
@@ -1483,9 +1483,12 @@ TEST_F(PPBatchStreamProcessorTest, DraftDecodeAfterPrefillUsesSelectedHiddenAndV
             EXPECT_EQ(tensorToVector<int32_t>(input.combo_tokens), (std::vector<int32_t>{50, 60}));
             EXPECT_EQ(tensorToVector<int32_t>(input.input_lengths), (std::vector<int32_t>{1, 1}));
             EXPECT_EQ(tensorToVector<int32_t>(input.sequence_lengths), (std::vector<int32_t>{8, 13}));
+            EXPECT_TRUE(input.sequence_lengths.is_cuda());
             EXPECT_EQ(tensorToVector<int32_t>(input.lm_output_indexes), (std::vector<int32_t>{0, 1}));
+            EXPECT_TRUE(input.lm_output_indexes.is_cuda());
             EXPECT_EQ(tensorToVector<int32_t>(input.combo_position_ids), (std::vector<int32_t>{8, 18, 28, 13, 23, 33}));
-            EXPECT_TRUE(input.combo_position_ids.is_pinned());
+            EXPECT_EQ(input.combo_position_ids.is_cuda(), device_state);
+            EXPECT_EQ(input.combo_position_ids.is_pinned(), !device_state);
             EXPECT_EQ(input.prefix_lengths.numel(), 0);
             EXPECT_FALSE(input.sequence_lengths_plus_1.defined());
             EXPECT_FALSE(input.request_id.defined());
@@ -1723,7 +1726,7 @@ TEST_F(PPBatchStreamProcessorTest, DSparkProposalUsesNextRoundStateInBothAnchorM
 }
 
 /** Result assembly maps sampler rows back to requests and preserves request-local errors. */
-TEST_F(PPBatchStreamProcessorTest, FillResultCommitsLastSampleAndCopiesRequestedOutputs) {
+TEST_F(PPBatchStreamProcessorTest, ResultExportCommitsLastSampleAndCopiesRequestedOutputs) {
     auto cfg                     = config(2);
     cfg.return_logits            = true;
     cfg.return_softmax_probs     = true;
@@ -1753,7 +1756,10 @@ TEST_F(PPBatchStreamProcessorTest, FillResultCommitsLastSampleAndCopiesRequested
     sampled.cum_log_probs = torch::tensor({-1.0f, -2.0f, -3.0f}).to(torch::kCUDA);
     sampled.all_probs     = torch::full({3, 64}, 1.0f / 64, output.logits.options());
     PPExecutionResult result;
-    processor.fillExecutionResult(plan, output, sampling, {}, result);
+    auto              pending_result = processor.submitExecutionResult(plan, output, sampling, {});
+    cuda_graph::graphGetCurrentStream().synchronize();
+    processor.finishExecutionResult(plan, pending_result);
+    result = std::move(pending_result.result);
     EXPECT_EQ(tensorToVector<int32_t>(result.new_token_ids), (std::vector<int32_t>{7, 8, 9}));
     EXPECT_TRUE(result.new_token_ids.device().is_cpu());
     ASSERT_EQ(result.request_outputs.size(), 2u);
@@ -1808,7 +1814,10 @@ TEST_F(PPBatchStreamProcessorTest, MixedBatchReturnsOnlyRequestedRowsAtNonzeroOf
     sampled.token_ids = intTensor({10, 11, 12, 13}).reshape({4, 1}).cuda();
     sampled.success   = torch::ones({4}, torch::TensorOptions(torch::kBool).device(torch::kCUDA));
     PPExecutionResult result;
-    processor.fillExecutionResult(plan, model_output, sampling, {}, result);
+    auto              pending_result = processor.submitExecutionResult(plan, model_output, sampling, {});
+    cuda_graph::graphGetCurrentStream().synchronize();
+    processor.finishExecutionResult(plan, pending_result);
+    result = std::move(pending_result.result);
 
     ASSERT_EQ(result.request_outputs.size(), 3u);
     const auto& output = result.request_outputs[1];
@@ -1854,7 +1863,10 @@ TEST_F(PPBatchStreamProcessorTest, VerifyResultReturnsAcceptedTokensAndErrorsWit
     sp_output.accept_len_cpu    = intTensor({3, 1, 2});
     sp_output.processor_errors = {std::nullopt, ErrorInfo(ErrorCode::INVALID_PARAMS, "verify failed"), std::nullopt};
     PPExecutionResult result;
-    processor.fillExecutionResult(plan, GptModelOutputs{}, sampling, {}, result);
+    auto              pending_result = processor.submitExecutionResult(plan, GptModelOutputs{}, sampling, {});
+    cuda_graph::graphGetCurrentStream().synchronize();
+    processor.finishExecutionResult(plan, pending_result);
+    result = std::move(pending_result.result);
     EXPECT_EQ(tensorToVector<int32_t>(result.new_token_ids), (std::vector<int32_t>{10, 11, 12, 13, 0, 0, 16, 17, 0}));
     EXPECT_EQ(tensorToVector<int32_t>(result.new_token_lengths), (std::vector<int32_t>{3, 1, 2}));
     for (const auto& output : result.request_outputs) {
@@ -1873,7 +1885,7 @@ TEST_F(PPBatchStreamProcessorTest, VerifyResultReturnsAcceptedTokensAndErrorsWit
     EXPECT_EQ(result.request_errors[2].code(), ErrorCode::UNKNOWN_ERROR);
 }
 
-TEST_F(PPBatchStreamProcessorTest, FillResultPreservesEarlierErrorsAndMapsSamplerRowsToRequests) {
+TEST_F(PPBatchStreamProcessorTest, ResultExportPreservesEarlierErrorsAndMapsSamplerRowsToRequests) {
     auto            first     = makeStream(101, {1});
     auto            multi     = makeStream(202, {2}, config(2));
     auto            failed    = makeStream(303, {3});
@@ -1890,7 +1902,14 @@ TEST_F(PPBatchStreamProcessorTest, FillResultPreservesEarlierErrorsAndMapsSample
     sampled.success   = torch::tensor({false, true, false, false, true}, torch::kBool);
     sampled.processor_errors.resize(5);
     sampled.processor_errors[3] = processor_error;
-    processor.fillExecutionResult(plan, GptModelOutputs{}, sampling, {}, result);
+    auto pending_result         = processor.submitExecutionResult(plan, GptModelOutputs{}, sampling, {});
+    EXPECT_EQ(pending_result.result.request_errors[0].ToString(), initialization_error.ToString());
+    for (size_t i = 1; i < pending_result.result.request_errors.size(); ++i) {
+        EXPECT_TRUE(pending_result.result.request_errors[i].ok());
+    }
+    cuda_graph::graphGetCurrentStream().synchronize();
+    processor.finishExecutionResult(plan, pending_result);
+    result = std::move(pending_result.result);
     EXPECT_EQ(result.request_errors[0].ToString(), initialization_error.ToString());
     EXPECT_EQ(result.request_errors[1].code(), ErrorCode::UNKNOWN_ERROR);
     EXPECT_EQ(result.request_errors[2].ToString(), processor_error.ToString());
@@ -1906,7 +1925,7 @@ TEST_F(PPBatchStreamProcessorTest, FillResultPreservesEarlierErrorsAndMapsSample
     }
 }
 
-TEST_F(PPBatchStreamProcessorTest, FillResultUsesCompactProbabilityBeforeRestoringTokenIds) {
+TEST_F(PPBatchStreamProcessorTest, ResultExportUsesCompactProbabilityBeforeRestoringTokenIds) {
     model_config_.output_vocab_ids = {0, 2, 7, 63};
     auto cfg                       = config();
     cfg.return_softmax_probs       = true;
@@ -1923,14 +1942,17 @@ TEST_F(PPBatchStreamProcessorTest, FillResultUsesCompactProbabilityBeforeRestori
     sampled.token_ids = intTensor({0, 2}).reshape({2, 1}).to(torch::kCUDA);
     sampled.success   = torch::tensor({false, true}, torch::kBool).to(torch::kCUDA);
     PPExecutionResult result;
-    processor.fillExecutionResult(plan, output, sampling, {}, result);
+    auto              pending_result = processor.submitExecutionResult(plan, output, sampling, {});
+    cuda_graph::graphGetCurrentStream().synchronize();
+    processor.finishExecutionResult(plan, pending_result);
+    result = std::move(pending_result.result);
     EXPECT_EQ(result.request_errors[0].code(), ErrorCode::UNKNOWN_ERROR);
     EXPECT_TRUE(result.request_errors[1].ok());
     EXPECT_EQ(tensorToVector<int32_t>(result.new_token_ids), (std::vector<int32_t>{0, 7}));
     EXPECT_NEAR(result.request_outputs[1].softmax_probs[0][0].item<float>(), 0.5f, 1e-6);
 }
 
-TEST_F(PPBatchStreamProcessorTest, FillResultSkipsFailedSamplerSentinelsDuringVocabularyMapping) {
+TEST_F(PPBatchStreamProcessorTest, ResultExportSkipsFailedSamplerSentinelsDuringVocabularyMapping) {
     model_config_.output_vocab_ids = {2, 7, 63};
     auto failed = makeStream(101, {1});
     auto healthy = makeStream(202, {3});
@@ -1940,13 +1962,16 @@ TEST_F(PPBatchStreamProcessorTest, FillResultSkipsFailedSamplerSentinelsDuringVo
     sampling.sampler_output.token_ids = intTensor({-1, 1}).reshape({2, 1}).cuda();
     sampling.sampler_output.success = torch::tensor({false, true}, torch::kBool).cuda();
     PPExecutionResult result;
-    processor.fillExecutionResult(plan, {}, sampling, {}, result);
+    auto              pending_result = processor.submitExecutionResult(plan, {}, sampling, {});
+    cuda_graph::graphGetCurrentStream().synchronize();
+    processor.finishExecutionResult(plan, pending_result);
+    result = std::move(pending_result.result);
     EXPECT_EQ(result.request_errors[0].code(), ErrorCode::UNKNOWN_ERROR);
     EXPECT_TRUE(result.request_errors[1].ok());
     EXPECT_EQ(tensorToVector<int32_t>(result.new_token_ids), (std::vector<int32_t>{-1, 7}));
 }
 
-TEST_F(PPBatchStreamProcessorTest, FillResultRejectsOutOfRangeCompactIds) {
+TEST_F(PPBatchStreamProcessorTest, ResultExportRejectsOutOfRangeCompactIds) {
     model_config_.output_vocab_ids = {2, 7, 63};
     for (bool return_probs : {false, true}) {
         SCOPED_TRACE(return_probs);
@@ -1965,7 +1990,10 @@ TEST_F(PPBatchStreamProcessorTest, FillResultRejectsOutOfRangeCompactIds) {
             GptModelOutputs output;
             output.logits = torch::zeros({3, 3}).cuda();
             PPExecutionResult result;
-            processor.fillExecutionResult(plan, output, sampling, {}, result);
+            auto              pending_result = processor.submitExecutionResult(plan, output, sampling, {});
+            cuda_graph::graphGetCurrentStream().synchronize();
+            processor.finishExecutionResult(plan, pending_result);
+            result = std::move(pending_result.result);
             EXPECT_EQ(result.request_errors[0].code(), ErrorCode::UNKNOWN_ERROR);
             EXPECT_EQ(result.request_errors[1].code(), ErrorCode::UNKNOWN_ERROR);
             EXPECT_TRUE(result.request_errors[2].ok());
@@ -1979,7 +2007,7 @@ TEST_F(PPBatchStreamProcessorTest, FillResultRejectsOutOfRangeCompactIds) {
     }
 }
 
-TEST_F(PPBatchStreamProcessorTest, FillResultPromptLogitsAreRequestLocalAndUseFirstSequenceOnlyInPrefill) {
+TEST_F(PPBatchStreamProcessorTest, ResultExportPromptLogitsAreRequestLocalAndUseFirstSequenceOnlyInPrefill) {
     setVocab(4);
     auto cfg                                           = config(2);
     cfg.return_prompt_logits                           = true;
@@ -2006,12 +2034,16 @@ TEST_F(PPBatchStreamProcessorTest, FillResultPromptLogitsAreRequestLocalAndUseFi
     output.all_logits[1].copy_(torch::tensor({4.0f, 3.0f, 2.0f, 1.0f}).log());
     output.all_logits[2].copy_(torch::tensor({1.0f, 3.0f, 2.0f, 4.0f}).log());
     output.all_logits[6].copy_(torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}).log());
+    output.all_logits = output.all_logits.to(torch::kCUDA);
     auto sampling = makeSamplingOutput(plan.sampling_plan);
     auto& sampled = sampling.sampler_output;
     sampled.token_ids = intTensor({2, 2, 0, 0}).reshape({4, 1});
     sampled.success   = torch::ones({4}, torch::kBool);
     PPExecutionResult result;
-    processor.fillExecutionResult(plan, output, sampling, {}, result);
+    auto              pending_result = processor.submitExecutionResult(plan, output, sampling, {});
+    cuda_graph::graphGetCurrentStream().synchronize();
+    processor.finishExecutionResult(plan, pending_result);
+    result = std::move(pending_result.result);
     ASSERT_EQ(result.request_outputs.size(), 3u);
     for (const auto& request : result.request_outputs) {
         EXPECT_FALSE(request.loss.defined());
@@ -2019,6 +2051,9 @@ TEST_F(PPBatchStreamProcessorTest, FillResultPromptLogitsAreRequestLocalAndUseFi
     EXPECT_FALSE(result.request_outputs[2].prompt_logits.has_value());
     ASSERT_TRUE(result.request_outputs[0].prompt_logits.has_value());
     const auto& prompt = result.request_outputs[0].prompt_logits.value();
+    EXPECT_TRUE(prompt.topk_token_ids.is_pinned());
+    EXPECT_TRUE(prompt.topk_logprobs.is_pinned());
+    EXPECT_TRUE(prompt.target_logprobs.is_pinned());
     EXPECT_EQ(prompt.start_pos, 1);
     EXPECT_EQ(prompt.end_pos, 3);
     EXPECT_EQ(tensorToVector<int32_t>(prompt.topk_token_ids), (std::vector<int32_t>{0, 1, 3, 1}));
@@ -2035,7 +2070,10 @@ TEST_F(PPBatchStreamProcessorTest, FillResultPromptLogitsAreRequestLocalAndUseFi
 
     plan.is_decode     = true;
     PPExecutionResult decode_result;
-    processor.fillExecutionResult(plan, output, sampling, {}, decode_result);
+    auto              pending_decode_result = processor.submitExecutionResult(plan, output, sampling, {});
+    cuda_graph::graphGetCurrentStream().synchronize();
+    processor.finishExecutionResult(plan, pending_decode_result);
+    decode_result = std::move(pending_decode_result.result);
     for (const auto& request : decode_result.request_outputs) {
         EXPECT_FALSE(request.prompt_logits.has_value());
         EXPECT_FALSE(request.loss.defined());

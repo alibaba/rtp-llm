@@ -795,18 +795,14 @@ TEST_F(MtpComputeTest, SharedAdvanceReusesHiddenStates) {
         auto         original_positions = input.combo_position_ids;
         auto         hidden_buffer      = torch::ones({2, 2}, torch::TensorOptions().device(torch::kCUDA));
         auto         draft_tokens       = torch::tensor({3, 4}, torch::kInt32).reshape({2, 1}).cuda();
-        TensorHolder holder;
-
-        mtp::advanceDraftInput(input, hidden_buffer, draft_tokens, 1, holder);
+        mtp::advanceDraftInput(input, hidden_buffer, draft_tokens);
 
         EXPECT_EQ(toVec<int32_t>(input.combo_tokens), (std::vector<int32_t>{3, 4}));
         EXPECT_EQ(toVec<int32_t>(input.sequence_lengths), (std::vector<int32_t>{9, 11}));
         EXPECT_EQ(toVec<int32_t>(input.combo_position_ids), (std::vector<int32_t>{8, 10}));
-        EXPECT_TRUE(input.sequence_lengths.is_cuda());
-        EXPECT_EQ(input.combo_position_ids.is_cuda(), device_input);
-        if (!device_input) {
-            EXPECT_TRUE(input.combo_position_ids.is_pinned());
-        }
+        EXPECT_EQ(input.sequence_lengths.device(), original_lengths.device());
+        EXPECT_EQ(input.combo_position_ids.device(), original_positions.device());
+        EXPECT_EQ(input.combo_position_ids.is_pinned(), !device_input);
         EXPECT_EQ(input.last_hidden_states.data_ptr(), hidden_buffer.data_ptr());
         EXPECT_TRUE(torch::equal(input.last_hidden_states, torch::ones_like(hidden_buffer)));
         EXPECT_EQ(toVec<int32_t>(original_lengths), (std::vector<int32_t>{8, 10}));

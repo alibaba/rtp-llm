@@ -1177,11 +1177,9 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
                                                           const GptModelOutputs& model_output,
                                                           const torch::Tensor&   draft_token_ids,
                                                           TensorHolder&          host_holder) {
-    mtp::advanceDraftInput(model_input,
-                           model_output.all_hidden_states,
-                           draft_token_ids,
-                           model_input_gatherer_config_.position_id_len_factor,
-                           host_holder);
+    /** The MTP model-input contract requires CUDA sequence lengths. */
+    model_input.sequence_lengths = toCudaInt32(model_input.sequence_lengths, host_holder);
+    mtp::advanceDraftInput(model_input, model_output.all_hidden_states, draft_token_ids);
 }
 
 void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroups&    stream_groups,

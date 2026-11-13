@@ -520,36 +520,21 @@ void syncDraftPrefillAfterVerify(GptModelInputs&          draft_input,
 
 void advanceDraftInput(GptModelInputs&      draft_input,
                        const torch::Tensor& draft_hidden_states,
-                       const torch::Tensor& draft_token_ids,
-                       size_t               position_id_len_factor,
-                       TensorHolder&        host_holder) {
+                       const torch::Tensor& draft_token_ids) {
     int batch_size                 = draft_input.combo_tokens.size(0);
     draft_input.last_hidden_states = draft_hidden_states;
     draft_input.combo_tokens       = draft_token_ids.reshape({batch_size});
 
-    if (draft_input.combo_position_ids.defined() && draft_input.combo_position_ids.is_cuda()) {
-        draft_input.combo_position_ids = draft_input.combo_position_ids + 1;
-    } else if (draft_input.combo_position_ids.defined()) {
+    if (draft_input.combo_position_ids.defined()) {
+        const auto& position_ids = draft_input.combo_position_ids;
+        /** Keep CPU output pinned for the model's asynchronous H2D copy. */
         auto next_position_ids =
-            torch::empty({(int64_t)(batch_size * position_id_len_factor)}, torch::kInt32).pin_memory();
-        int*       next_position_ids_ptr = next_position_ids.data_ptr<int>();
-        const auto position_ids_cpu      = draft_input.combo_position_ids.cpu().contiguous();
-        const int* position_ids_ptr      = position_ids_cpu.data_ptr<int>();
-        for (int64_t i = 0; i < next_position_ids.numel(); ++i) {
-            next_position_ids_ptr[i] = position_ids_ptr[i] + 1;
-        }
+            torch::empty(position_ids.sizes(), position_ids.options().pinned_memory(position_ids.device().is_cpu()));
+        torch::add_out(next_position_ids, position_ids, 1);
         draft_input.combo_position_ids = std::move(next_position_ids);
     }
 
-    if (draft_input.sequence_lengths.is_cuda()) {
-        draft_input.sequence_lengths = (draft_input.sequence_lengths + 1).to(torch::kInt32);
-    } else {
-        auto sequence_lengths_cpu = draft_input.sequence_lengths.cpu().clone().pin_memory();
-        for (int i = 0; i < batch_size; i++) {
-            sequence_lengths_cpu.data_ptr<int>()[i]++;
-        }
-        draft_input.sequence_lengths = toCudaInt32(sequence_lengths_cpu, host_holder);
-    }
+    draft_input.sequence_lengths = draft_input.sequence_lengths + 1;
 }
 
 void prepareDSparkProposeInput(GptModelInputs&            draft_input,
