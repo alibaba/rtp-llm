@@ -1,6 +1,7 @@
 import base64
 import io
 import logging
+import pickle
 import tempfile
 import time
 import unittest
@@ -12,7 +13,11 @@ from urllib3.exceptions import ReadTimeoutError
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MMPreprocessConfigPB
-from rtp_llm.multimodal.mm_error_messages import MMErr, format_mm_rpc_error
+from rtp_llm.multimodal.mm_error_messages import (
+    MediaDownloadError,
+    MMErr,
+    format_mm_rpc_error,
+)
 from rtp_llm.multimodal.multimodal_util import (
     collect_download_timing,
     get_bytes_io_from_url,
@@ -322,6 +327,57 @@ class TestMultiModalUtil(unittest.TestCase):
             with collect_download_timing() as cache_timing:
                 get_bytes_io_from_url("https://example.com/cached")
         self.assertEqual(cache_timing.elapsed_ms, 0.0)
+
+    def test_http_failure_diagnostics_survive_the_worker_boundary(self):
+        request_impl = Mock(
+            side_effect=[
+                requests.exceptions.ConnectTimeout(
+                    "https://example.com/?signature=secret"
+                ),
+                _FakeResponse(status_code=403),
+            ]
+        )
+        with patch("rtp_llm.multimodal.multimodal_util.REQUEST_GET", request_impl):
+            with self.assertRaises(MediaDownloadError) as captured:
+                get_bytes_io_from_url(
+                    "https://user:pass@example.com/media?signature=secret"
+                )
+
+        serialized = pickle.dumps(captured.exception)
+        self.assertNotIn(b"secret", serialized)
+        self.assertNotIn(b"/media", serialized)
+        self.assertNotIn(b"user:pass", serialized)
+        error = pickle.loads(serialized)
+        self.assertEqual(error.exception_type, ExceptionType.MM_DOWNLOAD_FAILED)
+        self.assertEqual(error.domain, "example.com")
+        self.assertEqual(error.retry_count, 1)
+        self.assertGreaterEqual(error.elapsed_ms, 0)
+        self.assertEqual(
+            error.metric_tags(), {"failure_type": "http_status", "http_status": "403"}
+        )
+
+    def test_http_failure_diagnostics_distinguish_network_failures(self):
+        for exception, failure_type, retry_count in (
+            (requests.exceptions.ConnectTimeout(), "connect_timeout", 2),
+            (requests.exceptions.ReadTimeout(), "read_timeout", 0),
+            (requests.exceptions.ConnectionError(), "connection_error", 0),
+            (requests.exceptions.InvalidURL(), "invalid_url", 0),
+        ):
+            with self.subTest(failure_type=failure_type):
+                with patch(
+                    "rtp_llm.multimodal.multimodal_util.REQUEST_GET",
+                    side_effect=exception,
+                ):
+                    with self.assertRaises(MediaDownloadError) as captured:
+                        get_bytes_io_from_url("https://example.com/network-failure")
+
+                error = captured.exception
+                self.assertIsNone(error.http_status)
+                self.assertEqual(error.retry_count, retry_count)
+                self.assertEqual(
+                    error.metric_tags(),
+                    {"failure_type": failure_type, "http_status": "none"},
+                )
 
 
 if __name__ == "__main__":

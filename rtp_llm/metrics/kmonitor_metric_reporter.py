@@ -56,6 +56,7 @@ class AccMetrics(Enum):
 
     VIT_QPS_METRIC = "py_rtp_vit_qps"
     VIT_ERROR_QPS_METRIC = "py_rtp_vit_error_qps"
+    VIT_MEDIA_DOWNLOAD_FAILURE_QPS_METRIC = "py_rtp_vit_media_download_failure_qps"
     VIT_SUCCESS_QPS_METRIC = "py_rtp_vit_success_qps"
     # Incremented when a submission is rejected because the scheduler's waiting
     # queue is full (overload / stalled forward backpressure).

@@ -11,6 +11,7 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
+    EmptyPB,
     MMRdmaSlotPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
@@ -29,6 +30,7 @@ from rtp_llm.multimodal.mm_scheduler import (
     MMSchedulerTimeoutError,
 )
 from rtp_llm.multimodal.transport.proxy_router import MMOutputProxyRouter
+from rtp_llm.server.request_headers import VIT_SOURCE_REQUEST_ID_METADATA
 from rtp_llm.server.vit_proxy_server import (
     DEFAULT_PROXY_RPC_TIMEOUT_SECONDS,
     STATUS_CHECK_TIMEOUT_SEC,
@@ -792,6 +794,39 @@ class VitProxyRpcServerStatusTest(TestCase):
 
 
 class VitProxyRpcServerForwardingTest(TestCase):
+    def test_request_identity_crosses_proxy_without_unrelated_headers(self):
+        metadata = (
+            ("x-dashscope-uid", "test-uid"),
+            ("x-dashscope-service", "test-service"),
+            (VIT_SOURCE_REQUEST_ID_METADATA, "source-请求#attempt2".encode()),
+        )
+        for method in (
+            "RemoteMultimodalEmbedding",
+            "WaitGreenNetVerdict",
+            "AsyncSubmitEmbedding",
+        ):
+            with self.subTest(method=method):
+                stub = MagicMock()
+                rpc = getattr(stub, method)
+                if method == "AsyncSubmitEmbedding":
+                    rpc.return_value = EmptyPB()
+                    forwarded = rpc
+                else:
+                    response = (
+                        MultimodalOutputPB()
+                        if method == "RemoteMultimodalEmbedding"
+                        else EmptyPB()
+                    )
+                    rpc.future.return_value = FakeGrpcFuture(response=response)
+                    forwarded = rpc.future
+                server = self._make_server({"worker": stub})
+                context = FakeContext()
+                context.invocation_metadata = lambda: metadata + (
+                    ("authorization", "do-not-forward"),
+                )
+                getattr(server, method)(MultimodalInputsPB(), context)
+                self.assertEqual(forwarded.call_args.kwargs["metadata"], metadata)
+
     def _make_status_stub(self, worker_status=None, error=None, done=True):
         stub = MagicMock()
         stub.GetWorkerStatus.future.return_value = FakeGrpcFuture(

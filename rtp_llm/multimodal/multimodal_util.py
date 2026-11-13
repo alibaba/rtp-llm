@@ -24,7 +24,12 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputsPB,
     MultimodalOutputPB,
 )
-from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
+from rtp_llm.multimodal.mm_error_messages import (
+    MediaDownloadError,
+    MMErr,
+    media_domain,
+    raise_mm,
+)
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
@@ -89,7 +94,9 @@ def _check_download(deadline, cancellation_event):
         raise TimeoutError("Media download deadline expired")
 
 
-def request_get(url, headers, timeout=None, *, deadline=None, cancellation_event=None):
+def request_get(
+    url, headers, timeout=None, *, deadline=None, cancellation_event=None, on_retry=None
+):
     global REQUEST_GET
     if REQUEST_GET is None:
         try:
@@ -116,11 +123,14 @@ def request_get(url, headers, timeout=None, *, deadline=None, cancellation_event
         except requests.exceptions.ConnectTimeout:
             if retry_count == CONNECT_TIMEOUT_RETRIES:
                 raise
-            logger.warning(
-                "multimodal download connect timeout; retrying request (%d/%d)",
-                retry_count + 1,
-                CONNECT_TIMEOUT_RETRIES,
-            )
+            if on_retry is not None:
+                on_retry(retry_count + 1)
+            else:
+                logger.warning(
+                    "multimodal download connect timeout; retrying request (%d/%d)",
+                    retry_count + 1,
+                    CONNECT_TIMEOUT_RETRIES,
+                )
 
 
 def _get_http_heads(download_headers: str = ""):
@@ -310,15 +320,41 @@ def _download_http_content(
     from urllib3.exceptions import ReadTimeoutError
 
     response = None
+    http_status = None
+    started = time.monotonic()
+    retry_count = 0
+
+    def on_retry(count):
+        nonlocal retry_count
+        retry_count = count
+
+    def failure(kind: str, message: str, code: ExceptionType) -> MediaDownloadError:
+        return MediaDownloadError(
+            code,
+            message,
+            kind,
+            http_status,
+            media_domain(url),
+            (time.monotonic() - started) * 1000,
+            retry_count,
+        )
+
     try:
         if deadline is None and cancellation_event is None:
-            response = request_get(url, headers)
+            response = request_get(url, headers, on_retry=on_retry)
         else:
             response = request_get(
-                url, headers, deadline=deadline, cancellation_event=cancellation_event
+                url,
+                headers,
+                deadline=deadline,
+                cancellation_event=cancellation_event,
+                on_retry=on_retry,
             )
-        if response.status_code != 200:
-            raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
+        http_status = response.status_code
+        if http_status != 200:
+            raise failure(
+                "http_status", MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED
+            )
 
         if max_file_size_kb is not None and max_file_size_kb > 0:
             content_length = response.headers.get("Content-Length")
@@ -346,23 +382,41 @@ def _download_http_content(
         raise
     except concurrent.futures.CancelledError:
         raise
+    except requests.exceptions.ConnectTimeout:
+        raise failure(
+            "connect_timeout", MMErr.DL_TIMEOUT, ExceptionType.MM_DOWNLOAD_FAILED
+        ) from None
+    except requests.exceptions.ReadTimeout:
+        raise failure(
+            "read_timeout", MMErr.DL_TIMEOUT, ExceptionType.MM_DOWNLOAD_FAILED
+        ) from None
     except (requests.exceptions.Timeout, TimeoutError):
-        raise_mm(MMErr.DL_TIMEOUT, ExceptionType.MM_DOWNLOAD_FAILED)
+        raise failure(
+            "timeout", MMErr.DL_TIMEOUT, ExceptionType.MM_DOWNLOAD_FAILED
+        ) from None
     except requests.exceptions.ConnectionError as error:
         # Response.iter_content wraps urllib3's read timeout in ConnectionError.
         if error.args and isinstance(error.args[0], ReadTimeoutError):
-            raise_mm(MMErr.DL_TIMEOUT, ExceptionType.MM_DOWNLOAD_FAILED)
-        raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
+            raise failure(
+                "read_timeout", MMErr.DL_TIMEOUT, ExceptionType.MM_DOWNLOAD_FAILED
+            ) from None
+        raise failure(
+            "connection_error", MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED
+        ) from None
     except (
         requests.exceptions.InvalidURL,
         requests.exceptions.MissingSchema,
         requests.exceptions.InvalidSchema,
         requests.exceptions.URLRequired,
     ):
-        raise_mm(MMErr.URL_INVALID, ExceptionType.MM_WRONG_FORMAT_ERROR)
+        raise failure(
+            "invalid_url", MMErr.URL_INVALID, ExceptionType.MM_WRONG_FORMAT_ERROR
+        ) from None
     except Exception:
-        logger.exception("failed to download multimodal content")
-        raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
+        # Transport exceptions can include signed URLs and request headers.
+        raise failure(
+            "request_error", MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED
+        ) from None
     finally:
         if response is not None:
             response.close()
