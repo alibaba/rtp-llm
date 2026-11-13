@@ -379,6 +379,7 @@ class FrontendWorker:
             urls=None,
             input_ids=input_ids,
             generate_config=generate_config,
+            generate_env_config=self.generate_env_config,
             headers=headers,
         )
         async for response in stream:

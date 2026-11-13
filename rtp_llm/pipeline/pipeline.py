@@ -184,6 +184,7 @@ class Pipeline(object):
         prompt: str,
         request_id: int = None,
         urls: Optional[List[str]] = None,
+        generate_env_config=None,
         **kwargs: Any,
     ) -> AsyncGenerator[GenerateResponse, None]:
         begin_time = current_time_ms()
@@ -199,6 +200,7 @@ class Pipeline(object):
             len(self.tokenizer),
             self._special_tokens,
             self.tokenizer,
+            generate_env_config=generate_env_config,
             **kwargs,
         )
         mm_inputs = (
