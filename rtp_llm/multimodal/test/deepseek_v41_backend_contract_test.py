@@ -88,8 +88,7 @@ class DeepSeekV41BackendContractTest(unittest.TestCase):
             mm_image_max_file_size_kb=123,
         )
 
-    def test_remote_identity_uses_same_source_as_decoder_and_inspection(self):
-        import hashlib
+    def test_remote_cache_retains_inspection_source_without_hashing_it(self):
         import pickle
 
         self.vit_config.mm_remote_cache_enable = True
@@ -105,10 +104,7 @@ class DeepSeekV41BackendContractTest(unittest.TestCase):
             )
         load.assert_called_once()
         self.assertEqual(result.inspection_sources, [payload])
-        self.assertEqual(
-            result.source_identity.sha256, hashlib.sha256(payload).hexdigest()
-        )
-        self.assertEqual(result.source_identity.nbytes, len(payload))
+        self.assertIsNone(result.source_identity)
         restored = pickle.loads(pickle.dumps(result))
         self.assertEqual(restored.source_identity, result.source_identity)
         self.assertTrue(torch.equal(restored.data.rgb, result.data.rgb))

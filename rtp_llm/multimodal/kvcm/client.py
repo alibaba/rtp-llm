@@ -131,6 +131,7 @@ class RtpKvMetaObjectClient:
         call_timeout_ms: int | None = None,
         put_timeout_ms: int | None = None,
         get_timeout_ms: int | None = None,
+        inspection: bool = False,
         gpu_tensors: Sequence[Any] = (),
     ) -> RtpKvMetaObjectClient:
         """Create from ``environ``, or the current process's ``RECO_*`` values."""
@@ -141,6 +142,7 @@ class RtpKvMetaObjectClient:
             call_timeout_ms=call_timeout_ms,
             put_timeout_ms=put_timeout_ms,
             get_timeout_ms=get_timeout_ms,
+            inspection=inspection,
         )
         return cls._from_config(config, gpu_tensors=gpu_tensors)
 
@@ -153,6 +155,7 @@ class RtpKvMetaObjectClient:
         call_timeout_ms: int | None = None,
         put_timeout_ms: int | None = None,
         get_timeout_ms: int | None = None,
+        inspection: bool = False,
         gpu_tensors: Sequence[Any] = (),
     ) -> RtpKvMetaObjectClient:
         """Create and register from RTP's parsed ``KVCacheConfig`` object."""
@@ -163,6 +166,7 @@ class RtpKvMetaObjectClient:
             call_timeout_ms=call_timeout_ms,
             put_timeout_ms=put_timeout_ms,
             get_timeout_ms=get_timeout_ms,
+            inspection=inspection,
         )
         return cls._from_config(config, gpu_tensors=gpu_tensors)
 

@@ -637,10 +637,9 @@ class InspectionPipelineTest(TestCase):
             engine.stop()
 
 
-class RemoteIdentityWorkerTest(TestCase):
-    def test_actual_decoder_identity_crosses_spawn_without_original_bytes(self):
+class InspectionSourceWorkerTest(TestCase):
+    def test_remote_cache_sends_neither_original_bytes_nor_digest_to_parent(self):
         import base64
-        import hashlib
         import io
 
         from PIL import Image
@@ -685,10 +684,7 @@ class RemoteIdentityWorkerTest(TestCase):
             executor.submit(item)
             wire_result = item.future.get(timeout=30).result
             self.assertEqual(wire_result.inspection_sources, [])
-            self.assertEqual(
-                wire_result.source_identity.sha256, hashlib.sha256(media).hexdigest()
-            )
-            self.assertEqual(wire_result.source_identity.nbytes, len(media))
+            self.assertIsNone(wire_result.source_identity)
             executor.get_result(item)
             self.assertEqual(item.source_identity, wire_result.source_identity)
             self.assertIsNone(item.inspection_sources)

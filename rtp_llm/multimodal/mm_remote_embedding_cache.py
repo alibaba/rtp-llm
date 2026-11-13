@@ -1,35 +1,30 @@
 """Bounded shared KVCM tier, populated by accepted encoder results.
 
-Remote identity binds actual image bytes to an immutable model namespace.
+Remote keys scope local embedding identities to an immutable model namespace.
 The local GPU/CPU scheduler and asynchronous eviction policy remain unchanged.
 """
 
-import base64
-import binascii
 import concurrent.futures
 import hashlib
 import json
 import logging
 import os
-import re
 import threading
 import time
 from collections import Counter
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 
 import torch
 
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
 from rtp_llm.multimodal.kvcm.tensor_object import (
     pack_object,
     plan_object,
     unpack_object,
-)
-from rtp_llm.multimodal.mm_preprocess_result import (
-    ImageSourceIdentity,
-    is_http_image_input,
 )
 
 # Python 3.10 keeps future wait timeouts separate from built-in IO timeouts.
@@ -47,10 +42,12 @@ class MMRemoteEmbeddingCache:
         read_timeout_ms=200,
         cuda_device=None,
         client_factory=None,
+        inspection_factory=None,
         namespace="",
         model_identity=None,
         gdr_enabled=None,
         audit_enabled=None,
+        request_scoped_inspection=False,
     ):
         if min(max_object_bytes, max_inflight_bytes, max_pending, read_timeout_ms) <= 0:
             raise ValueError("remote embedding cache limits must be positive")
@@ -62,6 +59,9 @@ class MMRemoteEmbeddingCache:
             )
         self._client = client
         self._factory = client_factory
+        self._inspection_factory = inspection_factory
+        self._inspection_client = None
+        self._inspection_lock = threading.Lock()
         self._client_lock = threading.Lock()
         self._client_users = {}
         self.max_object_bytes = max_object_bytes
@@ -69,8 +69,12 @@ class MMRemoteEmbeddingCache:
         self.max_pending = max_pending
         self.read_timeout_ms = read_timeout_ms
         self.cuda_device = cuda_device
-        self._namespace = namespace
         self._model_identity = model_identity or {}
+        scope = json.dumps(
+            [namespace, self._model_identity], sort_keys=True, separators=(",", ":")
+        ).encode()
+        self._key_prefix = "mm-v3:" + hashlib.sha256(scope).hexdigest() + ":"
+        self.request_scoped_inspection = request_scoped_inspection
         if gdr_enabled is None:
             gdr_enabled = os.environ.get("MM_REMOTE_CACHE_GDR_ENABLE") == "1"
         self._transport_mode = "gdr" if gdr_enabled else "staging"
@@ -98,7 +102,13 @@ class MMRemoteEmbeddingCache:
 
     @classmethod
     def from_configs(
-        cls, model_config, vit_config, *, kv_cache_config=None, device=None
+        cls,
+        model_config,
+        vit_config,
+        *,
+        kv_cache_config=None,
+        device=None,
+        request_scoped_inspection=False,
     ):
         from rtp_llm.multimodal.kvcm import RtpKvMetaObjectClient
 
@@ -164,6 +174,7 @@ class MMRemoteEmbeddingCache:
         return cls(
             client,
             client_factory=None if gdr_enabled else factory,
+            inspection_factory=partial(raw_factory, inspection=True),
             namespace=namespace,
             model_identity=identity,
             max_object_bytes=vit_config.mm_remote_cache_max_object_bytes,
@@ -173,6 +184,7 @@ class MMRemoteEmbeddingCache:
             cuda_device=device,
             gdr_enabled=gdr_enabled,
             audit_enabled=vit_config.mm_remote_cache_audit,
+            request_scoped_inspection=request_scoped_inspection,
         )
 
     def normalize_cpp_url_input(self, item):
@@ -190,7 +202,7 @@ class MMRemoteEmbeddingCache:
         if (
             (model_type in ("qwen3_vl", "qwen3_vl_moe", "deepseek_vl_v2") or is_v41)
             and item.mm_type == MMUrlType.IMAGE
-            and inline_url
+            and (inline_url or item.url.startswith(("http://", "https://")))
             and tensor is not None
             and tensor.device.type == "cpu"
             and tensor.dtype == torch.float32
@@ -206,7 +218,7 @@ class MMRemoteEmbeddingCache:
                 tensor_device="cpu",
             )
 
-    def key(self, mm_inputs, *, trace_id=None, source_identity=None):
+    def key(self, mm_inputs, *, trace_id=None, local_key=None):
         def bypass(reason, **fields):
             self._report_skip("key", reason)
             self.record("cache_bypass", trace_id=trace_id, reason=reason, **fields)
@@ -221,11 +233,6 @@ class MMRemoteEmbeddingCache:
 
         if item.mm_type != MMUrlType.IMAGE:
             return bypass("unsupported_media_type", mm_type=int(item.mm_type))
-        # The V4.1 renderer wraps immutable image bytes as octet-stream.
-        # IMAGE remains the type gate; the MIME label is not part of identity.
-        match = re.match(
-            r"^data:(?:image/[^;,]+|application/octet-stream);base64,", item.url
-        )
         if item.tensor is not None and item.tensor.numel():
             return bypass(
                 "nonempty_tensor",
@@ -233,66 +240,16 @@ class MMRemoteEmbeddingCache:
                 tensor_dtype=str(item.tensor.dtype),
                 tensor_device=str(item.tensor.device),
             )
-        identity_source = "inline_image_bytes"
-        if match is not None:
-            try:
-                media = base64.b64decode(item.url[match.end() :], validate=True)
-            except (binascii.Error, ValueError):
-                return bypass("invalid_inline_base64")
-            if not media:
-                return bypass("empty_inline_image")
-            identity = ImageSourceIdentity.from_bytes(media)
-            if source_identity is not None and source_identity != identity:
-                return bypass("source_identity_mismatch")
-        elif is_http_image_input(mm_inputs) and isinstance(
-            source_identity, ImageSourceIdentity
-        ):
-            # Only the trusted CPU preprocessor can supply this sidecar. The
-            # public request/RPC contains no digest field. URL strings, headers
-            # and signed query parameters are never accepted as content identity.
-            identity = source_identity
-            identity_source = "downloaded_image_bytes"
-        else:
-            return bypass("non_inline_image")
-        limits = self._model_identity.get("input_limits", [])
-        if limits and limits[0] > 0 and identity.nbytes > limits[0] * 1024:
-            return bypass(
-                "inline_image_too_large" if match else "downloaded_image_too_large",
-                media_nbytes=identity.nbytes,
-            )
-        config = item.mm_preprocess_config
-        fields = (
-            "width",
-            "height",
-            "min_pixels",
-            "max_pixels",
-            "fps",
-            "min_frames",
-            "max_frames",
-            "crop_positions",
-            "max_long_side_pixel",
-        )
-        preprocessing = {name: getattr(config, name, None) for name in fields}
-        media_sha256 = identity.sha256
-        material = dict(
-            schema="rtp-mm-result-v2",
-            namespace=self._namespace,
-            model=self._model_identity,
-            mm_type=int(item.mm_type),
-            media_sha256=media_sha256,
-            preprocessing=preprocessing,
-        )
-        encoded = json.dumps(
-            material, sort_keys=True, separators=(",", ":"), allow_nan=False
-        ).encode()
-        key = "mm-v2:" + hashlib.sha256(encoded).hexdigest()
+        if local_key is None:
+            if not item.url:
+                return bypass("missing_url")
+            local_key = item.cache_key()
+        key = self._key_prefix + hashlib.sha256(local_key.encode()).hexdigest()
         self.record(
             "cache_admitted",
             key=key,
             trace_id=trace_id,
-            identity_source=identity_source,
-            media_sha256=media_sha256,
-            media_nbytes=identity.nbytes,
+            identity_source="local_cache_key",
         )
         return key
 
@@ -605,7 +562,9 @@ class MMRemoteEmbeddingCache:
         if entry is not None and key is not None:
             entry.remote_cache_context = dict(key=key, trace_id=trace_id)
 
-    def submit_result(self, key, result, *, trace_id=None, producer_events=()):
+    def submit_result(
+        self, key, result, *, trace_id=None, producer_events=(), entry=None
+    ):
         """Snapshot an accepted encoder result, then upload owned bytes.
 
         Admission precedes allocation. Snapshotting happens on the caller while
@@ -615,7 +574,23 @@ class MMRemoteEmbeddingCache:
         if key is None:
             return
         try:
-            plan = plan_object(result, max_bytes=self.max_object_bytes)
+            inspection = None
+            if entry is not None:
+                verdict, checked = entry.greennet_snapshot()
+                if verdict is not None:
+                    if not verdict.passed:
+                        return
+                    inspection = dict(
+                        checked=checked,
+                        passed=verdict.passed,
+                        code=verdict.code,
+                        message=verdict.message,
+                        request_scoped=self.request_scoped_inspection,
+                    )
+            plan = plan_object(
+                {"version": 1, "result": result, "greennet": inspection},
+                max_bytes=self.max_object_bytes,
+            )
         except (ValueError, TypeError, RecursionError):
             self._count("encode_skip")
             self._report_skip("write", "unsupported_payload")
@@ -662,6 +637,15 @@ class MMRemoteEmbeddingCache:
             self._report_operation("write", started, "error", plan.nbytes)
             done(None)
             return
+        if (
+            entry is not None
+            and self._inspection_factory is not None
+            and not self.request_scoped_inspection
+            and not (inspection and inspection["checked"])
+        ):
+            # An unchecked encoder result can later be audited from the local
+            # cache without another remote lookup.
+            entry.on_shared_approval(partial(self._write_approval, key, trace_id))
         # The worker owns only the snapshot and small metadata, not tensors.
         nbytes, tensors = plan.nbytes, plan.header["tensors"]
 
@@ -725,7 +709,166 @@ class MMRemoteEmbeddingCache:
             return
         future.add_done_callback(done)
 
-    def load(self, key, *, timeout_ms=None, trace_id=None):
+    @staticmethod
+    def _decode_value(value):
+        # Older workers wrote the bare result tuple/list without inspection metadata.
+        approval = None
+        if isinstance(value, dict):
+            if (
+                set(value) != {"version", "result", "greennet"}
+                or type(value["version"]) is not int
+                or value["version"] != 1
+            ):
+                raise ValueError("invalid remote embedding cache schema")
+            inspection = value["greennet"]
+            if inspection is not None:
+                if (
+                    not isinstance(inspection, dict)
+                    or set(inspection)
+                    != {"checked", "passed", "code", "message", "request_scoped"}
+                    or any(
+                        type(inspection[k]) is not bool
+                        for k in ("checked", "passed", "request_scoped")
+                    )
+                    or type(inspection["code"]) is not int
+                    or not isinstance(inspection["message"], str)
+                ):
+                    raise ValueError("invalid remote GreenNet verdict")
+                if not inspection["passed"]:
+                    raise ValueError("remote embedding has a rejected GreenNet verdict")
+                if inspection["checked"] and not inspection["request_scoped"]:
+                    approval = GreenNetVerdict(
+                        True, inspection["code"], inspection["message"]
+                    )
+            value = value["result"]
+        if not isinstance(value, (list, tuple)) or len(value) not in (2, 3):
+            raise ValueError("remote object is not a multimodal result")
+        return value, approval
+
+    # Small CPU-only objects in a separate KVMeta instance use the exact
+    # embedding key. Immutable saves allow concurrent approvals without
+    # removing tensors that other clients may still be reading.
+    _MAX_APPROVAL_BYTES = 64 * 1024
+
+    @contextmanager
+    def _use_inspection_client(self):
+        # Small metadata transfers share a CPU client. Replace a failed native
+        # client only after its active operation has ended.
+        with self._inspection_lock:
+            if self._inspection_client is None:
+                self._inspection_client = self._inspection_factory()
+            try:
+                yield self._inspection_client
+            except Exception:
+                self._close_client(self._inspection_client)
+                self._inspection_client = None
+                raise
+
+    def _write_approval(self, key, trace_id, verdict):
+        try:
+            payload = json.dumps(
+                dict(
+                    version=1,
+                    key=key,
+                    checked=True,
+                    passed=True,
+                    request_scoped=False,
+                    code=verdict.code,
+                    message=verdict.message,
+                ),
+                separators=(",", ":"),
+            ).encode()
+            if len(payload) > min(
+                self._MAX_APPROVAL_BYTES, self.max_object_bytes
+            ) or not self._reserve(len(payload)):
+                self._report_skip("approval_write", "admission")
+                return
+
+            def write():
+                with self._observe_stage("approval_write", "transfer", len(payload)):
+                    buffer = torch.frombuffer(bytearray(payload), dtype=torch.uint8)
+                    with self._use_inspection_client() as client:
+                        client.save_one(key, buffer, trace_id=trace_id)
+
+            try:
+                future = self._executor.submit(write)
+            except RuntimeError:
+                self._release(len(payload))
+                return
+
+            def done(task):
+                self._release(len(payload))
+                if not task.cancelled():
+                    error = task.exception()
+                    self.record(
+                        "approval_write_error" if error else "approval_stored",
+                        key=key,
+                        trace_id=trace_id,
+                    )
+
+            future.add_done_callback(done)
+        except Exception:
+            # A best-effort cache update cannot change the inspection verdict.
+            self.record("approval_write_error", key=key, trace_id=trace_id)
+
+    def _read_approval(self, key, trace_id, deadline):
+        # Caller already has the tensor. An absent, invalid or late verdict
+        # only triggers inspection and must never turn that tensor into a miss.
+        timeout = deadline - time.monotonic()
+        budget = min(
+            self._MAX_APPROVAL_BYTES, self.max_inflight_bytes, self.max_object_bytes
+        )
+        if timeout <= 0 or not self._reserve(budget):
+            return None
+
+        def read():
+            with self._use_inspection_client() as client:
+                remaining = int((deadline - time.monotonic()) * 1000)
+                if remaining <= 0:
+                    return None
+                size = client.object_size(key, trace_id=trace_id, timeout_ms=remaining)
+                if size is None:
+                    return None
+                if not 0 < size <= budget:
+                    raise ValueError("invalid remote approval size")
+                buffer = torch.empty(size, dtype=torch.uint8)
+                client.load_one(key, buffer, trace_id=trace_id)
+            value = json.loads(buffer.numpy().tobytes())
+            if (
+                not isinstance(value, dict)
+                or type(value.get("version")) is not int
+                or value["version"] != 1
+                or value.get("key") != key
+                or value.get("checked") is not True
+                or value.get("passed") is not True
+                or value.get("request_scoped") is not False
+                or type(value.get("code")) is not int
+                or not isinstance(value.get("message"), str)
+            ):
+                raise ValueError("invalid remote approval")
+            return GreenNetVerdict(True, value["code"], value["message"])
+
+        try:
+            future = self._executor.submit(read)
+        except RuntimeError:
+            self._release(budget)
+            return None
+        future.add_done_callback(lambda _: self._release(budget))
+        try:
+            return future.result(timeout=max(0, deadline - time.monotonic()))
+        except Exception as error:
+            future.cancel()
+            self.record(
+                "approval_read_error",
+                key=key,
+                trace_id=trace_id,
+                error_type=type(error).__name__,
+            )
+            return None
+
+    def load(
+        self, key, *, timeout_ms=None, trace_id=None, entry=None, restore_approval=True
+    ):
         if key is None:
             return None
         timeout_ms = min(self.read_timeout_ms, timeout_ms or self.read_timeout_ms)
@@ -739,6 +882,7 @@ class MMRemoteEmbeddingCache:
             return None
         cost = 0
         future = None
+        transfer_released = False
 
         def read():
             nonlocal cost
@@ -802,9 +946,21 @@ class MMRemoteEmbeddingCache:
                     max_bytes=self.max_object_bytes,
                     cuda_device=self.cuda_device,
                 )
-                if not isinstance(value, (list, tuple)) or len(value) not in (2, 3):
-                    raise ValueError("remote object is not a multimodal result")
+                value, approval = self._decode_value(value)
                 plan = plan_object(value, max_bytes=self.max_object_bytes)
+                if entry is not None and not self.request_scoped_inspection:
+                    if approval is None and self._inspection_factory is not None:
+                        # The tensor read is complete. Allow the small lookup even
+                        # with max_pending=1, under the original read deadline.
+                        self._release(cost)
+                        transfer_released = True
+                        approval = self._read_approval(key, trace_id, deadline)
+                        if approval is None:
+                            entry.on_shared_approval(
+                                partial(self._write_approval, key, trace_id)
+                            )
+                    if approval is not None and restore_approval:
+                        entry.set_greennet_verdict(approval)
             self._count("hit")
             outcome = "hit"
             payload_nbytes = buffer.numel()
@@ -845,10 +1001,11 @@ class MMRemoteEmbeddingCache:
                 status=outcome,
                 scope="caller_queue_client_acquire_sdk_load_unpack_and_validation",
             )
-            if future is None or future.done():
-                self._release(cost)
-            else:
-                future.add_done_callback(lambda _: self._release(cost))
+            if not transfer_released:
+                if future is None or future.done():
+                    self._release(cost)
+                else:
+                    future.add_done_callback(lambda _: self._release(cost))
 
     def stats(self):
         with self._lock, self._stats_lock:
@@ -862,6 +1019,8 @@ class MMRemoteEmbeddingCache:
                 return
             self._closed = True
         self._executor.shutdown(wait=True, cancel_futures=True)
+        if self._inspection_client is not None:
+            self._close_client(self._inspection_client)
         with self._client_lock:
             client, self._client = self._client, None
             if client is not None:
