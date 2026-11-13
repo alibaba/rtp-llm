@@ -40,3 +40,4 @@ class ExecutorType(Enum):
     FP8_FP4 = 9  # DeepGEMM FP8-activation x FP4-weight executor
     CUTLASS_NVFP4 = 10
     MARLIN_NVFP4 = 11
+    NVFP4_HYBRID = 12

@@ -128,12 +128,14 @@ else:
             CudaFp4EpNormalStrategy,
             CudaFp4NoDPStrategy,
             CudaNvfp4CutlassStrategy,
+            CudaNvfp4HybridStrategy,
         )
 
         registry.register(CudaFp4EpLowLatencyStrategy())
         registry.register(CudaFp4EpNormalStrategy())
         registry.register(CudaFp4NoDPStrategy())
         registry.register(CudaNvfp4CutlassStrategy())
+        registry.register(CudaNvfp4HybridStrategy())
     FusedMoeFactory.set_registry(registry)
 
 # Out-of-tree backends registered a hook before this module existed. Runs for

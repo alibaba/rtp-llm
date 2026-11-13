@@ -852,6 +852,8 @@ class ModelOptFp4Config(QuantizationConfig):
             "activation_amax", 32.0 if qwen4_recipe else None
         )
         self.online_cache_dir = kwargs.get("online_cache_dir", None)
+        self.decode_b12x_max_rows = kwargs.get("decode_b12x_max_rows", 16)
+        self.decode_cutlass_profile_ids = kwargs.get("decode_cutlass_profile_ids", None)
         self.prefill_library = kwargs.get("prefill_library", None)
         self.prefill_library_sha256 = kwargs.get("prefill_library_sha256", None)
         self.source_fp8_block_size = kwargs.get(
