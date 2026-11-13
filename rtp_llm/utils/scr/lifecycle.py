@@ -35,18 +35,6 @@ class RestoreFixup(Protocol):
     def restore_fixup(self, context: RestoreContext) -> None: ...
 
 
-class DeferredStartup(Protocol):
-    """A component whose network side effects wait for the startup barrier.
-
-    Every participant follows one order: prepare local state, join the
-    barrier, then start.  When no template phase is active the barrier is a
-    no-op, so the component starts immediately and there is no second code
-    path to keep in sync.
-    """
-
-    def start_deferred(self) -> None: ...
-
-
 class TemplateLifecycleHook(RestoreFixup, Protocol):
     """Optional operations run around one template barrier."""
 
