@@ -1,5 +1,7 @@
 from typing import Any, Dict, Mapping, Optional
 
+VIT_SOURCE_REQUEST_ID_METADATA = "x-rtp-source-request-id-bin"
+
 REQUEST_HEADER_NAMES = (
     "user_id",
     "x-dashscope-uid",
@@ -92,3 +94,17 @@ def dashscope_greennet_metadata(headers: Optional[Mapping[str, Any]]) -> tuple:
         for name in ("x-dashscope-uid", "x-dashscope-service")
         if name in normalized
     )
+
+
+def vit_source_request_metadata(source_request_id: str) -> tuple:
+    value = source_request_id.encode("utf-8")[:256]
+    return ((VIT_SOURCE_REQUEST_ID_METADATA, value),) if value else ()
+
+
+def vit_forwarding_metadata(headers: Optional[Mapping[str, Any]]) -> tuple:
+    """Forward only ViT identity and bounded binary request correlation."""
+    metadata = dashscope_greennet_metadata(headers)
+    source_id = (headers or {}).get(VIT_SOURCE_REQUEST_ID_METADATA)
+    if isinstance(source_id, bytes) and source_id:
+        metadata += ((VIT_SOURCE_REQUEST_ID_METADATA, source_id[:256]),)
+    return metadata

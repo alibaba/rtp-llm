@@ -28,11 +28,16 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 )
 from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCache, MMHashKeyCache
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
+from rtp_llm.multimodal.mm_request_context import (
+    MEDIA_REQUEST_CONTEXT,
+    MediaRequestContext,
+)
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, PDSepConfig, VitSeparation
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.mm_cache_metadata import metadata_from_proto
-from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
+from rtp_llm.server.request_headers import vit_source_request_metadata
+from rtp_llm.server.vit_rpc_server import MultimodalRpcServer, _media_request_context
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 
 
@@ -105,6 +110,37 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         return MultimodalHashRequestPB(
             keys=keys or self.keys, inputs=inputs, timeout_ms=2000
         )
+
+    async def test_binary_source_identity_reaches_embedding_handler(self):
+        captured = []
+
+        def compute(inputs, **kwargs):
+            captured.append(MEDIA_REQUEST_CONTEXT.get())
+            return self.compute(inputs, **kwargs)
+
+        self.engine.get_embedding_result.side_effect = compute
+        await self.stub.GetMultimodalHashes(
+            self.wire_request(),
+            timeout=2,
+            metadata=vit_source_request_metadata("source-请求#attempt2"),
+        )
+        self.assertEqual(captured, [MediaRequestContext(123, "source-请求#attempt2")])
+        self.assertEqual(MEDIA_REQUEST_CONTEXT.get(), MediaRequestContext())
+
+    def test_rpc_context_resets_on_failure(self):
+        @_media_request_context
+        def fail(server, request, context):
+            self.assertEqual(
+                MEDIA_REQUEST_CONTEXT.get(), MediaRequestContext(7, "source")
+            )
+            raise RuntimeError("request failed")
+
+        context = SimpleNamespace(
+            invocation_metadata=lambda: vit_source_request_metadata("source")
+        )
+        with self.assertRaisesRegex(RuntimeError, "request failed"):
+            fail(None, MultimodalInputsPB(request_id=7), context)
+        self.assertEqual(MEDIA_REQUEST_CONTEXT.get(), MediaRequestContext())
 
     async def test_status_poll_does_not_snapshot_keys(self):
         with patch.object(self.engine._hash_key_cache, "keys") as hashes, patch.object(

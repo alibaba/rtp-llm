@@ -41,7 +41,7 @@ from rtp_llm.multimodal.greennet_hook import (
     GreenNetProvider,
     GreenNetVerdict,
 )
-from rtp_llm.multimodal.mm_error_messages import MMErr
+from rtp_llm.multimodal.mm_error_messages import MediaDownloadError, MMErr
 from rtp_llm.multimodal.mm_process_engine import (
     MMEmbeddingAsyncCache,
     MMEmbeddingCacheEntry,
@@ -49,6 +49,10 @@ from rtp_llm.multimodal.mm_process_engine import (
     MMProcessEngine,
     MMWorkItem,
     _feature_hashes_from_result,
+)
+from rtp_llm.multimodal.mm_request_context import (
+    MEDIA_REQUEST_CONTEXT,
+    MediaRequestContext,
 )
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
@@ -1125,6 +1129,43 @@ class MMEmbeddingAsyncCacheTest(TestCase):
 
 
 class VitErrorReportingTest(TestCase):
+    @patch("rtp_llm.multimodal.mm_process_engine.logging.warning")
+    @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+    def test_download_failure_deduplicates_safe_diagnostics(self, report, warning):
+        engine = object.__new__(MMProcessEngine)
+        error = MediaDownloadError(
+            ExceptionType.MM_DOWNLOAD_FAILED,
+            "download failed",
+            "http",
+            403,
+            "media.example",
+            12.5,
+            2,
+        )
+        token = MEDIA_REQUEST_CONTEXT.set(
+            MediaRequestContext(71, "external-id#attempt3")
+        )
+        try:
+            engine.report_vit_error(error)
+            engine.report_vit_error(error)
+        finally:
+            MEDIA_REQUEST_CONTEXT.reset(token)
+        self.assertEqual(report.call_count, 2)
+        self.assertEqual(
+            report.call_args.args,
+            (
+                AccMetrics.VIT_MEDIA_DOWNLOAD_FAILURE_QPS_METRIC,
+                1,
+                {"failure_type": "http", "http_status": "403"},
+            ),
+        )
+        warning.assert_called_once()
+        fields = json.loads(warning.call_args.args[1])
+        self.assertEqual(fields["request_id"], 71)
+        self.assertEqual(fields["source_request_id"], "external-id")
+        self.assertEqual(fields["source_retry_count"], 3)
+        self.assertEqual(fields["media_domain"], "media.example")
+
     @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
     def test_proxy_worker_reports_each_error_once(self, report):
         engine = object.__new__(MMProcessEngine)
@@ -2342,13 +2383,13 @@ class MMAccessLoggerRequestIdTest(TestCase):
         access_logger = MMAccessLogger.__new__(MMAccessLogger)
         access_logger.query_logger = MagicMock()
         mm_input = MagicMock()
-        mm_input.to_string.return_value = "image://test"
+        mm_input.url = "https://user:secret@media.example/image.jpg?signature=private"
 
         access_logger.log_query_access([mm_input], request_id=123456)
 
         payload = json.loads(access_logger.query_logger.info.call_args.args[0])
         self.assertEqual(payload["id"], 123456)
-        self.assertEqual(payload["query"], ["image://test"])
+        self.assertEqual(payload["query"], ["media.example"])
 
 
 if __name__ == "__main__":
