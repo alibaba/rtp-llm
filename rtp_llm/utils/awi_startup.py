@@ -96,12 +96,47 @@ def probe_installed() -> bool:
         return _installed
 
 
+def _model_native_context_tokens() -> int:
+    """Native positional context declared by the mounted checkpoint.
+
+    Reads ``max_position_embeddings`` from ``$CHECKPOINT_PATH/config.json``
+    (nested ``text_config`` first, then top level). Returns 0 when unknown.
+    """
+    try:
+        ckpt = os.environ.get("CHECKPOINT_PATH", "")
+        if not ckpt:
+            return 0
+        with open(os.path.join(ckpt, "config.json")) as f:
+            cfg = json.load(f)
+        for section in (cfg.get("text_config"), cfg):
+            if isinstance(section, dict):
+                value = section.get("max_position_embeddings")
+                if value:
+                    return int(value)
+    except Exception:  # noqa: BLE001 - telemetry must never break startup
+        logging.warning("AWI: could not read native context from checkpoint config")
+    return 0
+
+
 def build_configuration_json(py_env_configs, engine=None) -> str:
-    """Effective configuration derived from the live engine objects."""
+    """Effective configuration derived from the live engine objects.
+
+    ``context_tokens`` is the effective full-context span this deployment
+    serves: min(server max_seq_len cap, model native max_position_embeddings).
+    The server cap may legitimately carry reserve headroom ABOVE the native
+    context (e.g. MAX_SEQ_LEN=1048832 = 1,048,576 contract span + 256 armed
+    reserve_step, so the AWI arm's reservation cannot eat the output budget);
+    positions beyond the checkpoint's declared native context are outside the
+    guaranteed span, so the honest effective value is the minimum. Falls back
+    to the server cap when the native declaration is unavailable.
+    """
     context_tokens = -1
     try:
         if engine is not None and getattr(engine, "config", None) is not None:
             context_tokens = int(engine.config.max_seq_len)
+            native = _model_native_context_tokens()
+            if native > 0:
+                context_tokens = min(context_tokens, native)
     except Exception:  # noqa: BLE001 - configuration must never break startup
         logging.warning("AWI: could not read max_seq_len from engine config")
     memory_kv_reuse = bool(
