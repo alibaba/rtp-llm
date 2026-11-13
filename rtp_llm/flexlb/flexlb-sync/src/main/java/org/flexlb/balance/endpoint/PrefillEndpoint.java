@@ -83,6 +83,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
             new RoutingConfig.ExecutionTimeEstimatorConfig().getExpression());
     private final PrefillTimePredictor predictor;
     private final long inflightRequestLimit;
+    /** Engine waiting-queue admission gate; null when tokenBalance disables the gate. */
+    private final EngineQueueAdmission engineQueueAdmission;
     private final WorkerBatcher runtime;
     private final PrefillState prefillState;
     private final EndpointEventProjector endpointEvents;
@@ -122,10 +124,35 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 .getRoles().getPrefill();
         RoutingConfig.TokenBalanceConfig tokenBalance =
                 prefillRouting == null ? null : prefillRouting.getTokenBalance();
+        this.engineQueueAdmission = tokenBalance == null
+                || tokenBalance.getEngineQueueAdmissionThreshold() == null
+                ? null
+                : new EngineQueueAdmission(
+                        tokenBalance.getEngineQueueAdmissionThreshold(),
+                        tokenBalance.getEngineQueueOverloadDurationMs());
+        if (engineQueueAdmission != null) {
+            prefillState.configureEngineQueueAdmission(engineQueueAdmission);
+        }
         if (tokenBalance != null) {
             this.prefillState.enableTokenWorkload(
                     tokenBalance.isEnableWindow() ? tokenBalance.getWindowMs() : 0L);
         }
+    }
+
+    /** Sustained Engine waiting-queue congestion verdict; UNKNOWN before the first status. */
+    public EngineQueueAdmission.State engineQueueAdmissionState() {
+        EngineQueueAdmission admission = engineQueueAdmission;
+        return admission == null
+                ? EngineQueueAdmission.State.UNKNOWN : admission.state();
+    }
+
+    /** Advisory Engine waiting-queue admission gate verdict for diagnostics. */
+    public boolean engineQueueAdmissionBlocked() {
+        EngineQueueAdmission admission = engineQueueAdmission;
+        return admission != null
+                && admission.state() != EngineQueueAdmission.State.UNKNOWN
+                && (admission.state() == EngineQueueAdmission.State.CONGESTED
+                        || admission.dispatchBlocked());
     }
 
     /** Start the attached generation exactly once before routing publication. */

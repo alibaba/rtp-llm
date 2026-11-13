@@ -330,6 +330,12 @@ final class FlexlbConfigValidator {
                     "router.roles.prefill.tokenBalance.maxPendingComputeTokens");
             positive(tokenBalance.getWindowMs(),
                     "router.roles.prefill.tokenBalance.windowMs");
+            if (tokenBalance.getEngineQueueAdmissionThreshold() != null) {
+                nonNegative(tokenBalance.getEngineQueueAdmissionThreshold(),
+                        "router.roles.prefill.tokenBalance.engineQueueAdmissionThreshold");
+            }
+            nonNegative(tokenBalance.getEngineQueueOverloadDurationMs(),
+                    "router.roles.prefill.tokenBalance.engineQueueOverloadDurationMs");
         }
 
         require(routing.getRoles().getDecode() != null,

@@ -58,6 +58,10 @@ public final class RoutingConfig {
         /** Include recently completed uncached tokens in ranking only; disabled by default. */
         private boolean enableWindow = false;
         private long windowMs = 10_000L;
+        /** Engine waiting-queue depth that blocks admission and dispatch; null disables the gate. */
+        private Long engineQueueAdmissionThreshold = 10L;
+        /** Sustained-above-threshold waiting depth before a worker counts as congested. */
+        private long engineQueueOverloadDurationMs = 5_000L;
     }
 
     @Getter
