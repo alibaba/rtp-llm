@@ -511,6 +511,7 @@ bool AwiRuntime::barrierReadyLocked() const {
     if (barrier_operation_.empty() || barrier_requests_.empty()) {
         return true;
     }
+    const bool single_request = barrier_requests_.size() == 1;
     int64_t total_reserved = 0;
     for (const auto& id : barrier_requests_) {
         auto it = request_state_.find(id);
@@ -519,7 +520,11 @@ bool AwiRuntime::barrierReadyLocked() const {
         }
         const auto& state = it->second;
         const auto  target = state.target_tokens > 0 ? state.target_tokens : state.input_tokens;
-        if (target > 0 && state.reserved_tokens < target) {
+        // The output-horizon block for a single-request operation is allocated
+        // by the first decode, so requiring it before releasing that decode is
+        // circular.  Barrier admission already checked the full input+output
+        // capacity; here the single request only needs its input context resident.
+        if (!single_request && target > 0 && state.reserved_tokens < target) {
             return false;
         }
         if (state.kv_tokens < state.input_tokens) {
@@ -529,7 +534,7 @@ bool AwiRuntime::barrierReadyLocked() const {
     }
     // The operation requests the whole context to be resident at once.  This
     // is a real allocator-derived sum, not the requested value echoed back.
-    if (barrier_context_tokens_ > 0 && total_reserved < barrier_context_tokens_) {
+    if (!single_request && barrier_context_tokens_ > 0 && total_reserved < barrier_context_tokens_) {
         return false;
     }
     return true;

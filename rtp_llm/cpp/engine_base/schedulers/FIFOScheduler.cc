@@ -321,7 +321,7 @@ bool FIFOScheduler::waitPredicate() {
     // Check streams directly without calling empty() which acquires lock_ (already held by schedule())
     // Pending loads and capacity-blocked waiters are polled by the timed wait below. They are not
     // wakeup events themselves, otherwise a retryable KV shortage spins the scheduler.
-    return stop_ || schedule_trigger_ || !running_streams_.empty();
+    return stop_ || schedule_trigger_ || !running_streams_.empty() || !awi_held_decode_streams_.empty();
 }
 
 void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_streams,
@@ -705,7 +705,20 @@ void FIFOScheduler::applyAwiBarrierGate() {
         }
     }
 
+    RTP_LLM_LOG_INFO("awi barrier gate active=%d ready=%d running=%zu held=%zu waiting=%zu requests=%zu",
+                     runtime.barrierActive(), runtime.barrierReady(), running_streams_.size(),
+                     awi_held_decode_streams_.size(), waiting_streams_.size(), runtime.barrierRequestCount());
     if (runtime.barrierReady()) {
+        restoreAwiHeldDecodes();
+        return;
+    }
+    // A single-request operation is trivially resident once its context has
+    // been prefilled.  Waiting for the output-horizon block to be allocated
+    // before the first decode is circular: that block is allocated by the
+    // first decode.  Release the hold for the single-request case; multi-
+    // request capacity still waits for every member to be resident.
+    if (runtime.barrierRequestCount() <= 1) {
+        RTP_LLM_LOG_INFO("awi barrier gate releasing single-request held decode");
         restoreAwiHeldDecodes();
         return;
     }
@@ -715,6 +728,10 @@ void FIFOScheduler::applyAwiBarrierGate() {
         if (stream && !stream->isContextStream() && runtime.isBarrierRequest(stream->streamId())) {
             const int64_t kv_tokens = static_cast<int64_t>(stream->curBlocksNum()) * stream->seqSizePerBlock();
             const int64_t materialized = std::min<int64_t>(kv_tokens, stream->seqLength());
+            RTP_LLM_LOG_INFO("awi barrier stream=%ld input=%d seq=%d cur_blocks=%zu block=%d max_tokens=%zu kv=%ld materialized=%ld",
+                             stream->streamId(), stream->inputLength(), stream->seqLength(),
+                             stream->curBlocksNum(), stream->seqSizePerBlock(), stream->maxTokenNum(),
+                             kv_tokens, materialized);
             const bool ready = runtime.observeResidentAndCheckReady(
                 stream->streamId(), stream->inputLength(), materialized, kv_tokens);
             if (!ready) {
@@ -742,6 +759,11 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
         // No running work can release capacity. Poll PD-held block releases without turning a
         // large retryable queue into a tight malloc/eviction loop.
         cond_.wait_for(lock, std::chrono::milliseconds(100), [this] { return waitPredicate(); });
+    } else if (!awi_held_decode_streams_.empty()) {
+        // A held barrier decode is not in running_streams_, so the normal
+        // predicate can sleep forever waiting for work that only the gate can
+        // release.  Poll the gate at a bounded cadence instead.
+        cond_.wait_for(lock, std::chrono::milliseconds(100), [this] { return stop_ || schedule_trigger_ || !running_streams_.empty(); });
     } else {
         cond_.wait(lock, [this] { return waitPredicate(); });
     }
