@@ -234,6 +234,9 @@ class MMWorkItem:
 
     @property
     def should_preprocess(self) -> bool:
+        if self.capture_inspection_sources and self.cache_state == "miss":
+            # An unchecked remote tensor skips ViT but still needs source bytes.
+            return True
         return self.embedding_result is None and not self.waiting_for_cache
 
     def complete_cache(self, result: Any, force: bool = False) -> None:

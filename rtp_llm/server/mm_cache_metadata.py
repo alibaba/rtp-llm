@@ -124,9 +124,11 @@ def get_mm_cache_metadata(
         greennet_enabled if input_inspection_enabled is not False else False
     )
     if inspection_enabled:
+        request_scoped = engine._request_scoped_inspection()
         for entry in metadata["entries"]:
-            if not entry.get("greennet_passed", False):
-                entry.update(hit=False, hash_hit=False)
+            # A scoped verdict can only authorize the call that obtained it.
+            if request_scoped or not entry.get("greennet_passed", False):
+                entry.update(hit=False, hash_hit=False, greennet_passed=False)
                 for field in ("feature_hashes", "split_size", "entry_generation"):
                     entry.pop(field, None)
     missing = {entry["key"] for entry in metadata["entries"] if not entry["hash_hit"]}
