@@ -19,6 +19,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -82,7 +83,7 @@ class DeploymentIdentityConsistencyTest {
         MasterChangeNotifyResp response = service.handleMasterChange(request);
 
         assertThat(response.isSuccess()).isFalse();
-        verifyNoInteractions(electionService);
+        verify(electionService, never()).updateLatestMaster();
     }
 
     @ParameterizedTest

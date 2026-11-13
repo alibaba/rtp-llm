@@ -59,7 +59,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     private final DeploymentIdentity deploymentIdentity;
 
     @Setter private String roleId;
-    @Setter private String localIp;
+    @Getter @Setter private String localIp;
 
     @Setter private int port;
 
@@ -283,7 +283,11 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
 
     private void initializeIpAndPort() {
         try {
-            localIp = InetAddress.getLocalHost().getHostAddress();
+            String advertisedIp = environment.getProperty("flexlb.consistency.advertised-ip");
+            localIp =
+                    advertisedIp == null || advertisedIp.isBlank()
+                            ? InetAddress.getLocalHost().getHostAddress()
+                            : advertisedIp;
         } catch (UnknownHostException e) {
             throw new RuntimeException("Failed to retrieve local host address", e);
         }

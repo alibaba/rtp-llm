@@ -1,0 +1,13 @@
+mock.compute.forward.expression: "43.38148559976551"
+vit_concurrency: 128
+gpu_max_batch_size: 128
+patch_size: 14
+downsample_ratio: 3
+hidden_size: 4096
+min_pixels: 295936
+max_image_tokens: 1024
+mm_cache_cpu_max_bytes: 21474836480
+mm_cache_gpu_max_bytes: 84949672960
+vit_max_queue_size: 256
+mm_hash_key_cache_max_bytes: 2147483648
+mock.vit.skip.download: true

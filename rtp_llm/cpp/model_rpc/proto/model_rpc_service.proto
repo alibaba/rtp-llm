@@ -167,6 +167,8 @@ message GenerateConfigPB {
     // Explicit target-prefill assertion. true requires max_new_tokens == 0 and cannot be combined with
     // return_prompt_logits. false/omitted does not change the legacy bare-zero behavior above.
     bool prefill_only = 76;
+    bool return_logprobs = 77;
+    uint32 top_logprobs = 78;
 }
 
 message MMPreprocessConfigPB {
@@ -198,6 +200,7 @@ message MultimodalInputsPB {
     V41RequestInputsPB v41_inputs = 5;
     // Remaining request budget for typed prepared images (no URL configs).
     int64 timeout_ms = 4;
+    bool accept_mock_feature_seeds = 6;
 }
 
 enum TensorDataTypePB {
@@ -251,6 +254,8 @@ message MultimodalOutputPB {
     repeated MMRdmaSlotPB output_rdma_slots = 5;
     // Compact CPU row hashes stay inline for either transport.
     TensorPB multimodal_feature_hash = 7;
+    // When requested by a Mock caller, one seed per split_size replaces the row hashes.
+    repeated fixed64 mock_feature_seeds = 8;
 }
 
 message ReleaseLeasePB {
@@ -451,6 +456,24 @@ message StagePeerGroupPB {
     bool is_last_stage = 4;
 }
 
+// Cache identity of one assembled multimodal embedding segment in the Mock PD path.
+message MultimodalCacheSpanPB {
+    int32 offset = 1;
+    repeated sint32 row_hashes = 2;
+}
+
+// Exclusive end of the Prefill KV range handed off to Decode.
+message PrefillKvHandoffPB {
+    int64 computed_kv_end = 1;
+}
+
+// Mock Prefill computes the cache identity at Decode block boundaries.
+message MockDecodePromptPB {
+    int32 input_length = 1;
+    int32 block_size = 2;
+    repeated fixed64 block_keys = 3;
+}
+
 message GenerateRequestPB {
     RemoteStage stage = 1;
     int64 request_id = 2;
@@ -464,6 +487,9 @@ message GenerateRequestPB {
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
     repeated StagePeerGroupPB stage_peer_groups = 12;
+    PrefillKvHandoffPB prefill_kv_handoff = 13;
+    MockDecodePromptPB mock_decode_prompt = 14;
+    repeated MultimodalCacheSpanPB multimodal_cache_spans = 15;
 }
 
 // In the TP case, the decode master broadcasts to decode workers.
@@ -564,6 +590,12 @@ message CacheStatusPB {
     int64 version = 4;
     map<int64, bool> cache_keys = 5;
     MultimodalCacheStatusPB multimodal_cache = 6;
+    // Compact list of cache keys.
+    repeated sfixed64 cache_key_list = 7 [packed = true];
+    // Presence advertises compact Mock ALLOCATE at this worker's block size.
+    oneof mock_decode_layout {
+        fixed64 mock_decode_cache_seed = 8;
+    }
 }
 
 message MultimodalCacheStatusPB {
@@ -754,6 +786,8 @@ message WorkerStatusPB {
     // Number of matched cache blocks that must be recomputed by the engine.
     int32 cache_match_rollback_blocks = 26;
     WorkerStepMetricsPB last_step_metrics = 27;
+    // ViT work admitted for preparation, execution, or publication.
+    google.protobuf.Int64Value mm_inflight_inputs = 28;
 }
 
 message EmbeddingInputPB {
@@ -925,11 +959,22 @@ message RemoteBlockMaskPB {
     }
 }
 
+// The ordered incarnation list certifies that all members have drained.
+message ShutdownRequestPB {
+    string group_id = 1;
+    repeated string drained_instances = 2;
+    bool begin_shutdown = 3;
+    int64 deadline_unix_ms = 4;
+    uint32 sender_rank = 5;
+    string sender_instance_id = 6;
+}
+
 message FunctionRequestPB {
     oneof request {
         MemoryOperationRequestPB mem_request = 1;
         RemoteOperationRequestPB remote_request = 2;
         P2PConnectorBroadcastTpRequestPB p2p_request = 3;
+        ShutdownRequestPB shutdown_request = 4;
     }
 }
 
@@ -951,6 +996,8 @@ enum RemoteTransferStatusPB {
     REMOTE_TRANSFER_STATUS_SUCCESS = 1;
     REMOTE_TRANSFER_STATUS_FAILED = 2;
     REMOTE_TRANSFER_STATUS_TIMEOUT = 3;
+    // The failed operation no longer accesses caller buffers.
+    REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE = 5;
 }
 
 message RemoteOperationResponsePB {
@@ -958,6 +1005,8 @@ message RemoteOperationResponsePB {
     repeated string actual_uris = 2; // only for write
     // Legacy workers return UNSPECIFIED on RPC success.
     RemoteTransferStatusPB transfer_status = 3;
+    // True when no payload I/O was submitted or it has stopped accessing caller buffers.
+    bool payload_buffer_safe = 6;
 }
 
 message FunctionResponsePB {
@@ -1096,6 +1145,7 @@ message MultimodalHashRequestPB {
     repeated string keys = 1;
     MultimodalInputsPB inputs = 2;
     int64 timeout_ms = 3;
+    bool accept_mock_feature_seeds = 4;
 }
 
 message MultimodalHashEntryPB {
@@ -1108,6 +1158,9 @@ message MultimodalHashEntryPB {
     repeated uint32 split_size = 7;
     // Flattened little-endian signed int32 hashes, one per output token.
     bytes feature_hashes = 8;
+    oneof mock_feature_encoding {
+        fixed64 mock_feature_seed = 9;
+    }
 }
 
 message MultimodalHashResponsePB {
