@@ -177,8 +177,17 @@ class PpuModuleProvider:
     owns_runtime_buffers = True
 
     def build_attention(self, default_factory, *args, **kwargs):
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.attention import (
+            CommitOnlyAttentionFP8,
+        )
         from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_fp4_indexer import PpuFP4Attention
 
+        # DSpARK prefill keeps only wkv/kv_norm per layer, so the commit-only
+        # class must survive: the FP4 indexer variant needs Q/O + indexer weights.
+        if default_factory is CommitOnlyAttentionFP8:
+            return self._build_with_provider(
+                "attention", CommitOnlyAttentionFP8, *args, **kwargs
+            )
         return self._build_with_provider("attention", PpuFP4Attention, *args, **kwargs)
 
     def build_moe(self, default_factory, *args, **kwargs):

@@ -14,8 +14,9 @@ def decode_attention_overlap(attn, x, metadata, streams, *, input_quantized=None
     Streams are prepared at construction and shared across this model's layers.
     """
     bsz, q_len, _ = x.shape
-    if q_len not in (1, 2, 3, 4):
-        raise ValueError("PPU Decode overlap requires 1/2/3/4 tokens per request")
+    # 5/6 are the DSpARK proposal block and its gamma+1 target verify span.
+    if q_len not in (1, 2, 3, 4, 5, 6):
+        raise ValueError("PPU Decode overlap requires 1..6 tokens per request")
     start_pos = metadata.start_pos[:bsz]
     position_ids = metadata.position_ids[: bsz * q_len]
     attn._ensure_freqs_cis_bound()

@@ -4,6 +4,16 @@ import torch
 import triton
 import triton.language as tl
 
+# One C4 page holds four ring entries.  The cache spec sizes the ring as
+# ``window + gen_num_per_cycle`` rounded up to a whole page, so a compliant ring
+# is page aligned and at least the two-page window: 12 for MTP2 (gamma=2), 16
+# for DSpARK (gamma=5).  Anything else means the pool and the plan disagree.
+C4_RING_MIN_ENTRIES = 8
+
+
+def _c4_ring_ok(state_entries) -> bool:
+    return state_entries >= C4_RING_MIN_ENTRIES and state_entries % 4 == 0
+
 
 @triton.jit
 def _plans(
@@ -59,11 +69,13 @@ def build_plans(meta, state_bt, state_entries, state_tokens, seq_start):
     n = meta.positions.numel()
     if (
         n > (1 << 28)
-        or state_entries not in (8, 12)
+        or not _c4_ring_ok(state_entries)
         or state_tokens <= 0
         or state_tokens % 4
     ):
-        raise ValueError("SG C4 plans require <=2^28 rows and an 8/12-row native ring")
+        raise ValueError(
+            "SG C4 plans require <=2^28 rows and a page-aligned C4 ring >= 8 entries"
+        )
     if state_bt.ndim != 2 or state_bt.shape[1] == 0:
         raise ValueError("SG C4 plans require a nonempty state block table")
     varlen = meta.is_batched and meta.seq_start_per_req is not None
@@ -134,8 +146,10 @@ def _decode_plans(
 def build_decode_plan(meta, state_bt, state_entries, state_tokens):
     """Map one token per request onto native Decode/MTP3 C4 state pages."""
     n = meta.positions.numel()
-    if state_entries not in (8, 12) or state_tokens <= 0 or state_tokens % 4:
-        raise ValueError("FP4 Decode requires an 8/12-row native state ring")
+    if not _c4_ring_ok(state_entries) or state_tokens <= 0 or state_tokens % 4:
+        raise ValueError(
+            "FP4 Decode requires a page-aligned C4 state ring >= 8 entries"
+        )
     if state_bt.ndim != 2 or state_bt.shape[1] == 0:
         raise ValueError("FP4 Decode requires a nonempty state block table")
     if (
