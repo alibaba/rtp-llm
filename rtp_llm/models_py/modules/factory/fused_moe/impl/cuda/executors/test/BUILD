@@ -354,3 +354,9 @@ models_py_test(
         "//rtp_llm/models_py/triton_kernels/moe/test:small_moe_test_support",
     ],
 )
+
+py_test(
+    name = "nvfp4_hybrid_executor_test",
+    srcs = ["nvfp4_hybrid_executor_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:auto_model"],
+)
