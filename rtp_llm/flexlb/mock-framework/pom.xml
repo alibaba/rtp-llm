@@ -17,7 +17,7 @@
     <module>java/protocol</module>
     <module>java/metrics</module>
     <module>java/engine</module>
-    <module>java/client</module>
+    <module>java/frontend</module>
     <module>java/master</module>
     <module>java/zookeeper</module>
   </modules>

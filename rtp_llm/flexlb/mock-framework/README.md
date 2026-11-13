@@ -29,7 +29,7 @@ uv sync --locked
 
 ## 跑第一个 Case
 
-`cases/basic/case.yaml` 使用一个真实 Master、RTP P/D 和一个 Client。它以总 QPS=2、总并发=2 播放 20 条请求，检查唯一主节点、中段 QPS（1.5–2.5）及全部请求成功。
+`cases/basic/case.yaml` 使用一个真实 Master、RTP P/D 和一个 Frontend。它以总 QPS=2、总并发=2 播放 20 条请求，检查唯一主节点、中段 QPS（1.5–2.5）及全部请求成功。
 
 先编译 Case，再生成本机启动配方，最后执行同一份 Case：
 
@@ -54,7 +54,7 @@ uv run --locked mock-case run "$CASE_FILE" \
 
 Case 保存业务配置、流量和门禁。启动配方保存命令、程序路径与 JVM 参数。需要调整 JVM 参数时可编辑本轮生成的 `launch.yaml`。
 
-P/D/V、Master 和 Client 各实例直接启动独立 JVM。ZooKeeper 由单独的角色进程提供。
+P/D/V、Master 和 Frontend 各实例直接启动独立 JVM。ZooKeeper 由单独的角色进程提供。
 
 每次运行使用新的配方文件和结果目录。Runner 负责启动、执行和清理；异常或门禁失败会中止后续步骤并收尾。Ctrl+C 会取消执行并清理本次资源。环境问题可修复后重新准备；业务失败先保存证据，不为通过门禁改参数重跑。
 
@@ -65,13 +65,13 @@ P/D/V、Master 和 Client 各实例直接启动独立 JVM。ZooKeeper 由单独�
 | `result.json`            | 最终状态、起止时间及清理错误。状态为 PASS / FAIL / ERROR / CANCELLED。 |
 | `gates.jsonl` 和事件记录 | 步骤事件、门禁预期与实际值、单位、查询时刻和窗口。                     |
 | 配置与源码记录           | 原始 Case、编译配置、启动配方、Git 提交和差异（`git-state.json`）。    |
-| `components/`            | 组件生效配置、端点、日志和 Client 播放结果/请求证据。                  |
+| `components/`            | 组件生效配置、端点、日志和 Frontend 播放结果/请求证据。                |
 | `prometheus/`            | 采集配置、日志、完整性记录及 TSDB/WAL；缺指标不能补零。                |
 | `view.json`              | 本次保存的大盘快照，供之后回看。                                       |
 
-检查 Client 的 issued、finished、success/error/timeout/cancelled，以及 queued、inflight、unissued。Case 主动提前停止播放时，未发送的输入不算失败；已发送请求是否收齐终态、请求证据是否完整，要分别确认。清理错误和采集错误也应单独报告，不能解释成请求失败或忽略后宣称 PASS。
+检查 Frontend 的 issued、finished、success/error/timeout/cancelled，以及 queued、inflight、unissued。Case 主动提前停止播放时，未发送的输入不算失败；已发送请求是否收齐终态、请求证据是否完整，要分别确认。清理错误和采集错误也应单独报告，不能解释成请求失败或忽略后宣称 PASS。
 
-逐请求证据保存在 `components/<client>/playback/<轮次>/requests.jsonl`，供排查和测试。Client 收尾使用 Java 返回的最终汇总。详见 [Client 逐请求记录](docs/architecture.md#client-逐请求记录)。
+逐请求证据保存在 `components/<frontend>/playback/<轮次>/requests.jsonl`，供排查和测试。Frontend 收尾使用 Java 返回的最终汇总。详见 [Frontend 逐请求记录](docs/architecture.md#frontend-逐请求记录)。
 
 ## 查看报告
 

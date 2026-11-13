@@ -5,8 +5,8 @@ import copy
 from . import ExecutionError
 from .processes import ProcessSupervisor
 from .roles import ENGINE_ROLES
-from .roles.client import ClientRole
 from .roles.engine import EngineRole
+from .roles.frontend import FrontendRole
 from .roles.master import MasterRole
 from .roles.prometheus import PrometheusRole
 from .roles.zookeeper import ZooKeeperRole
@@ -104,9 +104,9 @@ class RunEnvironment:
             launch_by_role=launch["components"],
             monitoring=self.monitoring,
         )
-        self.clients = ClientRole(
-            role_config=case.environment.get("client"),
-            launch_config=launch["components"].get("client"),
+        self.frontends = FrontendRole(
+            role_config=case.environment.get("frontend"),
+            launch_config=launch["components"].get("frontend"),
             supervisor=self.supervisor,
             topology=self.topology,
             records=records,
@@ -127,7 +127,7 @@ class RunEnvironment:
             self.engines.used_ports.update((port, port + 2))
         await self.engines.start()
         await self.masters.start()
-        await self.clients.start()
+        await self.frontends.start()
         if self.monitoring:
             await self.supervisor.run_until_process_failure(
                 self.monitoring.wait_for_baseline(), self.monitoring.startup_timeout
@@ -145,18 +145,18 @@ class RunEnvironment:
             except Exception as error:
                 errors.append(f"{label}: {type(error).__name__}: {error}")
 
-        async def drain_clients():
-            await self.clients.stop_playback()
+        async def drain_frontends():
+            await self.frontends.stop_playback()
 
         if self.supervisor.failure.done():
             errors.append(self.supervisor.failure.result())
-        # Keep producers and observers alive through Client drain and the final scrape.
-        await cleanup("client final stop", drain_clients)
+        # Keep producers and observers alive through Frontend drain and the final scrape.
+        await cleanup("frontend final stop", drain_frontends)
         if self.monitoring:
             await cleanup(
                 "prometheus final scrape", self.monitoring.wait_for_final_scrape
             )
-        await cleanup("client processes", self.clients.close)
+        await cleanup("frontend processes", self.frontends.close)
         await cleanup("master processes", self.masters.close)
         await cleanup("engine processes", self.engines.close)
         await cleanup("zookeeper", self.zookeeper.close)

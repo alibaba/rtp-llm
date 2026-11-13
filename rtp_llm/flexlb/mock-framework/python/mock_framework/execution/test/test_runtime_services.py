@@ -49,7 +49,7 @@ def test_only_engine_changes_publish_discovery_with_an_isolated_snapshot(
         duplicate = {**endpoint, "id": f"{role}-1"}
         topology.register(duplicate["id"], role, duplicate["control"], duplicate)
     topology.register(f"{role}-1", role, endpoint["control"])
-    for other in ("master", "client"):
+    for other in ("master", "frontend"):
         control = "http://127.0.0.1:1004"
         topology.register(
             f"{other}-0",
@@ -77,18 +77,18 @@ def test_topology_rejects_endpoint_without_identity_field(tmp_path, field):
     topology = EndpointRegistry(tmp_path)
     control = "http://127.0.0.1:1002"
     endpoint = {
-        "id": "client-0",
-        "role": "client",
+        "id": "frontend-0",
+        "role": "frontend",
         "rpc": "127.0.0.1:1001",
         "control": control,
     }
     del endpoint[field]
     with pytest.raises(ExecutionError, match="endpoints differ from assigned identity"):
-        topology.register("client-0", "client", control, endpoint)
+        topology.register("frontend-0", "frontend", control, endpoint)
     assert topology.list_active_endpoints() == []
 
 
-def test_client_start_fails_without_endpoints(tmp_path):
+def test_frontend_start_fails_without_endpoints(tmp_path):
     async def exercise():
         role_config = {"deployment": {"replicas": 1}}
         ready = json.dumps({"url": "http://127.0.0.1:18080"})
@@ -99,10 +99,10 @@ def test_client_start_fails_without_endpoints(tmp_path):
             "time.sleep(30)\n"
         )
         runtime = RunEnvironment(
-            SimpleNamespace(environment={"client": role_config}),
+            SimpleNamespace(environment={"frontend": role_config}),
             {
                 "components": {
-                    "client": {
+                    "frontend": {
                         "command": [sys.executable, "-c", script],
                         "cwd": str(tmp_path),
                         "env": {},
@@ -114,10 +114,10 @@ def test_client_start_fails_without_endpoints(tmp_path):
         )
         try:
             with pytest.raises(
-                ExecutionError, match=r"client-0: missing endpoints[.]json"
+                ExecutionError, match=r"frontend-0: missing endpoints[.]json"
             ):
                 await runtime.start()
-            assert runtime.topology.list_active_endpoints("client") == []
+            assert runtime.topology.list_active_endpoints("frontend") == []
         finally:
             errors = await runtime.close()
         assert errors == []
@@ -252,8 +252,10 @@ def test_cleanup_continues_in_order_after_domain_failures(tmp_path):
 
             return run
 
-        runtime.clients.stop_playback = operation("drain", raises=True)
-        runtime.clients.close = operation("clients", errors=["client cleanup failed"])
+        runtime.frontends.stop_playback = operation("drain", raises=True)
+        runtime.frontends.close = operation(
+            "frontends", errors=["frontend cleanup failed"]
+        )
         runtime.masters.close = operation("masters")
         runtime.engines.close = operation("engines")
 
@@ -273,7 +275,7 @@ def test_cleanup_continues_in_order_after_domain_failures(tmp_path):
         assert order == [
             "drain",
             "scrape",
-            "clients",
+            "frontends",
             "masters",
             "engines",
             "election",
@@ -282,7 +284,7 @@ def test_cleanup_continues_in_order_after_domain_failures(tmp_path):
         ]
         assert len(errors) == 3 and finished == errors
         assert "drain failed" in errors[0] and "scrape failed" in errors[1]
-        assert errors[2] == "client cleanup failed"
+        assert errors[2] == "frontend cleanup failed"
 
     asyncio.run(exercise())
 

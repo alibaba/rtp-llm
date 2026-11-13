@@ -3,18 +3,17 @@ package org.flexlb.mock.engine.cache;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.ServiceLoader;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
-import org.flexlb.discovery.ServiceAddresses;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.kvcm.grpc.ErrorCode;
 import org.flexlb.kvcm.grpc.GetClusterInfoRequest;
 import org.flexlb.kvcm.grpc.MetaServiceGrpc;
-
-import static org.flexlb.discovery.ServiceAddresses.authority;
 
 /**
  * Engine cache reporting endpoint. Reporting owns lookup; close can cancel outstanding discovery.
@@ -65,7 +64,7 @@ public final class KvcmDiscovery implements AutoCloseable {
         }
         var failure = new IllegalStateException("No reachable authoritative KVCM leader");
         List<String> addresses = discovery == null
-                ? ServiceAddresses.resolve(bootstrap, null) : bootstrapAddresses();
+                ? List.of(fixedBootstrapAddress()) : bootstrapAddresses(failure);
         for (String address : addresses) {
             try {
                 URI found = resolve(address);
@@ -97,8 +96,19 @@ public final class KvcmDiscovery implements AutoCloseable {
         if (discovery != null) discovery.shutdown();
     }
 
-    private List<String> bootstrapAddresses() {
-        var lookup = new FutureTask<>(() -> ServiceAddresses.resolve(bootstrap, discovery));
+    private List<String> bootstrapAddresses(IllegalStateException failure) {
+        var lookup = new FutureTask<>(() -> {
+            var hosts = discovery.getHosts(bootstrap);
+            List<String> addresses = new ArrayList<>(hosts.size());
+            for (var host : hosts) {
+                try {
+                    addresses.add(authority(host.getIp(), host.getPort()));
+                } catch (IllegalStateException error) {
+                    failure.addSuppressed(error);
+                }
+            }
+            return addresses;
+        });
         synchronized (this) { requireOpen(); activeLookup = lookup; }
         try {
             Thread.ofVirtual().name("kvcm-bootstrap").start(lookup);
@@ -111,6 +121,17 @@ public final class KvcmDiscovery implements AutoCloseable {
         } finally {
             lookup.cancel(true);
             synchronized (this) { if (activeLookup == lookup) activeLookup = null; }
+        }
+    }
+
+    private static String authority(String host, int port) {
+        if (host == null || host.isBlank() || port < 1 || port > 65535) {
+            throw new IllegalStateException("Invalid service endpoint");
+        }
+        try {
+            return new URI(null, null, host, port, null, null, null).getRawAuthority();
+        } catch (URISyntaxException error) {
+            throw new IllegalStateException("Invalid service host", error);
         }
     }
 
@@ -134,5 +155,14 @@ public final class KvcmDiscovery implements AutoCloseable {
             channel.shutdownNow();
             synchronized (this) { if (activeChannel == channel) activeChannel = null; }
         }
+    }
+
+    private String fixedBootstrapAddress() {
+        URI uri = URI.create("tcp://" + bootstrap);
+        if (!bootstrap.equals(uri.getRawAuthority()) || uri.getRawUserInfo() != null
+                || uri.getHost() == null || uri.getPort() < 1 || uri.getPort() > 65535) {
+            throw new IllegalArgumentException("Expected a service host:port");
+        }
+        return uri.getRawAuthority();
     }
 }

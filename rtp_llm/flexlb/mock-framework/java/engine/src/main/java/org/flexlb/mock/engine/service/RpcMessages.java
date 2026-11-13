@@ -6,6 +6,7 @@ import java.nio.*;
 import java.util.concurrent.TimeUnit;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
+import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
 import org.flexlb.mock.protocol.PromptCacheKeys;
 
 /**
@@ -49,6 +50,9 @@ final class RpcMessages {
             .setIterateCount(task.iterations()).setWaitingTimeMs(task.waitingMillis())
             .setExecutionTimeMs(task.executionMillis()).setEndTimeMs(task.endTimeMillis());
         if (task.failure() != null) {
+            if (task.failure().reason() == RequestFailure.Reason.PREEMPTED) {
+                result.setPriorityPreemptionProgress(PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELED);
+            }
             long code = RpcErrors.code(task.failure());
             if (code == 0) code = RpcErrors.status(task.failure()).getCode().value();
             result.setErrorInfo(ErrorDetailsPB.newBuilder().setErrorCode(code).setErrorMessage(java.util.Objects.toString(task.failure().getMessage(), "")));
@@ -63,14 +67,21 @@ final class RpcMessages {
         if (g.hasAdapterName() || !g.getUniqueKey().isEmpty()
                 || g.getNumBeams() > 1 || g.getNumReturnSequences() > 1 || g.getVariableNumBeamsCount() > 0
                 || g.getReturnPromptLogits() || g.getReturnHiddenStates() || g.getReturnLogits() || g.getReturnAllHiddenStates()
-                || g.getReturnLogprobs() || g.getTopLogprobs() != 0
                 || g.getReturnAllProbs() || g.getReturnSoftmaxProbs() || g.getReturnCumLogProbs() || g.getCalculateLoss() != 0
                 || g.getStopWordsList().getRowsCount() > 0 || g.getSpEdit() || g.getSpInputLookup())
             throw Status.UNIMPLEMENTED.withDescription("Unsupported adapter, sequence shape or output mode").asRuntimeException();
     }
 
     static int sampledToken(GenerateInputPB input) {
-        int last = input.getTokenIds(input.getTokenIdsCount() - 1);
+        int tokenCount = input.getTokenIdsCount();
+        var spans = input.getMultimodalTokenLayout().getSpansList();
+        if (!spans.isEmpty()) {
+            var lastSpan = spans.getLast();
+            if (lastSpan.getOffset() + lastSpan.getLength() == tokenCount) {
+                return 42;
+            }
+        }
+        int last = input.getTokenIds(tokenCount - 1);
         // Media markers are input semantics, never generated vocabulary tokens.
         return last >= 0 ? last : 42;
     }

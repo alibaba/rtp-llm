@@ -33,7 +33,7 @@ public record ForwardBatch(String id, List<Request> requests) {
     }
 
     /**
-     * Original image shape only; no patching, resizing or feature-token calculation.
+     * Image shape supplied to the Forward cost model.
      */
     public record Image(String id, int width, int height, int channels) {
         public Image {

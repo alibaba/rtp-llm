@@ -2,18 +2,22 @@ package org.flexlb.mock.engine.scheduler;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.*;
-import io.grpc.stub.StreamObserver;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.mock.engine.*;
 import org.flexlb.mock.engine.cache.KvCacheManager;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.execution.LLMMockEngine;
-import org.flexlb.mock.engine.forward.SimulatedCompute;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
@@ -50,6 +54,34 @@ class SchedulerInjectionTest {
             assertEquals(returnsNull ? NullPointerException.class : IllegalStateException.class, error.getClass());
             assertNotNull(resource.get());
             assertThrows(IllegalStateException.class, () -> resource.get().prepare(1, List.of()));
+        }
+    }
+
+    @Test void scrapeReadsQueueStateFromInjectedScheduler() throws Exception {
+        var config = config("prefill");
+        try (var node = LLMMockEngine.start(config, (lock, cache, finished) -> {
+            var recorder = new RtpMetrics("prefill", () -> fail("Only the Engine recorder is scraped"));
+            var delegate = new RtpFifoScheduler(lock, config, cache, finished, recorder);
+            return (EngineScheduler) Proxy.newProxyInstance(
+                EngineScheduler.class.getClassLoader(), new Class<?>[]{EngineScheduler.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("queues")) {
+                        return new EngineScheduler.QueueSnapshot(7, 0, 0, 0);
+                    }
+                    try {
+                        return method.invoke(delegate, args);
+                    } catch (InvocationTargetException error) {
+                        throw error.getCause();
+                    }
+                });
+        }); var http = HttpClient.newHttpClient()) {
+            var request = HttpRequest.newBuilder(URI.create((String) node.endpoints().get("metrics")))
+                .timeout(Duration.ofSeconds(3)).build();
+            var response = http.send(request, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, response.statusCode());
+            assertTrue(response.body().lines().anyMatch(line -> line.startsWith("rtp_llm_scheduler_requests{")
+                && line.contains("state=\"waiting\"") && line.endsWith(" 7.0")));
+            assertTrue(response.body().contains("rtp_llm_kv_tokens"));
         }
     }
 

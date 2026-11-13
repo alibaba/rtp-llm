@@ -43,7 +43,7 @@ class FormulaForwardTest {
         assertEquals(Duration.ofMillis(3), new FormulaForward("param(baseMs, 1) + batchSize").estimate(input));
     }
 
-    @Test void retainsImageShapeAndUsesRawPixelsOnlyWhenFormulaAsksForThem() {
+    @Test void usesPixelsFromTheSuppliedImageShape() {
         var image = new ForwardBatch.Image("image", 640, 480, 3);
         var request = new ForwardBatch.Request("a", 10, 2, 32, 0, 8, 9, List.of(image, image));
         var input = batch(request);

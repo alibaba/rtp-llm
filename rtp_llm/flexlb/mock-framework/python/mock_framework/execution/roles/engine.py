@@ -33,7 +33,7 @@ class EngineRole:
             with socket.socket() as probe:
                 probe.bind(("127.0.0.1", 0))
                 port = probe.getsockname()[1]
-            if port not in self.used_ports:
+            if port <= 65534 and port not in self.used_ports:
                 self.used_ports.add(port)
                 return port
         raise ExecutionError("Cannot allocate a fresh Engine listener port")
@@ -123,14 +123,14 @@ class EngineRole:
             for item in selected:
                 node = item["id"]
                 child = self.supervisor.child(node)
+                retire_instance(
+                    self.topology,
+                    self.monitoring,
+                    node,
+                    self.records.directory / "components" / node,
+                )
                 errors = await self.supervisor.stop_intentionally(node)
                 if child.returncode is not None:
-                    retire_instance(
-                        self.topology,
-                        self.monitoring,
-                        node,
-                        self.records.directory / "components" / node,
-                    )
                     self.records.emit(
                         event="instance_stopped",
                         node=node,

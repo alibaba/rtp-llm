@@ -6,7 +6,7 @@
 
 ## P / D 与 ViT
 
-Prefill 和 Decode 分开提供吞吐/延迟/负载、PD RPC、本地 KV、KV 分池指标和 Mock 模拟质量分区。Decode 展示按步耗时估算的 TPOT，Client 展示按请求实际到达时间计算的 TPOT。Prefill 的缓存复用、输入 TPS 不混入 Decode；Decode 的输出 TPS、生成 Batch、输出长度不混入 Prefill。每条 Engine 查询显式使用 `role="prefill"` 或 `role="decode"`，再叠加全局 Engine 地址筛选。Mock 专有指标单列，不能当作名字相近的 real 指标。
+Prefill 和 Decode 分开提供吞吐/延迟/负载、PD RPC、本地 KV、KV 分池指标和 Mock 模拟质量分区。Decode 展示按步耗时估算的 TPOT，Frontend 展示按请求实际到达时间计算的 TPOT。Prefill 的缓存复用、输入 TPS 不混入 Decode；Decode 的输出 TPS、生成 Batch、输出长度不混入 Prefill。每条 Engine 查询显式使用 `role="prefill"` 或 `role="decode"`，再叠加全局 Engine 地址筛选。Mock 专有指标单列，不能当作名字相近的 real 指标。
 
 线上 Engine 查询主要使用全局 `hippo_role`，并非每个面板都硬编码了 Prefill/Decode。源码语义、线上 PD 分离分区和局部业务过滤共同决定本地归属；Master 的 `role=PREFILL/DECODE/PDFUSION` 是被观察 Worker 的角色，不是 Master 自己的角色，保留原查询的具体限制，不能替换为 Engine 自报的小写 role。
 
@@ -32,15 +32,15 @@ Master 的已有 Reporter 比 Engine 完整，所以可用曲线多。线上 RTP
 
 ## 筛选、标签与事件
 
-Engine、Master、Client 地址筛选各自作用于对应上报者；普通数量/状态按实例平均，明确的集群速率保留总量，Histogram 分位数合并 bucket，不能平均实例 P99。Master 上报中的 engineIp 是被观察 Worker，不能与上报者 instance 混用。
+Engine、Master、Frontend 地址筛选各自作用于对应上报者；普通数量/状态按实例平均，明确的集群速率保留总量，Histogram 分位数合并 bucket，不能平均实例 P99。Master 上报中的 engineIp 是被观察 Worker，不能与上报者 instance 混用。
 
 本地大盘直接使用 Prometheus 的 `instance`（IP:port）作为上报者身份，不在 Java 指标中新增或改写 `host_ip/container_ip`。KMonitor 的 `[[tag_…]]` 图例转换成 Prometheus `{{label}}`，业务维度按查询实际保留。
 
-Prefill、Decode、ViT 各有独立的地址选择器，地址来自保存指标的 role 标签，不按 IP 推测角色；没有该角色数据时隐藏对应选择器。三者分别支持多选：`All · 聚合全部` 按角色聚合；选择一个或多个具体地址则按实例分组；“逐实例全选”显式选中所有地址，仍按实例展示。全选地址与 All 是两种不同意图，不自动互相转换。未选择任何地址时回到聚合全部。Master、Client 的自建面板也支持同样的地址多选切换；平均、总量、成功率和 Histogram 的原有计算口径不变。
+Prefill、Decode、ViT 各有独立的地址选择器，地址来自保存指标的 role 标签，不按 IP 推测角色；没有该角色数据时隐藏对应选择器。三者分别支持多选：`All · 聚合全部` 按角色聚合；选择一个或多个具体地址则按实例分组；“逐实例全选”显式选中所有地址，仍按实例展示。全选地址与 All 是两种不同意图，不自动互相转换。未选择任何地址时回到聚合全部。Master、Frontend 的自建面板也支持同样的地址多选切换；平均、总量、成功率和 Histogram 的原有计算口径不变。
 
-隐藏变量 `prefill_group`、`decode_group`、`vit_group` 分别依赖同角色的 `*_instance`：All 的值为 `.*` 时返回 `role`，具体地址返回 `instance`。Engine 查询在 `by(...)` 与图例中使用对应角色的分组变量，保留 le、state 等业务维度。跨 P/D 的 Worker 面板拆成两组独立 target，保持两侧选择互不影响。变量查询仅对 `vector(1)` 操作，不扫描业务数据，不新增上报标签；报告页和独立 Grafana 使用同一规则。Client 自建面板使用 client_group（All=role，具体地址=instance）；Master JVM 补充面板使用 master_group（All=application，具体地址=instance）。JVM 内存先按 instance/application/area 汇总池，再按当前分组平均，不能先跨 JVM 求和。以后迁入面板时必须同时适配查询分组与图例。采集完整性的 up、采集时长、样本数始终逐目标展示，以免平均值隐藏失败目标。
+隐藏变量 `prefill_group`、`decode_group`、`vit_group` 分别依赖同角色的 `*_instance`：All 的值为 `.*` 时返回 `role`，具体地址返回 `instance`。Engine 查询在 `by(...)` 与图例中使用对应角色的分组变量，保留 le、state 等业务维度。跨 P/D 的 Worker 面板拆成两组独立 target，保持两侧选择互不影响。变量查询仅对 `vector(1)` 操作，不扫描业务数据，不新增上报标签；报告页和独立 Grafana 使用同一规则。Frontend 自建面板使用 frontend_group（All=role，具体地址=instance）；Master JVM 补充面板使用 master_group（All=application，具体地址=instance）。JVM 内存先按 instance/application/area 汇总池，再按当前分组平均，不能先跨 JVM 求和。以后迁入面板时必须同时适配查询分组与图例。采集完整性的 up、采集时长、样本数始终逐目标展示，以免平均值隐藏失败目标。
 
-PromQL 中地址变量使用 `${prefill_instance}` / `${decode_instance}` / `${vit_instance}` / `${master_instance}` / `${client_instance}`，由 Prometheus 数据源完成正则与字符串转义。显式 `:regex` 格式化会绕开数据源的字符串转义，含点号的具体 IP 可能产生非法 `\.`；只测试 All 的 `.*` 无法发现这个错误。旧 dashboard 如需使用 View 的地址筛选，请改用上述按角色区分的变量，并移除地址变量的 `:regex` 后缀。
+PromQL 中地址变量使用 `${prefill_instance}` / `${decode_instance}` / `${vit_instance}` / `${master_instance}` / `${frontend_instance}`，由 Prometheus 数据源完成正则与字符串转义。显式 `:regex` 格式化会绕开数据源的字符串转义，含点号的具体 IP 可能产生非法 `\.`；只测试 All 的 `.*` 无法发现这个错误。旧 dashboard 如需使用 View 的地址筛选，请改用上述按角色区分的变量，并移除地址变量的 `:regex` 后缀。
 
 标签沿用物理来源 HIPPO_APP/HIPPO_ROLE/HIPPO_SERVICE_NAME/HIPPO_SLAVE_IP/RequestedIP；本地不冒充 Pod IP。Engine 只支持 DP rank 0。业务指标与 Mock 专有指标保留原名，Prometheus 与线上 KMonitor 查询协议仍需分别适配，不能承诺直接导入同一查询 JSON。
 
@@ -55,7 +55,7 @@ PromQL 中地址变量使用 `${prefill_instance}` / `${decode_instance}` / `${v
 | 调度选批后        | `rtp_llm_wait_stream_size`、`rtp_llm_running_stream_size`、`rtp_llm_loading_cache_stream_size`                                                      | 区间内按轮次求均值。Waiting max/agg 取各实例轮均值的最大值。KV prepare 为同步操作，原生 KV loading 曲线为 0。                                                                                                                                                                    |
 | Forward 组装      | `rtp_llm_context_batch_size` / `generate_batch_size`，`execute_token_size`，`max_seq_len`；含 Context 的条件系列只在 P 上产生                       | Decode 执行 Token 取 verify/step，不拿整段历史输入相加；不把 running 请求数当作本批大小                                                                                                                                                                                          |
 | 执行步            | P/D `rtp_llm_step_latency_us`                                                                                                                       | 完成的非空执行步，从调度返回到处理完输出，微秒；包含 Mock 执行和输出处理                                                                                                                                                                                                         |
-| 每输出 token 耗时 | D `rtp_llm_sp_estimate_tpot_us`、Client `mock_client_tpot_seconds`                                                                                  | D 按输入组装至计算完成的耗时和本批截断前验收 token 数估算，参与 stream 包含入批后取消但计算完成者。Client 按成功请求首尾 token 到达间隔计算。                                                                                                                                    |
+| 每输出 token 耗时 | D `rtp_llm_sp_estimate_tpot_us`、Frontend `mock_frontend_tpot_seconds`                                                                              | D 按输入组装至计算完成的耗时和本批截断前验收 token 数估算，参与 stream 包含入批后取消但计算完成者。Frontend 按成功请求首尾 token 到达间隔计算。                                                                                                                                  |
 | 请求终态          | `rtp_llm_latency_us`、`wait_latency_us`、`first_token_latency_us`、`input_token_length`、`output_token_length`、`iterate_count`、`query_batch_size` | 如 real，仅 success/cancel/timeout 产生流统计；无首 Token 则不报首 Token 耗时；query batch 是 beam 数，当前为 1                                                                                                                                                                  |
 | D Loading         | `rtp_llm_stream_loading_cache_latency_us`                                                                                                           | 从实际 beginTransfer 到 transferCompleted，不含等待 P 计算；其他 loading 阶段不混用                                                                                                                                                                                              |
 | ViT 调度          | `py_rtp_vit_embedding_queue_size` / `queue_wait_rt` / `batch_size` / `forward_rt`                                                                   | 队列项是提交的工作 chunk。入队、出队和进入 Forward 时记录剩余队列，准备队列在任务进出时采样。                                                                                                                                                                                    |
@@ -68,10 +68,12 @@ PromQL 中地址变量使用 `${prefill_instance}` / `${decode_instance}` / `${v
 
 事件类均值统一由每个实例的累计 `_sum`、`_count` 计算。All 时分别汇总各实例增量再相除；选择具体实例时保留 instance 分组，用同一公式。禁止先计算各实例均值再 avg，也不使用已经删除的裸事件 Gauge。需要 token 总量或命中率的面板使用 `_sum` 增量，不能把样本数当成 token 数。
 
-原来使用 max 聚合事件窗口均值的面板，明确标为“实例均值最大值”，展示各实例在查询区间内事件均值的最大值；这不是单个事件峰值或 P99。每请求图片数和 Embedding 长度改为请求加权均值，不再把各实例均值相加。状态 Gauge、周期 TPS/QPS、Client Histogram 保持各自口径。线上 KMonitor 大盘不修改。
+原来使用 max 聚合事件窗口均值的面板，明确标为“实例均值最大值”，展示各实例在查询区间内事件均值的最大值；这不是单个事件峰值或 P99。每请求图片数和 Embedding 长度改为请求加权均值，不再把各实例均值相加。状态 Gauge、周期 TPS/QPS、Frontend Histogram 保持各自口径。线上 KMonitor 大盘不修改。
 
 Forward 平均耗时、输入、计算和输出长度均先汇总各实例的耗时或 token 增量，再除以 Forward 次数增量之和，保留批次权重。原生周期 TPS 的实例均值、集群墙钟 TPS 合计和按批次加权长度是不同统计量，标题和说明必须写清，不能相互替代。
 
 P/D 的 DEVICE 容量指标使用 `test_block_num - 1` 及其驻留占用，不使用统一缓存保留总量。`rtp_llm_kv_cache_item_num` 与 CacheStatus key 列表来自统一索引；设置更大的 `mock.cache.total.blocks` 后，索引条目数可超过 device 总块数。缓存命中仍受 device 驻留额度约束，不模拟分层搬运耗时。
 
 事件 QPS 与 ViT embedding TPS 在 Prometheus 中使用原名加 `_total` 的累计 Counter，View 用 `rate(...[1m])` 显示每秒速率；重复读取不清零。KMonitor 原名与逐事件上报口径保持不变。原生 RTP 窗口 TPS Gauge 不适用此换算。
+
+Frontend 成功数使用 RTP 原生指标 `py_rtp_success_qps_metric`，在 Prometheus 中导出为 `py_rtp_success_qps_metric_total`，每个成功结束的生成请求累计一次。大盘用它展示终态 QPS 的成功曲线。成功率继续使用同一个终态计数器计算分子和分母。发送速率从原生调用开始计数，TTFT 从发起调用计到首 token，TPOT 按成功请求的首尾 token 计时，请求耗时覆盖所有终态。这些口径使用 `mock_frontend_*`。

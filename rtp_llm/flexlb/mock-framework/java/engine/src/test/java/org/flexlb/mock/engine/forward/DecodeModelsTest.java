@@ -1,37 +1,28 @@
 package org.flexlb.mock.engine.forward;
 
 import static org.junit.jupiter.api.Assertions.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 /**
- * Checks deterministic Decode progress and EOS decisions.
+ * Checks deterministic Decode progress and Gaussian output lengths.
  */
 class DecodeModelsTest {
-    @Test void eosAndLengthClampOnlyAcceptedOutput() {
-        assertEquals(new ComputeModel.Result(4, true, 5), stopping(0, 1).complete("r", 0, 5, 0, 4, false));
-        assertEquals(new ComputeModel.Result(3, true, 5), stopping(1, 1).complete("r", 0, 5, 3, 10, false));
-        assertEquals(new ComputeModel.Result(5, false, 5), stopping(1, 1).complete("r", 0, 5, 0, 10, true));
-        assertEquals(new ComputeModel.Result(1, true, 5), stopping(0, 1).complete("r", 3, 5, 0, 4, true));
-        assertEquals(new ComputeModel.Result(2, true, 5), stopping(1, 1).complete("r", 0, 5, 9, 2, false));
-
-    }
-
-    @Test void perTokenEosHasGeometricMeanAndIsStableAcrossRoundWidths() {
-        var stop = stopping(.1, 42); double sum = 0;
-        for (int i = 0; i < 20000; i++) sum += stop.complete("r" + i, 0, 100, 1, 100, false).committedTokens();
-        assertEquals(10, sum / 20000, .3);
-        for (int i = 0; i < 100; i++) {
+    @Test void gaussianOutputUsesRelativeSpreadAndStableRequestSeeds() throws Exception {
+        var compute = ComputeModel.fromJson(new ObjectMapper().readTree("""
+            {"forward":{"expression":"1"},"output":{"mean_tokens":1000,"stddev_percent":10,"seed":42}}
+            """));
+        double sum = 0, squares = 0;
+        for (int i = 0; i < 10000; i++) {
             String key = "r" + i;
-            int expected = stop.complete(key, 0, 100, 3, 100, false).committedTokens();
-            for (int width : new int[]{1, 2, 5, 13}) {
-                int generated = 0;
-                while (true) {
-                    var result = stop.complete(key, generated, width, 3, 100, false);
-                    generated += result.committedTokens(); if (result.finished()) break;
-                }
-                assertEquals(expected, generated);
-            }
+            int length = compute.decodeOutputLimit(key, 0, 10000, false);
+            assertEquals(Math.min(length, 950), compute.decodeOutputLimit(key, 0, 950, false));
+            sum += length;
+            squares += (double) length * length;
         }
+        double mean = sum / 10000;
+        assertEquals(1000, mean, 5);
+        assertEquals(100, Math.sqrt(squares / 10000 - mean * mean), 5);
     }
 
     @Test void fractionalProgressIsAnAggregateModelAndTheTailCanProduceFiveButCommitFour() {
@@ -46,11 +37,6 @@ class DecodeModelsTest {
     @Test void invalidParametersAreRejected() {
         assertThrows(IllegalArgumentException.class, () -> new DecodeStepModel.Config(Double.NaN));
         assertThrows(IllegalArgumentException.class, () -> new DecodeStepModel.Config(.9));
-        assertThrows(IllegalArgumentException.class, () -> new EosPolicy.Config(.1, null));
-        assertThrows(IllegalArgumentException.class, () -> new EosPolicy.Config(Double.NaN, 1L));
         assertThrows(IllegalArgumentException.class, () -> new DecodeStepModel(new DecodeStepModel.Config(null)).tokens(-1));
-        assertThrows(IllegalArgumentException.class, () -> stopping(.1, 1).complete("", 0, 1, 0, 10, false));
     }
-
-    private EosPolicy stopping(double p, long seed) { return new EosPolicy(new EosPolicy.Config(p, seed)); }
 }

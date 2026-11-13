@@ -52,11 +52,15 @@ def validate_master_launch(config, launch_env, *, local_election):
     if local_election:
         assigned.update(
             {
+                "HIPPO_ROLE",
+                "FLEXLB_ADVERTISED_IP",
+                "MOCK_MASTER_PORT",
+                "BIZ_NAME",
+                "DEPLOYMENT_NAME",
+                "ZONE_NAME",
                 "SPECTRUM_WORKSPACE_ID",
                 "SPECTRUM_APPLICATION_NAME",
                 "SPECTRUM_DEPLOYMENT_NAME",
-                "FLEXLB_ADVERTISED_IP",
-                "MOCK_MASTER_PORT",
             }
         )
     for source, keys in [

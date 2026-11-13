@@ -8,11 +8,11 @@ from urllib.parse import parse_qs
 import pytest
 from mock_framework.execution import ExecutionError, metrics
 from mock_framework.execution.roles.prometheus import PrometheusRole, QuerySample
-from mock_framework.execution.step.metrics.client import query_success_rate
 from mock_framework.execution.step.metrics.engine import (
     query_cache_hit_rate,
     query_prefill_tps,
 )
+from mock_framework.execution.step.metrics.frontend import query_success_rate
 from mock_framework.execution.step.metrics.prometheus import (
     PrometheusQueryArgs,
     query_promql,
@@ -208,7 +208,7 @@ def test_success_rate_aggregates_all_terminals_without_a_request_count_floor(
     events = []
     ctx.records.emit = lambda **event: events.append(event)
     for node in ctx.nodes:
-        node["role"] = "client"
+        node["role"] = "frontend"
 
     async def instant(ctx, expression, at):
         calls.append((expression, at))
@@ -247,7 +247,7 @@ def test_success_rate_aggregates_all_terminals_without_a_request_count_floor(
 def test_success_rate_rejects_zero_terminal_nan_and_invalid_ratios(monkeypatch, value):
     ctx = context()
     for node in ctx.nodes:
-        node["role"] = "client"
+        node["role"] = "frontend"
 
     async def instant(ctx, expression, at):
         if expression.startswith("count_over_time"):
@@ -265,7 +265,7 @@ def test_success_rate_rejects_zero_terminal_nan_and_invalid_ratios(monkeypatch, 
 def test_success_rate_rejects_a_missing_outcome_series(monkeypatch):
     ctx = context()
     for node in ctx.nodes:
-        node["role"] = "client"
+        node["role"] = "frontend"
 
     async def instant(ctx, expression, at):
         ports = (1001,) if 'outcome="timeout"' in expression else (1001, 1002)
@@ -292,15 +292,15 @@ def test_success_rate_rejects_invalid_query_arguments(args):
     from mock_framework.execution.step.step_registry import StepRegistry
 
     with pytest.raises(ConfigError):
-        StepRegistry.standard().get("client/query/success_rate").build_arguments(args)
+        StepRegistry.standard().get("frontend/query/success_rate").build_arguments(args)
 
 
-def test_success_rate_window_keeps_selected_clients_and_fixed_end(monkeypatch):
+def test_success_rate_window_keeps_selected_frontends_and_fixed_end(monkeypatch):
     from mock_framework.execution.step.step_registry import StepRegistry
 
     ctx = context()
     for node in ctx.nodes:
-        node["role"] = "client"
+        node["role"] = "frontend"
     calls = []
 
     async def instant(ctx, expression, at):
@@ -312,7 +312,7 @@ def test_success_rate_window_keeps_selected_clients_and_fixed_end(monkeypatch):
     monkeypatch.setattr(metrics, "query_instant", instant)
     result = asyncio.run(
         StepRegistry.standard()
-        .get("client/query/success_rate")
+        .get("frontend/query/success_rate")
         .run_with_raw_args(
             ctx, {"targets": ["127.0.0.1:1002"], "range": ["-40s", "-20s"]}
         )
@@ -392,11 +392,11 @@ def test_latency_interval_uses_request_weights_and_merges_histogram_buckets(
     monkeypatch,
 ):
     from mock_framework.execution.metrics import LatencyArgs
-    from mock_framework.execution.step.metrics.client import query_ttft
+    from mock_framework.execution.step.metrics.frontend import query_ttft
 
     ctx = context()
     for node in ctx.nodes:
-        node["role"] = "client"
+        node["role"] = "frontend"
     expressions = []
     events = []
     ctx.records.emit = lambda **event: events.append(event)
@@ -418,11 +418,11 @@ def test_latency_interval_uses_request_weights_and_merges_histogram_buckets(
 
     monkeypatch.setattr(metrics, "query_instant", instant)
     assert asyncio.run(query_ttft(ctx, LatencyArgs(range=["-30s", "0s"]))) == 0.25
-    assert "sum(increase(mock_client_ttft_seconds_sum" in expressions[-1]
-    assert " / sum(increase(mock_client_ttft_seconds_count" in expressions[-1]
+    assert "sum(increase(mock_frontend_ttft_seconds_sum" in expressions[-1]
+    assert " / sum(increase(mock_frontend_ttft_seconds_count" in expressions[-1]
     p95 = LatencyArgs(range=["-30s", "0s"], statistic="p95")
     assert asyncio.run(query_ttft(ctx, p95)) == 0.25
-    assert "count_over_time(mock_client_ttft_seconds_bucket" in expressions[-2]
+    assert "count_over_time(mock_frontend_ttft_seconds_bucket" in expressions[-2]
     assert "histogram_quantile(0.95, sum by(le)(increase(" in expressions[-1]
     assert [event["end"] - event["start"] for event in events] == [30, 30]
 

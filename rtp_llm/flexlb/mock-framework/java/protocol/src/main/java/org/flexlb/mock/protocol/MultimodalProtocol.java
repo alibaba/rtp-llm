@@ -13,7 +13,7 @@ import org.flexlb.mock.protocol.grpc.MockEngineProtocol.ImageHashSeeds;
 import org.flexlb.mock.protocol.grpc.MockEngineProtocol.ImageSeeds;
 
 /**
- * Shares image identity, feature hashes, and multimodal message conversion across Client, ViT, and Prefill.
+ * Shares image identity, feature hashes, and multimodal message conversion across Frontend, ViT, and Prefill.
  */
 public final class MultimodalProtocol {
     public static final int IMAGE_TOKEN = -200;
@@ -109,11 +109,60 @@ public final class MultimodalProtocol {
         return applyRows(input,sizes,payload,imageToken);
     }
 
+    static Prepared applyHashes(GenerateInputPB input, MultimodalHashResponsePB metadata, int imageToken) {
+        var entries = new HashMap<String, MultimodalHashEntryPB>();
+        for (var entry : metadata.getEntriesList()) {
+            if (entries.putIfAbsent(entry.getKey(), entry) != null) {
+                throw Status.DATA_LOSS.withDescription("Duplicate vision hash entry").asRuntimeException();
+            }
+        }
+        var sizes = new ArrayList<Integer>();
+        ByteString payload = ByteString.EMPTY;
+        for (var media : input.getMultimodalInputsList()) {
+            var entry = entries.get(key(media));
+            if (entry == null || !entry.getHashHit() || entry.getSplitSizeCount() == 0) {
+                throw Status.DATA_LOSS.withDescription("Missing or invalid vision hashes for image").asRuntimeException();
+            }
+            long rows = 0;
+            for (int size : entry.getSplitSizeList()) {
+                if (size <= 0) {
+                    throw Status.DATA_LOSS.withDescription("Invalid vision image split size").asRuntimeException();
+                }
+                rows += size;
+            }
+            if (entry.getFeatureHashes().size() != rows * Integer.BYTES) {
+                throw Status.DATA_LOSS.withDescription("Vision feature hashes do not match image length").asRuntimeException();
+            }
+            sizes.add(Math.toIntExact(rows));
+            payload = payload.concat(entry.getFeatureHashes());
+        }
+        return applyRows(input, sizes, payload, imageToken);
+    }
+
     static String address(GenerateInputPB input) {
         var addresses = input.getGenerateConfig().getRoleAddrsList().stream().filter(a -> a.getRole() == RoleAddrPB.RoleType.VIT).toList();
         if (addresses.size() != 1 || addresses.getFirst().getIp().isBlank() || addresses.getFirst().getGrpcPort() < 1 || addresses.getFirst().getGrpcPort() > 65535)
             throw invalid("Exactly one valid VIT role address is required");
         var a = addresses.getFirst(); return (a.getIp().contains(":") ? "[" + a.getIp() + "]" : a.getIp()) + ":" + a.getGrpcPort();
+    }
+
+    /**
+     * Accepts main's expanded token IDs, whose media row hashes already participate in block keys.
+     */
+    static Prepared acceptExpanded(GenerateInputPB input) {
+        var spans = input.getMultimodalTokenLayout().getSpansList();
+        if (spans.isEmpty()) {
+            throw invalid("Empty multimodal token layout");
+        }
+        long previousEnd = 0;
+        for (var span : spans) {
+            long end = (long) span.getOffset() + span.getLength();
+            if (span.getOffset() < previousEnd || span.getLength() <= 0 || end > input.getTokenIdsCount()) {
+                throw invalid("Invalid multimodal token layout span");
+            }
+            previousEnd = end;
+        }
+        return text(input.toBuilder().clearMultimodalInputs().build());
     }
 
     private static Prepared applyRows(GenerateInputPB input, List<Integer> sizes, ByteString payload, int imageToken) {

@@ -142,7 +142,7 @@ def load_experiment_view(directory):
 
     windows, events, annotations = {}, [], {}
     processes, playback, master_queries = {}, [], []
-    role_names = ("client", "master", "prefill", "decode", "vit", "zookeeper")
+    role_names = ("frontend", "master", "prefill", "decode", "vit", "zookeeper")
     for number, event in read_json_lines("events.jsonl"):
         try:
             kind = event["event"]
@@ -161,7 +161,7 @@ def load_experiment_view(directory):
                         for k in ("recorded_at", "pid", "code", "url", "connect")
                         if k in event
                     }
-            elif kind == "client_result":
+            elif kind == "frontend_result":
                 playback.append(
                     {"time": event["recorded_at"], "result": event["result"]}
                 )
@@ -295,7 +295,7 @@ def load_experiment_view(directory):
             )
         )
         roles[role] = {"state": state, "instances": instances}
-    roles["client"]["playback"] = playback
+    roles["frontend"]["playback"] = playback
     roles["master"]["observations"] = master_queries
     collection = read_optional_json("prometheus/collection.json", dict)
     if collection is not None and type(collection.get("complete")) is not bool:

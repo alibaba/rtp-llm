@@ -82,7 +82,7 @@ def _check_history(name, targets, series):
     if name.endswith("_bucket"):
         buckets = {label.get("le") for label in labels}
         pairs = {(label.get("instance"), label.get("le")) for label in labels}
-        # Client instances export the same histogram. Each must cover every observed bound.
+        # Frontend instances export the same histogram. Each must cover every observed bound.
         if (
             None in buckets
             or "+Inf" not in buckets
@@ -213,7 +213,7 @@ async def query_gauge(ctx, args, role, name):
 
 async def query_latency(ctx, args, name):
     millis = counter_window_ms(ctx, args)
-    labels, targets = select_metric_targets(ctx, args, "client")
+    labels, targets = select_metric_targets(ctx, args, "frontend")
     if args.statistic == "mean":
         histories = [(name + suffix, labels, targets) for suffix in ("_sum", "_count")]
         expression = f"sum(increase({name}_sum{{{labels}}}[{millis}ms])) / sum(increase({name}_count{{{labels}}}[{millis}ms]))"

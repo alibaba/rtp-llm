@@ -1,4 +1,5 @@
-FROM hub.docker.alibaba-inc.com/aone-base-global/flexlb_base:20260519160456544448
+ARG JAVA_BASE_IMAGE=hub.docker.alibaba-inc.com/aone-base-global/flexlb_base:20260519160456544448
+FROM ${JAVA_BASE_IMAGE}
 
 ENV APP_NAME=mock-engine
 WORKDIR /home/admin/mock-engine

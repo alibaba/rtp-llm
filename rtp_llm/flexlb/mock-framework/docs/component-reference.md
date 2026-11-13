@@ -8,7 +8,9 @@
 
 `environment.master.config` 使用原生环境变量字符串。`FLEXLB_CONFIG` 是业务 JSON，`MODEL_SERVICE_CONFIG` 是路由 JSON。本地支持单 endpoint 组、P/D/V 分离角色和 gRPC。Runner 使用实验内的发现文件替换路由目标，保留服务 ID、组和角色信息。
 
-Runner 为本轮 Master 写入 `FLEXLB_CONFIG.consistency`，连接实验内的 ZooKeeper。同一轮的 Master 副本和重启进程共用部署身份，实际下发的配置和部署 ID 可在 `effective-config.json` 查看。
+本地 Runner 负责写入 `FLEXLB_CONFIG.consistency` 和实验的部署身份。多个 Master JVM 使用不同的回环 IP，共用 HTTP 端口及其加 2 的 gRPC 端口。Mock Master 启动器校验 Runner 分配的 IPv4 回环地址，通过 `server.address` 传给 Spring，并在 Spring 实例化 Bean 前将 gRPC 服务替换为 `LoopbackGrpcServer`，它覆写监听地址，RPC 服务、执行器和关闭流程继续采用 FlexLB 实现。Mock 启动器也将选主服务替换为 `LoopbackZookeeperMasterElectService`，用同一个地址登记 ZooKeeper 参与者身份。一致性服务替换为 `LoopbackLBStatusConsistencyService`，从 `server.address` 获取本机身份，供主备转发防环检查和状态查询使用。生产 Master 使用默认 gRPC 服务和系统本机地址。宿主机必须能绑定分配给各 JVM 的回环地址。
+
+本地 Engine endpoint 使用 `file` 发现。Runner 在拓扑变动后更新 `discovery.json`，Master 每次轮询读取当前地址，并由 FlexLB 的公共发现路由计算各端口。
 
 P 使用 `mock.scheduler.mode: fifo` 时，Master 使用 NON_BATCH 交付。Master 通过 EnqueueBatch 或 EnqueueGroup 交付时，P 必须开启 `group` 模式。原生批量入口支持 DP rank 0。
 
@@ -26,6 +28,7 @@ Mock 专用参数使用小写点号名称，例如 `mock.compute.forward.express
 | ------------------------------------------------------------ | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | seq_size_per_block / max_seq_len / test_block_num            | 64 / 8192 / 必填；前两者为 0 时用默认值，test_block_num ≥ 2 | 基础哈希/物理块 token 数、单请求序列上限、每 rank 的 Device 物理块数（含 null block）。P 的逻辑分配粒度为基础块大小乘 prefill_cp_size。                                 |
 | concurrency_limit                                            | 32，正整数                                                  | P/D 每轮请求数上限；real 的 ConcurrencyConfig 输入经 engine_config.py 写入内部 max_generate_batch_size。                                                                |
+| max_rpc_timeout_ms                                           | 7200000 毫秒，≤ 0 时关闭该上限                              | P→D 的 RemoteGenerate RPC 期限，与请求剩余时间取较短的有效值。                                                                                                          |
 | reserve_block_ratio                                          | 5，0–100                                                    | 首次分配预留百分比。                                                                                                                                                    |
 | reuse_cache / enable_device_cache                            | false / true                                                | 前缀复用和 Device 索引。                                                                                                                                                |
 | prefill_cp_size                                              | 1（0 视为默认）                                             | Mock P 每组包含的基础缓存块数。大于 1 时只取每组末尾的键，逻辑块大小为基础块大小乘该值，未命中 token 的准入预算按 2 × CP size 对齐。D 的本地 FULL KV 始终按基础块管理。 |
@@ -52,7 +55,7 @@ real 默认值和映射以 `rtp_llm/server/server_args`、`rtp_llm/config/engine
 | mock.engine.prefill.overhead.ms                                               | 仅 Prefill。非负整数，默认 0。控制一轮输出提交后到下一轮允许组批前的额外等待，单位 ms。见 [Prefill 轮间开销](whale-engine.md#prefill-轮间开销)。                           |
 | mock.compute.forward.noise.stddev.ms / stddev.ratio / max.deviation.ms / seed | 有界噪声，详见 Compute；数值后缀均相对 mock.compute.forward.noise。                                                                                                        |
 | mock.compute.decode.tokens.per.step                                           | D 平均每轮进度，与真实投机机制不同。                                                                                                                                       |
-| mock.compute.eos.probability / seed                                           | P/D 的概率停止模型。                                                                                                                                                       |
+| mock.compute.output.mean.tokens / stddev.percent / seed                       | Decode 输出总长的高斯均值、标准差百分比和随机种子。                                                                                                                        |
 
 ### ENV 输入
 
@@ -68,7 +71,7 @@ Mock 名称的点号转换为下划线并大写，例如 `mock.compute.decode.to
 
 ### Prefill CP
 
-本地回放时，Client 与 P 对齐基础块 `seq_size_per_block`、`prefill_cp_size` 和有符号 int64 `cache_key_hash_seed`。Client 缺省基础块大小时不生成路由键。Whale 使用真实 Frontend 时按部署指南对齐同一组值。
+本地回放时，Frontend 与 P 对齐基础块 `seq_size_per_block`、`prefill_cp_size` 和有符号 int64 `cache_key_hash_seed`。Frontend 缺省基础块大小时不生成路由键。Whale 使用真实 Frontend 时按部署指南对齐同一组值。
 
 基础块为 128、CP 为 4 时，每四个基础键取末尾的 K4、K8，路由跨度和 P 的逻辑块大小均为 512 token。媒体身份按基础块边界参与哈希。D 的 FULL KV 使用自己的基础块大小，P/D 在原生请求中交接语义 token 和媒体缓存区间。KVCM 注册使用基础块大小。配置的块数按块计，token 容量按对应角色的逻辑块大小换算。
 
@@ -99,26 +102,27 @@ vit:
 
 本地匿名图片回放设置 `mock.vit.skip.download: true`，使用数据集记录的宽高。真实 URL 使用默认 false，从 HTTP(S) 图片读取原始尺寸。支持 ImageIO 可读取的格式及 WebP 头尺寸。下载使用 `download_headers`（JSON 字符串）、`mm_image_max_file_size_kb` 和 `mm_timeout_ms`，同时受 DSV4.1 的 10 MiB 文件上限及请求剩余期限约束。
 
-Client 和 P/D 对齐 `image_token_id`。真实 Frontend 接入使用其生效标记。Mock Client 和 Prefill 从 ViT 接收每张图的 seed 和 split size，按需展开行 hash。真实 Frontend 仍通过原生 RPC 获取逐行 hash。
+Frontend 和 P/D 对齐 `image_token_id`。真实 Frontend 接入使用其生效标记。Mock Frontend 和 Prefill 从 ViT 接收每张图的 seed 和 split size，按需展开行 hash。真实 Frontend 仍通过原生 RPC 获取逐行 hash。
 
-## Compute、Forward、Decode 和 EOS
+## Compute、Forward 和 Decode
 
 以 Decode 的 `config` 为例。
 
 ```yaml
 mock.compute.forward.expression: "19.5 + 0.175 * batchSize"
 mock.compute.decode.tokens.per.step: 2.6
-mock.compute.eos.probability: 0.0025
-mock.compute.eos.seed: 20260922
+mock.compute.output.mean.tokens: 1000
+mock.compute.output.stddev.percent: 10
+mock.compute.output.seed: 20260922
 ```
 
-每个 P/D/V 必填 `mock.compute.forward.expression`，结果为每个 batch 的毫秒数。公式支持 `param(name, value)` 和 `sum(...)`。逐请求变量只在 `sum` 中使用，包括 `inputTokens`、`hitCacheTokens`、`computeTokens`、`hasHitCache`、`outputTokens`、`generatedTokens`、`contextTokens`、`stepTokens`、`priority`、`imageCount` 和 `imagePixels`。Batch 公式可用 `batchSize` 和 `total*`、`max*` 派生量，RTP 还提供 `cpSize` 和 `cpEnabled`。公式倍率直接写在表达式中。
+每个 P/D/V 必填 `mock.compute.forward.expression`，结果为每个 batch 的毫秒数。公式支持 `param(name, value)` 和 `sum(...)`。逐请求变量只在 `sum` 中使用，包括 `inputTokens`、`hitCacheTokens`、`computeTokens`、`hasHitCache`、`outputTokens`、`generatedTokens`、`contextTokens`、`stepTokens`、`priority`、`imageCount` 和 `imagePixels`。Batch 公式可用 `batchSize` 和 `total*`、`max*` 派生量，RTP 还提供 `cpSize` 和 `cpEnabled`。ViT 的 `imagePixels` 和 `totalImagePixels` 使用 resize 与补边后送入视觉编码器的尺寸。公式倍率直接写在表达式中。
 
-`forward.noise` 默认关闭，启用时指定 seed 和正的 `max.deviation.ms`。Decode 的 `tokens.per.step` 默认 1，设为 2.6 时每轮每请求产出 2 或 3 个 token。P/D 的 `eos.probability` 默认 0，概率介于 0 和 1 时需要 seed。实际输出受 EOS、`min_new_tokens`、`ignore_eos`、`max_new_tokens` 和剩余上下文约束。
+`forward.noise` 默认关闭，启用时指定 seed 和正的 `max.deviation.ms`。Decode 的 `tokens.per.step` 默认 1，设为 2.6 时每轮每请求产出 2 或 3 个 token。Decode 按请求采样一次输出总长，计入 Prefill 已生成的首 token。标准差百分比是相对均值的比例，均值 1000、百分比 10 对应标准差 100 token。采样四舍五入后至少取 1 和 `min_new_tokens` 中的较大值，再按 `max_new_tokens` 和剩余上下文容量截断。标准差百分比和种子默认 0。未配置均值或请求启用 `ignore_eos` 时，按请求和上下文上限生成。
 
 ## DSV4.1 Engine 与 KVCM 接线
 
-Java Master 与 Engine RPC 的源码对照基线为 `ba26ddf1dd86c02bcee3cc6eee966ca59e4ae7a6`（`feature/dsv41-dev-main-202161013`）。直接调用 P 的多 token 请求需开启 `can_use_pd_separation`，并提供一个有效的 Decode 地址。Mock Prefill 通过 `MockDecodeService.GetDecodeLayout` 读取 Decode 的物理块大小和缓存键 seed，再通过 `MockDecodeService.RemoteGenerate` 发送紧凑请求。`DecodeFrame.computed_kv_end` 表示已计算 prompt 的排他边界，不含首个采样 token。Mock Client 和 Prefill 通过 `MockVitService` 获取特征 seed。两项服务定义在 `java/protocol/src/main/proto/mock_engine.proto`。
+Java Master 与 Engine RPC 的源码对照基线为 `ba26ddf1dd86c02bcee3cc6eee966ca59e4ae7a6`（`feature/dsv41-dev-main-202161013`）。直接调用 P 的多 token 请求需开启 `can_use_pd_separation`，并提供一个有效的 Decode 地址。Mock Prefill 通过 `MockDecodeService.GetDecodeLayout` 读取 Decode 的物理块大小和缓存键 seed，再通过 `MockDecodeService.RemoteGenerate` 发送紧凑请求。`DecodeFrame.computed_kv_end` 表示已计算 prompt 的排他边界，不含首个采样 token。Mock Frontend 和 Prefill 通过 `MockVitService` 获取特征 seed。两项服务定义在 `java/protocol/src/main/proto/mock_engine.proto`。
 
 KVCM 接入使用以下配置。
 
@@ -132,4 +136,4 @@ kv_cache_event_snapshot_interval_ms: 600000
 
 显式 `kv_cache_event_manager_endpoint` 优先使用。省略时通过 `kvcm_enable_vipserver`、`kvcm_vipserver_domain` 或 `kvcm_server_address` 发现 Meta HTTP leader。实例 ID 显式指定共享查询空间，模型名和实例组需与消费端匹配，快照间隔必须为正。
 
-Reporter 注册一个 Full spec，发布统一池的有效块事件、快照和心跳。HBM 命名空间表示本实例可恢复的逻辑 key 集合。KVCM 能力标记为 `payload_io=false`，原生 READ/WRITE 返回 `FAILED_BUFFER_SAFE`。
+Reporter 注册一个 Full spec，发布统一池的有效块事件、快照和心跳。HBM 命名空间表示本实例可恢复的逻辑 key 集合。KVCM 能力标记为 `payload_io=false`，原生 READ/WRITE 在提交数据 I/O 前返回 `FAILED`。

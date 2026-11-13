@@ -44,14 +44,14 @@ class RtpConfigTest {
         var values = (ObjectNode) root.path("component").path("config");
         var defaults = load(root);
         try (var cache = new org.flexlb.mock.engine.cache.KvCacheManager(16, 8, 0);
-             var scheduler = AbstractRtpScheduler.factory(defaults).create(new Object(), cache, new org.flexlb.mock.engine.scheduler.TaskHistory())) {
+             var scheduler = new RtpTestMetrics(defaults).create(new Object(), cache, new org.flexlb.mock.engine.scheduler.TaskHistory())) {
             assertInstanceOf(RtpFifoScheduler.class, scheduler);
             assertEquals("fifo", defaults.effective().path("mock.scheduler.mode").asText());
         }
         values.put("mock.scheduler.mode", "group");
         var grouped = load(root);
         try (var cache = new org.flexlb.mock.engine.cache.KvCacheManager(16, 8, 0);
-             var scheduler = AbstractRtpScheduler.factory(grouped).create(new Object(), cache, new org.flexlb.mock.engine.scheduler.TaskHistory())) {
+             var scheduler = new RtpTestMetrics(grouped).create(new Object(), cache, new org.flexlb.mock.engine.scheduler.TaskHistory())) {
             assertInstanceOf(RtpPrefillGroupScheduler.class, scheduler);
             assertEquals("group", grouped.effective().path("mock.scheduler.mode").asText());
         }
@@ -103,12 +103,12 @@ class RtpConfigTest {
     @Test void rejectsInvalidOrMisplacedComputeModels() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         var compute = (ObjectNode) config.path("mock.compute");
-        compute.putObject("eos").put("probability", .1);
+        compute.putObject("output").put("stddev.percent", 10);
         assertThrows(Exception.class, () -> load(root));
-        ((ObjectNode) compute.path("eos")).put("seed", 42);
-        assertEquals(.1, load(root).compute().effectiveSettings().get("mock.compute.eos.probability").doubleValue());
-        ((ObjectNode) compute.path("eos")).put("extra", 1); assertThrows(Exception.class, () -> load(root));
-        compute.remove("eos"); compute.putObject("decode").put("tokens.per.step", 2.6);
+        ((ObjectNode) compute.path("output")).put("mean.tokens", 1000);
+        assertEquals(10, load(root).compute().effectiveSettings().get("mock.compute.output.stddev.percent").doubleValue());
+        ((ObjectNode) compute.path("output")).put("extra", 1); assertThrows(Exception.class, () -> load(root));
+        compute.remove("output"); compute.putObject("decode").put("tokens.per.step", 2.6);
         assertThrows(IllegalArgumentException.class, () -> load(root));
     }
 

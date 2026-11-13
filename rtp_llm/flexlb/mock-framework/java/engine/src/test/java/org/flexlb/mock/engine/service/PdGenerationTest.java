@@ -6,8 +6,10 @@ import org.flexlb.mock.protocol.grpc.MockEngineProtocol.DecodeLayout;
 import org.flexlb.mock.protocol.grpc.MockEngineProtocol.ImageSeeds;
 import org.flexlb.mock.protocol.grpc.MockVitServiceGrpc;
 import org.flexlb.mock.protocol.PromptCacheKeys.Span;
+import org.flexlb.mock.protocol.MultimodalProtocol;
 import com.fasterxml.jackson.databind.*;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.google.protobuf.ByteString;
 import io.grpc.*;
 import io.grpc.stub.StreamObserver;
 import java.nio.*;
@@ -18,6 +20,7 @@ import java.util.function.BooleanSupplier;
 import java.util.stream.IntStream;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.execution.LLMMockEngine;
 import org.flexlb.mock.engine.forward.ComputeModel;
@@ -47,8 +50,8 @@ class PdGenerationTest {
             var ps=rpc.getCacheStatus(query);
             var ds=RpcServiceGrpc.newBlockingStub(d.channel).withDeadlineAfter(2,TimeUnit.SECONDS).getCacheStatus(query);
             var base=org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(org.flexlb.mock.protocol.MultimodalProtocol.text(request), 2, 0, 1).keys();
-            assertEquals(Set.of(base.get(3),base.get(7)),Set.copyOf(ps.getCacheKeyListList()));
-            assertTrue(ds.getCacheKeyListList().containsAll(base));
+            assertEquals(Set.of(base.get(3),base.get(7)),Set.copyOf(ps.getCacheKeysMap().keySet()));
+            assertTrue(ds.getCacheKeysMap().keySet().containsAll(base));
             assertEquals(8,ps.getBlockSize());assertEquals(128,ps.getTotalKvCache());
             assertEquals(2,ds.getBlockSize());assertEquals(64,ds.getTotalKvCache());
         }
@@ -96,7 +99,7 @@ class PdGenerationTest {
             var keys = org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(new org.flexlb.mock.protocol.MultimodalProtocol.Prepared(prepared,
                 List.of(new Span(1, List.of(rowHash)))), 2, 0, 1).keys();
             var cached = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).build());
-            assertTrue(cached.getCacheKeyListList().containsAll(keys));
+            assertTrue(cached.getCacheKeysMap().keySet().containsAll(keys));
             assertEquals(6, calls.size());
             for(var item:List.of(Map.entry(p,6),Map.entry(d,5))) {
                 try(var stream=java.net.URI.create((String)item.getKey().node.endpoints().get("metrics")).toURL().openStream()) {
@@ -106,6 +109,79 @@ class PdGenerationTest {
                 }
             }
         } finally { vision.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
+    }
+
+    @Test void prefillUsesNativeVisionHashesToExpandInputAndBuildCacheKeys() throws Exception {
+        var query = new CompletableFuture<MultimodalHashRequestPB>();
+        var hashes = ByteString.copyFrom(ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(131).putInt(-92).array());
+        var vision = io.grpc.netty.NettyServerBuilder.forPort(0)
+            .addService(new MultimodalRpcServiceGrpc.MultimodalRpcServiceImplBase() {
+                @Override public void getMultimodalHashes(MultimodalHashRequestPB request,
+                                                          StreamObserver<MultimodalHashResponsePB> response) {
+                    query.complete(request);
+                    response.onNext(MultimodalHashResponsePB.newBuilder()
+                        .addEntries(MultimodalHashEntryPB.newBuilder().setKey(request.getKeys(0))
+                            .setHashHit(true).addSplitSize(2).setFeatureHashes(hashes))
+                        .build());
+                    response.onCompleted();
+                }
+            }).build().start();
+        try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1)) {
+            var request = image(input(d, 201, 3, 1, 3000, true), vision.getPort());
+            var rpc = RpcServiceGrpc.newBlockingStub(p.channel).withDeadlineAfter(4, TimeUnit.SECONDS);
+            var outputs = rpc.generateStreamCall(request);
+            GenerateOutputsPB last = null;
+            while (outputs.hasNext()) last = outputs.next();
+            assertNotNull(last);
+            assertTrue(last.getFlattenOutput().getFinished(0));
+
+            var submitted = query.get(1, TimeUnit.SECONDS);
+            var media = request.getMultimodalInputs(0);
+            assertEquals(List.of(media), submitted.getInputs().getMultimodalInputsList());
+            assertEquals(List.of(MultimodalProtocol.key(media)), submitted.getKeysList());
+            assertEquals(request.getRequestId(), submitted.getInputs().getRequestId());
+            assertFalse(submitted.getInputs().getSupportRdma());
+            assertTrue(submitted.getTimeoutMs() > 0);
+
+            var expanded = request.toBuilder().clearMultimodalInputs().clearTokenIds()
+                .addAllTokenIds(request.getTokenIdsList().subList(0, 2))
+                .addTokenIds(MultimodalProtocol.IMAGE_TOKEN)
+                .addAllTokenIds(request.getTokenIdsList().subList(2, request.getTokenIdsCount())).build();
+            var prepared = new MultimodalProtocol.Prepared(expanded, List.of(new Span(1, List.of(131, -92))));
+            var keys = MultimodalProtocol.computePromptKeys(prepared, 2, 0, 1).keys();
+            var cached = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).build());
+            assertTrue(cached.getCacheKeysMap().keySet().containsAll(keys));
+        } finally {
+            vision.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test void prefillAcceptsMainExpandedTokensWithoutAVisionAddress() throws Exception {
+        try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1)) {
+            var request = input(d, 202, 3, 2, 3000, true).toBuilder()
+                .clearTokenIds().addAllTokenIds(List.of(17, 18, -92, 131))
+                .addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl("image"))
+                .setMultimodalTokenLayout(MultimodalTokenLayoutPB.newBuilder()
+                    .addSpans(MultimodalTokenSpanPB.newBuilder().setOffset(2).setLength(2)))
+                .build();
+            try (var call = new Call(p, request)) {
+                call.completeOutput(2);
+            }
+            var rpc = RpcServiceGrpc.newBlockingStub(p.channel).withDeadlineAfter(4, TimeUnit.SECONDS);
+            var cached = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).build());
+            var expected = MultimodalProtocol.computePromptKeys(MultimodalProtocol.text(request), 2, 0, 1).keys();
+            assertTrue(cached.getCacheKeysMap().keySet().containsAll(expected));
+            assertEquals(42, RpcMessages.sampledToken(request));
+
+            var malformed = request.toBuilder().setRequestId(203)
+                .setMultimodalTokenLayout(MultimodalTokenLayoutPB.newBuilder()
+                    .addSpans(MultimodalTokenSpanPB.newBuilder().setOffset(2).setLength(3)))
+                .build();
+            try (var call = new Call(p, malformed)) {
+                call.error(Status.Code.INVALID_ARGUMENT);
+            }
+        }
     }
 
     @Test void preparationIsVisibleWithoutInflatingSchedulerLoadAndFailureHasOneTerminal() throws Exception {
@@ -188,7 +264,6 @@ class PdGenerationTest {
                 response.onNext(DecodeLayout.newBuilder().setBlockSize(2).build());
                 response.onCompleted();
             }
-
             @Override public StreamObserver<DecodeFrame> remoteGenerate(StreamObserver<GenerateOutputsPB> response) {
                 return new StreamObserver<>() {
                     public void onNext(DecodeFrame input) { allocations.incrementAndGet(); }
@@ -419,11 +494,36 @@ class PdGenerationTest {
         }
     }
 
+    @Test void cancelDuringStreamingFencesDeferredAdmissionWithoutEndingTheStream() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1);
+             var holder = assertInstanceOf(Ready.class, d.node.cacheManager().prepare(12, List.of())).lease()) {
+            var request = input(d, 2210, 5, 4, 5000, true);
+            try (var call = new Call(p, request)) {
+                await(() -> d.status().getRunningTaskInfoList().stream().anyMatch(
+                    task -> task.getRequestId() == request.getRequestId() && task.getIsWaiting()));
+                assertEquals(CancelStatusPB.CANCEL_STATUS_TOMBSTONED, cancel(p, request.getRequestId()));
+                var ack = enqueue(p, 1000, request);
+                assertEquals(0, ack.getSuccessesCount());
+                assertEquals(1, ack.getErrorsCount());
+                assertEquals(8429, ack.getErrors(0).getErrorInfo().getErrorCode());
+                holder.close();
+                call.completeOutput(4);
+                assertEquals(CancelStatusPB.CANCEL_STATUS_TOMBSTONED, cancel(p, request.getRequestId()));
+            }
+        }
+    }
+
     @Test void cancelUnattachedBatchReleasesBothOwnersAndLeavesPreemptionFence() throws Exception {
-        try (var p = node("prefill", 8, 100); var d = node("decode", 8, 1)) {
+        try (var p = node("prefill", 8, 1000); var d = node("decode", 8, 1)) {
             var request = input(d, 106, 5, 4, 2000, true); enqueue(p, 1500, request);
             assertEquals(CancelStatusPB.CANCEL_STATUS_ACCEPTED, cancel(p, 106));
             await(() -> p.status().getRunningTaskInfoCount() == 0 && d.status().getRunningTaskInfoCount() == 0);
+            var terminal = p.status().getFinishedTaskListList().stream()
+                .filter(task -> task.getRequestId() == request.getRequestId())
+                .findFirst().orElseThrow();
+            assertEquals(8429, terminal.getErrorInfo().getErrorCode());
+            assertEquals(PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELED,
+                terminal.getPriorityPreemptionProgress());
             assertEquals(16, p.status().getAvailableKvCache()); assertEquals(16, d.status().getAvailableKvCache());
             try (var fetch = new Call(p, request, true)) { assertEquals(8429, code(fetch.error(Status.Code.RESOURCE_EXHAUSTED))); }
             assertEquals(8429, enqueue(p, 1000, request).getErrors(0).getErrorInfo().getErrorCode());
@@ -532,24 +632,23 @@ class PdGenerationTest {
         }
     }
 
-    @Test void eosOnFirstTokenCompletesDWithoutADuplicateTokenOrForward() throws Exception {
-        try (var p = node("prefill", 8, 1, Map.of("eos", Map.of("probability", 1))); var d = node("decode", 8, 1);
+    @Test void sampledLengthOfOneCompletesDecodeWithoutAnExtraTokenOrForward() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1, Map.of("output", Map.of("mean.tokens", 1)));
                 var call = new Call(p, input(d, 1, 5, 10, 2000, true))) {
-            call.output(1, true, 1); assertEquals("completed", call.next());
+            call.output(1, false, 1); call.output(1, true, 0); assertEquals("completed", call.next());
             assertEquals(0, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
             assertFalse(d.status().getFinishedTaskList(0).hasErrorInfo()); assertEquals(16, d.status().getAvailableKvCache());
         }
     }
 
-    @Test void eosLengthIsStableAcrossRoundWidths() throws Exception {
+    @Test void sampledLengthIsStableAcrossRoundWidths() throws Exception {
         var compute = ComputeModel.fromJson(new ObjectMapper().readTree("""
-            {"forward":{"expression":"1"},"eos":{"probability":0.2,"seed":42}}
+            {"forward":{"expression":"1"},"output":{"mean_tokens":10,"stddev_percent":20,"seed":42}}
             """));
-        var generation = new ComputeModel.Request("77", 0, 5, 0, 3, 20, 25, false);
-        int expected = compute.completed(new ComputeModel.Plan(generation, 20)).committedTokens();
+        int expected = compute.decodeOutputLimit("77", 3, 20, false);
         for (int width : new int[]{1, 4}) {
-            try (var p = node("prefill", 16, 1, Map.of("eos", Map.of("probability", .2, "seed", 42)));
-                    var d = node("decode", 16, 1, Map.of("decode", Map.of("tokens.per.step", width), "eos", Map.of("probability", .2, "seed", 42)))) {
+            try (var p = node("prefill", 16, 1);
+                    var d = node("decode", 16, 1, Map.of("decode", Map.of("tokens.per.step", width), "output", Map.of("mean.tokens", 10, "stddev.percent", 20, "seed", 42)))) {
                 var input = input(d, 77, 5, 20, 2000, true).toBuilder(); input.getGenerateConfigBuilder().setMinNewTokens(3);
                 try (var call = new Call(p, input.build())) {
                     int sum = 0; boolean finished = false;
@@ -565,16 +664,16 @@ class PdGenerationTest {
     }
 
     @Test void ignoreEosKeepsAnExplicitOutputLengthAuthoritative() throws Exception {
-        try (var p = node("prefill", 8, 1, Map.of("eos", Map.of("probability", 1)));
-                var d = node("decode", 8, 1, Map.of("eos", Map.of("probability", 1)))) {
+        try (var p = node("prefill", 8, 1);
+                var d = node("decode", 8, 1, Map.of("output", Map.of("mean.tokens", 1)))) {
             var input = input(d, 1, 3, 4, 2000, true).toBuilder(); input.getGenerateConfigBuilder().setIgnoreEos(true);
             try (var call = new Call(p, input.build())) { call.completeOutput(4); }
         }
     }
 
-    @Test void decodeOwnsItsEosAndReportsOnlyCommittedOutput() throws Exception {
+    @Test void decodeReportsOnlyCommittedOutputAtTheSampledLimit() throws Exception {
         try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1,
-                Map.of("decode", Map.of("tokens.per.step", 5), "eos", Map.of("probability", 1)))) {
+                Map.of("decode", Map.of("tokens.per.step", 5), "output", Map.of("mean.tokens", 1)))) {
             var input = input(d, 1, 5, 20, 2000, true).toBuilder(); input.getGenerateConfigBuilder().setMinNewTokens(3);
             try (var call = new Call(p, input.build())) {
                 call.output(1, false, 1); call.output(3, true, 2); assertEquals("completed", call.next());
@@ -638,11 +737,14 @@ class PdGenerationTest {
         }
     }
 
-    @Test void cancellationDuringPComputeReleasesBothNodesWithoutOutput() throws Exception {
+    @Test void cancellationDuringPComputeFinishesForwardAndReleasesBothNodesWithoutOutput() throws Exception {
         try (var p = node("prefill", 8, 1000); var d = node("decode", 8, 1); var call = new Call(p, input(d, 1, 5, 4, 3000, true))) {
             await(() -> p.status().getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 1 && d.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 1);
-            call.close(); await(() -> p.status().getAvailableKvCache() == 16 && d.status().getAvailableKvCache() == 16);
-            assertEquals(0, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
+            call.close();
+            await(() -> p.status().getAvailableKvCache() == 16 && d.status().getAvailableKvCache() == 16);
+            assertEquals(1, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
+            assertTrue(metric(p, "rtp_llm_model_forward_seconds_sum", "role=\"prefill\"") >= 1);
+            assertEquals(0, metric(p, "rtp_llm_forward_tokens_total", "kind=\"output\""));
         }
     }
 
@@ -755,14 +857,15 @@ class PdGenerationTest {
         }
     }
 
-    @Test void downstreamFailureDuringPrefillCancelsTheComputeAndReleasesKv() throws Exception {
+    @Test void downstreamFailureDuringPrefillFinishesForwardAndReleasesKv() throws Exception {
         try (var p = node("prefill", 8, 1000); var d = node("decode", 8, 1);
              var call = new Call(p, input(d, 2400, 3, 4, 3000, true))) {
             await(() -> p.status().getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 1);
             d.node.close();
             call.error(Status.Code.UNAVAILABLE);
             await(() -> p.status().getAvailableKvCache() == 16);
-            assertEquals(0, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
+            assertEquals(1, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
+            assertEquals(0, metric(p, "rtp_llm_forward_tokens_total", "kind=\"output\""));
         }
     }
 
@@ -831,6 +934,24 @@ class PdGenerationTest {
             await(() -> p.status().getFinishedTaskListCount() == 2 && d.status().getFinishedTaskListCount() == 1);
             assertEquals(1, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
             assertEquals(32, p.status().getAvailableKvCache()); assertEquals(16, d.status().getAvailableKvCache());
+        }
+    }
+
+    @Test void decodeRpcTimeoutReturnsBatchAndReleasesKvWithoutRequestTimeout() throws Exception {
+        var settings = Map.<String, Object>of("settings", Map.of("max_rpc_timeout_ms", 1000));
+        try (var p = node("prefill", 16, 10, settings); var d = node("decode", 8, 1);
+             var holder = assertInstanceOf(Ready.class, d.node.cacheManager().prepare(8, List.of())).lease();
+             var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+            var accepted = workers.submit(() -> enqueue(p, 2000,
+                input(d, 731, 5, 3, 0, true), input(d, 732, 7, 3, 0, true)));
+            await(() -> d.status().getRunningTaskInfoCount() == 2 && d.status().getAvailableKvCache() < 8);
+            assertFalse(accepted.isDone());
+
+            var response = accepted.get(3, TimeUnit.SECONDS);
+            assertEquals(2, response.getSuccessesCount() + response.getErrorsCount());
+            assertTrue(response.getErrorsList().stream()
+                .anyMatch(error -> error.getErrorInfo().getErrorCode() == Status.Code.DEADLINE_EXCEEDED.value()));
+            await(() -> d.status().getFinishedTaskListCount() == 2 && d.status().getAvailableKvCache() == 8);
         }
     }
 

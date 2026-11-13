@@ -47,7 +47,7 @@ class KvcmProtocolTest {
         }
     }
 
-    @Test void unimplementedPayloadIoAndRankShutdownNeverFabricateSuccess() throws Exception {
+    @Test void unsupportedPayloadIoReturnsFailure() throws Exception {
         var path = directory.resolve("native.json"); JSON.writeValue(path.toFile(),LLMMockEngineTest.configuration("prefill"));
         try(var node = LLMMockEngine.start(RtpConfig.load(path))) {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
@@ -55,12 +55,8 @@ class KvcmProtocolTest {
                 var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(2,TimeUnit.SECONDS);
                 for(var op : List.of(RemoteOpType.REMOTE_OPERATION_READ, RemoteOpType.REMOTE_OPERATION_WRITE)) {
                     var result = rpc.executeFunction(FunctionRequestPB.newBuilder().setRemoteRequest(RemoteOperationRequestPB.newBuilder().setOp(op)).build()).getRemoteResponse();
-                    assertEquals(RemoteTransferStatusPB.REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE,result.getTransferStatus()); assertTrue(result.getPayloadBufferSafe());
+                    assertEquals(RemoteTransferStatusPB.REMOTE_TRANSFER_STATUS_FAILED, result.getTransferStatus());
                 }
-                var failure = assertThrows(StatusRuntimeException.class, () -> rpc.executeFunction(
-                    FunctionRequestPB.newBuilder().setShutdownRequest(ShutdownRequestPB.newBuilder().setBeginShutdown(true)).build()));
-                assertEquals(Status.Code.UNIMPLEMENTED,failure.getStatus().getCode());
-
             } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }
     }

@@ -112,21 +112,6 @@ class EngineLoopTest {
         }
     }
 
-    @Test void cancelledExecutionCallbackCannotCompleteItsReplacement() throws Exception {
-        var policy = new Policy(false);
-        var first = work("same"); var second = work("same");
-        policy.queue.add(first); policy.queue.add(second);
-        try (var loop = engine(policy, policy, "100")) {
-            loop.wakeUp();
-            assertSame(first, policy.scheduled.poll(2, TimeUnit.SECONDS));
-            synchronized (policy) { policy.cancelled = first; loop.wakeUp(); }
-            assertSame(second, policy.scheduled.poll(2, TimeUnit.SECONDS));
-            assertEquals("same", policy.finished.poll(2, TimeUnit.SECONDS));
-            assertNull(policy.finished.poll(150, TimeUnit.MILLISECONDS));
-            synchronized (policy) { assertEquals(List.of(first), policy.failures); }
-        }
-    }
-
     @Test void planningFailuresReleaseEveryWorkAndDoNotStrandQueue() throws Exception {
         var policy = new Policy(false);
         policy.queue.add(work("a")); policy.queue.add(work("b"));
@@ -201,7 +186,7 @@ class EngineLoopTest {
                     lease.close(); super.processOutputs(work, result);
                 }
             };
-            try (var loop = new EngineLoop(policy, (domain, storage, finished) -> policy, new TaskHistory(), cache, compute("1"), Role.prefill, "capacity")) {
+            try (var loop = new EngineLoop(policy, policy, new TaskHistory(), cache, compute("1"), Role.prefill, "capacity")) {
                 loop.wakeUp();
                 assertTrue(tried.await(2, TimeUnit.SECONDS));
                 Thread.sleep(100);
@@ -218,7 +203,7 @@ class EngineLoopTest {
     }
 
     private EngineLoop engine(Object lock, Policy policy, String expression) throws IOException {
-        return new EngineLoop(lock, (domain, cache, finished) -> policy, new TaskHistory(), new org.flexlb.mock.engine.cache.KvCacheManager(1, 1, 0), compute(expression), Role.prefill, "test");
+        return new EngineLoop(lock, policy, new TaskHistory(), new org.flexlb.mock.engine.cache.KvCacheManager(1, 1, 0), compute(expression), Role.prefill, "test");
     }
 
     private static ComputeModel compute(String expression) throws IOException {
@@ -236,13 +221,10 @@ class EngineLoopTest {
         final List<Work> failures = new ArrayList<>();
         final List<Runnable> notices = new ArrayList<>();
         final boolean newestFirst;
-        final BlockingQueue<Work> scheduled = new LinkedBlockingQueue<>();
-        Work cancelled;
         Policy(boolean newestFirst) { this.newestFirst = newestFirst; }
-        public Work schedule() { var work = newestFirst ? queue.pollLast() : queue.pollFirst(); if (work != null) scheduled.add(work); return work; }
+        public Work schedule() { return newestFirst ? queue.pollLast() : queue.pollFirst(); }
         public void processOutputs(Work work, SimulatedCompute.Outcome result) { finished.add(work.batch().id()); }
         public void failForward(Work work, RuntimeException error) { failures.add(work); }
-        public boolean isForwardCancelled(Work work) { return cancelled == work; }
         public void prepareKvAndCheckTimeouts() {}
         public long nextDeadline() { return Long.MAX_VALUE; }
         public List<Task> tasks() { return List.of(); }

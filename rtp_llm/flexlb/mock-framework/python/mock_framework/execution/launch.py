@@ -136,7 +136,7 @@ def local_launch(
         "prefill",
         "decode",
         "vit",
-        "client",
+        "frontend",
     }
     if unsupported:
         raise ExecutionError(
@@ -177,14 +177,12 @@ def local_launch(
             "java/zookeeper/target/classes/org/flexlb/mock/zookeeper/ZooKeeperMain.class"
         )
         classpath = java_classpath("master")
-        # Expose native metrics locally.
         commands["master"] = [
             str(java),
             "-XX:ActiveProcessorCount=32",
             "-Xmx96g",
             "-XX:MaxDirectMemorySize=16g",
             "-XX:MaxGCPauseMillis=150",
-            "-Dflexlb.monitor.metric-whitelist=flexlb_",
             "-cp",
             classpath,
             "org.flexlb.MasterMain",
@@ -208,13 +206,13 @@ def local_launch(
             "org.flexlb.mock.engine.EngineMain",
         ]
         commands.update(prefill=engine, decode=engine, vit=engine)
-    if "client" in case.environment:
-        commands["client"] = [
+    if "frontend" in case.environment:
+        commands["frontend"] = [
             str(java),
             "-XX:ActiveProcessorCount=16",
             "-Xmx16g",
             "-jar",
-            str(artifact("java/client/target/mock-client-1.0-SNAPSHOT-all.jar")),
+            str(artifact("java/frontend/target/mock-frontend-1.0-SNAPSHOT-all.jar")),
         ]
     raw["components"] = {
         role: {"command": list(commands[role]), "startup_timeout": "60s"}

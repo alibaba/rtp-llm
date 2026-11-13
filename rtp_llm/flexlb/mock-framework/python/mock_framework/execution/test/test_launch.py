@@ -15,7 +15,7 @@ def case(case_data, compile_data):
 
     case_data["environment"]["master"]["config"] = configuration()
     case_data["environment"]["decode"] = case_data["environment"]["prefill"]
-    case_data["environment"]["client"] = {"config": {}}
+    case_data["environment"]["frontend"] = {"config": {}}
     return compile_data(case_data)
 
 
@@ -26,7 +26,7 @@ def artifacts(tmp_path):
         "java/master/target/classes/org/flexlb/MasterMain.class",
         "java/zookeeper/target/classes/org/flexlb/mock/zookeeper/ZooKeeperMain.class",
         "java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar",
-        "java/client/target/mock-client-1.0-SNAPSHOT-all.jar",
+        "java/frontend/target/mock-frontend-1.0-SNAPSHOT-all.jar",
         "dependency.jar",
     ):
         path = framework / relative
@@ -59,8 +59,8 @@ def test_local_recipes_round_trip_without_shell_or_cwd_assumptions(case, artifac
     assert (
         launch["zookeeper"]["command"][-1] == "org.flexlb.mock.zookeeper.ZooKeeperMain"
     )
-    assert launch["components"]["client"]["command"][-1].endswith(
-        "mock-client-1.0-SNAPSHOT-all.jar"
+    assert launch["components"]["frontend"]["command"][-1].endswith(
+        "mock-frontend-1.0-SNAPSHOT-all.jar"
     )
     assert all(
         recipe["command"][0] == str(java) and recipe["cwd"] == str(framework)
@@ -142,7 +142,7 @@ def test_cli_generates_a_readable_launch_file_and_refuses_overwrite(
         "-XX:MaxDirectMemorySize=16g",
         "-XX:MaxGCPauseMillis=150",
     ]
-    assert commands["client"]["command"][1:3] == [
+    assert commands["frontend"]["command"][1:3] == [
         "-XX:ActiveProcessorCount=16",
         "-Xmx16g",
     ]
@@ -219,7 +219,7 @@ def test_cli_resolves_packaged_classpath_after_runtime_is_moved(
             str(target / entry) for entry in ("classes", *entries)
         ]
         assert recipe["cwd"] == str(framework)
-    for role in ("prefill", "decode", "client"):
+    for role in ("prefill", "decode", "frontend"):
         assert any(
             arg.startswith(str(relocated) + os.sep) and arg.endswith(".jar")
             for arg in launch["components"][role]["command"]

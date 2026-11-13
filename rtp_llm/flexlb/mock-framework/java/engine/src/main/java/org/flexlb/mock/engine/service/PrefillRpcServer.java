@@ -248,7 +248,7 @@ final class PrefillRpcServer implements AutoCloseable {
             if (call == null || !call.deferred) {
                 var fence = fences.get(id);
                 if (fence != null) return fence.preempted() ? CancelStatusPB.CANCEL_STATUS_TOMBSTONED : CancelStatusPB.CANCEL_STATUS_NOT_FOUND;
-                if (call != null) return CancelStatusPB.CANCEL_STATUS_NOT_FOUND;
+                // Streaming calls do not use the deferred registry. Fence only future deferred admission.
                 remember(id, true);
                 return CancelStatusPB.CANCEL_STATUS_TOMBSTONED;
             }
@@ -566,10 +566,17 @@ final class PrefillRpcServer implements AutoCloseable {
                     synchronized (this) { if (!prefill.result.isDone()) finish(error); }
                 });
                 var stub = MockDecodeServiceGrpc.newStub(peer.channel);
-                if (deadline != Long.MAX_VALUE) stub = stub.withDeadlineAfter(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+                long remainingNanos = deadline == Long.MAX_VALUE ? Long.MAX_VALUE : deadline - System.nanoTime();
+                if (config.maxRpcTimeoutMs() > 0) {
+                    remainingNanos = Math.min(remainingNanos, TimeUnit.MILLISECONDS.toNanos(config.maxRpcTimeoutMs()));
+                }
+                if (remainingNanos != Long.MAX_VALUE) {
+                    stub = stub.withDeadlineAfter(Math.max(1, remainingNanos), TimeUnit.NANOSECONDS);
+                }
                 var stream = stub.remoteGenerate(inbox);
                 var allocation = frame(RemoteStage.ALLOCATE).toBuilder();
-                var allocationInput = input.toBuilder().clearGroupId().clearGroupSize().clearTokenIds();
+                var allocationInput = input.toBuilder().clearGroupId().clearGroupSize()
+                    .clearTokenIds().clearMultimodalTokenLayout();
                 var sequence = MultimodalProtocol.computePromptKeys(media, layout.getBlockSize(), layout.getCacheKeySeed(), 1);
                 allocation.setPrompt(sequence.toDecodePrompt());
                 if (layout.getBlockSize() == config.physicalBlockSize() && layout.getCacheKeySeed() == config.cacheKeySeed())

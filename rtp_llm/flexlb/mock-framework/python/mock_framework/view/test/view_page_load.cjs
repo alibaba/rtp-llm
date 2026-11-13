@@ -31,7 +31,7 @@ for (const initiallyReady of [true, false]) {
   const document = {getElementById(id){if(!elements.has(id))elements.set(id,element(id));return elements.get(id)},
    createElement:element,createTextNode:text=>text,querySelectorAll:()=>[]};
   const ready = {status:'ready',url:'http://localhost/d/embedded',open_url:'http://localhost/d/full',
-   filters:{prefill_instance:['127.0.0.1:1001','127.0.0.1:1002'],decode_instance:['127.0.0.1:1003','127.0.0.1:1004'],vit_instance:includeVit?['127.0.0.1:1005','127.0.0.1:1006']:[],master_instance:['127.0.0.1:2001','127.0.0.1:2002'],client_instance:['127.0.0.1:3001','127.0.0.1:3002']},annotations:{steps:['kill_a','kill_b'],selected}};
+   filters:{prefill_instance:['127.0.0.1:1001','127.0.0.1:1002'],decode_instance:['127.0.0.1:1003','127.0.0.1:1004'],vit_instance:includeVit?['127.0.0.1:1005','127.0.0.1:1006']:[],master_instance:['127.0.0.1:2001','127.0.0.1:2002'],frontend_instance:['127.0.0.1:3001','127.0.0.1:3002']},annotations:{steps:['kill_a','kill_b'],selected}};
   const gate = {title:'Master',status:'PASS',unit:'',interface:'master/list/addresses',
    step_id:'kill_a',point:1500,from:1300,to:1600,args:{},actual:['127.0.0.1:1001'],expect:{eq:['127.0.0.1:1001']}};
   const longValue = {addresses:Array(8).fill('127.0.0.1:1001')};

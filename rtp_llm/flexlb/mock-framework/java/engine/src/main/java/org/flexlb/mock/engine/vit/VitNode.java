@@ -63,6 +63,8 @@ public final class VitNode implements AutoCloseable {
         }
     }
 
+    int inflight() { return service.preparation.inflight(); }
+
     /**
      * Serves native multimodal RPCs and owns their workers and pending replies.
      */
@@ -120,7 +122,7 @@ public final class VitNode implements AutoCloseable {
         }
 
         @Override public void getWorkerStatus(StatusVersionPB input,StreamObserver<WorkerStatusPB> response) {
-            try { scheduler.checkHealthy();response.onNext(WorkerStatusPB.newBuilder().setRole("VIT").setAlive(true).setStatusVersion(1).setMmInflightInputs(com.google.protobuf.Int64Value.of(preparation.inflight())).build());response.onCompleted(); }
+            try { scheduler.checkHealthy();response.onNext(WorkerStatusPB.newBuilder().setRole("VIT").setAlive(true).setStatusVersion(1).build());response.onCompleted(); }
             catch(RuntimeException error) { response.onError(Status.UNAVAILABLE.withCause(error).asRuntimeException()); }
         }
 

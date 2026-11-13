@@ -6,7 +6,7 @@
 
 1. 在 `cases/<case_id>/` 添加 `case.yaml`。基础收发参考 [Basic](../cases/basic/case.yaml)，故障恢复参考 [Master HA](../cases/master_ha_failover/case.yaml)，吞吐和延迟门禁参考 [性能回归](../cases/performance_regression/case.yaml)。
 2. 把本 Case 的角色配置放在 `configs/`，用 `config: configs/master.yaml` 等本地相对路径引用。借用其他 Case 的配置时先复制到本目录。少量参数可内联，空配置用 `config: {}`。
-3. 流量数据放在共享的 `data/traffic/`，在 `client/start/playback.args.requests_file` 引用 `.mckidx`。以 `data/` 开头的路径按共享根解析，默认是框架目录，可用 `--shared-root` 指定。其他相对路径从 Case 目录解析。Client 共用同一份数据，各自按索引读取。[回放格式](architecture.md#共享索引回放输入)
+3. 流量数据放在共享的 `data/traffic/`，在 `frontend/start/playback.args.requests_file` 引用 `.mckidx`。以 `data/` 开头的路径按共享根解析，默认是框架目录，可用 `--shared-root` 指定。其他相对路径从 Case 目录解析。Frontend 共用同一份数据，各自按索引读取。[回放格式](architecture.md#共享索引回放输入)
 4. 按实验目的划分 Phase。用已有接口描述操作和可观测的通过条件。使用默认大盘时省略 `view`，自定义大盘才显式声明路径。[默认大盘](../views/README.md)
 5. 提交前在框架目录运行 `uv run --locked mock-case compile cases/<case_id>/case.yaml`。编译检查 YAML、组件配置、接口参数和引用。再按 README 运行完整 Case，核对门禁和请求证据。
 
@@ -20,11 +20,11 @@
 | Phase | `id`、`describe`、`timeout`、`steps`      |                                                        |
 | Step  | `id`、`describe`、`interface`             | `args`、`expect`、`within`、`wait_after`、`background` |
 
-`environment` 按角色声明 `master`、`prefill`、`decode`、`vit`、`client`。P/D 必须写 `engine: rtp`。`deployment.replicas` 默认 1，表示独立 JVM 数。Client 的 `qps`、`total_concurrency` 是所有副本的合计，由 `client/start/playback` 的参数指定。本地启动器会拒绝当前无法落实的 `resources` 和 `heap` 限制。
+`environment` 按角色声明 `master`、`prefill`、`decode`、`vit`、`frontend`。P/D 必须写 `engine: rtp`。`deployment.replicas` 默认 1，表示独立 JVM 数。Frontend 的 `qps`、`total_concurrency` 是所有副本的合计，由 `frontend/start/playback` 的参数指定。本地启动器会拒绝当前无法落实的 `resources` 和 `heap` 限制。
 
 `config` 文件的内容就是角色配置 mapping。Master 的 `FLEXLB_CONFIG` 和 `MODEL_SERVICE_CONFIG` 使用原生 JSON 字符串。Mock 点分键由编译器展开。重复键、YAML merge 和点分路径冲突会报错。[组件参数](component-reference.md#engine-配置规则)
 
-ID 使用小写 `snake_case`，Case、Phase 和 Step 的 ID 在同一个 Case 中全局唯一。Case ID 与目录同名，Phase ID 描述阶段。Step ID 写成“动作 + 对象”，例如 `start_client`、`get_master_a`、`check_prefill_tps`、`check_client_success_rate_after_drain`。阈值放进 `expect`，场景意图放进 `describe`。改名时同步修改引用。
+ID 使用小写 `snake_case`，Case、Phase 和 Step 的 ID 在同一个 Case 中全局唯一。Case ID 与目录同名，Phase ID 描述阶段。Step ID 写成“动作 + 对象”，例如 `start_frontend`、`get_master_a`、`check_prefill_tps`、`check_frontend_success_rate_after_drain`。阈值放进 `expect`，场景意图放进 `describe`。改名时同步修改引用。
 
 ### `targets`
 
@@ -101,7 +101,7 @@ phases:
 
 ### 命名与注册
 
-接口名用 `角色/动词[/对象]`，例如 `client/query/qps`。对应的独立 Python 文件和函数用 `角色_动词[_对象]`。指标查询在 `execution/step/metrics/` 按角色放在一起。将函数加入 [`standard_actions()`](../python/mock_framework/execution/step/__init__.py)，使 Case 能通过接口名调用。
+接口名用 `角色/动词[/对象]`，例如 `frontend/query/qps`。对应的独立 Python 文件和函数用 `角色_动词[_对象]`。指标查询在 `execution/step/metrics/` 按角色放在一起。将函数加入 [`standard_actions()`](../python/mock_framework/execution/step/__init__.py)，使 Case 能通过接口名调用。
 
 ### 参数与执行
 
@@ -115,4 +115,4 @@ phases:
 
 用测试验证参数、返回值和失败语义，用实际 Case 验证接线。
 
-[现有动作示例 `master/list/addresses`](../python/mock_framework/execution/step/master_list_addresses.py) · [Step 注册和类型校验](../python/mock_framework/execution/step/step_registry.py) · [Case 执行架构](architecture.md#case-如何执行)
+[现有动作示例 `master/list/addresses`](../python/mock_framework/execution/step/master.py) · [Step 注册和类型校验](../python/mock_framework/execution/step/step_registry.py) · [Case 执行架构](architecture.md#case-如何执行)

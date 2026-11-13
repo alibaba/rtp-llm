@@ -200,7 +200,7 @@ def instance_filters(url, start, end, view):
             "decode_instance",
             "vit_instance",
             "master_instance",
-            "client_instance",
+            "frontend_instance",
         )
         if name in variables
     }
@@ -222,10 +222,8 @@ def instance_filters(url, start, end, view):
         if not isinstance(name, str) or not isinstance(address, str) or not address:
             raise ValueError("Invalid Prometheus series identity")
         role = series.get("role")
-        if role in ("prefill", "decode", "vit"):
+        if role in ("prefill", "decode", "vit", "frontend"):
             variable = role + "_instance"
-        elif name.startswith("mock_client_"):
-            variable = "client_instance"
         elif name.startswith("flexlb_") or series.get("application") == "flexlb-api":
             variable = "master_instance"
         else:

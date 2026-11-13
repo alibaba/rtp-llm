@@ -9,7 +9,7 @@ import java.util.*;
 import org.flexlb.mock.protocol.Role;
 
 /**
- * Composes Forward timing, Decode progress and EOS without mutating request state.
+ * Composes Forward timing, Decode progress and output length without mutating request state.
  */
 public final class ComputeModel {
     private static final ObjectMapper JSON = JsonMapper.builder()
@@ -25,19 +25,19 @@ public final class ComputeModel {
         Map.entry("forward.noise.max.deviation.ms", "forward.noise.max_deviation_ms"),
         Map.entry("forward.noise.seed", "forward.noise.seed"),
         Map.entry("decode.tokens.per.step", "decode.tokens_per_step"),
-        Map.entry("eos.probability", "eos.probability"),
-        Map.entry("eos.seed", "eos.seed"));
+        Map.entry("output.mean.tokens", "output.mean_tokens"),
+        Map.entry("output.stddev.percent", "output.stddev_percent"),
+        Map.entry("output.seed", "output.seed"));
 
     private final Config configuration;
     private final FormulaForward forward;
     private final NoiseModel noise;
     private final DecodeStepModel decode;
-    private final EosPolicy eos;
 
     private ComputeModel(Config spec, Map<String, Double> constants) {
         configuration = Objects.requireNonNull(spec);
         forward = new FormulaForward(spec.forward().expression(), constants); noise = new NoiseModel(spec.forward().noise());
-        decode = new DecodeStepModel(spec.decode()); eos = new EosPolicy(spec.eos());
+        decode = new DecodeStepModel(spec.decode());
     }
 
     public static Set<String> settingNames() {
@@ -76,7 +76,10 @@ public final class ComputeModel {
     public JsonNode effectiveSettings() {
         var result = JSON.createObjectNode();
         var spec = effectiveConfiguration();
-        SETTINGS.forEach((key, path) -> result.set("mock.compute." + key, spec.at("/" + path.replace('.', '/'))));
+        SETTINGS.forEach((key, path) -> {
+            var value = spec.at("/" + path.replace('.', '/'));
+            if (!value.isMissingNode()) result.set("mock.compute." + key, value);
+        });
         return result;
     }
 
@@ -84,6 +87,20 @@ public final class ComputeModel {
 
     public boolean hasCustomDecodeStep() {
         return !configuration.decode().equals(DecodeStepModel.Config.DEFAULT);
+    }
+
+    /** Samples the total output length once, including the first Prefill token. */
+    public int decodeOutputLimit(String requestKey, int minimum, int hardLimit, boolean ignoreEos) {
+        var output = configuration.output();
+        if (ignoreEos || output.mean_tokens() == null) return hardLimit;
+        double target = output.mean_tokens();
+        if (output.stddev_percent() > 0) {
+            long seed = NoiseModel.keyedSeed(output.seed(), "output/" + requestKey);
+            double deviation = target * (output.stddev_percent() / 100);
+            target += new SplittableRandom(seed).nextGaussian() * deviation;
+        }
+        long rounded = Math.round(target);
+        return (int) Math.min(hardLimit, Math.max(Math.max(1, minimum), rounded));
     }
 
     public Plan prepare(Role role, Request request) {
@@ -95,7 +112,8 @@ public final class ComputeModel {
     /** Pure result calculation: no request mutation, queue operations or resource release. */
     public Result completed(Plan plan) {
         var request = plan.request();
-        return eos.complete(request.key(), request.generated(), plan.candidates(), request.minimum(), request.limit(), request.ignoreEos());
+        int count = Math.min(plan.candidates(), request.limit() - request.generated());
+        return new Result(count, request.generated() + count == request.limit(), plan.candidates());
     }
 
     public NoiseModel.Sample sampleDuration(Role role, String engineId, ForwardBatch batch) {
@@ -113,15 +131,11 @@ public final class ComputeModel {
     /**
      * Captures generation progress and limits for one scheduler round.
      */
-    public record Request(String key, long round, int inputTokens, int generated, int minimum,
-                          int maximum, int maxSequence, boolean ignoreEos) {
+    public record Request(long round, int generated, int limit) {
         public Request {
-            if (key == null || key.isBlank() || round < 0 || inputTokens < 1 || generated < 0 || minimum < 0
-                    || maximum < 1 || minimum > maximum || maxSequence <= inputTokens
-                    || generated >= Math.min(maximum, maxSequence - inputTokens))
-                throw new IllegalArgumentException("Invalid generation request/limits");
+            if (round < 0 || generated < 0 || generated >= limit)
+                throw new IllegalArgumentException("Invalid generation progress or output limit");
         }
-        int limit() { return Math.min(maximum, maxSequence - inputTokens); }
     }
 
     /**
@@ -141,11 +155,28 @@ public final class ComputeModel {
     /**
      * Defines the compute settings read by Jackson and supplies default generation settings.
      */
-    private record Config(Forward forward, DecodeStepModel.Config decode, EosPolicy.Config eos) {
+    private record Config(Forward forward, DecodeStepModel.Config decode, Output output) {
         private Config {
             if (forward == null) throw new IllegalArgumentException("Compute requires forward");
             decode = decode == null ? DecodeStepModel.Config.DEFAULT : decode;
-            eos = eos == null ? new EosPolicy.Config(null, null) : eos;
+            output = output == null ? new Output(null, null, null) : output;
+        }
+
+        /**
+         * Validates the Gaussian mean and relative standard deviation.
+         */
+        private record Output(Integer mean_tokens, Double stddev_percent, Long seed) {
+            private Output {
+                stddev_percent = stddev_percent == null ? 0 : stddev_percent;
+                if (mean_tokens != null && mean_tokens < 1)
+                    throw new IllegalArgumentException("Output mean_tokens must be positive");
+                if (!Double.isFinite(stddev_percent) || stddev_percent < 0
+                        || (mean_tokens != null && !Double.isFinite(mean_tokens * (stddev_percent / 100))))
+                    throw new IllegalArgumentException("Output stddev_percent must specify a finite, nonnegative spread");
+                if (mean_tokens == null && (stddev_percent > 0 || seed != null))
+                    throw new IllegalArgumentException("Output stddev_percent and seed require mean_tokens");
+                if (mean_tokens != null && seed == null) seed = 0L;
+            }
         }
 
         /**

@@ -11,6 +11,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 import java.util.function.BooleanSupplier;
 import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.route.Endpoint;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
 import org.flexlb.kvcm.grpc.*;
@@ -38,6 +39,17 @@ class KvcmDiscoveryTest {
                 assertEquals(1, invalid.lookups.get());
             }
             assertTrue(vip.closed);
+        }
+    }
+
+    @Test void invalidVipAddressIsReportedWhenNoLeaderCanBeFound() {
+        var vip = new Vip();
+        vip.hosts.set(List.of(WorkerHost.of("bad host", 1234, "")));
+        try (var resolver = new KvcmDiscovery(null, "kvcm-domain", "shared_128", vip)) {
+            var failure = assertThrows(IllegalStateException.class, resolver::get);
+            var errors = failure.getSuppressed();
+            assertEquals(1, errors.length);
+            assertEquals("Invalid service host", errors[0].getMessage());
         }
     }
 
@@ -142,7 +154,9 @@ class KvcmDiscoveryTest {
         final AtomicReference<List<WorkerHost>> hosts = new AtomicReference<>(List.of());
         boolean closed;
         public List<WorkerHost> getHosts(String domain) { assertEquals("kvcm-domain", domain); return hosts.get(); }
-        public void listen(String domain, ServiceHostListener listener) { fail("No watcher is needed"); }
+        @Override public void validate(Endpoint endpoint) { fail("Only address-based bootstrap is expected"); }
+        @Override public List<WorkerHost> getHosts(Endpoint endpoint) { return fail("Only address-based bootstrap is expected"); }
+        @Override public void listen(Endpoint endpoint, ServiceHostListener listener) { fail("No watcher is needed"); }
         public void shutdown() { closed = true; }
     }
 

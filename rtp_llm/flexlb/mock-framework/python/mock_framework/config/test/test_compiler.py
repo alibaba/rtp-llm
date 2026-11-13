@@ -20,7 +20,7 @@ def test_shipped_cases_compile_and_reference_existing_inputs(path, registry):
     case = compile_case(path, registry)
     for phase in case.phases:
         for step in phase.steps:
-            if step.definition.name == "client/start/playback":
+            if step.definition.name == "frontend/start/playback":
                 assert (case.shared_root / step.args["requests_file"]).is_file()
 
 
@@ -47,7 +47,7 @@ def test_compiles_without_java_catalog_and_read_can_have_no_assertion(
         lambda d: d["environment"]["prefill"]["deployment"].update(replicas=True),
         lambda d: d["phases"][0].update(parallel=True),
         lambda d: d["phases"][0]["steps"][0].update(run="background"),
-        lambda d: d["phases"][0]["steps"][0].update(interface="client/traffic/run"),
+        lambda d: d["phases"][0]["steps"][0].update(interface="frontend/traffic/run"),
         lambda d: d["phases"][0]["steps"][0].update(within="-1s"),
         lambda d: d["phases"][0]["steps"][1]["args"].update(
             targets={"ref": "leader.nodes"}
