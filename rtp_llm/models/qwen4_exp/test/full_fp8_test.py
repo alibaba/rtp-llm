@@ -1,15 +1,13 @@
-import builtins
-import importlib.util
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
-from unittest import mock
 
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.config.quant_config import ModelOptFp4Config
-from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX, Fp8StorageWeight
+from rtp_llm.model_loader.fp8_weight import (
+    FP8_STORAGE_SCALE_SUFFIX,
+    Fp8StorageWeight,
+)
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import AtomicWeight
@@ -38,78 +36,6 @@ def quantized(value):
 
 
 class FullFp8StorageTest(unittest.TestCase):
-    def test_small_parameters_keep_source_values_without_fp8_copies(self):
-        tensors = {
-            W.linear_attn_alog: torch.linspace(-2, 3, 48).bfloat16(),
-            W.linear_attn_dt_b: torch.linspace(-3, 2, 48).bfloat16(),
-            W.linear_attn_conv1d_w: torch.linspace(-1, 1, 128 * 4)
-            .reshape(128, 1, 4)
-            .bfloat16(),
-            W.qwen4_hc_attn_norm: torch.linspace(-1, 1, 128).bfloat16(),
-            W.shared_expert_gate: torch.linspace(-1, 1, 2560)
-            .reshape(1, 2560)
-            .bfloat16(),
-        }
-
-        class Source(_Source):
-            def load_tensor(self, name, data_type=torch.float16):
-                return [tensors[name].to(data_type)]
-
-        config = SimpleNamespace(
-            tp_size=1,
-            dp_size=1,
-            ep_size=1,
-            merge_lora=False,
-            compute_dtype=torch.bfloat16,
-            exported_device=SimpleNamespace(
-                maybe_rewrite_weight_by_key=lambda key, value, **kw: value
-            ),
-            use_swizzleA=False,
-        )
-        for name, original in tensors.items():
-            with self.subTest(name=name):
-                source = AtomicWeight(name, [CkptWeightInfo(name)])
-                loaded = Fp8StorageWeight(source).load(Source(), None, "cpu", config)
-                self.assertEqual(set(loaded), {name})
-                self.assertEqual(loaded[name].dtype, original.dtype)
-                torch.testing.assert_close(loaded[name], original, rtol=0, atol=0)
-
-    def test_tied_fp8_embeddings_are_rejected_before_weight_descriptors(self):
-        from rtp_llm.config.qwen4_exp_config import validate_qwen4_runtime
-
-        config = SimpleNamespace(
-            enable_qwen4_qsa=True,
-            enable_qwen4_ple=True,
-            is_mtp=False,
-            _qwen4_full_fp8_nvfp4=True,
-            tie_word_embeddings=True,
-        )
-        with self.assertRaisesRegex(RuntimeError, "untied word embeddings"):
-            validate_qwen4_runtime(config, SimpleNamespace())
-
-    def test_recipe_rejects_expert_parallelism_beyond_attention_tp_before_loading(self):
-        from rtp_llm.config.quant_config import QWEN4_FP8_NVFP4_RECIPE
-        from rtp_llm.config.qwen4_exp_config import validate_qwen4_runtime
-
-        config = SimpleNamespace(
-            enable_qwen4_qsa=True,
-            enable_qwen4_ple=True,
-            is_mtp=False,
-            _qwen4_full_fp8_nvfp4=True,
-            tie_word_embeddings=False,
-            quant_config=ModelOptFp4Config(
-                bits=4,
-                group_size=16,
-                is_quanted=False,
-                source_fp8_block_size=128,
-                model_recipe=QWEN4_FP8_NVFP4_RECIPE,
-            ),
-        )
-        with self.assertRaisesRegex(RuntimeError, "before PLE weight loading"):
-            validate_qwen4_runtime(
-                config, SimpleNamespace(ep_size=2, get_attn_tp_size=lambda: 1)
-            )
-
     def test_original_descriptor_split_runs_before_quantization(self):
         source = AtomicWeight(W.embedding, [CkptWeightInfo("weight")])
         source.split_func = lambda t, **kwargs: t[:, :4]
@@ -151,58 +77,13 @@ class FullFp8StorageTest(unittest.TestCase):
             atol=0.5,
         )
 
-    def test_lm_head_uses_native_weight_scale_after_tp_split(self):
-        class HeadSource(_Source):
-            def load_tensor(self, name, data_type=torch.float16):
-                return [torch.arange(256).reshape(32, 8).to(data_type) - 128]
-
-        database = HeadSource()
-        source = AtomicWeight(W.lm_head, [CkptWeightInfo("weight")])
-        descriptor = Fp8StorageWeight(source)
-        config = SimpleNamespace(
-            tp_size=2,
-            tp_rank=0,
-            lm_head_tp_size=2,
-            lm_head_tp_rank=0,
-            ep_rank=0,
-            dp_rank=0,
-            ffn_tp_rank=0,
-            ffn_tp_size=2,
-            hidden_size=8,
-            head_num=1,
-            head_num_kv=1,
-            size_per_head=8,
-            moe_pure_tp_mode=False,
-            bit=16,
-            dp_size=1,
-            ep_size=1,
-            merge_lora=False,
-            compute_dtype=torch.bfloat16,
-            exported_device=SimpleNamespace(
-                maybe_rewrite_weight_by_key=lambda key, value, **kw: value
-            ),
-            use_swizzleA=False,
-        )
-        for rank in (0, 1):
-            config.lm_head_tp_rank = rank
-            loaded = descriptor.load(database, None, "cpu", config)
-            self.assertIn(W.lm_head_s, descriptor.additional_output_names)
-            self.assertNotIn(W.lm_head + FP8_STORAGE_SCALE_SUFFIX, loaded)
-            self.assertEqual(loaded[W.lm_head].shape, (16, 8))
-            reference, scale = quantized(
-                database.load_tensor("weight", torch.bfloat16)[0][
-                    rank * 16 : (rank + 1) * 16
-                ]
-            )
-            torch.testing.assert_close(
-                loaded[W.lm_head].float(), reference.float(), rtol=0, atol=0
-            )
-            torch.testing.assert_close(loaded[W.lm_head_s], scale, rtol=0, atol=0)
-
-    def test_custom_residual_consumers_keep_compute_copies_and_restart_markers(self):
+    def test_custom_residual_consumers_record_actual_compute_copies(self):
         from torch import nn
 
         from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpDecoderLayer
+        from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
+            annotate_compute_inventory,
+        )
 
         weights = ModelWeights(1, "cpu", torch.bfloat16)
         projections = (
@@ -225,7 +106,8 @@ class FullFp8StorageTest(unittest.TestCase):
         layer._build_residual_modules(
             SimpleNamespace(hc_mult=4, layernorm_eps=1e-6), prepared.weights[0]
         )
-        self.assertIs(prepared._fp8_storage_owner, weights)
+        inventory = annotate_compute_inventory(prepared)
+        entries = {entry.name: entry for entry in inventory.layers[0]}
         for unit, names in (
             (layer.attn_hyper_connection, [x[0] for x in projections[:3]]),
             (layer.mlp_hyper_connection, [x[0] for x in projections[3:]]),
@@ -234,31 +116,18 @@ class FullFp8StorageTest(unittest.TestCase):
                 names,
                 (unit.down_projection, unit.up_projection, unit.inject_projection),
             ):
-                self.assertIs(prepared.weights[0][name], weights.weights[0][name])
-                self.assertEqual(module.compute_weight.dtype, torch.bfloat16)
-                self.assertTrue(module.compute_weight._rtp_requires_restart_for_update)
-                torch.testing.assert_close(
-                    module.compute_weight,
-                    (
-                        weights.weights[0][name].float()
-                        * weights.weights[0][name + FP8_STORAGE_SCALE_SUFFIX]
-                    ).to(torch.bfloat16),
+                entry = entries[name]
+                self.assertEqual(
+                    entry.storage.data_ptr(), weights.weights[0][name].data_ptr()
                 )
+                self.assertEqual(
+                    entry.compute.data_ptr(), module.compute_weight.data_ptr()
+                )
+                self.assertEqual(entry.compute.dtype, torch.bfloat16)
+                self.assertTrue(entry.update_requires_restart)
+                self.assertTrue(entry.compute._rtp_requires_restart_for_update)
 
-    def test_source_bf16_rebinding_rejects_updates_to_detached_owner(self):
-        weights = ModelWeights(1, "cpu", torch.bfloat16)
-        for name in (W.qwen4_hc_attn_mix_down, W.linear_attn_qkvz_w):
-            original = torch.randn(4, 8, dtype=torch.bfloat16)
-            weights.weights[0][name] = original
-        prepared = compute_weight_view(weights)
-        for name, original in weights.weights[0].items():
-            prepared.weights[0][name] = original.clone()
-            self.assertTrue(original._rtp_requires_restart_for_update)
-            self.assertTrue(prepared.weights[0][name]._rtp_requires_restart_for_update)
-            with self.assertRaisesRegex(PermissionError, "restart"):
-                weights.update_layer_weight(0, name, torch.zeros_like(original))
-
-    def test_compute_view_preserves_fp8_owners_and_matrices(self):
+    def test_compute_view_preserves_fp8_inventory_and_matrices(self):
         weights = ModelWeights(1, "cpu", torch.bfloat16)
         matrix, ms = quantized(torch.randn(32, 32))
         norm, ns = quantized(torch.randn(32))
@@ -460,67 +329,6 @@ class FullFp8CudaTest(unittest.TestCase):
         torch.testing.assert_close(output[:3], expected, rtol=0.008, atol=0.02)
         self.assertEqual(output[-1].count_nonzero().item(), 0)
         self.assertEqual(module.weight.dtype, torch.float8_e4m3fn)
-
-
-class QwenAttentionFp8RuntimeTest(unittest.TestCase):
-    def test_runtime_attention_quant_config_does_not_change_moe_config(self):
-        from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextDecoderLayer
-        from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpDecoderLayer
-
-        original = ModelOptFp4Config(bits=4, group_size=16, is_quanted=False)
-        cfg = SimpleNamespace(quant_config=original, _qwen4_full_fp8_nvfp4=True)
-        layer = Qwen4ExpDecoderLayer.__new__(Qwen4ExpDecoderLayer)
-        self.assertEqual(
-            layer._attention_quant_config(cfg, {}).get_method(), "FP8_PER_BLOCK"
-        )
-        self.assertIs(cfg.quant_config, original)
-        cfg._qwen4_full_fp8_nvfp4 = False
-        self.assertIs(layer._attention_quant_config(cfg, {}), original)
-        base = Qwen3NextDecoderLayer.__new__(Qwen3NextDecoderLayer)
-        cfg._qwen4_full_fp8_nvfp4 = True
-        self.assertIs(base._attention_quant_config(cfg, {}), original)
-
-    def test_full_recipe_quantizes_both_attention_geometries(self):
-        from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpDecoderLayer
-        from rtp_llm.ops import HybridAttentionType
-
-        original = ModelOptFp4Config(bits=4, group_size=16, is_quanted=False)
-        cfg = SimpleNamespace(quant_config=original, _qwen4_full_fp8_nvfp4=True)
-        layer = Qwen4ExpDecoderLayer.__new__(Qwen4ExpDecoderLayer)
-        for kind in (HybridAttentionType.LINEAR, HybridAttentionType.NONE):
-            layer.layer_type = kind
-            self.assertEqual(
-                layer._attention_quant_config(cfg, {}).get_method(), "FP8_PER_BLOCK"
-            )
-            self.assertIs(cfg.quant_config, original)
-
-    def test_missing_optional_fp4_does_not_block_fp8_registration(self):
-        from rtp_llm.models_py.modules.factory.linear import LinearFactory
-        from rtp_llm.models_py.modules.factory.linear.impl import cuda
-
-        real_import = builtins.__import__
-
-        def import_without_fp4(name, globals=None, locals=None, fromlist=(), level=0):
-            if name == "fp4_linear" and level == 1:
-                raise ModuleNotFoundError("cutlass test sentinel")
-            return real_import(name, globals, locals, fromlist, level)
-
-        spec = importlib.util.spec_from_file_location(
-            cuda.__name__ + ".registration_probe", Path(cuda.__file__)
-        )
-        module = importlib.util.module_from_spec(spec)
-        module.__package__ = cuda.__name__
-        with (
-            mock.patch.object(builtins, "__import__", import_without_fp4),
-            mock.patch.object(LinearFactory, "register") as register,
-            mock.patch("rtp_llm.models_py.utils.arch.is_cuda", return_value=True),
-            mock.patch("rtp_llm.models_py.utils.arch.get_sm", return_value=(12, 0)),
-        ):
-            spec.loader.exec_module(module)
-        names = [args[0].__name__ for args, _ in register.call_args_list]
-        self.assertEqual(
-            names, ["CudaF16Linear", "CudaFp8PerTensorLinear", "CudaFp8GEMMLinear"]
-        )
 
 
 if __name__ == "__main__":

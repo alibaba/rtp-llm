@@ -20,7 +20,7 @@ def _vocab_rows(
     HAS_MASK: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     row = offsets // D
     col = offsets % D
     token = tl.load(Tokens + row * TOKEN_STRIDE, row < N, other=-1).to(tl.int64)
@@ -38,7 +38,7 @@ def _vocab_rows(
     # A masked text row is zero even when the vocabulary scale is nonfinite.
     if HAS_MASK:
         value = tl.where(keep, value, 0)
-    tl.store(Output + offsets, value, row < N)
+    tl.store(Output + offsets, value, offsets < N * D)
 
 
 def vocab_rows(tokens, weight, scale, text_mask=None):
@@ -75,7 +75,7 @@ def _gather_hyper_rows(
     BRANCHES: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    offset = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     width = TP * LOCAL_D
     row = offset // (BRANCHES * width)
     column = offset % width

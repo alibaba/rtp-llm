@@ -146,7 +146,6 @@ cc_test(
     srcs = ["CudaSamplerSm120Test.cc"],
     copts = copts(),
     deps = test_deps + [
-        "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
         "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
     ],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13"},

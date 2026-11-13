@@ -349,15 +349,6 @@ class CudaImpl(GpuImpl):
             logging.warn(f"no nvml found: " + str(e))
 
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
-        if self.py_env_configs.moe_config.moe_strategy == "nvfp4_marlin":
-            if self.py_env_configs.moe_config.fp4_moe_op not in ("auto", "marlin"):
-                raise ValueError("nvfp4_marlin requires FP4_MOE_OP=auto or marlin")
-            self.py_env_configs.moe_config.fp4_moe_op = "marlin"
-        if (
-            self.py_env_configs.moe_config.fp4_moe_op == "marlin"
-            and self.py_env_configs.moe_config.moe_strategy != "nvfp4_marlin"
-        ):
-            raise ValueError("FP4_MOE_OP=marlin requires MOE_STRATEGY=nvfp4_marlin")
         if (
             self.py_env_configs.moe_config.fp4_moe_op == "cutlass"
             and self.py_env_configs.moe_config.moe_strategy != "nvfp4_cutlass"
@@ -675,7 +666,7 @@ class CudaImpl(GpuImpl):
         if kernel_name not in [W.moe_w2, W.moe_w1]:
             return kernel, scale
 
-        if self.py_env_configs.moe_config.fp4_moe_op in ("cutlass", "marlin"):
+        if self.py_env_configs.moe_config.fp4_moe_op == "cutlass":
             # Weight rows remain in RTP's [up, gate] order; persist only the
             # prepared scales so model weight inventory holds no duplicate.
             return kernel, self.swizzle_blockscale(scale)

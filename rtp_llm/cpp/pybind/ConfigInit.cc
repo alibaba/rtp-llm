@@ -1862,16 +1862,20 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("active_tail_blocks", &CacheTailPolicyDesc::active_tail_blocks)
         .def_readwrite("validate_tail_blocks", &CacheTailPolicyDesc::validate_tail_blocks)
+        .def_readwrite("prefix_checkpoint_stride_blocks", &CacheTailPolicyDesc::prefix_checkpoint_stride_blocks)
         .def(py::pickle(
             [](const CacheTailPolicyDesc& self) {
-                return py::make_tuple(self.active_tail_blocks, self.validate_tail_blocks);
+                return py::make_tuple(self.active_tail_blocks, self.validate_tail_blocks,
+                                      self.prefix_checkpoint_stride_blocks);
             },
             [](py::tuple t) {
                 CacheTailPolicyDesc c;
-                if (t.size() != 2)
+                if (t.size() != 2 && t.size() != 3)
                     throw std::runtime_error("Invalid CacheTailPolicyDesc state!");
                 c.active_tail_blocks   = t[0].cast<std::optional<uint32_t>>();
                 c.validate_tail_blocks = t[1].cast<std::optional<bool>>();
+                if (t.size() == 3)
+                    c.prefix_checkpoint_stride_blocks = t[2].cast<std::optional<uint32_t>>();
                 return c;
             }));
 
@@ -1997,6 +2001,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cache_min_replay_tokens", &ModelConfig::cache_min_replay_tokens)
         .def_readwrite("cache_key_hash_seed", &ModelConfig::cache_key_hash_seed)
         .def_readwrite("kv_cache_spec_descs", &ModelConfig::kv_cache_spec_descs)
+        .def_readwrite("auxiliary_paged_cache_bytes_per_block", &ModelConfig::auxiliary_paged_cache_bytes_per_block)
         // task_type is defined as property below
         .def_readwrite("ckpt_path", &ModelConfig::ckpt_path)
         .def_readwrite("tokenizer_path", &ModelConfig::tokenizer_path)
@@ -2027,6 +2032,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("moe_normalize_expert_scale", &ModelConfig::moe_normalize_expert_scale)
         .def_readwrite("scoring_func", &ModelConfig::scoring_func)
         .def_readwrite("hc_mult", &ModelConfig::hc_mult)
+        .def_readwrite("mtp_input_hidden_size", &ModelConfig::mtp_input_hidden_size)
         .def_readwrite("hc_sinkhorn_iters", &ModelConfig::hc_sinkhorn_iters)
         .def_readwrite("hc_eps", &ModelConfig::hc_eps)
         .def_readwrite("swiglu_limit", &ModelConfig::swiglu_limit)

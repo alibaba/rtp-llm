@@ -6,7 +6,6 @@ import math
 from typing import Any
 
 import torch
-
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
@@ -44,7 +43,6 @@ def select_decode_tokens(
     then rotated and scored against every visible compressed entry.
     """
     graph_decode = bool(self.main_inputs.is_cuda_graph)
-    checks = self.take_prewrite_checks()
     input_lengths = self._validate_mode_and_metadata(
         expect_prefill=False, allow_graph_decode=graph_decode
     )
@@ -79,10 +77,14 @@ def select_decode_tokens(
     # writer accepts contiguous rows, and this copy is captured in Graph.
     raw_keys = raw_keys.contiguous()
 
-    # Device-input eager batches share one immutable metadata snapshot across
-    # sparse layers. Host-input/Graph batches read their existing host mirror.
-    host_lengths = self.host_values(sequence_lengths)
-    host_max_compressed = (max(host_lengths) + 1) // ratio
+    # The engine keeps decode lengths on pinned CPU memory. Derive the
+    # scorer's output width there, before the H2D copy, rather than
+    # synchronizing a GPU max reduction after every sparse layer.
+    host_max_compressed = (
+        (int(sequence_lengths.max().item()) + 1) // ratio
+        if sequence_lengths.device.type == "cpu"
+        else None
+    )
     # Replay refreshes this device tensor before launching the captured graph.
     # Reading the pinned mirror inside capture would freeze an H2D dependency.
     sequence_lengths = (
@@ -90,7 +92,11 @@ def select_decode_tokens(
         if graph_decode
         else sequence_lengths.to(device=q.device, dtype=torch.int32, non_blocking=True)
     ).contiguous()
-    invalid_lengths = any(length < 0 for length in host_lengths)
+    invalid_lengths = (
+        bool(torch.any(sequence_lengths < 0).item())
+        if host_max_compressed is None
+        else bool(torch.any(self.main_inputs.sequence_lengths < 0).item())
+    )
     if invalid_lengths:
         raise RuntimeError("qwen4_exp QSA sequence_lengths must be non-negative")
     position_ids = self.main_inputs.combo_position_ids
@@ -109,61 +115,60 @@ def select_decode_tokens(
     get_frequency = getattr(indexer, "rope_inv_freq", None)
     frequency = get_frequency(rope_config) if callable(get_frequency) else None
     prepared = None
-    position_state = self.positions(ratio, checks)
     if graph_decode and self.is_mtp_draft:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_decode_positions import (
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_decode_positions_triton import (
             try_prepare_decode_positions,
         )
 
         prepared = try_prepare_decode_positions(
             sequence_lengths, position_ids, frequency, rope_config
         )
-    if position_state is not None:
-        current_cos, current_sin = position_state.rope(rope_config)
-    elif prepared is not None:
-        (
-            current_cos,
-            current_sin,
-            rope_cos,
-            rope_sin,
-            visible_token_lengths,
-            compressed_lengths,
-        ) = prepared
-    elif graph_decode and self.is_mtp_draft:
-        if not is_qsa_rope_style(rope_config, "Base"):
-            raise RuntimeError("qwen4_exp draft Graph requires text-only Base RoPE")
-        # MTP's text position generator repeats one scalar across its
-        # axes. Eager checks equality; Graph capture cannot synchronize.
-        current_cos, current_sin = build_base_rope(
-            position_ids,
-            rope_config,
-            token_count=batch_size,
-            dtype=raw_keys.dtype,
-            device=raw_keys.device,
-            validate_position_axes=False,
-            inv_freq=frequency,
-        )
-    elif graph_decode:
-        # Graph capture uses the engine's canonical text
-        # positions. The C++ graph owner refreshes lengths before replay.
-        current_cos, current_sin = build_qsa_rope_from_logical_positions(
-            sequence_lengths,
-            rope_config,
-            token_count=batch_size,
-            dtype=raw_keys.dtype,
-            device=raw_keys.device,
-            inv_freq=frequency,
-        )
-    else:
-        current_cos, current_sin = build_qsa_rope(
-            position_ids,
-            rope_config,
-            token_count=batch_size,
-            dtype=raw_keys.dtype,
-            device=raw_keys.device,
-            logical_positions=decode_logical_positions,
-            checks=checks,
-        )
+    try:
+        if prepared is not None:
+            (
+                current_cos,
+                current_sin,
+                rope_cos,
+                rope_sin,
+                visible_token_lengths,
+                compressed_lengths,
+            ) = prepared
+        elif graph_decode and self.is_mtp_draft:
+            if not is_qsa_rope_style(rope_config, "Base"):
+                raise RuntimeError("qwen4_exp draft Graph requires text-only Base RoPE")
+            # MTP's text position generator repeats one scalar across its
+            # axes. Eager checks equality; Graph capture cannot synchronize.
+            current_cos, current_sin = build_base_rope(
+                position_ids,
+                rope_config,
+                token_count=batch_size,
+                dtype=raw_keys.dtype,
+                device=raw_keys.device,
+                validate_position_axes=False,
+                inv_freq=frequency,
+            )
+        elif graph_decode:
+            # Graph capture uses the engine's canonical text
+            # positions. The C++ graph owner refreshes lengths before replay.
+            current_cos, current_sin = build_qsa_rope_from_logical_positions(
+                sequence_lengths,
+                rope_config,
+                token_count=batch_size,
+                dtype=raw_keys.dtype,
+                device=raw_keys.device,
+                inv_freq=frequency,
+            )
+        else:
+            current_cos, current_sin = build_qsa_rope(
+                position_ids,
+                rope_config,
+                token_count=batch_size,
+                dtype=raw_keys.dtype,
+                device=raw_keys.device,
+                logical_positions=decode_logical_positions,
+            )
+    except ValueError as error:
+        raise RuntimeError(f"qwen4_exp QSA ordinary decode {error}") from error
 
     kv_tokens_per_block = int(self.indexer_kv_cache.seq_size_per_block)
     if kv_tokens_per_block <= 0 or kv_tokens_per_block % ratio:
@@ -216,7 +221,11 @@ def select_decode_tokens(
         visible_token_lengths = torch.where(active, visible_token_lengths, 0)
         compressed_lengths = torch.where(active, compressed_lengths, 0)
     compressed_capacity = int(kv_table.shape[1]) * kv_entries_per_block
-    exceeds_capacity = host_max_compressed > compressed_capacity
+    exceeds_capacity = (
+        host_max_compressed > compressed_capacity
+        if host_max_compressed is not None
+        else bool(torch.any(compressed_lengths > compressed_capacity).item())
+    )
     if exceeds_capacity:
         raise RuntimeError(
             "qwen4_exp QSA compressed decode length exceeds its tag-local "
@@ -231,13 +240,11 @@ def select_decode_tokens(
             required_kv_columns,
             pool_blocks=int(kv_pool.shape[0]),
             tag=INDEXER_KV_TAG,
-            checks=checks,
         )
-        checks.verify()
 
     # Only rows that close a compression group consume these values. Build
     # one block-start RoPE row per request instead of [0, context_len).
-    if prepared is None and position_state is None:
+    if prepared is None:
         block_starts = sequence_lengths.to(torch.int64)
         block_starts = block_starts - block_starts.remainder(ratio)
         rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
@@ -248,12 +255,9 @@ def select_decode_tokens(
             device=raw_keys.device,
             inv_freq=frequency,
         )
-    if position_state is not None:
-        rope_cos, rope_sin = position_state.rope(rope_config, group=True)
-        position_state.stage()
     fused_writer = True
     if fused_writer:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
             is_supported,
             write_decode_key_with_undo_,
         )
@@ -324,7 +328,7 @@ def select_decode_tokens(
             dtype=torch.float32,
             device=q.device,
         )
-    from rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score import (
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score import (
         qsa_paged_indexer_score,
     )
 
@@ -338,7 +342,11 @@ def select_decode_tokens(
         # _validate_required_blocks checked every visible physical ID;
         # the score kernel also masks invalid IDs before reading the pool.
         validate_block_table=False,
-        max_ctx_len=host_max_compressed,
+        max_ctx_len=(
+            host_max_compressed
+            if host_max_compressed is not None
+            else int(compressed_lengths.max().item())
+        ),
     )
     return select_qsa_paged_tokens(
         block_logits,

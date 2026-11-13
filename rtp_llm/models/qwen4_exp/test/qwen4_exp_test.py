@@ -6,32 +6,20 @@ from types import SimpleNamespace
 from unittest import mock
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import (
     QWEN4_FP8_NVFP4_RECIPE,
     Fp8BlockWiseQuantConfig,
     ModelOptFp4Config,
     init_quant_config,
 )
-from rtp_llm.config.qwen4_exp_config import Qwen4ModelConfig as ModelConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizer_factory_register import (
-    _tokenizer_factory,
-    ensure_tokenizer_registered,
-)
-from rtp_llm.model_factory_register import (
-    ModelDict,
-    _model_factory,
-    _model_type_to_module,
-    ensure_model_registered,
-)
+from rtp_llm.model_factory_register import ModelDict, _model_factory
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen35Moe
 from rtp_llm.models.qwen4_exp.qwen4_exp import Qwen4Exp
 from rtp_llm.models.qwen4_exp.qwen4_exp_weight import Qwen4ExpWeight
-from rtp_llm.models.qwen4_exp.test.config_fixture import qwen4_config
 from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
-from rtp_llm.multimodal.multimodal_mixins.qwen4_exp_mixin import Qwen4ExpMixin
-from rtp_llm.openai.renderer_factory_register import (
-    _renderer_factory,
-    ensure_renderer_registered,
+from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.qwen3_5_moe_mixin import (
+    Qwen3_5MoeMixin,
 )
 from rtp_llm.ops import (
     DataType,
@@ -93,63 +81,6 @@ class Qwen4ExpTest(unittest.TestCase):
         Path(self._temp_dir.name, "config.json").write_text(json.dumps(self._config()))
         self.config = Qwen4Exp.create_config(self._temp_dir.name)
 
-    def test_checkpoint_dtype_and_default_cache_pages(self):
-        data = self._config()
-        data["text_config"]["dtype"] = "bfloat16"
-        Path(self._temp_dir.name, "config.json").write_text(json.dumps(data))
-        self.config = Qwen4Exp.create_config(self._temp_dir.name)
-        self.assertEqual(self.config.config_dtype, "bfloat16")
-        for default in (8, 16, 64):
-            self.config.attn_config.tokens_per_block = default
-            self.config.attn_config.kernel_tokens_per_block = default
-            Qwen4Exp._post_build_model_config(self.config)
-            self.assertEqual(self.config.attn_config.tokens_per_block, 128)
-            self.assertEqual(self.config.attn_config.kernel_tokens_per_block, 128)
-        self.config.attn_config.tokens_per_block = 192
-        with self.assertRaisesRegex(ValueError, "128-token"):
-            Qwen4Exp._post_build_model_config(self.config)
-
-    def test_split_physical_and_kernel_cache_pages_are_rejected_before_build(self):
-        for physical in (256, 512, 32768):
-            with self.subTest(physical=physical):
-                self.config.attn_config.tokens_per_block = physical
-                self.config.attn_config.kernel_tokens_per_block = 128
-                with self.assertRaisesRegex(ValueError, "physical and kernel"):
-                    Qwen4Exp._post_build_model_config(self.config)
-
-    def test_ple_document_eos_survives_chat_tokenizer_setup(self):
-        from rtp_llm.config.qwen4_exp_config import ple_eos_token_id
-
-        data = self._config()
-        data["text_config"]["eos_token_id"] = 248044
-        Path(self._temp_dir.name, "config.json").write_text(json.dumps(data))
-        config = Qwen4Exp.create_config(self._temp_dir.name)
-        model = Qwen4Exp.__new__(Qwen4Exp)
-        model.model_config = config
-        model.tokenizer = SimpleNamespace(eos_token_id=248046)
-        model._fill_tokenizer_special_tokens()
-        self.assertEqual(config.special_tokens.eos_token_id, 248046)
-        self.assertEqual(ple_eos_token_id(config), 248044)
-        self.assertEqual(
-            ple_eos_token_id(self.config), self.config.special_tokens.eos_token_id
-        )
-        import torch
-
-        from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpNGramEmbedding
-
-        embedding = SimpleNamespace(eos_token_id=ple_eos_token_id(config))
-        history = torch.tensor([[11, 248046, 12, 248044, 13, 14]])
-        shifted = Qwen4ExpNGramEmbedding._shift_right_ignore_eos(embedding, history, 1)
-        self.assertEqual(shifted.tolist(), [[248044, 11, 248046, 12, 248044, 13]])
-
-    def test_invalid_ple_document_eos_is_rejected(self):
-        for eos in (-1, 248320, True, [248044]):
-            data = self._config()
-            data["text_config"]["eos_token_id"] = eos
-            Path(self._temp_dir.name, "config.json").write_text(json.dumps(data))
-            with self.subTest(eos=eos), self.assertRaisesRegex(ValueError, "PLE eos"):
-                Qwen4Exp.create_config(self._temp_dir.name)
-
     def _loaded_model(self, **changes):
         model = Qwen4Exp.__new__(Qwen4Exp)
         config = dict(
@@ -177,7 +108,6 @@ class Qwen4ExpTest(unittest.TestCase):
         config.update(changes)
         model.model_config = SimpleNamespace(**config)
         model.parallelism_config = SimpleNamespace(
-            local_rank=0,
             role_type=RoleType.PDFUSION,
             get_attn_tp_size=lambda: 1,
             prefill_cp_config=SimpleNamespace(
@@ -229,6 +159,7 @@ class Qwen4ExpTest(unittest.TestCase):
             w for w in info.layer_weights[1] if w.name == W.qwen4_ple_ngram_shards
         )
         self.assertEqual(ple.resident_device, "cpu")
+        self.assertEqual(self.config._tp_sharded_extra_weight_bytes, 0)
         self.assertGreater(self.config._replicated_extra_weight_bytes, 0)
 
     def test_indexer_weights_only_belong_to_full_attention(self):
@@ -271,10 +202,22 @@ class Qwen4ExpTest(unittest.TestCase):
                     model.load()
             parent.assert_not_called()
 
-    def test_prefetch_budget_override(self):
+    def test_graph_permission_is_common_and_model_has_capture_capability(self):
+        model = self._loaded_model()
+        self.assertTrue(model.support_cuda_graph())
+
+    def test_prefetch_budget_is_the_only_model_resource_override(self):
         self.assertEqual(self.config.qwen4_ple_prefetch_mb, 256)
         self.config.apply_override_args('{"qwen4_ple_prefetch_mb":64}')
         self.assertEqual(self.config.qwen4_ple_prefetch_mb, 64)
+        for budget in (0, -1, True, 1.5, "256", None):
+            with (
+                self.subTest(budget=budget),
+                self.assertRaisesRegex(ValueError, "positive integer"),
+            ):
+                self.config.apply_override_args(
+                    json.dumps({"qwen4_ple_prefetch_mb": budget})
+                )
 
     def test_bf16_checkpoint_rejects_partial_quantization_recipes(self):
         for choice in ("MODELOPT_FP4", "FP8_PER_BLOCK", "QWEN4_FP8_NVFP4"):
@@ -302,9 +245,7 @@ class Qwen4ExpTest(unittest.TestCase):
             "rtp_llm.models.qwen4_exp.moe_fp8.validate_moe_fp8_checkpoint"
         ) as validate:
             cfg = Qwen4Exp.create_config(self._temp_dir.name)
-            validate.assert_not_called()
-            Qwen4Exp._validate_checkpoint(cfg)
-            validate.assert_called_once()
+        validate.assert_called_once()
         cfg.quant_config = Fp8BlockWiseQuantConfig(is_quanted=True)
         cfg.quantization = json.dumps(
             {
@@ -323,56 +264,12 @@ class Qwen4ExpTest(unittest.TestCase):
         self.assertEqual(cfg.quant_config.online_cache_dir, "/tmp/qwen4-test-cache")
         self.assertEqual(cfg.quant_config.group_size(), 16)
         self.assertTrue(cfg._qwen4_full_fp8_nvfp4)
-        self.assertEqual(cfg.dense_weight_dtype, "fp8")
-        self.assertEqual(cfg.expert_weight_dtype, "fp4")
-
-    def test_invalid_source_manifest_is_rejected_before_parent_load(self):
-        data = self._config()
-        data["quantization_config"] = {
-            "quant_method": "fp8",
-            "activation_scheme": "dynamic",
-            "weight_block_size": [128, 128],
-        }
-        Path(self._temp_dir.name, "config.json").write_text(json.dumps(data))
-        Path(self._temp_dir.name, "model.safetensors.index.json").write_text(
-            json.dumps({"weight_map": {}})
-        )
-        cfg = Qwen4Exp.create_config(self._temp_dir.name)
-        model = self._loaded_model()
-        model.model_config._qwen4_fp8_source = True
-        model.model_config.ckpt_path = cfg.ckpt_path
-        with mock.patch.object(Qwen35Moe, "load") as parent:
-            with self.assertRaisesRegex(ValueError, "exactly the split MoE experts"):
-                model.load()
-        parent.assert_not_called()
 
     def test_quantization_preset_carries_the_complete_recipe(self):
         cfg = init_quant_config("QWEN4_FP8_NVFP4")
         self.assertEqual(cfg.model_recipe, QWEN4_FP8_NVFP4_RECIPE)
         self.assertEqual(cfg.activation_amax, 32.0)
         self.assertTrue(cfg.require_contiguous_experts)
-
-    def test_storage_precision_survives_recipe_finalization_and_pricing(self):
-        self.config._qwen4_fp8_source = True
-        self.config.quantization = json.dumps(
-            dict(
-                method="modelopt_fp4",
-                bits=4,
-                group_size=16,
-                is_quanted=False,
-                model_recipe=QWEN4_FP8_NVFP4_RECIPE,
-                dense_storage="source_bf16",
-                mtp_dense_storage="source_bf16_shared_vocab",
-            )
-        )
-        for _ in range(2):
-            Qwen4Exp._configure_precision_recipe(self.config)
-            self.assertEqual(self.config._qwen4_dense_storage, "source_bf16")
-            self.assertEqual(self.config.dense_weight_dtype, "bf16")
-            self.assertEqual(self.config.expert_weight_dtype, "fp4")
-            self.assertEqual(
-                self.config.quant_config.mtp_dense_storage, "source_bf16_shared_vocab"
-            )
 
     def tearDown(self):
         self._temp_dir.cleanup()
@@ -396,52 +293,10 @@ class Qwen4ExpTest(unittest.TestCase):
             dict(activation_amax=16),
             dict(require_contiguous_experts=False),
             dict(mixed_attention=True),
-            dict(dense_storage="bf16_from_fp8"),
-            dict(mtp_dense_storage="bf16_from_fp8"),
         ):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.config.quantization = json.dumps(dict(base, **changes))
                 Qwen4Exp._configure_precision_recipe(self.config)
-
-    def test_quantized_checkpoint_keeps_string_fallback_compatibility(self):
-        for quantization in ("not_a_preset", "FP8"):
-            config = ModelConfig()
-            config.model_type = "qwen3_moe"
-            config.quantization = quantization
-            quant = Fp8BlockWiseQuantConfig()
-            with mock.patch(
-                "rtp_llm.config.model_config.QuantizationConfig.load_from_ckpt",
-                return_value=quant,
-            ):
-                config.init_precision_config(None, "BF16")
-            self.assertIs(config.quant_config, quant)
-
-    def test_recipe_disables_conflicting_fp32_head_for_both_storage_modes(self):
-        for storage in ("fp8", "source_bf16"):
-            config = ModelConfig()
-            config._qwen4_fp8_source = True
-            config.enable_fp32_lm_head = True
-            config.quantization = json.dumps(
-                dict(
-                    method="modelopt_fp4",
-                    bits=4,
-                    group_size=16,
-                    is_quanted=False,
-                    model_recipe=QWEN4_FP8_NVFP4_RECIPE,
-                    source_fp8_block_size=128,
-                    dense_storage=storage,
-                )
-            )
-            with self.assertLogs(level="WARNING"):
-                Qwen4Exp._configure_precision_recipe(config)
-            self.assertFalse(config.enable_fp32_lm_head)
-            self.assertEqual(config._qwen4_dense_storage, storage)
-
-    def test_invalid_checkpoint_gate_activation_fails_before_loading(self):
-        with self.assertRaisesRegex(ValueError, "output gate activation"):
-            Qwen4Exp._parse_extra_text_config(
-                dict(hc_count=4, output_gate_type="gelu"), ModelConfig()
-            )
 
     def test_qwen4_recipe_rejected_for_other_models(self):
         config = ModelConfig()
@@ -459,9 +314,9 @@ class Qwen4ExpTest(unittest.TestCase):
             "qwen4_exp",
         )
         self.assertIs(Qwen4Exp.get_weight_cls(), Qwen4ExpWeight)
-        self.assertIs(get_multimodal_mixin_cls("qwen4_exp"), Qwen4ExpMixin)
+        self.assertIs(get_multimodal_mixin_cls("qwen4_exp"), Qwen3_5MoeMixin)
 
-    def test_checkpoint_config_mapping(self):
+    def test_basic_config(self):
         config = self.config
         self.assertEqual(config.num_layers, _NUM_LAYERS)
         self.assertEqual(config.hidden_size, 2560)
@@ -474,6 +329,7 @@ class Qwen4ExpTest(unittest.TestCase):
         self.assertEqual(config.layernorm_eps, 1e-6)
         self.assertTrue(config.qk_norm)
 
+    def test_rope_config(self):
         rope_config = self.config.attn_config.rope_config
         self.assertEqual(rope_config.style, RopeStyle.Mrope)
         self.assertEqual(rope_config.base, 10_000_000)
@@ -488,38 +344,6 @@ class Qwen4ExpTest(unittest.TestCase):
         self.assertTrue(rope_config.mrope_interleaved)
         self.assertEqual(self.config.mm_model_config.mm_position_ids_style, 2)
 
-        self.assertEqual(config.expert_num, 512)
-        self.assertEqual(config.moe_k, 10)
-        self.assertEqual(config.moe_inter_size, 640)
-        self.assertEqual(config.inter_size, 640)
-        self.assertEqual(config.n_shared_experts, 1)
-        self.assertEqual(config.moe_style, 2)
-        # No decoder_sparse_step in the checkpoint config: every layer is MoE.
-        self.assertEqual(list(config.moe_layer_index), list(range(_NUM_LAYERS)))
-
-        linear_config = self.config.linear_attention_config
-        self.assertEqual(linear_config.linear_num_key_heads, 16)
-        self.assertEqual(linear_config.linear_num_value_heads, 48)
-        self.assertEqual(linear_config.linear_key_head_dim, 128)
-        self.assertEqual(linear_config.linear_value_head_dim, 128)
-        self.assertEqual(linear_config.linear_conv_kernel_dim, 4)
-
-        mm_config = self.config.mm_model_config
-        self.assertTrue(mm_config.is_multimodal)
-        self.assertTrue(mm_config.include_sep_tokens)
-        self.assertEqual(
-            [list(pair) for pair in mm_config.mm_sep_tokens], [[248053, 248054]]
-        )
-        self.assertEqual(
-            self.config.mm_related_params.config["ckpt_path"], self._temp_dir.name
-        )
-
-        self.assertEqual(self.config.hc_mult, 4)
-        self.assertEqual(
-            self.config.getMtpInputHiddenSize(),
-            self.config.hc_mult * self.config.hidden_size,
-        )
-
     def test_linear_attn_norm_activation(self):
         # Upstream falls back to hidden_act when output_gate_type is unset
         # (this trimmed config has neither -> generic silu default).
@@ -529,6 +353,17 @@ class Qwen4ExpTest(unittest.TestCase):
         Path(self._temp_dir.name, "config.json").write_text(json.dumps(config_json))
         config = Qwen4Exp.create_config(self._temp_dir.name)
         self.assertEqual(config.linear_attn_norm_activation, "sigmoid")
+
+    def test_moe_config(self):
+        config = self.config
+        self.assertEqual(config.expert_num, 512)
+        self.assertEqual(config.moe_k, 10)
+        self.assertEqual(config.moe_inter_size, 640)
+        self.assertEqual(config.inter_size, 640)
+        self.assertEqual(config.n_shared_experts, 1)
+        self.assertEqual(config.moe_style, 2)
+        # No decoder_sparse_step in the checkpoint config: every layer is MoE.
+        self.assertEqual(list(config.moe_layer_index), list(range(_NUM_LAYERS)))
 
     def test_layer_types_drive_hybrid_topology(self):
         hybrid_config = self.config.hybrid_attention_config
@@ -544,6 +379,35 @@ class Qwen4ExpTest(unittest.TestCase):
                 else HybridAttentionType.LINEAR
             )
             self.assertEqual(layer_type, expected, f"layer {idx}")
+
+    def test_linear_attention_config(self):
+        linear_config = self.config.linear_attention_config
+        self.assertEqual(linear_config.linear_num_key_heads, 16)
+        self.assertEqual(linear_config.linear_num_value_heads, 48)
+        self.assertEqual(linear_config.linear_key_head_dim, 128)
+        self.assertEqual(linear_config.linear_value_head_dim, 128)
+        self.assertEqual(linear_config.linear_conv_kernel_dim, 4)
+
+    def test_multimodal_config(self):
+        mm_config = self.config.mm_model_config
+        self.assertTrue(mm_config.is_multimodal)
+        self.assertEqual(
+            [list(pair) for pair in mm_config.mm_sep_tokens], [[248053, 248054]]
+        )
+        self.assertEqual(
+            self.config.mm_related_params.config["ckpt_path"], self._temp_dir.name
+        )
+
+    def test_hc_mult_is_plumbed_from_hc_count(self):
+        self.assertEqual(self.config.hc_mult, 4)
+        self.assertEqual(
+            self.config.mtp_input_hidden_size,
+            self.config.hc_mult * self.config.hidden_size,
+        )
+        self.assertEqual(
+            self.config.getMtpInputHiddenSize(),
+            self.config.hc_mult * self.config.hidden_size,
+        )
 
     def _weight(self):
         weight = Qwen4ExpWeight(
@@ -644,33 +508,73 @@ class Qwen4ExpTest(unittest.TestCase):
 
     @staticmethod
     def _config():
-        config = qwen4_config(_NUM_LAYERS)
-        config["text_config"].update(full_attention_interval=4, hc_lowrank=320)
-        return config
-
-
-class Qwen4RegistrationTest(unittest.TestCase):
-    def test_qwen4_exp_lazy_renderer_registration(self):
-        self.assertTrue(ensure_renderer_registered("qwen4_exp"))
-        renderer_type = _renderer_factory["qwen4_exp"]
-        self.assertEqual(renderer_type.__name__, "Qwen4Renderer")
-        self.assertEqual(
-            renderer_type.__module__, "rtp_llm.openai.renderers.qwen35_renderer"
-        )
-
-    def test_qwen4_exp_mtp_lazy_registration(self):
-        self.assertEqual(
-            _model_type_to_module["qwen4_exp_mtp"],
-            "rtp_llm.models.qwen4_exp.qwen4_exp_mtp",
-        )
-        self.assertTrue(ensure_renderer_registered("qwen4_exp_mtp"))
-        self.assertEqual(_renderer_factory["qwen4_exp_mtp"].__name__, "Qwen4Renderer")
-        self.assertTrue(ensure_model_registered("qwen4_exp_mtp"))
-        self.assertEqual(_model_factory["qwen4_exp_mtp"].__name__, "Qwen4ExpMTP")
-        self.assertTrue(ensure_tokenizer_registered("qwen4_exp_mtp"))
-        self.assertEqual(
-            _tokenizer_factory["qwen4_exp_mtp"].__name__, "QWenV2Tokenizer"
-        )
+        """Trimmed Qwen/Qwen3.8-Flash-Next config.json."""
+        return {
+            "architectures": ["Qwen4ExpForConditionalGeneration"],
+            "image_token_id": 248056,
+            "model_type": "qwen4_exp",
+            "video_token_id": 248057,
+            "vision_start_token_id": 248053,
+            "vision_end_token_id": 248054,
+            "tie_word_embeddings": False,
+            "text_config": {
+                "model_type": "qwen4_exp_text",
+                "num_attention_heads": 24,
+                "num_key_value_heads": 2,
+                "head_dim": 256,
+                "num_hidden_layers": _NUM_LAYERS,
+                "hidden_size": 2560,
+                "vocab_size": 248320,
+                "max_position_embeddings": 262144,
+                "rms_norm_eps": 1e-6,
+                "tie_word_embeddings": False,
+                "full_attention_interval": 4,
+                "layer_types": [
+                    "full_attention" if (i + 1) % 4 == 0 else "linear_attention"
+                    for i in range(_NUM_LAYERS)
+                ],
+                "num_experts": 512,
+                "num_experts_per_tok": 10,
+                "moe_intermediate_size": 640,
+                "shared_expert_intermediate_size": 640,
+                "linear_conv_kernel_dim": 4,
+                "linear_key_head_dim": 128,
+                "linear_num_key_heads": 16,
+                "linear_num_value_heads": 48,
+                "linear_value_head_dim": 128,
+                "hc_count": 4,
+                "hc_lowrank": 320,
+                "indexer_budget": 2048,
+                "indexer_compress_ratio": 4,
+                "indexer_head_dim": 128,
+                "indexer_kv_heads": 1,
+                "indexer_n_heads": 4,
+                "ngram_size": 3,
+                "ngram_vocab_size_base": 20000000,
+                "ple_conv_kernel_size": 4,
+                "ple_embed_dim": 2560,
+                "ple_layer_ids": [2],
+                "split_ngram_parts": 128,
+                "partial_rotary_factor": 0.25,
+                "rope_parameters": {
+                    "mrope_interleaved": True,
+                    "mrope_section": [11, 11, 10],
+                    "partial_rotary_factor": 0.25,
+                    "rope_theta": 10000000,
+                    "rope_type": "default",
+                },
+            },
+            "vision_config": {
+                "deepstack_visual_indexes": [],
+                "depth": 27,
+                "hidden_size": 1152,
+                "intermediate_size": 4304,
+                "num_heads": 16,
+                "num_position_embeddings": 2304,
+                "out_hidden_size": 2560,
+                "patch_size": 16,
+            },
+        }
 
 
 if __name__ == "__main__":

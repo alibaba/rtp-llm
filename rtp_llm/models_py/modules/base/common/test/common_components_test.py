@@ -1,17 +1,20 @@
 """Public CPU contracts independent of model registration."""
 
-import importlib
 import sys
 import unittest
 
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
+from rtp_llm.models_py.modules.base.common.fp8_linear import (
+    Fp8Linear,
+    dequantize_parameter,
+)
 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     ZeroCenteredFusedQKRMSNorm,
     exact_head_rms_norm,
 )
+from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
 
 
 class CommonComponentsTest(unittest.TestCase):
@@ -26,6 +29,17 @@ class CommonComponentsTest(unittest.TestCase):
                 x = torch.randn(2, rows, in_width, dtype=torch.bfloat16)
                 expected = F.linear(x, weight.bfloat16() * scale.bfloat16(), bias)
                 torch.testing.assert_close(linear(x), expected, rtol=0, atol=0)
+
+    def test_dequantize_preserves_unscaled_parameter_identity(self):
+        plain = torch.randn(13, 17)
+        self.assertIs(dequantize_parameter({"w": plain}, "w"), plain)
+        fp8 = torch.ones(7, 11).to(torch.float8_e4m3fn)
+        result = dequantize_parameter(
+            {"w": fp8, "w" + FP8_STORAGE_SCALE_SUFFIX: torch.tensor([0.25])}, "w"
+        )
+        torch.testing.assert_close(
+            result, torch.full((7, 11), 0.25, dtype=torch.bfloat16)
+        )
 
     def test_zero_centered_gain_and_fused_value_preservation(self):
         for heads, kv_heads, dim in ((3, 1, 7), (4, 2, 11)):
@@ -57,18 +71,6 @@ class CommonComponentsTest(unittest.TestCase):
         # Run this target in a fresh process; the wrappers must not need model setup.
         loaded = [name for name in sys.modules if ".qwen4_exp" in name]
         self.assertEqual(loaded, [])
-
-        importlib.import_module(
-            "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.fp4"
-        )
-        # ModelConfig loads model configs; strategy import must leave the model
-        # implementation and Marlin execution dependencies unloaded.
-        for name in (
-            "rtp_llm.models_py.modules.qwen4_exp",
-            "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.marlin_nvfp4_executor",
-            "rtp_llm.models_py.kernels.cuda.marlin_nvfp4.marlin_nvfp4",
-        ):
-            self.assertNotIn(name, sys.modules)
 
 
 if __name__ == "__main__":

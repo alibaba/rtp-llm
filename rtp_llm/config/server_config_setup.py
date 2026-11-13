@@ -17,6 +17,7 @@ from rtp_llm.ops import (
     SpeculativeType,
 )
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
+from rtp_llm.utils.import_util import load_external_model_packages
 
 RUN_AFFINITY_TIMEOUT_SEC = 10
 
@@ -395,6 +396,78 @@ def _infer_model_type(ckpt_path: str) -> Optional[str]:
         return None
 
 
+def _route_atom_qwen4_exp_model_types(py_env_configs: PyEnvConfigs) -> None:
+    """Select ATOM's Qwen4Exp only when its RTP plugin is explicitly enabled."""
+    model_args = py_env_configs.model_args
+    if "atom.plugin.rtpllm.models" not in (model_args.external_model_packages or []):
+        return
+    if model_args.model_type not in ("qwen4_exp", "atom_qwen4_exp"):
+        return
+
+    if model_args.model_type == "qwen4_exp":
+        model_args.model_type = "atom_qwen4_exp"
+        logging.getLogger(__name__).info(
+            "Routed qwen4_exp to ATOM via external model package"
+        )
+    if py_env_configs.sp_config.model_type == "qwen4_exp_mtp":
+        py_env_configs.sp_config.model_type = "atom_qwen4_exp_mtp"
+        logging.getLogger(__name__).info(
+            "Routed qwen4_exp_mtp to ATOM via external model package"
+        )
+
+
+def _auto_load_atom_for_qwen4_ptpc(py_env_configs: PyEnvConfigs) -> None:
+    """Use the ROCm ATOM kernels for Qwen4 per-token/per-channel FP8 weights.
+
+    The native Qwen4 FP8 loader expects block-quantized experts for its
+    FP8/NVFP4 recipe. PTPC checkpoints have a different scale layout and must
+    reach the ATOM model before the native checkpoint validator runs.
+    """
+    model_args = py_env_configs.model_args
+    if model_args.model_type != "qwen4_exp" or not os.path.exists("/dev/kfd"):
+        return
+    config_path = os.path.join(model_args.ckpt_path, "config.json")
+    if not os.path.isfile(config_path):
+        return
+    with open(config_path, encoding="utf-8") as file:
+        config = json.load(file)
+    quant = config.get("quantization_config") or {}
+    if quant.get("quant_method") != "compressed-tensors":
+        return
+    groups = quant.get("config_groups") or {}
+    if len(groups) != 1:
+        return
+    group = next(iter(groups.values()))
+    weight = group.get("weights") or {}
+    activation = group.get("input_activations") or {}
+    if not (
+        weight.get("type") == "float"
+        and weight.get("num_bits") == 8
+        and weight.get("strategy") == "channel"
+        and weight.get("dynamic") is False
+        and activation.get("type") == "float"
+        and activation.get("num_bits") == 8
+        and activation.get("strategy") == "token"
+        and activation.get("dynamic") is True
+    ):
+        return
+    package = "atom.plugin.rtpllm.models"
+    packages = list(model_args.external_model_packages or [])
+    if package not in packages:
+        try:
+            load_external_model_packages([package])
+        except RuntimeError as error:
+            raise RuntimeError(
+                "Qwen4 PTPC-FP8 on ROCm requires the ATOM RTP plugin; "
+                "install its audited wheel and compatibility patch"
+            ) from error
+        packages.append(package)
+        model_args.external_model_packages = packages
+    logging.getLogger(__name__).info(
+        "Detected Qwen4 PTPC-FP8 checkpoint; selecting ATOM on ROCm"
+    )
+
+
 def setup_default_args(py_env_configs):
     set_parallelism_config(
         py_env_configs.parallelism_config,
@@ -408,6 +481,8 @@ def setup_default_args(py_env_configs):
             os.path.dirname(os.path.abspath(__file__)), "alog.conf"
         )
 
+    load_external_model_packages(py_env_configs.model_args.external_model_packages)
+
     if not py_env_configs.model_args.model_type:
         py_env_configs.model_args.model_type = _infer_model_type(
             py_env_configs.model_args.ckpt_path
@@ -416,6 +491,8 @@ def setup_default_args(py_env_configs):
         raise ValueError(
             f"model_type is not set and could not be inferred from checkpoint path: {py_env_configs.model_args.ckpt_path}. Please provide --model_type or MODEL_TYPE environment variable."
         )
+    _auto_load_atom_for_qwen4_ptpc(py_env_configs)
+    _route_atom_qwen4_exp_model_types(py_env_configs)
 
     if (
         os.path.exists("/dev/kfd")

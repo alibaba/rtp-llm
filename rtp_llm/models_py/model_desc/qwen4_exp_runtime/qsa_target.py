@@ -84,9 +84,8 @@ def select_target_verify_tokens(
         raise RuntimeError("qwen4_exp QSA target Graph requires Triton writer")
     rotated_q = None
     prepared = None
-    position_state = self.positions(ratio)
-    if raw_query and target_writer and position_state is None:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.target_prepare import (
+    if raw_query and target_writer:
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.target_prepare_triton import (
             try_prepare_target_window,
         )
 
@@ -112,29 +111,24 @@ def select_target_verify_tokens(
         rotated_q, undo = prepared
         object.__setattr__(self, "_side_cache_undo", undo)
     else:
-        if position_state is not None:
-            rope_cos, rope_sin = position_state.rope(rope_config, group=True)
-            current_cos, current_sin = position_state.rope(rope_config)
-            position_state.stage()
-        else:
-            rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
-                block_starts,
-                rope_config,
-                token_count=token_count,
-                dtype=raw_keys.dtype,
-                device=raw_keys.device,
-                inv_freq=frequency,
-            )
-            current_cos, current_sin = build_qsa_rope_from_logical_positions(
-                flat_query_positions,
-                rope_config,
-                token_count=token_count,
-                dtype=raw_keys.dtype,
-                device=raw_keys.device,
-                inv_freq=frequency,
-            )
+        rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
+            block_starts,
+            rope_config,
+            token_count=token_count,
+            dtype=raw_keys.dtype,
+            device=raw_keys.device,
+            inv_freq=frequency,
+        )
+        current_cos, current_sin = build_qsa_rope_from_logical_positions(
+            flat_query_positions,
+            rope_config,
+            token_count=token_count,
+            dtype=raw_keys.dtype,
+            device=raw_keys.device,
+            inv_freq=frequency,
+        )
         if target_writer:
-            from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
+            from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
                 write_target_window_with_undo_,
             )
 
@@ -179,7 +173,7 @@ def select_target_verify_tokens(
         sine = current_sin.view(batch_size, query_len, 1, -1)
         rotated_q = None
         if raw_query:
-            from rtp_llm.models_py.kernels.cuda.qsa.indexer_norm_rope import (
+            from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_norm_rope import (
                 try_indexer_norm_rope,
             )
 
@@ -207,7 +201,7 @@ def select_target_verify_tokens(
             dtype=torch.float32,
             device=q.device,
         )
-    from rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score import (
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score import (
         qsa_paged_indexer_score,
     )
 

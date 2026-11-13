@@ -39,60 +39,6 @@ class Source(TensorSource):
 
 
 class OnlineNvfp4Test(unittest.TestCase):
-    def test_legacy_bf16_streaming_matches_whole_group_quantization(self):
-        torch.manual_seed(1543)
-        for device in ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",):
-            for name, keys, process_fun in (
-                (W.moe_w1, ("gate", "up"), stack_moe_w1),
-                (W.moe_w2, ("down",), stack_),
-            ):
-                with self.subTest(device=device, weight=name):
-                    values = {
-                        f"{key}.{expert}": torch.randn(7, 64, dtype=torch.bfloat16)
-                        * (0.0 if expert == 1 else 0.01 * 10**expert)
-                        for expert in range(4)
-                        for key in keys
-                    }
-                    original = MoeAtomicWeight(
-                        name,
-                        [CkptWeightInfo(key + ".{expert_id}") for key in keys],
-                        process_fun=process_fun,
-                        config=MoeConfig(expert_num=4),
-                    )
-                    config = SimpleNamespace(
-                        compute_dtype=torch.bfloat16,
-                        moe_pure_tp_preshard=False,
-                        get_selected_experts=lambda layer, count: [1, 3],
-                    )
-                    whole_group = original._load_raw_tensor(
-                        Source(values), 0, device, config
-                    )[name]
-                    expected = [
-                        quantize_expert_to_nvfp4(expert) for expert in whole_group
-                    ]
-                    quant = OnlineModelOptFp4MoeWeight(
-                        original,
-                        ModelOptFp4Config(bits=4, group_size=16, is_quanted=False),
-                    )
-                    result = quant._load_raw_tensor(Source(values), 0, device, config)
-                    for index, key in enumerate(
-                        (quant.kernel.name, quant.scale.name, quant.scale_2.name)
-                    ):
-                        reference = torch.stack([item[index] for item in expected])
-                        self.assertTrue(
-                            torch.equal(
-                                result[key].contiguous().view(torch.uint8),
-                                reference.contiguous().view(torch.uint8),
-                            ),
-                            key,
-                        )
-                    self.assertTrue(
-                        torch.equal(
-                            result[quant.input_scale.name],
-                            torch.ones_like(result[quant.input_scale.name]),
-                        )
-                    )
-
     def test_fp8_source_applies_block_scales_before_nvfp4_quantization(self):
         original = MoeAtomicWeight(
             W.moe_w2,

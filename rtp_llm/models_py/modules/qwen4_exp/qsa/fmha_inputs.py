@@ -3,16 +3,10 @@
 from typing import Optional
 
 import torch
-
 from rtp_llm.ops.compute_ops import LayerKVCache
 
-from .fmha_plans import (
-    IncrementalPrefillInputs,
-    PagedInputs,
-    PrefillRequest,
-    _PrefillRequests,
-)
-from .fmha_validation import _validate_main_cache_layout, consume_main_geometry
+from .fmha_plans import IncrementalPrefillInputs, PagedInputs, PrefillRequest
+from .fmha_validation import _validate_main_cache_layout
 
 
 def _prepare_paged_inputs(
@@ -113,6 +107,10 @@ def _prepare_paged_inputs(
         sequence_lengths = device_source.to(
             device=qkv.device, dtype=torch.int32, non_blocking=True
         ).contiguous()
+        if not graph_paged and bool(torch.any(sequence_lengths < 0).item()):
+            raise ValueError(
+                "qwen4_exp sparse GQA sequence lengths must be non-negative"
+            )
         query_offsets = torch.arange(
             1, query_len + 1, device=qkv.device, dtype=torch.int32
         )
@@ -125,16 +123,23 @@ def _prepare_paged_inputs(
     if self.attn_inputs.is_s_padded:
         kv_lens = torch.where(block_table.ne(0).any(dim=1, keepdim=True), kv_lens, 0)
 
-    if graph_paged:
-        if bool(
+    if not graph_paged:
+        required_columns = (kv_lens[:, -1] + page_size - 1) // page_size
+    exceeds_capacity = (
+        bool(
             torch.any(
                 (lengths_source + query_len + page_size - 1) // page_size
                 > int(block_table.shape[1])
             ).item()
-        ):
-            raise RuntimeError(
-                "qwen4_exp sparse GQA main block table does not cover the visible KV"
-            )
+        )
+        if graph_paged
+        else bool(torch.any(required_columns > int(block_table.shape[1])).item())
+    )
+    if exceeds_capacity:
+        raise RuntimeError(
+            "qwen4_exp sparse GQA main block table does not cover the visible KV"
+        )
+    if graph_paged:
         return PagedInputs(
             **{
                 "batch": batch,
@@ -146,55 +151,27 @@ def _prepare_paged_inputs(
                 "page_size": page_size,
             }
         )
-    selected_indices = selected_indices.contiguous()
-    # One host verdict for the complete plan, before the main cache writer.
-    # The private FMHA consumer reuses this exact plan in the same invocation.
-    verdict = (
-        ((sequence_lengths < 0).any() | (kv_lens < 0).any()).to(torch.int32)
-        | ((selected_indices < -1).any().to(torch.int32) << 4)
-        | (
-            ((selected_indices >= 0) & (selected_indices >= kv_lens.unsqueeze(-1)))
-            .any()
-            .to(torch.int32)
-            << 5
-        )
-    )
-    if not consume_main_geometry(
-        self, kv_cache.kv_cache_base, block_table, lengths_source, tokens
-    ):
-        required_columns = (kv_lens[:, -1].to(torch.int64) + page_size - 1) // page_size
-        columns = torch.arange(
-            int(block_table.shape[1]), device=block_table.device
-        ).unsqueeze(0)
-        required = columns < required_columns.unsqueeze(1)
-        invalid = required & ((block_table <= 0) | (block_table >= cache_blocks))
-        verdict = (
-            verdict
-            | (
-                (required_columns > int(block_table.shape[1])).any().to(torch.int32)
-                << 1
-            )
-            | (invalid.any().to(torch.int32) << 2)
-        )
-    verdict = verdict.item()
-    if verdict & 1:
-        raise ValueError("qwen4_exp sparse GQA sequence lengths must be non-negative")
-    if verdict & 2:
-        raise RuntimeError(
-            "qwen4_exp sparse GQA main block table does not cover the visible KV"
-        )
-    if verdict & 4:
+    columns = torch.arange(
+        int(block_table.shape[1]), device=block_table.device
+    ).unsqueeze(0)
+    required = columns < required_columns.unsqueeze(1)
+    invalid = required & ((block_table <= 0) | (block_table >= cache_blocks))
+    if bool(torch.any(invalid).item()):
         raise RuntimeError(
             "qwen4_exp sparse GQA visible KV resolves to an unallocated or "
             "out-of-range physical block"
         )
 
-    if verdict & 16:
-        raise ValueError("selected indices may only use -1 as padding")
-    if verdict & 32:
-        raise ValueError(
-            "selected indices contain a token outside the row's visible KV"
+    if selected_indices.numel():
+        if int(selected_indices.min().item()) < -1:
+            raise ValueError("selected indices may only use -1 as padding")
+        invalid_visible = (selected_indices >= 0) & (
+            selected_indices >= kv_lens.unsqueeze(-1)
         )
+        if bool(torch.any(invalid_visible).item()):
+            raise ValueError(
+                "selected indices contain a token outside the row's visible KV"
+            )
 
     return PagedInputs(
         **{
@@ -205,7 +182,6 @@ def _prepare_paged_inputs(
             "kv_lens": kv_lens,
             "block_table": block_table,
             "page_size": page_size,
-            "validated_cache_blocks": cache_blocks,
         }
     )
 
@@ -217,12 +193,7 @@ def _prepare_incremental_prefill_inputs(
     selected_indices: torch.Tensor,
 ) -> IncrementalPrefillInputs:
     """Build ragged per-request paged plans before the production writer."""
-    prefixes = self.attn_inputs.prefix_lengths
-    if (
-        not self.is_prefill
-        or self.is_target_verify
-        or (prefixes.device.type == "cpu" and not self._is_prefix_reuse_prefill())
-    ):
+    if not self._is_prefix_reuse_prefill():
         raise RuntimeError("qwen4_exp incremental prefill requires an explicit prefix")
     if qkv.dim() != 2:
         raise ValueError(
@@ -250,61 +221,37 @@ def _prepare_incremental_prefill_inputs(
     batch = int(input_lengths.numel())
     if batch <= 0 or int(prefixes.numel()) != batch:
         raise ValueError("qwen4_exp incremental prefill lengths and prefixes disagree")
-    plan = _try_prepare_host_incremental_prefill(
-        self, qkv, kv_cache, selected_indices, input_lengths, prefixes
+    input_lengths_device = input_lengths.to(
+        device=qkv.device, dtype=torch.int32, non_blocking=True
     )
-    if plan is not None:
-        return plan
+    prefixes_device = prefixes.to(
+        device=qkv.device, dtype=torch.int32, non_blocking=True
+    )
+    if bool(torch.any(input_lengths_device <= 0).item()):
+        raise ValueError("qwen4_exp incremental prefill input lengths must be positive")
+    if bool(torch.any(prefixes_device < 0).item()):
+        raise ValueError("qwen4_exp incremental prefill prefixes must be non-negative")
 
-    from .fmha_validation import main_geometry_checks
-    from .validation import DeviceChecks
-
-    if input_lengths.dtype not in (torch.int32, torch.int64) or prefixes.dtype not in (
-        torch.int32,
-        torch.int64,
-    ):
-        raise ValueError("qwen4_exp incremental prefill lengths must be int32 or int64")
-    lengths_device = input_lengths.to(
-        device=qkv.device, dtype=torch.int64, non_blocking=True
-    )
-    prefixes_wide = prefixes.to(device=qkv.device, dtype=torch.int64, non_blocking=True)
-    checks = DeviceChecks()
-    checks.add(
-        ~(prefixes_wide != 0).any(),
-        "qwen4_exp incremental prefill requires an explicit prefix",
-    )
-    checks.add(
-        (lengths_device <= 0).any(),
-        "qwen4_exp incremental prefill input lengths must be positive",
-        ValueError,
-    )
-    checks.add(
-        (prefixes_wide < 0).any(),
-        "qwen4_exp incremental prefill prefixes must be non-negative",
-        ValueError,
-    )
     cu_seqlens = self.attn_inputs.cu_seqlens_device
+    expected_cu = torch.zeros(batch + 1, dtype=torch.int32, device=qkv.device)
+    expected_cu[1:] = input_lengths_device.cumsum(0)
     if (
         cu_seqlens is None
+        or cu_seqlens.dim() != 1
         or tuple(cu_seqlens.shape) != (batch + 1,)
         or cu_seqlens.dtype != torch.int32
         or cu_seqlens.device != qkv.device
+        or not bool(torch.equal(cu_seqlens, expected_cu))
     ):
         raise ValueError(
             "qwen4_exp incremental prefill cu_seqlens do not match input lengths"
         )
-    expected_cu = torch.cat((lengths_device.new_zeros(1), lengths_device.cumsum(0)))
-    checks.add(
-        (cu_seqlens != expected_cu).any() | (lengths_device > 2**31 - 1).any(),
-        "qwen4_exp incremental prefill cu_seqlens do not match input lengths",
-        ValueError,
-    )
-    tokens = int(qkv.shape[0])
-    checks.add(
-        expected_cu[-1] != tokens,
-        "qwen4_exp incremental prefill cu_seqlens do not partition qkv",
-        ValueError,
-    )
+    tokens = int(expected_cu[-1].item())
+    if int(qkv.shape[0]) != tokens:
+        raise ValueError(
+            "qwen4_exp incremental prefill cu_seqlens do not partition qkv: "
+            f"tokens={qkv.shape[0]}, cu_end={tokens}"
+        )
     if selected_indices.dim() != 2 or int(selected_indices.shape[0]) != tokens:
         raise ValueError(
             "qwen4_exp incremental prefill selected_indices must be packed "
@@ -316,145 +263,53 @@ def _prepare_incremental_prefill_inputs(
         raise ValueError(
             "qwen4_exp incremental prefill selection and qkv must share CUDA"
         )
+
     block_table = self.attn_inputs.kv_cache_kernel_block_id_device
-    page_size, cache_blocks = _validate_main_cache_layout(
-        self, kv_cache.kv_cache_base, block_table, batch, qkv.device
-    )
-    main_geometry_checks(
-        checks,
-        prefixes_wide,
-        lengths_device,
+    page_size = self._validate_main_paged_geometry(
+        kv_cache.kv_cache_base,
         block_table,
-        page_size,
-        cache_blocks,
-        bool(self.attn_inputs.is_s_padded),
+        prefixes_device,
+        input_lengths_device,
+        qkv.device,
     )
-    checks.add(
-        (prefixes_wide > 2**31 - 1 - lengths_device.clamp(0, 2**31)).any(),
-        "qwen4_exp incremental prefill visible KV exceeds int32 range",
-        ValueError,
-    )
-    rows = torch.arange(tokens, device=qkv.device, dtype=torch.int64)
-    # Clamp even malformed partitions: validation must never perform an unsafe
-    # gather before its verdict has been checked. Actual CU is compared above.
-    requests_for_rows = torch.searchsorted(expected_cu[1:], rows, right=True).clamp_max(
-        batch - 1
-    )
-    visible = (
-        prefixes_wide[requests_for_rows] + rows - expected_cu[requests_for_rows] + 1
-    )
-    checks.add(
-        (selected_indices < -1).any(),
-        "selected indices may only use -1 as padding",
-        ValueError,
-    )
-    checks.add(
-        ((selected_indices >= 0) & (selected_indices >= visible[:, None])).any(),
-        "incremental prefill selected indices contain a token outside the row's visible KV",
-        ValueError,
-    )
-    # Partition data and every verdict cross the device/host boundary together.
-    cu_host = checks.verify(expected_cu)
-    prefixes_device = prefixes_wide.to(torch.int32)
-    prefix_host = prefixes.tolist() if prefixes.device.type == "cpu" else None
+
+    cu_host = expected_cu.cpu().tolist()
     requests = []
     for request_idx in range(batch):
         start, end = cu_host[request_idx : request_idx + 2]
+        query_len = end - start
+        kv_lens = prefixes_device[request_idx] + torch.arange(
+            1, query_len + 1, dtype=torch.int32, device=qkv.device
+        )
+        request_selection = selected_indices[start:end]
+        if request_selection.numel():
+            if int(request_selection.min().item()) < -1:
+                raise ValueError("selected indices may only use -1 as padding")
+            invalid_visible = (request_selection >= 0) & (
+                request_selection >= kv_lens.unsqueeze(-1)
+            )
+            if bool(torch.any(invalid_visible).item()):
+                raise ValueError(
+                    "incremental prefill selected indices contain a token "
+                    "outside the row's visible KV"
+                )
         requests.append(
             PrefillRequest(
                 start,
                 end,
-                visible[None, start:end].to(torch.int32).contiguous(),
-                selected_indices[None, start:end].contiguous(),
-                None if prefix_host is None else int(prefix_host[request_idx]),
+                kv_lens.unsqueeze(0).contiguous(),
+                request_selection.unsqueeze(0).contiguous(),
             )
         )
+
     return IncrementalPrefillInputs(
-        batch,
-        tokens,
-        block_table,
-        page_size,
-        requests,
-        selected_indices,
-        prefixes_device,
-        cu_seqlens,
-    )
-
-
-def _try_prepare_host_incremental_prefill(
-    self, qkv, cache, selected, lengths, prefixes
-):
-    """Derive request offsets on CPU and validate the device partition once.
-
-    All device contents are checked for this invocation. Nothing is cached across
-    layers or calls; in-place metadata updates still take effect before KV writes.
-    """
-    from rtp_llm.models_py.kernels.cuda.qsa.prefill_validation import (
-        validate_prefill_inputs,
-    )
-
-    from .fmha_validation import _validate_main_cache_layout
-
-    cu = self.attn_inputs.cu_seqlens_device
-    tokens = int(qkv.shape[0])
-    batch = int(lengths.numel())
-    if not (
-        lengths.device.type == prefixes.device.type == "cpu"
-        and lengths.dtype in (torch.int32, torch.int64)
-        and prefixes.dtype in (torch.int32, torch.int64)
-        and isinstance(cu, torch.Tensor)
-        and cu.device == qkv.device
-        and cu.dtype == torch.int32
-        and cu.shape == (batch + 1,)
-        and cu.is_contiguous()
-        and selected.ndim == 2
-        and selected.shape[0] == tokens
-        and selected.shape[1] > 0
-        and selected.shape[1] <= 8192
-        and selected.dtype == torch.int32
-        and selected.device == qkv.device
-        and max(batch, tokens) < 2**30
-        and batch <= 256
-    ):
-        return None
-    lens = lengths.tolist()
-    prefix_host = prefixes.tolist()
-    if any(x <= 0 for x in lens):
-        raise ValueError("qwen4_exp incremental prefill input lengths must be positive")
-    if any(x < 0 for x in prefix_host):
-        raise ValueError("qwen4_exp incremental prefill prefixes must be non-negative")
-    if sum(lens) != tokens:
-        raise ValueError(
-            "qwen4_exp incremental prefill cu_seqlens do not partition qkv"
-        )
-    # Keep int32 visible positions and device lengths inside their supported range.
-    if any(p + s >= 2**31 for p, s in zip(prefix_host, lens)):
-        raise ValueError("qwen4_exp incremental prefill visible KV exceeds int32 range")
-    ld = lengths.to(device=qkv.device, dtype=torch.int32, non_blocking=True)
-    pd = prefixes.to(device=qkv.device, dtype=torch.int32, non_blocking=True)
-    table = self.attn_inputs.kv_cache_kernel_block_id_device
-    page_size, cache_blocks = _validate_main_cache_layout(
-        self, cache.kv_cache_base, table, batch, qkv.device
-    )
-    visible = validate_prefill_inputs(
-        selected,
-        cu,
-        ld,
-        pd,
-        table,
-        page_size,
-        cache_blocks,
-        bool(self.attn_inputs.is_s_padded),
-    )
-    requests = (
-        [
-            PrefillRequest(
-                0, tokens, visible[None], selected[None].contiguous(), prefix_host[0]
-            )
-        ]
-        if batch == 1
-        else _PrefillRequests(lens, prefix_host, visible, selected)
-    )
-    return IncrementalPrefillInputs(
-        batch, tokens, table, page_size, requests, selected, pd, cu
+        **{
+            "batch": batch,
+            "tokens": tokens,
+            "block_table": block_table,
+            "page_size": page_size,
+            "requests": requests,
+            "selected_indices": selected_indices,
+            "prefixes_device": prefixes_device,
+        }
     )

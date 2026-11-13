@@ -63,7 +63,7 @@ def _capture_pool_slots(
 def restore_indexer_cache(undo: IndexerCacheUndo) -> None:
     """Restore a captured side-cache write on the caller's current stream."""
     if undo.padded_slots:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill import (
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill_triton import (
             restore_padded_indexer_cache,
         )
 
@@ -148,7 +148,6 @@ def _write_indexer_cache_vectorized(
     invalid_block_policy: InvalidBlockPolicy,
     capture_undo: bool,
     rope_is_token_aligned: bool,
-    is_s_padded: bool = False,
 ) -> dict:
     """Device-vectorized writer used by the production CUDA path.
 
@@ -239,11 +238,6 @@ def _write_indexer_cache_vectorized(
     )
     local_indices = flat_indices - cu.index_select(0, request_ids)
     positions = starts.index_select(0, request_ids) + local_indices
-    active = (
-        state_block_table.ne(0).any(dim=1) | kv_block_table.ne(0).any(dim=1)
-        if is_s_padded
-        else None
-    )
 
     def _resolve(
         table: torch.Tensor,
@@ -254,8 +248,6 @@ def _write_indexer_cache_vectorized(
         tag: str,
         required: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if active is not None:
-            required = required & active[requests]
         width = int(table.shape[1])
         in_bounds = (logical_blocks >= 0) & (logical_blocks < width)
         safe_columns = logical_blocks.clamp(0, max(width - 1, 0))
@@ -264,8 +256,6 @@ def _write_indexer_cache_vectorized(
         if bool(torch.any(out_of_pool).item()):
             raise IndexError(f"{tag} physical block is outside pool size {pool_blocks}")
         allocated = in_bounds & (blocks > 0) & (blocks < pool_blocks)
-        if active is not None:
-            allocated = allocated & active[requests]
         missing = required & ~allocated
         if invalid_block_policy == "raise" and bool(torch.any(missing).item()):
             raise ValueError(f"{tag} resolves to an unallocated logical block")
@@ -287,8 +277,6 @@ def _write_indexer_cache_vectorized(
     )
 
     completed = (positions + 1).remainder(ratio) == 0
-    if active is not None:
-        completed = completed & active[request_ids]
     completed_indices = torch.nonzero(completed, as_tuple=False).flatten()
     kv_slots = torch.full_like(flat_indices, -1)
     kv_write_slots = torch.empty(0, dtype=torch.long, device=device)
@@ -434,7 +422,6 @@ def write_indexer_cache(
     invalid_block_policy: InvalidBlockPolicy = "raise",
     capture_undo: bool = False,
     rope_is_token_aligned: bool = False,
-    is_s_padded: bool = False,
 ) -> dict:
     """Write ragged raw indexer keys to the state ring and completed means to KV.
 
@@ -455,10 +442,6 @@ def write_indexer_cache(
     beyond the pool extent always raise because skipping them could hide memory
     corruption. Both tables use absolute logical-block columns. Only the payload
     offset inside an ``indexer_state`` block is a ring.
-
-    With ``is_s_padded=True``, requests whose two side block-table rows are
-    entirely zero are engine fake/warmup rows and never touch either pool.
-    Every other row retains the chosen invalid-block policy.
 
     By default, ``rope_cos`` / ``rope_sin`` cover absolute positions and may be
     shared ``[max_position, rotary_dim]`` or request-specific
@@ -567,7 +550,6 @@ def write_indexer_cache(
             invalid_block_policy=invalid_block_policy,
             capture_undo=capture_undo,
             rope_is_token_aligned=rope_is_token_aligned,
-            is_s_padded=is_s_padded,
         )
 
     offsets = [int(v) for v in cu_seqlens.tolist()]
@@ -632,12 +614,6 @@ def write_indexer_cache(
     completed = torch.zeros_like(state_slots, dtype=torch.bool)
 
     for request_idx in range(batch_size):
-        if (
-            is_s_padded
-            and not bool(state_block_table[request_idx].ne(0).any())
-            and not bool(kv_block_table[request_idx].ne(0).any())
-        ):
-            continue
         flat_lo, flat_hi = offsets[request_idx], offsets[request_idx + 1]
         seq_start = starts[request_idx]
         seq_len = flat_hi - flat_lo
@@ -755,3 +731,96 @@ def write_indexer_cache(
     if capture_undo:
         result["undo"] = undo
     return result
+
+
+def compress_prefill(
+    hidden_states: torch.Tensor,  # [B, T, D]
+    qk_proj: torch.Tensor,  # [(n_heads+1)*head_dim, D]
+    k_norm_gamma: torch.Tensor,  # [head_dim]
+    cos: torch.Tensor,  # [B, T, rotary_dim] (full-range)
+    sin: torch.Tensor,  # [B, T, rotary_dim]
+    *,
+    ratio: int,
+    head_dim: int,
+    norm_eps: float = 1e-6,
+) -> dict:
+    """Full prefill compression returning the compressed pool entries + raw keys.
+
+    This is the **flat-buffer form**: instead of writing to framework-managed paged
+    pools, it returns tensors that let the caller (or a test) verify the compressed
+    content by placing it in a pool buffer.
+
+    Returns a dict::
+
+        raw_keys      [B, T, D] fp32
+        pooled_k      [B, nb, D] bf16          (one per **complete** block)
+        block_starts  [B, nb] int64            first token index of each block
+        num_blocks    [B] int64                how many complete blocks per batch
+
+    The caller can copy ``pooled_k[i, b]`` directly into the bf16 view of the
+    ``indexer_kv`` pool at slot ``i * num_blocks + b``.
+    """
+    if hidden_states.dim() != 3:
+        raise ValueError(
+            f"hidden_states must be [B, T, hidden], got {tuple(hidden_states.shape)}"
+        )
+    if qk_proj.dim() != 2 or qk_proj.shape[1] != hidden_states.shape[-1]:
+        raise ValueError(
+            "qk_proj must be [(n_heads + 1) * head_dim, hidden], got "
+            f"{tuple(qk_proj.shape)} for hidden={hidden_states.shape[-1]}"
+        )
+    if ratio <= 0:
+        raise ValueError(f"ratio must be positive, got {ratio}")
+    if head_dim <= 0 or qk_proj.shape[0] % head_dim:
+        raise ValueError(
+            f"qk_proj output {qk_proj.shape[0]} is not divisible by head_dim={head_dim}"
+        )
+    n_heads = (qk_proj.shape[0] // head_dim) - 1
+    if n_heads <= 0:
+        raise ValueError("qk_proj must contain at least one Q head and one K head")
+    if k_norm_gamma.shape != (head_dim,):
+        raise ValueError(
+            f"k_norm_gamma must be [{head_dim}], got {tuple(k_norm_gamma.shape)}"
+        )
+    B, T, _ = hidden_states.shape
+    device = hidden_states.device
+    if cos.shape[:2] != (B, T) or sin.shape != cos.shape:
+        raise ValueError(
+            f"cos/sin must have matching [B, T, rotary_dim] shapes, got "
+            f"{tuple(cos.shape)} and {tuple(sin.shape)}"
+        )
+    rotary_dim = cos.shape[-1]
+    if rotary_dim <= 0 or rotary_dim > head_dim or rotary_dim % 2:
+        raise ValueError(
+            f"rotary_dim must be positive, even, and <= head_dim; got {rotary_dim}"
+        )
+
+    qk = hidden_states @ qk_proj.T
+    _, raw_k = qk.split([n_heads * head_dim, head_dim], dim=-1)
+    raw_keys = raw_k.float()  # [B, T, D] fp32
+
+    num_blocks_full = T // ratio
+    # Truncate raw_keys to the token positions that form complete blocks.
+    grouped = raw_keys[:, : num_blocks_full * ratio]  # [B, nb*ratio, D]
+    grouped = grouped.unflatten(1, (num_blocks_full, ratio))  # [B, nb, ratio, D]
+    # Mean in fp32 (upstream orders the summation the same way).
+    pooled = grouped.mean(dim=2).to(raw_k.dtype)  # [B, nb, D]
+
+    # Apply k_layernorm (with +1) and partial RoPE at each block's first position.
+    pooled = exact_head_rms_norm(pooled, k_norm_gamma[None, None, :], norm_eps)
+    block_starts = torch.arange(num_blocks_full, device=device) * ratio  # [nb]
+    pooled_rotated = apply_partial_rope(
+        pooled,
+        cos[:, block_starts],
+        sin[:, block_starts],
+    )
+    pooled_k = pooled_rotated.to(torch.bfloat16).contiguous()
+
+    return {
+        "raw_keys": raw_keys,
+        "pooled_k": pooled_k,
+        "block_starts": block_starts.expand(B, -1),
+        "num_blocks": torch.full(
+            (B,), num_blocks_full, dtype=torch.long, device=device
+        ),
+    }

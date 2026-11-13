@@ -43,7 +43,7 @@ def payload_view(base, geometry: CachePayloadGeometry, label: str) -> torch.Tens
     )
 
 
-def same_tensor_metadata(left, right, *, cache=None) -> bool:
+def same_tensor_metadata(left, right) -> bool:
     if left is right:
         return True
     if left is None or right is None:
@@ -58,23 +58,4 @@ def same_tensor_metadata(left, right, *, cache=None) -> bool:
         return False
     if left.stride() == right.stride() and left.data_ptr() == right.data_ptr():
         return True
-    if cache is None:
-        return bool(torch.equal(left, right))
-
-    # The caller owns this cache for one forward's read-only metadata.
-    def signature(tensor):
-        return (
-            tensor.data_ptr(),
-            tensor.shape,
-            tensor.stride(),
-            tensor.dtype,
-            tensor.device,
-            None if tensor.is_inference() else tensor._version,
-        )
-
-    key = ("metadata_equal", signature(left), signature(right))
-    if key not in cache:
-        if not torch.equal(left, right):
-            return False
-        cache[key] = (left, right)
-    return True
+    return bool(torch.equal(left, right))

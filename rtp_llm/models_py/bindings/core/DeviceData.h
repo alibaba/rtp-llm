@@ -8,10 +8,21 @@
 
 namespace rtp_llm {
 
+enum class MicroBatchType {
+    NONE       = 0,
+    DS_PREFILL = 1,
+    DS_DECODE  = 2,
+};
+
 struct ExecProperties {
     size_t tp_rank = 0;
     size_t tp_size = 1;
 
+    bool           enable_sp                = false;
+    size_t         overlap_comm_type        = 0;
+    size_t         m_split                  = 0;
+    MicroBatchType enable_layer_micro_batch = MicroBatchType::NONE;
+    bool           ffn_as_service           = false;
     bool enable_prefill_cp           = false;
     bool prefill_cp_kv_cache_sharded = false;
 };

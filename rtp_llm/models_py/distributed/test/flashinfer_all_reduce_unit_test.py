@@ -94,6 +94,24 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         tensor.dtype = torch.float32
         self.assertFalse(communicator.should_use(tensor))
 
+    def test_cpp_small_domain_keeps_prefill_and_other_widths_on_nccl(self):
+        workspace = MagicMock()
+        workspace.is_buffer_size_sufficient.return_value = True
+        communicator = _make_communicator(workspace)
+        communicator.cpp_small_enabled = True
+        communicator._hidden_dim = 2560
+        tensor = _FakeTensor()
+        tensor.ndim = 2
+        for rows in (1, 4, 16, 32):
+            tensor.shape = (rows, 2560)
+            self.assertTrue(communicator.should_use_cpp_small(tensor))
+        for shape in ((0, 2560), (33, 2560), (4096, 2560), (4, 1280)):
+            tensor.shape = shape
+            self.assertFalse(communicator.should_use_cpp_small(tensor))
+        tensor.shape = (4, 2560)
+        communicator.cpp_small_enabled = False
+        self.assertFalse(communicator.should_use_cpp_small(tensor))
+
     def test_oversized_prefill_falls_back_before_flashinfer_validation(self):
         workspace = MagicMock()
         communicator = _make_communicator(workspace)
@@ -134,7 +152,7 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         fast_path.all_reduce_into.side_effect = lambda source, target: target.copy_(
             reduced
         )
-        module = SimpleNamespace(get_all_reduce=lambda: fast_path)
+        module = SimpleNamespace(get_flashinfer_allreduce=lambda: fast_path)
 
         with patch.object(collective, "_get_all_reduce_module", return_value=module):
             result = collective.all_reduce(tensor, collective.Group.TP)
@@ -142,6 +160,7 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         torch.testing.assert_close(tensor, reduced)
         fast_path.should_use.assert_called_once_with(tensor)
         fast_path.all_reduce_into.assert_called_once_with(tensor, tensor)
+        fast_path.all_reduce.assert_not_called()
 
     def test_collective_supports_explicit_out_of_place(self):
         tensor = torch.ones((2, 4))
@@ -162,12 +181,14 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         fast_path = MagicMock()
         fast_path.should_use.return_value = True
         fast_path.all_reduce_into.side_effect = lambda source, target: target.fill_(2)
-        module = SimpleNamespace(get_all_reduce=lambda: fast_path)
+        module = SimpleNamespace(get_flashinfer_allreduce=lambda: fast_path)
 
         with patch.object(collective, "_get_all_reduce_module", return_value=module):
             result = collective.all_reduce(tensor, collective.Group.TP, inplace=True)
         self.assertIs(result, tensor)
         torch.testing.assert_close(tensor, torch.full_like(tensor, 2))
+        fast_path.all_reduce_into.assert_called_once_with(tensor, tensor)
+        fast_path.all_reduce.assert_not_called()
 
     def test_destroy_is_idempotent(self):
         workspace = MagicMock()

@@ -101,6 +101,7 @@ public:
                                       || role_ == CudaGraphRole::MTP_DRAFT_PREFILL
                                       || role_ == CudaGraphRole::GENERATION_PREFILL;
         is_target_verify_ = role_ == CudaGraphRole::TARGET_VERIFY;
+        RTP_LLM_CHECK_WITH_INFO(num_tokens_per_bs_ > 0, "CUDA graph tokens per request must be positive");
         draft_prefill_uses_request_lanes_ =
             isMtpDraftPrefillCudaGraph() && py::hasattr(py_instance_, "cuda_graph_draft_prefill_uses_request_lanes")
             && py_instance_.attr("cuda_graph_draft_prefill_uses_request_lanes")().cast<bool>();
@@ -131,11 +132,13 @@ public:
                                 "CUDA graph capacities exceed int32 token/padding indexing limits");
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr(forward_method_name);
-        // Optional model bookkeeping after eager warmup, capture and replay.
-        // These callbacks run outside capture and do not prepare device inputs.
+        // Optional bookkeeping outside capture for model-owned graph state.
         py_after_warmup_method_  = py::getattr(py_instance_, "on_cuda_graph_warmup", py::none());
         py_after_capture_method_ = py::getattr(py_instance_, "on_cuda_graph_capture", py::none());
         py_after_replay_method_  = py::getattr(py_instance_, "on_cuda_graph_replay", py::none());
+        prepare_model_inputs_enabled_ =
+            py::hasattr(py_instance_, "prepare_cuda_graph_model_inputs")
+            && py::getattr(py_instance_, "requires_cuda_graph_model_input_preparation", py::bool_(false)).cast<bool>();
         options_cuda_int32_ = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
@@ -206,6 +209,7 @@ public:
 private:
     // Common capture logic for both prefill and decode
     void captureOneGraphInstance(int key, const char* key_type);
+    void prepareModelInputs(const PyModelInputs& inputs);
     // Common replay and sync check logic
     void replayAndSyncCheck(int key, const char* key_type);
 
@@ -254,6 +258,7 @@ private:
     py::object              py_after_warmup_method_;
     py::object              py_after_capture_method_;
     py::object              py_after_replay_method_;
+    bool                    prepare_model_inputs_enabled_{false};
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};

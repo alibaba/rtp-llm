@@ -839,14 +839,7 @@ class ModelOptFp4Config(QuantizationConfig):
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
         self.model_recipe = kwargs.get("model_recipe", None)
-        self.dense_storage = kwargs.get("dense_storage", "fp8")
-        self.mtp_dense_storage = kwargs.get("mtp_dense_storage", "inherit")
         qwen4_recipe = self.model_recipe == QWEN4_FP8_NVFP4_RECIPE
-        if self.model_recipe is not None and not qwen4_recipe:
-            raise ValueError(f"Unsupported modelopt_fp4 recipe: {self.model_recipe}")
-        self.supported_model_types = (
-            ("qwen4_exp", "qwen4_exp_mtp") if qwen4_recipe else None
-        )
         self.mixed_attention = kwargs.get("mixed_attention", False)
         self.activation_amax = kwargs.get(
             "activation_amax", 32.0 if qwen4_recipe else None

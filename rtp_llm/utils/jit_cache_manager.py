@@ -181,13 +181,6 @@ def resolve_scope(
                 _distribution_version(p[1:]) if p.startswith("@") else scopes[p]
                 for p in item.scopes
             )
-            if (
-                item.name == "triton"
-                and backend == CUDA
-                and (os.environ.get("PPU_HOME") or "ppu" in torch.__version__.lower())
-            ):
-                # Old PPU snapshots contain metadata without the required .hgbin.
-                parts += ("ppu-hgbin-v1",)
             if item.name == "flashinfer":
                 # Bundled headers enter generated ninja files by absolute path.
                 # Fork snapshots when staging moves them out of Bazel runfiles;

@@ -11,9 +11,7 @@ from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
 
 class Qwen4FusedQKNormTest(unittest.TestCase):
     HEADS = 3
-
     KV_HEADS = 1
-
     DIM = 256
 
     def setUp(self):

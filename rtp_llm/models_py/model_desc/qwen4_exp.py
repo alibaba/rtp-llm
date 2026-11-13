@@ -6,11 +6,10 @@ import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.qwen4_exp_config import IndexerGeometry, ple_eos_token_id
+from rtp_llm.config.qwen4_exp_config import IndexerGeometry
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
-    INDEXER_ROPE_POS_TAG,
     INDEXER_STATE_TAG,
     PLE_NGRAM_CTX_TAG,
     PLE_STATE_TAG,
@@ -18,7 +17,6 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
 from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
     get_layer_tags,
-    get_primary_attention_inputs,
     select_attention_inputs_for_tag,
 )
 from rtp_llm.models_py.model_desc.qwen3_next import (
@@ -45,17 +43,14 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_transaction import (
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
     Qwen4ExpQSARuntimeContext,
 )
-from rtp_llm.models_py.model_desc.qwen4_exp_runtime.state_cache_inputs import (
-    prepare_state_cache_inputs,
-)
 from rtp_llm.models_py.modules import FMHAImplBase
 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     ZeroCenteredFusedQKRMSNorm,
 )
 from rtp_llm.models_py.modules.hybrid.causal_attention import CausalAttention
-from rtp_llm.models_py.modules.hybrid.gated_residual import inject_into_residual
-from rtp_llm.models_py.modules.qwen4_exp.gated_residual import (
-    Qwen4GatedResidual as GatedResidual,
+from rtp_llm.models_py.modules.hybrid.gated_residual import (
+    GatedResidual,
+    inject_into_residual,
 )
 from rtp_llm.models_py.modules.qwen4_exp.moe.shared_overlap import Qwen4MoeLayer
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
@@ -68,8 +63,9 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa import (
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import Qwen4ExpQSAIndexer
 from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
     Qwen4LinearFactory,
-    mark_projection_for_restart,
+    annotate_compute_inventory,
     prepare_compute_weights,
+    record_projection_consumer,
 )
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -83,7 +79,6 @@ from rtp_llm.ops.compute_ops import (
     PyModelInputs,
     PyModelOutputs,
 )
-from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
 from rtp_llm.utils.model_weight import W
 
 
@@ -154,13 +149,14 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             compress_ratio=ratio,
             norm_eps=layernorm_eps,
             projection_scale=weights.get(
-                W.qwen4_indexer_qk_proj_w + FP8_STORAGE_SCALE_SUFFIX
+                W.qwen4_indexer_qk_proj_w + ".qwen4_fp8_storage_scale"
             ),
             rope_config=self.qsa_rope_config,
         )
 
-        mark_projection_for_restart(
+        record_projection_consumer(
             weights,
+            W.qwen4_indexer_qk_proj_w,
             getattr(self.qsa_indexer, "qk_projection", None),
         )
 
@@ -237,14 +233,11 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 **({"raw_query": True} if raw_query else {}),
             )
         prefixes = qsa_runtime.main_inputs.prefix_lengths
-        prefix_values = qsa_runtime.host_values(prefixes)
-        has_prefix = any(value != 0 for value in prefix_values)
+        has_prefix = bool(prefixes.numel()) and bool(torch.any(prefixes != 0).item())
         if not bool(qsa_runtime.main_inputs.is_target_verify) and has_prefix:
             if self.is_mtp_draft:
                 input_lengths = qsa_runtime.main_inputs.input_lengths
-                max_input_length = max(
-                    int(length) for length in qsa_runtime.host_values(input_lengths)
-                )
+                max_input_length = max(int(length) for length in input_lengths.tolist())
                 # PD prefix hits retain local draft-prefill cu_kv coordinates
                 # even when only one token remains. Publication distinguishes
                 # them from post-rejection commits, whose KV ends are absolute.
@@ -254,7 +247,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 )
                 # A first prefill may mix cold requests with short prefix hits.
                 # Post-rejection commits always have a nonzero prefix per row.
-                has_cold_request = 0 in prefix_values
+                has_cold_request = bool(torch.any(prefixes == 0).item())
                 if (
                     pd_prefill
                     or has_cold_request
@@ -439,10 +432,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                     and "forward_causal_from_projected" not in self.qsa_indexer.__dict__
                     and callable(trusted_setter)
                 ):
-                    trusted_setter(
-                        selected,
-                        cu_seqlens=qsa_runtime.main_inputs.cu_seqlens_device,
-                    )
+                    trusted_setter(selected)
                 else:
                     set_selected(selected)
                 fused_gate_forward = getattr(
@@ -539,7 +529,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             self.self_attn.prefill_gdn = Qwen4Sm120GdnPrefill(
                 native.linear_attn_config, native.parallelism_config, native.weights
             )
-            from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm import (
+            from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm_triton import (
                 Qwen4PrefillGatedNorm,
             )
 
@@ -549,10 +539,25 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
                     gdn_norm, role=self._execution_role
                 )
         if hasattr(self.mlp, "select_topk"):
-            from rtp_llm.models_py.modules.qwen4_exp.moe.topk import Qwen4ExpMoeTopk
+            from rtp_llm.models_py.modules.qwen4_exp.moe.moe_topk_triton import (
+                Qwen4ExpMoeTopk,
+            )
 
             self.mlp.select_topk = Qwen4ExpMoeTopk(self.mlp.select_topk)
             self.mlp.prepare_shared_expert_overlap()
+        if self.layer_type != HybridAttentionType.LINEAR and getattr(
+            config, "enable_qwen4_qsa", False
+        ):
+            self.self_attn = Qwen4ExpAttention(
+                config.getAttentionConfigs(parallelism_config.get_attn_tp_size()),
+                parallelism_config,
+                weights,
+                config.layernorm_eps,
+                config,
+                self._attention_quant_config(config, weights),
+                hw_kernel_config=hw_kernel_config,
+                layer_idx=layer_idx,
+            )
         from rtp_llm.models_py.modules.qwen4_exp.tp_reduce import (
             install_target_graph_all_reduce,
         )
@@ -566,40 +571,11 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             self.self_attn.qk_fuse_norm = ZeroCenteredFusedQKRMSNorm.replacing(fused)
 
     def _attention_quant_config(self, config, weights):
-        if getattr(config, "_qwen4_nvfp4_source", False):
-            return None
         if bool(getattr(config, "_qwen4_full_fp8_nvfp4", False)):
             from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 
             return Fp8BlockWiseQuantConfig(is_quanted=False)
         return super()._attention_quant_config(config, weights)
-
-    def _build_full_attention(
-        self,
-        config,
-        parallelism_config,
-        weights,
-        attention_quant_config,
-        hw_kernel_config,
-    ):
-        if not getattr(config, "enable_qwen4_qsa", False):
-            return super()._build_full_attention(
-                config,
-                parallelism_config,
-                weights,
-                attention_quant_config,
-                hw_kernel_config,
-            )
-        return Qwen4ExpAttention(
-            config.getAttentionConfigs(parallelism_config.get_attn_tp_size()),
-            parallelism_config,
-            weights,
-            config.layernorm_eps,
-            config,
-            attention_quant_config,
-            hw_kernel_config=hw_kernel_config,
-            layer_idx=self.layer_idx,
-        )
 
     def _build_residual_modules(
         self, config: ModelConfig, weights: Dict[str, torch.Tensor]
@@ -613,7 +589,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             norm_eps=config.layernorm_eps,
             role=getattr(self, "_execution_role", "PDFUSION"),
             weight_scales=tuple(
-                weights.get(name + FP8_STORAGE_SCALE_SUFFIX)
+                weights.get(name + ".qwen4_fp8_storage_scale")
                 for name in (
                     W.qwen4_hc_attn_mix_down,
                     W.qwen4_hc_attn_mix_up,
@@ -630,7 +606,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             norm_eps=config.layernorm_eps,
             role=getattr(self, "_execution_role", "PDFUSION"),
             weight_scales=tuple(
-                weights.get(name + FP8_STORAGE_SCALE_SUFFIX)
+                weights.get(name + ".qwen4_fp8_storage_scale")
                 for name in (
                     W.qwen4_hc_mlp_mix_down,
                     W.qwen4_hc_mlp_mix_up,
@@ -638,13 +614,25 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
                 )
             ),
         )
-        for unit in (self.attn_hyper_connection, self.mlp_hyper_connection):
-            for projection in (
-                unit.down_projection,
-                unit.up_projection,
-                unit.inject_projection,
+        for unit, names in (
+            (
+                self.attn_hyper_connection,
+                (
+                    W.qwen4_hc_attn_mix_down,
+                    W.qwen4_hc_attn_mix_up,
+                    W.qwen4_hc_attn_inject,
+                ),
+            ),
+            (
+                self.mlp_hyper_connection,
+                (W.qwen4_hc_mlp_mix_down, W.qwen4_hc_mlp_mix_up, W.qwen4_hc_mlp_inject),
+            ),
+        ):
+            for name, projection in zip(
+                names,
+                (unit.down_projection, unit.up_projection, unit.inject_projection),
             ):
-                mark_projection_for_restart(weights, projection)
+                record_projection_consumer(weights, name, projection)
         for unit, down_name, inject_name in (
             (
                 self.attn_hyper_connection,
@@ -752,13 +740,7 @@ class Qwen4ExpModel(Qwen35Model):
     # `_attention_tag` sees more than one candidate and raises -- full-attention
     # layers own three regions once the indexer is enabled.
     _side_region_tags = frozenset(
-        {
-            PLE_STATE_TAG,
-            PLE_NGRAM_CTX_TAG,
-            INDEXER_KV_TAG,
-            INDEXER_STATE_TAG,
-            INDEXER_ROPE_POS_TAG,
-        }
+        {PLE_STATE_TAG, PLE_NGRAM_CTX_TAG, INDEXER_KV_TAG, INDEXER_STATE_TAG}
     )
 
     def __init__(
@@ -770,7 +752,11 @@ class Qwen4ExpModel(Qwen35Model):
         max_generate_batch_size: int,
         fmha_config=None,
         py_hw_kernel_config=None,
+        device_resource_config=None,
     ):
+        from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX
+        from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
+
         config = model_config
         compute_weights = (
             prepare_compute_weights(weights)
@@ -785,12 +771,14 @@ class Qwen4ExpModel(Qwen35Model):
             max_generate_batch_size,
             fmha_config,
             py_hw_kernel_config,
+            device_resource_config,
         )
-        fp8_embedding = (
-            getattr(self.config, "_qwen4_full_fp8_nvfp4", False)
-            and self.embed_tokens.weight.dtype == torch.float8_e4m3fn
-        )
-        if fp8_embedding:
+        if getattr(config, "_qwen4_full_fp8_nvfp4", False):
+            self._fp8_lm_head = Fp8Linear(
+                weights.global_weights[W.lm_head],
+                weights.global_weights[W.lm_head + FP8_STORAGE_SCALE_SUFFIX],
+            )
+        if getattr(self.config, "_qwen4_full_fp8_nvfp4", False):
             from rtp_llm.models_py.modules.base.common.fp8_embedding import (
                 Fp8VocabEmbedding,
             )
@@ -803,31 +791,43 @@ class Qwen4ExpModel(Qwen35Model):
                     W.embedding + FP8_STORAGE_SCALE_SUFFIX
                 ),
             )
-        if fp8_embedding:
+        if getattr(self.config, "_qwen4_full_fp8_nvfp4", False):
             self.embed_tokens.prepare_byte_gather(
                 role=getattr(parallelism_config, "role_type", "PDFUSION")
             )
         self.ple_layers = nn.ModuleDict()
+        self.requires_cuda_graph_model_input_preparation = bool(
+            getattr(self.config, "enable_qwen4_ple", False)
+        )
         self._ple_target_transaction: Optional[_PLETargetTransaction] = None
         self._ple_graph_target_transactions: Dict[int, _PLETargetTransaction] = {}
         self._capture_mtp_target_hidden = bool(getattr(self.config, "is_mtp", False))
         if getattr(self.config, "enable_qwen4_ple", False):
             self._build_ple_layers()
+            self.requires_cuda_graph_model_input_preparation = any(
+                not ple.ple_embedding.inline_cpu_uva_graph
+                for ple in self.ple_layers.values()
+            )
+        from .qwen4_exp_runtime.target_head_graph import TargetHeadGraph
+
+        self._target_head_graph = TargetHeadGraph(
+            enabled=hasattr(self, "_fp8_lm_head")
+            and bool(self.ple_layers)
+            and not getattr(self.config, "is_mtp", False)
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.head_ipc_gather import (
+            prepare_head_ipc_gather,
+        )
+
+        self._head_ipc_gather = prepare_head_ipc_gather(
+            config, parallelism_config, getattr(self, "_fp8_lm_head", None)
+        )
         from rtp_llm.models_py.modules.qwen4_exp.cpu_target_status import (
             prepare_cpu_target_status,
         )
 
         self._cpu_target_status = prepare_cpu_target_status(config, parallelism_config)
-        from rtp_llm.models_py.modules.qwen4_exp.tp_reduce import (
-            install_target_graph_all_reduce,
-            prepare_target_reduce,
-        )
-
-        self._target_reduce = prepare_target_reduce(config, parallelism_config)
-        dispatch = self._target_reduce
-        if dispatch is not None:
-            for layer in self.layers:
-                install_target_graph_all_reduce(layer.self_attn, layer.mlp, dispatch)
+        annotate_compute_inventory(self.weight)
 
     def _ple_coordinator(self) -> PLETransactionCoordinator:
         coordinator = self.__dict__.get("_ple_transaction_coordinator")
@@ -850,7 +850,7 @@ class Qwen4ExpModel(Qwen35Model):
                 self.ple_layers,
                 self.kv_cache,
                 self.parallelism_config,
-                ple_eos_token_id(self.config),
+                self.config.special_tokens.eos_token_id,
                 self._ple_coordinator(),
             )
             self._ple_execution_runtime = execution
@@ -907,13 +907,38 @@ class Qwen4ExpModel(Qwen35Model):
         for ple in self.ple_layers.values():
             ple.ple_embedding.close()
         self._ple_execution_runtime = None
+        head_graph = self.__dict__.get("_target_head_graph")
+        if head_graph is not None:
+            head_graph.clear_activation()
+            head_graph.outputs.clear()
+        head_ipc = self.__dict__.get("_head_ipc_gather")
+        if head_ipc is not None:
+            head_ipc.close()
         status = self.__dict__.get("_cpu_target_status")
         if status is not None:
             status.close()
-        target_reduce = self.__dict__.get("_target_reduce")
-        if target_reduce is not None:
-            target_reduce.close()
         self._closed = True
+
+    def compute_logits(self, hidden: torch.Tensor) -> Optional[torch.Tensor]:
+        if not hasattr(self, "_fp8_lm_head"):
+            return None
+        from rtp_llm.models_py.modules.base.common.vocab_parallel_logits import (
+            gather_vocab_parallel_logits,
+        )
+
+        workspace = self.__dict__.get("_head_ipc_gather")
+        return gather_vocab_parallel_logits(
+            self._compute_local_logits(hidden),
+            int(self.parallelism_config.tp_size),
+            try_gather=workspace.try_gather if workspace is not None else None,
+        )
+
+    def _compute_local_logits(self, hidden: torch.Tensor) -> torch.Tensor:
+        head_graph = self.__dict__.get("_target_head_graph")
+        logits = head_graph.take(hidden) if head_graph is not None else None
+        return (
+            self._fp8_lm_head(hidden.to(torch.bfloat16)) if logits is None else logits
+        )
 
     def initialize(self, init_resource) -> bool:
         initialized = super().initialize(init_resource)
@@ -1048,12 +1073,15 @@ class Qwen4ExpModel(Qwen35Model):
                 layer_weights[W.qwen4_ple_ngram_offsets],
                 layer_weights[W.qwen4_ple_multipliers],
                 ngram_size=ngram_size,
-                eos_token_id=int(ple_eos_token_id(self.config)),
+                eos_token_id=int(self.config.special_tokens.eos_token_id),
                 shard_indices=shard_indices,
                 total_shards=total_shards,
                 distributed_reduce=tp_size > 1,
                 weight_scale=layer_weights.get(W.qwen4_ple_ngram_scale),
                 prefetch_budget_mb=getattr(self.config, "qwen4_ple_prefetch_mb", 256),
+                inline_cpu_uva_graph=(
+                    shard_pairs[0][1].device.type == "cpu" and torch.version.hip is None
+                ),
             )
             # Retain the same pinned owners in the weight/export inventory;
             # release pageable copies after this initialization scope finishes.
@@ -1074,15 +1102,19 @@ class Qwen4ExpModel(Qwen35Model):
                 hidden_size=self.config.hidden_size,
                 conv_kernel_size=int(conv_weight.shape[-1]),
                 projection_scales=tuple(
-                    layer_weights.get(name + FP8_STORAGE_SCALE_SUFFIX)
+                    layer_weights.get(name + ".qwen4_fp8_storage_scale")
                     for name in (W.qwen4_ple_key_proj_w, W.qwen4_ple_value_proj_w)
                 ),
                 norm_eps=self.config.layernorm_eps,
             )
 
             unit = self.ple_layers[str(layer_idx)]
-            mark_projection_for_restart(layer_weights, unit.key_projection)
-            mark_projection_for_restart(layer_weights, unit.value_projection)
+            record_projection_consumer(
+                layer_weights, W.qwen4_ple_key_proj_w, unit.key_projection
+            )
+            record_projection_consumer(
+                layer_weights, W.qwen4_ple_value_proj_w, unit.value_projection
+            )
 
     def _maybe_inject_speculative_fault(self, phase: str) -> None:
         """Invoke the private transaction test hook with actual phase and rank."""
@@ -1090,34 +1122,24 @@ class Qwen4ExpModel(Qwen35Model):
         if hook is not None:
             hook(phase, int(self.parallelism_config.get_attn_tp_rank()))
 
-    def on_cuda_graph_warmup(self, inputs: PyModelInputs) -> None:
-        """Release eager-only state after each graph warmup forward."""
-        if get_primary_attention_inputs(inputs).is_target_verify:
-            self._ple_coordinator().clear_speculative_target_graph_capture()
+    def clear_speculative_target_graph_capture(self) -> None:
+        return self._ple_coordinator().clear_speculative_target_graph_capture()
 
-    def on_cuda_graph_capture(self, graph_key: int, inputs: PyModelInputs) -> None:
-        """Retain model-owned tensors for this captured graph instance."""
-        if not get_primary_attention_inputs(inputs).is_target_verify:
-            return
-        target_reduce = self.__dict__.get("_target_reduce")
-        if target_reduce is not None:
-            target_reduce.finish_graph_capture()
+    def save_speculative_target_graph_capture(self, graph_key: int) -> None:
+        from rtp_llm.models_py.distributed.flashinfer_all_reduce import (
+            get_flashinfer_allreduce,
+        )
+
+        communicator = get_flashinfer_allreduce()
+        if communicator is not None:
+            communicator.finish_graph_capture()
         return self._ple_coordinator().save_speculative_target_graph_capture(graph_key)
 
-    def on_cuda_graph_replay(self, graph_key: int, inputs: PyModelInputs) -> None:
-        """Activate the model state belonging to the graph that just replayed."""
-        if not get_primary_attention_inputs(inputs).is_target_verify:
-            return
+    def activate_speculative_target_graph_replay(self, graph_key: int) -> None:
         self._ple_coordinator().activate_speculative_target_graph_replay(graph_key)
-
-    def requires_speculative_target_commit(self) -> bool:
-        parallelism = getattr(self, "parallelism_config", None)
-        role = str(getattr(parallelism, "role_type", "PDFUSION")).rsplit(".", 1)[-1]
-        return (
-            role in ("DECODE", "PDFUSION")
-            and bool(self.ple_layers)
-            and not bool(getattr(self.config, "is_mtp", False))
-        )
+        head_graph = self.__dict__.get("_target_head_graph")
+        if head_graph is not None:
+            head_graph.activate(graph_key)
 
     def has_speculative_target_status_reducer(self) -> bool:
         return self.__dict__.get("_cpu_target_status") is not None
@@ -1137,17 +1159,15 @@ class Qwen4ExpModel(Qwen35Model):
     def finalize_speculative_target_commit(self) -> None:
         return self._ple_coordinator().finalize_speculative_target_commit()
 
-    def _start_eager_ple_prefetch(
-        self,
-        inputs: PyModelInputs,
-        attention_inputs,
-        ple_ids: torch.Tensor | None = None,
-    ):
+    def _start_eager_ple_prefetch(self, inputs: PyModelInputs, attention_inputs):
         if not self.ple_layers:
             return {}
-        return self._ple_execution()._start_eager_ple_prefetch(
-            inputs, attention_inputs, ple_ids
-        )
+        return self._ple_execution()._start_eager_ple_prefetch(inputs, attention_inputs)
+
+    def prepare_cuda_graph_model_inputs(self, inputs: PyModelInputs) -> None:
+        if not self.ple_layers:
+            return
+        return self._ple_execution().prepare_cuda_graph_model_inputs(inputs)
 
     def _apply_ple(
         self,
@@ -1156,17 +1176,11 @@ class Qwen4ExpModel(Qwen35Model):
         input_ids: torch.Tensor,
         attention_inputs: Any,
         prefetch=None,
-        metadata_cache=None,
     ) -> torch.Tensor:
         if str(layer_idx) not in self.ple_layers:
             return hyper_states
         return self._ple_execution()._apply_ple(
-            layer_idx,
-            hyper_states,
-            input_ids,
-            attention_inputs,
-            prefetch,
-            metadata_cache,
+            layer_idx, hyper_states, input_ids, attention_inputs, prefetch
         )
 
     def _attention_tag(self, layer_idx: int) -> str:
@@ -1186,26 +1200,6 @@ class Qwen4ExpModel(Qwen35Model):
                 f"layer {layer_idx} must own exactly one attention region, got {tags}"
             )
         return tags[0]
-
-    def _build_attn_meta(self, inputs, device, is_cuda_graph=False):
-        linear_inputs = None
-        if self.kv_cache is not None:
-            linear_layer_idx = next(
-                (
-                    i
-                    for i, layer in enumerate(self.layers)
-                    if layer.layer_type == HybridAttentionType.LINEAR
-                ),
-                None,
-            )
-            if linear_layer_idx is not None:
-                linear_inputs = select_attention_inputs_for_tag(
-                    get_attention_inputs_value(inputs),
-                    self._attention_tag(linear_layer_idx),
-                )
-        return super()._build_attn_meta(
-            inputs, device, is_cuda_graph, linear_attention_inputs=linear_inputs
-        )
 
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
         """The attention regions only; side regions need no FMHA impl.
@@ -1246,14 +1240,11 @@ class Qwen4ExpModel(Qwen35Model):
         main_cache: LayerKVCache,
         main_inputs: PyAttentionInputs,
         attention_inputs: Any,
-        metadata_cache=None,
     ) -> Qwen4ExpQSARuntimeContext:
         if self.kv_cache is None or not isinstance(attention_inputs, Mapping):
             raise RuntimeError(
                 "qwen4_exp QSA requires tag-local main/indexer cache inputs"
             )
-        is_draft = bool(getattr(self.config, "is_mtp", False))
-        has_positions = not is_draft and INDEXER_ROPE_POS_TAG in attention_inputs
         return Qwen4ExpQSARuntimeContext(
             main_cache=main_cache,
             main_inputs=main_inputs,
@@ -1267,16 +1258,7 @@ class Qwen4ExpModel(Qwen35Model):
             indexer_state_inputs=select_attention_inputs_for_tag(
                 attention_inputs, INDEXER_STATE_TAG
             ),
-            is_mtp_draft=is_draft,
-            metadata_cache=metadata_cache,
-            position_state_cache=(
-                self.kv_cache.get_layer_cache(layer_idx, INDEXER_ROPE_POS_TAG)
-                if has_positions
-                else None
-            ),
-            position_state_inputs=(
-                attention_inputs[INDEXER_ROPE_POS_TAG] if has_positions else None
-            ),
+            is_mtp_draft=bool(getattr(self.config, "is_mtp", False)),
         )
 
     def _build_output_head(
@@ -1293,43 +1275,66 @@ class Qwen4ExpModel(Qwen35Model):
             role=getattr(self.parallelism_config, "role_type", "PDFUSION"),
             weight_scales=(
                 weights.global_weights.get(
-                    W.qwen4_hc_mixer_mix_down + FP8_STORAGE_SCALE_SUFFIX
+                    W.qwen4_hc_mixer_mix_down + ".qwen4_fp8_storage_scale"
                 ),
                 weights.global_weights.get(
-                    W.qwen4_hc_mixer_mix_up + FP8_STORAGE_SCALE_SUFFIX
+                    W.qwen4_hc_mixer_mix_up + ".qwen4_fp8_storage_scale"
                 ),
                 None,
             ),
         )
 
-        for projection in (
-            self.hyper_connection_mixer.down_projection,
-            self.hyper_connection_mixer.up_projection,
+        for name, projection in (
+            (W.qwen4_hc_mixer_mix_down, self.hyper_connection_mixer.down_projection),
+            (W.qwen4_hc_mixer_mix_up, self.hyper_connection_mixer.up_projection),
         ):
-            mark_projection_for_restart(weights.global_weights, projection)
+            record_projection_consumer(weights.global_weights, name, projection)
 
     def _ple_input_ids(self, inputs: PyModelInputs) -> torch.Tensor:
-        return ple_input_ids(inputs, ple_eos_token_id(getattr(self, "config", None)))
+        tokens = getattr(getattr(self, "config", None), "special_tokens", None)
+        return ple_input_ids(inputs, getattr(tokens, "eos_token_id", None))
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         if self.__dict__.get("_closed", False):
             raise RuntimeError("Qwen4 model is closed")
-        target_reduce = self.__dict__.get("_target_reduce")
-        if target_reduce is not None:
+        from rtp_llm.models_py.distributed.flashinfer_all_reduce import (
+            get_flashinfer_allreduce,
+        )
+
+        communicator = get_flashinfer_allreduce()
+        prior_capture = None
+        if communicator is not None:
             groups = get_attention_inputs_value(inputs)
             groups = groups.values() if isinstance(groups, dict) else (groups,)
-            target_reduce.active = any(
-                bool(getattr(a, "is_target_verify", False)) for a in groups
-            )
+            prior_capture = communicator.allow_ipc_capture
+            communicator.allow_ipc_capture = not bool(
+                getattr(self.config, "is_mtp", False)
+            ) and any(bool(getattr(a, "is_target_verify", False)) for a in groups)
+        head_graph = self.__dict__.get("_target_head_graph")
+        if head_graph is not None:
+            head_graph.clear_activation()
         try:
-            from .qwen4_exp_runtime.prefill_preflight import prefill_geometry_scope
-
-            with prefill_geometry_scope(self, inputs, fmha_impl):
-                outputs = self._forward_with_ple_prefetch(inputs, fmha_impl)
+            outputs = self._forward_with_ple_prefetch(inputs, fmha_impl)
+            transaction = (
+                self._ple_target_transaction
+                if head_graph is not None and head_graph.enabled
+                else None
+            )
+            if transaction is not None:
+                groups = get_attention_inputs_value(inputs)
+                values = (
+                    tuple(groups.values()) if isinstance(groups, Mapping) else (groups,)
+                )
+                if values and all(
+                    value.is_cuda_graph and value.is_target_verify for value in values
+                ):
+                    head_graph.stage(
+                        self._fp8_lm_head, outputs.hidden_states, transaction.batch_size
+                    )
             return outputs
         finally:
-            if target_reduce is not None:
-                target_reduce.active = False
+            if communicator is not None:
+                communicator.allow_ipc_capture = prior_capture
             for ple in self.ple_layers.values():
                 embedding = getattr(ple, "ple_embedding", None)
                 finish = getattr(embedding, "finish_prefetch", None)
@@ -1352,28 +1357,6 @@ class Qwen4ExpModel(Qwen35Model):
             getattr(getattr(layer, "self_attn", None), "qsa_indexer", None) is not None
             for layer in self.layers
         )
-        if has_side_caches and self.kv_cache is None:
-            groups = (
-                attention_inputs.values()
-                if isinstance(attention_inputs, Mapping)
-                else (attention_inputs,)
-            )
-            if not all(a.is_prefill and a.is_s_padded for a in groups):
-                raise RuntimeError(
-                    "qwen4_exp side caches are required outside prefill warmup"
-                )
-            hidden = self.word_embedding(inputs)
-            target_hidden = (
-                self._initial_hyper_states(hidden)
-                if getattr(self, "_capture_mtp_target_hidden", False)
-                else None
-            )
-            return (
-                PyModelOutputs(hidden, target_hidden)
-                if target_hidden is not None
-                else PyModelOutputs(hidden)
-            )
-        attention_inputs = prepare_state_cache_inputs(attention_inputs, self.kv_cache)
         side_cache_writers = (
             prepare_side_cache_store_writers(
                 attention_inputs, self.kv_cache, layer_count=len(self.layers)
@@ -1395,25 +1378,17 @@ class Qwen4ExpModel(Qwen35Model):
             prefetch_after_embedding = bool(
                 ple_context_inputs.is_prefill and not ple_context_inputs.is_cuda_graph
             )
-        ple_input_ids = (
-            self._ple_input_ids(inputs)
-            if self.ple_layers and not prefetch_after_embedding
-            else inputs.input_ids
-        )
         ple_prefetch = (
             {}
             if prefetch_after_embedding
-            else self._start_eager_ple_prefetch(inputs, attention_inputs, ple_input_ids)
+            else self._start_eager_ple_prefetch(inputs, attention_inputs)
         )
         prepared_hyper = self._try_fp8_hyper_embedding(inputs)
         hidden_states = (
             self.word_embedding(inputs) if prepared_hyper is None else prepared_hyper
         )
         if prefetch_after_embedding:
-            ple_input_ids = self._ple_input_ids(inputs)
-            ple_prefetch = self._start_eager_ple_prefetch(
-                inputs, attention_inputs, ple_input_ids
-            )
+            ple_prefetch = self._start_eager_ple_prefetch(inputs, attention_inputs)
 
         is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
         attn_meta = self._build_attn_meta(inputs, hidden_states.device, is_cuda_graph)
@@ -1430,6 +1405,10 @@ class Qwen4ExpModel(Qwen35Model):
             else prepared_hyper
         )
 
+        attention_inputs = get_attention_inputs_value(inputs)
+        ple_input_ids = inputs.input_ids
+        if self.ple_layers:
+            ple_input_ids = self._ple_input_ids(inputs)
         pending_injection = None
         defer_residual = (
             not is_cuda_graph
@@ -1437,11 +1416,10 @@ class Qwen4ExpModel(Qwen35Model):
             and torch.version.hip is None
             and hyper_states.ndim == 2
             and hyper_states.shape[1] == 10240
-            and 4093 <= hyper_states.shape[0] <= 16384
+            and 4093 <= hyper_states.shape[0] <= 12288
             and hyper_states.dtype == torch.bfloat16
             and torch.cuda.get_device_capability(hyper_states.device) == (12, 0)
         )
-        qsa_metadata_cache = {}
         for i, decoder_layer in enumerate(self.layers):
             if str(i) in self.ple_layers:
                 if pending_injection is not None:
@@ -1458,7 +1436,6 @@ class Qwen4ExpModel(Qwen35Model):
                     hyper_states,
                     ple_input_ids,
                     attention_inputs,
-                    metadata_cache=qsa_metadata_cache,
                     **({"prefetch": ple_prefetch[i]} if i in ple_prefetch else {}),
                 )
             if self.kv_cache is None:
@@ -1487,7 +1464,6 @@ class Qwen4ExpModel(Qwen35Model):
                     layer_kv_cache,
                     layer_attention_inputs,
                     attention_inputs,
-                    metadata_cache=qsa_metadata_cache,
                 )
             layer_kwargs = dict(
                 kv_cache=layer_kv_cache,

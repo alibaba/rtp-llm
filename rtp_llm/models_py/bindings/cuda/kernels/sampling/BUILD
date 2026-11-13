@@ -40,38 +40,3 @@ cc_library(
     copts = cuda_copts() + ["-nvcc_options=ftz=false"],
     visibility = ["//visibility:public"],
 )
-
-# Host selection between the tuned kernel and PyTorch fallback.
-cc_library(
-    name = "softmax_host",
-    srcs = ["softmax_host.cc"],
-    hdrs = ["softmax_host.h"],
-    deps = [
-        ":split_softmax",
-        ":host_utils",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ] + torch_deps(),
-    copts = copts(),
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "host_utils",
-    hdrs = ["host_utils.h"],
-    deps = ["@local_config_cuda//cuda:cuda_headers"] + torch_deps(),
-)
-
-# CUDA host dispatch for the temperature penalty kernel.
-cc_library(
-    name = "temperature_host",
-    srcs = ["temperature_host.cc"],
-    hdrs = ["temperature_host.h"],
-    deps = [
-        "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
-        ":host_utils",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ] + torch_deps(),
-    copts = copts(),
-)

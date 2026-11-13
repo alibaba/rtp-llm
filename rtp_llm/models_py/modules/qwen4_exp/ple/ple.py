@@ -1,5 +1,4 @@
 import math
-import os
 from contextlib import contextmanager
 from typing import List, Optional
 
@@ -24,9 +23,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
     table, which for the released model would be 102GB.
 
     Shards can remain on the CPU while hash metadata and activations live on
-    CUDA. Eager prefetch gathers selected rows on a side stream before the TP
-    reduction. CUDA Graph captures hash and UVA lookup on the model stream so
-    every replay reads its current token history without staging the table.
+    CUDA. Host lookup transfers only ids and gathered rows to the execution
+    device before the TP reduction. CUDA Graph uses externally prepared lookup
+    rows; the large table remains on the CPU.
     """
 
     def __init__(
@@ -43,6 +42,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         distributed_reduce: bool = False,
         weight_scale: Optional[torch.Tensor] = None,
         prefetch_budget_mb: int = 256,
+        inline_cpu_uva_graph: bool = False,
     ):
         super().__init__()
         if not shards:
@@ -136,8 +136,13 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             and vocab_sizes.is_cuda
             and torch.version.hip is None
         )
+        if type(inline_cpu_uva_graph) is not bool:
+            raise ValueError("inline_cpu_uva_graph must be a boolean")
+        if inline_cpu_uva_graph and not self._cpu_uva_enabled:
+            raise ValueError("inline graph lookup requires pinned NVIDIA CPU UVA")
+        self.inline_cpu_uva_graph = inline_cpu_uva_graph
         if self._cpu_uva_enabled:
-            from rtp_llm.models_py.kernels.cuda.qwen4_ple.gather import (
+            from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gather_triton import (
                 prepare_cpu_uva_shards,
             )
 
@@ -161,6 +166,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         self._triton_shard_signature: Optional[tuple[int, ...]] = None
         self._closed = False
         self._graph_gather_required = False
+        self._cpu_graph_buffers = {}
+        self._cpu_graph_rows: Optional[torch.Tensor] = None
+        self._cpu_graph_prefetch = None
         self._prefetcher = None
         if self._cpu_uva_enabled:
             from rtp_llm.models_py.modules.qwen4_exp.ple.ple_prefetch import (
@@ -192,18 +200,31 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             for shard in self.shards
             if shard.device.type == "cpu"
         }
+        graph_host = sum(
+            host.nbytes
+            for host, _ in self._cpu_graph_buffers.values()
+            if host is not None
+        )
+        graph_device = sum(
+            device.nbytes for _, device in self._cpu_graph_buffers.values()
+        )
         retained = (
             self._prefetcher.retained_eager_bytes if self._prefetcher is not None else 0
         )
         return {
             "cpu_table_bytes": sum(storage.nbytes() for storage in storages.values()),
             "eager_retained_bytes": retained,
+            "graph_host_bytes": graph_host,
+            "graph_device_bytes": graph_device,
         }
 
     def close(self) -> None:
         """Called after graph runners are destroyed; release lookup buffers."""
         if self._prefetcher is not None:
             self._prefetcher.close()
+        self._cpu_graph_prefetch = None
+        self._cpu_graph_rows = None
+        self._cpu_graph_buffers.clear()
         self._prefetcher = None
         self._triton_shard_ptrs = None
         self._cpu_uva_pointers = None
@@ -224,10 +245,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             and not module_hooks._global_forward_hooks
         )
 
-    def start_prefetch(self, ids: torch.Tensor, *, slot=0):
+    def start_prefetch(self, ids: torch.Tensor, *, slot=0, out=None):
         if not self.supports_prefetch:
             return None
-        return self._prefetcher.start(ids, slot=slot)
+        return self._prefetcher.start(ids, slot=slot, out=out)
 
     def consume_prefetch(self, prefetch):
         if self._prefetcher is None or prefetch.owner is not self._prefetcher:
@@ -267,9 +288,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
     def hashed_ids(self, token_history: torch.Tensor, seq_len: int) -> torch.Tensor:
         """Map a ``[B, context_len + seq_len]`` history to ``[B, seq_len, heads]``."""
         if token_history.is_cuda and torch.version.hip is None:
-            from rtp_llm.models_py.kernels.cuda.qwen4_ple.hash import (
-                try_hashed_ngram_ids,
-            )
+            from .ple_hash_triton import try_hashed_ngram_ids
 
             result = try_hashed_ngram_ids(
                 token_history,
@@ -302,12 +321,84 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             blocks.append(hashed + head_offsets)
         return torch.cat(blocks, dim=-1)[:, -seq_len:]
 
+    def prepare_cpu_graph_rows(self, ngram_ids: torch.Tensor, graph_key: int) -> None:
+        """Refresh selected rows outside capture; keep the large table on CPU."""
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("PLE CPU graph preparation must run outside capture")
+        if self.shards[0].device.type != "cpu" or not ngram_ids.is_cuda:
+            raise RuntimeError(
+                "PLE CPU graph preparation needs CPU tables and CUDA ids"
+            )
+        shape = (*ngram_ids.shape, self.shards[0].shape[-1])
+        key = (graph_key, tuple(shape), ngram_ids.device)
+        if key not in self._cpu_graph_buffers:
+            host = (
+                None
+                if self._cpu_uva_enabled
+                else torch.empty(shape, dtype=self.output_dtype, pin_memory=True)
+            )
+            device = torch.empty(
+                shape, dtype=self.output_dtype, device=ngram_ids.device
+            )
+            self._cpu_graph_buffers[key] = (host, device)
+        host, device = self._cpu_graph_buffers[key]
+        if self.supports_prefetch:
+            self._cpu_graph_prefetch = self.start_prefetch(ngram_ids, out=device)
+            self._cpu_graph_rows = device
+            return
+        self._cpu_graph_prefetch = None
+        if self._cpu_uva_enabled:
+            from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gather_triton import (
+                gather_local,
+            )
+
+            gather_local(
+                ngram_ids,
+                self.shards,
+                self.shard_indices,
+                self.total_shards,
+                self._cpu_uva_pointers,
+                out=device,
+                scale=self.weight_scale,
+            )
+            self._cpu_graph_rows = device
+            return
+        assert host is not None
+        # The D2H finishes before CPU indexing. Only selected rows are pinned;
+        # the checkpoint shards remain pageable CPU memory.
+        host.copy_(self._gather_torch(ngram_ids.cpu()))
+        device.copy_(host, non_blocking=True)
+        self._cpu_graph_rows = device
+
+    def _prepared_cpu_graph_rows(
+        self, shape: tuple, device: torch.device
+    ) -> torch.Tensor:
+        rows = self._cpu_graph_rows
+        if rows is None:
+            raise RuntimeError(
+                "qwen4_exp PLE CPU offload requires eager execution or "
+                "graph preparation of lookup rows"
+            )
+        if (
+            rows.shape != shape
+            or rows.device != device
+            or rows.dtype != self.output_dtype
+        ):
+            raise RuntimeError("PLE CPU graph lookup buffer geometry is stale")
+        if self._cpu_graph_prefetch is not None:
+            self.consume_prefetch(self._cpu_graph_prefetch)
+        return rows
+
     def _gather_local(self, ngram_ids: torch.Tensor) -> torch.Tensor:
         if self.shards[0].device.type == "cpu":
-            if self._graph_gather_required and not self._cpu_uva_enabled:
-                raise RuntimeError("PLE CPU graph lookup requires pinned NVIDIA UVA")
+            if self._graph_gather_required and not self.inline_cpu_uva_graph:
+                return self._prepared_cpu_graph_rows(
+                    (*ngram_ids.shape, self.shards[0].shape[-1]), ngram_ids.device
+                )
             if self._cpu_uva_enabled:
-                from rtp_llm.models_py.kernels.cuda.qwen4_ple.gather import gather_local
+                from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gather_triton import (
+                    gather_local,
+                )
 
                 return gather_local(
                     ngram_ids,
@@ -323,7 +414,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 )
             # CPU-only component reference; never stages deployment rows via H2D.
             return self._gather_torch(ngram_ids)
-        from rtp_llm.models_py.kernels.cuda.qwen4_ple.gather import (
+        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gather_triton import (
             gather_local,
             is_supported,
         )
@@ -404,6 +495,19 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 or token_history.shape[1] != self.context_len + seq_len
             ):
                 raise RuntimeError("PLE CPU graph history geometry is invalid")
+            if not self.inline_cpu_uva_graph:
+                # Preparation already hashed the current history. Captured
+                # forward consumes those rows directly.
+                rows = self._prepared_cpu_graph_rows(
+                    (
+                        token_history.shape[0],
+                        seq_len,
+                        self.ngram_heads,
+                        self.shards[0].shape[-1],
+                    ),
+                    token_history.device,
+                )
+                return self._reduce_rows(rows)
             # The constructor pinned and retained every table owner and mapped
             # its device address before capture. Capture hash + UVA gather on
             # the model stream so each replay reads its own current history.
@@ -536,7 +640,7 @@ class Qwen4ExpPLELayer(nn.Module):
                 else F.linear(embeddings, self.value_proj)
             )
         if hyper_states.is_cuda and torch.version.hip is None:
-            from rtp_llm.models_py.kernels.cuda.qwen4_ple.gate import try_ple_gate
+            from .ple_gate_triton import try_ple_gate
 
             fused = try_ple_gate(
                 key,
@@ -620,99 +724,6 @@ class Qwen4ExpPLELayer(nn.Module):
         ]
         return output, state
 
-    def _try_bf16_prefill_page_snapshots(
-        self, hyper_states, embeddings, page_size, conv_buffer, add_residual
-    ):
-        """Opt-in eager SM120 route; all source-BF16 page GEMMs stay unchanged."""
-        if os.environ.get("RTP_QWEN4_BF16_PLE_BATCH", "0") != "1":
-            return None
-        if not (
-            hyper_states.is_cuda
-            and torch.version.hip is None
-            and torch.cuda.get_device_capability(hyper_states.device) == (12, 0)
-            and not torch.cuda.is_current_stream_capturing()
-            and hyper_states.shape == (1, 8192, 10240)
-            and embeddings.shape == (1, 8192, 2560)
-            and page_size == 128
-            and self.key_projection is None
-            and self.value_projection is None
-            and self.key_proj.shape == (10240, 2560)
-            and self.value_proj.shape == (2560, 2560)
-            and self.conv_weight.shape == (10240, 1, 4)
-            and self.conv_dilation == 3
-            and self.short_conv_state_len == 9
-            and all(
-                x.dtype == torch.bfloat16
-                and x.device == hyper_states.device
-                and x.is_contiguous()
-                and not x.requires_grad
-                for x in (
-                    hyper_states,
-                    embeddings,
-                    self.key_proj,
-                    self.value_proj,
-                    self.conv_weight,
-                    self.norm_key,
-                    self.norm_query,
-                    self.norm_conv,
-                )
-            )
-            and all(
-                g.shape == (10240,)
-                for g in (self.norm_key, self.norm_query, self.norm_conv)
-            )
-            and math.isfinite(self.norm_eps)
-            and self.norm_eps >= 0
-            and (
-                conv_buffer is None
-                or (conv_buffer.stride(-1) == 1 and not conv_buffer.requires_grad)
-            )
-        ):
-            return None
-        from rtp_llm.models_py.kernels.cuda.qwen4_ple.conv import try_ple_conv
-        from rtp_llm.models_py.kernels.cuda.qwen4_ple.gate import try_ple_gate
-
-        keys, values = [], []
-        for start in range(0, hyper_states.shape[1], page_size):
-            # Match _gated_values' source-BF16 input shape, stride and call order.
-            page = embeddings[:, start : start + page_size].contiguous()
-            keys.append(F.linear(page, self.key_proj))
-            values.append(F.linear(page, self.value_proj))
-        key = torch.cat(keys, 1)
-        del keys
-        value = torch.cat(values, 1)
-        del values
-        fused = try_ple_gate(
-            key,
-            value,
-            hyper_states,
-            self.norm_key,
-            self.norm_query,
-            self.norm_conv,
-            self.norm_eps,
-        )
-        if fused is None:
-            return None
-        gated, normed = fused
-        del fused, key, value
-        output = try_ple_conv(
-            gated,
-            normed,
-            conv_buffer,
-            self.conv_weight,
-            self.conv_dilation,
-            residual=hyper_states if add_residual else None,
-        )
-        if output is None:
-            return None
-        del gated
-        # Each view keeps normed alive until the existing runtime commits all pages.
-        snapshots = [
-            normed[:, end - self.short_conv_state_len : end]
-            for end in range(page_size, hyper_states.shape[1] + 1, page_size)
-        ]
-        return output, snapshots
-
     def prefill_page_snapshots(
         self,
         hyper_states: torch.Tensor,
@@ -725,9 +736,8 @@ class Qwen4ExpPLELayer(nn.Module):
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Gather once while retaining every page's resumable prefill state.
 
-        Projections keep their original page-sized shapes to preserve BF16
-        accumulation and rounding. The opt-in BF16 route batches only the
-        existing row-local gate and convolution consumers. N-gram hashing, shard gather,
+        Projections and convolution keep their original page-sized shapes to
+        preserve BF16 accumulation and rounding. N-gram hashing, shard gather,
         and its TP reduction run once per request, including a partial final
         page and a reused prefix's left context. With ``add_residual``, the
         convolution epilogue also adds the outer residual after rounding the
@@ -746,11 +756,6 @@ class Qwen4ExpPLELayer(nn.Module):
             raise ValueError("PLE snapshot prefill must contain at least one token")
         if embeddings is None:
             embeddings = self.ple_embedding(token_history, length)
-        batched_bf16 = self._try_bf16_prefill_page_snapshots(
-            hyper_states, embeddings, page_size, conv_buffer, add_residual
-        )
-        if batched_bf16 is not None:
-            return batched_bf16
         if (
             batch == 1
             and width == 10240
@@ -763,11 +768,11 @@ class Qwen4ExpPLELayer(nn.Module):
             and self.key_projection.use_scaled_mm
             and self.value_projection.use_scaled_mm
         ):
-            from rtp_llm.models_py.kernels.cuda.qwen4_ple.gate import try_ple_gate
             from rtp_llm.models_py.modules.base.common.fp8_linear import (
                 project_fp8_pair,
             )
 
+            from .ple_gate_triton import try_ple_gate
             from .ple_page_projection import project_pages_pair
 
             projected = project_pages_pair(
@@ -807,9 +812,7 @@ class Qwen4ExpPLELayer(nn.Module):
                 )
                 if fused is not None:
                     gated, normed = fused
-                    from rtp_llm.models_py.kernels.cuda.qwen4_ple.conv import (
-                        try_ple_conv,
-                    )
+                    from .ple_conv_triton import try_ple_conv
 
                     output = try_ple_conv(
                         gated,
@@ -1003,7 +1006,7 @@ class Qwen4ExpPLELayer(nn.Module):
             hyper_states, token_history, embeddings=embeddings
         )
         if hyper_states.is_cuda and torch.version.hip is None:
-            from rtp_llm.models_py.kernels.cuda.qwen4_ple.conv import try_ple_conv
+            from .ple_conv_triton import try_ple_conv
 
             fused = try_ple_conv(
                 gated_value,

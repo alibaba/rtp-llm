@@ -4,9 +4,11 @@ from collections.abc import Mapping
 from typing import Any
 
 import torch
-
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import PLE_NGRAM_CTX_TAG, PLE_STATE_TAG
-from rtp_llm.models_py.model_desc.block_map import select_attention_inputs_for_tag
+from rtp_llm.models_py.model_desc.block_map import (
+    get_attention_inputs_value,
+    select_attention_inputs_for_tag,
+)
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.pd_publication import (
     validate_pd_cache_inputs,
 )
@@ -30,6 +32,7 @@ class PLEExecution:
         self.parallelism_config = parallelism
         self.eos_token_id = eos_token_id
         self.coordinator = coordinator
+        self.requires_cuda_graph_model_input_preparation = bool(layers)
 
     _fixed_state_pool = staticmethod(PLECacheViews._fixed_state_pool)
     _physical_blocks = staticmethod(PLECacheViews._physical_blocks)
@@ -58,66 +61,45 @@ class PLEExecution:
             raise RuntimeError("qwen4_exp PLE does not support prefill CP yet")
         validate_pd_cache_inputs((attention_inputs,))
 
-    def _start_eager_ple_prefetch(
-        self,
-        inputs: PyModelInputs,
-        attention_inputs,
-        ple_ids: torch.Tensor | None = None,
-    ):
+    def _start_eager_ple_prefetch(self, inputs: PyModelInputs, attention_inputs):
         """Read PLE contexts early; leave persistent state untouched."""
         enabled = [
             (int(key), ple)
             for key, ple in self.ple_layers.items()
             if getattr(getattr(ple, "ple_embedding", None), "supports_prefetch", False)
         ]
-        if not enabled or self.kv_cache is None:
+        if not enabled:
             return {}
         ctx_inputs = select_attention_inputs_for_tag(
             attention_inputs, PLE_NGRAM_CTX_TAG
         )
         if bool(ctx_inputs.is_cuda_graph):
             return {}
-        if ple_ids is None:
-            ple_ids = self._ple_input_ids(inputs)
-        ids = ple_ids.reshape(-1).long()
-        self._validate_ple_mode(ctx_inputs, allow_target_verify=True)
-        if ctx_inputs.is_prefill:
-            lengths = [int(x) for x in ctx_inputs.input_lengths.tolist()]
-            raw_prefixes = ctx_inputs.prefix_lengths
-            prefixes = (
-                [int(x) for x in raw_prefixes.tolist()]
-                if raw_prefixes is not None and raw_prefixes.numel()
-                else [0] * len(lengths)
-            )
-            if (
-                not lengths
-                or any(length <= 0 for length in lengths)
-                or sum(lengths) != ids.numel()
-                or len(prefixes) != len(lengths)
-                or any(prefix < 0 for prefix in prefixes)
-            ):
-                raise RuntimeError("PLE prefetch prefill metadata is inconsistent")
-            if len(lengths) > 128:
-                return {}
-            if ctx_inputs.is_target_verify and any(
-                length != lengths[0] for length in lengths
-            ):
-                raise RuntimeError("PLE target prefetch requires uniform query rows")
-        else:
-            lengths = ctx_inputs.sequence_lengths.to(
-                device=ids.device, dtype=torch.long
-            )
-            padded = bool(ctx_inputs.is_s_padded)
-            if ids.numel() != lengths.numel() or bool(
-                (lengths < (0 if padded else 1)).any().item()
-            ):
-                raise RuntimeError("PLE decode prefetch metadata is inconsistent")
+        ids = self._ple_input_ids(inputs).reshape(-1).long()
         plans = {}
         for layer_idx, ple in enabled:
             embedding = ple.ple_embedding
+            self._validate_ple_mode(ctx_inputs, allow_target_verify=True)
             cache = self.kv_cache.get_layer_cache(layer_idx, PLE_NGRAM_CTX_TAG)
             page_size = int(cache.seq_size_per_block)
             if ctx_inputs.is_prefill:
+                lengths = [int(x) for x in ctx_inputs.input_lengths.tolist()]
+                raw_prefixes = ctx_inputs.prefix_lengths
+                prefixes = (
+                    [int(x) for x in raw_prefixes.tolist()]
+                    if raw_prefixes is not None and raw_prefixes.numel()
+                    else [0] * len(lengths)
+                )
+                if (
+                    not lengths
+                    or any(length <= 0 for length in lengths)
+                    or sum(lengths) != ids.numel()
+                    or len(prefixes) != len(lengths)
+                    or any(prefix < 0 for prefix in prefixes)
+                ):
+                    raise RuntimeError("PLE prefetch prefill metadata is inconsistent")
+                if len(lengths) > 128:
+                    continue
                 contexts = ids.new_full(
                     (len(lengths), embedding.context_len), embedding.eos_token_id
                 )
@@ -144,6 +126,10 @@ class PLEExecution:
                     contexts = torch.where(mask, cached, contexts)
                 if ctx_inputs.is_target_verify:
                     width = lengths[0]
+                    if any(length != width for length in lengths):
+                        raise RuntimeError(
+                            "PLE target prefetch requires uniform query rows"
+                        )
                     history = torch.cat(
                         (contexts, ids.view(len(lengths), width)), dim=1
                     )
@@ -169,6 +155,14 @@ class PLEExecution:
                         offset += length
                     plans[layer_idx] = handles
             else:
+                lengths = ctx_inputs.sequence_lengths.to(
+                    device=ids.device, dtype=torch.long
+                )
+                padded = bool(ctx_inputs.is_s_padded)
+                if ids.numel() != lengths.numel() or bool(
+                    (lengths < (0 if padded else 1)).any().item()
+                ):
+                    raise RuntimeError("PLE decode prefetch metadata is inconsistent")
                 pool = self._fixed_state_pool(
                     cache, torch.int64, embedding.context_len, 1
                 ).squeeze(-1)
@@ -179,6 +173,7 @@ class PLEExecution:
                     pages,
                     int(pool.shape[0]),
                     pool.device,
+                    graph_capture=padded,
                 )
                 history = torch.cat(
                     (pool.index_select(0, blocks), ids.view(-1, 1)), dim=1
@@ -188,6 +183,76 @@ class PLEExecution:
                 ]
         return plans
 
+    def prepare_cuda_graph_model_inputs(self, inputs: PyModelInputs) -> None:
+        """Prepare CPU-resident PLE rows before replay, without committing state."""
+        if not self.requires_cuda_graph_model_input_preparation or not self.ple_layers:
+            return
+        groups = get_attention_inputs_value(inputs)
+        ctx_inputs = select_attention_inputs_for_tag(groups, PLE_NGRAM_CTX_TAG)
+        ids = self._ple_input_ids(inputs).reshape(-1).long()
+        graph_key = inputs.input_ids.data_ptr()
+        for key, ple in self.ple_layers.items():
+            embedding = ple.ple_embedding
+            if getattr(embedding, "inline_cpu_uva_graph", False):
+                continue
+            cache = self.kv_cache.get_layer_cache(int(key), PLE_NGRAM_CTX_TAG)
+            pool = self._fixed_state_pool(
+                cache, torch.int64, embedding.context_len, 1
+            ).squeeze(-1)
+            if ctx_inputs.is_prefill:
+                lengths = ctx_inputs.input_lengths
+                batch = int(lengths.numel())
+                if batch <= 0:
+                    raise RuntimeError("PLE CPU graph requires nonempty query rows")
+                width = int(lengths[0].item())
+                if (
+                    width <= 0
+                    or ids.numel() != batch * width
+                    or bool((lengths != width).any().item())
+                ):
+                    raise RuntimeError(
+                        "PLE CPU graph requires uniform nonempty query rows"
+                    )
+                prefixes = ctx_inputs.prefix_lengths_device.to(
+                    device=ids.device, dtype=torch.long
+                )
+                pages = torch.div(
+                    prefixes - 1, cache.seq_size_per_block, rounding_mode="floor"
+                )
+            else:
+                batch, width = int(ids.numel()), 1
+                sequence_lengths = ctx_inputs.sequence_lengths_plus_1_device.long() - 1
+                pages = torch.div(
+                    sequence_lengths - 1,
+                    cache.seq_size_per_block,
+                    rounding_mode="floor",
+                )
+            blocks = self._physical_blocks(
+                ctx_inputs,
+                PLE_NGRAM_CTX_TAG,
+                pages,
+                int(pool.shape[0]),
+                pool.device,
+                graph_capture=True,
+            )
+            context = pool.index_select(0, blocks)
+            active = (prefixes > 0) if ctx_inputs.is_prefill else (sequence_lengths > 0)
+            context = torch.where(
+                active.unsqueeze(1),
+                context,
+                torch.full_like(context, embedding.eos_token_id),
+            )
+            if ctx_inputs.is_prefill and not ctx_inputs.is_target_verify:
+                context = torch.where(
+                    (prefixes > 0).unsqueeze(1),
+                    context,
+                    torch.full_like(context, embedding.eos_token_id),
+                )
+            history = torch.cat((context, ids.reshape(batch, width)), dim=1)
+            embedding.prepare_cpu_graph_rows(
+                embedding.hashed_ids(history, width), graph_key
+            )
+
     def _apply_ple(
         self,
         layer_idx: int,
@@ -195,7 +260,6 @@ class PLEExecution:
         input_ids: torch.Tensor,
         attention_inputs: Any,
         prefetch=None,
-        metadata_cache=None,
     ) -> torch.Tensor:
         ple = self.ple_layers[str(layer_idx)]
         state_inputs = select_attention_inputs_for_tag(attention_inputs, PLE_STATE_TAG)
@@ -208,11 +272,8 @@ class PLEExecution:
         if (
             is_target_verify != bool(ctx_inputs.is_target_verify)
             or bool(state_inputs.is_prefill) != bool(ctx_inputs.is_prefill)
-            or bool(state_inputs.is_s_padded) != bool(ctx_inputs.is_s_padded)
             or any(
-                not self._same_metadata(
-                    state_inputs, ctx_inputs, name, cache=metadata_cache
-                )
+                not self._same_metadata(state_inputs, ctx_inputs, name)
                 for name in (
                     "input_lengths",
                     "prefix_lengths",
@@ -309,7 +370,6 @@ class PLEExecution:
                     ctx_pool=ctx_pool,
                     page_size=page_size,
                     embeddings=prefetched,
-                    live_rows=PLECacheViews.eager_live_rows(state_inputs, ctx_inputs),
                 )
 
             if state_inputs.is_prefill:
@@ -515,19 +575,6 @@ class PLEExecution:
                         .all()
                         .item()
                     )
-                if not terminal_writable and bool(
-                    getattr(state_inputs, "is_s_padded", False)
-                ):
-                    tables = (
-                        host_block_tables
-                        if trusted_host_tables
-                        else device_block_tables
-                    )
-                    inactive = tables[0].eq(0).all(dim=1) & tables[1].eq(0).all(dim=1)
-                    valid = state_writable[terminal_t] & ctx_writable[terminal_t]
-                    terminal_writable = bool(
-                        (valid | inactive.to(valid.device)).all().item()
-                    )
                 if not terminal_writable:
                     raise RuntimeError(
                         "qwen4_exp PLE terminal page is unallocated: decode resumes "
@@ -634,7 +681,7 @@ class PLEExecution:
                 read_pages,
                 int(state_pool.shape[0]),
                 state_pool.device,
-                graph_capture=graph_capture,
+                graph_capture=graph_capture or padded,
             )
             ctx_read_blocks = self._physical_blocks(
                 ctx_inputs,
@@ -642,7 +689,7 @@ class PLEExecution:
                 read_pages,
                 int(ctx_pool.shape[0]),
                 ctx_pool.device,
-                graph_capture=graph_capture,
+                graph_capture=graph_capture or padded,
             )
             state_write_blocks = self._physical_blocks(
                 state_inputs,
@@ -650,7 +697,7 @@ class PLEExecution:
                 write_pages,
                 int(state_pool.shape[0]),
                 state_pool.device,
-                graph_capture=graph_capture,
+                graph_capture=graph_capture or padded,
             )
             ctx_write_blocks = self._physical_blocks(
                 ctx_inputs,
@@ -658,14 +705,11 @@ class PLEExecution:
                 write_pages,
                 int(ctx_pool.shape[0]),
                 ctx_pool.device,
-                graph_capture=graph_capture,
+                graph_capture=graph_capture or padded,
             )
             conv_buffer = state_pool.index_select(0, state_read_blocks)
             context = ctx_pool.index_select(0, ctx_read_blocks)
             live = sequence_lengths.to(device=state_pool.device) > 0
-            eager_live = PLECacheViews.eager_live_rows(state_inputs, ctx_inputs)
-            if eager_live is not None:
-                live = live & eager_live.to(live.device)
             conv_buffer = torch.where(live[:, None, None], conv_buffer, 0)
             context = torch.where(live[:, None], context, eos)
             state_write_blocks = torch.where(live, state_write_blocks, 0)
@@ -681,7 +725,7 @@ class PLEExecution:
                     else None
                 ),
             )
-            from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit import (
+            from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_triton import (
                 store_decode_rows,
             )
 
@@ -693,33 +737,13 @@ class PLEExecution:
         return ple_input_ids(inputs, self.eos_token_id)
 
 
-def semantic_token_ids(inputs: PyModelInputs) -> torch.Tensor:
-    """Restore per-token vocabulary IDs from the existing multimodal sidecar."""
-    mm = inputs.multimodal_inputs
-    extra = mm.mm_extra_input
-    locations = mm.mm_features_locs.reshape(-1)
-    features = mm.multimodal_features
-    if len(extra) != locations.numel() or len(features) != len(extra):
-        raise ValueError("semantic IDs must match multimodal media tensors")
-    result = inputs.input_ids.clone()
-    for loc, ids, feature in zip(locations.unbind(), extra, features):
-        if ids.dtype != torch.int32 or ids.ndim != 1 or ids.numel() != feature.shape[0]:
-            raise ValueError("semantic IDs require one int32 value per media token")
-        indices = torch.arange(feature.shape[0], device=result.device) + loc
-        result.index_copy_(
-            0,
-            indices.long(),
-            ids.to(device=result.device, dtype=result.dtype, non_blocking=True),
-        )
-    return result
-
-
 def ple_input_ids(inputs: PyModelInputs, eos_token_id) -> torch.Tensor:
-    """Use vocabulary IDs for PLE, independently of visual cache hashes."""
+    """Text ids for the n-gram hash; non-text positions hash as EOS.
 
-    mm = getattr(inputs, "multimodal_inputs", None)
-    if mm is not None and getattr(mm, "mm_extra_input", None):
-        return semantic_token_ids(inputs)
+    Mirrors upstream: ``ple_input_ids = where(text_mask, ids, eos_token_id)``,
+    so image-placeholder positions contribute the EOS id to the n-gram
+    history instead of an arbitrary vision token id.
+    """
     input_ids = inputs.input_ids
     embedding_inputs = getattr(inputs, "embedding_inputs", None)
     text_mask = getattr(embedding_inputs, "text_tokens_mask", None)
@@ -730,11 +754,6 @@ def ple_input_ids(inputs: PyModelInputs, eos_token_id) -> torch.Tensor:
             "qwen4_exp PLE text token mask size does not match input ids: "
             f"{text_mask.numel()} != {input_ids.numel()}"
         )
-    features = getattr(mm, "multimodal_features", None)
-    if features is not None and not features:
-        # Native text/decode batches have no visual rows. Keep size validation
-        # above, but do not read their all-text device mask back to the host.
-        return input_ids
     text_flags = text_mask.bool()
     if bool(text_flags.all().item()):
         return input_ids

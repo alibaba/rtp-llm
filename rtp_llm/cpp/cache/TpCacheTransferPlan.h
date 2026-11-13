@@ -72,8 +72,8 @@ struct TpCacheTransferPlan {
         return {destination_bytes / peers, destination_bytes, peers, peer, std::move(slices)};
     }
 
-    static TpCacheTransferPlan mha(size_t k_bytes, size_t v_bytes, size_t heads, size_t head, size_t kernel_pages = 1) {
-        auto slices = mhaTpCacheSlices(k_bytes, v_bytes, heads, head, kernel_pages);
+    static TpCacheTransferPlan mha(size_t k_bytes, size_t v_bytes, size_t heads, size_t head) {
+        auto slices = mhaTpCacheSlices(k_bytes, v_bytes, heads, head);
         return {(k_bytes + v_bytes) / heads, k_bytes + v_bytes, heads, head, std::move(slices)};
     }
 
@@ -110,8 +110,7 @@ struct TpCacheTransferLayout {
                              size_t                         v_bytes,
                              size_t                         local_heads,
                              const TpCacheTransferTopology& topology,
-                             size_t                         peer,
-                             size_t                         kernel_pages = 1) const {
+                             size_t                         peer) const {
         if (!tpCachePeerOwnsPayload(mode, local_heads, topology, peer)) {
             throw std::invalid_argument("typed TP plan requested from a non-owner peer");
         }
@@ -127,8 +126,7 @@ struct TpCacheTransferLayout {
             return result;
         }
         if (mode == TpCacheTransferMode::MHA_HEADS && local_heads == 2) {
-            return TpCacheTransferPlan::mha(
-                k_bytes, v_bytes, local_heads, peer / (topology.peers / local_heads), kernel_pages);
+            return TpCacheTransferPlan::mha(k_bytes, v_bytes, local_heads, peer / (topology.peers / local_heads));
         }
         throw std::invalid_argument("cache transfer layout does not require reassembly");
     }

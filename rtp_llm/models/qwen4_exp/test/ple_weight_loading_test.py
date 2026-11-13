@@ -206,14 +206,12 @@ class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
         loader._load_config = SimpleNamespace(
             database=database,
             num_layers=1,
-            layer_range=range(1),
             tp_rank=0,
             dp_rank=0,
             ep_rank=0,
             compute_dtype=torch.float32,
             exported_device=SimpleNamespace(support_dio_load=True),
         )
-        database.get_pretrain_tensor_names.return_value = []
         prefix = ModelWeights.layer_weight_prefix(0, 0, 0)
         table_name = f"{W.qwen4_ple_ngram_shards}.0"
         database.load_tensors_by_prefix.return_value = {
@@ -416,6 +414,13 @@ class Qwen4ExpPleWeightGateTest(unittest.TestCase):
         self.assertIsInstance(descriptors[-1], Qwen4ExpPleNgramWeight)
         self.assertEqual(len(descriptors[-1].weights), _SHARD_COUNT)
         self.assertEqual(descriptors[-1].resident_device, "cpu")
+
+    def test_production_tables_always_reside_in_host_memory(self):
+        layer_weights = [[]]
+
+        self._weight(True)._append_ple_weights(layer_weights)
+
+        self.assertEqual(layer_weights[0][-1].resident_device, "cpu")
 
     def test_hash_metadata_stays_int64_from_loader_to_hashed_ids(self):
         layer_weights = [[]]

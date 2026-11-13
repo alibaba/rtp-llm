@@ -63,12 +63,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         self.N = self.w1.size(1)  # 2 * inter_size
         self.K = self.w1.size(2)  # hidden_size
         self.inter_size = self.N // 2
-        capabilities = decode_capabilities(
-            self.w1,
-            self.top_k,
-            self.ep_size,
-            getattr(getattr(config, "model_config", None), "model_type", ""),
-        )
+        capabilities = decode_capabilities(self.w1, self.top_k, self.ep_size)
         self._decode_alignment = capabilities.alignment
         self._decode_tiles = capabilities.tuned_tiles
         self._small_moe_gemv = capabilities.small_gemv
@@ -141,12 +136,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         block_m1 = config1["BLOCK_SIZE_M"]
         block_m2 = config2["BLOCK_SIZE_M"]
         align = moe_align_block_size_torch
-        if (
-            self._decode_alignment
-            and 0 < M <= 32
-            and topk_ids.dtype == torch.int32
-            and topk_ids.is_contiguous()
-        ):
+        if self._decode_alignment and 0 < M <= 32:
             from rtp_llm.models_py.triton_kernels.moe.decode_alignment import (
                 moe_align_decode,
             )

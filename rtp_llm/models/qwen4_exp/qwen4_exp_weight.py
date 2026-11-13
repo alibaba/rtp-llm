@@ -112,6 +112,10 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
         start = tp_rank * shards_per_rank
         return range(start, start + shards_per_rank)
 
+    def local_shard_indices(self, load_config: LoadConfig) -> tuple[int, ...]:
+        """Global checkpoint shard indices owned by the current TP rank."""
+        return tuple(self._local_shard_range(load_config))
+
     def get_tensor_names(
         self, layer_id: Optional[int], load_config: LoadConfig
     ) -> set[str]:
@@ -225,9 +229,7 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
         self._moe_only_fp4 = bool(
             getattr(self.model_config, "_qwen4_full_fp8_nvfp4", False)
         )
-        if self._moe_only_fp4 or getattr(
-            self.model_config, "_qwen4_nvfp4_source", False
-        ):
+        if self._moe_only_fp4:
             self._align_size = 0
 
     def _process_meta(self, meta_dict: Any, weight_keys: Collection[str]):
@@ -313,19 +315,10 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
         info = super()._get_weight_info()
         self._append_indexer_weights(info.layer_weights)
         self._append_ple_weights(info.layer_weights)
-        if getattr(self.model_config, "_qwen4_nvfp4_source", False):
-            from rtp_llm.models.qwen4_exp.moe_nvfp4 import Qwen4Nvfp4WeightInfo
-
-            return Qwen4Nvfp4WeightInfo(info.weights, info.layer_weights)
         if self._moe_only_fp4:
             from rtp_llm.models.qwen4_exp.moe_fp4 import Qwen4MoeFp4WeightInfo
 
-            return Qwen4MoeFp4WeightInfo(
-                info.weights,
-                info.layer_weights,
-                dense_storage=getattr(self.model_config, "_qwen4_dense_storage", None),
-                vocab_storage=getattr(self.model_config, "_qwen4_vocab_storage", None),
-            )
+            return Qwen4MoeFp4WeightInfo(info.weights, info.layer_weights)
         return info
 
     def _append_indexer_weights(self, layer_weights: List[List[WeightModule]]) -> None:

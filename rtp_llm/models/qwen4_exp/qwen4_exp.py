@@ -2,12 +2,10 @@ import json
 from pathlib import Path
 from typing import Dict, List
 
-from rtp_llm.config.model_config import ModelConfig, apply_quant_scope_to_pricing
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.qwen4_exp_config import (
-    Qwen4ModelConfig,
     build_qwen4_quant_config,
     freeze_runtime_config,
-    resolve_qwen4_parallelism,
     validate_qwen4_runtime,
 )
 from rtp_llm.model_factory_register import register_model
@@ -32,20 +30,9 @@ class Qwen4Exp(Qwen35Moe):
     residual and checkpoint-required PLE/QSA paths are always connected.
     """
 
-    _model_config_cls = Qwen4ModelConfig
-
-    @classmethod
-    def _parse_mm_config(cls, config_json, config):
-        super()._parse_mm_config(config_json, config)
-        if config.mm_model_config.is_multimodal:
-            config.mm_model_config.include_sep_tokens = True
-
     @staticmethod
     def get_weight_cls():
         return Qwen4ExpWeight
-
-    def support_pp(self) -> bool:
-        return False
 
     def support_cuda_graph(self) -> bool:
         # Capability only; common graph settings decide capture.
@@ -54,35 +41,9 @@ class Qwen4Exp(Qwen35Moe):
 
     def load(self, skip_python_model: bool = False):
         config = getattr(self, "model_config", None)
-        self.parallelism_config = resolve_qwen4_parallelism(
-            config, self.parallelism_config
-        )
         validate_qwen4_runtime(config, self.parallelism_config)
         freeze_runtime_config(config, self.parallelism_config)
-        self._validate_checkpoint(config)
         return super().load(skip_python_model=skip_python_model)
-
-    @staticmethod
-    def _validate_checkpoint(config: ModelConfig) -> None:
-        if getattr(config, "_qwen4_nvfp4_source", False):
-            from rtp_llm.models.qwen4_exp.moe_nvfp4 import validate_nvfp4_manifest
-
-            root = Path(config.ckpt_path)
-            validate_nvfp4_manifest(
-                json.loads((root / "config.json").read_text()),
-                json.loads((root / "model.safetensors.index.json").read_text())[
-                    "weight_map"
-                ],
-            )
-            return
-        if not getattr(config, "_qwen4_fp8_source", False):
-            return
-        from rtp_llm.models.qwen4_exp.moe_fp8 import validate_moe_fp8_checkpoint
-
-        root = Path(config.ckpt_path)
-        config_json = json.loads((root / "config.json").read_text())
-        index = json.loads((root / "model.safetensors.index.json").read_text())
-        validate_moe_fp8_checkpoint(config_json, index["weight_map"], root)
 
     def _py_model_class(self):
         from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpModel
@@ -90,77 +51,29 @@ class Qwen4Exp(Qwen35Moe):
         return Qwen4ExpModel
 
     @classmethod
-    def _create_config_from_json(cls, ckpt_path: str, config_json: dict) -> ModelConfig:
-        config = super()._create_config_from_json(ckpt_path, config_json)
+    def _create_config(cls, ckpt_path: str) -> ModelConfig:
+        config = super()._create_config(ckpt_path)
         config.model_type = "qwen4_exp"
+        root = Path(ckpt_path)
+        config_json = json.loads((root / "config.json").read_text())
         source_quant = config_json.get("quantization_config")
-        text_config = config_json.get("text_config", config_json)
-        # PLE hashes use the training document boundary, independently of the
-        # tokenizer's chat stop token installed later by BaseModel.
-        ple_eos = text_config.get("eos_token_id", config_json.get("eos_token_id"))
-        if ple_eos is not None and (
-            type(ple_eos) is not int or not 0 <= ple_eos < config.vocab_size
-        ):
-            raise ValueError("qwen4_exp PLE eos_token_id must be a vocabulary ID")
-        config._qwen4_ple_eos_token_id = ple_eos
-        config.config_dtype = text_config.get("dtype") or text_config.get(
-            "torch_dtype", ""
-        )
-        config._qwen4_nvfp4_source = bool(
-            source_quant
-            and source_quant.get("quant_method") == "modelopt"
-            and str(source_quant.get("quant_algo", "")).upper() == "NVFP4"
-        )
-        config._qwen4_fp8_source = bool(source_quant) and not config._qwen4_nvfp4_source
+        config._qwen4_fp8_source = bool(source_quant)
+        if source_quant:
+            from rtp_llm.models.qwen4_exp.moe_fp8 import validate_moe_fp8_checkpoint
+
+            index = json.loads((root / "model.safetensors.index.json").read_text())
+            validate_moe_fp8_checkpoint(config_json, index["weight_map"], root)
         cls._configure_precision_recipe(config)
         return config
 
     @staticmethod
     def _configure_precision_recipe(config: ModelConfig) -> None:
-        if getattr(config, "_qwen4_nvfp4_source", False):
-            from rtp_llm.config.quant_config import ModelOptFp4Config
-
-            if config.quantization:
-                raise ValueError(
-                    "Qwen4 NVFP4 checkpoints do not support requantization"
-                )
-            # Routed experts are already packed. Dense weights and PLE tables
-            # retain their original BF16 storage without online quantization.
-            config._qwen4_full_fp8_nvfp4 = False
-            config._qwen4_dense_storage = "source_bf16"
-            config.quant_config = ModelOptFp4Config(
-                bits=4,
-                group_size=16,
-                is_quanted=True,
-                mixed_attention=True,
-                dense_storage="source_bf16",
-                require_contiguous_experts=True,
-            )
-            config.quant_algo.setQuantAlgo("modelopt_fp4", 4, 16)
-            config.dense_weight_dtype = "bf16"
-            config.expert_weight_dtype = "fp4"
-            return
         config._qwen4_full_fp8_nvfp4 = bool(getattr(config, "_qwen4_fp8_source", False))
         config.quant_config = build_qwen4_quant_config(
             config.quantization, config._qwen4_full_fp8_nvfp4
         )
-        config._qwen4_dense_storage = getattr(
-            config.quant_config, "dense_storage", "fp8"
-        )
         if config.quant_config is not None:
-            if config.enable_fp32_lm_head:
-                import logging
-
-                logging.warning(
-                    "QWEN4_FP8_NVFP4 uses its configured vocabulary storage; "
-                    "disabling enable_fp32_lm_head"
-                )
-                config.enable_fp32_lm_head = False
             config.quant_algo.setQuantAlgo("modelopt_fp4", 4, 16)
-            apply_quant_scope_to_pricing(config, config.quant_config)
-            config.dense_weight_dtype = (
-                "bf16" if config._qwen4_dense_storage == "source_bf16" else "fp8"
-            )
 
     @classmethod
     def _parse_extra_text_config(cls, config_json: dict, config: ModelConfig) -> None:
@@ -171,12 +84,11 @@ class Qwen4Exp(Qwen35Moe):
         # The released MTP head consumes the target residual before the final
         # hyper-connection mixer.  Each row therefore retains all hc branches;
         # the draft applies fc_hidden independently to every branch.
+        config.mtp_input_hidden_size = config.hidden_size * config.hc_mult
         # Linear-attention output gate activation; upstream falls back to hidden_act.
         config.linear_attn_norm_activation = config_json.get(
             "output_gate_type"
         ) or config_json.get("hidden_act", "silu")
-        if config.linear_attn_norm_activation not in ("silu", "sigmoid"):
-            raise ValueError("qwen4_exp output gate activation must be silu or sigmoid")
         config._qwen4_ple_layer_ids = list(config_json.get("ple_layer_ids", []))
         config._qwen4_ngram_size = int(config_json.get("ngram_size", 0))
         config._qwen4_ple_conv_kernel_size = int(
@@ -189,6 +101,7 @@ class Qwen4Exp(Qwen35Moe):
         config._qwen4_ple_embed_dim = int(config_json.get("ple_embed_dim", 0))
         config._qwen4_heads_per_ngram = int(config_json.get("heads_per_ngram", 8))
         config._extra_weight_bytes = 0.0
+        config._tp_sharded_extra_weight_bytes = 0.0
         config._replicated_extra_weight_bytes = 0.0
         config._extra_weight_param_count = 0
         cls._set_ple_weight_size_estimate(config)
@@ -261,27 +174,16 @@ class Qwen4Exp(Qwen35Moe):
 
     @classmethod
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
-        attn = model_config.attn_config
-        # Promote framework defaults before compressed pools are materialized.
-        if int(attn.tokens_per_block) in (0, 8, 16, 64):
-            if int(attn.kernel_tokens_per_block) in (0, int(attn.tokens_per_block)):
-                attn.kernel_tokens_per_block = 128
-            attn.tokens_per_block = 128
-        if int(attn.kernel_tokens_per_block) == 0:
-            attn.kernel_tokens_per_block = 128
-        if (
-            int(attn.tokens_per_block) != 128
-            or int(attn.kernel_tokens_per_block) != 128
-        ):
-            raise ValueError(
-                "qwen4_exp requires 128-token physical and kernel cache pages "
-                "(tokens_per_block == kernel_tokens_per_block == 128)"
-            )
         # Generic precision initialization reads source checkpoint metadata;
         # finalize the complete source-to-runtime recipe after that stage.
         cls._configure_precision_recipe(model_config)
         if not model_config.is_mtp:
             cls._set_ple_weight_size_estimate(model_config)
+        if (
+            type(model_config.qwen4_ple_prefetch_mb) is not int
+            or model_config.qwen4_ple_prefetch_mb <= 0
+        ):
+            raise ValueError("qwen4_ple_prefetch_mb must be a positive integer")
         ple_layer_ids = (
             getattr(model_config, "_qwen4_ple_layer_ids", [])
             if model_config.enable_qwen4_ple

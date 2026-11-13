@@ -209,6 +209,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     }
 #endif
 
+    if (!params.py_model.is_none() || test_model_factory) {
+        model_init_params.mtp_input_hidden_size = params.model_config_.getMtpInputHiddenSize();
+    }
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
         model_.reset(new PyWrappedModel(model_init_params, params.py_model));

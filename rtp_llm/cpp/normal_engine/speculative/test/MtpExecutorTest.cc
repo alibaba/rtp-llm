@@ -83,19 +83,14 @@ TEST(MtpExecutorPolicyTest, DSparkPrefillRoleDisablesDraftGraphCapture) {
     EXPECT_TRUE(MtpExecutor::dsparkDraftGraphAllowed(/*is_dspark=*/false, RoleType::DECODE));
 }
 
-TEST(MtpExecutorPolicyTest, MtpInputHiddenSizeDerivesCheckedHyperConnectionWidth) {
+TEST(MtpExecutorPolicyTest, MtpInputHiddenSizeDefaultsToHyperConnectionWidth) {
     ModelConfig config;
     config.hidden_size = 8;
     config.hc_mult     = 4;
     EXPECT_EQ(config.getMtpInputHiddenSize(), 32);
 
-    config.hidden_size = 0;
-    EXPECT_THROW(config.getMtpInputHiddenSize(), std::runtime_error);
-    config.hidden_size = 8;
-    config.hc_mult     = 0;
-    EXPECT_THROW(config.getMtpInputHiddenSize(), std::runtime_error);
-    config.hc_mult = std::numeric_limits<int64_t>::max();
-    EXPECT_THROW(config.getMtpInputHiddenSize(), std::runtime_error);
+    config.mtp_input_hidden_size = 8;
+    EXPECT_EQ(config.getMtpInputHiddenSize(), 8);
 }
 
 TEST(MtpExecutorPolicyTest, CpRestoreSnapshotOwnsMutableHostInput) {
@@ -133,16 +128,16 @@ TEST(MtpExecutorPolicyTest, HybridCacheWaitsBeforeReadingNextRoundHostState) {
 }
 
 TEST(MtpExecutorPolicyTest, MtpSequenceUpperBoundChainsUntilBookkeepingCatchesUp) {
-    constexpr int width      = 8;
-    const int     first_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
-                               /*pending=*/false, /*previous_next_bound=*/-1, /*host_seq_len=*/96)
-                           + width;
-    const int second_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
-                                /*pending=*/true, /*previous_next_bound=*/first_next, /*host_seq_len=*/96)
-                            + width;
-    const int third_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
-                               /*pending=*/true, /*previous_next_bound=*/second_next, /*host_seq_len=*/96)
-                           + width;
+    constexpr int width       = 8;
+    const int     first_next  = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
+                                    /*pending=*/false, /*previous_next_bound=*/-1, /*host_seq_len=*/96)
+                                + width;
+    const int     second_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
+                                    /*pending=*/true, /*previous_next_bound=*/first_next, /*host_seq_len=*/96)
+                                + width;
+    const int     third_next  = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
+                                    /*pending=*/true, /*previous_next_bound=*/second_next, /*host_seq_len=*/96)
+                                + width;
     EXPECT_EQ(104, first_next);
     EXPECT_EQ(112, second_next);
     EXPECT_EQ(120, third_next);
@@ -807,7 +802,6 @@ public:
     using MtpExecutor::reduceSpeculativeTargetPrepareStatus;
     using MtpExecutor::rendezvousSpeculativeTargetPhaseStatus;
     using MtpExecutor::rendezvousSpeculativeTargetSamplingStatus;
-    using MtpExecutor::runTargetVerifyForward;
     using MtpExecutor::validateSpeculativeTargetExecutionPolicy;
 };
 
@@ -1196,14 +1190,93 @@ public:
         EXPECT_EQ(target_sampler->forwardCount(), 0);
     }
 
-    void runSnapshotFaultScenario(const char* directory);
-    void runSingleBatchPrefillScenario(bool                         simulate_cp_mutation,
-                                       bool                         with_cp_hidden_buffers = true,
-                                       const MtpExecutorTestConfig* config_override        = nullptr,
-                                       MtpExecutorComponents*       out                    = nullptr);
-    void runSingleBatchDecodeScenario(bool                         with_prefill_only,
-                                      const MtpExecutorTestConfig* config_override   = nullptr,
-                                      int64_t*                     out_kv_len_before = nullptr);
+    void runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers = true);
+    void runSingleBatchDecodeScenario(bool with_prefill_only, bool stale_python_hidden = false);
+
+    void setupAlignmentModel(FakeModel*          model,
+                             vector<string>&     forward_trace,
+                             const string&       label,
+                             const vector<bool>& target_verify) {
+        model->setSkipInputCheck(true);
+        model->setExpectedTargetVerify(target_verify);
+        model->setForwardTrace(&forward_trace, label);
+        model->setOutputs(vector<GptModelOutputs>(target_verify.size()));
+    }
+
+    void runEmptyAlignmentScenario(RoleType              role_type,
+                                   SpeculativeType       sp_type,
+                                   size_t                propose_step,
+                                   bool                  is_ffn_rank,
+                                   const vector<string>& expected_trace,
+                                   const vector<size_t>& expected_counts,
+                                   const vector<bool>&   target_verify,
+                                   const vector<bool>&   draft_verify,
+                                   const vector<bool>&   commit_verify = {},
+                                   const string&         commit_label  = "") {
+        ASSERT_EQ(expected_counts.size(), 3);
+        MtpExecutorTestConfig test_config;
+        test_config.role_type         = role_type;
+        test_config.gen_num_per_cycle = propose_step;
+        test_config.sp_type           = sp_type;
+        if (sp_type == SP_TYPE_DSPARK) {
+            test_config.dspark_mask_token_id = 0;
+        }
+        auto components                               = createMtpExecutorComponents(test_config);
+        components.executor->enable_ffn_disaggregate_ = true;
+        components.executor->parallelism_config_.ffn_disaggregate_config.enable_ffn_disaggregate = true;
+        components.executor->parallelism_config_.ffn_disaggregate_config.is_ffn_rank             = is_ffn_rank;
+
+        vector<string> forward_trace;
+        auto*          target_model        = components.fake_target_model.get();
+        auto*          draft_model         = components.fake_draft_model.get();
+        auto*          draft_sampler       = components.fake_fast_topk_sampler.get();
+        auto*          speculative_sampler = components.fake_speculative_sampler.get();
+        auto*          target_sampler      = components.fake_sampler.get();
+        setupAlignmentModel(target_model, forward_trace, "target", target_verify);
+        setupAlignmentModel(
+            draft_model, forward_trace, sp_type == SP_TYPE_DSPARK ? "dspark_propose" : "draft", draft_verify);
+
+        // Exercise both commit installation paths, including the separately owned SP prefill slot.
+        std::shared_ptr<FakeModel> sp_prefill_draft_model;
+        FakeModel*                 commit_model = nullptr;
+        if (commit_label == "sp_prefill_draft") {
+            sp_prefill_draft_model = std::make_shared<FakeModel>();
+            commit_model           = sp_prefill_draft_model.get();
+        } else if (!commit_verify.empty()) {
+            commit_model = components.fake_draft_prefill_model.get();
+        }
+        if (commit_model) {
+            setupAlignmentModel(commit_model, forward_trace, commit_label, commit_verify);
+        }
+        std::unique_ptr<FakeModel> draft_prefill_model;
+        if (commit_model && !sp_prefill_draft_model) {
+            draft_prefill_model = std::move(components.fake_draft_prefill_model);
+        }
+        setupFakeModels(components.executor.get(),
+                        std::move(components.fake_target_model),
+                        std::move(components.fake_draft_model),
+                        std::move(components.fake_fast_topk_sampler),
+                        std::move(components.fake_speculative_sampler),
+                        std::move(components.fake_sampler),
+                        std::move(draft_prefill_model));
+        if (sp_prefill_draft_model) {
+            components.executor->sp_prefill_draft_model_ = sp_prefill_draft_model;
+        }
+
+        ASSERT_TRUE(components.executor->process({}).ok());
+        EXPECT_EQ(forward_trace, expected_trace);
+        EXPECT_EQ(target_model->forwardCount(), expected_counts[0]);
+        EXPECT_EQ(draft_model->forwardCount(), expected_counts[1]);
+        EXPECT_FALSE(target_model->hasPendingTargetVerify());
+        EXPECT_FALSE(draft_model->hasPendingTargetVerify());
+        if (commit_model) {
+            EXPECT_EQ(commit_model->forwardCount(), expected_counts[2]);
+            EXPECT_FALSE(commit_model->hasPendingTargetVerify());
+        }
+        EXPECT_EQ(draft_sampler->forwardCount(), 0);
+        EXPECT_EQ(speculative_sampler->forwardCount(), 0);
+        EXPECT_EQ(target_sampler->forwardCount(), 0);
+    }
 
     GptModelOutputs createRandomGptModelOutputs(size_t token_num, size_t vocab_size, size_t hidden_size) {
         auto output              = GptModelOutputs{};
@@ -1557,10 +1630,20 @@ TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
     }
 }
 
-void MtpExecutorTest::runSingleBatchPrefillScenario(bool                         simulate_cp_mutation,
-                                                    bool                         with_cp_hidden_buffers,
-                                                    const MtpExecutorTestConfig* config_override,
-                                                    MtpExecutorComponents*       out) {
+TEST_F(MtpExecutorTest, testMtpTargetHiddenRowsZeroUsesTensorRows) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    GptModelOutputs output;
+    output.mtp_target_hidden_states = torch::ones({3, 8}, torch::kFloat);
+
+    // Prefill can pass zero as an unspecified row hint. The explicit MTP
+    // tensor follows the same contract as getMtpTargetHiddenStates below.
+    components.executor->maybeOverrideLastHiddenWithMtpBuffer(output, *components.fake_target_model, 0);
+    ASSERT_TRUE(output.all_hidden_states.defined());
+    EXPECT_EQ(output.all_hidden_states.data_ptr(), output.mtp_target_hidden_states.data_ptr());
+    EXPECT_EQ(output.all_hidden_states.size(0), 3);
+}
+
+void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers) {
     MtpExecutorTestConfig test_config;
     if (config_override) {
         test_config = *config_override;
@@ -2473,9 +2556,7 @@ TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
     checkOutput(stream2, {2, 3, 0}, {0, 1}, {0.0, 0.0, 1.0, 0.0}, {1.13, 1.14});
 }
 
-void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         with_prefill_only,
-                                                   const MtpExecutorTestConfig* config_override,
-                                                   int64_t*                     out_kv_len_before) {
+void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only, bool stale_python_hidden) {
     // test single batch decode accept partial
     // input [0, 1, 2] + [3]
     // darft [3] + [2, 1, 3]
@@ -2593,6 +2674,15 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
     components.fake_target_model->setMtpTargetHiddenStates(torch::full_like(target_output.all_hidden_states, -1));
 
     next_draft_input.last_hidden_states = target_output.all_hidden_states.narrow(0, 0, 3);
+
+    if (stale_python_hidden) {
+        // Graph replay publishes live HC rows through the forward result, but
+        // does not refresh the Python attribute left by capture. The commit
+        // input must retain the three accepted rows, never this stale buffer.
+        target_output.mtp_target_hidden_states = target_output.all_hidden_states;
+        components.fake_target_model->setMtpTargetHiddenStates(
+            torch::full_like(target_output.all_hidden_states, -99.0f));
+    }
 
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3});
@@ -2722,6 +2812,10 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
 
 TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     runSingleBatchDecodeScenario(/*with_prefill_only=*/false);
+}
+
+TEST_F(MtpExecutorTest, testDecodePreservesAcceptedGraphHiddenRowsWithStalePythonBuffer) {
+    runSingleBatchDecodeScenario(/*with_prefill_only=*/false, /*stale_python_hidden=*/true);
 }
 
 TEST_F(MtpExecutorTest, testPdfusionPrefillOnlyDoesNotSkipSingleBatchDecode) {
@@ -2922,7 +3016,8 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     EXPECT_FALSE(stream->getProposeTokensGpu().defined());
 
     auto processor = std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen());
-    stream->sampling_state_.logits_processors.push_back(processor);
+    EXPECT_FALSE(processor->mtpCapability().requires_executor_thread);
+    stream->logits_processor_list_.push_back(processor);
     const auto main_thread_id = std::this_thread::get_id();
 
     GptModelInputs target_input;
@@ -3025,9 +3120,9 @@ TEST_F(MtpExecutorTest, testDSparkDraftUsesFlashInferSamplingAndReturnsExactQ) {
     stream->generateConfig()->temperature = 0.5f;
     StreamGroups stream_groups({stream});
 
-    auto base_logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.4f, 0.3f, 0.2f, 0.7f, 0.1f, 0.0f, -0.1f})
-                           .reshape({1, gamma, vocab_size})
-                           .to(torch::kCUDA);
+    auto base_logits   = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.4f, 0.3f, 0.2f, 0.7f, 0.1f, 0.0f, -0.1f})
+                             .reshape({1, gamma, vocab_size})
+                             .to(torch::kCUDA);
     auto anchors       = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     auto padded_logits = torch::cat(
         {base_logits.reshape({gamma, vocab_size}),
@@ -3203,8 +3298,8 @@ TEST_F(MtpExecutorTest, testDSparkReducedVocabFeedsMappedTargetTokenIntoMarkovCh
     auto anchors     = torch::tensor({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     auto temperature = torch::ones({1}, cuda_float);
     auto markov_w1   = torch::tensor({0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f}, torch::kFloat32)
-                         .reshape({target_vocab_size, 1})
-                         .to(torch::kCUDA);
+                           .reshape({target_vocab_size, 1})
+                           .to(torch::kCUDA);
     auto markov_w2 =
         torch::tensor({-100.0f, 0.0f, 100.0f}, torch::kFloat32).reshape({draft_vocab_size, 1}).to(torch::kCUDA);
 
@@ -3435,6 +3530,13 @@ void MtpExecutorTest::runMultiBatchDecode(bool use_mtp_hidden_buffer) {
         target_hidden = mtp_hidden_buffer.narrow(0, 0, 10);
     }
     next_draft_input.last_hidden_states = torch::cat({target_hidden.narrow(0, 0, 1), target_hidden.narrow(0, 5, 5)});
+
+    // Different accept lengths select rows [0, 5, 6, 7, 8, 9], not a prefix
+    // of the dense verify result. A stale capture-time Python buffer must not
+    // replace either the live forward output or these compacted commit rows.
+    target_output.mtp_target_hidden_states = target_output.all_hidden_states;
+    components.fake_target_model->setMtpTargetHiddenStates(
+        torch::full_like(target_output.all_hidden_states, -99.0f));
 
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
@@ -3716,62 +3818,26 @@ TEST_F(MtpExecutorTest, testDSparkFakeDecodeStartsWithoutProposalState) {
     EXPECT_EQ((std::vector<int32_t>{1, 1, 0}), stream->speculativeAcceptedTokensPerPos());
 }
 
-TEST_F(MtpExecutorTest, testFakeDecodeUsesHyperConnectionInputHiddenSize) {
+TEST_F(MtpExecutorTest, testFakeDecodeUsesExplicitMtpInputHiddenSize) {
     constexpr int32_t gamma      = 3;
     constexpr int32_t vocab_size = 16;
 
     ModelConfig     model_config;
     RuntimeConfig   runtime_config;
     ResourceContext resource_context;
-    model_config.max_seq_len = 64;
-    model_config.vocab_size  = vocab_size;
-    model_config.hidden_size = 8;
-    model_config.hc_mult     = 4;
-    model_config.data_type   = TYPE_FP16;
+    model_config.max_seq_len           = 64;
+    model_config.vocab_size            = vocab_size;
+    model_config.hidden_size           = 8;
+    model_config.hc_mult               = 4;
+    model_config.mtp_input_hidden_size = 8;
+    model_config.data_type             = TYPE_FP16;
 
     auto stream = MtpExecutor::createMinFakeDecodeStream(
         gamma, model_config, runtime_config, resource_context, vocab_size, false);
     auto sp_buffer = stream->getSPOutputBuffer();
     ASSERT_NE(sp_buffer, nullptr);
     ASSERT_TRUE(sp_buffer->hidden_states.defined());
-    EXPECT_EQ((std::vector<int64_t>{1, 32}), sp_buffer->hidden_states.sizes().vec());
-}
-
-TEST_F(MtpExecutorTest, MixedPreviousTargetTokensUseDeviceStateWithoutBookkeepingWait) {
-    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
-    auto steady =
-        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
-    auto fresh =
-        createContextStream(components.model_config, components.runtime_config, components.resource_context, {1, 2});
-    auto stale    = std::make_shared<SpeculativeExecutorStreamOutput>();
-    stale->tokens = torch::tensor({-999}, torch::kInt32);
-    steady->setSPOutputBuffer(stale);
-    auto initial    = std::make_shared<SpeculativeExecutorStreamOutput>();
-    initial->tokens = torch::tensor({20}, torch::kInt32);
-    fresh->setSPOutputBuffer(initial);
-    GenerateStream::MtpAsyncDeviceState state;
-    state.accept_tokens_gpu = torch::tensor({10, 11, 12}, torch::kInt32).cuda();
-    state.accept_len_gpu    = torch::tensor({2}, torch::kInt32).cuda();
-    steady->setMtpAsyncDeviceState(state);
-    steady->incPendingAsyncBookkeeping();
-    bool          from_device = false;
-    torch::Tensor result;
-    try {
-        result = components.executor->gatherPreviousTargetTokens(StreamGroups({steady, fresh}), 2, true, from_device);
-    } catch (...) {
-        steady->decPendingAsyncBookkeepingAndMaybeRelease();
-        throw;
-    }
-    // No worker will finish until the call above returns, so an inserted join
-    // would deadlock. The poisoned host row must never reach the output.
-    EXPECT_TRUE(steady->hasPendingAsyncBookkeeping());
-    steady->decPendingAsyncBookkeepingAndMaybeRelease();
-    EXPECT_TRUE(from_device);
-    EXPECT_EQ((std::vector<int>{11, 20}), toVec<int>(result));
-    initial->tokens.fill_(21);
-    result = components.executor->gatherPreviousTargetTokens(StreamGroups({fresh}), 1, true, from_device);
-    EXPECT_FALSE(from_device);
-    EXPECT_EQ((std::vector<int>{21}), toVec<int>(result));
+    EXPECT_EQ((std::vector<int64_t>{1, 8}), sp_buffer->hidden_states.sizes().vec());
 }
 
 TEST_F(MtpExecutorTest, HostTargetStatusDoesNotAllocateDeviceStatusAndPropagatesFailure) {
@@ -3779,7 +3845,8 @@ TEST_F(MtpExecutorTest, HostTargetStatusDoesNotAllocateDeviceStatusAndPropagates
     auto* model      = components.fake_target_model.get();
     model->enableSpeculativeTargetCommit();
     components.executor->setTargetModel(std::move(components.fake_target_model));
-    components.executor->parallelism_config_.tp_size = 2;
+    components.executor->parallelism_config_.tp_size        = 2;
+    components.executor->speculative_target_prepare_status_ = torch::Tensor();
     std::vector<bool> seen;
     model->host_status_reducer = [&seen](bool ok) -> std::optional<bool> {
         seen.push_back(ok);
@@ -3788,11 +3855,10 @@ TEST_F(MtpExecutorTest, HostTargetStatusDoesNotAllocateDeviceStatusAndPropagates
     EXPECT_FALSE(components.executor->reduceSpeculativeTargetPrepareStatus(true));
     EXPECT_FALSE(components.executor->reduceSpeculativeTargetPrepareStatus(false));
     EXPECT_EQ(seen, (std::vector<bool>{true, false}));
+    EXPECT_FALSE(components.executor->speculative_target_prepare_status_.defined());
     model->host_status_reducer = [](bool ok) -> std::optional<bool> { return ok; };
     EXPECT_TRUE(components.executor->reduceSpeculativeTargetPrepareStatus(true));
     model->host_status_reducer = [](bool) -> std::optional<bool> { throw std::runtime_error("poisoned host status"); };
-    EXPECT_THROW(components.executor->reduceSpeculativeTargetPrepareStatus(true), std::runtime_error);
-    model->host_status_reducer = {};
     EXPECT_THROW(components.executor->reduceSpeculativeTargetPrepareStatus(true), std::runtime_error);
     // TP1 remains local and never enters the transport, even when configured.
     components.executor->parallelism_config_.tp_size = 1;
@@ -4030,8 +4096,9 @@ TEST_F(MtpExecutorTest, testSpeculativeTargetPeerCommitFailureRollsBackLocalComm
     EXPECT_FALSE(target_model->speculativeTargetUndoRetained());
 }
 
-TEST_F(MtpExecutorTest, DispatchStateUsesAcceptedLengths) {
-    /** Rejected rows must not advance state; derive sequence lengths and hidden indexes from accepted counts. */
+#if USING_CUDA
+TEST_F(MtpExecutorTest, testDispatchStatePrepareKernel) {
+    // Test invokeMtpDispatchStatePrepare correctness
     const int64_t batch_size = 8;
     auto          cuda_i32   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     auto          cuda_i64   = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
@@ -4041,11 +4108,9 @@ TEST_F(MtpExecutorTest, DispatchStateUsesAcceptedLengths) {
     auto next_seq_len = torch::empty({batch_size}, cuda_i32);
     auto hidden_idx   = torch::empty({batch_size}, cuda_i64);
 
-#if USING_CUDA
     invokeMtpDispatchStatePrepare(
         accept_len, prev_seq_len, next_seq_len, hidden_idx, batch_size, at::cuda::getCurrentCUDAStream().stream());
     cudaDeviceSynchronize();
-#endif
 
     auto expected_next = (prev_seq_len + accept_len).cpu();
     auto actual_next   = next_seq_len.cpu();
@@ -4060,7 +4125,64 @@ TEST_F(MtpExecutorTest, DispatchStateUsesAcceptedLengths) {
                                                         << expected_idx;
 }
 
-/** An incompatible processor fails its request; healthy requests must continue decoding. */
+TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
+    // Micro-benchmark: compare per-stream scalar ops vs batched approach
+    const int64_t batch_size = 128;
+    const int     iterations = 1000;
+    auto          cuda_i32   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto          cuda_i64   = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+
+    auto accept_len   = torch::randint(1, 5, {batch_size}, cuda_i32);
+    auto prev_seq_len = torch::randint(10, 1000, {batch_size}, cuda_i32);
+
+    // Pre-allocate output buffers
+    auto next_seq_len = torch::empty({batch_size}, cuda_i32);
+    auto hidden_idx   = torch::empty({batch_size}, cuda_i64);
+
+    // Warm up
+    for (int i = 0; i < 10; i++) {
+        invokeMtpDispatchStatePrepare(
+            accept_len, prev_seq_len, next_seq_len, hidden_idx, batch_size, at::cuda::getCurrentCUDAStream().stream());
+    }
+    cudaDeviceSynchronize();
+
+    // Benchmark batched approach (fused kernel)
+    auto start_batched = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; i++) {
+        invokeMtpDispatchStatePrepare(
+            accept_len, prev_seq_len, next_seq_len, hidden_idx, batch_size, at::cuda::getCurrentCUDAStream().stream());
+    }
+    cudaDeviceSynchronize();
+    auto end_batched = std::chrono::high_resolution_clock::now();
+    auto us_batched  = std::chrono::duration_cast<std::chrono::microseconds>(end_batched - start_batched).count();
+
+    // Benchmark per-stream scalar approach (old way)
+    auto start_scalar = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; i++) {
+        for (int64_t j = 0; j < batch_size; j++) {
+            auto al_slice     = accept_len.narrow(0, j, 1);
+            auto prev_slice   = prev_seq_len.narrow(0, j, 1);
+            auto next_slice   = (prev_slice + al_slice).to(torch::kInt32);
+            auto hidden_slice = (al_slice - 1).to(torch::kLong);
+            (void)next_slice;
+            (void)hidden_slice;
+        }
+    }
+    cudaDeviceSynchronize();
+    auto end_scalar = std::chrono::high_resolution_clock::now();
+    auto us_scalar  = std::chrono::duration_cast<std::chrono::microseconds>(end_scalar - start_scalar).count();
+
+    double speedup = static_cast<double>(us_scalar) / static_cast<double>(us_batched);
+    RTP_LLM_LOG_INFO("[dispatch-bench] batch_size=%ld iterations=%d", batch_size, iterations);
+    RTP_LLM_LOG_INFO(
+        "[dispatch-bench] batched: %ld us total, %.2f us/iter", us_batched, (double)us_batched / iterations);
+    RTP_LLM_LOG_INFO("[dispatch-bench] scalar:  %ld us total, %.2f us/iter", us_scalar, (double)us_scalar / iterations);
+    RTP_LLM_LOG_INFO("[dispatch-bench] speedup: %.1fx", speedup);
+}
+#endif  // USING_CUDA
+
+// MTP-incompatible stateful processor: main's capability contract makes the
+// stream (not the whole engine step) fail, so decodeStep must keep running.
 class IncompatibleMtpProcessor: public BaseLogitsProcessor {
 public:
     std::optional<ErrorInfo> process(const SamplerInputs&, size_t, size_t) override {

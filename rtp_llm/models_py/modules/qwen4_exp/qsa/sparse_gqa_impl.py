@@ -2,7 +2,7 @@
 
 The indexer picks which compressed-block tokens each query may read; this impl
 consumes that selection and runs :func:`sparse_prefill_attn
-<rtp_llm.models_py.kernels.cuda.qsa.sparse_fmha.sparse_prefill_attn>` instead
+<rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_fmha.sparse_prefill_attn>` instead
 of the dense attention.
 
 Routing uses checkpoint-derived ``attn_configs.is_sparse`` and the ordinary
@@ -73,10 +73,8 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         self._is_mtp_draft = False
         self._selected_indices: Optional[torch.Tensor] = None
         self._trusted_selected_indices = False
-        self._trusted_prefill_cu_seqlens: Optional[torch.Tensor] = None
         self._qsa_main_cache_mutation_started = False
         self._qsa_target_visible_lengths = None
-        self._qsa_main_geometry = None
         self._validate_runtime_mode()
         rope_writer_cls = (
             FusedRopeKVCachePrefillOpQKVOut
@@ -88,9 +86,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     def _paged_kv_scale_args(self, cache):
-        from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
-            main_kv_scale_view,
-        )
+        from .sparse_paged_fmha import main_kv_scale_view
 
         if cache is None:
             return {}
@@ -148,7 +144,6 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         """Reset the main-cache phase before the paired side-cache write."""
         self._qsa_main_cache_mutation_started = False
         self._qsa_target_visible_lengths = None
-        self._qsa_main_geometry = None
 
     def qsa_main_cache_mutation_started(self) -> bool:
         """Whether the fused main KV writer may have mutated its cache."""
@@ -180,7 +175,6 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         query_lengths: torch.Tensor,
         device: torch.device,
         graph_capture: bool = False,
-        checks=None,
     ) -> int:
         return fmha_validation._validate_main_paged_geometry(
             self,
@@ -190,7 +184,6 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             query_lengths,
             device,
             graph_capture,
-            checks,
         )
 
     def validate_qsa_before_side_write(
@@ -209,18 +202,11 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             raise RuntimeError("qwen4_exp sparse GQA has an unconsumed selection")
         self._selected_indices = selected_indices
         self._trusted_selected_indices = False
-        self._trusted_prefill_cu_seqlens = None
 
-    def set_trusted_selected_indices(
-        self,
-        selected_indices: torch.Tensor,
-        *,
-        cu_seqlens: Optional[torch.Tensor] = None,
-    ) -> None:
+    def set_trusted_selected_indices(self, selected_indices: torch.Tensor) -> None:
         """Accept a selection produced by this model's causal QSA indexer."""
         self.set_selected_indices(selected_indices)
         self._trusted_selected_indices = True
-        self._trusted_prefill_cu_seqlens = cu_seqlens
 
     def _prepare_paged_inputs(
         self,
@@ -258,20 +244,16 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         )
 
     def _forward_draft_graph(self, qkv, kv_cache, selected_indices, output_gate=None):
-        from rtp_llm.models_py.kernels.cuda.qsa.draft_layout_triton import (
-            try_pack_inputs,
-            try_unpack_output,
-        )
-        from rtp_llm.models_py.kernels.cuda.qsa.draft_paged_fmha import (
-            try_draft_paged_attention,
-        )
-        from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
-            sparse_paged_gqa_attn,
-        )
         from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_prefill_graph import (
             draft_graph_lanes,
             draft_graph_rows,
         )
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
+            sparse_paged_gqa_attn,
+        )
+
+        from .draft_layout_triton import try_pack_inputs, try_unpack_output
+        from .draft_paged_fmha import try_draft_paged_attention
 
         if kv_cache is None or kv_cache.kv_cache_base.dtype not in (
             torch.bfloat16,
@@ -475,7 +457,6 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             )
             if uses_stored_selection:
                 self._selected_indices = None
-                self._trusted_prefill_cu_seqlens = None
             return output
         is_incremental_prefill = self._is_prefix_reuse_prefill()
 
@@ -490,9 +471,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         writer = self.rope_kvcache_impl
         fused_writer = None
         if qk_norm is not None and self.is_target_verify:
-            from rtp_llm.models_py.modules.qwen4_exp.qsa.main_qk_cache import (
-                prepare_main_qk_cache,
-            )
+            from .main_qk_cache_triton import prepare_main_qk_cache
 
             fused_writer = prepare_main_qk_cache(
                 qkv,
@@ -507,9 +486,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             if fused_writer is None:
                 qkv = qk_norm(qkv)
         elif qk_norm is not None:
-            from rtp_llm.models_py.kernels.cuda.qsa.main_qk_norm_rope import (
-                try_main_qk_norm_rope,
-            )
+            from .main_qk_norm_rope import try_main_qk_norm_rope
 
             position_ids = self.rope_params.position_ids
             # The MRoPE fast path needs one three-axis id per token; anything
@@ -581,7 +558,6 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             )
             if uses_stored_selection:
                 self._selected_indices = None
-                self._trusted_prefill_cu_seqlens = None
             return output
         if is_incremental_prefill:
             if int(qkv.shape[1]) < self.q_width:
@@ -593,14 +569,10 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 self.write_cache_store_impl, self.attn_inputs, kv_cache
             )
             output = self._forward_ragged_paged(
-                qkv[:, : self.q_width],
-                kv_cache,
-                paged_plan,
-                trusted_selected=trusted_selected,
+                qkv[:, : self.q_width], kv_cache, paged_plan
             )
             if uses_stored_selection:
                 self._selected_indices = None
-                self._trusted_prefill_cu_seqlens = None
             return output
         if not self.is_prefill:
             if qkv.dim() != 2 or int(qkv.shape[1]) != self.q_width:
@@ -620,17 +592,14 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             output = self._forward_paged(qkv, kv_cache, paged_plan, output_gate)
             if uses_stored_selection:
                 self._selected_indices = None
-                self._trusted_prefill_cu_seqlens = None
             return output
 
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
-        from rtp_llm.models_py.kernels.cuda.qsa.sparse_fmha import sparse_prefill_attn
-        from rtp_llm.models_py.kernels.cuda.qsa.tma_prefill import (
-            try_causal_qsa_prefill,
-            try_ragged_causal_qsa_prefill,
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_fmha import (
+            sparse_prefill_attn,
         )
 
         tokens = int(qkv.shape[0])
@@ -660,25 +629,6 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 f"{tuple(selected_indices.shape)} for total_tokens={tokens}"
             )
 
-        cu = getattr(self, "_trusted_prefill_cu_seqlens", None)
-        owner_cu = getattr(self.attn_inputs, "cu_seqlens_device", None)
-        if (
-            trusted_selected
-            and self.attn_configs.indexer_topk == 512
-            and isinstance(cu, torch.Tensor)
-            and isinstance(owner_cu, torch.Tensor)
-            and cu.device == owner_cu.device
-            and cu.data_ptr() == owner_cu.data_ptr()
-        ):
-            output = try_ragged_causal_qsa_prefill(
-                q, k, v, selected_indices, lengths, cu
-            )
-            if output is not None:
-                if uses_stored_selection:
-                    self._selected_indices = None
-                    self._trusted_prefill_cu_seqlens = None
-                return output
-
         outputs = []
         offset = 0
         validation_kwargs = {"validate_selected": False} if trusted_selected else {}
@@ -687,29 +637,18 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             seq_q = q[offset:end].reshape(1, seq_len, self.head_num, self.head_dim)
             seq_k = k[offset:end].reshape(1, seq_len, self.kv_head_num, self.head_dim)
             seq_v = v[offset:end].reshape(1, seq_len, self.kv_head_num, self.head_dim)
-            seq_q = seq_q.transpose(1, 2)
-            seq_k = seq_k.transpose(1, 2)
-            seq_v = seq_v.transpose(1, 2)
-            seq_selected = selected_indices[offset:end].unsqueeze(0).contiguous()
-            seq_out = None
-            # Together with the 2051-column selection, 512 scored blocks
-            # identify the four-token compression layout.
-            if trusted_selected and self.attn_configs.indexer_topk == 512:
-                seq_out = try_causal_qsa_prefill(seq_q, seq_k, seq_v, seq_selected)
-            if seq_out is None:
-                seq_out = sparse_prefill_attn(
-                    seq_q.contiguous(),
-                    seq_k.contiguous(),
-                    seq_v.contiguous(),
-                    seq_selected,
-                    **validation_kwargs,
-                )
+            seq_out = sparse_prefill_attn(
+                seq_q.transpose(1, 2).contiguous(),
+                seq_k.transpose(1, 2).contiguous(),
+                seq_v.transpose(1, 2).contiguous(),
+                selected_indices[offset:end].unsqueeze(0).contiguous(),
+                **validation_kwargs,
+            )
             outputs.append(seq_out.transpose(1, 2).reshape(seq_len, self.q_width))
             offset = end
-        output = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
+        output = torch.cat(outputs, dim=0)
         if uses_stored_selection:
             self._selected_indices = None
-            self._trusted_prefill_cu_seqlens = None
         return output
 
     def _forward_paged(
@@ -733,7 +672,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         block_table = plan.block_table
         page_size = int(plan.page_size)
 
-        from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
             sparse_paged_gqa_attn,
         )
 
@@ -757,11 +696,6 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             ),
             **self._paged_kv_scale_args(kv_cache),
             **({"graph_capture": True} if self.attn_inputs.is_cuda_graph else {}),
-            **(
-                {"_validated_plan": plan}
-                if plan.validated_cache_blocks is not None
-                else {}
-            ),
         )
         return output.transpose(1, 2).reshape(tokens, self.q_width)
 
@@ -770,8 +704,6 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         q: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         plan: PagedInputs | IncrementalPrefillInputs,
-        *,
-        trusted_selected: bool = False,
     ) -> torch.Tensor:
         """Run paged attention over packed incremental-prefill requests."""
         assert kv_cache is not None
@@ -782,15 +714,14 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 "inconsistent with preflight"
             )
 
-        from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
             sparse_paged_gqa_attn,
         )
 
         block_table = plan.block_table
         page_size = int(plan.page_size)
         requests = plan.requests
-        lengths = plan.lengths_host
-        max_rows = max(lengths)
+        max_rows = max(int(req.end) - int(req.start) for req in requests)
         batch_rows = self._is_mtp_draft and len(requests) > 1 and max_rows <= 4
         if batch_rows:
             # The draft's short, ragged windows share a single paged launch.
@@ -842,69 +773,26 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 .index_select(0, packed_positions)
             )
 
-        if (
-            trusted_selected
-            and self.attn_configs.indexer_topk == 512
-            and len(requests) > 1
-        ):
-            from rtp_llm.models_py.kernels.cuda.qsa.tma_prefill import (
-                try_ragged_paged_qsa_prefill,
-            )
-
-            output = try_ragged_paged_qsa_prefill(
-                q,
-                kv_cache.kv_cache_base,
-                block_table,
-                plan.selected_indices,
-                lengths,
-                plan.prefixes_host,
-                plan.cu_seqlens,
-                plan.prefixes_device,
-                page_size=page_size,
-                kv_head_num=self.kv_head_num,
-                **self._paged_kv_scale_args(kv_cache),
-            )
-            if output is not None:
-                return output
-
         outputs = []
         for request_idx, request in enumerate(requests):
             start, end = int(request.start), int(request.end)
             query_len = end - start
             request_q = q[start:end].view(1, query_len, self.head_num, self.head_dim)
-            request_q = request_q.transpose(1, 2)
-            request_output = None
-            if trusted_selected and self.attn_configs.indexer_topk == 512:
-                from rtp_llm.models_py.kernels.cuda.qsa.tma_prefill import (
-                    try_paged_causal_qsa_prefill,
-                )
-
-                request_output = try_paged_causal_qsa_prefill(
-                    request_q,
-                    kv_cache.kv_cache_base,
-                    block_table[request_idx : request_idx + 1],
-                    request.selected_indices,
-                    prefix=request.prefix,
-                    page_size=page_size,
-                    kv_head_num=self.kv_head_num,
-                    **self._paged_kv_scale_args(kv_cache),
-                )
-            if request_output is None:
-                request_output = sparse_paged_gqa_attn(
-                    request_q.contiguous(),
-                    kv_cache.kv_cache_base,
-                    block_table[request_idx : request_idx + 1].contiguous(),
-                    request.kv_lens,
-                    request.selected_indices,
-                    page_size=page_size,
-                    kv_head_num=self.kv_head_num,
-                    validate_selected=not trusted_selected,
-                    **self._paged_kv_scale_args(kv_cache),
-                )
+            request_q = request_q.transpose(1, 2).contiguous()
+            request_output = sparse_paged_gqa_attn(
+                request_q,
+                kv_cache.kv_cache_base,
+                block_table[request_idx : request_idx + 1].contiguous(),
+                request.kv_lens,
+                request.selected_indices,
+                page_size=page_size,
+                kv_head_num=self.kv_head_num,
+                **self._paged_kv_scale_args(kv_cache),
+            )
             outputs.append(
                 request_output.transpose(1, 2).reshape(query_len, self.q_width)
             )
-        return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
+        return torch.cat(outputs, dim=0)
 
 
 def create_sparse_gqa_impl(

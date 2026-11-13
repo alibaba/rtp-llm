@@ -1,5 +1,6 @@
 # （锚点/锁文件里的 --hash=sha256 是文件内容哈希，换主机不影响；不要盲目全局替换。）
 -r requirements_base.txt
+transformers==5.2.0
 torch==2.9.0+cu129
 torchvision==0.24.0
 mysql-connector-python

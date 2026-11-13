@@ -2,7 +2,6 @@
 #include "rtp_llm/models_py/bindings/common/kernels/sampling_penalty_kernels.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
-#include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
 #include "rtp_llm/models_py/bindings/cuda/ops/tests/CudaTestUtils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -10,6 +9,7 @@
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <cstdlib>
 #include <optional>
 #include <limits>
 #include <cmath>
@@ -18,26 +18,6 @@
 #include <vector>
 using namespace std;
 using namespace rtp_llm;
-
-namespace {
-void referenceRejectionSampling(const RejectionSamplingParams& params) {
-    check_cuda_value(
-        invokeRejectionSampling(params.draft_probs_point_mass ? nullptr : params.draft_probs_d.data_ptr<float>(),
-                                params.draft_token_ids_d.data_ptr<int32_t>(),
-                                params.uniform_samples_d.data_ptr<float>(),
-                                params.target_probs_d.data_ptr<float>(),
-                                params.target_token_ids_d.data_ptr<int32_t>(),
-                                params.target_token_ids_d.size(1),
-                                params.output_token_ids_d.data_ptr<int32_t>(),
-                                params.output_accepted_token_num_d.data_ptr<int32_t>(),
-                                params.do_sample_d.data_ptr<bool>(),
-                                params.draft_token_ids_d.size(0),
-                                params.draft_token_ids_d.size(1),
-                                params.target_probs_d.size(2),
-                                at::cuda::getCurrentCUDAStream().stream(),
-                                params.draft_probs_point_mass));
-}
-}  // namespace
 
 class CudaSamplerSm120Test: public DeviceTestBase {
 protected:
@@ -50,6 +30,17 @@ protected:
 };
 
 TEST_F(CudaSamplerSm120Test, testSplitSoftmaxPreservesSeededTokensAndRngWithCloseProbabilityOutputs) {
+    const char* previous = std::getenv("RTP_LLM_SAMPLER_SPLIT_SOFTMAX");
+    const auto  saved = previous == nullptr ? std::optional<std::string>() : std::make_optional(std::string(previous));
+    struct RestoreFlag {
+        std::optional<std::string> previous;
+        ~RestoreFlag() {
+            if (previous.has_value())
+                setenv("RTP_LLM_SAMPLER_SPLIT_SOFTMAX", previous->c_str(), 1);
+            else
+                unsetenv("RTP_LLM_SAMPLER_SPLIT_SOFTMAX");
+        }
+    } restore{saved};
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
     torch::manual_seed(20261019);
     for (int64_t batch : {1, 4, 17, 32}) {
@@ -62,7 +53,8 @@ TEST_F(CudaSamplerSm120Test, testSplitSoftmaxPreservesSeededTokensAndRngWithClos
                 auto top_k   = torch::zeros_like(lengths);
                 auto temperature = torch::ones_like(top_p);
                 std::vector<torch::Tensor> samples, probabilities, log_probabilities, states, in_place;
-                for (bool reference : {true, false}) {
+                for (const char* flag : {"0", "1"}) {
+                    setenv("RTP_LLM_SAMPLER_SPLIT_SOFTMAX", flag, 1);
                     std::vector<at::Generator> generators;
                     for (int64_t i = 0; i < batch; ++i) {
                         auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
@@ -75,10 +67,7 @@ TEST_F(CudaSamplerSm120Test, testSplitSoftmaxPreservesSeededTokensAndRngWithClos
                         tokens.select(1, 1).fill_(5);
                         auto         probs   = torch::empty_like(logits);
                         auto         cum     = torch::full({batch}, -2.0, options);
-                        auto mutated = reference ? torch::empty({batch, vocab * 2}, options).slice(1, 0, vocab * 2, 2) :
-                                                   logits.clone();
-                        if (reference)
-                            mutated.copy_(logits);
+                        auto         mutated = logits.clone();
                         GreedyParams params({mutated,
                                              lengths,
                                              lengths,
@@ -100,7 +89,7 @@ TEST_F(CudaSamplerSm120Test, testSplitSoftmaxPreservesSeededTokensAndRngWithClos
                         auto         result = execSampleGreedy(params);
                         check_cuda_error();
                         ASSERT_TRUE(result.success.all().item<bool>());
-                        if (reference) {
+                        if (flag[0] == '0') {
                             samples.push_back(tokens.clone());
                             probabilities.push_back(probs.clone());
                             log_probabilities.push_back(cum.clone());
@@ -123,6 +112,17 @@ TEST_F(CudaSamplerSm120Test, testSplitSoftmaxPreservesSeededTokensAndRngWithClos
 }
 
 TEST_F(CudaSamplerSm120Test, testSplitPointMassRejectionMatchesOriginalForAllAcceptancePaths) {
+    const char* previous = std::getenv("RTP_LLM_SPLIT_REJECTION");
+    const auto  saved = previous == nullptr ? std::optional<std::string>() : std::make_optional(std::string(previous));
+    struct RestoreFlag {
+        std::optional<std::string> previous;
+        ~RestoreFlag() {
+            if (previous.has_value())
+                setenv("RTP_LLM_SPLIT_REJECTION", previous->c_str(), 1);
+            else
+                unsetenv("RTP_LLM_SPLIT_REJECTION");
+        }
+    } restore{saved};
     torch::manual_seed(20261019);
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
     for (int64_t batch : {1, 3, 8}) {
@@ -151,11 +151,12 @@ TEST_F(CudaSamplerSm120Test, testSplitPointMassRejectionMatchesOriginalForAllAcc
                 for (int i = 0; i < pos; ++i)
                     target.select(1, stride - 1).reshape({batch, 4}).select(1, i).copy_(draft.select(1, i));
                 for (int variant = 0; variant < 2; ++variant) {
+                    setenv("RTP_LLM_SPLIT_REJECTION", variant ? "1" : "0", 1);
                     auto output  = variant ? actual : expected;
                     auto lengths = variant ? actual_len : expected_len;
                     output.fill_(-999);
                     lengths.fill_(-999);
-                    (variant ? execRejectionSampling : referenceRejectionSampling)(
+                    execRejectionSampling(
                         {torch::Tensor(), draft, uniform, probs, target, output, lengths, do_sample, true});
                 }
                 ASSERT_TRUE(torch::equal(actual, expected))
@@ -166,8 +167,10 @@ TEST_F(CudaSamplerSm120Test, testSplitPointMassRejectionMatchesOriginalForAllAcc
             probs.zero_();
             auto uniform    = torch::ones({batch, 4}, options);
             auto stochastic = torch::ones({batch}, options.dtype(torch::kBool));
-            referenceRejectionSampling(
+            setenv("RTP_LLM_SPLIT_REJECTION", "0", 1);
+            execRejectionSampling(
                 {torch::Tensor(), draft, uniform, probs, target, expected, expected_len, stochastic, true});
+            setenv("RTP_LLM_SPLIT_REJECTION", "1", 1);
             execRejectionSampling(
                 {torch::Tensor(), draft, uniform, probs, target, actual, actual_len, stochastic, true});
             ASSERT_TRUE(torch::equal(actual, expected));
@@ -177,6 +180,17 @@ TEST_F(CudaSamplerSm120Test, testSplitPointMassRejectionMatchesOriginalForAllAcc
 }
 
 TEST_F(CudaSamplerSm120Test, testSplitDenseRejectionMatchesOriginalForAllAcceptancePaths) {
+    const char* previous = std::getenv("RTP_LLM_SPLIT_REJECTION");
+    const auto  saved = previous == nullptr ? std::optional<std::string>() : std::make_optional(std::string(previous));
+    struct RestoreFlag {
+        std::optional<std::string> previous;
+        ~RestoreFlag() {
+            if (previous.has_value())
+                setenv("RTP_LLM_SPLIT_REJECTION", previous->c_str(), 1);
+            else
+                unsetenv("RTP_LLM_SPLIT_REJECTION");
+        }
+    } restore{saved};
     torch::manual_seed(20261019);
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
     for (int64_t batch : {1, 3, 8}) {
@@ -211,11 +225,12 @@ TEST_F(CudaSamplerSm120Test, testSplitDenseRejectionMatchesOriginalForAllAccepta
                 for (int i = 0; i < pos; ++i)
                     target.select(1, stride - 1).reshape({batch, 4}).select(1, i).copy_(draft.select(1, i));
                 for (int variant = 0; variant < 2; ++variant) {
+                    setenv("RTP_LLM_SPLIT_REJECTION", variant ? "1" : "0", 1);
                     auto output  = variant ? actual : expected;
                     auto lengths = variant ? actual_len : expected_len;
                     output.fill_(-999);
                     lengths.fill_(-999);
-                    (variant ? execRejectionSampling : referenceRejectionSampling)(
+                    execRejectionSampling(
                         {draft_probs, draft, uniform, probs, target, output, lengths, do_sample, false});
                 }
                 ASSERT_TRUE(torch::equal(actual, expected))
@@ -226,8 +241,10 @@ TEST_F(CudaSamplerSm120Test, testSplitDenseRejectionMatchesOriginalForAllAccepta
             probs.zero_();
             auto uniform    = torch::ones({batch, 4}, options);
             auto stochastic = torch::ones({batch}, options.dtype(torch::kBool));
-            referenceRejectionSampling(
+            setenv("RTP_LLM_SPLIT_REJECTION", "0", 1);
+            execRejectionSampling(
                 {draft_probs, draft, uniform, probs, target, expected, expected_len, stochastic, false});
+            setenv("RTP_LLM_SPLIT_REJECTION", "1", 1);
             execRejectionSampling({draft_probs, draft, uniform, probs, target, actual, actual_len, stochastic, false});
             ASSERT_TRUE(torch::equal(actual, expected));
             ASSERT_TRUE(torch::equal(actual_len, expected_len));
@@ -236,6 +253,29 @@ TEST_F(CudaSamplerSm120Test, testSplitDenseRejectionMatchesOriginalForAllAccepta
 }
 
 TEST_F(CudaSamplerSm120Test, testTiledTemperaturePreservesSeededTokensProbabilitiesAndRng) {
+    const char* previous = std::getenv("RTP_LLM_SAMPLER_TILED_TEMPERATURE");
+    const auto  saved = previous == nullptr ? std::optional<std::string>() : std::make_optional(std::string(previous));
+    struct RestoreFlag {
+        std::optional<std::string> previous;
+        ~RestoreFlag() {
+            if (previous.has_value())
+                setenv("RTP_LLM_SAMPLER_TILED_TEMPERATURE", previous->c_str(), 1);
+            else
+                unsetenv("RTP_LLM_SAMPLER_TILED_TEMPERATURE");
+        }
+    } restore{saved};
+    const char* softmax_flag = std::getenv("RTP_LLM_SAMPLER_SPLIT_SOFTMAX");
+    struct RestoreSoftmax {
+        std::optional<std::string> flag;
+        ~RestoreSoftmax() {
+            if (flag)
+                setenv("RTP_LLM_SAMPLER_SPLIT_SOFTMAX", flag->c_str(), 1);
+            else
+                unsetenv("RTP_LLM_SAMPLER_SPLIT_SOFTMAX");
+        }
+    } restore_softmax{softmax_flag == nullptr ? std::optional<std::string>() :
+                                                std::make_optional(std::string(softmax_flag))};
+    setenv("RTP_LLM_SAMPLER_SPLIT_SOFTMAX", "1", 1);
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
     torch::manual_seed(20261019);
     for (int64_t batch : {1, 4, 17, 32}) {
@@ -248,7 +288,8 @@ TEST_F(CudaSamplerSm120Test, testTiledTemperaturePreservesSeededTokensProbabilit
                 auto top_k   = torch::zeros_like(lengths);
                 auto temperature = torch::full_like(top_p, 0.7);
                 std::vector<torch::Tensor> samples, probabilities, log_probabilities, states, in_place;
-                for (bool reference : {true, false}) {
+                for (const char* flag : {"0", "1"}) {
+                    setenv("RTP_LLM_SAMPLER_TILED_TEMPERATURE", flag, 1);
                     std::vector<at::Generator> generators;
                     for (int64_t i = 0; i < batch; ++i) {
                         auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
@@ -262,16 +303,6 @@ TEST_F(CudaSamplerSm120Test, testTiledTemperaturePreservesSeededTokensProbabilit
                         auto         probs   = torch::empty_like(logits);
                         auto         cum     = torch::full({batch}, -2.0, options);
                         auto         mutated = logits.clone();
-                        if (reference) {
-                            auto temperatures_gpu = temperature.to(torch::kCUDA);
-                            invokeBatchApplyTemperaturePenalty<float>(mutated.data_ptr<float>(),
-                                                                      nullptr,
-                                                                      temperatures_gpu.data_ptr<float>(),
-                                                                      batch,
-                                                                      vocab,
-                                                                      vocab,
-                                                                      at::cuda::getCurrentCUDAStream().stream());
-                        }
                         GreedyParams params({mutated,
                                              lengths,
                                              lengths,
@@ -279,7 +310,7 @@ TEST_F(CudaSamplerSm120Test, testTiledTemperaturePreservesSeededTokensProbabilit
                                              2,
                                              top_k,
                                              top_p,
-                                             reference ? torch::ones_like(temperature) : temperature,
+                                             temperature,
                                              std::nullopt,
                                              std::nullopt,
                                              cum,
@@ -293,7 +324,116 @@ TEST_F(CudaSamplerSm120Test, testTiledTemperaturePreservesSeededTokensProbabilit
                         auto         result = execSampleGreedy(params);
                         check_cuda_error();
                         ASSERT_TRUE(result.success.all().item<bool>());
-                        if (reference) {
+                        if (flag[0] == '0') {
+                            samples.push_back(tokens.clone());
+                            probabilities.push_back(probs.clone());
+                            log_probabilities.push_back(cum.clone());
+                            in_place.push_back(mutated.clone());
+                            for (auto& generator : generators)
+                                states.push_back(generator.get_state());
+                        } else {
+                            ASSERT_TRUE(torch::equal(tokens, samples[generation]));
+                            ASSERT_TRUE(torch::equal(probs, probabilities[generation]));
+                            ASSERT_TRUE(torch::equal(mutated, in_place[generation]));
+                            ASSERT_TRUE(torch::equal(cum, log_probabilities[generation]));
+                            for (int64_t i = 0; i < batch; ++i)
+                                ASSERT_TRUE(torch::equal(generators[i].get_state(), states[generation * batch + i]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(CudaSamplerSm120Test, testCompactOutputPreservesTokensProbabilitiesRngAndPenaltyFallback) {
+    const char* previous = std::getenv("RTP_LLM_SAMPLER_COMPACT_OUTPUT");
+    const auto  saved = previous == nullptr ? std::optional<std::string>() : std::make_optional(std::string(previous));
+    struct RestoreFlag {
+        std::optional<std::string> previous;
+        ~RestoreFlag() {
+            if (previous.has_value())
+                setenv("RTP_LLM_SAMPLER_COMPACT_OUTPUT", previous->c_str(), 1);
+            else
+                unsetenv("RTP_LLM_SAMPLER_COMPACT_OUTPUT");
+        }
+    } restore{saved};
+    const char* softmax_flag = std::getenv("RTP_LLM_SAMPLER_SPLIT_SOFTMAX");
+    struct RestoreSoftmax {
+        std::optional<std::string> flag;
+        ~RestoreSoftmax() {
+            if (flag)
+                setenv("RTP_LLM_SAMPLER_SPLIT_SOFTMAX", flag->c_str(), 1);
+            else
+                unsetenv("RTP_LLM_SAMPLER_SPLIT_SOFTMAX");
+        }
+    } restore_softmax{softmax_flag == nullptr ? std::optional<std::string>() :
+                                                std::make_optional(std::string(softmax_flag))};
+    setenv("RTP_LLM_SAMPLER_SPLIT_SOFTMAX", "1", 1);
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    torch::manual_seed(20261019);
+    for (int64_t batch : {1, 4, 17, 32}) {
+        for (int64_t vocab : {257, 248320}) {
+            for (int penalty_case = 0; penalty_case < 6; ++penalty_case) {
+                const float gain   = penalty_case == 0 ? 0.0f : 1.0f;
+                auto        logits = torch::randn({batch, vocab}, options) * gain;
+                logits.slice(1, vocab - 13).fill_(-std::numeric_limits<float>::infinity());
+                auto lengths =
+                    torch::full({batch}, 128, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+                auto top_p = torch::ones({batch}, torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true));
+                auto top_k = torch::zeros_like(lengths);
+                auto temperature = torch::full_like(top_p, 0.7);
+                auto repetition  = torch::ones_like(top_p);
+                auto presence    = torch::zeros_like(top_p);
+                auto frequency   = torch::zeros_like(top_p);
+                auto ngram       = torch::zeros_like(lengths);
+                if (penalty_case == 2)
+                    repetition.fill_(1.2);
+                if (penalty_case == 3)
+                    presence.fill_(0.2);
+                if (penalty_case == 4)
+                    frequency.fill_(0.3);
+                if (penalty_case == 5)
+                    ngram.fill_(2);
+                std::vector<torch::Tensor> samples, probabilities, log_probabilities, states, in_place;
+                for (const char* flag : {"0", "1"}) {
+                    setenv("RTP_LLM_SAMPLER_COMPACT_OUTPUT", flag, 1);
+                    std::vector<at::Generator> generators;
+                    for (int64_t i = 0; i < batch; ++i) {
+                        auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
+                        generator.set_current_seed(210000 + i);
+                        generators.push_back(generator);
+                    }
+                    for (int generation = 0; generation < 4; ++generation) {
+                        auto tokens = torch::zeros({batch, 129}, options.dtype(torch::kInt32));
+                        tokens.select(1, 0).fill_(3);
+                        tokens.select(1, 1).fill_(5);
+                        tokens.select(1, 128).fill_(17);
+                        auto         probs   = torch::empty_like(logits);
+                        auto         cum     = torch::full({batch}, -2.0, options);
+                        auto         mutated = logits.clone();
+                        GreedyParams params({mutated,
+                                             lengths,
+                                             lengths,
+                                             tokens,
+                                             128,
+                                             top_k,
+                                             top_p,
+                                             temperature,
+                                             penalty_case == 0 ? std::nullopt : std::make_optional(repetition),
+                                             ngram,
+                                             cum,
+                                             std::nullopt,
+                                             false,
+                                             probs,
+                                             presence,
+                                             frequency,
+                                             std::nullopt,
+                                             generators});
+                        auto         result = execSampleGreedy(params);
+                        check_cuda_error();
+                        ASSERT_TRUE(result.success.all().item<bool>());
+                        if (flag[0] == '0') {
                             samples.push_back(tokens.clone());
                             probabilities.push_back(probs.clone());
                             log_probabilities.push_back(cum.clone());

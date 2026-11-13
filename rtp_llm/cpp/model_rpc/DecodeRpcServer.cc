@@ -25,7 +25,6 @@
 #include "rtp_llm/cpp/cache/TpCacheTransferPlan.h"
 #include "rtp_llm/cpp/model_rpc/RegisteredCacheStaging.h"
 #include "rtp_llm/cpp/cache/MhaTpCacheLayout.h"
-#include "rtp_llm/cpp/model_rpc/StagePeerGroups.h"
 #include "rtp_llm/cpp/config/RankLayout.h"
 #include "rtp_llm/cpp/config/StageLayerRange.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -1186,8 +1185,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     if (typed_tp) {
         staging_device_guard.reset_device(torch::Device(torch::kCUDA, maga_init_params_.parallelism_config.local_rank));
     }
-    RegisteredCacheStagingPool    staging_pool(resource_.cache_store->getMemoryUtil());
-    std::vector<PendingCacheCopy> pending_cache_copies;
+    std::vector<PendingCacheCopy>                                      pending_cache_copies;
     std::unordered_map<void*, std::shared_ptr<RegisteredCacheStaging>> staging_owners;
     auto requireTypedTp = [](bool valid, const std::string& message) {
         if (!valid) {
@@ -1195,13 +1193,10 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         }
     };
     auto stageTpPart = [&](std::vector<BlockInfo> parts, const CacheConfig& cfg, const std::string& tag, int peer_idx) {
-        if (!typed_tp) {
-            return parts;
-        }
         const auto& group  = cfg.topology().group(tag);
         const auto& spec   = group.spec;
         const auto& layout = spec->tp_transfer;
-        if (!layout.needsReassembly(group.localKvHeadNum())) {
+        if (!typed_tp || !layout.needsReassembly(group.localKvHeadNum())) {
             return parts;
         }
         requireTypedTp(parts.size() == (spec->scale_block_size_bytes() == 0 ? 1u : 2u),
@@ -1211,12 +1206,12 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             const auto v_bytes = index == 0 ? spec->v_block_size_bytes() : spec->v_scale_block_size_bytes();
             requireTypedTp(parts[index].is_cuda && parts[index].size_bytes == k_bytes + v_bytes,
                            "typed TP destination is not a matching CUDA packed payload");
-            auto plan = layout.plan(
-                k_bytes, v_bytes, group.localKvHeadNum(), transfer_topology, peer_idx, group.kernelBlocksPerKvBlock());
+            auto plan = layout.plan(k_bytes, v_bytes, group.localKvHeadNum(), transfer_topology, peer_idx);
             plan.validateSlices();
             requireTypedTp(plan.destination_bytes == parts[index].size_bytes, "typed TP destination bytes changed");
             const size_t source_bytes = plan.source_bytes;
-            auto         staging      = staging_pool.allocate(source_bytes);
+            auto         staging =
+                std::make_shared<RegisteredCacheStaging>(source_bytes, resource_.cache_store->getMemoryUtil());
             staging_owners.emplace(staging->tensor().data_ptr(), staging);
             pending_cache_copies.push_back({staging, parts[index], std::move(plan)});
             parts[index].addr       = staging->tensor().data_ptr();
@@ -1283,11 +1278,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         return cpMapperForGroup(cfg, tag).layoutForGroup(cfg, tag).slice != CpBlockSliceMode::NONE;
     };
     auto shouldLoadGroupFromPeer =
-        [&](const CacheConfig& cfg,
-            CacheGroupType     group_type,
-            const std::string& tag,
-            int                peer_idx,
-            bool               page_level_rr) {
+        [&](const CacheConfig& cfg, CacheGroupType group_type, const std::string& tag, int peer_idx, bool page_level_rr) {
             if (typed_tp) {
                 const auto& group = cfg.topology().group(tag);
                 return tpCachePeerOwnsPayload(group.spec->tp_transfer.mode,
@@ -1400,8 +1391,8 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                             layer_id, tag, block_id, slice.local_piece_count, slice.local_piece_id);
                     }
 
-                    parts = sliceCpDestinationForPeer(std::move(parts), cache_config, tag, peer_idx, page_level_rr);
-                    parts = stageTpPart(std::move(parts), cache_config, tag, peer_idx);
+                    parts            = sliceCpDestinationForPeer(std::move(parts), cache_config, tag, peer_idx, page_level_rr);
+                    parts            = stageTpPart(std::move(parts), cache_config, tag, peer_idx);
                     auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                         RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null block addr for key=%s", key.c_str());
                         RTP_LLM_CHECK_WITH_INFO(block.size_bytes > 0, "zero block size for key=%s", key.c_str());
@@ -1541,8 +1532,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                                                                 slice.local_piece_id);
                                 }
 
-                                parts = sliceCpDestinationForPeer(
-                                    std::move(parts), mtp_cache_cfg, tag, peer_idx, page_level_rr);
+                                parts            = sliceCpDestinationForPeer(std::move(parts), mtp_cache_cfg, tag, peer_idx, page_level_rr);
                                 parts            = stageTpPart(std::move(parts), mtp_cache_cfg, tag, peer_idx);
                                 auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                                     RTP_LLM_CHECK_WITH_INFO(
@@ -1769,8 +1759,7 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                  request->partition_count(),
                                  request->partition_id(),
                                  server_context,
-                                 request->prefill_cp_size() > 0 ? request->prefill_cp_size() : 1,
-                                 parseStagePeerGroups(request->stage_peer_groups())});
+                                 request->prefill_cp_size() > 0 ? request->prefill_cp_size() : 1});
     } catch (const std::exception& error) {
         RTP_LLM_LOG_WARNING("request %s cache handoff exception: %s", request->request_key().c_str(), error.what());
         load_result = {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "cache handoff failed"), 0};

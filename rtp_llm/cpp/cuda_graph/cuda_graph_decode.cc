@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
-#include <limits>
 
 namespace rtp_llm {
 void CudaGraphRunner::replayDecode(int bs) {

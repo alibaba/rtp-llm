@@ -29,6 +29,7 @@ cc_library(
     name = "core_utils",
     hdrs = [
         "AssertUtils.h",
+        "DevicePerfWrapper.h",
         "Logger.h",
         "RemoteCacheConfig.h",
         "StringUtil.h",

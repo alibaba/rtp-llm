@@ -8,18 +8,10 @@ from rtp_llm.models_py.modules.hybrid.gated_residual import (
     grouped_rms_norm,
     inject_into_residual,
 )
-from rtp_llm.models_py.modules.hybrid.test.residual_fixtures import ResidualFp8Fixture
-from rtp_llm.models_py.modules.qwen4_exp.gated_residual import Qwen4GatedResidual
 
 _HC = 4
-
-
 _HIDDEN = 16
-
-
 _LOWRANK = 6
-
-
 _EPS = 1e-6
 
 
@@ -265,42 +257,59 @@ class GatedResidualTest(unittest.TestCase):
                 (4, 4 * hidden),
             )
         ]
+        unit = GatedResidual(*tensors, hc_mult=4, norm_eps=_EPS)
         hyper = torch.randn(3, 4 * hidden, device="cuda", dtype=torch.bfloat16)
         sublayer = torch.randn(3, hidden, device="cuda", dtype=torch.bfloat16)
         gates = torch.rand(3, 4, device="cuda", dtype=torch.bfloat16)
+        seen = []
+
+        def alter_output(module, inputs, output):
+            seen.append(inputs[0].shape)
+            return output[0] + 1, output[1], output[2]
+
         combined = hyper + (sublayer.unsqueeze(1) * gates.unsqueeze(-1)).flatten(1)
-        units = (
-            Qwen4GatedResidual(*tensors, hc_mult=4, norm_eps=_EPS),
-            ResidualFp8Fixture().module(True),
+        expected_mixed, expected_gates = _reference(combined, *tensors, hc=4, eps=_EPS)
+        handle = unit.register_forward_hook(alter_output)
+        try:
+            mixed, residual, write_gates = unit.forward_with_injection(
+                hyper, sublayer, gates
+            )
+            self.assertEqual(seen, [hyper.shape])
+            torch.testing.assert_close(residual, combined, atol=0, rtol=0)
+            torch.testing.assert_close(mixed, expected_mixed + 1, atol=0.016, rtol=0.01)
+            torch.testing.assert_close(
+                write_gates, expected_gates, atol=0.016, rtol=0.01
+            )
+        finally:
+            handle.remove()
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_merged_down_epilogue_preserves_bf16_rounding_and_graph_replay(self):
+        from rtp_llm.models_py.triton_kernels.common.gated_residual_down_triton import (
+            down_inject_epilogue,
         )
-        for unit in units:
-            for global_hooks in (False, True):
-                seen = []
 
-                def alter_input(module, inputs):
-                    if module is unit:
-                        seen.append("pre")
-                        return (inputs[0] + 0.25,)
+        source = torch.randn(17, 336, device="cuda", dtype=torch.bfloat16) * 4
 
-                def alter_output(module, inputs, output):
-                    if module is unit:
-                        seen.append("post")
-                        return output[0] + 1, output[1], output[2]
+        def reference():
+            return (
+                F.silu(source[:, :320] / 4),
+                2 * torch.sigmoid(source[:, 320:324] / 4),
+            )
 
-                hooks = torch.nn.modules.module if global_hooks else unit
-                prefix = "register_module" if global_hooks else "register"
-                pre = getattr(hooks, prefix + "_forward_pre_hook")(alter_input)
-                post = getattr(hooks, prefix + "_forward_hook")(alter_output)
-                try:
-                    expected = unit(combined)
-                    seen.clear()
-                    actual = unit.forward_with_injection(hyper, sublayer, gates)
-                    self.assertEqual(seen, ["pre", "post"])
-                    for got, want in zip(actual, expected):
-                        torch.testing.assert_close(got, want, atol=0, rtol=0)
-                finally:
-                    pre.remove()
-                    post.remove()
+        expected = reference()
+        actual = down_inject_epilogue(source, 320, 4)
+        for got, want in zip(actual, expected):
+            torch.testing.assert_close(got, want, atol=0, rtol=0)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = down_inject_epilogue(source, 320, 4)
+        source.copy_(
+            torch.linspace(-128, 128, source.numel(), device="cuda").reshape_as(source)
+        )
+        graph.replay()
+        for got, want in zip(actual, reference()):
+            torch.testing.assert_close(got, want, atol=0, rtol=0)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_merged_projection_matches_original_at_real_width(self):
@@ -333,22 +342,6 @@ class GatedResidualTest(unittest.TestCase):
             torch.testing.assert_close(got, want, atol=8e-3, rtol=1e-2)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
-    def test_group_norm_addresses_beyond_signed_int32(self):
-        width, rows = 10240, 2**31 // 10240 + 2
-        x = torch.zeros((rows, width), device="cuda", dtype=torch.bfloat16)
-        x[-3:].normal_()
-        gamma = torch.zeros(width, device="cuda", dtype=torch.bfloat16)
-        tail = x[-3:].float().reshape(3, 4, 2560)
-        reference = (
-            (tail * torch.rsqrt(tail.square().mean(-1, keepdim=True) + _EPS))
-            .reshape(3, width)
-            .bfloat16()
-        )
-        result = grouped_rms_norm(x, gamma, 2560, _EPS)
-        torch.testing.assert_close(result[-3:], reference, atol=0.016, rtol=0.01)
-        self.assertEqual(torch.count_nonzero(result[0]), 0)
-
-    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_fused_group_norm_matches_torch_and_replays(self):
         width = 4 * 2560
         gamma = (torch.randn(width, device="cuda") * 0.1).bfloat16()
@@ -372,6 +365,39 @@ class GatedResidualTest(unittest.TestCase):
             normalized.pow(2).mean(-1, keepdim=True) + _EPS
         )
         reference = (normalized.flatten(1) * (1.0 + gamma.float())).to(source.dtype)
+        graph.replay()
+        torch.testing.assert_close(
+            replayed.float(), reference.float(), atol=0.016, rtol=0.01
+        )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_fused_mix_reduce_matches_torch_and_replays(self):
+        from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
+            fused_mix_reduce,
+        )
+
+        width = 4 * 2560
+        for rows in (1, 8, 17):
+            with self.subTest(rows=rows):
+                logits = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
+                normed = torch.randn_like(logits)
+                reference = (
+                    torch.sigmoid(logits).reshape(rows, 4, 2560)
+                    * normed.reshape(rows, 4, 2560)
+                ).mean(1)
+                actual = fused_mix_reduce(logits, normed, 4)
+                torch.testing.assert_close(
+                    actual.float(), reference.float(), atol=0.016, rtol=0.01
+                )
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            replayed = fused_mix_reduce(logits, normed, 4)
+        logits.copy_(torch.randn_like(logits))
+        normed.copy_(torch.randn_like(normed))
+        reference = (
+            torch.sigmoid(logits).reshape(17, 4, 2560) * normed.reshape(17, 4, 2560)
+        ).mean(1)
         graph.replay()
         torch.testing.assert_close(
             replayed.float(), reference.float(), atol=0.016, rtol=0.01

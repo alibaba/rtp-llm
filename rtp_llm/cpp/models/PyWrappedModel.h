@@ -88,6 +88,7 @@ public:
     ~PyWrappedModel();
 
     GptModelOutputs            forward(const GptModelInputs& inputs) override;
+    GptModelOutputs            forwardMicroBatched(const GptModelInputs& inputs, bool capture_hidden_states);
     PPIntermediateTensors      makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
     void                       releaseBuffers() override;
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
@@ -116,8 +117,8 @@ private:
     torch_ext::PyEmbeddingInputs  buildPyEmbeddingInputs(const GptModelInputs& inputs);
     torch_ext::PyMultimodalInputs buildPyMultimodalInputs(const GptModelInputs& inputs);
     torch_ext::BertEmbeddingInputs
-                                    buildBertEmbeddingInputs(const GptModelInputs& inputs,
-                                                             const torch::Tensor&  prepared_position_ids = torch::Tensor());
+    buildBertEmbeddingInputs(const GptModelInputs& inputs,
+                             const torch::Tensor&  prepared_position_ids = torch::Tensor());
     torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                    const GptModelInputs&         inputs);
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
@@ -138,6 +139,7 @@ private:
                                       const bool            has_context_request,
                                       const bool            need_all_logits,
                                       const torch::Tensor&  lm_output_indexes,
+                                      bool                  enable_sp,
                                       size_t                token_num,
                                       const GptModelInputs& inputs,
                                       torch::Tensor         merged_eagle3_hidden,
@@ -148,6 +150,9 @@ private:
     // CP path's skip_final_layernorm=true) and returns the small [num_lm, hidden]
     // both as hidden_states and all_hidden_states.
     GptModelOutputs forwardPostLayersLastHidden(torch::Tensor hidden, const GptModelInputs& inputs);
+    MicroBatchPlan  planMicroBatches(const GptModelInputs& inputs);
+    std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
+                    splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);
     void            holdInputsHostBuffers(const GptModelInputs& inputs);
     GraphBase*      selectGraphRunner(const torch_ext::PyAttentionInputs& attention_inputs) const;
     CudaGraphState& selectGraphState(const torch_ext::PyAttentionInputs& attention_inputs);
@@ -182,8 +187,10 @@ private:
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     bool use_spec_decoding_{false};
     bool has_mtp_hidden_buffer_{false};
+    bool supports_micro_batch_{false};
     bool has_speculative_target_commit_hooks_{false};
     bool has_speculative_target_status_reducer_{false};
+    bool enable_device_perf_{false};
     bool check_nan_{false};
 
     std::unique_ptr<HiddenStateCapturePublisher> hidden_state_capture_publisher_;
@@ -359,7 +366,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
-    py_model_             = py_instance;
+    py_model_                 = py_instance;
+    supports_micro_batch_     = py::hasattr(py_model_, "forward_micro_batch");
     // MtpExecutor passes use_spec_decoding only to its target wrapper. The
     // normal and draft wrappers may share the same Python class, but must not
     // activate target transactions.
@@ -373,10 +381,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                 "Python speculative target model must implement prepare_speculative_target_commit and "
                                 "finish_speculative_target_commit as a pair, together with "
                                 "finalize_speculative_target_commit");
-        has_speculative_target_commit_hooks_ =
-            has_prepare_speculative_target_commit
-            && (!py::hasattr(py_model_, "requires_speculative_target_commit")
-                || py_model_.attr("requires_speculative_target_commit")().cast<bool>());
+        has_speculative_target_commit_hooks_ = has_prepare_speculative_target_commit;
         if (has_speculative_target_commit_hooks_ && py::hasattr(py_model_, "has_speculative_target_status_reducer")) {
             has_speculative_target_status_reducer_ =
                 py_model_.attr("has_speculative_target_status_reducer")().cast<bool>();
@@ -385,15 +390,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                     "Python target status reducer capability requires its reduce hook");
         }
         if (has_speculative_target_commit_hooks_ && enable_cuda_graph_) {
-            RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "on_cuda_graph_warmup")
-                                        && py::hasattr(py_model_, "on_cuda_graph_capture")
-                                        && py::hasattr(py_model_, "on_cuda_graph_replay"),
+            RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "clear_speculative_target_graph_capture")
+                                        && py::hasattr(py_model_, "save_speculative_target_graph_capture")
+                                        && py::hasattr(py_model_, "activate_speculative_target_graph_replay"),
                                     "speculative target CUDA Graph requires capture, save and replay transaction "
                                     "hooks to preserve side-state across graph instances");
         }
-        RTP_LLM_CHECK_WITH_INFO(!has_speculative_target_commit_hooks_ || params.parallelism_config.tp_size <= 1
-                                    || has_speculative_target_status_reducer_,
-                                "speculative target transactions require a CPU TP status reducer");
     }
 
     auto py_initialize_method = py_model_.attr("initialize");
@@ -411,6 +413,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                  dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
                                                                                   "forward";
     py_forward_method_         = py_model_.attr(forward_method);
+    if (enable_cuda_graph_ && is_prefill_cuda_graph_mode
+        && py::hasattr(py_instance, "supports_cuda_graph_draft_prefill")
+        && !py_instance.attr("supports_cuda_graph_draft_prefill")().cast<bool>()) {
+        // Decode and target verification may still use their graph runners.
+        // This role needs its own graph-safe incremental-prefill cache path.
+        RTP_LLM_LOG_WARNING("CUDA graph disabled for draft prefill: model requires eager incremental prefill");
+        enable_cuda_graph_ = false;
+    }
     if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value()) {
         // No published topology means there is no trustworthy model geometry
         // for any graph role (including prefill warmup). Keep the eager path.
@@ -432,9 +442,19 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
         graph_params.max_seq_len                  = params.max_seq_len;
         graph_params.hidden_size                  = params.hidden_size;
-        // Match eager MTP's hyper-connection input width.
-        graph_params.input_hidden_size =
-            static_cast<size_t>(resolveMtpInputHiddenSize(params.hidden_size, params.hc_mult));
+        // Keep CUDA Graph capture on the same MTP input-hidden ABI as eager
+        // execution. Zero remains a compatibility fallback for direct/test
+        // GptModelInitParams construction sites.
+        RTP_LLM_CHECK_WITH_INFO(params.hidden_size > 0 && params.hc_mult > 0 && params.mtp_input_hidden_size >= 0,
+                                "invalid MTP input width inputs: hidden_size=%ld hc_mult=%ld explicit_width=%ld",
+                                params.hidden_size,
+                                params.hc_mult,
+                                params.mtp_input_hidden_size);
+        const size_t configured_mtp_input_hidden_size =
+            params.mtp_input_hidden_size == 0 ?
+                static_cast<size_t>(params.hidden_size) * static_cast<size_t>(params.hc_mult) :
+                static_cast<size_t>(params.mtp_input_hidden_size);
+        graph_params.input_hidden_size      = configured_mtp_input_hidden_size;
         graph_params.input_embedding_scalar = description_.input_embedding_scalar;
         if (weights_.position_encoding) {
             graph_params.position_encoding = weights_.position_encoding->kernel.cuda();

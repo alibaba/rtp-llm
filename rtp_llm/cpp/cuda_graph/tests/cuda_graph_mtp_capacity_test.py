@@ -149,12 +149,10 @@ class MtpGraphCapacityTest(unittest.TestCase):
                 torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
     def test_nonpositive_request_lanes_rejected_before_capture(self):
-        for lanes in (0, -1):
-            with self.subTest(lanes=lanes):
-                with self.assertRaisesRegex(RuntimeError, "int32 token/padding"):
-                    CudaGraphRunner().init_mtp_draft_prefill(
-                        DraftCapacityModel(), 8, 4, lanes, 4
-                    )
+        with self.assertRaisesRegex(
+            RuntimeError, "tokens per request must be positive"
+        ):
+            CudaGraphRunner().init_mtp_draft_prefill(DraftCapacityModel(), 8, 4, 0, 4)
 
 
 if __name__ == "__main__":

@@ -926,6 +926,10 @@ rename_wheel(
     name = "rtp_llm",
     package_name = "rtp_llm-%s" % RELEASE_VERSION,
     src = ":rtp_llm_whl",
+    extra_files = select({
+        "@//:using_rocm": ["@patched_atom_wheel//:atom-0.1.1.dev1+g0189b3506-py3-none-any.whl"],
+        "//conditions:default": [],
+    }),
 )
 
 rename_wheel(

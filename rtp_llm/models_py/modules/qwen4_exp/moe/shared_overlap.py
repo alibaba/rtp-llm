@@ -5,13 +5,11 @@ The routed TP reduction stays on the original stream. The unsharded shared
 branch retains its BF16 output and original fused sigmoid-scale-add boundary.
 """
 
-import os
 from functools import lru_cache
 
 import torch
 
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
-from rtp_llm.models_py.modules.qwen4_exp.dense_mlp import Qwen4DenseMLP
 
 
 @lru_cache(maxsize=None)
@@ -21,19 +19,8 @@ def _shared_stream_for_device(device_index: int):
 
 
 class Qwen4MoeLayer(GenericMoeLayer):
-    _shared_mlp_cls = Qwen4DenseMLP
-
     _shared_stream = None
     _reused_shared_stream = None
-
-    def __init__(self, config, parallelism_config, weights, *args, **kwargs):
-        super().__init__(config, parallelism_config, weights, *args, **kwargs)
-        if os.getenv("RTP_QWEN4_BF16_SHARED_TP2", "0") == "1":
-            from rtp_llm.models_py.modules.qwen4_exp.moe.shared_tp2 import (
-                maybe_prepare_bf16_shared_tp2,
-            )
-
-            maybe_prepare_bf16_shared_tp2(self, weights)
 
     def prepare_shared_expert_overlap(self) -> None:
         """Allocate streams only for the explicitly qualified Qwen4 layout."""
@@ -45,9 +32,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
             PureTpRouterNvfp4Cutlass,
         )
-        from rtp_llm.models_py.modules.qwen4_exp.dense_mlp import (
-            Qwen4DenseMLP as DenseMLP,
-        )
+        from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
 
         pc = self.parallelism_config
         role = str(getattr(pc, "role_type", "PDFUSION")).rsplit(".", 1)[-1]
@@ -58,6 +43,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and pc.tp_size == 2
             and pc.ep_size == 2
             and pc.dp_size == 1
+            and pc.ffn_sp_size == 2
             and self.ffn_tp_size == 1
             and not self.use_ep_shared_allreduce
             and not self.use_unified_tp_allreduce

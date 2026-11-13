@@ -8,11 +8,6 @@ from rtp_llm.model_loader.weight_module import (
     WeightModule,
 )
 from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
-from rtp_llm.utils.model_weight import W
-
-
-def _scale_name(name):
-    return W.lm_head_s if name == W.lm_head else name + FP8_STORAGE_SCALE_SUFFIX
 
 
 class Fp8StorageWeight(CompositeWeight, QuantWeight):
@@ -26,7 +21,7 @@ class Fp8StorageWeight(CompositeWeight, QuantWeight):
         self.resident_device = source.resident_device
         self.resident_output_devices = dict(source.resident_output_devices)
         self.additional_output_names = tuple(
-            _scale_name(c.name) for c in source.get_components()
+            c.name + FP8_STORAGE_SCALE_SUFFIX for c in source.get_components()
         )
 
     @classmethod
@@ -46,20 +41,13 @@ class Fp8StorageWeight(CompositeWeight, QuantWeight):
             for name, value in items.items():
                 if isinstance(value, dict):
                     quantize(value)
-                elif (
-                    value.dtype in (torch.float16, torch.bfloat16, torch.float32)
-                    and value.ndim == 2
-                    and (
-                        name in (W.embedding, W.lm_head)
-                        or all(size % 16 == 0 for size in value.shape)
-                    )
-                ):
+                elif value.dtype in (torch.float16, torch.bfloat16, torch.float32):
                     values = value.float()
                     scale = values.abs().amax().clamp_min(1e-12).reshape(1) / 448.0
                     result[name] = (
                         (values / scale).clamp(-448, 448).to(torch.float8_e4m3fn)
                     )
-                    result[_scale_name(name)] = scale
+                    result[name + FP8_STORAGE_SCALE_SUFFIX] = scale
                 else:
                     result[name] = value
 

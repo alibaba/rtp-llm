@@ -418,9 +418,8 @@ def setup_jit_cache(cache_dir=None, packages=None):
     )
 
     if packages is None:
-        # flashinfer_cubin carries the flashInferMetaInfo.h / csrc headers that
-        # fmha_gen ops embed as -I paths: without a stable package copy those
-        # anchors point into per-action runfiles and poison the shared cache.
+        # The cubin package also supplies JIT headers. Its include paths must
+        # outlive the Bazel action that first generated shared build rules.
         packages = ["flashinfer", "flashinfer_cubin", "torch", "deep_gemm", "tvm_ffi"]
 
     # Copy packages to cache with file locking

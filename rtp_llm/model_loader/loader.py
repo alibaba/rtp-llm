@@ -264,7 +264,7 @@ class ModelLoader:
             and self.is_global_weight_local(name[len(global_weight_prefix) :])
         )
         all_tensors = self._load_config.database.load_tensors_by_prefix(
-            prefixes,
+            (layer_weight_prefix, global_weight_prefix),
             source_device,
             direct_io=direct_io and source_device == device,
         )
@@ -346,49 +346,16 @@ class ModelLoader:
             for component in descriptor.get_components()
         )
 
-    def _local_layer_counts(self) -> tuple[int, int]:
-        local_layers = set(self._load_config.layer_range)
-        local_moe_layers = local_layers & set(
-            self._weights_info.model_config.moe_layer_index
-        )
-        return len(local_layers), len(local_moe_layers)
-
-    def _eval_local_model_weight_size_parts(self) -> tuple[float, float]:
-        model_config = self._weights_info.model_config
-        layer_count, moe_layer_count = self._local_layer_counts()
-        owns_embedding = self.is_global_weight_local(W.embedding)
-        owns_lm_head = self.is_global_weight_local(W.lm_head)
-        vocab_weight_count = int(owns_embedding) + int(owns_lm_head)
-        return model_config.eval_model_weight_size_parts(
-            layer_count, moe_layer_count, vocab_weight_count
-        )
-
-    def _eval_local_model_weight_memory(self) -> tuple[float, float]:
-        non_expert_size, expert_size = self._eval_local_model_weight_size_parts()
-        non_expert_parallel_size = max(
-            1, min(self._load_config.tp_size, self._load_config.ffn_tp_size)
-        )
-        expert_parallel_size = (
-            self._load_config.tp_size
-            if self._load_config.ep_size == 1
-            else self._load_config.ep_size
-        )
-        model_config = self._weights_info.model_config
-        return (
-            (non_expert_size - model_config._extra_weight_bytes)
-            / non_expert_parallel_size
-            + model_config._replicated_extra_weight_bytes,
-            expert_size / expert_parallel_size,
-        )
-
     def _is_memory_enough_for_fastsafetensor(self):
-        non_expert_mem, expert_mem = self._eval_local_model_weight_memory()
         device_mem_info = self._load_config.exported_device.get_mem_info()
         max_file_size = self._load_config.database.get_max_file_size()
         if device_mem_info is None:
             return False
         else:
             free_mem = device_mem_info.free / (1024.0**2)
+        model_mem = self._weights_info.model_config.eval_model_weight_size_per_rank(
+            self._load_config.tp_size, self._load_config.ep_size
+        ) / (1024.0**2)
         if self._is_online_ptpc():
             # Online PTPC with inline FP8: MoE expert weights are quantized
             # per-expert during loading (no BF16 peak for MoE), but dense
@@ -775,14 +742,15 @@ class ModelLoader:
         if self._load_config.force_cpu_load_weights:
             logging.warning("force_cpu_load_weights is enabled, load weights to cpu")
             return "cpu"
-        non_expert_mem, expert_mem = self._eval_local_model_weight_memory()
         device_mem_info = self._load_config.exported_device.get_mem_info()
         if device_mem_info is None:
             logging.warning("device_mem_info is None, load weights to cpu")
             return "cpu"
         else:
             free_mem = device_mem_info.free / (1024.0**3)
-        model_mem = (non_expert_mem + expert_mem) / (1024.0**3)
+        model_mem = self._weights_info.model_config.eval_model_weight_size_per_rank(
+            self._load_config.tp_size, self._load_config.ep_size
+        ) / (1024.0**3)
         device = current_device if free_mem * 0.9 > model_mem else "cpu"
         logging.info(
             f"free_mem: {free_mem:.2f}GB, estimated model_mem: {model_mem:.2f}GB, use device: {device}"

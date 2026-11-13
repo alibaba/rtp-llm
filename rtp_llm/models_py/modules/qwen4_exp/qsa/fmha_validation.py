@@ -2,39 +2,6 @@
 
 import torch
 
-from .validation import DeviceChecks
-
-
-def main_geometry_checks(checks, bases, lengths, table, page_size, pages, padded):
-    """Queue safe wide-integer checks; the caller owns the single host read."""
-    bases = bases.to(device=table.device, dtype=torch.int64, non_blocking=True)
-    lengths = lengths.to(device=table.device, dtype=torch.int64, non_blocking=True)
-    capacity = int(table.shape[1]) * page_size
-    bounded_bases = bases.clamp(0, capacity)
-    exceeds = (bases > capacity) | (lengths > capacity - bounded_bases)
-    ends = bounded_bases + lengths.clamp(0, capacity + 1)
-    required = torch.div(ends, page_size, rounding_mode="floor") + (
-        ends % page_size != 0
-    )
-    columns = torch.arange(table.shape[1], device=table.device)[None]
-    invalid = (columns < required[:, None]) & ((table <= 0) | (table >= pages))
-    if padded:
-        active = table.ne(0).any(dim=1)
-        exceeds = exceeds & active
-        invalid = invalid & active[:, None]
-    checks.add(
-        (bases < 0).any() | (lengths <= 0).any(),
-        "qwen4_exp QSA paged sequence bases must be non-negative and query lengths positive",
-    )
-    checks.add(
-        exceeds.any(),
-        "qwen4_exp QSA paged main block table does not cover the visible KV",
-    )
-    checks.add(
-        invalid.any(),
-        "qwen4_exp QSA paged visible KV resolves to an unallocated or out-of-range physical block",
-    )
-
 
 def _validate_main_cache_layout(self, cache, block_table, batch_size, device):
     """Validate shared paged-cache layout without reading device tensor values."""
@@ -109,67 +76,6 @@ def _validate_main_cache_layout(self, cache, block_table, batch_size, device):
     return page_size, cache_blocks
 
 
-def _try_validate_main_paged_geometry(
-    self,
-    cache,
-    block_table,
-    sequence_bases,
-    query_lengths,
-    device,
-    checks=None,
-):
-    batch_size = int(sequence_bases.numel())
-    if not (
-        isinstance(cache, torch.Tensor)
-        and cache.is_cuda
-        and cache.ndim in (2, 5)
-        and cache.shape[0] <= 2**31 - 1
-        and isinstance(block_table, torch.Tensor)
-        and block_table.ndim == 2
-        and block_table.shape[1] <= 1024
-        and sequence_bases.dtype in (torch.int32, torch.int64)
-        and query_lengths.dtype in (torch.int32, torch.int64)
-        and batch_size <= 256
-        and torch.version.hip is None
-        and torch.cuda.get_device_capability(device) == (12, 0)
-    ):
-        return None
-    page_size, cache_blocks = _validate_main_cache_layout(
-        self, cache, block_table, batch_size, device
-    )
-    from rtp_llm.models_py.kernels.cuda.qsa.paged_validation import (
-        geometry_flags,
-        validate_geometry,
-    )
-
-    # Preserve int64 metadata until validation; narrowing first can hide overflow.
-    bases = sequence_bases.to(device=device, non_blocking=True)
-    lengths = query_lengths.to(device=device, non_blocking=True)
-    args = (
-        lengths,
-        bases,
-        block_table,
-        page_size,
-        cache_blocks,
-        bool(self.attn_inputs.is_s_padded),
-    )
-    if checks is None:
-        validate_geometry(*args)
-    else:
-        checks.add_flags(
-            geometry_flags(*args),
-            [
-                "qwen4_exp QSA paged sequence bases must be non-negative and query lengths positive",
-                None,
-                None,
-                None,
-                "qwen4_exp QSA paged main block table does not cover the visible KV",
-                "qwen4_exp QSA paged visible KV resolves to an unallocated or out-of-range physical block",
-            ],
-        )
-    return page_size
-
-
 def _validate_main_paged_geometry(
     self,
     cache: torch.Tensor,
@@ -178,7 +84,6 @@ def _validate_main_paged_geometry(
     query_lengths: torch.Tensor,
     device: torch.device,
     graph_capture: bool = False,
-    checks=None,
 ) -> int:
     """Validate all pages that a paged prefill/decode may observe."""
     batch_size = int(sequence_bases.numel())
@@ -189,56 +94,66 @@ def _validate_main_paged_geometry(
         or batch_size <= 0
     ):
         raise RuntimeError("qwen4_exp QSA paged sequence metadata has invalid geometry")
-    if graph_capture:
-        if sequence_bases.device.type != "cpu" or query_lengths.device.type != "cpu":
-            raise RuntimeError("qwen4_exp sparse GQA Graph requires host lengths")
-        bases, lengths = sequence_bases.tolist(), query_lengths.tolist()
-        if any(p < 0 or n <= 0 for p, n in zip(bases, lengths)):
-            raise RuntimeError(
-                "qwen4_exp QSA paged sequence bases must be non-negative and "
-                "query lengths positive"
-            )
-        page_size, _ = _validate_main_cache_layout(
-            self, cache, block_table, batch_size, device
-        )
-        if any(
-            p + n > int(block_table.shape[1]) * page_size
-            for p, n in zip(bases, lengths)
-        ):
-            raise RuntimeError(
-                "qwen4_exp QSA paged main block table does not cover the visible KV"
-            )
-        return page_size
-    for receipt in getattr(self, "_model_prefill_geometry", None) or ():
-        if receipt.matches(self, cache, block_table, sequence_bases, query_lengths):
-            return receipt.page_size
-    page_size = _try_validate_main_paged_geometry(
-        self,
-        cache,
-        block_table,
-        sequence_bases,
-        query_lengths,
-        device,
-        checks,
+    if graph_capture and (
+        sequence_bases.device.type != "cpu" or query_lengths.device.type != "cpu"
+    ):
+        raise RuntimeError("qwen4_exp sparse GQA Graph requires host lengths")
+    invalid_lengths = (
+        bool(torch.any(sequence_bases < 0).item())
+        or bool(torch.any(query_lengths <= 0).item())
+        if graph_capture
+        else False
     )
-    if page_size is not None:
-        return page_size
+    if not graph_capture:
+        sequence_bases = sequence_bases.to(
+            device=device, dtype=torch.int32, non_blocking=True
+        )
+        query_lengths = query_lengths.to(
+            device=device, dtype=torch.int32, non_blocking=True
+        )
+        invalid_lengths = bool(torch.any(sequence_bases < 0).item()) or bool(
+            torch.any(query_lengths <= 0).item()
+        )
+    if invalid_lengths:
+        raise RuntimeError(
+            "qwen4_exp QSA paged sequence bases must be non-negative and "
+            "query lengths positive"
+        )
+
     page_size, cache_blocks = _validate_main_cache_layout(
         self, cache, block_table, batch_size, device
     )
-    own_checks = checks is None
-    checks = DeviceChecks() if checks is None else checks
-    main_geometry_checks(
-        checks,
-        sequence_bases,
-        query_lengths,
-        block_table,
-        page_size,
-        cache_blocks,
-        bool(self.attn_inputs.is_s_padded),
-    )
-    if own_checks:
-        checks.verify()
+
+    if (
+        not graph_capture
+        and block_table.numel()
+        and int(block_table.max().item()) >= cache_blocks
+    ):
+        raise RuntimeError(
+            "qwen4_exp QSA paged main block table contains an "
+            "out-of-range physical block"
+        )
+    visible_ends = sequence_bases + query_lengths
+    required_columns = (visible_ends + page_size - 1) // page_size
+    if self.attn_inputs.is_s_padded and not graph_capture:
+        active = block_table.ne(0).any(dim=1).to(device=required_columns.device)
+        required_columns = torch.where(active, required_columns, 0)
+    if bool(torch.any(required_columns > int(block_table.shape[1])).item()):
+        raise RuntimeError(
+            "qwen4_exp QSA paged main block table does not cover the visible KV"
+        )
+    if graph_capture:
+        return page_size
+    columns = torch.arange(
+        int(block_table.shape[1]), device=block_table.device
+    ).unsqueeze(0)
+    required = columns < required_columns.unsqueeze(1)
+    invalid = required & ((block_table <= 0) | (block_table >= cache_blocks))
+    if bool(torch.any(invalid).item()):
+        raise RuntimeError(
+            "qwen4_exp QSA paged visible KV resolves to an unallocated "
+            "or out-of-range physical block"
+        )
     return page_size
 
 
@@ -263,32 +178,40 @@ def validate_qsa_before_side_write(
             )
         draft_graph_lanes(self.attn_inputs, int(hidden_states.shape[0]))
         return
-    from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
-        Qwen4ExpQSARuntimeContext,
+    qsa_runtime.validate_before_projection(
+        indexer=indexer,
+        token_count=int(hidden_states.shape[0]),
+        device=hidden_states.device,
     )
-
-    combined = not self.attn_inputs.is_cuda_graph and isinstance(
-        qsa_runtime, Qwen4ExpQSARuntimeContext
-    )
-    if not combined:
-        qsa_runtime.validate_before_projection(
-            indexer=indexer,
-            token_count=int(hidden_states.shape[0]),
-            device=hidden_states.device,
-        )
     is_incremental_prefill = self._is_prefix_reuse_prefill()
     if self.is_prefill and not self.is_target_verify and not is_incremental_prefill:
-        if combined:
-            qsa_runtime.validate_before_projection(
-                indexer=indexer,
-                token_count=int(hidden_states.shape[0]),
-                device=hidden_states.device,
-            )
         return
     if qsa_runtime.main_cache is None:
         raise RuntimeError("qwen4_exp QSA paged attention requires the main KV cache")
     if qsa_runtime.main_inputs is not self.attn_inputs:
-        raise RuntimeError("qwen4_exp QSA paged main attention inputs are inconsistent")
+
+        def _inputs_brief(inputs) -> str:
+            try:
+                prefixes = inputs.prefix_lengths
+                prefix_head = prefixes[:4].tolist() if prefixes is not None else None
+            except Exception as error:  # pragma: no cover - diagnostics only
+                prefix_head = f"unavailable({error!r})"
+            return (
+                f"id={id(inputs)}"
+                f" is_prefill={getattr(inputs, 'is_prefill', None)}"
+                f" is_target_verify={getattr(inputs, 'is_target_verify', None)}"
+                f" prefix_head={prefix_head}"
+            )
+
+        raise RuntimeError(
+            "qwen4_exp QSA paged main attention inputs are inconsistent"
+            f" [runtime {_inputs_brief(qsa_runtime.main_inputs)} |"
+            f" impl {_inputs_brief(self.attn_inputs)} |"
+            f" impl_flags prefill={self.is_prefill}"
+            f" verify={self.is_target_verify}"
+            f" mtp_draft={self._is_mtp_draft}"
+            f" incremental={is_incremental_prefill}]"
+        )
     if hidden_states.dtype != torch.bfloat16:
         raise RuntimeError(
             "qwen4_exp QSA paged attention currently requires BF16 hidden states"
@@ -302,59 +225,21 @@ def validate_qsa_before_side_write(
     else:
         sequence_bases = self.attn_inputs.sequence_lengths
         query_lengths = torch.ones_like(sequence_bases)
-    graph_capture = bool(
-        self.attn_inputs.is_cuda_graph
-        and (not self.is_prefill or self.is_target_verify)
-    )
-    checks = None
-    if combined:
-        # The model's side-writer preflight combines these read-only flags with
-        # its position/CU and pool checks, before the first cache mutation.
-        checks = DeviceChecks()
-        object.__setattr__(qsa_runtime, "_prewrite_checks", checks)
-    token_mismatch = query_lengths.sum() != int(hidden_states.shape[0])
-    if checks is not None and token_mismatch.is_cuda:
-        checks.add(
-            token_mismatch,
-            "qwen4_exp QSA paged token count does not match batch/query geometry",
-        )
-    elif bool(token_mismatch.item()):
+    if int(hidden_states.shape[0]) != int(query_lengths.sum().item()):
         raise RuntimeError(
             "qwen4_exp QSA paged token count does not match batch/query geometry"
         )
-    kwargs = {"checks": checks} if checks is not None else {}
-    page_size = self._validate_main_paged_geometry(
+    self._validate_main_paged_geometry(
         qsa_runtime.main_cache.kv_cache_base,
         self.attn_inputs.kv_cache_kernel_block_id_device,
         sequence_bases,
         query_lengths,
         hidden_states.device,
-        graph_capture=graph_capture,
-        **kwargs,
+        graph_capture=bool(
+            self.attn_inputs.is_cuda_graph
+            and (not self.is_prefill or self.is_target_verify)
+        ),
     )
-    if not graph_capture and not is_incremental_prefill:
-        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.prefill_preflight import (
-            MainGeometryReceipt,
-        )
-
-        self._qsa_main_geometry = (
-            MainGeometryReceipt(
-                self,
-                qsa_runtime.main_cache.kv_cache_base,
-                self.attn_inputs.kv_cache_kernel_block_id_device,
-                sequence_bases,
-                query_lengths,
-                page_size,
-            ),
-            checks,
-            int(hidden_states.shape[0]),
-        )
-    if combined:
-        qsa_runtime.validate_before_projection(
-            indexer=indexer,
-            token_count=int(hidden_states.shape[0]),
-            device=hidden_states.device,
-        )
 
     # Reuse this invocation's already validated side-plan producer in the main
     # Graph reader. It stays layer-local, is consumed once and is reset by the
@@ -366,20 +251,3 @@ def validate_qsa_before_side_write(
             int(hidden_states.shape[0]),
             plan.visible_lengths,
         )
-
-
-def consume_main_geometry(self, cache, table, bases, tokens):
-    """Reuse only a successfully accepted prewrite check, once in this call."""
-    pending = getattr(self, "_qsa_main_geometry", None)
-    self._qsa_main_geometry = None
-    if pending is None:
-        return False
-    receipt, checks, checked_tokens = pending
-    lengths = (
-        self.attn_inputs.input_lengths if self.is_target_verify else receipt.owners[-1]
-    )
-    return (
-        checked_tokens == tokens
-        and (checks is None or checks.verified)
-        and receipt.matches(self, cache, table, bases, lengths)
-    )

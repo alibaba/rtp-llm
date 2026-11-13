@@ -12,7 +12,6 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_STATE_TAG,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
-    _MAX_SCORE_WORKSPACE_BYTES,
     apply_partial_rope,
     build_qsa_rope,
     build_qsa_rope_from_logical_positions,
@@ -122,7 +121,6 @@ def write_prefill_indexer_cache(
         ratio == 4
         and int(self.indexer_state_cache.seq_size_per_block) == kv_tokens_per_block
         and raw_keys.is_cuda
-        and not self.main_inputs.is_s_padded
     )
     if not defer_cu:
         check_cu_partition()
@@ -137,7 +135,6 @@ def write_prefill_indexer_cache(
             f"{token_count} tokens"
         )
     positions = position_ids.reshape(token_count, index_factor)
-    position_state = self.positions(ratio)
     max_len = max(lengths)
     rotary_dim = int(rope_config.dim)
     rope_cos = torch.zeros(
@@ -182,20 +179,12 @@ def write_prefill_indexer_cache(
         rope_sin[request_idx, :seq_len].copy_(sin)
         offset = end
 
-    if position_state is not None:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
-
-        checks = DeviceChecks()
-        if position_state.add_checks(checks):
-            # Cold prefill can validate other tables using CPU mirrors. Only
-            # this new tag needs a device verdict, shared by all QSA layers.
-            checks.verify()
-        position_state.stage()
-
-    # The fused prefill writer requires allocated pages for every request.
-    # Fake/warmup batches use the transactional writer's row-level padding mask.
-    if defer_cu:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill import (
+    if (
+        ratio == 4
+        and int(self.indexer_state_cache.seq_size_per_block) == kv_tokens_per_block
+        and raw_keys.is_cuda
+    ):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill_triton import (
             write_zero_prefix_prefill,
         )
 
@@ -275,15 +264,15 @@ def select_draft_graph_tokens(
     raw_query: bool = False,
 ) -> torch.Tensor:
     """Capture a fixed-capacity draft plan; replay validates host mirrors."""
-    from rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score import (
-        qsa_paged_indexer_score,
-    )
     from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_prefill_graph import (
         draft_graph_lanes,
         draft_graph_rows,
     )
-    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
         write_draft_window_with_undo_,
+    )
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score import (
+        qsa_paged_indexer_score,
     )
 
     inputs = self.main_inputs
@@ -365,7 +354,7 @@ def select_draft_graph_tokens(
         batch_size=batch,
         device=q.device,
     )
-    from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_prepare import (
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_prepare_triton import (
         try_prepare,
         try_prepare_metadata,
     )
@@ -454,7 +443,9 @@ def select_draft_graph_tokens(
         max_ctx_len=int(kv_table.shape[1]) * 32,
         validate_block_table=False,
     )
-    from rtp_llm.models_py.kernels.cuda.qsa.cub_topk import try_cub_draft_qsa_tokens
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.cub_topk import (
+        try_cub_draft_qsa_tokens,
+    )
 
     if int(indexer.token_budget) == 2048:
         packed = try_cub_draft_qsa_tokens(
@@ -473,7 +464,7 @@ def select_draft_graph_tokens(
         validate_lengths=False,
         scores_are_masked=True,
     )
-    from rtp_llm.models_py.kernels.cuda.qsa.draft_layout_triton import (
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_layout_triton import (
         try_restore_selection,
     )
 
@@ -590,9 +581,6 @@ def _incremental_prefill_selection(
         raise RuntimeError(
             f"qwen4_exp QSA {label} paged scoring requires " "CUDA tensors"
         )
-    position_state = self.positions(int(plan.ratio))
-    if position_state is not None:
-        position_state.stage()
     triton_draft_window = (
         draft
         and max(plan.lengths) <= 4
@@ -602,7 +590,7 @@ def _incremental_prefill_selection(
         and int(plan.state_tokens_per_block) == 128
     )
     if triton_draft_window:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
             write_draft_window_with_undo_,
         )
 
@@ -655,12 +643,9 @@ def _incremental_prefill_selection(
         dtype=torch.float32,
         device=q.device,
     )
-    from rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score import (
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score import (
         qsa_paged_indexer_score,
     )
-
-    if not draft:
-        return _select_prefix_prefill_chunks(rotated_q, score_weights, plan)
 
     # The draft has at most one compression group's worth of rows per
     # request. Pad only that short dimension so all requests share one
@@ -702,60 +687,3 @@ def _incremental_prefill_selection(
     return selected.index_select(
         0, torch.tensor(valid_rows, dtype=torch.int64, device=q.device)
     )
-
-
-def _select_prefix_prefill_chunks(q, weights, plan):
-    """Bound score storage without padding the batch to its longest request."""
-    from rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score import (
-        qsa_paged_indexer_score,
-    )
-
-    columns = int(plan.max_ctx_len)
-    chunk_rows = max(1, _MAX_SCORE_WORKSPACE_BYTES // max(1, columns * 4))
-    # Preserve the MMA producer used by a long batch even for a short tail.
-    minimum_rows = min(16, chunk_rows) if max(plan.lengths) >= 16 else 1
-    output = torch.empty(
-        (q.shape[0], int(plan.token_budget) + int(plan.ratio) - 1),
-        dtype=torch.int32,
-        device=q.device,
-    )
-    offset = 0
-    for request, length in enumerate(plan.lengths):
-        table = plan.kv_table[request : request + 1]
-        for start in range(0, length, chunk_rows):
-            end = min(start + chunk_rows, length)
-            rows = end - start
-            queries = q[offset + start : offset + end]
-            row_weights = weights[offset + start : offset + end]
-            contexts = plan.compressed_lengths[request : request + 1, start:end]
-            if rows < minimum_rows:
-                padding = minimum_rows - rows
-                queries = torch.cat((queries, queries[-1:].expand(padding, -1, -1)))
-                row_weights = torch.cat(
-                    (row_weights, row_weights[-1:].expand(padding, -1))
-                )
-                contexts = torch.cat(
-                    (contexts, contexts.new_zeros((1, padding))), dim=1
-                )
-            logits = qsa_paged_indexer_score(
-                queries.unsqueeze(0),
-                row_weights,
-                plan.kv_pool.flatten(0, 1),
-                table,
-                contexts.contiguous(),
-                block_size=int(plan.kv_entries_per_block),
-                max_ctx_len=columns,
-                validate_block_table=False,
-            )
-            selected = select_qsa_paged_tokens(
-                logits[:rows],
-                plan.visible_lengths[request, start:end].to(torch.int32),
-                compress_ratio=int(plan.ratio),
-                token_budget=int(plan.token_budget),
-                validate_lengths=False,
-                scores_are_masked=True,
-            )
-            output[offset + start : offset + end].copy_(selected)
-            del logits, selected
-        offset += length
-    return output

@@ -85,6 +85,7 @@ public:
         params.max_seq_len              = 64;
         params.kernel_block_table_width = 1;
         params.num_tokens_per_bs        = static_cast<int>(num_tokens_per_request);
+        params.hc_mult                  = hc_mult;
         params.max_context_batch_size   = static_cast<size_t>(max_requests);
         params.hidden_size              = static_cast<size_t>(hidden_size);
         params.input_hidden_size        = static_cast<size_t>(hidden_size * hc_mult);
@@ -141,8 +142,7 @@ public:
                      std::vector<std::string> group_tags,
                      bool                     is_target_verify,
                      int64_t                  num_tokens_per_bs,
-                     int64_t                  position_id_len_factor,
-                     int64_t                  max_context_batch_size) {
+                     int64_t                  position_id_len_factor) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph            = true;
@@ -293,8 +293,7 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("group_tags")             = std::vector<std::string>{},
              py::arg("is_target_verify")       = false,
              py::arg("num_tokens_per_bs")      = 1,
-             py::arg("position_id_len_factor") = 0,
-             py::arg("max_context_batch_size") = 128)
+             py::arg("position_id_len_factor") = 0)
         .def("init_generation_prefill",
              &CudaGraphTestRunner::init_generation_prefill,
              py::arg("py_instance"),

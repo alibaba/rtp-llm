@@ -1,0 +1,11 @@
+diff --git a/atom/plugin/rtpllm/models/qwen3_5.py b/atom/plugin/rtpllm/models/qwen3_5.py
+--- a/atom/plugin/rtpllm/models/qwen3_5.py
++++ b/atom/plugin/rtpllm/models/qwen3_5.py
+@@ -105,6 +105,7 @@
+             fmha_config=fmha_config,
+             py_hw_kernel_config=py_hw_kernel_config,
+         )
++        self.device_resource_config = device_resource_config
+         self.model = atom_model
+         first_param = next(self.model.parameters(), None)
+         if first_param is None:

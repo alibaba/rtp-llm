@@ -21,6 +21,7 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
         hr._hipgraph_allgather_outputs.clear()
 
     def tearDown(self):
+        hr._aiter_capture_state.context = None
         hr._is_rocm_runtime = self._orig_is_rocm_runtime
         hr._rccl_comm = self._orig_rccl_comm
         hr._rccl_world_size = self._orig_rccl_world_size
@@ -288,6 +289,36 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
         self.assertIsNotNone(hr._rccl_comm)
         self.assertEqual(hr._rccl_comm.value, 456)
         self.assertEqual(hr._rccl_world_size, 2)
+
+    def test_aiter_custom_ar_context_follows_rtp_graph_capture(self):
+        context = unittest.mock.MagicMock()
+        with patch.object(hr, "_get_aiter_custom_ar_capture", return_value=context):
+            hr.enter_graph_capture_mode()
+            context.__enter__.assert_called_once_with()
+            self.assertIs(hr._aiter_capture_state.context, context)
+            with self.assertRaisesRegex(RuntimeError, "nested AITER"):
+                hr.enter_graph_capture_mode()
+            hr.exit_graph_capture_mode()
+        context.__exit__.assert_called_once_with(None, None, None)
+        self.assertIsNone(hr._aiter_capture_state.context)
+
+    def test_aiter_custom_ar_context_is_optional(self):
+        with patch.object(hr, "_get_aiter_custom_ar_capture", return_value=None):
+            hr.enter_graph_capture_mode()
+            hr.exit_graph_capture_mode()
+        self.assertIsNone(getattr(hr._aiter_capture_state, "context", None))
+
+    def test_aiter_custom_ar_context_uses_initialized_tp_group(self):
+        context = unittest.mock.MagicMock()
+        communicator = SimpleNamespace(disabled=False, capture=lambda: context)
+        group = SimpleNamespace(
+            device_communicator=SimpleNamespace(ca_comm=communicator)
+        )
+        module = SimpleNamespace(_TP=group)
+        with patch.dict(sys.modules, {"aiter.dist.parallel_state": module}):
+            self.assertIs(hr._get_aiter_custom_ar_capture(), context)
+            communicator.disabled = True
+            self.assertIsNone(hr._get_aiter_custom_ar_capture())
 
     def test_non_tp_group_does_not_use_rccl_during_capture(self):
         """all_reduce on a non-TP group must NOT route through RCCL even during capture."""

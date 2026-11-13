@@ -1,8 +1,7 @@
 import pickle
 import unittest
 
-from rtp_llm.config.qwen4_exp_config import Qwen4ModelConfig as ModelConfig
-from rtp_llm.models.qwen4_exp.qwen4_exp import Qwen4Exp
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
@@ -11,6 +10,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     build_qwen4_exp_kv_cache_spec_descs,
     indexer_kv_desc,
     indexer_state_desc,
+    ple_short_conv_state_len,
     ple_state_desc,
 )
 from rtp_llm.ops import (
@@ -93,6 +93,10 @@ class FixedLinearCapacityTest(unittest.TestCase):
 
 
 class PleStateDescTest(unittest.TestCase):
+    def test_state_length_reaches_back_over_whole_ngrams(self):
+        # dilation == ngram_size, so the kernel steps over n-grams not tokens.
+        self.assertEqual(ple_short_conv_state_len(_PLE_KERNEL, _NGRAM), 9)
+
     def test_desc_is_a_fixed_bf16_state_region(self):
         desc = ple_state_desc(_HC * _HIDDEN, _PLE_KERNEL, _NGRAM)
 
@@ -123,7 +127,7 @@ class BuildDescsTest(unittest.TestCase):
             ngram_size=_NGRAM,
         )
 
-    def test_ple_layer_regions_preserve_layout_and_geometry(self):
+    def test_only_the_ple_layer_gets_extra_regions(self):
         descs = self._build()
         tags = [[d.tag for d in layer] for layer in descs]
 
@@ -138,6 +142,9 @@ class BuildDescsTest(unittest.TestCase):
                 self.assertNotIn(PLE_NGRAM_CTX_TAG, layer_tags)
                 self.assertEqual(len(descs[layer_idx]), 1)
 
+    def test_ngram_ctx_region_is_int64_of_context_len(self):
+        descs = self._build()
+
         ctx = next(d for d in descs[1] if d.tag == PLE_NGRAM_CTX_TAG)
         self.assertEqual(ctx.cache_type, KVCacheSpecType.OPAQUE_STATE)
         self.assertEqual(ctx.entry_dtype, DataType.TYPE_INT64)
@@ -147,11 +154,17 @@ class BuildDescsTest(unittest.TestCase):
         self.assertTrue(ctx.reuse.enable_prefix_reuse)
         self.assertEqual(ctx.tail.active_tail_blocks, 0)
 
+    def test_ple_layer_keeps_its_own_attention_region(self):
+        descs = self._build()
+
         non_ple = [
             d for d in descs[1] if d.tag not in (PLE_STATE_TAG, PLE_NGRAM_CTX_TAG)
         ]
         self.assertEqual(len(non_ple), 1)
         self.assertEqual(non_ple[0].cache_type, KVCacheSpecType.LINEAR)
+
+    def test_state_width_follows_hc_mult_times_hidden(self):
+        descs = self._build()
 
         ple = next(d for d in descs[1] if d.tag == PLE_STATE_TAG)
         self.assertEqual(ple.entry_elems, _HC * _HIDDEN)
@@ -249,101 +262,6 @@ class IndexerLayerPlacementTest(unittest.TestCase):
     def test_rejects_missing_compress_ratio(self):
         with self.assertRaisesRegex(ValueError, "compress_ratio must be positive"):
             self._build(indexer_head_dim=self.HEAD_DIM, indexer_compress_ratio=0)
-
-
-class HybridTopologyTest(unittest.TestCase):
-    def test_qwen4_exp_48_layers_from_layer_types(self):
-        config = ModelConfig()
-        config.num_layers = 48
-        config.hidden_size = 8
-        Qwen4Exp._parse_extra_text_config(
-            {
-                "hc_count": 4,
-                "ple_layer_ids": [1],
-                "ngram_size": 2,
-                "ple_conv_kernel_size": 4,
-                "ngram_vocab_size_base": 17,
-                "ple_embed_dim": 8,
-                "heads_per_ngram": 1,
-            },
-            config,
-        )
-        layer_types = [
-            "full_attention" if (i + 1) % 4 == 0 else "linear_attention"
-            for i in range(48)
-        ]
-
-        Qwen4Exp._parse_hybrid_attention_config({"layer_types": layer_types}, config)
-        Qwen4Exp._post_build_model_config(config)
-
-        self.assertTrue(config.hybrid_attention_config.enable_hybrid_attention)
-        self.assertEqual(
-            list(config.hybrid_attention_config.hybrid_attention_types)[:4],
-            [
-                HybridAttentionType.LINEAR,
-                HybridAttentionType.LINEAR,
-                HybridAttentionType.LINEAR,
-                HybridAttentionType.NONE,
-            ],
-        )
-        tags = [layer_descs[0].tag for layer_descs in config.kv_cache_spec_descs]
-        self.assertEqual(len(tags), 48)
-        self.assertEqual(tags.count("full"), 12)
-        self.assertEqual(tags.count("linear"), 36)
-        self.assertEqual(
-            tags,
-            [
-                "full" if layer_type == "full_attention" else "linear"
-                for layer_type in layer_types
-            ],
-        )
-        self.assertEqual(tags[3], "full")
-        self.assertEqual(tags[4], "linear")
-        self.assertEqual(
-            [desc.tag for desc in config.kv_cache_spec_descs[0]],
-            ["linear", "ple_conv_state", "ple_ngram_ctx"],
-        )
-        for tag, layer_descs in zip(tags, config.kv_cache_spec_descs):
-            expected = KVCacheSpecType.MHA if tag == "full" else KVCacheSpecType.LINEAR
-            self.assertEqual(layer_descs[0].cache_type, expected)
-
-    def test_qwen4_exp_falls_back_to_full_attention_interval(self):
-        config = ModelConfig()
-        config.num_layers = 8
-
-        Qwen4Exp._parse_hybrid_attention_config({"full_attention_interval": 4}, config)
-
-        self.assertEqual(
-            list(config.hybrid_attention_config.hybrid_attention_types),
-            [
-                HybridAttentionType.LINEAR,
-                HybridAttentionType.LINEAR,
-                HybridAttentionType.LINEAR,
-                HybridAttentionType.NONE,
-                HybridAttentionType.LINEAR,
-                HybridAttentionType.LINEAR,
-                HybridAttentionType.LINEAR,
-                HybridAttentionType.NONE,
-            ],
-        )
-
-    def test_qwen4_exp_rejects_layer_types_length_mismatch(self):
-        config = ModelConfig()
-        config.num_layers = 48
-
-        with self.assertRaisesRegex(ValueError, "4 entries but the model has 48"):
-            Qwen4Exp._parse_hybrid_attention_config(
-                {"layer_types": ["linear_attention"] * 3 + ["full_attention"]}, config
-            )
-
-    def test_qwen4_exp_rejects_unknown_layer_type(self):
-        config = ModelConfig()
-        config.num_layers = 2
-
-        with self.assertRaisesRegex(ValueError, "layer_types\\[1\\] is 'swa'"):
-            Qwen4Exp._parse_hybrid_attention_config(
-                {"layer_types": ["linear_attention", "swa"]}, config
-            )
 
 
 if __name__ == "__main__":

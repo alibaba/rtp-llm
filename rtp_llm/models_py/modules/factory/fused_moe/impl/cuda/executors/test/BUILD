@@ -345,12 +345,3 @@ py_test(
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
 )
-
-models_py_test(
-    name = "small_moe_gemv_test",
-    src = "small_moe_gemv_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        "//rtp_llm/models_py/triton_kernels/moe/test:small_moe_test_support",
-    ],
-)

@@ -4,7 +4,29 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from rtp_llm.models_py.kernels.cuda.fp8_input_quant import _quantize_projection_input
+from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
+
+
+def dequantize_parameter(weights, name):
+    value = weights[name]
+    scale = weights.get(name + FP8_STORAGE_SCALE_SUFFIX)
+    if scale is None:
+        return value
+    return (value.float() * scale).to(torch.bfloat16)
+
+
+def _quantize_projection_input(rows, *, role, scale=None, output=None):
+    if scale is None and role in ("DECODE", "PDFUSION"):
+        from rtp_llm.models_py.triton_kernels.common.fp8_small_quant import (
+            try_small_fp8_quant,
+        )
+
+        result = try_small_fp8_quant(rows, output=output)
+        if result is not None:
+            return result
+    from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quant
+
+    return scaled_fp8_per_tensor_quant(rows, scale=scale, output=output)
 
 
 class Fp8Linear(nn.Module):
@@ -116,13 +138,15 @@ class Fp8Linear(nn.Module):
             and rows.shape[0] <= 4
             and tuple(self.weight.shape) == (10240, 320)
         ):
-            from rtp_llm.models_py.triton_kernels.gated_residual.fp8_gemv import (
-                try_fp8_hc_gemv,
+            from rtp_llm.models_py.triton_kernels.common.fp8_gemv import (
+                fp8_hc_gemv,
+                is_supported,
             )
 
-            out = try_fp8_hc_gemv(rows, self.weight, self.scale)
-            if out is not None:
-                out = out.reshape(*x.shape[:-1], self.weight.shape[0])
+            if is_supported(rows, self.weight, self.scale):
+                out = fp8_hc_gemv(rows, self.weight, self.scale).reshape(
+                    *x.shape[:-1], self.weight.shape[0]
+                )
                 return out if self.bias is None else (out + self.bias).to(x.dtype)
         padding = (-rows.shape[0]) % 16
         padded_output = None

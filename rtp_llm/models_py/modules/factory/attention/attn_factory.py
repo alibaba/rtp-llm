@@ -311,7 +311,9 @@ def get_fmha_impl(
     raise Exception("can not find mha type")
 
 
-def _select_attention_impl_key(attn_configs: AttentionConfigs) -> str:
+def _select_attention_impl_key(
+    attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+) -> str:
     """Route to the attention implementation family.
 
     * ``mla`` -- MLA models (DSv4, GLM5.3, ...).
@@ -356,56 +358,7 @@ class AttnImplFactory(object):
             parallelism_config.get_attn_tp_size()
         )
         attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
-        if (
-            decode_cascade_max_requests > 0
-            and not attn_inputs.is_prefill
-            and not attn_configs.use_mla
-            and not attn_inputs.headwise_config
-        ):
-            import torch
-
-            attn_inputs.is_cuda_graph = is_cuda_graph
-            if torch.version.hip is not None and torch.cuda.is_available():
-                from rtp_llm.models_py.modules.factory.attention.rocm_impl.beam_search_cascade import (
-                    AiterCascadeDecodeImpl,
-                )
-
-                if AiterCascadeDecodeImpl.support(
-                    attn_configs, attn_inputs
-                ) and AiterCascadeDecodeImpl.support_parallelism_config(
-                    parallelism_config
-                ):
-                    return AiterCascadeDecodeImpl(
-                        attn_configs,
-                        attn_inputs,
-                        parallelism_config,
-                        decode_cascade_max_requests,
-                        model_config.max_seq_len,
-                        fmha_config=fmha_config,
-                    )
-            elif torch.cuda.is_available() and not (
-                fmha_config and fmha_config.disable_flashinfer_native
-            ):
-                from rtp_llm.models_py.modules.factory.attention.cuda_impl.beam_search_cascade import (
-                    PyFlashinferCascadeDecodeImpl,
-                )
-
-                if PyFlashinferCascadeDecodeImpl.support(
-                    attn_configs, attn_inputs
-                ) and PyFlashinferCascadeDecodeImpl.support_parallelism_config(
-                    parallelism_config
-                ):
-                    return PyFlashinferCascadeDecodeImpl(
-                        attn_configs,
-                        attn_inputs,
-                        parallelism_config,
-                        decode_cascade_max_requests,
-                        model_config.max_seq_len,
-                        # Quantized models amplify rounded partial states.
-                        # Preserve shared-prefix execution with FP32 states.
-                        use_fp32_partials=model_config.quant_config is not None,
-                    )
-        key_str = _select_attention_impl_key(attn_configs)
+        key_str = _select_attention_impl_key(attn_configs, attn_inputs)
         fmha_impl_method = cls.get_fmha_impl_method(key_str)
         instance = fmha_impl_method(
             attn_configs,

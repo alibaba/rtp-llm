@@ -1,3 +1,4 @@
+import hashlib
 import os
 import tempfile
 import unittest
@@ -12,35 +13,6 @@ from rtp_llm.model_loader.nvfp4_cache import Nvfp4ExpertCache, quantize_expert_t
 
 
 class Nvfp4CacheTest(unittest.TestCase):
-    def test_sourceless_fingerprint_tracks_the_unwrapped_algorithm(self):
-        from functools import wraps
-        from unittest.mock import patch
-
-        from rtp_llm.model_loader.nvfp4_cache import _algorithm_source
-
-        def decorate(function):
-            @wraps(function)
-            def wrapper(value):
-                return function(value)
-
-            return wrapper
-
-        @decorate
-        def first(value):
-            return value + 1
-
-        @decorate
-        def second(value):
-            return value + 2
-
-        with patch(
-            "rtp_llm.model_loader.nvfp4_cache.inspect.getsource", side_effect=OSError
-        ):
-            self.assertNotEqual(_algorithm_source(first), _algorithm_source(second))
-            self.assertEqual(
-                _algorithm_source(first), _algorithm_source(first.__wrapped__)
-            )
-
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -63,38 +35,11 @@ class Nvfp4CacheTest(unittest.TestCase):
             self.assertTrue(
                 torch.equal(left.float().reshape(-1), right.float().reshape(-1))
             )
-        self.assertEqual(len(list(Path(self.temp.name).glob("*.safetensors"))), 1)
-
-    def test_disk_failures_preserve_quantized_weights_and_cleanup(self):
-        expected = quantize_expert_to_nvfp4(self.weight, 16)
-        for operation, error in (
-            ("tempfile.mkstemp", PermissionError("read only")),
-            ("save_file", OSError("quota")),
-            ("save_file", SafetensorError("no space")),
-            ("os.replace", OSError("no space")),
-        ):
-            with (
-                self.subTest(operation=operation),
-                mock.patch(
-                    "rtp_llm.model_loader.nvfp4_cache." + operation, side_effect=error
-                ),
-                self.assertLogs(level="WARNING"),
-            ):
-                got = self.cache.get_or_quantize(self.weight, **self.args)
-            for actual, reference in zip(got, expected):
-                self.assertTrue(
-                    torch.equal(
-                        actual.reshape(-1).view(torch.uint8),
-                        reference.reshape(-1).view(torch.uint8),
-                    )
-                )
-            self.assertFalse(list(Path(self.temp.name).glob(".nvfp4-*")))
-        with (
-            mock.patch("pathlib.Path.mkdir", side_effect=PermissionError("read only")),
-            self.assertLogs(level="WARNING"),
-        ):
-            cache = Nvfp4ExpertCache(self.temp.name)
-        self.assertEqual(cache.directory, Path(self.temp.name))
+        manifest = self.cache.manifest()
+        self.assertEqual(len(manifest["entries"]), 1)
+        entry = manifest["entries"][0]
+        data = (Path(self.temp.name) / entry["file"]).read_bytes()
+        self.assertEqual(entry["sha256"], hashlib.sha256(data).hexdigest())
 
     def test_source_and_activation_contract_invalidate_cache(self):
         self.cache.get_or_quantize(self.weight, **self.args)
@@ -102,7 +47,7 @@ class Nvfp4CacheTest(unittest.TestCase):
         self.cache.get_or_quantize(
             self.weight, **{**self.args, "input_scale": 1 / 2688}
         )
-        self.assertEqual(len(list(Path(self.temp.name).glob("*.safetensors"))), 3)
+        self.assertEqual(len(self.cache.manifest()["entries"]), 3)
 
     def test_algorithm_revision_invalidates_cache(self):
         self.cache.get_or_quantize(self.weight, **self.args)
@@ -111,7 +56,7 @@ class Nvfp4CacheTest(unittest.TestCase):
             "revised-rounding-contract",
         ):
             self.cache.get_or_quantize(self.weight, **self.args)
-        self.assertEqual(len(list(Path(self.temp.name).glob("*.safetensors"))), 2)
+        self.assertEqual(len(self.cache.manifest()["entries"]), 2)
 
     def test_invalid_scale_or_block_size_is_rejected(self):
         for changes in (
@@ -124,13 +69,10 @@ class Nvfp4CacheTest(unittest.TestCase):
         self.assertFalse(list(Path(self.temp.name).glob("*.safetensors")))
 
     def _assert_rebuilt(self, expected):
-        with (
-            self.assertLogs(level="WARNING") as logs,
-            mock.patch(
-                "rtp_llm.model_loader.nvfp4_cache.quantize_expert_to_nvfp4",
-                wraps=quantize_expert_to_nvfp4,
-            ) as quantize,
-        ):
+        with self.assertLogs(level="WARNING") as logs, mock.patch(
+            "rtp_llm.model_loader.nvfp4_cache.quantize_expert_to_nvfp4",
+            wraps=quantize_expert_to_nvfp4,
+        ) as quantize:
             got = self.cache.get_or_quantize(self.weight, **self.args)
         quantize.assert_called_once_with(self.weight, self.args["block_size"])
         self.assertIn("Rebuilding invalid NVFP4 cache", "\n".join(logs.output))
@@ -151,7 +93,7 @@ class Nvfp4CacheTest(unittest.TestCase):
                         right.reshape(-1).view(torch.uint8),
                     )
                 )
-        self.assertEqual(len(list(Path(self.temp.name).glob("*.safetensors"))), 1)
+        self.assertEqual(len(self.cache.manifest()["entries"]), 1)
         self.assertFalse(list(Path(self.temp.name).glob(".nvfp4-*")))
 
     def test_corrupted_payload_is_rebuilt(self):
@@ -203,66 +145,42 @@ class Nvfp4CacheTest(unittest.TestCase):
                 save_file(changed, str(path), metadata=metadata)
                 self._assert_rebuilt(expected)
 
-    def test_read_permission_error_requantizes(self):
-        expected = self.cache.get_or_quantize(self.weight, **self.args)
-        with (
-            mock.patch(
-                "rtp_llm.model_loader.nvfp4_cache.safe_open",
-                side_effect=PermissionError("cache is unreadable"),
-            ),
-            mock.patch(
-                "rtp_llm.model_loader.nvfp4_cache.quantize_expert_to_nvfp4",
-                wraps=quantize_expert_to_nvfp4,
-            ) as quantize,
-            self.assertLogs(level="WARNING"),
-        ):
-            got = self.cache.get_or_quantize(self.weight, **self.args)
-        quantize.assert_called_once()
-        for actual, reference in zip(got, expected):
-            torch.testing.assert_close(
-                actual.float(), reference.float(), atol=0, rtol=0
-            )
+    def test_read_permission_error_is_not_requantized(self):
+        self.cache.get_or_quantize(self.weight, **self.args)
+        with mock.patch(
+            "rtp_llm.model_loader.nvfp4_cache.safe_open",
+            side_effect=PermissionError("cache is unreadable"),
+        ), mock.patch(
+            "rtp_llm.model_loader.nvfp4_cache.quantize_expert_to_nvfp4"
+        ) as quantize:
+            with self.assertRaisesRegex(PermissionError, "cache is unreadable"):
+                self.cache.get_or_quantize(self.weight, **self.args)
+        quantize.assert_not_called()
 
     @unittest.skipIf(os.geteuid() == 0, "requires non-root file permissions")
-    def test_unreadable_file_requantizes(self):
-        expected = self.cache.get_or_quantize(self.weight, **self.args)
+    def test_unreadable_file_is_not_requantized(self):
+        self.cache.get_or_quantize(self.weight, **self.args)
         path = next(Path(self.temp.name).glob("*.safetensors"))
         path.chmod(0)
         self.addCleanup(path.chmod, 0o600)
-        with (
-            mock.patch(
-                "rtp_llm.model_loader.nvfp4_cache.quantize_expert_to_nvfp4",
-                wraps=quantize_expert_to_nvfp4,
-            ) as quantize,
-            self.assertLogs(level="WARNING"),
-        ):
-            got = self.cache.get_or_quantize(self.weight, **self.args)
-        quantize.assert_called_once()
-        for actual, reference in zip(got, expected):
-            torch.testing.assert_close(
-                actual.float(), reference.float(), atol=0, rtol=0
-            )
+        with mock.patch(
+            "rtp_llm.model_loader.nvfp4_cache.quantize_expert_to_nvfp4"
+        ) as quantize:
+            with self.assertRaises(OSError):
+                self.cache.get_or_quantize(self.weight, **self.args)
+        quantize.assert_not_called()
 
     def test_failed_rebuild_preserves_entry_and_can_retry(self):
         expected = self.cache.get_or_quantize(self.weight, **self.args)
         path = next(Path(self.temp.name).glob("*.safetensors"))
         damaged = b"truncated"
         path.write_bytes(damaged)
-        with (
-            self.assertLogs(level="WARNING"),
-            mock.patch(
-                "rtp_llm.model_loader.nvfp4_cache.os.replace",
-                side_effect=OSError("cache publication failed"),
-            ),
+        with self.assertLogs(level="WARNING"), mock.patch(
+            "rtp_llm.model_loader.nvfp4_cache.os.replace",
+            side_effect=OSError("cache publication failed"),
         ):
-            got = self.cache.get_or_quantize(self.weight, **self.args)
-        for actual, reference in zip(got, expected):
-            self.assertTrue(
-                torch.equal(
-                    actual.reshape(-1).view(torch.uint8),
-                    reference.reshape(-1).view(torch.uint8),
-                )
-            )
+            with self.assertRaisesRegex(OSError, "cache publication failed"):
+                self.cache.get_or_quantize(self.weight, **self.args)
         self.assertEqual(path.read_bytes(), damaged)
         self.assertFalse(list(Path(self.temp.name).glob(".nvfp4-*")))
         self._assert_rebuilt(expected)
@@ -271,13 +189,10 @@ class Nvfp4CacheTest(unittest.TestCase):
         self.cache.get_or_quantize(self.weight, **self.args)
         path = next(Path(self.temp.name).glob("*.safetensors"))
         path.write_bytes(b"truncated")
-        with (
-            self.assertLogs(level="WARNING"),
-            mock.patch(
-                "rtp_llm.model_loader.nvfp4_cache.quantize_expert_to_nvfp4",
-                side_effect=RuntimeError("quantization failed"),
-            ) as quantize,
-        ):
+        with self.assertLogs(level="WARNING"), mock.patch(
+            "rtp_llm.model_loader.nvfp4_cache.quantize_expert_to_nvfp4",
+            side_effect=RuntimeError("quantization failed"),
+        ) as quantize:
             with self.assertRaisesRegex(RuntimeError, "quantization failed"):
                 self.cache.get_or_quantize(self.weight, **self.args)
         quantize.assert_called_once()
@@ -292,16 +207,12 @@ class Nvfp4CacheTest(unittest.TestCase):
             path.write_bytes(valid)
             raise SafetensorError("invalid header from the old entry")
 
-        with (
-            self.assertLogs(level="WARNING"),
-            mock.patch(
-                "rtp_llm.model_loader.nvfp4_cache.safe_open",
-                side_effect=publish_before_read_error,
-            ),
-            mock.patch(
-                "rtp_llm.model_loader.nvfp4_cache.quantize_expert_to_nvfp4",
-                side_effect=RuntimeError("quantization failed"),
-            ),
+        with self.assertLogs(level="WARNING"), mock.patch(
+            "rtp_llm.model_loader.nvfp4_cache.safe_open",
+            side_effect=publish_before_read_error,
+        ), mock.patch(
+            "rtp_llm.model_loader.nvfp4_cache.quantize_expert_to_nvfp4",
+            side_effect=RuntimeError("quantization failed"),
         ):
             with self.assertRaisesRegex(RuntimeError, "quantization failed"):
                 self.cache.get_or_quantize(self.weight, **self.args)

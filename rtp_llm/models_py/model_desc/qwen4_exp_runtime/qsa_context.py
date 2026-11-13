@@ -1,11 +1,12 @@
-"""Qwen4 QSA side-cache runtime.
+"""Restricted Qwen4 QSA side-cache runtime.
 
 This module wires pure prefill, page-aligned prefix reuse, MTP-draft incremental prefill,
 ordinary single-token decode and bounded speculative target verification into
-the independent ``indexer_kv`` and ``indexer_state`` pools. Multimodal main
-models also retain exact MRoPE coordinates in ``indexer_rope_positions`` so
-compression groups crossing prefill/decode boundaries use their first token's
-coordinates. Logical cache rows remain independent of those coordinates.
+the independent ``indexer_kv`` and ``indexer_state`` pools. Decode is
+deliberately limited to text-only MRoPE, whose three current position axes all
+equal ``sequence_lengths``.  The side state stores raw keys but no historical
+MRoPE positions, so accepting a multimodal/non-linear position stream would
+make a compressed block that crosses the prefill/decode boundary incorrect.
 
 Target verification may overwrite the uncommitted physical tail without an
 accepted-length callback only when its width is at most one compression group.
@@ -24,7 +25,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
-
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
@@ -34,7 +34,6 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
     restore_indexer_cache,
     write_indexer_cache,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 
 from . import qsa_decode, qsa_geometry, qsa_prefill, qsa_target
@@ -51,52 +50,17 @@ class Qwen4ExpQSARuntimeContext:
     indexer_state_cache: LayerKVCache
     indexer_state_inputs: PyAttentionInputs
     is_mtp_draft: bool = False
-    metadata_cache: dict | None = field(default=None, repr=False, compare=False)
-    position_state_cache: LayerKVCache | None = None
-    position_state_inputs: PyAttentionInputs | None = None
-    _position_state: Any = field(default=None, init=False, repr=False, compare=False)
     _side_cache_undo: IndexerCacheUndo | None = field(
         default=None, init=False, repr=False, compare=False
     )
     _target_verify_plan: TargetVerifyPlan | None = field(
         default=None, init=False, repr=False, compare=False
     )
-    _prewrite_checks: DeviceChecks | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
-
-    def take_prewrite_checks(self) -> DeviceChecks:
-        """Consume flags once; the side writer verifies them before any mutation."""
-        checks = self._prewrite_checks
-        object.__setattr__(self, "_prewrite_checks", None)
-        return DeviceChecks() if checks is None else checks
-
-    def host_values(self, tensor: torch.Tensor) -> list[int]:
-        # This cache belongs to one forward invocation, never a graph buffer's
-        # address across steps. Keep the tensor owner alongside the host values.
-        cache = self.metadata_cache
-        key = (
-            tensor.data_ptr(),
-            tensor.shape,
-            tensor.stride(),
-            tensor.dtype,
-            tensor.device,
-        )
-        if cache is None:
-            return tensor.tolist()
-        if key not in cache:
-            cache[key] = (tensor, tensor.tolist())
-        return cache[key][1]
 
     def _write_indexer_cache_transactional(self, *args, **kwargs) -> dict:
         if self._side_cache_undo is not None:
             raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
-        result = write_indexer_cache(
-            *args,
-            **kwargs,
-            capture_undo=True,
-            is_s_padded=bool(self.main_inputs.is_s_padded),
-        )
+        result = write_indexer_cache(*args, **kwargs, capture_undo=True)
         undo = result.pop("undo", None)
         if not isinstance(undo, IndexerCacheUndo):
             raise RuntimeError("qwen4_exp QSA writer did not return an undo record")
@@ -105,8 +69,6 @@ class Qwen4ExpQSARuntimeContext:
 
     def rollback_side_cache(self) -> None:
         """Restore one failed QSA side write and make rollback idempotent."""
-        if self._position_state is not None:
-            self._position_state.rollback()
         undo = self._side_cache_undo
         if undo is None:
             return
@@ -124,17 +86,6 @@ class Qwen4ExpQSARuntimeContext:
                 "qwen4_exp QSA has no active side-cache transaction to finalize"
             )
         object.__setattr__(self, "_side_cache_undo", None)
-
-    def positions(self, ratio, checks=None):
-        if self.position_state_cache is None:
-            return None
-        if self._position_state is None:
-            from .qsa_position_state import QSAPositionState
-
-            object.__setattr__(self, "_position_state", QSAPositionState(self, ratio))
-        if checks is not None:
-            self._position_state.add_checks(checks)
-        return self._position_state
 
     def _target_verify_enabled(self) -> bool:
         all_inputs = (
@@ -198,7 +149,7 @@ class Qwen4ExpQSARuntimeContext:
                 and not allow_draft_incremental
                 and not allow_prefix_reuse
                 and prefixes.numel()
-                and any(value != 0 for value in self.host_values(prefixes))
+                and bool(torch.any(prefixes != 0).item())
             ):
                 raise RuntimeError("qwen4_exp QSA prefix reuse is not implemented")
 
@@ -225,18 +176,14 @@ class Qwen4ExpQSARuntimeContext:
         ):
             main_value = getattr(self.main_inputs, name, None)
             if any(
-                not _same_tensor_metadata(
-                    main_value, getattr(inputs, name, None), cache=self.metadata_cache
-                )
+                not _same_tensor_metadata(main_value, getattr(inputs, name, None))
                 for inputs in all_inputs[1:]
             ):
                 raise RuntimeError(
                     f"qwen4_exp QSA cache-region metadata {name!r} is inconsistent"
                 )
 
-        lengths = [
-            int(value) for value in self.host_values(self.main_inputs.input_lengths)
-        ]
+        lengths = [int(value) for value in self.main_inputs.input_lengths.tolist()]
         minimum = 0 if self.main_inputs.is_s_padded and not expect_prefill else 1
         if not lengths or any(length < minimum for length in lengths):
             raise RuntimeError(f"qwen4_exp QSA has invalid input_lengths={lengths}")

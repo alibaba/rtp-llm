@@ -274,6 +274,17 @@ cc_test(
 )
 
 cc_test(
+    name = "linear_tp_cache_layout_test",
+    srcs = ["LinearTpCacheLayoutTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache:tp_cache_transfer_layout",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "registered_cache_staging_test",
     srcs = ["RegisteredCacheStagingTest.cc"],
     copts = test_copts,

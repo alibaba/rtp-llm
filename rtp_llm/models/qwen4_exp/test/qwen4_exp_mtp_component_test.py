@@ -8,16 +8,14 @@ from unittest import mock
 import torch
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
-from rtp_llm.config.qwen4_exp_config import Qwen4ModelConfig
+from rtp_llm.model_factory_register import _model_factory, get_lazy_model_module_path
 from rtp_llm.model_loader.weight_module import CompositeWeight
-from rtp_llm.models.qwen3_next.qwen3_next import Qwen35Moe
 from rtp_llm.models.qwen4_exp.qwen4_exp import Qwen4Exp
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
 )
 from rtp_llm.models.qwen4_exp.qwen4_exp_mtp import Qwen4ExpMTP, Qwen4ExpMTPWeight
-from rtp_llm.models.qwen4_exp.test.config_fixture import qwen4_config
 from rtp_llm.ops import (
     HWKernelConfig,
     HybridAttentionType,
@@ -101,35 +99,23 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
             kv_cache_config=KVCacheConfig(),
         )
 
-    def test_target_and_draft_read_root_json_once_and_keep_configs_independent(self):
-        configs = []
-        for model in (Qwen4Exp, Qwen4ExpMTP):
-            with (
-                self.subTest(model=model.__name__),
-                mock.patch("json.loads", wraps=json.loads) as parse,
-            ):
-                configs.append(model.create_config(self._temp_dir.name))
-                self.assertEqual(parse.call_count, 1)
-        target, draft = configs
-        self.assertIs(type(target), Qwen4ModelConfig)
-        self.assertIs(type(draft), Qwen4ModelConfig)
-        self.assertEqual((target.num_layers, draft.num_layers), (48, 1))
-        self.assertIsNot(target.attn_config, draft.attn_config)
-        target.attn_config.rope_config.base = 123
-        self.assertEqual(draft.attn_config.rope_config.base, 10_000_000)
-
-    def test_shared_load_rejects_disabled_qsa_before_weight_loading(self):
+    def test_component_is_registered_and_qsa_load_reaches_parent(self):
+        self.assertIs(_model_factory["qwen4_exp_mtp"], Qwen4ExpMTP)
+        self.assertEqual(
+            get_lazy_model_module_path("qwen4_exp_mtp"),
+            "rtp_llm.models.qwen4_exp.qwen4_exp_mtp",
+        )
         model = Qwen4ExpMTP.__new__(Qwen4ExpMTP)
         model.model_config = self.config
-        model.model_config._qwen4_indexer_head_dim = 0
-        model.parallelism_config = ParallelismConfig()
-        with (
-            mock.patch.object(Qwen35Moe, "load") as parent_load,
-            mock.patch("torch.version.hip", None),
-        ):
-            with self.assertRaisesRegex(
-                RuntimeError, "complete checkpoint PLE/QSA geometry"
-            ):
+        with mock.patch.object(Qwen4Exp, "load") as parent_load:
+            model.load(skip_python_model=True)
+        parent_load.assert_called_once_with(skip_python_model=True)
+
+    def test_load_rejects_disabled_qsa_before_parent(self):
+        model = Qwen4ExpMTP.__new__(Qwen4ExpMTP)
+        model.model_config = SimpleNamespace(enable_qwen4_qsa=False)
+        with mock.patch.object(Qwen4Exp, "load") as parent_load:
+            with self.assertRaisesRegex(RuntimeError, "dense draft fallback"):
                 model.load()
         parent_load.assert_not_called()
 
@@ -139,7 +125,7 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
         self.assertEqual(self.config.moe_layer_index, [0])
         self.assertTrue(self.config.is_mtp)
         self.assertEqual(
-            self.config.getMtpInputHiddenSize(),
+            self.config.mtp_input_hidden_size,
             self.config.hc_mult * self.config.hidden_size,
         )
         self.assertEqual(
@@ -251,32 +237,6 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "output-vocab pruning"):
             Qwen4ExpMTP.speculative_weight_alias_names(target, draft)
 
-    def test_source_bf16_vocabulary_aliases_do_not_request_fp8_scale(self):
-        draft = self.config
-        draft._qwen4_full_fp8_nvfp4 = True
-        draft._qwen4_dense_storage = "source_bf16"
-        target = Qwen4Exp.__new__(Qwen4Exp)
-        target.model_config = SimpleNamespace(
-            **{
-                name: getattr(draft, name)
-                for name in (
-                    "vocab_size",
-                    "hidden_size",
-                    "data_type",
-                    "enable_fp32_lm_head",
-                    "_qwen4_full_fp8_nvfp4",
-                    "_qwen4_dense_storage",
-                )
-            }
-        )
-        self.assertEqual(
-            Qwen4ExpMTP.speculative_weight_alias_names(target, draft),
-            (W.embedding, W.lm_head),
-        )
-        draft._qwen4_dense_storage = "fp8"
-        with self.assertRaisesRegex(ValueError, "matching dense storage"):
-            Qwen4ExpMTP.speculative_weight_alias_names(target, draft)
-
     def test_rejects_nonfinal_target_hidden_source(self):
         config = self._config()
         config["text_config"]["mtp"]["mtp_use_hidden_state_from_layer"] = 17
@@ -285,97 +245,82 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "final hidden state"):
             Qwen4ExpMTP.create_config(self._temp_dir.name)
 
-    def test_draft_original_precision_does_not_change_target_config(self):
-        for mode in ("source_bf16", "source_bf16_shared_vocab"):
-            target = self._precision_config(Qwen4Exp, mode)
-            draft = self._precision_config(Qwen4ExpMTP, mode)
-            self.assertEqual(target._qwen4_dense_storage, "fp8")
-            self.assertEqual(draft._qwen4_dense_storage, "source_bf16")
-            self.assertEqual(draft._qwen4_mtp_dense_storage_mode, mode)
-            self.assertEqual(
-                draft._qwen4_vocab_storage,
-                "fp8" if mode.endswith("shared_vocab") else "source_bf16",
-            )
-
-    def test_draft_original_vocab_loads_independently_and_shared_vocab_aliases_scales(
-        self,
-    ):
-        from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX
-
-        for mode in ("source_bf16", "source_bf16_shared_vocab"):
-            draft = self._precision_config(Qwen4ExpMTP, mode)
-            draft._qwen4_full_fp8_nvfp4 = True
-            target = Qwen4Exp.__new__(Qwen4Exp)
-            target.model_config = SimpleNamespace(
-                **{
-                    name: getattr(draft, name)
-                    for name in (
-                        "vocab_size",
-                        "hidden_size",
-                        "data_type",
-                        "enable_fp32_lm_head",
-                        "_qwen4_full_fp8_nvfp4",
-                    )
-                },
-                _qwen4_dense_storage="fp8",
-            )
-            names = Qwen4ExpMTP.speculative_weight_alias_names(target, draft)
-            if mode == "source_bf16":
-                self.assertEqual(names, ())
-                # An independent descriptor still loads the released target
-                # checkpoint matrices, never missing dedicated mtp.* tensors.
-                source = _source_keys(self._weight()._create_global_weights())
-                self.assertIn("model.language_model.embed_tokens.weight", source)
-                self.assertIn("lm_head.weight", source)
-            else:
-                self.assertEqual(
-                    names,
-                    (
-                        W.embedding,
-                        W.lm_head,
-                        W.embedding + FP8_STORAGE_SCALE_SUFFIX,
-                        W.lm_head_s,
-                    ),
-                )
-            target.model_config.hidden_size += 1
-            with self.assertRaisesRegex(ValueError, "semantically incompatible"):
-                Qwen4ExpMTP.speculative_weight_alias_names(target, draft)
-
-    def test_invalid_draft_storage_mode_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "mtp_dense_storage"):
-            self._precision_config(Qwen4ExpMTP, "dequantized_fp8")
-
-    def _precision_config(self, model, mode):
-        config = model.create_config(self._temp_dir.name)
-        config._qwen4_fp8_source = True
-        config.quantization = json.dumps(
-            dict(
-                method="modelopt_fp4",
-                bits=4,
-                group_size=16,
-                is_quanted=False,
-                model_recipe="qwen4_fp8_nvfp4",
-                mtp_dense_storage=mode,
-            )
-        )
-        model._configure_precision_recipe(config)
-        return config
-
     @staticmethod
     def _config():
-        config = qwen4_config()
-        config["text_config"].update(
-            mtp={
-                "hybrid": True,
-                "layer_types": ["full_attention"],
-                "mtp_use_hidden_state_from_layer": None,
-                "num_hidden_layers": 1,
-                "rope_theta": 10_000_000,
+        num_layers = 48
+        return {
+            "architectures": ["Qwen4ExpForConditionalGeneration"],
+            "image_token_id": 248056,
+            "model_type": "qwen4_exp",
+            "video_token_id": 248057,
+            "vision_start_token_id": 248053,
+            "vision_end_token_id": 248054,
+            "tie_word_embeddings": False,
+            "text_config": {
+                "model_type": "qwen4_exp_text",
+                "num_attention_heads": 24,
+                "num_key_value_heads": 2,
+                "head_dim": 256,
+                "num_hidden_layers": num_layers,
+                "hidden_size": 2560,
+                "vocab_size": 248320,
+                "max_position_embeddings": 262144,
+                "rms_norm_eps": 1e-6,
+                "tie_word_embeddings": False,
+                "layer_types": [
+                    "full_attention" if (i + 1) % 4 == 0 else "linear_attention"
+                    for i in range(num_layers)
+                ],
+                "num_experts": 512,
+                "num_experts_per_tok": 10,
+                "moe_intermediate_size": 640,
+                "shared_expert_intermediate_size": 640,
+                "linear_conv_kernel_dim": 4,
+                "linear_key_head_dim": 128,
+                "linear_num_key_heads": 16,
+                "linear_num_value_heads": 48,
+                "linear_value_head_dim": 128,
+                "hc_count": 4,
+                "indexer_budget": 2048,
+                "indexer_compress_ratio": 4,
+                "indexer_head_dim": 128,
+                "indexer_kv_heads": 1,
+                "indexer_n_heads": 4,
+                "ngram_size": 3,
+                "ngram_vocab_size_base": 20000000,
+                "ple_conv_kernel_size": 4,
+                "ple_embed_dim": 2560,
+                "ple_layer_ids": [2],
+                "split_ngram_parts": 128,
+                "partial_rotary_factor": 0.25,
+                "rope_parameters": {
+                    "mrope_interleaved": True,
+                    "mrope_section": [11, 11, 10],
+                    "partial_rotary_factor": 0.25,
+                    "rope_theta": 10_000_000,
+                    "rope_type": "default",
+                },
+                "mtp": {
+                    "hybrid": True,
+                    "layer_types": ["full_attention"],
+                    "mtp_use_hidden_state_from_layer": None,
+                    "num_hidden_layers": 1,
+                    "rope_theta": 10_000_000,
+                },
+                "mtp_num_hidden_layers": 1,
+                "mtp_use_dedicated_embeddings": False,
             },
-            mtp_num_hidden_layers=1,
-            mtp_use_dedicated_embeddings=False,
-        )
-        return config
+            "vision_config": {
+                "deepstack_visual_indexes": [],
+                "depth": 27,
+                "hidden_size": 1152,
+                "intermediate_size": 4304,
+                "num_heads": 16,
+                "num_position_embeddings": 2304,
+                "out_hidden_size": 2560,
+                "patch_size": 16,
+            },
+        }
 
 
 if __name__ == "__main__":

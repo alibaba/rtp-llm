@@ -5,3 +5,5 @@
 *.bin binary
 *.model binary
 *.safetensors binary
+# Unified diffs require a leading space on blank context lines.
+patches/atom/main_0189b3506/atom.patch whitespace=-blank-at-eol

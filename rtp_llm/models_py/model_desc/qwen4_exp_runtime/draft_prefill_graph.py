@@ -6,8 +6,6 @@ import torch
 
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import INDEXER_STATE_TAG
 
-from .state_cache_inputs import prepare_state_cache_inputs
-
 
 def draft_graph_lanes(inputs, token_capacity):
     batch = inputs.input_lengths_device.numel()
@@ -26,7 +24,9 @@ def draft_graph_rows(inputs, token_capacity):
     batch = lengths.numel()
     lanes = draft_graph_lanes(inputs, token_capacity)
     if lengths.is_cuda:
-        from rtp_llm.models_py.kernels.cuda.qsa.draft_metadata_triton import draft_rows
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_metadata_triton import (
+            draft_rows,
+        )
 
         fused = draft_rows(lengths, prefixes, cu, token_capacity)
         if fused is not None:
@@ -54,14 +54,11 @@ class DraftPrefillGraphReplay(Mapping):
     model-wide callback with all cache groups, rather than each FMHA separately.
     """
 
-    def __init__(
-        self, impls, bounds, position_factor, token_capacity, state_cache=None
-    ):
+    def __init__(self, impls, bounds, position_factor, token_capacity):
         self.impls = impls
         self.bounds = bounds
         self.position_factor = position_factor
         self.token_capacity = token_capacity
-        self.state_cache = state_cache
 
     def __getitem__(self, key):
         return self.impls[key]
@@ -73,15 +70,20 @@ class DraftPrefillGraphReplay(Mapping):
         return len(self.impls)
 
     def prepare_cuda_graph(self, groups):
-        groups = prepare_state_cache_inputs(groups, self.state_cache)
         anchor = groups[next(iter(self.impls))]
         lengths = anchor.input_lengths
         prefixes = anchor.prefix_lengths
-        if any(value.device.type != "cpu" for value in (lengths, prefixes)):
+        cu = anchor.cu_seqlens
+        if any(value.device.type != "cpu" for value in (lengths, prefixes, cu)):
             raise RuntimeError("QSA draft graph replay requires host length mirrors")
         lengths = lengths.tolist()
         prefixes = prefixes.tolist()
-        if not lengths or len(prefixes) != len(lengths):
+        starts = cu.tolist()
+        if (
+            not lengths
+            or len(prefixes) != len(lengths)
+            or len(starts) != len(lengths) + 1
+        ):
             raise RuntimeError("QSA draft graph replay has invalid length geometry")
         expected = [0]
         lanes = draft_graph_lanes(anchor, self.token_capacity)
@@ -96,9 +98,15 @@ class DraftPrefillGraphReplay(Mapping):
                 )
             expected.append(expected[-1] + length)
             positions.extend(range(prefix, prefix + length))
-        # Derive the host partition from the same current length mirror; a
-        # device-only CU tensor must not add a public GraphRunner D2H copy.
-        if expected[-1] > self.token_capacity:
+        live_batch = next(
+            (i for i, length in enumerate(lengths) if length == 0), len(lengths)
+        )
+        # Only the live prefix of the host cu_seqlens mirror is copied by the
+        # runner. Its device padding tail is filled separately for every replay.
+        if (
+            starts[: live_batch + 1] != expected[: live_batch + 1]
+            or expected[-1] > self.token_capacity
+        ):
             raise RuntimeError(
                 "QSA draft graph cu_seqlens do not partition the live token capacity"
             )
@@ -110,8 +118,8 @@ class DraftPrefillGraphReplay(Mapping):
             ) or not torch.equal(inputs.prefix_lengths, anchor.prefix_lengths):
                 raise RuntimeError("QSA draft graph cache groups disagree on lengths")
             if tag == INDEXER_STATE_TAG:
-                # The model's state view derives physical pages from the
-                # refreshed kernel table; do not use a stale host mirror.
+                # The graph runner refreshes the raw state table on device;
+                # unlike kernel tables, it has no refreshed host mirror.
                 state_geometry = (inputs.kv_cache_block_id_device, pool_size, page_size)
                 continue
             table = inputs.kv_cache_kernel_block_id
@@ -144,9 +152,8 @@ class DraftPrefillGraphReplay(Mapping):
                     raise RuntimeError(
                         "QSA draft graph live row resolves to an unallocated or out-of-range physical block"
                     )
-        # The draft uses logical Base-RoPE coordinates. The target transports
-        # MRoPE coordinates, which differ after an image or timestamped frame;
-        # normalize this graph-owned buffer just as eager draft prefill does.
+        # The raw-key ring has no historical position axes. Prove the text
+        # position contract before generating canonical positions in the graph.
         transported = anchor.combo_position_ids
         if (
             transported is None
@@ -159,16 +166,6 @@ class DraftPrefillGraphReplay(Mapping):
             device="cpu",
             pin_memory=transported.is_cuda,
         ).to(device=transported.device, non_blocking=True)
-        canonical = torch.zeros_like(transported).reshape(
-            self.token_capacity, self.position_factor
-        )
-        canonical[: len(positions)] = expected_positions[:, None]
-        copied = set()
-        for value in groups.values():
-            target = value.combo_position_ids
-            if target.data_ptr() not in copied:
-                target.copy_(canonical.reshape_as(target))
-                copied.add(target.data_ptr())
         if state_geometry is None:
             raise RuntimeError("QSA draft graph requires a raw-state cache group")
         table, pool_size, page_size = state_geometry
@@ -176,7 +173,7 @@ class DraftPrefillGraphReplay(Mapping):
         prefix_device = anchor.prefix_lengths_device
         invalid_replay = None
         if length_device.is_cuda:
-            from rtp_llm.models_py.kernels.cuda.qsa.draft_metadata_triton import (
+            from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_metadata_triton import (
                 replay_invalid,
             )
 
@@ -211,23 +208,9 @@ class DraftPrefillGraphReplay(Mapping):
             ]
             invalid_positions = (actual != expected_positions.unsqueeze(1)).any()
             invalid_replay = invalid_state | invalid_positions
-        cu = getattr(anchor, "cu_seqlens_device", None)
-        if (
-            not isinstance(cu, torch.Tensor)
-            or cu.dtype != torch.int32
-            or tuple(cu.shape) != (len(expected),)
-        ):
-            raise RuntimeError(
-                "QSA draft graph requires int32 device cu_seqlens matching the request capacity"
-            )
-        expected_cu = torch.tensor(
-            expected, device="cpu", dtype=cu.dtype, pin_memory=cu.is_cuda
-        )
-        expected_cu = expected_cu.to(device=cu.device, non_blocking=True)
-        invalid_replay = invalid_replay | torch.any(cu != expected_cu)
         if bool(invalid_replay.item()):
             raise RuntimeError(
-                "QSA draft graph has invalid raw-state pages, cu_seqlens or positions disagree with logical cache positions"
+                "QSA draft graph has invalid raw-state pages or positions disagree with logical cache positions"
             )
         for tag, impl in self.impls.items():
             impl.prepare_cuda_graph(groups[tag])

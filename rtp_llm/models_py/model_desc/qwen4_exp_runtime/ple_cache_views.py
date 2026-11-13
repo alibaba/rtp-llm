@@ -2,7 +2,6 @@
 
 import torch
 
-from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import PLE_NGRAM_CTX_TAG, PLE_STATE_TAG
 from rtp_llm.models_py.utils.cache_payload_view import (
     CachePayloadGeometry,
     payload_view,
@@ -12,17 +11,6 @@ from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 
 
 class PLECacheViews:
-    @classmethod
-    def eager_live_rows(cls, state_inputs, ctx_inputs):
-        if bool(state_inputs.is_cuda_graph) or not bool(state_inputs.is_s_padded):
-            return None
-        state = cls._resolve_block_table(state_inputs, PLE_STATE_TAG)
-        context = cls._resolve_block_table(ctx_inputs, PLE_NGRAM_CTX_TAG)
-        active = state.ne(0).any(dim=1)
-        if not torch.equal(active, context.ne(0).any(dim=1).to(active.device)):
-            raise RuntimeError("qwen4_exp PLE regions disagree about padded rows")
-        return active
-
     @staticmethod
     def _fixed_state_pool(
         cache: LayerKVCache, dtype: torch.dtype, entries: int, width: int
@@ -57,16 +45,12 @@ class PLECacheViews:
         blocks: torch.Tensor,
         pool_rows: int,
     ) -> torch.Tensor:
-        verdict = (
-            (blocks <= 0).any().to(torch.int32)
-            | ((blocks >= pool_rows).any().to(torch.int32) << 1)
-        ).item()
-        if verdict & 1:
+        if bool((blocks <= 0).any().item()):
             raise RuntimeError(
                 f"PLE cache {tag!r} has an unallocated logical page; "
                 f"blocks={blocks.tolist()[:32]} pool_rows={pool_rows}"
             )
-        if verdict & 2:
+        if bool((blocks >= pool_rows).any().item()):
             raise RuntimeError(f"PLE cache {tag!r} physical block id exceeds its pool")
         return blocks.to(torch.long)
 
@@ -87,39 +71,7 @@ class PLECacheViews:
             logical_pages.numel()
         ):
             raise RuntimeError(f"PLE cache {tag!r} block-table batch is inconsistent")
-        host_table = getattr(attention_inputs, "kv_cache_block_id", None)
-        use_host_table = (
-            not graph_capture
-            and type(attention_inputs) is PyAttentionInputs
-            and not bool(attention_inputs.is_cuda_graph)
-            and logical_pages.device.type == "cpu"
-            and table.is_cuda
-            and isinstance(host_table, torch.Tensor)
-            and host_table.device.type == "cpu"
-            and host_table.dtype == table.dtype
-            and host_table.shape == table.shape
-        )
-        # Native eager inputs upload this exact host table in PyWrappedModel.
-        # Graph/device snapshots have no authoritative host table and retain
-        # the device checks below. Never copy device metadata back for decode.
-        lookup_table = host_table if use_host_table else table
-        pages = logical_pages.to(device=lookup_table.device, dtype=torch.long)
-        if not graph_capture and bool(getattr(attention_inputs, "is_s_padded", False)):
-            # The framework aliases whole dummy rows to block zero. A missing
-            # page in a live row must still fail before any persistent write.
-            active = lookup_table.ne(0).any(dim=1)
-            if not lookup_table.shape[1] or pool_rows <= 0:
-                raise RuntimeError(f"PLE cache {tag!r} padded table or pool is empty")
-            valid_page = (pages >= 0) & (pages < lookup_table.shape[1])
-            if bool((active & ~valid_page).any().item()):
-                raise RuntimeError(f"PLE cache {tag!r} has an invalid logical page")
-            blocks = lookup_table.gather(
-                1, pages.clamp(0, lookup_table.shape[1] - 1).unsqueeze(1)
-            ).squeeze(1)
-            cls._check_physical_blocks(tag, blocks[active], pool_rows)
-            return torch.where(active, blocks, 0).to(
-                device=device, dtype=torch.long, non_blocking=True
-            )
+        pages = logical_pages.to(device=table.device, dtype=torch.long)
         if graph_capture:
             # The graph runner owns the fixed-size device table and refreshes
             # it each step. Clamp invalid indices to
@@ -127,7 +79,7 @@ class PLECacheViews:
             # the pool while capture/replay is in progress.
             if not pages.numel() or not int(table.shape[1]) or pool_rows <= 0:
                 raise RuntimeError(f"PLE cache {tag!r} graph table is empty")
-            from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit import (
+            from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_triton import (
                 resolve_read_blocks,
             )
 
@@ -141,24 +93,15 @@ class PLECacheViews:
             return torch.where(valid_page & valid_block, blocks, 0).to(
                 device=device, dtype=torch.long
             )
-        if not pages.numel():
+        if not pages.numel() or bool((pages < 0).any().item()):
             raise RuntimeError(f"PLE cache {tag!r} has an invalid logical page")
-        verdict = (
-            (pages < 0).any().to(torch.int32)
-            | ((pages >= int(table.shape[1])).any().to(torch.int32) << 1)
-        ).item()
-        if verdict & 1:
-            raise RuntimeError(f"PLE cache {tag!r} has an invalid logical page")
-        if verdict & 2:
+        if bool((pages >= int(table.shape[1])).any().item()):
             raise RuntimeError(
                 f"PLE cache {tag!r} logical page exceeds its block table"
             )
-        blocks = cls._check_physical_blocks(
-            tag, lookup_table.gather(1, pages.unsqueeze(1)).squeeze(1), pool_rows
-        )
-        if blocks.device.type == "cpu" and device.type == "cuda":
-            blocks = blocks.pin_memory()
-        return blocks.to(device=device, non_blocking=True)
+        return cls._check_physical_blocks(
+            tag, table.gather(1, pages.unsqueeze(1)).squeeze(1), pool_rows
+        ).to(device=device)
 
     @classmethod
     def _commit_physical_blocks(
@@ -180,7 +123,7 @@ class PLECacheViews:
         if table.shape[1] == 0 or pool_rows <= 0:
             raise RuntimeError(f"PLE cache {tag!r} commit table or pool is empty")
         pages = logical_pages.to(device=table.device, dtype=torch.long)
-        from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit import (
+        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_triton import (
             resolve_commit_blocks,
         )
 
@@ -224,19 +167,28 @@ class PLECacheViews:
 
     @classmethod
     def _commit_physical_block_pair(cls, stage, accepted):
-        """Try fused resolution after validating both table layouts."""
+        """Fast path only when both tables have valid structural metadata.
+
+        Malformed metadata falls back to the original sequential validation;
+        valid metadata retains the state-before-context error precedence.
+        """
         from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
             PLE_NGRAM_CTX_TAG,
             PLE_STATE_TAG,
         )
-        from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit import resolve_commit_pair
+        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_triton import (
+            resolve_commit_pair,
+        )
 
         tables = []
         for inputs, tag in (
             (stage.state_inputs, PLE_STATE_TAG),
             (stage.ctx_inputs, PLE_NGRAM_CTX_TAG),
         ):
-            tables.append(cls._resolve_block_table(inputs, tag))
+            try:
+                tables.append(cls._resolve_block_table(inputs, tag))
+            except RuntimeError:
+                return None
         if (
             stage.state_pool.device != accepted.device
             or stage.ctx_pool.device != accepted.device
@@ -346,8 +298,6 @@ class PLECacheViews:
 
     @staticmethod
     def _same_metadata(
-        lhs: PyAttentionInputs, rhs: PyAttentionInputs, name: str, *, cache=None
+        lhs: PyAttentionInputs, rhs: PyAttentionInputs, name: str
     ) -> bool:
-        return same_tensor_metadata(
-            getattr(lhs, name, None), getattr(rhs, name, None), cache=cache
-        )
+        return same_tensor_metadata(getattr(lhs, name, None), getattr(rhs, name, None))

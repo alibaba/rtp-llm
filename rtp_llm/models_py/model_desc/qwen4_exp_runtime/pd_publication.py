@@ -5,20 +5,13 @@ from collections.abc import Mapping
 
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
-    INDEXER_ROPE_POS_TAG,
     INDEXER_STATE_TAG,
     PLE_NGRAM_CTX_TAG,
     PLE_STATE_TAG,
 )
 
 SIDE_TAGS = frozenset(
-    (
-        PLE_STATE_TAG,
-        PLE_NGRAM_CTX_TAG,
-        INDEXER_KV_TAG,
-        INDEXER_STATE_TAG,
-        INDEXER_ROPE_POS_TAG,
-    )
+    (PLE_STATE_TAG, PLE_NGRAM_CTX_TAG, INDEXER_KV_TAG, INDEXER_STATE_TAG)
 )
 
 

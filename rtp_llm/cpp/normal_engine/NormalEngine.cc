@@ -313,15 +313,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 }
 
 void NormalEngine::initExecutor(const EngineInitParams& params) {
-    if (parallelism_config.pp_size > 1) {
-        executor_.reset(new PPExecutor(
-            params,
-            resource_context_.cache_manager,
-            false,
-            [this]() { step_profiler_.startStep(); },
-            [this]() { step_profiler_.finishStep(); },
-            propose_params_.get()));
-    } else if (sp_config.type != SP_TYPE_NONE) {
+    if (propose_params_) {
         auto mtp_executor = std::make_unique<MtpExecutor>(
             params, propose_params_, resource_context_.cache_manager, kv_cache_group_num_);
         mtp_executor->setModelForwardCallbacks([this]() { step_profiler_.startStep(); },
@@ -916,15 +908,16 @@ absl::Status NormalEngine::stop() {
     }
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
-    const auto scheduler_status = scheduler_->stop();
-    // Ask rank 0 to stop at a step boundary. Receivers must finish all model
-    // collectives for inputs that rank 0 has already published before exiting.
-    CpuTpBroadcaster::instance().requestStop();
+    RETURN_IF_STATUS_ERROR(scheduler_->stop());
+    // A non-root idle MTP loop may be waiting for the next CPU input frame.
+    // Wake it before join; otherwise rank 0's model teardown collective waits
+    // for a peer that cannot reach its own model destructor.
+    CpuTpBroadcaster::instance().interruptReceive();
     loop_thread_->join();
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
     resource_context_.cache_manager->stopMetricsReporter();
-    return scheduler_status;
+    return absl::OkStatus();
 }
 
 void NormalEngine::loop() {
@@ -932,25 +925,27 @@ void NormalEngine::loop() {
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
-    auto& tp_broadcaster = CpuTpBroadcaster::instance();
-    while (parallelism_config.pp_size > 1 ? running_.load() : !tp_broadcaster.shouldStop(!running_)) {
+    while (running_) {
         try {
-            auto status = parallelism_config.pp_size > 1 ? pp_step() : step();
+            auto status = step();
             if (!status.ok()) {
                 RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
                 THROW_IF_STATUS_ERROR(trySaveStepError());
             }
-        } catch (const CpuTpBroadcastStopped& e) {
-            running_ = false;
-            RTP_LLM_LOG_INFO("normal engine TP loop stopped: %s", e.what());
+        } catch (const std::exception& e) {
+            // A peer may close its TP broadcast socket after stop() clears
+            // running_ but before this rank returns from its current step.
+            // Treat that exception as part of shutdown; an exception during
+            // normal service must still fail the process.
+            if (running_) {
+                throw;
+            }
+            RTP_LLM_LOG_WARNING("normal engine loop stopped during shutdown: %s", e.what());
             break;
         }
     }
     running_ = false;
-    // Publish only after the last complete step, while sockets remain alive
-    // for the receivers and subsequent model teardown collectives.
     THROW_IF_STATUS_ERROR(executor_->finish());
-    tp_broadcaster.finish();
 }
 
 absl::Status NormalEngine::trySaveStepError() const {

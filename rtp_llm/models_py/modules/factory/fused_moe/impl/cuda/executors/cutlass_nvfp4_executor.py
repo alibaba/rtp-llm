@@ -1,5 +1,7 @@
 """SM120 CUTLASS NVFP4 MoE with BF16 input and fused activation quantization."""
 
+import os
+
 import torch
 from flashinfer import ActivationType
 from flashinfer.fused_moe import cutlass_fused_moe
@@ -15,16 +17,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 from rtp_llm.models_py.modules.factory.fused_moe.utils.nvfp4_parallelism import (
     use_nvfp4_tensor_parallel,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.nvfp4_weights import (
-    Nvfp4WeightViews,
-)
-
-
-def _prefill_library(config):
-    return (
-        getattr(config, "prefill_library", None),
-        getattr(config, "prefill_library_sha256", None),
-    )
+from rtp_llm.utils.model_weight import W
 
 
 class CutlassNvfp4Executor(FusedMoeExpertExecutor):
@@ -42,17 +35,9 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
         )
         tensor_parallel = use_nvfp4_tensor_parallel(config)
         checker.check(
-            config.ep_size > 1
-            or config.parallelism_config.get_ffn_tp_size() == 1
-            or tensor_parallel
+            config.parallelism_config.get_ffn_tp_size() == 1 or tensor_parallel
         )
-        checker.check(
-            config.moe_config.fp4_moe_op == "cutlass"
-            or (
-                config.moe_config.fp4_moe_op == "auto"
-                and config.moe_config.moe_strategy == "nvfp4_cutlass"
-            )
-        )
+        checker.check(config.moe_config.fp4_moe_op == "cutlass")
         quant_config = config.model_config.quant_config
         checker.check(quant_config is not None and not quant_config.is_quanted())
         checker.check(not config.has_redundant_experts)
@@ -65,14 +50,40 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
 
     def __init__(self, config, quant_config, weights):
         super().__init__(config, quant_config, weights)
-        prepared = Nvfp4WeightViews(config, quant_config, weights)
-        self.w1, self.w2 = prepared.w1, prepared.w2
-        self.quant_scales = prepared.cutlass_quant_scales()
-        self.ep_size, self.ep_rank = prepared.ep_size, prepared.ep_rank
-        self.tp_size, self.tp_rank = prepared.tp_size, prepared.tp_rank
+        # RTP's stacked MoE descriptor already emits [up, gate].
+        self.w1 = weights[W.moe_w1].contiguous().view(torch.int64)
+        self.w2 = weights[W.moe_w2].contiguous().view(torch.int64)
+        for name in (W.moe_w1_i_s, W.moe_w2_i_s):
+            scale = weights[name]
+            if (
+                not bool(torch.isfinite(scale).all())
+                or not bool((scale > 0).all())
+                or not bool((scale == scale.flatten()[0]).all())
+            ):
+                raise ValueError(
+                    "CUTLASS online NVFP4 requires uniform finite positive activation scales"
+                )
+        self.quant_scales = [
+            weights[W.moe_w1_i_s].reciprocal().min(),
+            weights[W.moe_s1].view(torch.int32),
+            weights[W.moe_w1_i_s] * weights[W.moe_w1_s2],
+            weights[W.moe_w2_i_s].reciprocal().min(),
+            weights[W.moe_s2].view(torch.int32),
+            weights[W.moe_w2_i_s] * weights[W.moe_w2_s2],
+        ]
+        self.ep_size = config.ep_size
+        self.ep_rank = config.ep_rank
+        pc = getattr(config, "parallelism_config", None)
+        self.tp_size = pc.get_ffn_tp_size() if pc is not None else 1
+        self.tp_rank = pc.get_ffn_tp_rank() if pc is not None else 0
         self.sm120_prefill = None
         backend_config = getattr(config.model_config, "quant_config", None)
-        library, library_sha256 = _prefill_library(backend_config)
+        library = os.getenv("RTP_LLM_NVFP4_SM120_LIBRARY") or getattr(
+            backend_config, "prefill_library", None
+        )
+        library_sha256 = os.getenv("RTP_LLM_NVFP4_SM120_LIBRARY_SHA256") or getattr(
+            backend_config, "prefill_library_sha256", None
+        )
         if (
             library
             and self.w1.is_cuda
@@ -118,11 +129,6 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
             and expert_x.is_contiguous()
             and expert_x.shape[0] >= 128
             and expert_x.shape[1] == 2560
-            and self.w1.ndim == self.w2.ndim == 3
-            and self.w1.shape[0] == self.w2.shape[0]
-            and self.w1.shape[2] * 16 == expert_x.shape[1]
-            and self.w2.shape[1] == expert_x.shape[1]
-            and self.w1.shape[1] == 32 * self.w2.shape[2]
             and not torch.cuda.is_current_stream_capturing()
         ):
             output = self.sm120_prefill(

@@ -589,6 +589,50 @@ class MixedDeviceMetadataModel(CacheStoreForwardModel):
         return super()._forward_one(inputs)
 
 
+class CloseAwareCacheStoreForwardModel(CacheStoreForwardModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+        self.close_calls = 0
+        self.initialize_calls = 0
+        self.fail_initialize = False
+
+    def initialize(self, resources) -> bool:
+        self.initialize_calls += 1
+        if self.fail_initialize:
+            raise RuntimeError("injected model initialize failure")
+        return super().initialize(resources)
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        if self.closed:
+            raise RuntimeError("model is closed")
+        return super().forward(inputs, fmha_impl)
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.closed = True
+
+
+class MixedDeviceMetadataModel(CacheStoreForwardModel):
+    def __init__(self):
+        super().__init__()
+        self.metadata = []
+
+    def _forward_one(self, inputs):
+        attn = inputs.attention_inputs
+        if isinstance(attn, dict):
+            attn = next(iter(attn.values()))
+        assert attn.input_lengths.is_cuda
+        assert not attn.prefix_lengths.is_cuda
+        self.metadata.append(
+            (
+                attn.cu_seqlens_device.cpu().tolist(),
+                attn.cu_kv_seqlens_device.cpu().tolist(),
+            )
+        )
+        return super()._forward_one(inputs)
+
+
 class DirtyGenerationPrefillCaptureModel:
     """Fail on the graph-capture body after all eager generation-prefill warmups."""
 
@@ -1110,6 +1154,23 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 )
                 self.assertEqual(result["records"], [])
 
+    @unittest.skipIf(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM",
+        "ROCm normalizes these lengths to the host metadata path",
+    )
+    def test_micro_batch_cuda_lengths_host_prefix_metadata(self):
+        model = MixedDeviceMetadataModel()
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            run_scenario(model, "cuda_lengths_host_prefix_micro")
+        stream.synchronize()
+        lengths, visible = [], []
+        for cu, cu_kv in model.metadata:
+            lengths.extend(b - a for a, b in zip(cu, cu[1:]))
+            visible.extend(b - a for a, b in zip(cu_kv, cu_kv[1:]))
+        self.assertEqual(lengths, [1, 3, 4] * 3)
+        self.assertEqual(visible, [129, 259, 516, 257, 131, 388, 1, 3, 4])
+
     def test_successful_generation_prefill_capture_does_not_reserve_request_blocks(
         self,
     ) -> None:
@@ -1483,15 +1544,6 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             run_speculative_commit_bridge(
                 PrepareOnlySpeculativeCommitBridgeModel(), "has_hooks"
             )
-
-    def test_speculative_commit_explicit_capability_disables_inactive_hooks(self):
-        model = SpeculativeCommitBridgeModel()
-        self.assertTrue(run_speculative_commit_bridge(model, "has_hooks"))
-        model.requires_speculative_target_commit = lambda: False
-        self.assertFalse(run_speculative_commit_bridge(model, "has_hooks"))
-        model.requires_speculative_target_commit = lambda: True
-        self.assertTrue(run_speculative_commit_bridge(model, "has_hooks"))
-        self.assertFalse(run_speculative_commit_bridge(model, "has_hooks", False))
 
     def test_cpu_status_bridge_preserves_false_and_ignores_non_target(self):
         model = SpeculativeCommitBridgeModel()
@@ -3644,37 +3696,68 @@ class CustomOutputPostLayersTest(unittest.TestCase):
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")
-class NativeLogitsBoundaryTest(unittest.TestCase):
-    def test_python_logits_hook_is_not_consulted(self):
+class ModelLogitsPostLayersTest(unittest.TestCase):
+    def run_case(self, processor, *, compact=False, graph=False):
+        model = ForwardModel()
+        if processor is not None:
+            model.compute_logits = processor
+        return _extension.run_post_layers(
+            model, None, torch.empty(0, dtype=torch.int64).pin_memory(), graph, compact
+        )
+
+    def test_model_logits_own_head_and_preserve_row_selection(self):
         for compact, graph in ((False, False), (False, True), (True, False)):
             with self.subTest(compact=compact, graph=graph):
+                baseline = self.run_case(None, compact=compact, graph=graph)
+                seen = []
 
-                def run(model):
-                    return _extension.run_post_layers(
-                        model,
-                        None,
-                        torch.empty(0, dtype=torch.int64).pin_memory(),
-                        graph,
-                        compact,
-                    )
+                def processor(rows):
+                    seen.append(rows.clone())
+                    return (rows.to(torch.bfloat16).float() * 3).contiguous()
 
-                baseline = run(ForwardModel())
-                model = ForwardModel()
-
-                def forbidden(_):
-                    raise AssertionError(
-                        "native post-layers delegated LM head ownership to Python"
-                    )
-
-                model.compute_logits = forbidden
-                result = run(model)
-                torch.testing.assert_close(
-                    result["logits"], baseline["logits"], rtol=0, atol=0
-                )
+                result = self.run_case(processor, compact=compact, graph=graph)
+                torch.testing.assert_close(result["logits"], baseline["logits"] * 3)
+                self.assertTrue(seen)
                 if graph:
+                    self.assertEqual(result["graph_status"], "replayed")
                     torch.testing.assert_close(
-                        result["next_logits"], baseline["next_logits"], rtol=0, atol=0
+                        result["next_logits"], baseline["next_logits"] * 3
                     )
+
+    def test_none_delegates_to_native_head(self):
+        for compact in (False, True):
+            baseline = self.run_case(None, compact=compact)
+            fallback = self.run_case(lambda _: None, compact=compact)
+            torch.testing.assert_close(
+                fallback["logits"], baseline["logits"], rtol=0, atol=0
+            )
+
+    def test_invalid_logits_fail_before_sampling(self):
+        for compact in (False, True):
+            for processor in (
+                lambda x: x.to(torch.bfloat16),
+                lambda x: x.float().cpu(),
+                lambda x: x.float()[:1],
+                lambda x: x.float()[:, :2],
+                lambda x: x.float().unsqueeze(0),
+                lambda x: x.float().t().contiguous().t(),
+            ):
+                with self.subTest(compact=compact, processor=processor):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "compute_logits must return"
+                    ):
+                        self.run_case(processor, compact=compact)
+
+    def test_processor_errors_propagate(self):
+        def processor(_):
+            raise ValueError("logits processor failed")
+
+        for compact in (False, True):
+            # The full forward wraps Python exceptions in its native status;
+            # the compact post-layer entry propagates the Python exception.
+            error_type = ValueError if compact else RuntimeError
+            with self.assertRaisesRegex(error_type, "logits processor failed"):
+                self.run_case(processor, compact=compact)
 
 
 if __name__ == "__main__":

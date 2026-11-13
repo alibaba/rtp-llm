@@ -1,10 +1,8 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import torch
-from rtp_llm.config.quant_config import QWEN4_FP8_NVFP4_RECIPE
-from rtp_llm.config.qwen4_exp_config import resolve_qwen4_parallelism
+
 from rtp_llm.device.device_impl import CudaImpl
 from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
     quantize_expert_to_nvfp4,
@@ -17,146 +15,11 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_nvfp4_executor import (
     CutlassNvfp4Executor,
-    _prefill_library,
-)
-from rtp_llm.models_py.modules.factory.fused_moe.utils.nvfp4_weights import (
-    Nvfp4WeightViews,
 )
 from rtp_llm.utils.model_weight import W
 
 
 class CutlassNvfp4ExecutorTest(unittest.TestCase):
-    def test_shared_weight_views_do_not_require_cutlass_activation_scales(self):
-        weights = {
-            W.moe_w1: torch.zeros(2, 16, 16, dtype=torch.uint8),
-            W.moe_w2: torch.zeros(2, 16, 16, dtype=torch.uint8),
-            W.moe_s1: torch.ones(2, 16, 16).to(torch.float8_e4m3fn),
-            W.moe_s2: torch.ones(2, 16, 16).to(torch.float8_e4m3fn),
-        }
-        views = Nvfp4WeightViews(SimpleNamespace(ep_size=1, ep_rank=0), None, weights)
-        self.assertEqual(views.w1.dtype, torch.int64)
-        self.assertEqual(views.block_scales[0].dtype, torch.int32)
-        for ep_size in (1, 2):
-            for rank in (0, 1):
-                pc = SimpleNamespace(
-                    get_ffn_tp_size=lambda: 2, get_ffn_tp_rank=lambda: rank
-                )
-                views = Nvfp4WeightViews(
-                    SimpleNamespace(
-                        ep_size=ep_size, ep_rank=rank, parallelism_config=pc
-                    ),
-                    None,
-                    weights,
-                )
-                self.assertEqual(views.tp_size, 2 if ep_size == 1 else 1)
-                self.assertEqual(views.tp_rank, rank if ep_size == 1 else 0)
-        weights[W.moe_w1_i_s] = torch.tensor([1.0, 2.0])
-        weights[W.moe_w2_i_s] = torch.ones(2)
-        with self.assertRaisesRegex(ValueError, "uniform finite positive"):
-            views.cutlass_quant_scales()
-
-    def test_prefill_library_keeps_configured_path_and_checksum_together(self):
-        config = SimpleNamespace(
-            prefill_library="config.so", prefill_library_sha256="config-sha"
-        )
-        self.assertEqual(_prefill_library(config), ("config.so", "config-sha"))
-        self.assertEqual(_prefill_library(None), (None, None))
-        config.prefill_library_sha256 = None
-        self.assertEqual(_prefill_library(config), ("config.so", None))
-
-    def test_marlin_layout_requires_matching_strategy_before_loading(self):
-        import sys
-
-        from rtp_llm.device.device_impl import GpuImpl
-
-        def initialize(device):
-            device.py_env_configs = SimpleNamespace(moe_config=moe)
-
-        with (
-            patch.object(GpuImpl, "__init__", initialize),
-            patch.dict(sys.modules, {"pynvml": SimpleNamespace(nvmlInit=lambda: None)}),
-        ):
-            for strategy in (
-                "auto",
-                "fp4_no_dp",
-                "fp4_ep_normal",
-                "fp4_ep_low_latency",
-                "nvfp4_cutlass",
-            ):
-                moe = SimpleNamespace(moe_strategy=strategy, fp4_moe_op="marlin")
-                with (
-                    self.subTest(strategy=strategy),
-                    self.assertRaisesRegex(
-                        ValueError,
-                        "FP4_MOE_OP=marlin requires MOE_STRATEGY=nvfp4_marlin",
-                    ),
-                ):
-                    CudaImpl()
-            for backend in ("auto", "marlin"):
-                moe = SimpleNamespace(moe_strategy="nvfp4_marlin", fp4_moe_op=backend)
-                self.assertEqual(
-                    CudaImpl().py_env_configs.moe_config.fp4_moe_op, "marlin"
-                )
-
-    def test_prefill_runner_uses_bool_for_swizzled_input_scale(self):
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_nvfp4_prefill import (
-            Sm120PrefillMoE,
-        )
-
-        class Runner:
-            # FlashInfer v0.7.0 fused_moe/core.py's non-min-latency run_moe ABI.
-            def run_moe(
-                self,
-                output,
-                x,
-                ids,
-                router,
-                w1,
-                bias1,
-                w2,
-                bias2,
-                scales,
-                input_sf,
-                alpha,
-                beta,
-                limit,
-                situ_beta,
-                situ_linear_beta,
-                swizzled_input_sf,
-                tp_size,
-                tp_rank,
-                ep_size,
-                ep_rank,
-                cluster_size,
-                cluster_rank,
-                alltoall,
-                min_latency,
-                tactics,
-                pdl,
-                activation,
-                workspace,
-            ):
-                if type(swizzled_input_sf) is not bool:
-                    raise TypeError("swizzled_input_sf must be bool")
-                output.fill_(7)
-
-        adapter = Sm120PrefillMoE.__new__(Sm120PrefillMoE)
-        adapter.runner = Runner()
-        x = torch.zeros(2, 16, dtype=torch.bfloat16)
-        out = adapter(
-            x,
-            torch.zeros(2, 1, dtype=torch.int32),
-            torch.ones(2, 1),
-            torch.empty(1, 2, 1, dtype=torch.int64),
-            torch.empty(1, 16, 1, dtype=torch.int64),
-            [],
-            tp_size=1,
-            tp_rank=0,
-            ep_size=1,
-            ep_rank=0,
-        )
-        self.assertTrue(torch.equal(out, torch.full_like(x, 7)))
-
     def test_selection_rejects_unquantized_bf16_models(self):
         from rtp_llm.config.model_config import ModelConfig
         from rtp_llm.config.server_config_setup import set_parallelism_config
@@ -179,6 +42,7 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
             pc = ParallelismConfig()
             pc.tp_size = tp_size
             pc.ep_size = tp_size
+            pc.ffn_sp_size = tp_size
             pc.world_size = tp_size
             pc.local_world_size = tp_size
             set_parallelism_config(pc)
@@ -281,6 +145,7 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
             pc.tp_size = 2
             pc.tp_rank = rank
             pc.ep_size = 1
+            pc.ffn_sp_size = 1
             pc.world_size = 2
             pc.local_world_size = 2
             pc.world_rank = rank
@@ -337,7 +202,7 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
             torch.testing.assert_close(got, combined(), atol=0, rtol=0)
             torch.testing.assert_close(got, run(full).float(), atol=0.0005, rtol=0.02)
 
-    def test_tensor_parallel_selection_uses_format_and_rejects_ffn_tp_and_world_mismatch(
+    def test_tensor_parallel_selection_uses_format_and_rejects_sp_and_world_mismatch(
         self,
     ):
         from rtp_llm.config.model_config import ModelConfig
@@ -372,6 +237,7 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         pc = ParallelismConfig()
         pc.tp_size = 2
         pc.ep_size = 1
+        pc.ffn_sp_size = 1
         pc.world_size = 2
         pc.local_world_size = 2
         set_parallelism_config(pc)
@@ -390,8 +256,8 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         pc.world_size = 4
         self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
         pc.world_size = 2
+        pc.ffn_sp_size = 2
         set_parallelism_config(pc)
-        pc.ffn_tp_size = 1
         self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
 
     def test_selection_requires_matching_attention_tp_ep_and_online_weights(self):
@@ -430,11 +296,10 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         pc = ParallelismConfig()
         pc.tp_size = 2
         pc.ep_size = 2
+        pc.ffn_sp_size = 2
         pc.world_size = 2
         pc.local_world_size = 2
         set_parallelism_config(pc)
-        model.quant_config.model_recipe = QWEN4_FP8_NVFP4_RECIPE
-        pc = resolve_qwen4_parallelism(model, pc)
         moe = MoeConfig()
         moe.moe_strategy = "nvfp4_cutlass"
         moe.fp4_moe_op = "cutlass"
@@ -444,8 +309,6 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         self.assertTrue(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
         pc.ep_size = 1
         set_parallelism_config(pc)
-        self.assertTrue(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
-        model.quant_config.require_contiguous_experts = False
         self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
         pc.ep_size = 2
         set_parallelism_config(pc)

@@ -67,7 +67,9 @@ struct GptModelInitParams {
     std::shared_ptr<KVCacheManager>              cache_manager;
     // nullopt selects the main-model cache config; otherwise selects this MTP module config.
     std::optional<int> mtp_cache_config_index;
-    // Hyper-connection residual multiplier for the MTP input hidden width.
+    // Hyper-connection residual multiplier. Kept separately because model
+    // internals can still be hc_mult * hidden_size wide even when the MTP draft
+    // consumes a collapsed target hidden state.
     int64_t                                    hc_mult = 1;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter;
     // Final CUDA-graph kernel block-table width. Executors compute it from
@@ -76,6 +78,10 @@ struct GptModelInitParams {
 
     std::vector<int64_t>    hidden_state_capture_layer_ids;
     HiddenStateCaptureDtype hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
+
+    // Explicit MTP input_hiddens row width. Zero preserves the legacy fallback
+    // to hidden_size * hc_mult for direct/test construction sites.
+    int64_t mtp_input_hidden_size = 0;
 
     // Warmup wrappers borrow the Python model later used by the real executor.
     bool owns_py_model = true;
@@ -189,6 +195,21 @@ std::array<int64_t, 2>  decodeMtpHiddenStatesShape(int64_t total_numel, int64_t 
 std::vector<int64_t> decodeKvBlockTableShape(int64_t rank, int64_t group_num, int64_t batch_size, int64_t max_blocks);
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
+
+struct MicroBatchInfo {
+    size_t prefill_num;
+    size_t decoder_num;
+};
+
+struct MicroBatchPlan {
+    bool                        enable = false;
+    std::vector<MicroBatchInfo> batch_infos;
+};
+
+struct TokenSliceInfo {
+    size_t offset = 0;
+    size_t count  = 0;
+};
 
 class ModelBase {
 public:

@@ -21,14 +21,20 @@ cuda13_torch_link_deps = select({
 
 test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
-    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/cpp/models:logits_processor",
     "//rtp_llm/cpp/config:config_modules",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
-    "@local_config_cuda//cuda:cuda_headers",
-    "@local_config_cuda//cuda:cudart",
-] + torch_deps() + cuda13_torch_link_deps
+] + select({
+    "@//:using_rocm": [
+        "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+    ],
+    "//conditions:default": [
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+}) + torch_deps() + cuda13_torch_link_deps
 
 cc_test(
     name = "think_mode_logits_processor_test",
@@ -89,6 +95,20 @@ cc_test(
     },
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "spec_logits_verify_runner_rocm_test",
+    srcs = ["SpecLogitsVerifyRunnerTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {"TEST_USING_DEVICE": "ROCM"},
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+    tags = ["MI308X-ROCM7"],
+    target_compatible_with = select({
+        "@//:using_rocm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
 )
 
 # The benchmark is gated behind the DISABLED_ gtest prefix; run it explicitly

@@ -1435,8 +1435,10 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config,
                 parallelism_config,
                 weights,
+                config.layernorm_eps,
                 attention_quant_config,
-                hw_kernel_config,
+                hw_kernel_config=hw_kernel_config,
+                linear_factory=self._linear_factory,
             )
 
         if config.moe_style in (1, 2):
@@ -1464,24 +1466,6 @@ class Qwen3NextDecoderLayer(nn.Module):
 
     def _attention_quant_config(self, config, weights):
         return config.quant_config
-
-    def _build_full_attention(
-        self,
-        config,
-        parallelism_config,
-        weights,
-        attention_quant_config,
-        hw_kernel_config,
-    ):
-        return Qwen3NextAttention(
-            config.getAttentionConfigs(parallelism_config.get_attn_tp_size()),
-            parallelism_config,
-            weights,
-            config.layernorm_eps,
-            attention_quant_config,
-            hw_kernel_config=hw_kernel_config,
-            linear_factory=self._linear_factory,
-        )
 
     def _build_residual_modules(
         self, config: ModelConfig, weights: Dict[str, torch.Tensor]
@@ -1574,13 +1558,8 @@ class Qwen3NextModel(GptModelBase):
     def _build_output_head(
         self, model_config: ModelConfig, weights: ModelWeights
     ) -> None:
-        self.norm = (
-            RMSResNorm(
-                weights.get_global_weight(W.final_ln_gamma),
-                eps=model_config.layernorm_eps,
-            )
-            if self.layer_num - 1 in self.layer_ids()
-            else None
+        self.norm = RMSResNorm(
+            weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
         self._init_capture_context(
             self._capture_canonical_layer,
@@ -1740,7 +1719,6 @@ class Qwen3NextModel(GptModelBase):
         inputs: PyModelInputs,
         device: torch.device,
         is_cuda_graph: bool = False,
-        linear_attention_inputs: Optional[PyAttentionInputs] = None,
     ) -> Qwen3NextMetadata:
         attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
         linear_layer_idx = next(
@@ -1877,12 +1855,7 @@ class Qwen3NextModel(GptModelBase):
             fmha_impl, (_QwenGraphAttentionImpls, _QwenGdnGraphDelegate)
         ):
             fmha_impl.bind_graph_inputs(inputs)
-        if self.embed_tokens is not None:
-            hidden_states = self.word_embedding(inputs)
-            residual = torch.zeros_like(hidden_states)
-        else:
-            hidden_states = inputs.pp_intermediates["hidden_states"]
-            residual = inputs.pp_intermediates["residual"]
+        hidden_states = self.word_embedding(inputs)
 
         is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
         attn_meta = self._build_attn_meta(inputs, hidden_states.device, is_cuda_graph)
@@ -1893,24 +1866,17 @@ class Qwen3NextModel(GptModelBase):
 
         capture_aux_hidden = bool(self._mtp_aux_capture_layer_ids)
         if capture_aux_hidden:
-            self.begin_aux_hidden_capture(
-                hidden_states,
-                attn_meta.is_target_verify,
-                upstream_hidden=inputs.pp_intermediates.get("mtp_aux_hidden_states"),
-            )
+            self.begin_aux_hidden_capture(hidden_states, attn_meta.is_target_verify)
 
-        layer_ids = self.layer_ids()
-        for local_idx, decoder_layer in enumerate(self.layers):
+        for i, decoder_layer in enumerate(self.layers):
             layer_attention_inputs = select_attention_inputs_for_layer(
-                inputs, self.kv_cache, local_idx
+                inputs, self.kv_cache, i
             )
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 residual,
-                self._layer_fmha_impl(decoder_layer, fmha_impl, local_idx),
-                kv_cache=(
-                    self.kv_cache.get_layer_cache(local_idx) if self.kv_cache else None
-                ),
+                self._layer_fmha_impl(decoder_layer, fmha_impl, i),
+                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )

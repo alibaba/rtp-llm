@@ -185,7 +185,9 @@ def _rename_wheel_impl(ctx):
         outputs = [out],
         command = "set -xe && cp -f '%s' '%s' && chmod a+w '%s'" % (src.path, out.path, out.path),
     )
-    return [DefaultInfo(files = depset([out]))]
+    # Extra artifacts are built alongside the renamed wheel, not embedded in it.
+    extra_files = [file for dep in ctx.attr.extra_files for file in dep.files.to_list()]
+    return [DefaultInfo(files = depset([out] + extra_files))]
 
 # genrule outs cannot be configurable, so the ABI-tagged output name is an attr.
 _rename_wheel = rule(
@@ -193,13 +195,15 @@ _rename_wheel = rule(
     attrs = {
         "src": attr.label(allow_single_file = True, mandatory = True),
         "out_name": attr.string(mandatory = True),
+        "extra_files": attr.label_list(allow_files = True),
     },
 )
 
-def rename_wheel(name, package_name, src):
+def rename_wheel(name, package_name, src, extra_files = []):
     _rename_wheel(
         name = name,
         src = src,
+        extra_files = extra_files,
         out_name = select({
             "@rtp_llm//:using_ppu": package_name + "-cp312-cp312-manylinux1_x86_64.whl",
             "//conditions:default": package_name + "-cp310-cp310-manylinux1_x86_64.whl",

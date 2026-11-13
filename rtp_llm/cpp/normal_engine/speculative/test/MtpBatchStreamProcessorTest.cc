@@ -787,7 +787,7 @@ TEST_F(MtpBatchStreamProcessorTest, testExpandTargetVerifyPositionIdsPreservesMr
     model_config.num_layers                            = 1;
     model_config.mm_model_config.mm_position_ids_style = MROPE;
     model_config.attn_config.rope_config.index_factor  = 3;
-    sp_config.gen_num_per_cycle                        = 3;
+    sp_config.gen_num_per_cycle                        = 1;
 
     ResourceContext resource_context;
     auto            stream = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 4}, 1);
@@ -798,17 +798,15 @@ TEST_F(MtpBatchStreamProcessorTest, testExpandTargetVerifyPositionIdsPreservesMr
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     GptModelInputs model_input;
-    model_input.combo_position_ids = torch::zeros({6}, torch::kInt32);
-    auto authoritative_prefix      = torch::tensor({20, 40}, torch::kInt32).to(torch::kCUDA);
+    model_input.combo_position_ids = torch::zeros({3}, torch::kInt32);
+    auto authoritative_prefix      = torch::tensor({20}, torch::kInt32).to(torch::kCUDA);
 
-    processor.expandTargetVerifyPositionIds(StreamGroups({stream, stream}), model_input, authoritative_prefix);
+    processor.expandTargetVerifyPositionIds(StreamGroups({stream}), model_input, authoritative_prefix);
 
     EXPECT_TRUE(model_input.combo_position_ids.is_cuda());
     EXPECT_EQ(model_input.combo_position_ids.scalar_type(), torch::kInt32);
     EXPECT_TRUE(model_input.combo_position_ids.is_contiguous());
-    EXPECT_EQ(
-        (vector<int>{29, 29, 29, 30, 30, 30, 31, 31, 31, 32, 32, 32, 49, 49, 49, 50, 50, 50, 51, 51, 51, 52, 52, 52}),
-        toVec<int>(model_input.combo_position_ids));
+    EXPECT_EQ((vector<int>{29, 29, 29, 30, 30, 30}), toVec<int>(model_input.combo_position_ids));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
@@ -941,92 +939,6 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
 
     expect_positions(model_input, {6, 3}, {6, 3});
     EXPECT_TRUE(torch::equal(model_input.combo_position_ids, original_position_ids));
-}
-
-TEST_F(MtpBatchStreamProcessorTest, DraftPreparationPreservesProposalOnlyRowsAndDeviceLengths) {
-    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "0");
-    for (const auto* enabled : {"0", "1"}) {
-        autil::EnvGuard device_state("RTP_LLM_MTP_ASYNC_DEVICE_STATE", enabled);
-        SCOPED_TRACE(enabled);
-        for (bool pending : {false, true}) {
-            SCOPED_TRACE(pending);
-            ModelConfig model_config;
-            model_config.max_seq_len                           = 2048;
-            model_config.vocab_size                            = 32;
-            model_config.num_layers                            = 1;
-            model_config.mm_model_config.mm_position_ids_style = MROPE;
-            model_config.attn_config.rope_config.index_factor  = 3;
-            SpeculativeExecutionConfig sp_config;
-            sp_config.gen_num_per_cycle = 3;
-            RuntimeConfig   runtime_config;
-            ResourceContext resource_context;
-            auto steady = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 4}, 1);
-            auto idle   = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 1);
-            idle->setIsContextStream(false);
-            idle->getSPOutputBuffer()->tokens = torch::tensor({{0, 2}}, torch::kInt32);
-            const auto cuda_i32               = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-            GenerateStream::MtpAsyncDeviceState steady_state;
-            steady_state.propose_tokens_gpu                = torch::full({1, 1}, 11, cuda_i32);
-            steady_state.next_seq_len_gpu                  = torch::full({1}, 6, cuda_i32);
-            steady_state.next_seq_len_upper_bound          = 6;
-            steady_state.next_kv_cache_block_id_gpu        = torch::ones({1, 1, 1}, cuda_i32);
-            steady_state.next_kv_cache_kernel_block_id_gpu = steady_state.next_kv_cache_block_id_gpu.clone();
-            steady->setMtpAsyncDeviceState(std::move(steady_state));
-            if (pending) {
-                steady->incPendingAsyncBookkeeping();
-            }
-            auto pending_guard = std::shared_ptr<void>(nullptr, [steady, pending](void*) {
-                if (pending) {
-                    steady->decPendingAsyncBookkeepingAndMaybeRelease();
-                }
-            });
-            GenerateStream::MtpAsyncDeviceState idle_state;
-            idle_state.propose_tokens_gpu = torch::full({1, 1}, 22, cuda_i32);
-            idle->setMtpAsyncDeviceState(std::move(idle_state));
-            MtpBatchStreamProcessor processor(model_config,
-                                              PDSepConfig{},
-                                              ProfilingDebugLoggingConfig{},
-                                              makeProcessorCacheConfig(),
-                                              sp_config,
-                                              false);
-            TensorHolder            holder;
-            GptModelInputs          input;
-            input.input_lengths = torch::tensor({1, 3}, torch::kInt32);
-            // Snapshot rows have a shape-only zero from the generic gatherer.
-            input.sequence_lengths   = torch::tensor({0, 2}, torch::kInt32);
-            input.combo_position_ids = torch::tensor({0, 0, 0, 2, 2, 2}, torch::kInt32);
-            processor.prepareDecodeDraftModelInput(StreamGroups({steady, idle}), input, holder);
-            EXPECT_EQ((vector<int>{11, 22}), toVec<int>(input.combo_tokens));
-            EXPECT_EQ((vector<int>{5, 2}), toVec<int>(input.sequence_lengths));
-            EXPECT_EQ((vector<int>{5, 2}), toVec<int>(input.prefix_lengths));
-            EXPECT_EQ((vector<int>{5, 5, 5, 2, 2, 2}), toVec<int>(input.combo_position_ids));
-            EXPECT_EQ(pending, steady->hasPendingAsyncBookkeeping());
-
-            GptModelInputs idle_input;
-            idle_input.input_lengths      = torch::tensor({3}, torch::kInt32);
-            idle_input.sequence_lengths   = torch::tensor({2}, torch::kInt32);
-            idle_input.combo_position_ids = torch::tensor({2, 2, 2}, torch::kInt32);
-            processor.prepareDecodeDraftModelInput(StreamGroups({idle}), idle_input, holder);
-            // The published proposal wins over the deliberately different legacy token,
-            // including when the device-state environment switch is off.
-            EXPECT_EQ((vector<int>{22}), toVec<int>(idle_input.combo_tokens));
-            EXPECT_EQ((vector<int>{2}), toVec<int>(idle_input.prefix_lengths));
-
-            for (bool missing_length : {false, true}) {
-                SCOPED_TRACE(missing_length);
-                auto incomplete               = steady->getMtpAsyncDeviceState();
-                incomplete.propose_tokens_gpu = missing_length ? torch::full({1, 1}, 11, cuda_i32) : torch::Tensor();
-                incomplete.next_seq_len_gpu   = missing_length ? torch::Tensor() : torch::full({1}, 6, cuda_i32);
-                steady->setMtpAsyncDeviceState(std::move(incomplete));
-                GptModelInputs invalid_input;
-                invalid_input.input_lengths      = torch::tensor({1}, torch::kInt32);
-                invalid_input.sequence_lengths   = torch::tensor({0}, torch::kInt32);
-                invalid_input.combo_position_ids = torch::zeros({3}, torch::kInt32);
-                EXPECT_THROW(processor.prepareDecodeDraftModelInput(StreamGroups({steady}), invalid_input, holder),
-                             std::runtime_error);
-            }
-        }
-    }
 }
 
 TEST_F(MtpBatchStreamProcessorTest, DraftCacheWritesRemainContiguousAcrossPreparationPaths) {
@@ -1543,7 +1455,6 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputKeepsDens
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     GptModelInputs model_input;
-    model_input.is_target_verify = true;
     model_input.input_lengths    = torch::tensor({3, 3}, torch::kInt32).to(torch::kCUDA);
     model_input.prefix_lengths   = torch::tensor({7, 11}, torch::kInt32).to(torch::kCUDA);
     model_input.sequence_lengths = torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));

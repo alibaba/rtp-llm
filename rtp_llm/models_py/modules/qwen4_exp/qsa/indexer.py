@@ -34,11 +34,6 @@ from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     exact_head_rms_norm,
 )
 
-from .validation import DeviceChecks
-
-# Bound fallback logits and their head reduction independently of context length.
-_MAX_SCORE_WORKSPACE_BYTES = 64 * 1024 * 1024
-
 
 def _normalized_rope_style_name(style: Any) -> str:
     """Read pybind, string and integer RopeStyle representations lazily."""
@@ -97,7 +92,6 @@ def _validate_logical_cache_positions(
     logical_positions: torch.Tensor,
     *,
     rope_name: str,
-    checks: Optional[DeviceChecks] = None,
 ) -> None:
     expected = (
         logical_positions.to(device=positions.device, dtype=torch.long)
@@ -109,22 +103,15 @@ def _validate_logical_cache_positions(
             f"qwen4 QSA {rope_name} logical cache positions have "
             f"{expected.numel()} values, expected {positions.shape[0]}"
         )
-
-    def message():
+    if not bool(torch.equal(positions, expected.unsqueeze(1).expand_as(positions))):
         actual_head = positions[:6].reshape(-1).tolist()
         actual_tail = positions[-3:].reshape(-1).tolist()
-        return (
+        raise ValueError(
             f"qwen4 QSA {rope_name} positions must equal the logical cache positions"
             f" (rows={positions.shape[0]}, cols={positions.shape[1]},"
             f" actual[:6]={actual_head}, actual[-3:]={actual_tail},"
             f" expected_rows={expected.numel()})"
         )
-
-    own_checks = checks is None
-    checks = DeviceChecks() if checks is None else checks
-    checks.add((positions != expected[:, None]).any(), message, ValueError)
-    if own_checks:
-        checks.verify()
 
 
 def build_interleaved_mrope(
@@ -214,7 +201,6 @@ def build_base_rope(
     logical_positions: Optional[torch.Tensor] = None,
     validate_position_axes: bool = True,
     inv_freq: Optional[torch.Tensor] = None,
-    checks: Optional[DeviceChecks] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Build one-axis Base RoPE for the Qwen4 MTP draft indexer.
 
@@ -241,25 +227,23 @@ def build_base_rope(
         index_factor=index_factor,
         device=device,
     )
-    own_checks = checks is None
-    checks = DeviceChecks() if checks is None else checks
-    if index_factor == 3 and validate_position_axes:
-        checks.add(
-            (positions != positions[:, :1]).any(),
+    if (
+        index_factor == 3
+        and validate_position_axes
+        and not bool(torch.equal(positions, positions[:, :1].expand_as(positions)))
+    ):
+        raise ValueError(
             "qwen4 QSA Base RoPE factor=3 only supports draft text-only "
-            "positions whose three axes are equal",
-            ValueError,
+            "positions whose three axes are equal"
         )
     if logical_positions is not None:
         _validate_logical_cache_positions(
-            positions, logical_positions, rope_name="Base RoPE", checks=checks
+            positions, logical_positions, rope_name="Base RoPE"
         )
-    if own_checks:
-        checks.verify()
 
     scale = _rope_scale(rope_config, "Base RoPE")
     if inv_freq is not None and positions.is_cuda and torch.version.hip is None:
-        from rtp_llm.models_py.kernels.cuda.qsa.rope_triton import try_build_text_rope
+        from .rope_triton import try_build_text_rope
 
         fused = try_build_text_rope(
             positions[:, 0],
@@ -292,7 +276,6 @@ def build_qsa_rope(
     dtype: torch.dtype,
     device: torch.device,
     logical_positions: Optional[torch.Tensor] = None,
-    checks: Optional[DeviceChecks] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Dispatch the QSA indexer RoPE builder from ``rope_config.style``.
 
@@ -301,6 +284,7 @@ def build_qsa_rope(
     target MRoPE prefill intentionally omits that check so its existing
     multimodal position behavior is unchanged.
     """
+    _validate_indexer_rope_layout(rope_config)
     if is_qsa_rope_style(rope_config, "Base"):
         return build_base_rope(
             position_ids,
@@ -309,7 +293,6 @@ def build_qsa_rope(
             dtype=dtype,
             device=device,
             logical_positions=logical_positions,
-            checks=checks,
         )
     if is_qsa_rope_style(rope_config, "Mrope"):
         if logical_positions is not None:
@@ -320,7 +303,7 @@ def build_qsa_rope(
                 device=device,
             )
             _validate_logical_cache_positions(
-                positions, logical_positions, rope_name="text-only MRoPE", checks=checks
+                positions, logical_positions, rope_name="text-only MRoPE"
             )
         return build_interleaved_mrope(
             position_ids,
@@ -345,7 +328,7 @@ def build_qsa_rope_from_logical_positions(
     if logical_positions.dim() != 1 or int(logical_positions.numel()) != token_count:
         raise ValueError("qwen4 QSA logical position count does not match tokens")
     if logical_positions.is_cuda and torch.version.hip is None:
-        from rtp_llm.models_py.kernels.cuda.qsa.rope_triton import try_build_text_rope
+        from .rope_triton import try_build_text_rope
 
         result = try_build_text_rope(
             logical_positions,
@@ -397,9 +380,7 @@ def apply_partial_rope(
     ``cos``/``sin`` must already be broadcastable to ``x``.
     """
     if x.is_cuda and torch.version.hip is None:
-        from rtp_llm.models_py.kernels.cuda.qsa.rope_triton import (
-            try_apply_partial_rope,
-        )
+        from .rope_triton import try_apply_partial_rope
 
         result = try_apply_partial_rope(x, cos, sin)
         if result is not None:
@@ -558,8 +539,8 @@ class Qwen4ExpQSAIndexer(nn.Module):
     ) -> torch.Tensor:
         """Loop-free causal selection: ``[B,S,hidden] -> [B,S,max_selected]``.
 
-        Block keys are pooled once per sequence. Long fallback scoring is split
-        into bounded query chunks. All shapes are static: no ``nonzero``, no data-dependent slicing.
+        Block keys are pooled once per sequence and every query is scored in one
+        batched matmul. All shapes are static: no ``nonzero``, no data-dependent slicing.
         Causal visibility only -- prefill with ``past_raw_keys=None``, decode with
         ``S=1``.
 
@@ -605,7 +586,10 @@ class Qwen4ExpQSAIndexer(nn.Module):
             q, cos[:, past_len:].unsqueeze(2), sin[:, past_len:].unsqueeze(2)
         )
 
+        out = None
         positions = past_len + torch.arange(seq_len, device=device)
+        # Complete blocks visible to each query; also where its tail starts.
+        complete = (positions + 1) // ratio
 
         if precomputed_block_keys is not None:
             if past_raw_keys is not None or not (
@@ -622,62 +606,21 @@ class Qwen4ExpQSAIndexer(nn.Module):
         else:
             block_keys = self.pooled_block_keys_all(raw_keys, cos, sin)
         num_blocks = block_keys.shape[1]
-        if num_blocks == 0:
-            return self._select_causal_scores(
-                torch.empty((batch, seq_len, 0), device=device), positions
-            )
-
-        from rtp_llm.models_py.kernels.cuda.qsa.indexer_prefill_score import (
-            try_prefill_score,
-        )
-
-        scores = try_prefill_score(q, block_keys)
-        if scores is not None:
-            return self._select_causal_scores(scores, positions)
-
-        # The unfused route holds FP32 per-head logits, ReLU output and reduced
-        # scores. Select each query chunk before allocating the next one, so a
-        # supported long request never materializes an S-by-S score tensor.
-        bytes_per_query = batch * num_blocks * (2 * heads + 2) * 4
-        chunk_size = max(1, _MAX_SCORE_WORKSPACE_BYTES // bytes_per_query)
-        keys = block_keys.float().transpose(-1, -2).unsqueeze(1)
-        out = None
-        for start in range(0, seq_len, chunk_size):
-            end = min(start + chunk_size, seq_len)
-            logits = torch.matmul(q[:, start:end].float(), keys)
-            scores = torch.relu(logits.transpose(-1, -2)).sum(dim=-1) / math.sqrt(
-                self.head_dim
-            )
-            selected = self._select_causal_scores(scores, positions[start:end])
-            if start == 0 and end == seq_len:
-                return selected
-            if out is None:
-                out = torch.empty(
-                    (batch, seq_len, self.max_selected),
-                    dtype=torch.int32,
-                    device=device,
-                )
-            out[:, start:end].copy_(selected)
-            del logits, scores, selected
-        if out is None:
-            out = torch.empty(
-                (batch, seq_len, self.max_selected), dtype=torch.int32, device=device
-            )
-        return out
-
-    def _select_causal_scores(self, scores, positions):
-        batch, seq_len, num_blocks = scores.shape
-        ratio = self.compress_ratio
-        device = scores.device
-        # Keep absolute positions when queries belong to a later score chunk.
-        complete = (positions + 1) // ratio
-        out = None
         top_k = min(self.block_topk, num_blocks)
         if top_k > 0:
-            if ratio == 4 and self.token_budget == 2048:
-                from rtp_llm.models_py.kernels.cuda.qsa.qsa_topk_triton import (
-                    try_select_qsa_tokens,
+            from .indexer_prefill_score import try_prefill_score
+
+            scores = try_prefill_score(q, block_keys)
+            if scores is None:
+                # [B,S,H,nb] -> relu -> sum(H), with FP32 intermediate scores.
+                scores = torch.matmul(
+                    q.float(), block_keys.float().transpose(-1, -2).unsqueeze(1)
                 )
+                scores = torch.relu(scores.transpose(-1, -2)).sum(dim=-1) / math.sqrt(
+                    self.head_dim
+                )
+            if ratio == 4 and self.token_budget == 2048:
+                from .qsa_topk_triton import try_select_qsa_tokens
 
                 visible_lengths = (positions + 1).to(torch.int32).repeat(batch)
                 selected = try_select_qsa_tokens(

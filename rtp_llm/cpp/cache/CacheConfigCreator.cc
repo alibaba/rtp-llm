@@ -33,10 +33,9 @@ bool modelHasMultipleCacheGroups(const ModelConfig& model_config) {
     return false;
 }
 
-// Kernel blocks feeding a compressed (OpaqueKV) pool must be a whole number of
-// 128-token units: 128 is the HCA compression unit and also FlashMLA's block
-// quantum. Divisibility alone (the generic check) is not enough -- a 64-token
-// kernel block passes it and then produces a partial compression unit.
+// HCA and FlashMLA compressed pools require a 128-token kernel quantum.
+// Qwen4Exp's indexer_kv instead compresses groups of four tokens and supports
+// the existing 64-token ATOM page size without a partial group.
 constexpr uint32_t kCompressedKernelSeqSizeAlignment = 128;
 
 bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVCacheBlockBudget& budget) {
@@ -208,7 +207,10 @@ void validateDescs(const ModelConfig& model_config, uint32_t kernel_tokens_per_b
                                         desc.tag.c_str(),
                                         desc.compression_ratio,
                                         kernel_tokens_per_block);
-                if (desc.compression_ratio > 1) {
+                const bool qwen4_atom_indexer = (model_config.model_type == "atom_qwen4_exp"
+                                                 || model_config.model_type == "atom_qwen4_exp_mtp")
+                                                 && desc.tag == "indexer_kv" && desc.compression_ratio == 4;
+                if (desc.compression_ratio > 1 && !qwen4_atom_indexer) {
                     RTP_LLM_CHECK_WITH_INFO(
                         kernel_tokens_per_block >= kCompressedKernelSeqSizeAlignment
                             && kernel_tokens_per_block % kCompressedKernelSeqSizeAlignment == 0,
@@ -507,7 +509,8 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
     } else {
         const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
             runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
-        const auto block_budget = blockBudgetForConfig(config);
+        auto block_budget = blockBudgetForConfig(config);
+        addBudgetBytes(block_budget.paged_block_bytes, model_config.auxiliary_paged_cache_bytes_per_block);
         if (block_budget.explicit_pool_reserve_bytes > 0) {
             RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size >= block_budget.explicit_pool_reserve_bytes,
                                     "kv cache budget %zu MiB is smaller than explicitly-sized pool reservation %zu MiB "

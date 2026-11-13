@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
@@ -39,7 +38,6 @@ def _draft_incremental_prefill_geometry(
     by the side pool, and the writer seals complete blocks exactly as the
     draft path does.
     """
-    checks = self.take_prewrite_checks()
     if draft_prefix_reuse:
         if draft or not self.is_mtp_draft:
             raise RuntimeError(
@@ -101,11 +99,11 @@ def _draft_incremental_prefill_geometry(
             "qwen4_exp QSA draft incremental prefill requires int32 "
             "prefix_lengths [B]"
         )
-    host_prefixes = self.host_values(prefixes)
     prefixes = prefixes.to(
         device=device, dtype=torch.int64, non_blocking=True
     ).contiguous()
-    if any(value <= 0 if draft else value < 0 for value in host_prefixes):
+    invalid_prefixes = prefixes <= 0 if draft else prefixes < 0
+    if bool(torch.any(invalid_prefixes).item()):
         requirement = "nonzero" if draft else "non-negative"
         raise RuntimeError(
             f"qwen4_exp QSA {label} requires every prefix length to be "
@@ -121,28 +119,22 @@ def _draft_incremental_prefill_geometry(
     expected_cu = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
     expected_cu[1:] = torch.tensor(lengths, dtype=torch.int32, device=device).cumsum(0)
     if (
-        tuple(cu_seqlens.shape) != (batch_size + 1,)
+        cu_seqlens.dim() != 1
         or cu_seqlens.dtype != torch.int32
         or cu_seqlens.device != device
+        or not bool(torch.equal(cu_seqlens, expected_cu))
     ):
         raise RuntimeError(
             "qwen4_exp QSA draft incremental prefill cu_seqlens do not "
             "match input_lengths"
         )
-    checks.add(
-        (cu_seqlens != expected_cu).any(),
-        "qwen4_exp QSA draft incremental prefill cu_seqlens do not match input_lengths",
-    )
     expected_cu_kv = torch.zeros_like(expected_cu)
     visible_ends = prefixes + torch.tensor(lengths, dtype=torch.int64, device=device)
-    host_visible_ends = [
-        prefix + length for prefix, length in zip(host_prefixes, lengths)
-    ]
-    if max(host_visible_ends) > torch.iinfo(torch.int32).max:
+    if bool(torch.any(visible_ends > torch.iinfo(torch.int32).max).item()):
         raise RuntimeError(
             "qwen4_exp QSA draft incremental prefill positions exceed int32"
         )
-    if sum(host_visible_ends) > torch.iinfo(torch.int32).max:
+    if int(visible_ends.sum().item()) > torch.iinfo(torch.int32).max:
         raise RuntimeError(
             "qwen4_exp QSA draft incremental prefill cumulative KV lengths "
             "exceed int32"
@@ -150,7 +142,7 @@ def _draft_incremental_prefill_geometry(
     expected_cu_kv[1:] = visible_ends.to(torch.int32).cumsum(0)
     cu_kv_seqlens = self.main_inputs.cu_kv_seqlens_device
     if (
-        tuple(cu_kv_seqlens.shape) != (batch_size + 1,)
+        cu_kv_seqlens.dim() != 1
         or cu_kv_seqlens.dtype != torch.int32
         or cu_kv_seqlens.device != device
     ):
@@ -158,19 +150,21 @@ def _draft_incremental_prefill_geometry(
             "qwen4_exp QSA draft incremental prefill cu_kv_seqlens do not "
             "provide device int32 [B + 1] metadata"
         )
-    if draft_prefix_reuse:
-        checks.add(
-            (cu_kv_seqlens != expected_cu_kv).any()
-            & (cu_kv_seqlens[1:] < cu_kv_seqlens[:-1]).any(),
-            "qwen4_exp QSA MTP draft prefix-reuse has invalid local cu_kv_seqlens metadata",
-        )
-    else:
-        checks.add(
-            (cu_kv_seqlens != expected_cu_kv).any(),
-            "qwen4_exp QSA draft incremental prefill cu_kv_seqlens do not match prefix+input lengths",
-        )
+    if not bool(torch.equal(cu_kv_seqlens, expected_cu_kv)):
+        if not draft_prefix_reuse:
+            raise RuntimeError(
+                "qwen4_exp QSA draft incremental prefill cu_kv_seqlens do not "
+                "match prefix+input lengths"
+            )
+        if int(cu_kv_seqlens.numel()) != batch_size + 1 or bool(
+            torch.any(cu_kv_seqlens[1:] < cu_kv_seqlens[:-1]).item()
+        ):
+            raise RuntimeError(
+                "qwen4_exp QSA MTP draft prefix-reuse has invalid local "
+                "cu_kv_seqlens metadata"
+            )
 
-    prefix_values = host_prefixes
+    prefix_values = prefixes.tolist()
     logical_positions = torch.cat(
         [
             torch.arange(prefix, prefix + length, device=device)
@@ -186,17 +180,19 @@ def _draft_incremental_prefill_geometry(
             f"match index_factor={index_factor}: got {actual} values for "
             f"{token_count} tokens"
         )
-    current_cos, current_sin = build_qsa_rope(
-        position_ids,
-        rope_config,
-        token_count=token_count,
-        dtype=torch.bfloat16,
-        device=device,
-        logical_positions=(
-            logical_positions if self.position_state_cache is None else None
-        ),
-        checks=checks,
-    )
+    try:
+        current_cos, current_sin = build_qsa_rope(
+            position_ids,
+            rope_config,
+            token_count=token_count,
+            dtype=torch.bfloat16,
+            device=device,
+            logical_positions=logical_positions,
+        )
+    except ValueError as error:
+        raise RuntimeError(
+            f"qwen4_exp QSA draft incremental prefill {error}"
+        ) from error
 
     kv_tokens_per_block = int(self.indexer_kv_cache.seq_size_per_block)
     state_tokens_per_block = int(self.indexer_state_cache.seq_size_per_block)
@@ -207,7 +203,7 @@ def _draft_incremental_prefill_geometry(
         )
     if state_tokens_per_block <= 0:
         raise RuntimeError("qwen4_exp QSA indexer state page size must be positive")
-    if not draft and any(prefix % kv_tokens_per_block for prefix in host_prefixes):
+    if not draft and bool((prefixes % kv_tokens_per_block != 0).any().item()):
         raise RuntimeError(
             "qwen4_exp QSA prefix reuse requires prefixes aligned to the "
             f"indexer KV page size ({kv_tokens_per_block})"
@@ -275,13 +271,11 @@ def _draft_incremental_prefill_geometry(
         required_kv_columns,
         pool_blocks=int(kv_pool.shape[0]),
         tag=INDEXER_KV_TAG,
-        checks=checks,
     )
 
     # A completed group may read committed raw keys preceding the new rows.
     # Validate that source tail and every destination absolute state page.
     state_table_width = int(state_table.shape[1])
-    state_pairs = []
     for request_idx, (prefix, length) in enumerate(zip(prefix_values, lengths)):
         first_needed = prefix - (prefix % ratio)
         logical_blocks = {
@@ -294,22 +288,15 @@ def _draft_incremental_prefill_geometry(
                     "QSA cache 'indexer_state' block table does not cover the "
                     "draft incremental tail"
                 )
-            state_pairs.append((request_idx, logical_block))
-    from .qsa_cache_views import _validate_state_pairs
+            block_id = int(state_table[request_idx, logical_block].item())
+            if block_id <= 0 or block_id >= int(state_pool.shape[0]):
+                raise RuntimeError(
+                    "QSA cache 'indexer_state' draft incremental tail resolves "
+                    "to an unallocated or out-of-range physical block"
+                )
 
-    _validate_state_pairs(
-        state_table,
-        state_pairs,
-        int(state_pool.shape[0]),
-        "draft incremental tail",
-        checks=checks,
-    )
-
-    position_state = self.positions(ratio, checks)
-    if position_state is not None:
-        rope_cos, rope_sin = position_state.rope(rope_config, group=True)
-    else:
-        block_starts = logical_positions - logical_positions.remainder(ratio)
+    block_starts = logical_positions - logical_positions.remainder(ratio)
+    try:
         rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
             block_starts,
             rope_config,
@@ -317,8 +304,11 @@ def _draft_incremental_prefill_geometry(
             dtype=torch.bfloat16,
             device=device,
         )
+    except ValueError as error:
+        raise RuntimeError(
+            f"qwen4_exp QSA draft incremental prefill {error}"
+        ) from error
 
-    checks.verify()
     return IncrementalPrefillPlan(
         **{
             "lengths": lengths,
@@ -329,6 +319,7 @@ def _draft_incremental_prefill_geometry(
             "token_budget": token_budget,
             "prefixes": prefixes,
             "cu_seqlens": expected_cu,
+            "logical_positions": logical_positions,
             "current_cos": current_cos,
             "current_sin": current_sin,
             "visible_lengths": visible_lengths,
@@ -359,11 +350,11 @@ def _target_verify_geometry(
 ) -> TargetVerifyPlan:
     """Validate and materialise the bounded physical-tail overwrite plan.
 
-    The model calls this before projection and shares the verified plan with
-    its side writer. Direct component calls build and verify their own plan.
+    This method is intentionally side-effect free. The model calls it before
+    either the QSA projection or the production main-cache writer, then the
+    target selection path repeats it immediately before its side-pool write.
     """
     graph_target = bool(self.main_inputs.is_cuda_graph)
-    checks = self.take_prewrite_checks()
     lengths = self._validate_mode_and_metadata(
         expect_prefill=True,
         allow_target_verify=True,
@@ -430,8 +421,7 @@ def _target_verify_geometry(
         )
     if graph_target and prefixes.device.type != "cpu":
         raise RuntimeError("qwen4_exp QSA target Graph requires host prefixes")
-    prefix_values = self.host_values(prefixes)
-    if any(prefix < 0 for prefix in prefix_values):
+    if graph_target and bool(torch.any(prefixes < 0).item()):
         raise RuntimeError(
             "qwen4_exp QSA target-verify prefix lengths must be non-negative"
         )
@@ -439,6 +429,10 @@ def _target_verify_geometry(
     prefixes_device = prefix_source.to(
         device=device, dtype=torch.int32, non_blocking=True
     ).contiguous()
+    if not graph_target and bool(torch.any(prefixes_device < 0).item()):
+        raise RuntimeError(
+            "qwen4_exp QSA target-verify prefix lengths must be non-negative"
+        )
 
     expected_cu = torch.arange(
         0,
@@ -457,10 +451,10 @@ def _target_verify_geometry(
             "qwen4_exp QSA target-verify cu_seqlens do not match gamma+1"
         )
     if not graph_target:
-        checks.add(
-            (cu_seqlens != expected_cu).any(),
-            "qwen4_exp QSA target-verify cu_seqlens do not match gamma+1",
-        )
+        if not bool(torch.equal(cu_seqlens, expected_cu)):
+            raise RuntimeError(
+                "qwen4_exp QSA target-verify cu_seqlens do not match gamma+1"
+            )
     cu_kv_seqlens = self.main_inputs.cu_kv_seqlens_device
     if (
         cu_kv_seqlens.dtype != torch.int32
@@ -473,10 +467,10 @@ def _target_verify_geometry(
     if not graph_target:
         expected_cu_kv = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
         expected_cu_kv[1:] = (prefixes_device + query_len).cumsum(0)
-        checks.add(
-            (cu_kv_seqlens != expected_cu_kv).any(),
-            "qwen4_exp QSA target-verify cu_kv_seqlens do not match prefix+gamma+1",
-        )
+        if not bool(torch.equal(cu_kv_seqlens, expected_cu_kv)):
+            raise RuntimeError(
+                "qwen4_exp QSA target-verify cu_kv_seqlens do not match prefix+gamma+1"
+            )
 
     positions = self.main_inputs.combo_position_ids
     if positions is None or int(positions.numel()) != token_count * 3:
@@ -486,19 +480,19 @@ def _target_verify_geometry(
             f"token, got {actual} for {token_count} tokens"
         )
     offsets = None
-    if not graph_target and self.position_state_cache is None:
+    if not graph_target:
         offsets = torch.arange(query_len, dtype=torch.int32, device=device)
         positions = positions.to(
-            device=device, dtype=torch.int64, non_blocking=True
+            device=device, dtype=torch.int32, non_blocking=True
         ).reshape(batch_size, query_len, 3)
         expected_positions = prefixes_device[:, None, None] + offsets[None, :, None]
         expected_positions = expected_positions.expand(-1, -1, 3)
-        checks.add(
-            (positions != expected_positions).any(),
-            "qwen4_exp QSA target-verify only supports contiguous text-only "
-            "MRoPE whose three axes equal prefix+j",
-        )
-    elif positions.device.type == "cpu" and self.position_state_cache is None:
+        if not bool(torch.equal(positions, expected_positions)):
+            raise RuntimeError(
+                "qwen4_exp QSA target-verify only supports contiguous text-only "
+                "MRoPE whose three axes equal prefix+j"
+            )
+    elif positions.device.type == "cpu":
         # Graph replay cannot re-read device capture buffers per step without a
         # host sync, so validate host-resident positions for free here. Device
         # positions rely on the position generator's uniform-axis contract;
@@ -561,7 +555,7 @@ def _target_verify_geometry(
         device=device,
     )
 
-    from rtp_llm.models_py.kernels.cuda.qsa.target_metadata_triton import (
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.target_metadata_triton import (
         try_target_metadata,
     )
 
@@ -575,12 +569,14 @@ def _target_verify_geometry(
     else:
         visible_lengths, compressed_lengths, query_positions, block_starts = metadata
     if self.main_inputs.is_s_padded:
-        active = state_table.ne(0).any(dim=1, keepdim=True) | kv_table.ne(0).any(
-            dim=1, keepdim=True
-        )
+        active = state_table.ne(0).any(dim=1, keepdim=True)
         visible_lengths = torch.where(active, visible_lengths, 0)
         compressed_lengths = torch.where(active, compressed_lengths, 0)
-    max_ctx_len = (max(prefix_values) + query_len) // ratio
+    max_ctx_len = (
+        (int(prefixes.max().item()) + query_len) // ratio
+        if prefixes.device.type == "cpu"
+        else int(compressed_lengths.max().item())
+    )
     if graph_target:
         required_host = (max_ctx_len + kv_entries_per_block - 1) // kv_entries_per_block
         if required_host > int(kv_table.shape[1]):
@@ -596,22 +592,15 @@ def _target_verify_geometry(
             required_kv_columns,
             pool_blocks=int(kv_pool.shape[0]),
             tag=INDEXER_KV_TAG,
-            checks=checks,
         )
 
     # STATE_RING payload offsets wrap, but the framework block table keeps
     # absolute logical-page columns (including sentinel holes). Validate the
     # small committed-tail + candidate window explicitly before any write.
     state_table_width = int(state_table.shape[1])
-    state_pairs = []
-    active_rows = (
-        self.host_values(active.reshape(-1))
-        if self.main_inputs.is_s_padded and not graph_target
-        else None
-    )
-    for request_idx, prefix in enumerate(prefix_values):
-        if active_rows is not None and not active_rows[request_idx]:
-            continue
+    for request_idx, prefix in enumerate(
+        prefixes.tolist() if graph_target else prefixes_device.tolist()
+    ):
         first_needed = max(0, prefix - (prefix % ratio))
         logical_blocks = {
             position // state_tokens_per_block
@@ -624,20 +613,13 @@ def _target_verify_geometry(
                     "target-verify tail"
                 )
             if not graph_target:
-                state_pairs.append((request_idx, logical_block))
-    if not graph_target:
-        from .qsa_cache_views import _validate_state_pairs
+                block_id = int(state_table[request_idx, logical_block].item())
+                if block_id <= 0 or block_id >= int(state_pool.shape[0]):
+                    raise RuntimeError(
+                        "QSA cache 'indexer_state' target-verify tail resolves to "
+                        "an unallocated or out-of-range physical block"
+                    )
 
-        _validate_state_pairs(
-            state_table,
-            state_pairs,
-            int(state_pool.shape[0]),
-            "target-verify tail",
-            checks=checks,
-        )
-
-    self.positions(ratio, checks)
-    checks.verify()
     return TargetVerifyPlan(
         **{
             "batch_size": batch_size,

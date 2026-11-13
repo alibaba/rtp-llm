@@ -6,30 +6,13 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.model_loader.loader import ModelLoader
+from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models_py.modules.base.common.fp8_embedding import Fp8VocabEmbedding
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class Fp8VocabEmbeddingTest(unittest.TestCase):
-    def test_output_element_count_crossing_signed_int32_boundary(self):
-        reference, module = self.make_embedding()
-        # N itself still fits int32, while N * D crosses 2**31. Inspect every
-        # output element in bounded chunks without allocating a second 4 GiB tensor.
-        for rows in (2**31 // module.hidden_size, 2**31 // module.hidden_size + 1):
-            with self.subTest(rows=rows):
-                ids = torch.arange(rows, device="cuda", dtype=torch.int32) % 257
-                mask = ids % 2 == 0
-                output = module(ids, text_tokens_mask=mask)
-                for begin in range(0, rows, 4096):
-                    end = min(begin + 4096, rows)
-                    expected = F.embedding(ids[begin:end].long(), reference)
-                    expected[~mask[begin:end]] = 0
-                    torch.testing.assert_close(
-                        output[begin:end], expected, rtol=0, atol=0
-                    )
-                del output
-
     def make_embedding(self, width=2560, tp=1):
         torch.manual_seed(671)
         weight = torch.randn(257, width, device="cuda").to(torch.float8_e4m3fn)
@@ -70,6 +53,30 @@ class Fp8VocabEmbeddingTest(unittest.TestCase):
                 mask.unsqueeze(-1), expected, torch.zeros_like(expected)
             )
             torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+    def test_tp_reorder_and_hyper_repeat_match_live_graph(self):
+        from rtp_llm.models_py.triton_kernels.common.fp8_vocab_lookup import (
+            gather_hyper_rows,
+        )
+
+        for rows in (1, 4, 16, 4096):
+            source = torch.randn(2, rows, 1280, device="cuda", dtype=torch.bfloat16)
+            expected = (
+                source.transpose(0, 1).contiguous().reshape(rows, 2560).repeat(1, 4)
+            )
+            actual = gather_hyper_rows(source, rows, 1280, 2, 4)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        source = torch.randn(2, 4, 1280, device="cuda", dtype=torch.bfloat16)
+        for _ in range(3):
+            gather_hyper_rows(source, 4, 1280, 2, 4)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = gather_hyper_rows(source, 4, 1280, 2, 4)
+        for gain in (0.01, 1.0, 3.0):
+            source.normal_(0, gain)
+            graph.replay()
+            expected = source.transpose(0, 1).contiguous().reshape(4, 2560).repeat(1, 4)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def test_target_embedding_preserves_bf16_mask_and_column_contract(self):
         reference, module = self.make_embedding(1280, tp=2)

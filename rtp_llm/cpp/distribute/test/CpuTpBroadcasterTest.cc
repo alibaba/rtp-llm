@@ -289,179 +289,69 @@ void runHappyPath(int tp_size) {
     cleanupTempBase(base, tp_size);
 }
 
-// A stop can arrive after root checked the step boundary, including before a
-// receiver consumes already-published inputs. Every frame and later model
-// collective of that step must still complete on every rank.
-void runStopDuringStep(int tp_size) {
-    const auto base = makeTempBase();
-    int        requested[2];
-    ASSERT_EQ(::pipe(requested), 0);
-    std::vector<pid_t> pids;
-    for (int rank = 0; rank < tp_size; ++rank) {
-        pids.push_back(spawnChild([=] {
-            auto& bcast = CpuTpBroadcaster::instance();
-            bcast.reset();
-            bcast.initialize(rank, tp_size, base);
-            constexpr size_t  kBytes = 8 * 1024 * 1024;
-            std::vector<char> payload(kBytes, rank == 0 ? 42 : 0);
-            if (rank == 0) {
-                ::close(requested[1]);
-                char ack = 0;
-                if (readAllRaw(requested[0], &ack, 1) != 1 || ack != 1)
-                    return 1;
-                // Simulate root having entered the step before the request.
-                bcast.broadcast(payload.data(), payload.size(), 0);
-                int next_phase = 19;
-                bcast.broadcast(&next_phase, sizeof(next_phase), 0);
-                if (!bcast.shouldStop(false))
-                    return 1;
-                bcast.finish();
-                bcast.finish();
-                ::close(requested[0]);
-            } else {
-                ::close(requested[0]);
-                if (rank == tp_size - 1) {
-                    bcast.requestStop();
-                    bcast.requestStop();
-                    if (bcast.shouldStop(true))
-                        return 1;
-                    const char ack = 1;
-                    if (::write(requested[1], &ack, 1) != 1)
-                        return 1;
-                }
-                ::close(requested[1]);
-                bcast.broadcast(payload.data(), payload.size(), 0);
-                for (char value : payload) {
-                    if (value != 42)
-                        return 1;
-                }
-                int next_phase = 0;
-                bcast.broadcast(&next_phase, sizeof(next_phase), 0);
-                if (next_phase != 19)
-                    return 1;
-                if (expectThrowContains([&] { bcast.broadcast(&next_phase, sizeof(next_phase), 0); }, "step boundary"))
-                    return 1;
-                // Repeated receives fail locally after the terminal frame.
-                if (expectThrowContains([&] { bcast.broadcast(&next_phase, sizeof(next_phase), 0); }, "step boundary"))
-                    return 1;
-            }
-            bcast.reset();
-            return 0;
-        }));
-    }
-    ::close(requested[0]);
-    ::close(requested[1]);
-    expectChildrenOk(pids);
-    cleanupTempBase(base, tp_size);
-}
-
-TEST(CpuTpBroadcasterTest, StopRequestPreservesInFlightStepTp2) {
-    runStopDuringStep(2);
-}
-
-TEST(CpuTpBroadcasterTest, StopRequestPreservesWholeFanoutTp4) {
-    runStopDuringStep(4);
-}
-
-TEST(CpuTpBroadcasterTest, RootStopWakesIdleReceiverBeforeTeardown) {
-    const auto         base = makeTempBase();
+TEST(CpuTpBroadcasterTest, InterruptReceiveAllowsBothRanksToReachTeardown) {
+    const std::string base = makeTempBase();
+    int               reached[2];
+    ASSERT_EQ(::pipe(reached), 0);
     std::vector<pid_t> pids;
     pids.push_back(spawnChild([=] {
+        ::close(reached[1]);
         auto& bcast = CpuTpBroadcaster::instance();
         bcast.reset();
+        bcast.interruptReceive();  // Uninitialized no-op.
         bcast.initialize(0, 2, base);
-        if (!bcast.shouldStop(true))
-            return 1;
-        bcast.finish();
+        bcast.interruptReceive();  // Rank 0 must remain usable.
+        int value = 19;
+        bcast.broadcast(&value, sizeof(value), 0);
+        // Model teardown needs the peer to leave its input loop first. Keep
+        // the root socket open until the peer explicitly reaches teardown.
+        char       ack = 0;
+        const auto n   = readAllRaw(reached[0], &ack, 1);
         bcast.reset();
-        return 0;
+        ::close(reached[0]);
+        return n == 1 && ack == 42 ? 0 : 1;
     }));
     pids.push_back(spawnChild([=] {
+        ::close(reached[0]);
         auto& bcast = CpuTpBroadcaster::instance();
         bcast.reset();
         bcast.initialize(1, 2, base);
-        int       value = 0;
-        const int rc    = expectThrowContains([&] { bcast.broadcast(&value, sizeof(value), 0); }, "step boundary");
+        int value = 0;
+        bcast.broadcast(&value, sizeof(value), 0);
+        if (value != 19)
+            return 1;
+        std::atomic<bool> entered{false}, returned{false};
+        std::thread       receiver([&] {
+            entered.store(true, std::memory_order_release);
+            try {
+                bcast.broadcast(&value, sizeof(value), 0);
+            } catch (const std::exception&) {
+                returned.store(true, std::memory_order_release);
+            }
+        });
+        while (!entered.load(std::memory_order_acquire))
+            std::this_thread::yield();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const auto start = std::chrono::steady_clock::now();
+        bcast.interruptReceive();
+        bcast.interruptReceive();  // Idempotent while the reader unwinds.
+        receiver.join();
+        const auto elapsed = std::chrono::steady_clock::now() - start;
+        if (!returned.load(std::memory_order_acquire) || elapsed > std::chrono::seconds(1))
+            return 1;
+        if (expectThrowContains([&] { bcast.broadcast(&value, sizeof(value), 0); }, "receive interrupted"))
+            return 1;
+        const char ack = 42;
+        const auto n   = ::write(reached[1], &ack, 1);
         bcast.reset();
-        return rc;
+        bcast.reset();
+        ::close(reached[1]);
+        return n == 1 ? 0 : 1;
     }));
+    ::close(reached[0]);
+    ::close(reached[1]);
     expectChildrenOk(pids);
     cleanupTempBase(base, 2);
-}
-
-TEST(CpuTpBroadcasterTest, LateLocalStopAfterRootClosedStillCompletes) {
-    const auto base = makeTempBase();
-    int        closed[2];
-    ASSERT_EQ(::pipe(closed), 0);
-    std::vector<pid_t> pids;
-    for (int rank = 0; rank < 2; ++rank) {
-        pids.push_back(spawnChild([=] {
-            auto& bcast = CpuTpBroadcaster::instance();
-            bcast.reset();
-            bcast.initialize(rank, 2, base);
-            if (rank == 0) {
-                ::close(closed[0]);
-                bcast.finish();
-                bcast.reset();
-                const char ack = 1;
-                return ::write(closed[1], &ack, 1) == 1 ? 0 : 1;
-            }
-            ::close(closed[1]);
-            int value = 0;
-            if (expectThrowContains([&] { bcast.broadcast(&value, sizeof(value), 0); }, "step boundary"))
-                return 1;
-            char ack = 0;
-            if (readAllRaw(closed[0], &ack, 1) != 1 || ack != 1)
-                return 1;
-            bcast.requestStop();
-            bcast.requestStop();
-            bcast.reset();
-            return 0;
-        }));
-    }
-    ::close(closed[0]);
-    ::close(closed[1]);
-    expectChildrenOk(pids);
-    cleanupTempBase(base, 2);
-}
-
-TEST(CpuTpBroadcasterTest, DepartedPeerDoesNotPreventStopFanout) {
-    const auto base = makeTempBase();
-    int        closed[2];
-    ASSERT_EQ(::pipe(closed), 0);
-    std::vector<pid_t> pids;
-    for (int rank = 0; rank < 3; ++rank) {
-        pids.push_back(spawnChild([=] {
-            auto& bcast = CpuTpBroadcaster::instance();
-            bcast.reset();
-            bcast.initialize(rank, 3, base);
-            if (rank == 1) {
-                ::close(closed[0]);
-                bcast.reset();
-                const char ack = 1;
-                return ::write(closed[1], &ack, 1) == 1 ? 0 : 1;
-            }
-            ::close(closed[1]);
-            if (rank == 0) {
-                char ack = 0;
-                if (readAllRaw(closed[0], &ack, 1) != 1 || ack != 1)
-                    return 1;
-                bcast.finish();
-                bcast.finish();
-            } else {
-                int value = 0;
-                if (expectThrowContains([&] { bcast.broadcast(&value, sizeof(value), 0); }, "step boundary"))
-                    return 1;
-            }
-            ::close(closed[0]);
-            bcast.reset();
-            return 0;
-        }));
-    }
-    ::close(closed[0]);
-    ::close(closed[1]);
-    expectChildrenOk(pids);
-    cleanupTempBase(base, 3);
 }
 
 TEST(CpuTpBroadcasterTest, BroadcastHappyPathTp2) {

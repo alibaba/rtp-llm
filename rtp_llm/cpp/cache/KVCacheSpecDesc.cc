@@ -26,18 +26,31 @@ KVCacheSpecPtr SpecBuilder::build(const KVCacheSpecDesc& desc, const SpecBuildCo
             break;
     }
     RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "unknown KVCacheSpecType=%d", static_cast<int>(desc.cache_type));
-    const auto mode = desc.tp_transfer_mode;
-    RTP_LLM_CHECK_WITH_INFO(
-        mode == TpCacheTransferMode::LEGACY
-            || (mode == TpCacheTransferMode::LINEAR_QKV && desc.cache_type == KVCacheSpecType::LinearAttention)
-            || (mode == TpCacheTransferMode::MHA_HEADS && desc.cache_type == KVCacheSpecType::MultiHeadAttention)
-            || (mode == TpCacheTransferMode::REPLICATED
-                && (desc.cache_type == KVCacheSpecType::OpaqueKV || desc.cache_type == KVCacheSpecType::OpaqueState)),
-        "invalid cache TP transfer mode: tag=%s cache_type=%d mode=%d",
-        desc.tag.c_str(),
-        static_cast<int>(desc.cache_type),
-        static_cast<int>(mode));
-    spec->tp_transfer.mode = mode;
+    auto& layout = spec->tp_transfer;
+    layout.mode  = desc.tp_transfer_mode;
+    if (layout.mode == TpCacheTransferMode::LINEAR_QKV) {
+        RTP_LLM_CHECK_WITH_INFO(desc.cache_type == KVCacheSpecType::LinearAttention,
+                                "LINEAR_QKV transfer requires a linear cache spec");
+        const auto& linear    = *ctx.linear_attention_config;
+        const auto  tp        = std::max<int64_t>(1, ctx.parallelism_config->get_attn_tp_size());
+        const auto  item_size = getTypeSize(linear.conv_state_dtype);
+        layout.key_heads      = linear.linear_num_key_heads / tp;
+        layout.value_heads    = linear.linear_num_value_heads / tp;
+        layout.q_row_bytes    = layout.key_heads * linear.linear_key_head_dim * item_size;
+        layout.k_row_bytes    = layout.q_row_bytes;
+        layout.v_row_bytes    = layout.value_heads * linear.linear_value_head_dim * item_size;
+        layout.history_rows   = linear.linear_conv_kernel_dim - 1;
+    } else if (layout.mode == TpCacheTransferMode::MHA_HEADS) {
+        RTP_LLM_CHECK_WITH_INFO(desc.cache_type == KVCacheSpecType::MultiHeadAttention,
+                                "MHA_HEADS transfer requires an MHA cache spec");
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(layout.mode == TpCacheTransferMode::LEGACY
+                                    || (layout.mode == TpCacheTransferMode::REPLICATED
+                                        && (desc.cache_type == KVCacheSpecType::OpaqueKV
+                                            || desc.cache_type == KVCacheSpecType::OpaqueState)),
+                                "invalid cache TP transfer mode for tag=%s",
+                                desc.tag.c_str());
+    }
     return spec;
 }
 
@@ -98,6 +111,9 @@ CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
         }
         if (desc.tail->validate_tail_blocks.has_value()) {
             policy.validate_tail_blocks = *desc.tail->validate_tail_blocks;
+        }
+        if (desc.tail->prefix_checkpoint_stride_blocks.has_value()) {
+            policy.prefix_checkpoint_stride_blocks = *desc.tail->prefix_checkpoint_stride_blocks;
         }
     }
     if (desc.cp.has_value()) {

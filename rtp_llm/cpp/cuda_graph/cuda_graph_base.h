@@ -38,19 +38,19 @@ struct CudaGraphState {
 };
 
 struct GraphParams {
-    bool          enable_cuda_graph            = false;
-    bool          enable_cuda_graph_debug_mode = false;
-    bool          is_prefill_cuda_graph_mode   = false;
-    bool          is_target_verify             = false;
-    CudaGraphRole role                         = CudaGraphRole::AUTO;
-    int           max_seq_len                  = 0;
+    bool             enable_cuda_graph                  = false;
+    bool             enable_cuda_graph_debug_mode       = false;
+    bool             is_prefill_cuda_graph_mode         = false;
+    bool             is_target_verify                   = false;
+    CudaGraphRole    role                               = CudaGraphRole::AUTO;
+    int              max_seq_len                        = 0;
     // Generation prefill may capture a longer discarded scratch sequence.
     // Zero keeps the existing per-request bound equal to max_seq_len.
-    int    request_max_seq_len    = 0;
-    int    num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
-    size_t max_context_batch_size = 128;
-    std::size_t      hidden_size           = 0;
-    c10::ScalarType  model_data_type       = c10::ScalarType::Float;
+    int              request_max_seq_len                = 0;
+    int              num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
+    size_t           max_context_batch_size = 128;
+    std::size_t      hidden_size            = 0;
+    c10::ScalarType  model_data_type        = c10::ScalarType::Float;
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
     int              generation_prefill_cuda_graph_max_requests = 0;

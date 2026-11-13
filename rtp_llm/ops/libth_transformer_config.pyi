@@ -1053,6 +1053,7 @@ class ModelConfig:
     moe_style: int
     moe_topk_group: int
     hc_mult: int
+    mtp_input_hidden_size: int
     hc_sinkhorn_iters: int
     hc_eps: float
     swiglu_limit: float

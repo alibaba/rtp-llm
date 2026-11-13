@@ -1,5 +1,20 @@
 workspace(name = "rtp_llm")
 
+load("//:atom_wheel_repository.bzl", "patched_atom_wheel")
+
+# Patch the SHA-pinned ATOM wheel at Bazel fetch time. CI installs the resulting
+# wheel; the image build does not apply or carry ATOM source patches.
+patched_atom_wheel(
+    name = "patched_atom_wheel",
+    url = "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/atom/atom-0.1.1.dev1%2Bg0189b3506-py3-none-any.whl",
+    sha256 = "021920395fa6e95e7d3fe75631d0f8c93083c90f5c1ae3f4a4d46a93d940cbcc",
+    patches = [
+        "//patches/atom/main_0189b3506:atom.patch",
+        "//patches/atom:async_mtp_rebase_compat.patch",
+    ],
+    wheel_name = "atom-0.1.1.dev1+g0189b3506-py3-none-any.whl",
+)
+
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(

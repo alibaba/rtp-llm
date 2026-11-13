@@ -11,12 +11,17 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import get_attention_inputs_value
 from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextMetadata
 from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpModel
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_head_graph import (
+    DraftHeadGraph,
+)
 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     exact_head_rms_norm,
 )
+from rtp_llm.models_py.modules.hybrid.gated_residual import grouped_rms_norm
 from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
     Qwen4LinearFactory as LinearFactory,
 )
+from rtp_llm.models_py.modules.qwen4_exp.weight_views import annotate_compute_inventory
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs
 from rtp_llm.utils.model_weight import W
@@ -85,51 +90,6 @@ def normalize_mtp_prefill_positions(inputs, index_factor: int) -> None:
             copied.add(tensor.data_ptr())
 
 
-def normalize_mtp_decode_positions(inputs, index_factor: int) -> None:
-    """Keep draft decode in the logical Base-RoPE coordinates of its prompt KV.
-
-    Native stream positions retain the target's media-dependent MRoPE offset.
-    Build from live device lengths inside the captured forward so replay also
-    refreshes these positions without reading a device scalar on the host.
-    """
-    groups = get_attention_inputs_value(inputs)
-    values = tuple(groups.values()) if isinstance(groups, Mapping) else (groups,)
-    if not values or any(
-        value.is_prefill or value.is_target_verify for value in values
-    ):
-        return
-    anchor = values[0]
-    lengths = (
-        anchor.sequence_lengths_plus_1_device - 1
-        if anchor.is_cuda_graph
-        else anchor.sequence_lengths
-    )
-    if (
-        index_factor <= 0
-        or lengths.ndim != 1
-        or lengths.numel() != inputs.input_ids.numel()
-    ):
-        raise RuntimeError("MTP decode position geometry is invalid")
-    positions = lengths.to(
-        device=inputs.input_ids.device, dtype=torch.int32, non_blocking=True
-    ).repeat_interleave(index_factor)
-    tensors = [
-        inputs.combo_position_ids,
-        *(value.combo_position_ids for value in values),
-    ]
-    copied = set()
-    for tensor in tensors:
-        if (
-            tensor.dtype != torch.int32
-            or tensor.device != positions.device
-            or tensor.numel() != positions.numel()
-        ):
-            raise RuntimeError("MTP decode transported position geometry is invalid")
-        if tensor.data_ptr() not in copied:
-            tensor.copy_(positions.reshape_as(tensor))
-            copied.add(tensor.data_ptr())
-
-
 class Qwen4ExpMTPInputProjection(nn.Module):
     """Fuse one token embedding into every target hyper-connection branch."""
 
@@ -185,7 +145,7 @@ class Qwen4ExpMTPInputProjection(nn.Module):
 
         embedding = None
         if inputs_embeds.is_cuda and torch.version.hip is None:
-            from rtp_llm.models_py.kernels.cuda.qwen4_mtp_norm import (
+            from rtp_llm.models_py.modules.qwen4_exp.mtp_norm_triton import (
                 try_mtp_embedding_rms_norm,
             )
 
@@ -196,11 +156,12 @@ class Qwen4ExpMTPInputProjection(nn.Module):
             embedding = exact_head_rms_norm(
                 inputs_embeds, self.embedding_gamma, self.norm_eps
             )
-        # The MTP pre-FC norm spans the entire HC stream, before the branch
-        # reshape (SGLang Qwen4ExpForCausalLMMTP._fuse_residual_linear_shared).
-        # Main-model HC norms remain branch-local.
-        hidden = exact_head_rms_norm(input_hiddens, self.hidden_gamma, self.norm_eps)
-        hidden = hidden.unflatten(-1, (self.hc_mult, self.hidden_size))
+        hidden = grouped_rms_norm(
+            input_hiddens,
+            self.hidden_gamma,
+            self.hidden_size,
+            self.norm_eps,
+        ).unflatten(-1, (self.hc_mult, self.hidden_size))
 
         # fc_embedding/fc_hidden are hidden_size-wide matrices.  Apply them to
         # every branch independently; pooling the target stream before either
@@ -214,6 +175,9 @@ class Qwen4ExpMTPInputProjection(nn.Module):
 
 class Qwen4ExpMTPModel(Qwen4ExpModel):
     """One-layer draft model with target-hidden input fusion and QSA."""
+
+    def supports_cuda_graph_draft_prefill(self) -> bool:
+        return True
 
     def cuda_graph_draft_prefill_uses_request_lanes(self) -> bool:
         # QSA reserves speculative token lanes independently of the HC width.
@@ -274,7 +238,6 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
             bounds,
             self.cuda_graph_position_id_len_factor(),
             int(inputs.input_ids.numel()),
-            state_cache=self.kv_cache,
         )
 
     def _build_attn_meta(self, inputs, device, is_cuda_graph=False):
@@ -305,6 +268,7 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
         max_generate_batch_size: int,
         fmha_config=None,
         py_hw_kernel_config=None,
+        device_resource_config=None,
     ) -> None:
         super().__init__(
             model_config,
@@ -314,6 +278,7 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
             max_generate_batch_size=max_generate_batch_size,
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
+            device_resource_config=device_resource_config,
         )
         if self.layer_num != 1:
             raise RuntimeError("qwen4_exp MTP model descriptor requires one layer")
@@ -336,12 +301,33 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
             hidden_size=model_config.hidden_size,
             norm_eps=model_config.layernorm_eps,
         )
+        self._draft_head_graph = DraftHeadGraph(enabled=hasattr(self, "_fp8_lm_head"))
+        annotate_compute_inventory(self.weight)
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None):
-        normalize_mtp_decode_positions(
-            inputs, int(self.config.attn_config.rope_config.index_factor)
-        )
-        return super().forward(inputs, fmha_impl)
+        self._draft_head_graph.clear_activation()
+        outputs = super().forward(inputs, fmha_impl)
+        groups = get_attention_inputs_value(inputs)
+        values = tuple(groups.values()) if isinstance(groups, Mapping) else (groups,)
+        if (
+            self._draft_head_graph.enabled
+            and values
+            and all(value.is_cuda_graph and not value.is_prefill for value in values)
+        ):
+            self._draft_head_graph.stage(self._fp8_lm_head, outputs.hidden_states)
+        return outputs
+
+    def activate_draft_lm_head_graph(self, graph_batch: int) -> None:
+        self._draft_head_graph.activate(graph_batch)
+
+    def _compute_local_logits(self, hidden: torch.Tensor) -> torch.Tensor:
+        logits = self._draft_head_graph.take(hidden)
+        return super()._compute_local_logits(hidden) if logits is None else logits
+
+    def close(self) -> None:
+        self._draft_head_graph.clear_activation()
+        self._draft_head_graph.outputs.clear()
+        super().close()
 
     def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
         input_hiddens: Optional[torch.Tensor] = getattr(inputs, "input_hiddens", None)
@@ -349,15 +335,9 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
             raise RuntimeError(
                 "qwen4_exp MTP requires hc_mult*hidden_size-wide target input_hiddens"
             )
-        from rtp_llm.models_py.model_desc.qwen3_next import Qwen35Model
-
-        # Inject the shifted prompt's visual rows before the draft projection.
-        mm = getattr(inputs, "multimodal_inputs", None)
-        inputs_embeds = (
-            Qwen35Model.word_embedding(self, inputs)
-            if mm is not None and len(mm.multimodal_features)
-            else self.embed_tokens(inputs.input_ids)
-        )
+        # The MTP draft consumes text ids only; do not enter Qwen35's multimodal
+        # embedding injector from this override.
+        inputs_embeds = self.embed_tokens(inputs.input_ids)
         return self.mtp_input_projection(inputs_embeds, input_hiddens)
 
     def _initial_hyper_states(self, hidden_states: torch.Tensor) -> torch.Tensor:

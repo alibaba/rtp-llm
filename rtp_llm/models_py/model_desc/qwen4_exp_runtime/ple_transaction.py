@@ -10,7 +10,6 @@ from types import SimpleNamespace
 from typing import Optional
 
 import torch
-
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import PLE_NGRAM_CTX_TAG, PLE_STATE_TAG
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpPLELayer
 from rtp_llm.ops.compute_ops import PyAttentionInputs
@@ -58,7 +57,6 @@ class PLETransactionCoordinator:
         ctx_pool: torch.Tensor,
         page_size: int,
         embeddings: Optional[torch.Tensor] = None,
-        live_rows: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute all target rows while leaving the persistent PLE pools intact."""
         if not bool(state_inputs.is_prefill):
@@ -103,10 +101,7 @@ class PLETransactionCoordinator:
         prefixes_device = prefix_source.to(
             device=hyper_states.device, dtype=torch.long, non_blocking=True
         ).contiguous()
-        invalid_history = prefixes <= 0
-        if live_rows is not None:
-            invalid_history = invalid_history & live_rows.to(prefixes.device)
-        if not graph_capture and bool(torch.any(invalid_history).item()):
+        if not graph_capture and bool(torch.any(prefixes_device <= 0).item()):
             raise RuntimeError(
                 "qwen4_exp PLE target verify requires a non-empty committed history"
             )
@@ -125,7 +120,7 @@ class PLETransactionCoordinator:
 
         gathered = None
         if graph_capture:
-            from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit import (
+            from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_triton import (
                 gather_target_read_state,
             )
 
@@ -142,18 +137,8 @@ class PLETransactionCoordinator:
         if gathered is not None:
             initial_state, initial_context, history = gathered
         else:
-            # Graph fallback must read the live device mirror, including B>32
-            # where the fused gather is unavailable. Host page arithmetic both
-            # freezes capture-time metadata and creates an unpinned H2D copy.
             read_pages = torch.div(
-                (
-                    prefixes
-                    if not graph_capture and prefixes.device.type == "cpu"
-                    else prefixes_device
-                )
-                - 1,
-                page_size,
-                rounding_mode="floor",
+                prefixes_device - 1, page_size, rounding_mode="floor"
             )
             state_read_blocks = self._physical_blocks(
                 state_inputs,
@@ -173,12 +158,6 @@ class PLETransactionCoordinator:
             )
             initial_state = state_pool.index_select(0, state_read_blocks)
             initial_context = ctx_pool.index_select(0, ctx_read_blocks)
-            if live_rows is not None:
-                live = live_rows.to(hyper_states.device)
-                initial_state = torch.where(live[:, None, None], initial_state, 0)
-                initial_context = torch.where(
-                    live[:, None], initial_context, ple.ple_embedding.eos_token_id
-                )
             history = torch.cat([initial_context, candidate_ids], dim=1)
         output, candidate_state_inputs = ple.decode_chunk(
             hyper_states.reshape(batch_size, query_len, -1),
@@ -199,7 +178,6 @@ class PLETransactionCoordinator:
             candidate_state_inputs=candidate_state_inputs,
             initial_context=initial_context,
             candidate_ids=candidate_ids,
-            live_rows=live_rows,
         )
         transaction = self.active_transaction
         if transaction is None:
@@ -240,8 +218,6 @@ class PLETransactionCoordinator:
                 f"qwen4_exp PLE target layer {layer_idx} was staged twice"
             )
         transaction.stages[layer_idx] = stage
-        if live_rows is not None:
-            output = torch.where(live_rows.to(output.device)[:, None, None], output, 0)
         return hyper_states + output.reshape_as(hyper_states)
 
     @staticmethod
@@ -380,58 +356,7 @@ class PLETransactionCoordinator:
                     for layer, stage in transaction.stages.items()
                 },
             )
-        first_stage = next(iter(transaction.stages.values()))
-        live_rows = first_stage.live_rows
-        if live_rows is not None:
-            # DP dummy rows must participate in the forward collectives, but
-            # must never enter destination validation, writes, or undo records.
-            for stage in transaction.stages.values():
-                if stage.live_rows is None or not torch.equal(
-                    live_rows, stage.live_rows.to(live_rows.device)
-                ):
-                    raise RuntimeError(
-                        "qwen4_exp PLE layers disagree about padded rows"
-                    )
-            rows = live_rows.nonzero().reshape(-1)
-            if not rows.numel():
-                owner.prepared_writes = []
-                return
-
-            def select(value):
-                return value.index_select(0, rows.to(value.device))
-
-            def select_inputs(inputs):
-                return SimpleNamespace(
-                    **{
-                        name: (
-                            select(value) if isinstance(value, torch.Tensor) else value
-                        )
-                        for name in ("kv_cache_block_id_device", "kv_cache_block_id")
-                        for value in (getattr(inputs, name, None),)
-                    }
-                )
-
-            accept_len = select(accept_len)
-            transaction = replace(
-                transaction,
-                batch_size=int(rows.numel()),
-                prefixes=select(transaction.prefixes),
-                stages={
-                    layer: replace(
-                        stage,
-                        prefixes=select(stage.prefixes),
-                        state_inputs=select_inputs(stage.state_inputs),
-                        ctx_inputs=select_inputs(stage.ctx_inputs),
-                        initial_state=select(stage.initial_state),
-                        candidate_state_inputs=select(stage.candidate_state_inputs),
-                        initial_context=select(stage.initial_context),
-                        candidate_ids=select(stage.candidate_ids),
-                        live_rows=None,
-                    )
-                    for layer, stage in transaction.stages.items()
-                },
-            )
-        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_commit_metadata import (
+        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_metadata_triton import (
             begin_accepted_pair_resolution,
         )
 
@@ -509,7 +434,7 @@ class PLETransactionCoordinator:
         # allocate immutable undo only now, with no persistent-pool writes.
         prepared_writes = []
         for stage, state_blocks, ctx_blocks in pending:
-            from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_commit_prepare import (
+            from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_prepare_triton import (
                 prepare_commit_values,
             )
 
@@ -547,8 +472,7 @@ class PLETransactionCoordinator:
         # streams (async bookkeeping) the way a device-wide sync does.
         if resolution is not None:
             resolution.verify()
-        else:
-            self._synchronize_ple_transaction(transaction)
+        self._synchronize_ple_transaction(transaction)
         owner.prepared_writes = prepared_writes
 
     def _prepare_boundary_slots(
@@ -579,7 +503,7 @@ class PLETransactionCoordinator:
         blocks stay tolerated in both modes: parking routes such writes to
         the final destination.
         """
-        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_commit_prepare import (
+        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_prepare_triton import (
             prepare_commit_values,
         )
 
