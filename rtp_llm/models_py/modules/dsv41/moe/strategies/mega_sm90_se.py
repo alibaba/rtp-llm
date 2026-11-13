@@ -55,10 +55,10 @@ class SM90MegaMoEFusedSEStrategy(SM90MegaMoEStrategy):
     def can_handle(cls, cfg: MoeCfg, explicit: bool = False) -> bool:
         if not _fused_se_enabled() or not _has_fused_shared_api():
             return False
-        if cfg.n_shared_experts < 1:
-            return False
         # The fused shared GEMM takes 128x128 FP32 block scales; MXFP8 32x32
         # checkpoint scales are folded into the FP8 bytes at weight setup.
+        # MoeCfg carries no shared-expert count: the layer only routes here when
+        # it has one, and setup_weights() fails loudly if the keys are absent.
         if cfg.shared_fp8_block_size not in (_SHARED_BLOCK, 32):
             return False
         return super().can_handle(cfg, explicit=explicit)
@@ -97,6 +97,21 @@ class SM90MegaMoEFusedSEStrategy(SM90MegaMoEStrategy):
             )
             return folded, residual
 
+        missing = [
+            key
+            for key in (
+                W.v4_shared_w13_w,
+                W.v4_shared_w13_s,
+                W.v4_shared_w2_w,
+                W.v4_shared_w2_s,
+            )
+            if key not in layer_weights
+        ]
+        if missing:
+            raise ValueError(
+                "mega_sm90_se needs the shared-expert weights in the layer dict; "
+                f"missing {missing}"
+            )
         w13 = layer_weights.pop(W.v4_shared_w13_w)
         s13 = layer_weights.pop(W.v4_shared_w13_s)
         w2 = layer_weights.pop(W.v4_shared_w2_w)
