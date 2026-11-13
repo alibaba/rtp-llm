@@ -3,6 +3,7 @@
 #include "aios/network/arpc/arpc/metric/KMonitorANetClientMetricReporter.h"
 
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "autil/EnvUtil.h"
 
 namespace rtp_llm {
 
@@ -77,8 +78,16 @@ std::shared_ptr<arpc::RPCChannelBase> TcpClient::openChannel(const std::string& 
     // workers behind a saturated channel: ANet reports enqueue failure through
     // the RPC callback, and the cache-load state machine applies its bounded
     // transfer retry policy without starving healthy peers.
+    // A hybrid-model handoff can issue several per-layer loads per request.
+    // Keep admission bounded and nonblocking, while allowing deployments to
+    // size the queue for their maximum concurrent handoff batch.
+    auto queue_limit = autil::EnvUtil::getEnv("RTP_CACHE_STORE_RPC_QUEUE_LIMIT", size_t(1000));
+    if (queue_limit == 0) {
+        queue_limit = 1000;
+    }
+    RTP_LLM_LOG_INFO("cache store RPC channel %s queue limit %zu", spec.c_str(), queue_limit);
     return std::shared_ptr<arpc::RPCChannelBase>(
-        dynamic_cast<arpc::RPCChannelBase*>(rpc_channel_manager_->OpenChannel(spec, false, 1000ul)));
+        dynamic_cast<arpc::RPCChannelBase*>(rpc_channel_manager_->OpenChannel(spec, false, queue_limit)));
 }
 
 std::shared_ptr<TransferConnection>

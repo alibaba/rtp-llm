@@ -5,9 +5,10 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 import jinja2
-from jinja2.exceptions import TemplateError
-from jinja2.sandbox import ImmutableSandboxedEnvironment
 from packaging import version
+from transformers.utils.chat_template_utils import (
+    _compile_jinja_template as compile_hf_chat_template,
+)
 
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
@@ -157,17 +158,11 @@ class BasicRenderer(CustomChatRenderer):
 
     @lru_cache
     def _compile_jinja_template(self, chat_template) -> jinja2.Template:
-
-        def raise_exception(message):
-            raise TemplateError(message)
-
-        jinja_env = ImmutableSandboxedEnvironment(
-            trim_blocks=True,
-            lstrip_blocks=True,
-            extensions=["jinja2.ext.do", "jinja2.ext.loopcontrols"],
+        # Match tokenizer templates, including {% generation %} blocks.
+        environment = compile_hf_chat_template("").environment.overlay(
+            extensions=["jinja2.ext.do"]
         )
-        jinja_env.globals["raise_exception"] = raise_exception
-        return jinja_env.from_string(chat_template)
+        return environment.from_string(chat_template)
 
     def _get_template(self, request: ChatCompletionRequest) -> jinja2.Template:
         if request.user_template:
