@@ -50,7 +50,7 @@ public class LLMMockEngineTest {
                 assertEquals(96, rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
                 lease.publish(List.of(1L, -2L), 32); lease.close();
                 var snapshot = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
-                assertEquals(Set.of(1L, -2L), Set.copyOf(snapshot.getCacheKeyListList()));
+                assertEquals(Set.of(1L, -2L), Set.copyOf(snapshot.getCacheKeysMap().keySet()));
                 assertEquals(16, snapshot.getBlockSize()); assertEquals(128, snapshot.getAvailableKvCache());
                 try (var extra = assertInstanceOf(Ready.class, node.cacheManager().prepare(112, List.of())).lease()) {
                     assertTrue(extra.publish(List.of(10L, 11L, 12L, 13L, 14L, 15L, 16L), 112));
@@ -58,10 +58,10 @@ public class LLMMockEngineTest {
                 assertEquals(9, node.cacheManager().itemCount()); // Logical cache now exceeds eight device blocks.
                 assertEquals(128, rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getTotalKvCache());
                 snapshot = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
-                assertEquals(9, snapshot.getCacheKeyListCount());
+                assertEquals(9, snapshot.getCacheKeysCount());
                 var pinned = assertInstanceOf(Ready.class, node.cacheManager().prepare(16, List.of(1L))).lease();
                 var unchanged = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(snapshot.getVersion()).build());
-                assertEquals(snapshot.getVersion(), unchanged.getVersion()); assertEquals(0, unchanged.getCacheKeyListCount());
+                assertEquals(snapshot.getVersion(), unchanged.getVersion()); assertEquals(0, unchanged.getCacheKeysCount());
                 assertEquals(112, unchanged.getAvailableKvCache()); pinned.close();
             } finally { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
         }

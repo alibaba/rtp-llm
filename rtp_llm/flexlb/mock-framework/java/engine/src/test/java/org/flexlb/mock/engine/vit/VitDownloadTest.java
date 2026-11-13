@@ -49,7 +49,7 @@ class VitDownloadTest {
                     rpc.asyncSubmitEmbedding(input(server,"/first")); // Same key shares its producer/slot.
                     rpc.asyncSubmitEmbedding(input(server,"/second"));assertTrue(secondEntered.await(2,TimeUnit.SECONDS));
                     rpc.asyncSubmitEmbedding(input(server,"/queued"));
-                    assertEquals(3,rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getMmInflightInputs().getValue());
+                    assertEquals(3,node.inflight());
                     assertFalse(hits.containsKey("/queued"));
                     String snapshot=metrics(node);
                     assertEquals(3,VitTest.sample(snapshot,"py_rtp_vit_preprocess_queue_size_count"));
@@ -64,7 +64,7 @@ class VitDownloadTest {
                     assertEquals(1,releaseFirst.getCount()); // Forward completed while first HTTP body is still blocked.
                     assertEquals(1,hits.get("/first").get());
                     releaseFirst.countDown();
-                    await(()->rpc.withDeadlineAfter(1,TimeUnit.SECONDS).getWorkerStatus(StatusVersionPB.getDefaultInstance()).getMmInflightInputs().getValue()==0);
+                    await(()->node.inflight()==0);
                 } finally { releaseFirst.countDown();releaseSecond.countDown();channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
             } finally { server.stop(0); }
         }
@@ -89,7 +89,7 @@ class VitDownloadTest {
                 rpc.asyncSubmitEmbedding(input(server,"/slow"));assertTrue(entered.await(2,TimeUnit.SECONDS));
                 assertEquals(Status.Code.DEADLINE_EXCEEDED,assertThrows(StatusRuntimeException.class,()->
                     rpc.withDeadlineAfter(100,TimeUnit.MILLISECONDS).remoteMultimodalEmbedding(input(server,"/queued"))).getStatus().getCode());
-                await(()->rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getMmInflightInputs().getValue()==1);
+                await(()->node.inflight()==1);
                 assertEquals(0,queuedHits.get());
                 threads.submit(node::close).get(3,TimeUnit.SECONDS);
             } finally { release.countDown();node.close();channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS);server.stop(0); }
@@ -121,7 +121,7 @@ class VitDownloadTest {
                             ()->assertThrows(StatusRuntimeException.class,()->rpc.withDeadlineAfter(3,TimeUnit.SECONDS).remoteMultimodalEmbedding(request)));
                         var expected=path.equals("/missing")?Status.Code.UNAVAILABLE:path.equals("/timeout")?Status.Code.DEADLINE_EXCEEDED:Status.Code.INVALID_ARGUMENT;
                         assertEquals(expected,error.getStatus().getCode());
-                        await(()->rpc.withDeadlineAfter(1,TimeUnit.SECONDS).getWorkerStatus(StatusVersionPB.getDefaultInstance()).getMmInflightInputs().getValue()==0);
+                        await(()->node.inflight()==0);
                     }
                     var urlOnly=input(server,"/good").toBuilder();
                     urlOnly.setMultimodalInputs(0,urlOnly.getMultimodalInputs(0).toBuilder().clearMmPreprocessConfig());

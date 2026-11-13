@@ -469,7 +469,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path):
         )
         for node in masters
     ]
-    for key in ("deployment_id", "FLEXLB_CONFIG", "server_port"):
+    for key in ("HIPPO_ROLE", "FLEXLB_CONFIG", "server_port"):
         assert all(
             config[key] == effective_configs[0][key] for config in effective_configs
         )
@@ -593,6 +593,12 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(
                         expect={"count": 1},
                     ),
                     step(
+                        "added",
+                        "engine/scale",
+                        args={"direction": "out", "role": "prefill", "count": 1},
+                        expect={"count": 1},
+                    ),
+                    step(
                         "restored",
                         "master/restart",
                         args={"targets": {"ref": "steps.a"}},
@@ -604,12 +610,6 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(
                         "master/list/addresses",
                         args={"is_leader": True},
                         expect={"eq": {"ref": "steps.a"}},
-                    ),
-                    step(
-                        "added",
-                        "engine/scale",
-                        args={"direction": "out", "role": "prefill", "count": 1},
-                        expect={"count": 1},
                     ),
                 ],
             )
@@ -639,8 +639,14 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(
     original = json.loads((first / "endpoints.json").read_text())
     restored = json.loads((current / "endpoints.json").read_text())
     assert original["rpc"] == restored["rpc"] and original["http"] == restored["http"]
-    assert len(json.loads((first / "discovery.json").read_text())["p-domain"]) == 1
-    assert len(json.loads((current / "discovery.json").read_text())["p-domain"]) == 1
+    assert (
+        json.loads((first / "discovery.json").read_text())["p-domain"]
+        == values["removed"]
+    )
+    assert (
+        json.loads((current / "discovery.json").read_text())["p-domain"]
+        == values["added"]
+    )
     process = [
         item
         for item in logs(output)

@@ -54,9 +54,28 @@ class MasterRoutesTest {
         assertRoutesAfterFirstFailure(503, true);
     }
 
-    @Test void heartbeatRequiresBothBooleanFields() throws Exception {
+    @Test void heartbeatDefaultsToSendingGenerateInputWhenCapabilityIsMissing() throws Exception {
         Path topology = directory.resolve("topology.json");
-        for (String response : List.of("{\"ready\":true}", "{\"requires_generate_input\":false}",
+        try (var master = new BackendRpcClientTest.Harness()) {
+            publish(topology, List.of(master.endpoint()));
+            master.heartbeat.removeContext("/rtp_llm/master/info");
+            master.heartbeat.createContext("/rtp_llm/master/info", exchange -> {
+                try (exchange) {
+                    byte[] bytes = "{\"ready\":true}".getBytes(StandardCharsets.UTF_8);
+                    exchange.sendResponseHeaders(200, bytes.length);
+                    exchange.getResponseBody().write(bytes);
+                }
+            });
+            try (var discovery = new MasterRoutes(topology, null)) {
+                assertEquals(1, discovery.routes().size());
+                assertTrue(discovery.routes().getFirst().requiresGenerateInput());
+            }
+        }
+    }
+
+    @Test void heartbeatRejectsMissingReadinessAndNonBooleanFields() throws Exception {
+        Path topology = directory.resolve("topology.json");
+        for (String response : List.of("{\"requires_generate_input\":false}",
                 "{\"ready\":\"true\",\"requires_generate_input\":false}",
                 "{\"ready\":true,\"requires_generate_input\":null}")) {
             try (var master = new BackendRpcClientTest.Harness()) {

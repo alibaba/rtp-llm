@@ -22,6 +22,7 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
@@ -193,7 +194,8 @@ class FlexlbGrpcExecutorMetricsTest {
                 """);
         ConfigService config = mock(ConfigService.class);
         when(config.loadBalanceConfig()).thenReturn(loadBalanceConfig);
-        return new FlexlbGrpcServer(null, config, new MockEnvironment(), null, monitor, null, null);
+        return new FlexlbGrpcServer(
+                null, config, new MockEnvironment(), null, monitor, null, null, Optional.empty());
     }
 
     /**

@@ -16,6 +16,7 @@ import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.apache.curator.utils.CloseableUtils;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DeploymentIdentity;
+import org.flexlb.config.MasterLoopbackAddress;
 import org.flexlb.config.ZookeeperConsistencyConfig;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
@@ -34,6 +35,7 @@ import java.net.URI;
 import java.net.UnknownHostException;
 import java.time.Duration;
 import java.util.Collection;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -57,9 +59,10 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     private final EngineHealthReporter engineHealthReporter;
     private final Environment environment;
     private final DeploymentIdentity deploymentIdentity;
+    private final Optional<MasterLoopbackAddress> loopbackAddress;
 
     @Setter private String roleId;
-    @Setter private String localIp;
+    @Getter @Setter private String localIp;
 
     @Setter private int port;
 
@@ -82,7 +85,8 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
             EngineHealthReporter engineHealthReporter,
             Environment environment,
             ConfigService configService,
-            DeploymentIdentity deploymentIdentity) {
+            DeploymentIdentity deploymentIdentity,
+            Optional<MasterLoopbackAddress> loopbackAddress) {
 
         Logger.warn("Initializing ZookeeperMasterElectService...");
 
@@ -90,6 +94,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         this.engineHealthReporter = engineHealthReporter;
         this.environment = environment;
         this.deploymentIdentity = deploymentIdentity;
+        this.loopbackAddress = loopbackAddress;
         this.consistencyConfig =
                 configService.loadBalanceConfig().getConsistency()
                                 instanceof ZookeeperConsistencyConfig zookeeper
@@ -283,7 +288,10 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
 
     private void initializeIpAndPort() {
         try {
-            localIp = InetAddress.getLocalHost().getHostAddress();
+            localIp =
+                    loopbackAddress.isEmpty()
+                            ? InetAddress.getLocalHost().getHostAddress()
+                            : loopbackAddress.get().address().getHostAddress();
         } catch (UnknownHostException e) {
             throw new RuntimeException("Failed to retrieve local host address", e);
         }

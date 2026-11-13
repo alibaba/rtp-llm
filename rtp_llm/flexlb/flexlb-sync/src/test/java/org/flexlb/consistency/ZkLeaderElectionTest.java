@@ -25,6 +25,7 @@ import java.io.IOException;
 import java.net.ServerSocket;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -242,7 +243,8 @@ class ZkLeaderElectionTest {
                         healthReporter,
                         environment,
                         configService,
-                        deploymentIdentity);
+                        deploymentIdentity,
+                        Optional.empty());
         service.setRoleId(ROLE_ID);
         service.setLocalIp(localIp);
         service.setPort(18_080);

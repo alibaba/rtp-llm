@@ -47,8 +47,8 @@ class PdGenerationTest {
             var ps=rpc.getCacheStatus(query);
             var ds=RpcServiceGrpc.newBlockingStub(d.channel).withDeadlineAfter(2,TimeUnit.SECONDS).getCacheStatus(query);
             var base=org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(org.flexlb.mock.protocol.MultimodalProtocol.text(request), 2, 0, 1).keys();
-            assertEquals(Set.of(base.get(3),base.get(7)),Set.copyOf(ps.getCacheKeyListList()));
-            assertTrue(ds.getCacheKeyListList().containsAll(base));
+            assertEquals(Set.of(base.get(3),base.get(7)),Set.copyOf(ps.getCacheKeysMap().keySet()));
+            assertTrue(ds.getCacheKeysMap().keySet().containsAll(base));
             assertEquals(8,ps.getBlockSize());assertEquals(128,ps.getTotalKvCache());
             assertEquals(2,ds.getBlockSize());assertEquals(64,ds.getTotalKvCache());
         }
@@ -96,7 +96,7 @@ class PdGenerationTest {
             var keys = org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(new org.flexlb.mock.protocol.MultimodalProtocol.Prepared(prepared,
                 List.of(new Span(1, List.of(rowHash)))), 2, 0, 1).keys();
             var cached = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).build());
-            assertTrue(cached.getCacheKeyListList().containsAll(keys));
+            assertTrue(cached.getCacheKeysMap().keySet().containsAll(keys));
             assertEquals(6, calls.size());
             for(var item:List.of(Map.entry(p,6),Map.entry(d,5))) {
                 try(var stream=java.net.URI.create((String)item.getKey().node.endpoints().get("metrics")).toURL().openStream()) {
@@ -188,7 +188,6 @@ class PdGenerationTest {
                 response.onNext(DecodeLayout.newBuilder().setBlockSize(2).build());
                 response.onCompleted();
             }
-
             @Override public StreamObserver<DecodeFrame> remoteGenerate(StreamObserver<GenerateOutputsPB> response) {
                 return new StreamObserver<>() {
                     public void onNext(DecodeFrame input) { allocations.incrementAndGet(); }

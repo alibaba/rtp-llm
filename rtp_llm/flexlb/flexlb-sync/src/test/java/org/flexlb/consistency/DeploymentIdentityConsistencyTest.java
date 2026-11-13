@@ -17,8 +17,11 @@ import org.springframework.context.annotation.AnnotationConfigApplicationContext
 import org.springframework.core.env.Environment;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.util.Optional;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -82,7 +85,7 @@ class DeploymentIdentityConsistencyTest {
         MasterChangeNotifyResp response = service.handleMasterChange(request);
 
         assertThat(response.isSuccess()).isFalse();
-        verifyNoInteractions(electionService);
+        verify(electionService, never()).updateLatestMaster();
     }
 
     @ParameterizedTest
@@ -97,7 +100,8 @@ class DeploymentIdentityConsistencyTest {
                         mock(EngineHealthReporter.class),
                         mock(Environment.class),
                         configService(false),
-                        identity);
+                        identity,
+                        Optional.empty());
 
         ReflectionTestUtils.invokeMethod(service, "initializeRoleId");
 
@@ -126,7 +130,8 @@ class DeploymentIdentityConsistencyTest {
                         mock(EngineHealthReporter.class),
                         mock(Environment.class),
                         configService(false),
-                        mock(DeploymentIdentity.class));
+                        mock(DeploymentIdentity.class),
+                        Optional.empty());
         ReflectionTestUtils.setField(electionService, "client", curatorClient);
         try (AnnotationConfigApplicationContext context =
                 new AnnotationConfigApplicationContext()) {

@@ -1,7 +1,8 @@
 package org.flexlb;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.config.DeploymentIdentity;
+import com.google.common.net.InetAddresses;
+import org.flexlb.config.MasterLoopbackAddress;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.mock.protocol.ControlHttpServer;
 import org.flexlb.mock.protocol.Role;
@@ -11,6 +12,7 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.core.SpringProperties;
 import org.springframework.core.env.AbstractEnvironment;
 
+import java.net.Inet4Address;
 import java.net.InetSocketAddress;
 import java.nio.file.Path;
 import java.util.List;
@@ -46,23 +48,32 @@ public final class MasterMain {
         var directory = Path.of(required("MOCK_OUTPUT_DIR"));
         int port = Integer.parseInt(required("MOCK_MASTER_PORT"));
         String host = required("FLEXLB_ADVERTISED_IP");
+        if (!(InetAddresses.forString(host) instanceof Inet4Address ipv4)) {
+            throw new IllegalArgumentException("Local Mock Master requires an IPv4 loopback address");
+        }
+        var loopbackAddress = new MasterLoopbackAddress(ipv4);
+        var election = json.readTree(required("FLEXLB_CONFIG")).path("consistency");
+        if (!"ZOOKEEPER".equals(election.path("type").asText()))
+            throw new IllegalArgumentException("Master requires ZooKeeper election");
         SpringProperties.setFlag(AbstractEnvironment.IGNORE_GETENV_PROPERTY_NAME);
         org.flexlb.OpenTelemetryBootstrap.configureFromEnvironment();
         var application = new SpringApplication(Application.class);
+        application.addInitializers(
+                context ->
+                        context.getBeanFactory()
+                                .registerSingleton("masterLoopbackAddress", loopbackAddress));
         application.setRegisterShutdownHook(false);
         var context =
                 application.run(
                         "--server.address=" + host,
-                        "--flexlb.advertised-ip=" + host,
+                        "--flexlb.monitor.provider=micrometer",
+                        "--flexlb.monitor.metric-whitelist=flexlb_",
                         "--server.port=" + port,
                         "--management.server.port=" + port,
                         "--flexlb.log.path=" + directory.resolve("logs"));
         try {
             var lifecycle = context.getBean(ApplicationLifecycle.class);
             var consistency = context.getBean(LBStatusConsistencyService.class);
-            if (!consistency.isNeedConsistency())
-                throw new IllegalArgumentException("Master requires ZooKeeper election");
-            var deploymentId = context.getBean(DeploymentIdentity.class).getDeploymentId();
             var workers = context.getBean(WorkerDirectory.class);
             lifecycle.online();
             long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(30);
@@ -127,8 +138,8 @@ public final class MasterMain {
                                         port,
                                         "advertised_ip",
                                         host,
-                                        "deployment_id",
-                                        deploymentId));
+                                        "HIPPO_ROLE",
+                                        required("HIPPO_ROLE")));
                 Runtime.getRuntime()
                         .addShutdownHook(
                                 new Thread(

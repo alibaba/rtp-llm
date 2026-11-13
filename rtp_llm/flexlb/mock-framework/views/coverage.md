@@ -420,7 +420,7 @@ Mock 只统计统一池的容量回收，标签为 `tier=DEVICE`、`group_type=f
 | `py_rtp_vit_embedding_cache_{hit,miss,inflight,eviction}_qps`        | 每 key 获取时区分驻留命中、新工作、共享等待；eviction 只计逻辑结果被容量淘汰，GPU→CPU 保留不计。GPU 淘汰且 CPU 放不下也必须计。                                                                  |
 | `py_rtp_vit_embedding_cache_tokens` / `bytes`                        | GPU+CPU 逻辑 embedding 驻留量。Mock 用形状计费，不代表真实 Tensor、GPU 内存或 JVM 物理内存。                                                                                                     |
 
-本地 View 按 `source` 筛选，合并请求成功与失败的原始 sum/count 后求均值。未模拟的 CUDA Graph、GreenNet、预处理进程和真实 Tensor 数据面保留无样本。WorkerStatus 的 `mm_inflight_inputs` 计去重后的在途媒体，覆盖排队、执行和结果发布。
+本地 View 按 `source` 筛选，合并请求成功与失败的原始 sum/count 后求均值。未模拟的 CUDA Graph、GreenNet、预处理进程和真实 Tensor 数据面保留无样本。Mock ViT 在内部记录去重后的在途媒体数，用于接纳控制，覆盖排队、执行和结果发布。
 
 ### 状态 RPC 的 RT 与 QPS
 

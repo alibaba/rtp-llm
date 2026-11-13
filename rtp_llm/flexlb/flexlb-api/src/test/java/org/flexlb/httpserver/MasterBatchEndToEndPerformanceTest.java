@@ -86,6 +86,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.SplittableRandom;
 import java.util.concurrent.CompletableFuture;
@@ -407,7 +408,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                         masterServerEventLoopGroup,
                         NoOpFlexMonitor.getInstance(),
                         new GrpcServerTimingInterceptor(),
-                        new GrpcQosHeaderInterceptor());
+                        new GrpcQosHeaderInterceptor(),
+                        Optional.empty());
         masterServer.start();
 
         if (MASTER_CLIENT_CHANNELS <= 0) {

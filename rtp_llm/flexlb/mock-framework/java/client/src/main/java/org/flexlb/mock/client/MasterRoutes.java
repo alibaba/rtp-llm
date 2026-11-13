@@ -75,7 +75,7 @@ final class MasterRoutes implements AutoCloseable {
             Host host = entry.getKey();
             JsonNode value = entry.getValue().get();
             host.lastProbe = System.nanoTime();
-            host.requiresGenerateInput = value == null || value.get("requires_generate_input").booleanValue();
+            host.requiresGenerateInput = value == null || value.path("requires_generate_input").asBoolean(true);
             if (value == null) {
                 if (++host.failures >= 2) host.healthy = false;
             } else if (!value.get("ready").booleanValue()) {
@@ -112,8 +112,11 @@ final class MasterRoutes implements AutoCloseable {
             var response = http.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() == 200) {
                 var value = JSON.readTree(response.body());
-                if (value != null && value.isObject()
-                        && value.path("ready").isBoolean() && value.path("requires_generate_input").isBoolean()) return value;
+                if (value != null && value.isObject() && value.path("ready").isBoolean()) {
+                    // Master versions without the capability field still need GenerateInput.
+                    var capability = value.path("requires_generate_input");
+                    if (capability.isMissingNode() || capability.isBoolean()) return value;
+                }
             }
         } catch (IOException | IllegalArgumentException error) {
             // Failed heartbeats are availability observations, not playback infrastructure errors.

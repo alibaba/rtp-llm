@@ -3,7 +3,6 @@ package org.flexlb.mock.master;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.Endpoint;
-import org.flexlb.discovery.LocalServiceDiscovery;
 import org.flexlb.discovery.ServiceDiscoveryProvider;
 import org.flexlb.discovery.ServiceDiscoveryType;
 import org.flexlb.discovery.ServiceHostListener;

@@ -8,7 +8,9 @@
 
 `environment.master.config` 使用原生环境变量字符串。`FLEXLB_CONFIG` 是业务 JSON，`MODEL_SERVICE_CONFIG` 是路由 JSON。本地支持单 endpoint 组、P/D/V 分离角色和 gRPC。Runner 使用实验内的发现文件替换路由目标，保留服务 ID、组和角色信息。
 
-Runner 为本轮 Master 写入 `FLEXLB_CONFIG.consistency`，连接实验内的 ZooKeeper。同一轮的 Master 副本和重启进程共用部署身份，实际下发的配置和部署 ID 可在 `effective-config.json` 查看。
+本地 Runner 负责写入 `FLEXLB_CONFIG.consistency` 和实验的部署身份。多个 Master JVM 使用不同的回环 IP，共用 HTTP 端口及其加 2 的 gRPC 端口。Mock Master 启动器在 Spring 初始化前注册 `MasterLoopbackAddress`，把同一个 IPv4 回环地址用于 gRPC 监听、ZooKeeper 选主身份和主备转发的本机判断。这个 Bean 只用于本地 Mock，由 Runner 分配地址，生产 Master 启动器走系统本机地址。宿主机必须能绑定分配给各 JVM 的回环地址。
+
+本地 Engine endpoint 使用 `file` 发现。Runner 在拓扑变动后更新 `discovery.json`，Master 每次轮询读取当前地址，并由 FlexLB 的公共发现路由计算各端口。
 
 P 使用 `mock.scheduler.mode: fifo` 时，Master 使用 NON_BATCH 交付。Master 通过 EnqueueBatch 或 EnqueueGroup 交付时，P 必须开启 `group` 模式。原生批量入口支持 DP rank 0。
 
@@ -132,4 +134,4 @@ kv_cache_event_snapshot_interval_ms: 600000
 
 显式 `kv_cache_event_manager_endpoint` 优先使用。省略时通过 `kvcm_enable_vipserver`、`kvcm_vipserver_domain` 或 `kvcm_server_address` 发现 Meta HTTP leader。实例 ID 显式指定共享查询空间，模型名和实例组需与消费端匹配，快照间隔必须为正。
 
-Reporter 注册一个 Full spec，发布统一池的有效块事件、快照和心跳。HBM 命名空间表示本实例可恢复的逻辑 key 集合。KVCM 能力标记为 `payload_io=false`，原生 READ/WRITE 返回 `FAILED_BUFFER_SAFE`。
+Reporter 注册一个 Full spec，发布统一池的有效块事件、快照和心跳。HBM 命名空间表示本实例可恢复的逻辑 key 集合。KVCM 能力标记为 `payload_io=false`，原生 READ/WRITE 在提交数据 I/O 前返回 `FAILED`。

@@ -79,9 +79,9 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         if (input.hasRemoteRequest()) {
             var operation = input.getRemoteRequest().getOp();
             if (operation == RemoteOpType.REMOTE_OPERATION_READ || operation == RemoteOpType.REMOTE_OPERATION_WRITE) {
-                // No SDK or external I/O was submitted: failure is explicitly buffer-safe.
+                // Reject before submitting any payload I/O.
                 response.onNext(FunctionResponsePB.newBuilder().setRemoteResponse(RemoteOperationResponsePB.newBuilder()
-                    .setTransferStatus(RemoteTransferStatusPB.REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE).setPayloadBufferSafe(true)).build());
+                    .setTransferStatus(RemoteTransferStatusPB.REMOTE_TRANSFER_STATUS_FAILED)).build());
                 response.onCompleted(); return;
             }
         }
@@ -172,7 +172,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
             long collectedAtNanos = System.nanoTime();
             var result = CacheStatusPB.newBuilder().setTotalKvCache(tokens(snapshot.totalBlocks()))
                 .setAvailableKvCache(tokens(snapshot.availableBlocks())).setBlockSize(config.tokensPerCacheKey()).setVersion(snapshot.version());
-            for (long key : snapshot.keys()) result.addCacheKeyList(key);
+            for (long key : snapshot.keys()) result.putCacheKeys(key, true);
             return new StatusResult<>(result.build(), collectedAtNanos);
         });
     }

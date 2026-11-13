@@ -463,12 +463,13 @@ def test_real_master_routes_to_isolated_rtp_processes(
     effective = json.loads(
         (output / "components/master-0/effective-config.json").read_text()
     )
-    native = json.loads(effective["FLEXLB_CONFIG"])
-    election = native.pop("consistency")
-    assert native == json.loads(master_config["FLEXLB_CONFIG"])
+    behavior = json.loads(effective["FLEXLB_CONFIG"])
+    election = behavior.pop("consistency")
+    expected_behavior = json.loads(master_config["FLEXLB_CONFIG"])
+    expected_behavior.setdefault("schemaVersion", 3)
+    assert behavior == expected_behavior
     assert election["type"] == "ZOOKEEPER"
     assert election["connectString"]
-    assert effective["deployment_id"].startswith("spectrum:mock:flexlb:")
     assert not (output / "components/master-0/native-environment.json").exists()
     assert not (output / "zookeeper/master-environment.json").exists()
     events = [
@@ -520,7 +521,7 @@ def test_real_master_routes_to_isolated_rtp_processes(
             and effective["advertised_ip"] == "127.0.0.1"
         )
         assert other["server_port"] == effective["server_port"]
-        assert other["deployment_id"] == effective["deployment_id"]
+        assert other["HIPPO_ROLE"] == effective["HIPPO_ROLE"]
         assert json.loads(other["FLEXLB_CONFIG"])["consistency"] == election
     stopped = [event["node"] for event in events if event["event"] == "process_stopped"]
     assert stopped[-1] == "zookeeper"
