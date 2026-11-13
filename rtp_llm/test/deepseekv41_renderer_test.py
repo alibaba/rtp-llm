@@ -132,8 +132,10 @@ class V41RequestTest(unittest.TestCase):
             json.dumps({"messages": [{"role": "user", "content": "hi"}]})
         )
         self.assertFalse(renderer.in_think_mode(request))
+        self.assertFalse(renderer._recipe_request(request).thinking)
         renderer.default_thinking_mode = ThinkingMode.ENABLED
         self.assertTrue(renderer.in_think_mode(request))
+        self.assertTrue(renderer._recipe_request(request).thinking)
 
 
 class V41OfficialEncodingTest(unittest.TestCase):
@@ -158,6 +160,7 @@ class V41OfficialEncodingTest(unittest.TestCase):
         renderer.tokenizer = Tokenizer()
         renderer.prompt_tokenizer = PromptTokenizer(fast.backend_tokenizer)
         renderer.think_mode = False
+        renderer.default_thinking_mode = ThinkingMode.DISABLED
         messages = [
             {"role": "system", "content": "First instruction"},
             {"role": "user", "content": "hello"},

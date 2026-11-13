@@ -165,8 +165,14 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
 
     def _recipe_request(self, request):
         try:
+            # The recipe renderer also takes a bool default. Passing the
+            # configured string made every mode truthy and produced the
+            # thinking prompt even when think_mode was disabled.
+            default_thinking = (
+                self.default_thinking_mode != ThinkingMode.DISABLED
+            )
             return convert_request(
-                self._request_dict(request), default_thinking=self.think_mode
+                self._request_dict(request), default_thinking=default_thinking
             )
         except (TypeError, ValueError) as error:
             raise FtRuntimeException(
