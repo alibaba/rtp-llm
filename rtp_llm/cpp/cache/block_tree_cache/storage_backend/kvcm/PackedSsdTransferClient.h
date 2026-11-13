@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <vector>
 #include "kvcm_client/transfer_client.h"
+#include "kvcm_client/TransferClientCompat.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkTransferObserver.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -291,13 +292,7 @@ private:
     Code loadOne(const InnerIo& call) {
         Code code;
         try {
-#if defined(KVCM_HAS_TRANSFER_DEADLINE)
-            code = call.deadline_ms > 0 ?
-                inner_->LoadKvCachesWithDeadline(call.uris, call.buffers, call.deadline_ms, call.trace) :
-                inner_->LoadKvCaches(call.uris, call.buffers, call.trace);
-#else
-            code = inner_->LoadKvCaches(call.uris, call.buffers, call.trace);
-#endif
+            code = loadSdkKvCaches(*inner_, call.uris, call.buffers, call.deadline_ms, call.trace);
         } catch (...) {
             observe(true, 0, true);
             throw;
@@ -309,13 +304,7 @@ private:
     std::pair<Code, Uris> saveBatch(const InnerIo& call) {
         std::pair<Code, Uris> result;
         try {
-#if defined(KVCM_HAS_TRANSFER_DEADLINE)
-            result = call.deadline_ms > 0 ?
-                inner_->SaveKvCachesWithDeadline(call.uris, call.buffers, call.deadline_ms, call.trace) :
-                inner_->SaveKvCaches(call.uris, call.buffers, call.trace);
-#else
-            result = inner_->SaveKvCaches(call.uris, call.buffers, call.trace);
-#endif
+            result = saveSdkKvCaches(*inner_, call.uris, call.buffers, call.deadline_ms, call.trace);
         } catch (...) {
             observe(false, 0, true);
             throw;

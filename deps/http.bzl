@@ -159,41 +159,41 @@ def http_deps():
     http_file(
         name = "remote_kv_cache_manager_client_rpm",
         urls = [
-            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/deadline-20261113/10df8459-f3e4cf09-8783028b/kv-cache-manager-client-2026_11_13_03_00-cuda12.x86_64.rpm",
+            "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/kvcm/kv-cache-manager-client-2026_04_29_14_29.rpm",
         ],
-        sha256 = "ac5081df26db43cee9315b2feb7ab87880e394c68a2102c3a86a16b3114302cd",
+        sha256 = "8a50e27c6c009bb2e9d55c7ff44ccef53268cc0b67559b95fd7e22221f1e9600",
     )
 
     http_file(
         name = "remote_kv_cache_manager_client_rpm_cuda130_x86",
         urls = [
-            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/deadline-20261113/10df8459-f3e4cf09-8783028b/kv-cache-manager-client-2026_11_13_02_59-cuda130.x86_64.rpm",
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_10_13_22_33-79404320-cuda130.x86_64.rpm",
         ],
-        sha256 = "04429ed5baf74a2e5e27f4ce2bce946f3ef2b89f58a4ce83fd644e8f482f258d",
+        sha256 = "24e3d6b828dc560d6c71d8ab3baae8727d8d2de74d63a5d425cc8c9f78081bae",
     )
 
     http_file(
         name = "remote_kv_cache_manager_client_rpm_cuda130_arm",
         urls = [
-            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/deadline-20261113/10df8459-f3e4cf09-8783028b/kv-cache-manager-client-2026_11_13_02_58-cuda130.aarch64.rpm",
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_10_13_22_33-79404320-cuda130.aarch64.rpm",
         ],
-        sha256 = "503e09e306993a75c9b102e4913c305c5b67b7af850c42d89b3c121a38d9ce01",
+        sha256 = "d4bfe547429c6f6d76f1278451a053e94bba570b7ecfc24c8eef152f749749a3",
     )
 
     http_file(
         name = "remote_kv_cache_manager_client_rpm_cuda12_x86",
         urls = [
-            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/deadline-20261113/10df8459-f3e4cf09-8783028b/kv-cache-manager-client-2026_11_13_03_00-cuda12.x86_64.rpm",
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_10_13_22_33-79404320-cuda12.x86_64.rpm",
         ],
-        sha256 = "ac5081df26db43cee9315b2feb7ab87880e394c68a2102c3a86a16b3114302cd",
+        sha256 = "0eceae95bf35805c3a299567794f8c2cbba3fe13661a7f58acf4124fafaf7aee",
     )
 
     http_file(
         name = "remote_kv_cache_manager_client_rpm_cuda129_x86",
         urls = [
-            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/deadline-20261113/10df8459-f3e4cf09-8783028b/kv-cache-manager-client-2026_11_13_02_58-cuda129.x86_64.rpm",
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_10_13_22_33-79404320-cuda129.x86_64.rpm",
         ],
-        sha256 = "166c093a6fc869e4d96a1a404998e2557e7562e0be2184dbe6bf93fc3245c18d",
+        sha256 = "fdde24106e6a5418429058d8176a52e1fde03a455a820ddfcffb4d379df02ada",
     )
 
     http_archive(
