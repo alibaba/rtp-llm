@@ -480,6 +480,7 @@ def causal_conv1d_fn(
     pad_slot_id: int = PAD_SLOT_ID,
     metadata: Optional[CausalConv1dMetadata] = None,
     validate_data=False,
+    block_n: int = BLOCK_N,
 ):
     """support varlen + continuous batching when x is 2D tensor
 
@@ -603,7 +604,7 @@ def causal_conv1d_fn(
         batch_ptr = batch_ptr.to(x.device)
         token_chunk_offset_ptr = token_chunk_offset_ptr.to(x.device)
 
-    grid = (grid_x, triton.cdiv(dim, BLOCK_N))
+    grid = (grid_x, triton.cdiv(dim, block_n))
     _causal_conv1d_fwd_kernel[grid](
         # Pointers to matrices
         x,
@@ -652,7 +653,8 @@ def causal_conv1d_fn(
         USE_PAD_SLOT=pad_slot_id is not None,
         NP2_STATELEN=np2_statelen,
         BLOCK_M=BLOCK_M,
-        BLOCK_N=BLOCK_N,
+        BLOCK_N=block_n,
+        num_stages=2 if block_n == 512 else 3,
     )
     return out.to(original_x_dtype)
 

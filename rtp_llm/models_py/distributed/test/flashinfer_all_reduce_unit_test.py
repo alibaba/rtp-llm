@@ -125,6 +125,49 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         self.assertFalse(communicator.should_use(tensor))
         workspace.is_buffer_size_sufficient.assert_not_called()
 
+    def test_h20_decode_workspace_keeps_prefill_on_original_collective(self):
+        for sms, world_size, expected_capacity in (
+            (78, 2, 128),
+            (132, 2, 13107),
+            (78, 4, 409),
+        ):
+            with self.subTest(sms=sms, world_size=world_size):
+                communicator = _make_communicator()
+                communicator.cpp_small_enabled = False
+                communicator.world_size = world_size
+                workspace = SimpleNamespace()
+                factory = (
+                    communicator._flashinfer_comm.create_allreduce_fusion_workspace
+                )
+                factory.return_value = workspace
+                tensor = _FakeTensor()
+                tensor.shape = (8192, 2560)
+                backend = SimpleNamespace(TorchDistBackend=MagicMock())
+                with (
+                    patch("torch.cuda.is_current_stream_capturing", return_value=False),
+                    patch("torch.cuda.get_device_capability", return_value=(9, 0)),
+                    patch(
+                        "torch.cuda.get_device_properties",
+                        return_value=SimpleNamespace(multi_processor_count=sms),
+                    ),
+                    patch.object(torch.version, "hip", None),
+                    patch("torch.tensor", return_value=SimpleNamespace(item=lambda: 1)),
+                    patch.object(flashinfer_ar.dist, "all_reduce"),
+                    patch.dict("sys.modules", {"flashinfer.comm.mnnvl": backend}),
+                ):
+                    self.assertTrue(communicator._create_workspace(tensor))
+                    self.assertEqual(communicator._max_num_tokens, expected_capacity)
+                    self.assertEqual(
+                        factory.call_args.kwargs["max_token_num"], expected_capacity
+                    )
+                    if sms == 78 and world_size == 2:
+                        self.assertFalse(communicator.should_use(tensor))
+                        for rows in (1, 16, 32, 64, 128):
+                            tensor.shape = (rows, 2560)
+                            self.assertTrue(communicator.should_use(tensor))
+                        tensor.shape = (129, 2560)
+                        self.assertFalse(communicator.should_use(tensor))
+
     def test_capture_never_silently_selects_nccl_before_warmup(self):
         communicator = _make_communicator()
         with patch("torch.cuda.is_current_stream_capturing", return_value=True):

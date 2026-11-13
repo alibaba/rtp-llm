@@ -100,18 +100,18 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
 
     def _supports_prefill(self, x, gate):
         width = x.shape[-1] if x.ndim == 2 else 0
-        # The capability check leads the conjunction: it is process-constant
-        # and False on every SM90 device, so the remaining conditions (and the
-        # module attribute reads) never run there.
+        capability = cached_device_capability(x.device)
+        sm90 = capability == (9, 0)
+        max_rows = 32768 if sm90 else (8192 if width == 3072 else 12288)
         return (
-            cached_device_capability(x.device) == (12, 0)
+            (capability == (12, 0) or sm90)
             and self.role in ("PREFILL", "PDFUSION")
             and x.is_cuda
             and torch.version.hip is None
             and x.ndim == 2
             and width in (768, 1536, 3072)
-            and 2048 <= x.shape[0] <= 12288
-            and (width != 3072 or x.shape[0] <= 8192)
+            and (not sm90 or (flat_head_norm is not None and width == 3072))
+            and 2048 <= x.shape[0] <= max_rows
             and self.group_size == 128
             and self.activation == "sigmoid"
             and self.bias is None
@@ -137,7 +137,8 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
     def forward_project(self, x, gate, projection):
         """Explicit GDN consumer; preserve the BF16 norm quantization boundary."""
         if not (
-            norm_quant is not None
+            cached_device_capability(x.device) == (12, 0)
+            and norm_quant is not None
             and self._supports_prefill(x, gate)
             and x.shape[1] in (1536, 3072)
             and x.shape[0] <= 8192

@@ -99,6 +99,13 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     SAVE_NEW_VALUE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_LOG2: tl.constexpr,
+    state_pool=None,
+    block_map=None,
+    prefix_lengths=None,
+    STATE_STRIDE: tl.constexpr = 0,
+    MAP_STRIDE: tl.constexpr = 0,
+    PAGE_SIZE: tl.constexpr = 0,
+    DIRECT_STORE: tl.constexpr = False,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
@@ -395,6 +402,27 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             b_k = tl.load(p_k, mask=p_k_m0[:, None] & p_k_m1[None, :], other=0)
             b_h4 += tl.trans(tl.dot(b_k, b_v))
 
+        if DIRECT_STORE:
+            # Publish every completed page, including the first 64-token page.
+            if i_t == NT - 1 or (i_t + 1) * BT % PAGE_SIZE == 0:
+                prefix = tl.load(prefix_lengths + i_n)
+                position = (prefix + tl.minimum((i_t + 1) * BT, T) - 1) // PAGE_SIZE
+                page = tl.load(block_map + i_n * MAP_STRIDE + position).to(tl.int64)
+                if page > 0:
+                    rows = i_v * BV + tl.arange(0, BV)
+                    cols = tl.arange(0, 64)
+                    target = state_pool + page * STATE_STRIDE + i_h * V * K
+                    tl.store(
+                        target + rows[:, None] * K + cols[None, :],
+                        b_h1,
+                        mask=(rows[:, None] < V) & (cols[None, :] < K),
+                    )
+                    tl.store(
+                        target + rows[:, None] * K + 64 + cols[None, :],
+                        b_h2,
+                        mask=(rows[:, None] < V) & (64 + cols[None, :] < K),
+                    )
+
     # epilogue — V-first store
     if STORE_FINAL_STATE:
         p_ht_i0 = tl.arange(0, BV).to(tl.int64) + (i_v * BV)
@@ -454,6 +482,7 @@ def chunk_gated_delta_rule_fwd_h(
     save_new_value: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
     state_dtype: torch.dtype | None = None,
+    page_state_store=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Args:
@@ -536,6 +565,16 @@ def chunk_gated_delta_rule_fwd_h(
         h_dtype = state_dtype
     # V-first cache layout, matches the on-disk ssm_states declaration
     # (B, blocks, H, V, K) and SGL main / FLA state_v_first=True.
+    state_pool, block_map, prefix_lengths, page_size = (
+        page_state_store if page_state_store is not None else (None, None, None, 0)
+    )
+    if page_state_store is not None:
+        assert K == V == 128 and state_pool.dtype == torch.float32
+        assert state_pool.shape[1:] == (H, V, K)
+        assert state_pool.stride()[1:] == (V * K, K, 1)
+        assert k.dtype == torch.bfloat16 and gk is None and page_size in (64, 128)
+        # chunk-o already rounds every h load to BF16. Cache pages retain FP32.
+        h_dtype = k.dtype if state_dtype is None else state_dtype
     h = k.new_empty(B, NT, H, V, K, dtype=h_dtype)
     final_state = (
         k.new_empty(N, H, V, K, dtype=torch.float32) if output_final_state else None
@@ -547,7 +586,7 @@ def chunk_gated_delta_rule_fwd_h(
         return (triton.cdiv(V, meta["BV"]), N * H)
 
     block_v = 64 if is_amd_cdna3 else (16 if is_amd_cdna4 else 32)
-    if _use_sm90_bv16_chunk_h(k, w, u, gk, h_dtype, N):
+    if _use_sm90_bv16_chunk_h(k, w, u, gk, h_dtype, N) or page_state_store is not None:
         block_v = 16
 
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
@@ -570,6 +609,13 @@ def chunk_gated_delta_rule_fwd_h(
         BT=BT,
         BV=block_v,
         IS_LOG2=is_amd,
+        state_pool=state_pool,
+        block_map=block_map,
+        prefix_lengths=prefix_lengths,
+        STATE_STRIDE=state_pool.stride(0) if state_pool is not None else 0,
+        MAP_STRIDE=block_map.stride(0) if block_map is not None else 0,
+        PAGE_SIZE=page_size,
+        DIRECT_STORE=page_state_store is not None,
         num_warps=4,
         num_stages=2,
     )

@@ -8,6 +8,15 @@ from rtp_llm.models_py.triton_kernels.fla.utils import is_amd
 
 
 @triton.jit
+def _gdn_gate_values(A_log, a, b, bias, beta: tl.constexpr, threshold: tl.constexpr):
+    x = a.to(tl.float32) + bias.to(tl.float32)
+    softplus_x = tl.where(
+        beta * x <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * x)), x
+    )
+    return -tl.exp(A_log.to(tl.float32)) * softplus_x, tl.sigmoid(b.to(tl.float32))
+
+
+@triton.jit
 def fused_gdn_gating_kernel(
     g,
     beta_output,
@@ -32,15 +41,10 @@ def fused_gdn_gating_kernel(
     blk_a = tl.load(a + ba_off, mask=mask)
     blk_b = tl.load(b + ba_off, mask=mask)
     blk_bias = tl.load(dt_bias + head_off, mask=mask)
-    # If the model is loaded in fp16, without the .float() here, A might be -inf
-    x = blk_a.to(tl.float32) + blk_bias.to(tl.float32)
-    softplus_x = tl.where(
-        beta * x <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * x)), x
+    blk_g, blk_beta_output = _gdn_gate_values(
+        blk_A_log, blk_a, blk_b, blk_bias, beta, threshold
     )
-    blk_g = -tl.exp(blk_A_log.to(tl.float32)) * softplus_x
     tl.store(g + off, blk_g.to(g.dtype.element_ty), mask=mask)
-    # compute beta_output = sigmoid(b)
-    blk_beta_output = tl.sigmoid(blk_b.to(tl.float32))
     tl.store(
         beta_output + off, blk_beta_output.to(beta_output.dtype.element_ty), mask=mask
     )
