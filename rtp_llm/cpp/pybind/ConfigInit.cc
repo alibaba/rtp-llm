@@ -1,6 +1,12 @@
 #define PYBIND11_DETAILED_ERROR_MESSAGES
+#include <cerrno>
 #include <cmath>
+#include <fcntl.h>
 #include <limits>
+#include <system_error>
+#include <unistd.h>
+#include <ATen/MapAllocator.h>
+#include <c10/util/ScopeExit.h>
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputClass.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
 #include "rtp_llm/cpp/pybind/common/blockUtil.h"
@@ -23,7 +29,23 @@
 namespace py = pybind11;
 using namespace rtp_llm;
 
+// Match PyTorch's shared-fd storage ownership while allowing other Python
+// threads to run if mmap waits on the GPU driver's memory migration.
+static at::Storage mapPreprocessStorage(int borrowed_fd, size_t nbytes) {
+    const int fd = fcntl(borrowed_fd, F_DUPFD_CLOEXEC, 0);
+    if (fd < 0) {
+        throw std::system_error(errno, std::generic_category(), "dup preprocess storage fd");
+    }
+    auto close_fd = c10::make_scope_exit([fd] { close(fd); });
+    constexpr int flags = at::ALLOCATOR_MAPPED_SHAREDMEM | at::ALLOCATOR_MAPPED_NOCREATE
+                          | at::ALLOCATOR_MAPPED_KEEPFD | at::ALLOCATOR_MAPPED_FROMFD;
+    auto data = at::MapAllocator::makeDataPtr(at::WITH_FD, "", fd, flags, nbytes, nullptr);
+    close_fd.release();  // MapAllocator now owns the duplicate.
+    return at::Storage(at::Storage::use_byte_size_t(), nbytes, std::move(data));
+}
+
 void registerMultimodal(py::module& m) {
+    m.def("map_preprocess_storage", &mapPreprocessStorage, py::call_guard<py::gil_scoped_release>());
     m.def("get_multimodal_token_spans",
           &getMultimodalTokenSpans,
           py::arg("token_ids"),

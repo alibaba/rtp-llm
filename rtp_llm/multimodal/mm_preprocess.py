@@ -25,6 +25,7 @@ from rtp_llm.multimodal.multimodal_util import (
     url_data_cache_,
     vit_emb_cache_,
 )
+from rtp_llm.multimodal.preprocess_ipc import register_preprocess_storage_reducer
 from rtp_llm.multimodal.vit_metrics import (
     VitMetricSample,
     collect_vit_preprocess_metrics,
@@ -194,6 +195,7 @@ def _worker_initializer(
     global _worker_inspection
     # 让工作进程忽略 SIGINT 信号，这样主进程的 Ctrl+C 不会杀死它们
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    register_preprocess_storage_reducer()
     _worker_vit_config = vit_config
     _worker_preprocess_params = preprocess_params
     _worker_preprocess_func = preprocess_func

@@ -2,6 +2,13 @@ load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 load("@arch_config//:arch_select.bzl", "telemetry_test_deps")
 
 py_test(
+    name = "preprocess_ipc_test",
+    srcs = ["preprocess_ipc_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "0", "CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "mm_media_tracing_test",
     srcs = ["mm_media_tracing_test.py"],
     deps = ["//rtp_llm:testlib"] + telemetry_test_deps(),
