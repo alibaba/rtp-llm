@@ -336,6 +336,25 @@ final class FlexlbConfigValidator {
             }
             nonNegative(tokenBalance.getEngineQueueOverloadDurationMs(),
                     "router.roles.prefill.tokenBalance.engineQueueOverloadDurationMs");
+            RoutingConfig.HotspotRescueConfig hotspotRescue = tokenBalance.getHotspotRescue();
+            if (hotspotRescue != null) {
+                nonNegative(hotspotRescue.getEngineQueueMigrationThreshold(),
+                        "router.roles.prefill.tokenBalance.hotspotRescue.engineQueueMigrationThreshold");
+                positive(hotspotRescue.getMinWaitMs(),
+                        "router.roles.prefill.tokenBalance.hotspotRescue.minWaitMs");
+                positive(hotspotRescue.getMaxInputTokens(),
+                        "router.roles.prefill.tokenBalance.hotspotRescue.maxInputTokens");
+                positive(hotspotRescue.getMigrationIntervalMs(),
+                        "router.roles.prefill.tokenBalance.hotspotRescue.migrationIntervalMs");
+                require(hotspotRescue.getMigrationIntervalMs() <= Long.MAX_VALUE / 1_000_000L,
+                        "router.roles.prefill.tokenBalance.hotspotRescue.migrationIntervalMs", "is too large");
+                positive(hotspotRescue.getMaxMigrationsPerRound(),
+                        "router.roles.prefill.tokenBalance.hotspotRescue.maxMigrationsPerRound");
+                nonNegative(hotspotRescue.getMaxIdlePendingTokens(),
+                        "router.roles.prefill.tokenBalance.hotspotRescue.maxIdlePendingTokens");
+                require(hotspotRescue.getMaxIdlePendingTokens() < tokenBalance.getMaxPendingComputeTokens(),
+                        "router.roles.prefill.tokenBalance.hotspotRescue.maxIdlePendingTokens", "must be below pending waterline");
+            }
         }
 
         require(routing.getRoles().getDecode() != null,

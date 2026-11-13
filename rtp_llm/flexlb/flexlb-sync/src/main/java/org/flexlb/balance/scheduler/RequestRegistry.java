@@ -84,6 +84,60 @@ public class RequestRegistry {
 
     private record WithdrawnRoute(RequestSlot slot, ScheduledRequest item, AdmissionHandle claim) { }
 
+    /**
+     * Withdraw one queued route from a congested Prefill source and return it
+     * to its original global queue identity for re-selection. The claim blocks
+     * concurrent delivery; a request can only be migrated once.
+     */
+    public boolean migrateQueuedPrefillRoute(PrefillEndpoint source, ScheduledRequest exact) {
+        GlobalQueueCoordinator queue = globalQueue;
+        if (queue == null || shuttingDown.get()) { return false; }
+        if (exact.ctx().getPrefillMigrationSource() != null) { return false; }
+        if (!enterAdmissionHandleGate()) { return false; }
+        AdmissionHandle claim = null;
+        boolean migrated = false;
+        try {
+            RequestSlot slot = requestSlots.get(exact.requestId());
+            if (slot == null) { return false; }
+            synchronized (slot) {
+                if (!isCurrentSlot(slot)) { return false; }
+                claim = slot.tryBeginPrefillMigration(source);
+                if (claim == null) { return false; }
+            }
+            try {
+                // Never acquire the Prefill queue lock under the request monitor.
+                if (source.removeQueued(exact, "HOTSPOT_RESCUE_MIGRATION")) {
+                    slot.detachMigratedRoute(claim, exact);
+                    migrated = true;
+                }
+            } catch (Throwable failure) {
+                claim.terminate(buildErrorResponse(
+                        StrategyErrorType.DISPATCH_FAILED, "queued route withdrawal failed"));
+                Logger.error(
+                        "Queued Prefill migration failed: request_id={}",
+                        exact.requestId(), failure);
+                return false;
+            }
+            if (!migrated) { return false; }
+            DecodeEndpoint decodeEndpoint = exact.decodeEp();
+            DecodeEndpoint.ReservationHandle decodeReservation = exact.decodeReservation();
+            if (decodeEndpoint != null && decodeReservation != null) {
+                decodeEndpoint.release(decodeReservation, DecodeEndpoint.ReleaseReason.NOT_SENT);
+            }
+            exact.ctx().setPrefillMigrationSource(source.ipPort());
+            return true;
+        } finally {
+            // Closing the claim exits the admission gate; a round that never
+            // claimed one must exit it directly.
+            if (claim == null) { exitAdmissionHandleGate(); }
+            if (claim != null) { claim.close(); }
+            if (migrated && (!exact.future().isDone() && !queue.requeue(exact))) {
+                completeError(exact.future(), StrategyErrorType.DISPATCH_FAILED,
+                        "scheduler closed during migration");
+            }
+        }
+    }
+
     /** Transfer queued Decode capacity, then return each victim to its original global queue identity. */
     public boolean replaceQueuedDecodeReservations(
             DecodeEndpoint endpoint, List<DecodeEndpoint.ReservationHandle> victims,

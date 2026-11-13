@@ -439,6 +439,35 @@ public final class RequestSlot {
         }
     }
 
+    /**
+     * Begin a hotspot rescue withdrawal of the queued route from the congested
+     * source. The claim blocks concurrent delivery and preemption, mirroring
+     * {@link #tryBeginRouteWithdrawal} without a Decode reservation transfer.
+     */
+    synchronized AdmissionHandle tryBeginPrefillMigration(PrefillEndpoint source) {
+        if (pendingItem == null || pendingItem.prefillEp() != source
+                || !ownsPreparedDeliveryLocked(pendingItem) || admissionHandle != null
+                || pendingItem.requestExpired(System.currentTimeMillis())) {
+            return null;
+        }
+        admissionHandle = new AdmissionHandle(this);
+        withdrawingRoute = pendingItem;
+        return admissionHandle;
+    }
+
+    /** Called only after the exact route was removed from the source worker queue. */
+    void detachMigratedRoute(AdmissionHandle claim, ScheduledRequest exact) {
+        synchronized (this) {
+            if (admissionHandle != claim || withdrawingRoute != exact || item != exact.execution()) {
+                throw new IllegalStateException("route withdrawal lost its owner: " + requestId);
+            }
+            item = null;
+            pendingItem = null;
+            detail = "queued after hotspot rescue migration";
+            updatedAtMs = System.currentTimeMillis();
+        }
+    }
+
     PlacementResult.Status commitRoute(ScheduledRequest exact, BooleanSupplier publication) {
         synchronized (this) {
             if (!tryBindItemForPublicationLocked(exact)) { return PlacementResult.Status.CLOSED; }

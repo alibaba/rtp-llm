@@ -362,6 +362,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return prefillState.pendingTokenWork();
     }
 
+    /** Advisory outstanding uncached work including soft reservations, for rescue idle targets. */
+    public long outstandingTokenWork() {
+        return prefillState.outstandingTokenWork();
+    }
+
     /**
      * Admit on the selected generation using its current canonical occupancy
      * and bound dispatcher policy. The pin preserves generation identity while

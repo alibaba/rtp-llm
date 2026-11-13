@@ -71,6 +71,13 @@ public class BalanceContext {
     private long workerEnqueueSequence;
 
     /**
+     * Address of the Prefill worker this request was rescued from by a hotspot
+     * migration round. Set once when the queued route is withdrawn; the next
+     * placement selection excludes this worker so the request never returns.
+     */
+    private String prefillMigrationSource;
+
+    /**
      * Timestamp (ms) when the engine acknowledges the batch in BATCH mode.
      * Set when RequestScheduler confirms the EnqueueBatch acknowledgement.
      * Used to compute ack_to_response_time_ms in FlexlbServiceImpl.completeSchedule().
