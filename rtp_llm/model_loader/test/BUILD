@@ -99,3 +99,10 @@ py_test(
     visibility = ["//rtp_llm/test/qwen4_exp:__pkg__"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "test_compressed_tensors_nvfp4",
+    srcs = ["test_compressed_tensors_nvfp4.py"],
+    data = ["//rtp_llm/config/test:fixtures/nvfp4/q_proj_tile.json"],
+    deps = py_test_deps,
+)
