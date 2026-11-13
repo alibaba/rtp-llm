@@ -1,11 +1,15 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Context;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointRegistry.PrefillRoutingEntry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
@@ -15,6 +19,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -38,14 +43,38 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks queue-to-decision ordering and progress across asynchronous planners.
+ */
 class GlobalQueueProgressTest {
+    @Test
+    void queueAdmissionEventPrecedesDecisionOnPlannerThread() throws Exception {
+        FlexlbTrace.configure(OpenTelemetry.noop(), "test");
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            var span = mock(Span.class);
+            when(span.isRecording()).thenReturn(true);
+            when(span.storeInContext(any(Context.class))).thenCallRealMethod();
+            BalanceContext context = RequestLifecycleTestSupport.context(f.config, 90L);
+            context.setTraceContext(Context.root().with(span));
+            f.groups.put(90L, "g1");
+            f.scheduler.submit(context);
+            verify(span, timeout(1000)).addEvent(eq("flexlb.decision.started"), any(Attributes.class), anyLong(), eq(TimeUnit.NANOSECONDS));
+            var order = org.mockito.Mockito.inOrder(span);
+            order.verify(span).addEvent(eq("flexlb.queue.enqueued"), any(Attributes.class), anyLong(), eq(TimeUnit.NANOSECONDS));
+            order.verify(span).addEvent(eq("flexlb.decision.started"), any(Attributes.class), anyLong(), eq(TimeUnit.NANOSECONDS));
+        } finally {
+            FlexlbTrace.configure(null, "");
+        }
+    }
+
     @Test
     void completedBacklogDoesNotDelayRefillingAReleasedSlot() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
@@ -280,6 +309,9 @@ class GlobalQueueProgressTest {
         }
     }
 
+    /**
+     * Owns the scheduler and test dependencies for one queue scenario.
+     */
     private static final class Fixture implements AutoCloseable {
         private final FlexlbConfig config = twoPlannerConfig();
         private final PlacementAvailability availability = new PlacementAvailability();
@@ -293,18 +325,12 @@ class GlobalQueueProgressTest {
         private final List<Long> admissionOrder = new CopyOnWriteArrayList<>();
         private final Set<Long> admissionBlocked = ConcurrentHashMap.newKeySet();
         private final Set<Long> decodeBlocked = ConcurrentHashMap.newKeySet();
+
         private volatile LongConsumer onAdmission = ignored -> { };
         private volatile LongConsumer onSelection = ignored -> { };
+
         private final RequestScheduler scheduler;
         private final RoleType role;
-
-        private static FlexlbConfig twoPlannerConfig() {
-            FlexlbConfig config = spy(SchedulingTestConfig.batchConfig());
-            var runtime = spy(config.getInternalRuntime());
-            when(runtime.getQueuePlannerThreads()).thenReturn(2);
-            when(config.getInternalRuntime()).thenReturn(runtime);
-            return config;
-        }
 
         private Fixture(RoleType role) {
             this(role, false);
@@ -369,6 +395,19 @@ class GlobalQueueProgressTest {
                     mock(EvictionManager.class), lifecycle, availability);
         }
 
+        public void close() {
+            requests.values().forEach(future -> future.complete(new Response()));
+            scheduler.closePlacement();
+        }
+
+        private static FlexlbConfig twoPlannerConfig() {
+            FlexlbConfig config = spy(SchedulingTestConfig.batchConfig());
+            var runtime = spy(config.getInternalRuntime());
+            when(runtime.getQueuePlannerThreads()).thenReturn(2);
+            when(config.getInternalRuntime()).thenReturn(runtime);
+            return config;
+        }
+
         private void submit(long id, String group) {
             submit(id, group, 50);
         }
@@ -399,11 +438,6 @@ class GlobalQueueProgressTest {
 
         private void release(String group) {
             availability.capacityChanged(PlacementKey.exact(role, group, group + ":8000"));
-        }
-
-        public void close() {
-            requests.values().forEach(future -> future.complete(new Response()));
-            scheduler.closePlacement();
         }
 
         private static PrefillRoutingEntry endpoint(String group) {

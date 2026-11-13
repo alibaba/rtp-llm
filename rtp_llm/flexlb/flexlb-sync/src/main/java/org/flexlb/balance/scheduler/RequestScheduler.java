@@ -28,7 +28,6 @@ import java.util.concurrent.CompletableFuture;
  */
 @Component
 public final class RequestScheduler {
-
     private final DefaultRouter router;
     private final EndpointRegistry endpointRegistry;
     private final RequestRegistry requestRegistry;
@@ -100,46 +99,6 @@ public final class RequestScheduler {
         return future;
     }
 
-    private void submitDirect(BalanceContext context) {
-        Response failure = Response.error(StrategyErrorType.DISPATCH_FAILED);
-        long decisionStartedNanos = System.nanoTime();
-        try {
-            PlacementResult<RouteAdmission, PlacementKey> selection = router.select(context);
-            FlexlbTrace.recordPlacement(context.getTraceContext(), decisionStartedNanos,
-                    selection.status().name(), selection.diagnostics(), null);
-            context.setSchedulingDiagnostics(selection.diagnostics());
-            switch (selection.status()) {
-                case SUCCESS -> {
-                    try (RouteAdmission admission = selection.value()) {
-                        var committed = admission.tryCommitDirectRoute(context, requestRegistry);
-                        failure = switch (committed.status()) {
-                            case SUCCESS -> {
-                                var delivery = committed.value();
-                                requestRegistry.publishRoute(delivery.claim(), delivery.precedingWork(), delivery.unstartedWorkMs());
-                                yield null;
-                            }
-                            case REJECTED -> committed.failure();
-                            case CLOSED -> Response.error(StrategyErrorType.REQUEST_CANCELLED);
-                            case BLOCKED -> Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
-                        };
-                    }
-                }
-                case BLOCKED -> failure = selection.failure() != null
-                        ? selection.failure() : Response.error(selection.blocker().role().getErrorType());
-                case REJECTED -> failure = selection.failure();
-                case CLOSED -> failure = Response.error(StrategyErrorType.REQUEST_CANCELLED);
-            }
-        } catch (RuntimeException selectionFailure) {
-            FlexlbTrace.recordPlacement(context.getTraceContext(), decisionStartedNanos,
-                    "ERROR", null, selectionFailure);
-            Logger.warn("DIRECT admission failed: request_id={}", context.getRequestId(), selectionFailure);
-        } finally {
-            if (failure != null) {
-                requestRegistry.publishDecisionResponseAsync(context.getRequestId(), context.getFuture(), failure);
-            }
-        }
-    }
-
     public RequestState cancelRequest(
             long requestId,
             long expectedBatchId,
@@ -174,6 +133,48 @@ public final class RequestScheduler {
     public void closePlacement() {
         if (globalQueue != null) {
             globalQueue.close();
+        }
+    }
+
+    private void submitDirect(BalanceContext context) {
+        Response failure = Response.error(StrategyErrorType.DISPATCH_FAILED);
+        long decisionStartedNanos = System.nanoTime();
+        FlexlbTrace.event(context.getTraceContext(), "flexlb.decision.started");
+        try {
+            PlacementResult<RouteAdmission, PlacementKey> selection = FlexlbTrace.stage(
+                    context.getTraceContext(), "rtp_llm.flexlb.pd_decision", () -> router.select(context));
+            FlexlbTrace.recordPlacement(context.getTraceContext(), decisionStartedNanos,
+                    selection.status().name(), selection.diagnostics(), null);
+            context.setSchedulingDiagnostics(selection.diagnostics());
+            switch (selection.status()) {
+                case SUCCESS -> {
+                    try (RouteAdmission admission = selection.value()) {
+                        var committed = admission.tryCommitDirectRoute(context, requestRegistry);
+                        failure = switch (committed.status()) {
+                            case SUCCESS -> {
+                                var delivery = committed.value();
+                                requestRegistry.publishRoute(delivery.claim(), delivery.precedingWork(), delivery.unstartedWorkMs());
+                                yield null;
+                            }
+                            case REJECTED -> committed.failure();
+                            case CLOSED -> Response.error(StrategyErrorType.REQUEST_CANCELLED);
+                            case BLOCKED -> Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+                        };
+                    }
+                }
+                case BLOCKED -> failure = selection.failure() != null
+                        ? selection.failure() : Response.error(selection.blocker().role().getErrorType());
+                case REJECTED -> failure = selection.failure();
+                case CLOSED -> failure = Response.error(StrategyErrorType.REQUEST_CANCELLED);
+            }
+        } catch (RuntimeException selectionFailure) {
+            FlexlbTrace.recordPlacement(context.getTraceContext(), decisionStartedNanos,
+                    "ERROR", null, selectionFailure);
+            Logger.warn("DIRECT admission failed: request_id={}", context.getRequestId(), selectionFailure);
+        } finally {
+            if (failure != null) {
+                requestRegistry.publishDecisionResponseAsync(context.getRequestId(), context.getFuture(), failure);
+            }
         }
     }
 
