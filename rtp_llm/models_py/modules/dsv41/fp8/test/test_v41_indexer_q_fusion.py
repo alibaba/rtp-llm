@@ -470,6 +470,58 @@ class V41IndexerQFusionCUDA(unittest.TestCase):
                     self.assertTrue(bool((candidates == -1).all()))
 
     @torch.no_grad()
+    def test_grouped_prefill_q_offsets_cross_int32_boundary(self):
+        # Q has 4096 BF16 elements per token, so token 524288 crosses int32.
+        # Sample the reference to avoid materializing the full eager pipeline.
+        boundary = 1 << 19
+        case = make_case(boundary + 3, 1)
+        indices = torch.tensor([0, boundary - 1, boundary, boundary + 2], device="cuda")
+        sampled = {
+            key: value if key == "freqs_cis" else value.index_select(0, indices)
+            for key, value in case.items()
+        }
+        expected = baseline(sampled, weights_out_dtype=torch.bfloat16)
+        actual = candidate(case, weights_out_dtype=torch.bfloat16)
+        assert_identical(
+            tuple(value.index_select(0, indices) for value in actual), expected
+        )
+
+    @torch.no_grad()
+    def test_grouped_selection_offsets_cross_int32_boundary(self):
+        # An int32 output of width 65536 crosses the element-offset limit at
+        # token 32768. Exercise each optional output separately to bound memory.
+        boundary = 1 << 15
+        tokens, width = boundary + 1, 65536
+        case = make_case(tokens, 1)
+        indices = torch.tensor([0, boundary - 1, boundary], device="cuda")
+        sampled = {
+            key: value if key == "freqs_cis" else value.index_select(0, indices)
+            for key, value in case.items()
+        }
+        expected = baseline(sampled, weights_out_dtype=torch.bfloat16)
+        for output_name in ("selection_out", "candidates_out"):
+            with self.subTest(output_name=output_name):
+                storage = torch.empty(
+                    tokens * width + 2, device="cuda", dtype=torch.int32
+                )
+                storage[0] = storage[-1] = 123
+                output = storage[1:-1].view(tokens, width)
+                output[indices] = 7
+                actual = fused.try_fused_indexer_q(
+                    **case,
+                    weights_out_dtype=torch.bfloat16,
+                    **{output_name: output},
+                )
+                self.assertIsNotNone(actual)
+                assert_identical(
+                    tuple(value.index_select(0, indices) for value in actual), expected
+                )
+                self.assertTrue(bool((output.index_select(0, indices) == -1).all()))
+                self.assertEqual(storage[0].item(), 123)
+                self.assertEqual(storage[-1].item(), 123)
+                del actual, output, storage
+
+    @torch.no_grad()
     def test_real_shapes_and_input_immutability(self):
         for batch, span in (
             (1, 1),

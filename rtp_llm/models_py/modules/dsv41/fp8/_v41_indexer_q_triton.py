@@ -115,7 +115,8 @@ def _fused_indexer_q_rope_fp4_rows_kernel(
 ):
     # Four adjacent heads share one CTA and one position read. The caller's
     # 32-head contract makes the row count divisible by four.
-    row = tl.program_id(0) * 4 + tl.arange(0, 4)
+    # Promote before multiplying: long Q and selection offsets can exceed int32.
+    row = tl.program_id(0).to(tl.int64) * 4 + tl.arange(0, 4)
     token = row // 32
     head = row % 32
     position = tl.load(positions_ptr + token).to(tl.int64)
