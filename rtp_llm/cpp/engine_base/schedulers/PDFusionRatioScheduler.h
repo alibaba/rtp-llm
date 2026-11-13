@@ -1,6 +1,7 @@
 #pragma once
 
 #include <list>
+#include <future>
 #include <memory>
 #include <string>
 
@@ -27,13 +28,15 @@ public:
 
     absl::StatusOr<ScheduleOutput> schedule() override;
 
+    ScheduleObservation lastScheduleObservation() override;
+
     // for test
     using FIFOSchedulerBase::runningStreamsSize;
     using FIFOSchedulerBase::waitingStreamsSize;
     int64_t pendingDecodeStreamsSize();
     int64_t decodeSincePrefillForTest();
 
-private:
+protected:
     enum class RoundType {
         PREFILL,
         DECODE
@@ -44,6 +47,9 @@ private:
     }
     bool      evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams,
                                     const GenerateStreamPtr&            new_stream) override;
+    bool      evaluatePrefillMemory(const std::list<GenerateStreamPtr>& streams,
+                                    const GenerateStreamPtr&            new_stream,
+                                    bool                                packed_tokens);
     bool      waitPredicate() override;
     void      cancelExtraStreams() override;
     int64_t   extraOnflightStreams() const override;
@@ -53,18 +59,28 @@ private:
     bool      promotePendingDecodeStreams();
     RoundType chooseRound();
     bool      tryAdmitKVForPrefill(const GenerateStreamPtr& new_stream);
+    void      advanceLateMultimodal(std::unique_lock<std::mutex>& lock, bool allow_prepare);
+
+    void                admitWaitingForCoordination(const std::list<GenerateStreamPtr>& ready_reservations = {});
+    void                observeCommitted(const std::list<GenerateStreamPtr>& streams, bool prefill);
+    const bool          current_kv_admission_;
+    const bool          trace_enabled_;
+    ScheduleObservation observation_;
 
     struct AdmissionPeakState;
-    void buildAdmissionPeakState();
+    void buildAdmissionPeakState(const std::list<GenerateStreamPtr>& ready_reservations = {});
     bool tryAddToAdmissionPeakState(const GenerateStreamPtr& new_stream,
                                     int64_t                  initial_capacity,
                                     int64_t                  lifecycle_capacity);
 
-private:
     // new_streams_ keeps the admitted prefill cohort across chunks. The flag marks that the cohort
     // returned by the previous schedule round must be classified before it can be scheduled again.
     bool                         has_unclassified_prefill_batch_ = false;
     std::list<GenerateStreamPtr> pending_decode_streams_;
+    const size_t late_multimodal_batch_limit_;
+    // One preparation job per rank; retain its cohort until Prefill consumes it.
+    std::vector<GenerateStreamPtr> late_multimodal_streams_;
+    std::future<std::function<void()>> late_multimodal_future_;
     // Per-prefill-round scratch state, guarded by the scheduler lock.
     std::unique_ptr<AdmissionPeakState> admission_peak_state_;
     int64_t                             decode_prefill_step_  = 1;

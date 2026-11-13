@@ -437,7 +437,15 @@ struct FIFOSchedulerConfig {
     //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".
-    std::string decode_prefill_ratio           = "1";
+    std::string decode_prefill_ratio = "1";
+    // Opt-in CPU scheduling observations; no control collective or policy change.
+    bool        pdfusion_schedule_trace = false;
+    std::string pdfusion_trace_run_id   = "unset";
+    // Internal per-launch control identity, assigned once before backend ranks spawn.
+    // Independent of the optional trace label; never exposed as a CLI/env setting.
+    std::string pdfusion_coord_group_id        = "";
+    std::string pdfusion_coord_mode            = "off";
+    int64_t     pdfusion_coord_timeout_ms      = 30000;
     bool        cp_force_single_prefill        = true;
     int64_t     max_inited_kv_cache_streams    = 0;
     int64_t     max_batch_tokens_without_cache = 0;

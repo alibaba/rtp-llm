@@ -18,6 +18,19 @@ namespace rtp_llm {
 struct ScheduleOutput {
     std::list<GenerateStreamPtr> streams;
     std::vector<int64_t>         finished_request_ids;
+    bool                        coordinated = false;
+};
+
+// Snapshot of the actual admission path, never a speculative readiness probe.
+struct ScheduleObservation {
+    bool    valid          = false;
+    bool    intent_prefill = false;
+    int64_t waiting = 0, loading = 0, running = 0, pending = 0;
+    int64_t kv_available = 0, kv_reserved = 0;
+    int64_t rejected_batch = 0, rejected_tokens = 0, rejected_kv = 0;
+    int64_t committed_prefill = 0, committed_decode = 0, committed_input_tokens = 0;
+    int64_t waiting_after = 0, loading_after = 0;
+    int64_t oldest_waiting_us = 0;
 };
 
 class SchedulerBase {
@@ -36,6 +49,10 @@ public:
     virtual absl::StatusOr<ScheduleOutput> scheduleConservative(int /*propose_step*/) {
         return schedule();
     }
+    virtual ScheduleObservation lastScheduleObservation() {
+        return {};
+    }
+
     virtual absl::Status stop()             = 0;
     virtual bool         empty()            = 0;
     virtual int64_t      lastScheduleTime() = 0;

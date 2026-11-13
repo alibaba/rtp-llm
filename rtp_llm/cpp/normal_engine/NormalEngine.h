@@ -53,7 +53,7 @@ private:
     void                            initScheduler();
     std::shared_ptr<GenerateStream> createStream(const std::shared_ptr<GenerateInput>& input);
     bool                            validateStreamForScheduling(const GenerateStreamPtr& stream) const;
-    std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
+    std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens, bool prefill = false);
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
     WarmUpResult                    decodeWarmUp(const EngineInitParams& params);
@@ -79,7 +79,7 @@ private:
     static size_t warmUpReservedBlockCount(size_t seq_len, size_t reserve_tokens, size_t tokens_per_block);
     static bool   shouldEarlyReturnEmptyBatch(bool streams_empty, int64_t tp_size);
     static bool   shouldAddMtpFakePrefill(bool has_prefill, bool use_batch_decode_scheduler, int64_t dp_size);
-    void          mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
+    void          mayAddFakeStream(std::list<GenerateStreamPtr>& streams, bool global_prefill = false, bool coordinated = false);
 
     void initExecutor(const EngineInitParams& params);
 
@@ -106,6 +106,8 @@ private:
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
     StepWindowProfiler                            step_profiler_;
     int                                           reserve_step_ = 0;
+    int64_t                                       trace_control_epoch_ = 0;
+    int64_t                                       trace_model_step_id_ = 0;
 };
 
 }  // namespace rtp_llm

@@ -2823,15 +2823,21 @@ absl::Status MtpExecutor::process(const ScheduleOutput& schedule_output, int64_t
 
     // prepare streams
     prepareStreams(streams, prefill_streams, decode_streams);
+    if (schedule_output.coordinated) {
+        RTP_LLM_CHECK_WITH_INFO(prefill_streams.empty() != decode_streams.empty(),
+                                "coordinated MTP requires exactly one globally selected phase");
+    }
 
     // step forward
     int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
-    if (role_type_ == RoleType::PREFILL || role_type_ == RoleType::PDFUSION) {
+    if ((role_type_ == RoleType::PREFILL || role_type_ == RoleType::PDFUSION)
+        && (!schedule_output.coordinated || !prefill_streams.empty())) {
         THROW_IF_STATUS_ERROR(prefillStep(prefill_streams, metrics_collector, schedule_time_us));
     }
 
-    if (role_type_ == RoleType::DECODE || role_type_ == RoleType::PDFUSION) {
+    if ((role_type_ == RoleType::DECODE || role_type_ == RoleType::PDFUSION)
+        && (!schedule_output.coordinated || !decode_streams.empty())) {
         THROW_IF_STATUS_ERROR(decodeStep(decode_streams, metrics_collector));
     }
 

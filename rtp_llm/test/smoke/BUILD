@@ -258,3 +258,20 @@ custom_smoke_test(
     tags = ["dsv41_cuda13", "model_contract", "dspark_contract"],
     data = ["//rtp_llm:sdk", "deepseek_v41_contract_test.py"],
 )
+
+
+py_test(
+    name = "pdfusion_schedule_trace_test",
+    srcs = [
+        "pdfusion_schedule_trace.py",
+        "pdfusion_schedule_trace_test.py",
+    ],
+)
+
+custom_smoke_test(
+    name = "local_mm_ratio_cadence_smoke",
+    main = "local_mm_ratio_cadence_smoke_test.py",
+    smoke_args = "--use_local 1 --role_type PDFUSION --vit_separation 0 --world_size 2 --tp_size 1 --dp_size 2 --ep_size 2 --act_type BF16 --load_method auto --max_seq_len 16384 --enable_cuda_graph 0 --reuse_cache 1 --think_mode 0 --seq_size_per_block 2048 --kernel_seq_size_per_block 64 --kv_cache_mem_mb 16384 --reserver_runtime_mem_mb 24576",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual"],
+)

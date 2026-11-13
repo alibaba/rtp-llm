@@ -504,3 +504,9 @@ py_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+py_test(
+    name = "pdfusion_coordination_startup_test",
+    srcs = ["pdfusion_coordination_startup_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

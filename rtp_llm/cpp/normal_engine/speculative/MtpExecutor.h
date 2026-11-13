@@ -98,6 +98,11 @@ public:
                                                              bool cache_snapshot_ready = false);
     static int               selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
 
+    bool supportsCoordinatedSchedule() const {
+        return !is_dspark_ && propose_step_ >= 1 && propose_step_ <= 4 && !useStreamAsync() && !useDropBroadSync()
+               && !useAsyncDeviceState() && !useDeviceInput();
+    }
+
 protected:
     static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
     static bool dsparkDraftGraphAllowed(bool is_dspark, RoleType role_type);

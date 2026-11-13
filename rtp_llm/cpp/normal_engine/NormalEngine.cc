@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/PPScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/PDFusionCoordinatedScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
@@ -340,6 +341,39 @@ void NormalEngine::initExecutor(const EngineInitParams& params) {
 }
 
 void NormalEngine::initScheduler() {
+    const auto& fifo           = runtime_config.fifo_scheduler_config;
+    const auto  cadence_config = PDFusionCadenceConfig::fromEnv();
+    if (cadence_config.usesCoordinator(fifo.pdfusion_coord_mode, fifo.pdfusion_scheduler_mode)) {
+        RTP_LLM_CHECK_WITH_INFO(
+            pd_sep_config.role_type == RoleType::PDFUSION && parallelism_config.tp_size == 1
+                && (parallelism_config.dp_size == 2 || parallelism_config.dp_size == 4)
+                && parallelism_config.ep_size == parallelism_config.dp_size && parallelism_config.pp_size == 1
+                && parallelism_config.world_size == parallelism_config.dp_size
+                && parallelism_config.local_world_size == parallelism_config.dp_size
+                && !parallelism_config.prefill_cp_config.is_enabled()
+                && (!propose_params_ || (isMTPEagle() && !isDSpark()))
+                && !runtime_config.use_batch_decode_scheduler && fifo.prefill_chunk_size == 0
+                && !deviceInputEnabled(),
+            "global cadence requires single-host synchronous TP1/DP2/EP2 or TP1/DP4/EP4 PDFUSION without chunked prefill");
+        auto* normal = dynamic_cast<NormalExecutor*>(executor_.get());
+        auto* mtp    = dynamic_cast<MtpExecutor*>(executor_.get());
+        RTP_LLM_CHECK_WITH_INFO(
+            (normal && normal->supportsCoordinatedSchedule()) || (mtp && mtp->supportsCoordinatedSchedule()),
+            "global cadence requires synchronous host dispatch; MTP supports one through four draft tokens");
+        RTP_LLM_CHECK_WITH_INFO(!fifo.pdfusion_coord_group_id.empty(),
+                                "global cadence requires an internally initialized control group");
+        scheduler_.reset(
+            new PDFusionCoordinatedScheduler(runtime_config,
+                                             model_config_,
+                                             pd_sep_config,
+                                             parallelism_config,
+                                             resource_context_.cache_manager,
+                                             metrics_reporter_,
+                                             propose_params_ ? static_cast<int>(sp_config.gen_num_per_cycle) : 0,
+                                             cadence_config));
+        RTP_LLM_LOG_INFO("create global PDFUSION cadence scheduler, group=%s", fifo.pdfusion_coord_group_id.c_str());
+        return;
+    }
     const auto pdfusion_scheduler_mode =
         parsePDFusionSchedulerMode(runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode);
     if (pdfusion_scheduler_mode == PDFusionSchedulerMode::UNKNOWN) {
@@ -770,7 +804,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
 #endif
 }
 
-std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_new_tokens) {
+std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_new_tokens, bool prefill) {
     RTP_LLM_LOG_DEBUG("create min fake query");
     auto fake_input                             = makeFakeInput(1);
     fake_input->generate_config->max_new_tokens = max_new_tokens;
@@ -779,7 +813,7 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     stream->setIsFakeStream(true);
     stream->setMetricsReporter(nullptr);
     stream->fakeInitKVBlock();
-    if (pd_sep_config.role_type == RoleType::PDFUSION || pd_sep_config.role_type == RoleType::DECODE) {
+    if (!prefill && (pd_sep_config.role_type == RoleType::PDFUSION || pd_sep_config.role_type == RoleType::DECODE)) {
         auto new_tokens = torch::zeros({1, 1}, torch::kInt32);
 
         StreamUpdateInfo update_info{new_tokens,
@@ -921,6 +955,9 @@ absl::Status NormalEngine::stop() {
     // collectives for inputs that rank 0 has already published before exiting.
     CpuTpBroadcaster::instance().requestStop();
     loop_thread_->join();
+    if (auto* coordinated = dynamic_cast<PDFusionCoordinatedScheduler*>(scheduler_.get())) {
+        coordinated->releaseStoppedStreams();
+    }
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
     resource_context_.cache_manager->stopMetricsReporter();
@@ -1089,6 +1126,14 @@ absl::Status NormalEngine::step() try {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
+    const bool  schedule_trace = runtime_config.fifo_scheduler_config.pdfusion_schedule_trace;
+    auto*       coordinated    = dynamic_cast<PDFusionCoordinatedScheduler*>(scheduler_.get());
+    const auto& fifo           = runtime_config.fifo_scheduler_config;
+    const auto& trace_run_id =
+        coordinated && (fifo.pdfusion_trace_run_id.empty() || fifo.pdfusion_trace_run_id == "unset") ?
+            fifo.pdfusion_coord_group_id :
+            fifo.pdfusion_trace_run_id;
+    int64_t                 control_epoch        = schedule_trace && !coordinated ? ++trace_control_epoch_ : 0;
     int64_t        tps_schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     ScheduleOutput schedule_output;
     auto&          streams = schedule_output.streams;
@@ -1097,9 +1142,16 @@ absl::Status NormalEngine::step() try {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(schedule_output, scheduler_->schedule());
         }
+        if (coordinated) {
+            control_epoch = coordinated->controlEpoch();
+            if (coordinated->globalIdle()) {
+                return absl::OkStatus();
+            }
+        }
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
-            mayAddFakeStream(streams);
+            const bool global_prefill = coordinated && coordinated->plan() == PDFusionPlan::PREFILL;
+            mayAddFakeStream(streams, global_prefill, coordinated != nullptr);
         }
         // TP collectives require empty batches to enter process().
         if (shouldEarlyReturnEmptyBatch(streams.empty(), parallelism_config.tp_size)) {
@@ -1108,8 +1160,103 @@ absl::Status NormalEngine::step() try {
     }
 
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    absl::Status status             = absl::OkStatus();
+    std::vector<std::pair<GenerateStreamPtr, int>> measurement_lengths;
+    int     measurement_prefill = 0, measurement_decode = 0, measurement_fake = 0;
+    int64_t measurement_input_tokens = 0;
+    if (schedule_trace) {
+        for (const auto& stream : streams) {
+            if (stream->isFakeStream()) {
+                ++measurement_fake;
+                continue;
+            }
+            measurement_lengths.emplace_back(stream, stream->seqLength());
+            if (stream->isContextStream()) {
+                ++measurement_prefill;
+                measurement_input_tokens += stream->inputLength();
+            } else {
+                ++measurement_decode;
+            }
+        }
+    }
+    int64_t       step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    absl::Status  status             = absl::OkStatus();
+    const int64_t model_step_id      = schedule_trace ? ++trace_model_step_id_ : 0;
+    if (schedule_trace) {
+        const auto observation = scheduler_->lastScheduleObservation();
+        RTP_LLM_LOG_INFO("SCHEDULE_TRACE v=1 event=begin run=%s rank=%d control_epoch=%ld model_step_id=%ld "
+                         "epoch_scope=%s global_plan=%s start_us=%ld execute_start_us=%ld "
+                         "snapshot_valid=%d intent=%s waiting=%ld loading=%ld running=%ld pending=%ld "
+                         "kv_available=%ld kv_reserved=%ld reject_batch=%ld reject_tokens=%ld reject_kv=%ld "
+                         "committed_prefill=%ld committed_decode=%ld committed_input_tokens=%ld "
+                         "waiting_after=%ld loading_after=%ld oldest_waiting_us=%ld "
+                         "prefill=%d decode=%d fake=%d input_tokens=%ld graph_batch=-1 "
+                         "ready_prefill=%ld ready_decode=%ld oldest_ready_us=%ld decode_unserved_us=%ld "
+                         "ready_mask=%ld commit_mask=%ld prepare_us=%ld control_us=%ld commit_us=%ld "
+                         "cadence_adaptive=%ld cadence_reason=%s decode_peak=%ld low_decode_mask=%ld "
+                         "decode_window=%ld low_water_pct=%ld prefill_max_wait_ms=%ld "
+                         "min_decode_share_pct=%ld prefill_admit_allowed=%d last_model_us=%ld decode_debt_us=%ld "
+                         "debt_before_scaled=%ld debt_after_scaled=%ld charged_plan=%ld admit_before=%ld "
+                         "admit_credit_before_scaled=%ld admit_credit_after_scaled=%ld "
+                         "local_draining=%ld drain_mask=%ld max_context_batch_size=%ld",
+                         trace_run_id.c_str(),
+                         parallelism_config.dp_rank,
+                         control_epoch,
+                         model_step_id,
+                         coordinated ? "global_control" : "local_model_order",
+                         coordinated ? (coordinated->plan() == PDFusionPlan::PREFILL ? "prefill" : "decode") : "local",
+                         tps_schedule_time_us,
+                         step_begin_time_us,
+                         static_cast<int>(observation.valid),
+                         observation.valid ? (observation.intent_prefill ? "prefill" : "decode") : "unknown",
+                         observation.waiting,
+                         observation.loading,
+                         observation.running,
+                         observation.pending,
+                         observation.kv_available,
+                         observation.kv_reserved,
+                         observation.rejected_batch,
+                         observation.rejected_tokens,
+                         observation.rejected_kv,
+                         observation.committed_prefill,
+                         observation.committed_decode,
+                         observation.committed_input_tokens,
+                         observation.waiting_after,
+                         observation.loading_after,
+                         observation.oldest_waiting_us,
+                         measurement_prefill,
+                         measurement_decode,
+                         measurement_fake,
+                         measurement_input_tokens,
+                         coordinated ? coordinated->lastPrepared().ready_prefill : -1L,
+                         coordinated ? coordinated->lastPrepared().ready_decode : -1L,
+                         coordinated ? coordinated->lastPrepared().oldest_ready_us : -1L,
+                         coordinated ? coordinated->lastPrepared().decode_unserved_us : -1L,
+                         coordinated ? coordinated->preparedMask() : 0L,
+                         coordinated ? coordinated->committedMask() : 0L,
+                         coordinated ? coordinated->prepareUs() : 0L,
+                         coordinated ? coordinated->controlUs() : 0L,
+                         coordinated ? coordinated->commitUs() : 0L,
+                         coordinated ? coordinated->cadenceConfig().adaptive : 0L,
+                         coordinated ? coordinated->cadenceDecision().reason : "local",
+                         coordinated ? coordinated->cadenceDecision().decode_peak[parallelism_config.dp_rank] : 0L,
+                         coordinated ? coordinated->cadenceDecision().low_decode_mask : 0L,
+                         coordinated ? coordinated->cadenceConfig().decode_window : 64L,
+                         coordinated ? coordinated->cadenceConfig().low_water_pct : 50L,
+                         coordinated ? coordinated->cadenceConfig().prefill_max_wait_ms : 0L,
+                         coordinated ? coordinated->cadenceConfig().min_decode_share_pct : 25L,
+                         coordinated ? static_cast<int>(coordinated->prefillAdmissionAllowed()) : 1,
+                         coordinated ? coordinated->lastPrepared().last_model_us : 0L,
+                         coordinated ? coordinated->cadenceDecision().decode_debt_us : 0L,
+                         coordinated ? coordinated->cadenceDecision().debt_before_scaled : 0L,
+                         coordinated ? coordinated->cadenceDecision().debt_after_scaled : 0L,
+                         coordinated ? coordinated->cadenceDecision().charged_plan : 0L,
+                         coordinated ? coordinated->cadenceDecision().admit_before : 1L,
+                         coordinated ? coordinated->cadenceDecision().admit_credit_before_scaled : 0L,
+                         coordinated ? coordinated->cadenceDecision().admit_credit_after_scaled : 0L,
+                         coordinated ? coordinated->lastPrepared().draining : 0L,
+                         coordinated ? coordinated->cadenceDecision().drain_mask : 0L,
+                         runtime_config.fifo_scheduler_config.max_context_batch_size);
+    }
 
     // Per-request timeline: if any stream requested gen_timeline and no session is
     // active yet, configure the profiler so the executor-driven step window
@@ -1129,6 +1276,26 @@ absl::Status NormalEngine::step() try {
         // after TP input synchronization has rejected idle steps.
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(schedule_output, tps_schedule_time_us);
+    }
+    if (coordinated && status.ok()) {
+        coordinated->completeModelStep();
+    }
+
+    if (schedule_trace) {
+        int64_t emitted = 0;
+        for (const auto& item : measurement_lengths) {
+            emitted += std::max(0, item.first->seqLength() - item.second);
+        }
+        const auto completed_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        RTP_LLM_LOG_INFO("SCHEDULE_TRACE v=1 event=end run=%s rank=%d control_epoch=%ld model_step_id=%ld "
+                         "end_us=%ld output_tokens=%ld ok=%d timing=host_executor_wall",
+                         trace_run_id.c_str(),
+                         parallelism_config.dp_rank,
+                         control_epoch,
+                         model_step_id,
+                         completed_us,
+                         emitted,
+                         static_cast<int>(status.ok()));
     }
 
     // report step metrics
@@ -1244,7 +1411,7 @@ bool NormalEngine::shouldAddMtpFakePrefill(bool has_prefill, bool use_batch_deco
     return !has_prefill && (!use_batch_decode_scheduler || dp_size > 1);
 }
 
-void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
+void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams, bool global_prefill, bool coordinated) {
     if (parallelism_config.pp_size > 1) {
         /** PP executes one scheduled phase, so only an empty batch needs a placeholder. */
         if (!streams.empty()) {
@@ -1259,7 +1426,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
         }
     } else if (!isMTPEagle()) {
         if (streams.empty()) {
-            streams.emplace_back(createMinFakeStream(1));
+            streams.emplace_back(createMinFakeStream(1, global_prefill));
         }
     } else {
         bool need_prefill = false;
@@ -1280,6 +1447,13 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                     } else {
                         has_decode = true;
                     }
+                }
+                if (coordinated) {
+                    RTP_LLM_CHECK_WITH_INFO(!(global_prefill ? has_decode : has_prefill),
+                                            "MTP real streams violate the coordinated phase");
+                    need_prefill = global_prefill && !has_prefill;
+                    need_decode  = !global_prefill && !has_decode;
+                    break;
                 }
                 need_prefill = shouldAddMtpFakePrefill(
                     has_prefill, runtime_config.use_batch_decode_scheduler, parallelism_config.dp_size);

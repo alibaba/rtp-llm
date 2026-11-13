@@ -52,6 +52,10 @@ public:
 
     bool updateEplbConfig(const EPLBConfig& config) override;
 
+    bool supportsCoordinatedSchedule() const {
+        return !useStreamAsync() && !useDropBroadSync() && !useDeviceInput();
+    }
+
 protected:
     // Stream-async dispatch gate. Reuses the same env var as MtpExecutor so a
     // single launcher knob (`RTP_LLM_STREAM_ASYNC=1`) flips both paths.

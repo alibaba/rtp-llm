@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
+#include <unordered_set>
 
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -15,6 +18,17 @@ namespace rtp_llm {
 
 namespace {
 constexpr auto kNoProgressScheduleGap = std::chrono::milliseconds(1);
+
+bool currentKVAdmissionFromEnv() {
+    const auto* mode = std::getenv("PDFUSION_KV_ADMISSION_MODE");
+    if (!mode || std::string(mode) == "lifetime") {
+        return false;
+    }
+    if (std::string(mode) == "current") {
+        return true;
+    }
+    throw std::invalid_argument("PDFUSION_KV_ADMISSION_MODE must be lifetime or current");
+}
 
 int remainingKVAllocationSteps(const GenerateStreamPtr& stream) {
     /** Estimate until scheduling stops; the final generated token needs no subsequent KV allocation. */
@@ -147,9 +161,13 @@ PDFusionRatioScheduler::PDFusionRatioScheduler(const RuntimeConfig&             
                       parallelism_config,
                       cache_manager,
                       metrics_reporter),
+    current_kv_admission_(currentKVAdmissionFromEnv()),
+    trace_enabled_(runtime_config.fifo_scheduler_config.pdfusion_schedule_trace),
+    late_multimodal_batch_limit_(std::max<int64_t>(1, runtime_config.fifo_scheduler_config.max_context_batch_size)),
     decode_prefill_step_(parseDecodePrefillRatio(runtime_config.fifo_scheduler_config.decode_prefill_ratio)),
     decode_since_prefill_(0),
     prefill_since_decode_(0) {
+    RTP_LLM_LOG_INFO("PDFUSION_KV_ADMISSION mode=%s", current_kv_admission_ ? "current" : "lifetime");
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_);
@@ -166,6 +184,12 @@ PDFusionRatioScheduler::~PDFusionRatioScheduler() {
 
 bool PDFusionRatioScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
                                                    const GenerateStreamPtr&       new_stream) {
+    return evaluatePrefillMemory(streams, new_stream, false);
+}
+
+bool PDFusionRatioScheduler::evaluatePrefillMemory(const list<GenerateStreamPtr>& streams,
+                                                   const GenerateStreamPtr&       new_stream,
+                                                   bool                           packed_tokens) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!new_stream->isContextStream()) {
         return false;
@@ -180,6 +204,9 @@ bool PDFusionRatioScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>
     const bool already_in_peak   = isAdmittedWaitingStream(new_stream);
     const auto in_flight_streams = admission_peak_state_->streams.size();
     if (!already_in_peak && in_flight_streams + 1 > max_generate_batch_size_) {
+        if (trace_enabled_) {
+            ++observation_.rejected_batch;
+        }
         return false;
     }
 
@@ -187,16 +214,118 @@ bool PDFusionRatioScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>
     if (streams.empty() && max_token_size < max_seq_len_) {
         return already_in_peak || tryAdmitKVForPrefill(new_stream);
     }
+    if (packed_tokens) {
+        // Match StreamGroups::modelExecuteTokenSize without materializing token vectors.
+        // Already loaded/loading reservations are supplied by the coordinated scheduler.
+        // Preserve the legacy exclusive boundary and standalone-request exception.
+        size_t used = 0;
+        auto   fits = [&](const GenerateStreamPtr& stream) {
+            const auto tokens = static_cast<size_t>(std::max(stream->contextLength(), 0))
+                                * static_cast<size_t>(std::max(stream->currentBatchSize(), 1));
+            if (used >= max_batch_tokens_size_ || tokens >= max_batch_tokens_size_ - used) {
+                return false;
+            }
+            used += tokens;
+            return true;
+        };
+        bool within_budget = fits(new_stream);
+        for (const auto& stream : streams) {
+            if (!within_budget) {
+                break;
+            }
+            within_budget = fits(stream);
+        }
+        if (!within_budget) {
+            if (trace_enabled_) {
+                ++observation_.rejected_tokens;
+            }
+            return false;
+        }
+        return already_in_peak || tryAdmitKVForPrefill(new_stream);
+    }
     for (auto& stream : streams) {
         max_token_size = std::max(max_token_size, static_cast<size_t>(stream->contextLength()));
     }
-    return max_token_size * (streams.size() + 1) < max_batch_tokens_size_
-           && (already_in_peak || tryAdmitKVForPrefill(new_stream));
+    if (max_token_size * (streams.size() + 1) >= max_batch_tokens_size_) {
+        if (trace_enabled_) {
+            ++observation_.rejected_tokens;
+        }
+        return false;
+    }
+    return already_in_peak || tryAdmitKVForPrefill(new_stream);
 }
 
 bool PDFusionRatioScheduler::waitPredicate() {
     return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !loading_cache_streams_.empty()
-           || !running_streams_.empty() || !pending_decode_streams_.empty() || !new_streams_.empty();
+           || !running_streams_.empty() || !pending_decode_streams_.empty() || !new_streams_.empty() || late_multimodal_future_.valid();
+}
+
+void PDFusionRatioScheduler::advanceLateMultimodal(std::unique_lock<std::mutex>& lock, bool allow_prepare) {
+    if (late_multimodal_future_.valid()) {
+        if (late_multimodal_future_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            return;
+        }
+        // Only the scheduling thread publishes prepared tensors/identities. The
+        // worker never mutates live inputs while admission reads their metadata.
+        auto completed = std::move(late_multimodal_future_);
+        lock.unlock();
+        try {
+            completed.get()();
+        } catch (const std::exception& error) {
+            for (const auto& stream : late_multimodal_streams_) {
+                stream->reportError(ErrorCode::MM_PROCESS_ERROR, error.what());
+            }
+        }
+        lock.lock();
+        late_multimodal_streams_.clear();
+    }
+    if (stop_ || !allow_prepare || !new_streams_.empty() || !loading_cache_streams_.empty()) {
+        return;
+    }
+    for (const auto& stream : waiting_streams_) {
+        if (!stream->hasError() && stream->generateInput()->multimodal_prepared_late) {
+            return;  // KV shortage must not grow a second prepared cohort.
+        }
+    }
+    size_t tokens = 0, sequences = 0;
+    const size_t inited = countInitedKVCacheStreams() + pending_decode_streams_.size();
+    for (const auto& stream : waiting_streams_) {
+        if (stream->hasError() || !stream->hasPendingMultimodal()) {
+            continue;
+        }
+        if (late_multimodal_streams_.size() >= late_multimodal_batch_limit_
+            || (max_inited_kv_cache_streams_ > 0
+                && inited + late_multimodal_streams_.size() >= max_inited_kv_cache_streams_)) {
+            break;
+        }
+        const auto width = static_cast<size_t>(std::max(stream->currentBatchSize(), 1));
+        const auto length = static_cast<size_t>(std::max(stream->contextLength(), 0));
+        if (width > max_generate_batch_size_ - sequences || tokens >= max_batch_tokens_size_
+            || length > (max_batch_tokens_size_ - tokens - 1) / width) {
+            // Preserve the non-GDN standalone context exception.
+            if (late_multimodal_streams_.empty()) {
+                late_multimodal_streams_.push_back(stream);
+            }
+            break;
+        }
+        tokens += length * width;
+        sequences += width;
+        late_multimodal_streams_.push_back(stream);
+    }
+    if (!late_multimodal_streams_.empty()) {
+        try {
+            RTP_LLM_LOG_INFO("LOCAL_MM_LATE_PREFILL prepare batch=%zu tokens=%zu",
+                             late_multimodal_streams_.size(), tokens);
+            late_multimodal_future_ = std::async(std::launch::async, [streams = late_multimodal_streams_] {
+                return GenerateStream::prepareLateMultimodalBatchDeferred(streams);
+            });
+        } catch (const std::exception& error) {
+            for (const auto& stream : late_multimodal_streams_) {
+                stream->reportError(ErrorCode::MM_PROCESS_ERROR, error.what());
+            }
+            late_multimodal_streams_.clear();
+        }
+    }
 }
 
 absl::StatusOr<ScheduleOutput> PDFusionRatioScheduler::schedule() {
@@ -221,6 +350,25 @@ absl::StatusOr<ScheduleOutput> PDFusionRatioScheduler::schedule() {
     made_progress |= refreshAndReapTerminalStreams(pending_decode_streams_);
 
     const RoundType round = chooseRound();
+    advanceLateMultimodal(lock, round == RoundType::PREFILL);
+    if (trace_enabled_) {
+        observation_                = {};
+        observation_.valid          = true;
+        observation_.intent_prefill = round == RoundType::PREFILL;
+        observation_.waiting        = waiting_streams_.size();
+        observation_.loading        = loading_cache_streams_.size();
+        observation_.running        = running_streams_.size();
+        observation_.pending        = pending_decode_streams_.size();
+        if (cache_manager_) {
+            observation_.kv_available = cache_manager_->availableBlocksNum();
+            observation_.kv_reserved  = cache_manager_->reserveBlocksNum();
+        }
+        const auto now = autil::TimeUtility::currentTimeInMicroSeconds();
+        for (const auto& stream : waiting_streams_) {
+            observation_.oldest_waiting_us =
+                std::max(observation_.oldest_waiting_us, std::max<int64_t>(0, now - stream->schedulerEnqueueTimeUs()));
+        }
+    }
 
     if (round == RoundType::PREFILL) {
         if (new_streams_.empty()) {
@@ -244,6 +392,9 @@ absl::StatusOr<ScheduleOutput> PDFusionRatioScheduler::schedule() {
                 prefill_since_decode_ += 1;
                 reportMetrics();
                 last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
+                if (trace_enabled_) {
+                    observeCommitted(prefill_batch, true);
+                }
                 return ScheduleOutput{std::move(prefill_batch)};
             }
         }
@@ -268,6 +419,9 @@ absl::StatusOr<ScheduleOutput> PDFusionRatioScheduler::schedule() {
 
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
+    if (trace_enabled_) {
+        observeCommitted(running_streams_, false);
+    }
     return ScheduleOutput{running_streams_};
 }
 
@@ -288,12 +442,16 @@ PDFusionRatioScheduler::RoundType PDFusionRatioScheduler::chooseRound() {
     return prefill_since_decode_ < m ? RoundType::PREFILL : RoundType::DECODE;
 }
 
-void PDFusionRatioScheduler::buildAdmissionPeakState() {
+void PDFusionRatioScheduler::buildAdmissionPeakState(const std::list<GenerateStreamPtr>& ready_reservations) {
     auto state = std::make_unique<AdmissionPeakState>();
     state->streams.reserve(loading_cache_streams_.size() + running_streams_.size() + pending_decode_streams_.size()
-                           + waiting_streams_.size());
-    auto append_stream = [&](const GenerateStreamPtr& s) {
-        state->streams.push_back({s, remainingKVAllocationSteps(s)});
+                           + waiting_streams_.size() + ready_reservations.size());
+    std::unordered_set<GenerateStream*> included;
+    auto                                append_stream = [&](const GenerateStreamPtr& s) {
+        if (!included.insert(s.get()).second) {
+            return;
+        }
+        state->streams.push_back({s, current_kv_admission_ ? 0 : remainingKVAllocationSteps(s)});
         state->initial_need_blocks += estimateInitialNeedBlocks(s);
     };
     for (const auto& s : loading_cache_streams_) {
@@ -305,13 +463,18 @@ void PDFusionRatioScheduler::buildAdmissionPeakState() {
     for (const auto& s : pending_decode_streams_) {
         append_stream(s);
     }
+    for (const auto& s : ready_reservations) {
+        append_stream(s);
+    }
     for (const auto& s : waiting_streams_) {
         if (isAdmittedWaitingStream(s)) {
             append_stream(s);
         }
     }
-    std::sort(state->streams.begin(), state->streams.end(), longerLifetimeFirst);
-    state->peak           = estimateApproximatePeak(state->streams);
+    if (!current_kv_admission_) {
+        std::sort(state->streams.begin(), state->streams.end(), longerLifetimeFirst);
+        state->peak = estimateApproximatePeak(state->streams);
+    }
     admission_peak_state_ = std::move(state);
 }
 
@@ -319,20 +482,29 @@ bool PDFusionRatioScheduler::tryAddToAdmissionPeakState(const GenerateStreamPtr&
                                                         int64_t                  initial_capacity,
                                                         int64_t                  lifecycle_capacity) {
     auto&     state              = *admission_peak_state_;
-    const int remaining_kv_steps = remainingKVAllocationSteps(new_stream);
+    const int remaining_kv_steps = current_kv_admission_ ? 0 : remainingKVAllocationSteps(new_stream);
     // Preserve the idle fast path, where the allocator reports an impossible standalone request.
-    const bool    enforce_capacity = !state.streams.empty();
+    const bool enforce_capacity = !state.streams.empty();
     // Device KV-cache matching happens later in the allocator. At scheduler admission time the actual prefix hit is
     // unknown, so use the conservative no-hit estimate here.
-    const int64_t initial_delta    = estimateInitialNeedBlocks(new_stream);
+    const int64_t initial_delta = estimateInitialNeedBlocks(new_stream);
 
     if (enforce_capacity
         && (state.initial_need_blocks + initial_delta > initial_capacity
-            || state.peak.need_blocks > lifecycle_capacity)) {
+            || (!current_kv_admission_ && state.peak.need_blocks > lifecycle_capacity))) {
         return false;
     }
 
-    const auto insert_it = std::lower_bound(state.streams.begin(),
+    if (current_kv_admission_) {
+        // Retain current allocation/reserve checks and in-flight accounting, but do not
+        // budget to max_new_tokens. Decode grows KV through the existing allocator;
+        // incremental allocation failure retains its existing MALLOC_FAILED behavior.
+        state.streams.push_back({new_stream, 0});
+        state.initial_need_blocks += initial_delta;
+        return true;
+    }
+
+    const auto insert_it      = std::lower_bound(state.streams.begin(),
                                             state.streams.end(),
                                             AdmissionStreamInfo{new_stream, remaining_kv_steps},
                                             longerLifetimeFirst);
@@ -365,8 +537,12 @@ bool PDFusionRatioScheduler::tryAdmitKVForPrefill(const GenerateStreamPtr& new_s
     // Grouped requests are best-effort grouping, not all-or-nothing admission. Members are
     // checked individually against batch-size and prefill-token limits before KV admission;
     // KV gating intentionally preserves that behavior.
-    return tryAddToAdmissionPeakState(
-        new_stream, static_cast<int64_t>(initial_capacity), static_cast<int64_t>(available));
+    const bool admitted =
+        tryAddToAdmissionPeakState(new_stream, static_cast<int64_t>(initial_capacity), static_cast<int64_t>(available));
+    if (trace_enabled_ && !admitted) {
+        ++observation_.rejected_kv;
+    }
+    return admitted;
 }
 
 bool PDFusionRatioScheduler::classifyActivePrefillBatch() {
@@ -421,6 +597,33 @@ bool PDFusionRatioScheduler::promotePendingDecodeStreams() {
         }
     }
     return processed;
+}
+
+void PDFusionRatioScheduler::admitWaitingForCoordination(const std::list<GenerateStreamPtr>& ready_reservations) {
+    admission_peak_state_.reset();
+    if (!ready_reservations.empty()) {
+        buildAdmissionPeakState(ready_reservations);
+    }
+    evaluateWaitingStreams(waiting_streams_, /*include_running_mode=*/false);
+    admission_peak_state_.reset();
+}
+
+void PDFusionRatioScheduler::observeCommitted(const std::list<GenerateStreamPtr>& streams, bool prefill) {
+    // Called under lock after the existing state machine has made the batch executable.
+    observation_.committed_prefill = prefill ? streams.size() : 0;
+    observation_.committed_decode  = prefill ? 0 : streams.size();
+    for (const auto& stream : streams) {
+        if (prefill) {
+            observation_.committed_input_tokens += stream->contextLength();
+        }
+    }
+    observation_.waiting_after = waiting_streams_.size();
+    observation_.loading_after = loading_cache_streams_.size();
+}
+
+ScheduleObservation PDFusionRatioScheduler::lastScheduleObservation() {
+    std::lock_guard<mutex> lock(lock_);
+    return observation_;
 }
 
 int64_t PDFusionRatioScheduler::pendingDecodeStreamsSize() {

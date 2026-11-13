@@ -16,6 +16,7 @@ from setproctitle import setproctitle
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.config.log_config import setup_logging
+from rtp_llm.config.pdfusion_coordination import initialize_pdfusion_coordination
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
     configure_kv_cache_event_host_ip_port,
@@ -412,6 +413,7 @@ def start_backend_server(
     signal.signal(signal.SIGINT, abort)
 
     logging.info(f"[PROCESS_START]Start backend server process")
+    initialize_pdfusion_coordination(py_env_configs)
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()

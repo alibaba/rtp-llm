@@ -76,3 +76,14 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+cc_test(
+    name = "pdfusion_schedule_coordinator_test",
+    srcs = ["PDFusionScheduleCoordinatorTest.cc"],
+    deps = [
+        "//rtp_llm/cpp/engine_base/schedulers:pdfusion_schedule_coordinator",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = copts(),
+)

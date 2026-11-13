@@ -13,7 +13,10 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         bind_to=[(fifo_scheduler_config, "max_context_batch_size")],
         type=int,
         default=1,
-        help="（设备参数）为设备参数设置的最大 context batch size，影响默认调度器的凑批决策。",
+        help=(
+            "最大 context 请求数，通常默认 1。adaptive cadence 不使用此参数限制请求数；"
+            "该模式按实际 packed token、总并发及 KV 预算准入，并从总并发推导容量配置。"
+        ),
     )
     fifo_scheduler_group.add_argument(
         "--max_batch_tokens_size",
@@ -21,7 +24,11 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         bind_to=[(fifo_scheduler_config, "max_batch_tokens_size")],
         type=int,
         default=0,
-        help="最大 batch tokens 大小。",
+        help=(
+            "最大 batch tokens 大小。adaptive cadence 累加 "
+            "contextLength * currentBatchSize，包含已保留/加载中的 Prefill；"
+            "保留原有严格小于边界和单请求特例。legacy ratio 仍使用最长长度估算。"
+        ),
     )
     fifo_scheduler_group.add_argument(
         "--max_batch_tokens_without_cache",
@@ -53,6 +60,38 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         help="PDFusionRatioScheduler 的 decode:prefill 轮数比字符串。仅当 pdfusion_scheduler_mode='ratio' 生效；"
         "'0' = 有 waiting stream 时优先尝试 prefill；默认 '1' 严格交替；'N' = 1 轮 prefill 后 N 轮 decode；"
         "'1/X' = X 轮 prefill 后 1 轮 decode。非法值回退为 '1'。",
+    )
+    fifo_scheduler_group.add_argument(
+        "--pdfusion_schedule_trace",
+        env_name="PDFUSION_SCHEDULE_TRACE",
+        bind_to=[(fifo_scheduler_config, "pdfusion_schedule_trace")],
+        type=str2bool,
+        default=False,
+        help="Optional scheduling diagnostics, disabled by default. Cadence does not require tracing.",
+    )
+    fifo_scheduler_group.add_argument(
+        "--pdfusion_trace_run_id",
+        env_name="PDFUSION_TRACE_RUN_ID",
+        bind_to=[(fifo_scheduler_config, "pdfusion_trace_run_id")],
+        type=str,
+        default="unset",
+        help="Optional trace label only; never selects a control group. Cadence defaults to its internal group ID.",
+    )
+    fifo_scheduler_group.add_argument(
+        "--pdfusion_coord_mode",
+        env_name="PDFUSION_COORD_MODE",
+        bind_to=[(fifo_scheduler_config, "pdfusion_coord_mode")],
+        choices=["off", "cadence"],
+        default="off",
+        help="Opt-in single-host TP1/DP2/EP2 or TP1/DP4/EP4 global cadence; unsupported modes are rejected.",
+    )
+    fifo_scheduler_group.add_argument(
+        "--pdfusion_coord_timeout_ms",
+        env_name="PDFUSION_COORD_TIMEOUT_MS",
+        bind_to=[(fifo_scheduler_config, "pdfusion_coord_timeout_ms")],
+        type=int,
+        default=30000,
+        help="Control exchange deadline. Failure terminates the group without local fallback.",
     )
     fifo_scheduler_group.add_argument(
         "--cp_force_single_prefill",
