@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import torch
 import torch.distributed as dist
@@ -23,6 +24,8 @@ def reference(hidden, weight, scale=None):
     if weight.dtype != torch.float8_e4m3fn:
         rows = hidden.to(weight.dtype)
         if weight.dtype == torch.bfloat16:
+            if os.environ.get("RTP_LLM_BF16_LOGITS", "1") == "1":
+                return rows.mm(weight.t()).float()
             return rows.float().mm(weight.float().t())
         return rows.mm(weight.t()).float()
     rows = hidden.to(torch.bfloat16).contiguous()
@@ -203,6 +206,40 @@ class NativeLmHeadTest(unittest.TestCase):
         del runner
         gc.collect()
 
+    def test_bf16_precision_policy_and_graph_replay(self):
+        weight = torch.randn(128, 2560, device="cuda", dtype=torch.bfloat16)
+        hidden = torch.randn(3, 2560, device="cuda", dtype=torch.bfloat16)
+        selected = indexes(3)
+        for policy in ("0", "1"):
+            with self.subTest(policy=policy), mock.patch.dict(
+                os.environ, RTP_LLM_BF16_LOGITS=policy
+            ):
+                runner = make_head(weight)
+                for _ in range(3):
+                    runner(hidden, selected, compact=True)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    actual = runner(hidden, selected, compact=True)["logits"]
+                self.assertEqual(actual.dtype, torch.float32)
+                for magnitude in (0.0, 0.01, 1.0, 10.0):
+                    hidden.normal_().mul_(magnitude)
+                    graph.replay()
+                    # The legacy cuBLAS FP32 accumulator and a full FP32
+                    # reference can accumulate in different orders.
+                    torch.testing.assert_close(
+                        actual,
+                        reference(hidden, weight),
+                        rtol=0 if policy == "1" else 1e-4,
+                        atol=0 if policy == "1" else 1e-3,
+                    )
+                    if policy == "1":
+                        self.assertTrue(torch.equal(actual, actual.bfloat16().float()))
+                graph.reset()
+                del runner
+        with mock.patch.dict(os.environ, RTP_LLM_BF16_LOGITS="invalid"):
+            with self.assertRaisesRegex(RuntimeError, "must be 0 or 1"):
+                make_head(weight)
+
 
 def _tp_worker(rank, rendezvous):
     torch.cuda.set_device(rank)
@@ -220,6 +257,15 @@ def _tp_worker(rank, rendezvous):
 
     def gather(recv, mode, send, inplace):
         assert mode == 0 and len(recv) == 1 and not send
+        # Check the actual production collective buffer, before the public
+        # post-layer API promotes logits for the sampler.
+        expected_dtype = (
+            torch.bfloat16
+            if dtype == torch.bfloat16
+            and os.environ.get("RTP_LLM_BF16_LOGITS", "1") == "1"
+            else torch.float32
+        )
+        assert recv[0].dtype == expected_dtype, (recv[0].dtype, expected_dtype)
         dest = recv[0].view(-1)
         size = dest.numel() // 2
         local = dest[rank * size : (rank + 1) * size].clone()
@@ -256,6 +302,7 @@ def _tp_worker(rank, rendezvous):
                     dim=1,
                 )[:, :61]
                 outputs = runner(hidden, selected, need_all_logits=need_all)
+                assert outputs["logits"].dtype == torch.float32
                 torch.testing.assert_close(
                     outputs["logits"],
                     expected[selected.cuda()] if need_all else expected,
@@ -266,6 +313,19 @@ def _tp_worker(rank, rendezvous):
                     torch.testing.assert_close(
                         outputs["all_logits"], expected, rtol=1e-5, atol=1e-5
                     )
+            compact = runner(hidden, indexes(7), compact=True)["logits"]
+            compact_expected = torch.cat(
+                [
+                    reference(
+                        hidden,
+                        shards[i],
+                        scales[i] if dtype == torch.float8_e4m3fn else None,
+                    )
+                    for i in range(2)
+                ],
+                dim=1,
+            )
+            torch.testing.assert_close(compact, compact_expected, rtol=1e-5, atol=1e-5)
             del runner
         dist.barrier()
     finally:

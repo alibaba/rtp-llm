@@ -204,7 +204,14 @@ public:
     /** Runs this model instance; a partitioned target executes only its local stage. */
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     /** Builds rank-local PP warmup activations from full model inputs, applying CP padding when enabled. */
-    virtual PPIntermediateTensors      makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp);
+    virtual PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp);
+    virtual bool                  supportsMtpDraftGraph(int steps) const {
+        return false;
+    }
+    // An empty result means unsupported and has not executed a model forward.
+    virtual GptModelOutputs forwardMtpDraft(const GptModelInputs& inputs, int steps) {
+        return {};
+    }
     virtual void                       releaseBuffers() {}
     virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
     virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {

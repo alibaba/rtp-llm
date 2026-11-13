@@ -40,6 +40,12 @@ void registerExecCtxOps(pybind11::module& m);
 namespace rtp_llm::test {
 
 struct PyWrappedModelTestPeer {
+    static void installDeviceLengthGraph(PyWrappedModel& model, std::unique_ptr<GraphBase> runner) {
+        model.enable_cuda_graph_      = true;
+        model.graph_device_kv_length_ = true;
+        model.graph_runner_           = std::move(runner);
+    }
+
     static void replaceContextParallelProcessor(PyWrappedModel&                            model,
                                                 std::unique_ptr<IContextParallelProcessor> processor) {
         model.context_parallel_processor_ = std::move(processor);
@@ -70,6 +76,33 @@ struct PyWrappedModelTestPeer {
 };
 
 namespace {
+
+// Admit at PREPARE, then reject at FORWARD to exercise the late eager
+// fallback without requiring a captured model computation in this fixture.
+class DeviceLengthFallbackGraph final: public GraphBase {
+public:
+    explicit DeviceLengthFallbackGraph(bool admit_prepare): GraphBase(py::none()), admit_prepare_(admit_prepare) {}
+    void           initCapture() override {}
+    PyModelOutputs forward(const PyModelInputs&, CudaGraphState&) override {
+        throw std::runtime_error("fallback fixture must not execute a graph");
+    }
+    void setPositionEncoding(torch::Tensor) override {}
+    void setTokenTypeEmbedding(torch::Tensor) override {}
+    void setInputEmbeddingScalar(float) override {}
+    bool canRun(const PyModelInputs&, CudaGraphState&, CudaGraphCheckMode mode) override {
+        return admit_prepare_ && mode == CudaGraphCheckMode::PREPARE;
+    }
+    bool captureSessionMayBeDirty() const override {
+        return false;
+    }
+    void prepareAttentionInputs(const PyModelInputs& inputs, CudaGraphState&, bool) override {
+        RTP_LLM_CHECK_WITH_INFO(inputs.attention_inputs.context_total_kv_length == inputs.attention_inputs.total_tokens,
+                                "host prefix sum was materialized before graph selection");
+    }
+
+private:
+    bool admit_prepare_;
+};
 
 constexpr int    kLayerId        = 0;
 constexpr size_t kPhysicalBlocks = 8;
@@ -661,21 +694,25 @@ Scenario makeScenario(const std::string& name) {
             {2, 2, 8});
         return {std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     }
-    if (name == "cuda_lengths_host_prefix") {
+    if (name.find("cuda_lengths_host_prefix") == 0) {
         auto config           = makeCacheConfig({{"full", 128, 256}});
         auto layout           = makeLayout(config);
         auto inputs           = makeInputs({1, 3, 4},
                                            {501, 502, 503},
-                                           std::vector<int64_t>(24, 0),
-                                           8,
-                                           std::vector<int32_t>(24, 1),
+                                 std::vector<int64_t>(24, 0),
+                                 8,
+                                 std::vector<int32_t>(24, 1),
                                            {"full"},
-                                           8,
-                                           128,
-                                           256);
+                                 8,
+                                 128,
+                                 256);
         inputs.input_lengths  = inputs.input_lengths.cuda();
         inputs.prefix_lengths = pinnedTensor({128, 256, 512}, {3});
         inputs.pd_separation  = false;
+        if (name.find("graph_") != std::string::npos) {
+            inputs.prefix_lengths   = inputs.prefix_lengths.cuda();
+            inputs.is_target_verify = true;
+        }
         Scenario scenario{
             std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
         return scenario;
@@ -1059,10 +1096,10 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
 
     RTP_LLM_CHECK_WITH_INFO(forward_count > 0, "forward_count must be positive");
 
-    const bool cacheless_warmup = scenario_name == "cacheless_warmup";
-    const auto input_scenario   = cacheless_warmup ? "multi_tag" : scenario_name;
-    auto       scenario         = makeScenario(input_scenario);
-    auto                cache_store = std::make_shared<RecordingCacheStore>();
+    const bool          cacheless_warmup = scenario_name == "cacheless_warmup";
+    const auto          input_scenario   = cacheless_warmup ? "multi_tag" : scenario_name;
+    auto                scenario         = makeScenario(input_scenario);
+    auto                cache_store      = std::make_shared<RecordingCacheStore>();
     FakeMetricsReporter fake_metrics_reporter;
     const auto&         metrics_reporter = fake_metrics_reporter.reporter();
     auto                manager          = std::make_shared<KVCacheManager>(scenario.manager_config,
@@ -1137,6 +1174,12 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                              /*allow_cuda_graph=*/true,
                              /*track_cache_store_completion=*/false,
                              enable_cache_store);
+        if (scenario_name.find("cuda_lengths_host_prefix_graph_") == 0) {
+            PyWrappedModelTestPeer::installDeviceLengthGraph(
+                model,
+                std::make_unique<DeviceLengthFallbackGraph>(scenario_name.find("graph_forward_fallback")
+                                                            != std::string::npos));
+        }
         TestContextParallelProcessor* test_cp_processor = nullptr;
         if (scenario.replace_cp_processor) {
             auto processor = std::make_unique<TestContextParallelProcessor>(
@@ -1174,8 +1217,14 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
         }
         if (scenario_name.find("cuda_lengths_host_prefix") == 0) {
             scenario.inputs.prefix_lengths = pinnedTensor({256, 128, 384}, {3});
+            if (scenario_name.find("graph_") != std::string::npos) {
+                scenario.inputs.prefix_lengths = scenario.inputs.prefix_lengths.cuda();
+            }
             (void)model.forward(scenario.inputs);
             scenario.inputs.prefix_lengths = pinnedTensor({0, 0, 0}, {3});
+            if (scenario_name.find("graph_") != std::string::npos) {
+                scenario.inputs.prefix_lengths = scenario.inputs.prefix_lengths.cuda();
+            }
             (void)model.forward(scenario.inputs);
         }
         capture_stats = model.hiddenStateCaptureStats();
@@ -1206,9 +1255,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
 
 py::dict runDirtyGenerationPrefillCaptureScenario(py::object py_model) {
     static std::once_flag runtime_once;
-    std::call_once(runtime_once, []() {
-        initRuntime(/*device_id=*/0);
-    });
+    std::call_once(runtime_once, []() { initRuntime(/*device_id=*/0); });
 
     bool                          saw_dirty_capture_error = false;
     size_t                        available_before        = 0;
@@ -1278,9 +1325,7 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
                                              const std::string&                        expected_error_substring,
                                              const std::vector<std::pair<bool, bool>>& forward_flags) {
     static std::once_flag runtime_once;
-    std::call_once(runtime_once, []() {
-        initRuntime(/*device_id=*/0);
-    });
+    std::call_once(runtime_once, []() { initRuntime(/*device_id=*/0); });
 
     auto config  = makeCacheConfig({{"full", 4, 64}});
     auto layout  = makeLayout(config);
@@ -1459,9 +1504,9 @@ runCustomOutput(py::object py_model, py::object handler, torch::Tensor indexes, 
         model.prepareAttentionInputs(inputs);
         model.updateKVCacheKernelBlockId(inputs);
     }
-    const auto outputs            = compact_output ? PyWrappedModelTestPeer::forwardPostLayersLastHidden(
+    const auto outputs      = compact_output ? PyWrappedModelTestPeer::forwardPostLayersLastHidden(
                                               model, torch::ones({2, width}, lm_head->kernel.options()), inputs) :
-                                                     model.forward(inputs);
+                                               model.forward(inputs);
     result["graph_status"]  = generationPrefillCudaGraphStatusString(outputs.generation_prefill_cuda_graph_status);
     result["custom_output"] = outputs.custom_output;
     result["custom_output_error"] = outputs.custom_output_error;
