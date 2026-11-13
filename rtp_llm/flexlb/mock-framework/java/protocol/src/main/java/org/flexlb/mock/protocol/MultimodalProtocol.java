@@ -8,6 +8,9 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.ImageHashSeed;
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.ImageHashSeeds;
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.ImageSeeds;
 
 /**
  * Shares image identity, feature hashes, and multimodal message conversion across Client, ViT, and Prefill.
@@ -35,24 +38,14 @@ public final class MultimodalProtocol {
     public static Prepared text(GenerateInputPB input) { return new Prepared(input, List.of()); }
 
     /** Expands the seeds returned by the Mock ViT embedding RPC. */
-    public static Prepared apply(GenerateInputPB input, MultimodalOutputPB output, int imageToken) {
-        var tensor = output.getMultimodalEmbedding();
-        if (output.getOutputRdmaSlotsCount() != 0 || !tensor.getFp32Data().isEmpty() || !tensor.getBf16Data().isEmpty()
-                || !tensor.getFp16Data().isEmpty() || !tensor.getInt32Data().isEmpty()
-                || tensor.getShapeCount() != 2 || tensor.getShape(0) < 1 || tensor.getShape(1) < 1
-                || tensor.getDataType() != TensorPB.DataType.BF16)
-            throw Status.DATA_LOSS.withDescription("Malformed Mock vision metadata").asRuntimeException();
-        if (output.hasMultimodalPosId() || output.getMultimodalExtraInputCount() != 0)
-            throw Status.DATA_LOSS.withDescription("Unexpected vision tensor payload").asRuntimeException();
+    public static Prepared apply(GenerateInputPB input, ImageSeeds output, int imageToken) {
         var sizes = output.getSplitSizeList();
-        if (output.hasMultimodalFeatureHash() || sizes.size() != output.getMockFeatureSeedsCount()
-                || sizes.size() != input.getMultimodalInputsCount()
-                || sizes.stream().anyMatch(size -> size < 1)
-                || sizes.stream().mapToLong(Integer::longValue).sum() != tensor.getShape(0))
+        if (sizes.size() != output.getSeedsCount() || sizes.size() != input.getMultimodalInputsCount()
+                || sizes.stream().anyMatch(size -> size < 1))
             throw Status.DATA_LOSS.withDescription("Invalid Mock feature seeds").asRuntimeException();
         ByteString payload = ByteString.EMPTY;
         for (int i = 0; i < sizes.size(); i++)
-            payload = payload.concat(expandFeatureHashes(output.getMockFeatureSeeds(i), sizes.get(i)));
+            payload = payload.concat(expandFeatureHashes(output.getSeeds(i), sizes.get(i)));
         return applyRows(input, sizes, payload, imageToken);
     }
 
@@ -68,8 +61,7 @@ public final class MultimodalProtocol {
     public static PromptCacheKeys computePromptKeys(Prepared prepared, int physicalBlockSize, long seed, int cpSize) {
         validateSpans(prepared.input(), prepared.spans());
         return new PromptCacheKeys(physicalBlockSize, prepared.input().getTokenIdsList(),
-            prepared.spans().stream().map(span -> new PromptCacheKeys.Span(
-                span.getOffset(), span.getRowHashesList())).toList(), seed, cpSize);
+            prepared.spans(), seed, cpSize);
     }
 
     public static long featureSeed(String key) {
@@ -100,20 +92,19 @@ public final class MultimodalProtocol {
         hash^=hash>>>47;hash*=m;return hash^(hash>>>47);
     }
 
-    static Prepared applyHashes(GenerateInputPB input, MultimodalHashResponsePB metadata, int imageToken) {
-        var entries=new HashMap<String,MultimodalHashEntryPB>();
+    static Prepared applyHashes(GenerateInputPB input, ImageHashSeeds metadata, int imageToken) {
+        var entries=new HashMap<String,ImageHashSeed>();
         for(var entry:metadata.getEntriesList()) {
             if(entries.putIfAbsent(entry.getKey(),entry)!=null) throw Status.DATA_LOSS.withDescription("Duplicate vision hash entry").asRuntimeException();
         }
         var sizes=new ArrayList<Integer>();ByteString payload=ByteString.EMPTY;
         for(var media:input.getMultimodalInputsList()) {
             var entry=entries.get(key(media));
-            if(entry==null || !entry.getHashHit() || entry.getSplitSizeCount()!=1 || entry.getSplitSize(0)<1
-                    || !entry.hasMockFeatureSeed() || !entry.getFeatureHashes().isEmpty())
+            if(entry == null || entry.getRows() < 1)
                 throw Status.DATA_LOSS.withDescription("Missing or invalid vision feature hashes").asRuntimeException();
-            int rows = entry.getSplitSize(0);
+            int rows = entry.getRows();
             sizes.add(rows);
-            payload = payload.concat(expandFeatureHashes(entry.getMockFeatureSeed(), rows));
+            payload = payload.concat(expandFeatureHashes(entry.getSeed(), rows));
         }
         return applyRows(input,sizes,payload,imageToken);
     }
@@ -129,7 +120,7 @@ public final class MultimodalProtocol {
         if (sizes.size() != input.getMultimodalInputsCount()) throw invalid("Image output count mismatch");
         var data = payload.asReadOnlyByteBuffer().order(ByteOrder.LITTLE_ENDIAN);
         var result = input.toBuilder().clearTokenIds().clearMultimodalInputs();
-        var spans = new ArrayList<MultimodalCacheSpanPB>();
+        var spans = new ArrayList<PromptCacheKeys.Span>();
         int image = 0;
         for (int token : input.getTokenIdsList()) {
             if (token != imageToken) { result.addTokenIds(token); continue; }
@@ -137,22 +128,23 @@ public final class MultimodalProtocol {
             int rows = sizes.get(image++);
             if (rows < 1 || data.remaining() < (long) rows * 4)
                 throw invalid("Invalid image output length");
-            var span = MultimodalCacheSpanPB.newBuilder().setOffset(result.getTokenIdsCount());
+            int offset = result.getTokenIdsCount();
+            var hashes = new ArrayList<Integer>(rows);
             for (int row = 0; row < rows; row++) {
                 result.addTokenIds(imageToken);
-                span.addRowHashes(data.getInt());
+                hashes.add(data.getInt());
             }
-            spans.add(span.build());
+            spans.add(new PromptCacheKeys.Span(offset, hashes));
         }
         if (image != sizes.size() || data.hasRemaining()) throw invalid("Image placeholders and hashes differ");
         return new Prepared(result.build(), spans);
     }
 
-    private static void validateSpans(GenerateInputPB input, List<MultimodalCacheSpanPB> spans) {
+    private static void validateSpans(GenerateInputPB input, List<PromptCacheKeys.Span> spans) {
         long previous = 0;
         for (var span : spans) {
-            long end = (long) span.getOffset() + span.getRowHashesCount();
-            if (span.getOffset() < previous || span.getRowHashesCount() < 1 || end > input.getTokenIdsCount())
+            long end = (long) span.offset() + span.rowHashes().size();
+            if (span.offset() < previous || span.rowHashes().size() < 1 || end > input.getTokenIdsCount())
                 throw invalid("Invalid multimodal cache span");
             previous = end;
         }
@@ -161,7 +153,7 @@ public final class MultimodalProtocol {
     /**
      * Pairs the native generation input with resolved media cache spans.
      */
-    public record Prepared(GenerateInputPB input, List<MultimodalCacheSpanPB> spans) {
+    public record Prepared(GenerateInputPB input, List<PromptCacheKeys.Span> spans) {
         public Prepared { spans = List.copyOf(spans); }
     }
 }

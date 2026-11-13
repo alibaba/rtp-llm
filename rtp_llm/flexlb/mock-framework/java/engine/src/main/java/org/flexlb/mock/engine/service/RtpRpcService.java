@@ -1,5 +1,6 @@
 package org.flexlb.mock.engine.service;
 
+import io.grpc.BindableService;
 import io.grpc.Status;
 import io.prometheus.client.Collector.MetricFamilySamples;
 import io.prometheus.client.CollectorRegistry;
@@ -15,6 +16,9 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.mock.protocol.grpc.MockDecodeServiceGrpc;
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.DecodeFrame;
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.DecodeLayout;
 import org.flexlb.mock.engine.cache.KvCacheManager;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.forward.ComputeModel;
@@ -84,8 +88,19 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         response.onError(Status.UNIMPLEMENTED.withDescription("KVCM payload SDK and metadata backend operations are not simulated").asRuntimeException());
     }
 
-    @Override public StreamObserver<GenerateRequestPB> remoteGenerate(StreamObserver<GenerateOutputsPB> observer) {
-        return decode == null ? super.remoteGenerate(observer) : decode.open(observer);
+    public BindableService mockDecodeService() {
+        if (decode == null) throw new IllegalStateException("Expected a Decode engine");
+        return new MockDecodeServiceGrpc.MockDecodeServiceImplBase() {
+            @Override public void getDecodeLayout(EmptyPB input, StreamObserver<DecodeLayout> response) {
+                response.onNext(DecodeLayout.newBuilder().setBlockSize(config.physicalBlockSize())
+                    .setCacheKeySeed(config.cacheKeySeed()).build());
+                response.onCompleted();
+            }
+
+            @Override public StreamObserver<DecodeFrame> remoteGenerate(StreamObserver<GenerateOutputsPB> response) {
+                return decode.open(response);
+            }
+        };
     }
 
     @Override public void enqueueBatch(EnqueueBatchRequestPB request, StreamObserver<EnqueueBatchResponsePB> response) {
@@ -157,7 +172,6 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
             long collectedAtNanos = System.nanoTime();
             var result = CacheStatusPB.newBuilder().setTotalKvCache(tokens(snapshot.totalBlocks()))
                 .setAvailableKvCache(tokens(snapshot.availableBlocks())).setBlockSize(config.tokensPerCacheKey()).setVersion(snapshot.version());
-            if (decode != null) result.setMockDecodeCacheSeed(config.cacheKeySeed());
             for (long key : snapshot.keys()) result.addCacheKeyList(key);
             return new StatusResult<>(result.build(), collectedAtNanos);
         });

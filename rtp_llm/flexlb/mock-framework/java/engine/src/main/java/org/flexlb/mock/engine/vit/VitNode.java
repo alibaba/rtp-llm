@@ -11,6 +11,8 @@ import java.util.concurrent.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
 import org.flexlb.mock.protocol.*;
+import org.flexlb.mock.protocol.grpc.MockVitServiceGrpc;
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.*;
 import org.flexlb.mock.engine.EngineMain.Address;
 
 /**
@@ -28,7 +30,7 @@ public final class VitNode implements AutoCloseable {
     public static VitNode start(VitConfig config,int rpcPort,int controlPort) throws Exception {
         var node=new VitNode(config);
         try {
-            node.rpc=NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service).build().start();
+            node.rpc=NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service).addService(node.service.mockVitService()).build().start();
             node.metrics=org.flexlb.mock.metrics.MetricsOutput.start(node.service::collectMetrics);
             node.api=new ControlServer(node.address.listener(controlPort)).health(node::checkHealthy);
             if(node.metrics.prometheus()) node.api.metrics(node.service::metrics);
@@ -40,7 +42,7 @@ public final class VitNode implements AutoCloseable {
     }
     public Map<String,Object> endpoints() {
         return Map.of("id",config.id(),"role","vit","rpc",address.rpc(rpc.getPort()),"control",address.http(api.port()),
-            "metrics",metrics.prometheus()?address.http(api.port())+"/metrics":"","metrics_backend",metrics.prometheus()?"prometheus":"kmonitor","metadata_only",true,"supported_rpc",List.of("GetWorkerStatus","GetCacheStatus","RemoteMultimodalEmbedding","GetMultimodalHashes","AsyncSubmitEmbedding"));
+            "metrics",metrics.prometheus()?address.http(api.port())+"/metrics":"","metrics_backend",metrics.prometheus()?"prometheus":"kmonitor","metadata_only",true,"supported_rpc",List.of("GetWorkerStatus","GetCacheStatus","RemoteMultimodalEmbedding","GetMultimodalHashes","AsyncSubmitEmbedding","PrepareImages","GetHashSeeds"));
     }
     public void checkHealthy() { if(closed || rpc == null || rpc.isShutdown()) throw new IllegalStateException("V stopped");service.checkHealthy(); }
     @Override public synchronized void close() {
@@ -84,35 +86,12 @@ public final class VitNode implements AutoCloseable {
         }
 
         @Override public void remoteMultimodalEmbedding(MultimodalInputsPB input,StreamObserver<MultimodalOutputPB> response) {
-            var context=Context.current(); reply(response,()->output(compute(input,context), input.getAcceptMockFeatureSeeds()));
+            var context=Context.current(); reply(response,()->output(compute(input,context)));
         }
 
         @Override public void getMultimodalHashes(MultimodalHashRequestPB input,StreamObserver<MultimodalHashResponsePB> response) {
             var context=Context.current(); reply(response,()-> {
-                if(input.getKeysList().stream().anyMatch(String::isBlank)) throw MultimodalProtocol.invalid("Empty hash query key");
-                Map<String,VitGeometry.Image> computed=new HashMap<>();
-                if(input.getTimeoutMs()<0) throw MultimodalProtocol.invalid("Invalid hash request timeout");
-                if(input.hasInputs()) {
-                    var media=input.getInputs();
-                    VitGeometry.validate(media,config.skipDownload());
-                    var requested=new LinkedHashSet<>(input.getKeysList());
-                    var byKey=new LinkedHashMap<String,MultimodalInputPB>();
-                    for(var image:media.getMultimodalInputsList()) {
-                        String key=MultimodalProtocol.key(image);
-                        if(!requested.contains(key)) throw MultimodalProtocol.invalid("Hash submission inputs differ from requested keys");
-                        byKey.put(key,image);
-                    }
-                    var missing=media.toBuilder().clearMultimodalInputs();
-                    for(var key:requested) {
-                        var hit=cache.hash(key);
-                        if(hit!=null) computed.put(key,hit);
-                        else if(byKey.containsKey(key)) missing.addMultimodalInputs(byKey.get(key));
-                        else throw MultimodalProtocol.invalid("Missing image input for hash acquisition");
-                    }
-                    if(input.getTimeoutMs()>0 && (media.getTimeoutMs()<=0 || input.getTimeoutMs()<media.getTimeoutMs()))
-                        missing.setTimeoutMs(input.getTimeoutMs());
-                    if(missing.getMultimodalInputsCount()>0) for(var image:compute(missing.build(),context)) computed.put(image.key(),image);
-                }
+                var computed = prepareHashInputs(input, context);
                 var result=MultimodalHashResponsePB.newBuilder().setWorkerInstance(instance);
                 for(var key:input.getKeysList()) {
                     var image=computed.get(key);if(image==null) image=cache.hash(key);
@@ -121,8 +100,7 @@ public final class VitNode implements AutoCloseable {
                     if (image != null) {
                         long seed = MultimodalProtocol.featureSeed(image.featureIdentity());
                         entry.setHashHit(true).setEntryGeneration(instance+":"+key).addSplitSize(image.rows());
-                        if (input.getAcceptMockFeatureSeeds()) entry.setMockFeatureSeed(seed);
-                        else entry.setFeatureHashes(MultimodalProtocol.expandFeatureHashes(seed, image.rows()));
+                        entry.setFeatureHashes(MultimodalProtocol.expandFeatureHashes(seed, image.rows()));
                     }
                     result.addEntries(entry);
                 }
@@ -160,6 +138,46 @@ public final class VitNode implements AutoCloseable {
         String metrics() { return metrics.scrape(scheduler,cache); }
 
         void checkHealthy() { scheduler.checkHealthy(); }
+
+        private io.grpc.BindableService mockVitService() {
+            return new MockVitServiceGrpc.MockVitServiceImplBase() {
+                @Override public void prepareImages(MultimodalInputsPB input, StreamObserver<ImageSeeds> response) {
+                    var context = Context.current();
+                    reply(response, () -> {
+                        var seeds = ImageSeeds.newBuilder();
+                        for (var image : compute(input, context)) {
+                            seeds.addSplitSize(image.rows()).addSeeds(MultimodalProtocol.featureSeed(image.featureIdentity()));
+                        }
+                        return seeds.build();
+                    });
+                }
+
+                @Override public void getHashSeeds(MultimodalHashRequestPB input, StreamObserver<ImageHashSeeds> response) {
+                    var context = Context.current();
+                    reply(response, () -> {
+                        var computed = prepareHashInputs(input, context);
+                        var seeds = ImageHashSeeds.newBuilder();
+                        for (String key : input.getKeysList()) {
+                            var image = computed.get(key);
+                            if (image == null) image = cache.hash(key);
+                            if (image != null) {
+                                seeds.addEntries(ImageHashSeed.newBuilder().setKey(key).setRows(image.rows())
+                                    .setSeed(MultimodalProtocol.featureSeed(image.featureIdentity())));
+                            }
+                        }
+                        return seeds.build();
+                    });
+                }
+            };
+        }
+
+        private <T> void reply(StreamObserver<T> response, Callable<T> operation) {
+            if(closed) { response.onError(Status.UNAVAILABLE.withDescription("V stopped").asRuntimeException()); return; }
+            try { replies.execute(()-> {
+                try { response.onNext(operation.call());response.onCompleted(); }
+                catch(Exception error) { response.onError(error instanceof StatusRuntimeException?error:Status.INTERNAL.withDescription(error.getMessage()).withCause(error).asRuntimeException()); }
+            }); } catch(RejectedExecutionException error) { response.onError(Status.UNAVAILABLE.asRuntimeException()); }
+        }
 
         private List<VitGeometry.Image> compute(MultimodalInputsPB input, Context context) throws Exception {
             long started = System.nanoTime();
@@ -205,15 +223,35 @@ public final class VitNode implements AutoCloseable {
             return preparation.submit(input);
         }
 
-        private <T> void reply(StreamObserver<T> response, Callable<T> operation) {
-            if(closed) { response.onError(Status.UNAVAILABLE.withDescription("V stopped").asRuntimeException()); return; }
-            try { replies.execute(()-> {
-                try { response.onNext(operation.call());response.onCompleted(); }
-                catch(Exception error) { response.onError(error instanceof StatusRuntimeException?error:Status.INTERNAL.withDescription(error.getMessage()).withCause(error).asRuntimeException()); }
-            }); } catch(RejectedExecutionException error) { response.onError(Status.UNAVAILABLE.asRuntimeException()); }
+        private Map<String, VitGeometry.Image> prepareHashInputs(MultimodalHashRequestPB input, Context context) throws Exception {
+            if(input.getKeysList().stream().anyMatch(String::isBlank)) throw MultimodalProtocol.invalid("Empty hash query key");
+            Map<String,VitGeometry.Image> computed=new HashMap<>();
+            if(input.getTimeoutMs()<0) throw MultimodalProtocol.invalid("Invalid hash request timeout");
+            if(input.hasInputs()) {
+                var media=input.getInputs();
+                VitGeometry.validate(media,config.skipDownload());
+                var requested=new LinkedHashSet<>(input.getKeysList());
+                var byKey=new LinkedHashMap<String,MultimodalInputPB>();
+                for(var image:media.getMultimodalInputsList()) {
+                    String key=MultimodalProtocol.key(image);
+                    if(!requested.contains(key)) throw MultimodalProtocol.invalid("Hash submission inputs differ from requested keys");
+                    byKey.put(key,image);
+                }
+                var missing=media.toBuilder().clearMultimodalInputs();
+                for(var key:requested) {
+                    var hit=cache.hash(key);
+                    if(hit!=null) computed.put(key,hit);
+                    else if(byKey.containsKey(key)) missing.addMultimodalInputs(byKey.get(key));
+                    else throw MultimodalProtocol.invalid("Missing image input for hash acquisition");
+                }
+                if(input.getTimeoutMs()>0 && (media.getTimeoutMs()<=0 || input.getTimeoutMs()<media.getTimeoutMs()))
+                    missing.setTimeoutMs(input.getTimeoutMs());
+                if(missing.getMultimodalInputsCount()>0) for(var image:compute(missing.build(),context)) computed.put(image.key(),image);
+            }
+            return computed;
         }
 
-        private MultimodalOutputPB output(List<VitGeometry.Image> images, boolean compact) throws Exception {
+        private MultimodalOutputPB output(List<VitGeometry.Image> images) throws Exception {
             int rows = Math.toIntExact(images.stream().mapToLong(VitGeometry.Image::rows).sum());
             var output = MultimodalOutputPB.newBuilder().setMultimodalEmbedding(
                 TensorPB.newBuilder().setDataType(TensorPB.DataType.BF16).addShape(rows).addShape(config.hidden()));
@@ -221,10 +259,9 @@ public final class VitNode implements AutoCloseable {
             for (var image : images) {
                 output.addSplitSize(image.rows());
                 long seed = MultimodalProtocol.featureSeed(image.featureIdentity());
-                if (compact) output.addMockFeatureSeeds(seed);
-                else MultimodalProtocol.expandFeatureHashes(seed, image.rows()).writeTo(hashes);
+                MultimodalProtocol.expandFeatureHashes(seed, image.rows()).writeTo(hashes);
             }
-            if (!compact) output.setMultimodalFeatureHash(TensorPB.newBuilder()
+            output.setMultimodalFeatureHash(TensorPB.newBuilder()
                 .setDataType(TensorPB.DataType.INT32).addShape(rows).setInt32Data(ByteString.copyFrom(hashes.toByteArray())));
             return output.build();
         }

@@ -2,7 +2,7 @@ package org.flexlb.mock.protocol;
 
 import java.util.*;
 import java.util.function.IntUnaryOperator;
-import org.flexlb.engine.grpc.EngineRpcService.MockDecodePromptPB;
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.MockDecodePromptPB;
 
 /**
  * Stores the prompt length and keys for complete cache blocks. Hashes advance at physical block

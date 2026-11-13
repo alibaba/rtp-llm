@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package flexlb.mock.engine;
+option java_package = "org.flexlb.mock.protocol.grpc";
+option java_outer_classname = "MockEngineProtocol";
+
+import "engine_rpc_service.proto";
+
+service MockDecodeService {
+  rpc GetDecodeLayout(.EmptyPB) returns (DecodeLayout);
+  rpc RemoteGenerate(stream DecodeFrame) returns (stream.GenerateOutputsPB);
+}
+
+message DecodeLayout {
+  int32 block_size = 1;
+  fixed64 cache_key_seed = 2;
+}
+
+message DecodeFrame {
+  .RemoteStage stage = 1;
+  int64 request_id = 2;
+  string client_id = 3;
+  .GenerateInputPB input = 4;
+  int32 first_generate_token_id = 5;
+  MockDecodePromptPB prompt = 6;
+  optional int64 computed_kv_end = 7;
+}
+
+message MockDecodePromptPB {
+  int32 input_length = 1;
+  int32 block_size = 2;
+  repeated fixed64 block_keys = 3;
+}
+
+service MockVitService {
+  rpc PrepareImages(.MultimodalInputsPB) returns (ImageSeeds);
+  rpc GetHashSeeds(.MultimodalHashRequestPB) returns (ImageHashSeeds);
+}
+
+message ImageSeeds {
+  repeated int32 split_size = 1;
+  repeated fixed64 seeds = 2;
+}
+
+message ImageHashSeeds {
+  repeated ImageHashSeed entries = 1;
+}
+
+message ImageHashSeed {
+  string key = 1;
+  int32 rows = 2;
+  fixed64 seed = 3;
+}

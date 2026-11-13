@@ -1,5 +1,7 @@
 package org.flexlb.mock.engine.service;
 
+import org.flexlb.mock.protocol.grpc.MockDecodeServiceGrpc;
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.DecodeFrame;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -41,7 +43,9 @@ class AdmissionTest {
                  }, history, cache, compute, role, "test");
                  var service = new RtpRpcService(new RtpRpcService.Config("test", role, 2, 4096, 0, compute, -200, 0L, 1),
                      cache, lock, history, engine, true)) {
-                var server = io.grpc.netty.NettyServerBuilder.forPort(0).addService(service).build().start();
+                var builder = io.grpc.netty.NettyServerBuilder.forPort(0).addService(service);
+                if (role == Role.decode) builder.addService(service.mockDecodeService());
+                var server = builder.build().start();
                 var channel = ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
                 try {
                     var input = GenerateInputPB.newBuilder().setRequestId(1).addAllTokenIds(List.of(1, 2, 3))
@@ -52,7 +56,7 @@ class AdmissionTest {
                             .withDeadlineAfter(2, TimeUnit.SECONDS).generateStreamCall(input).hasNext());
                     } else {
                         var ended = new CompletableFuture<Throwable>();
-                        var stream = RpcServiceGrpc.newStub(channel).withDeadlineAfter(2, TimeUnit.SECONDS)
+                        var stream = MockDecodeServiceGrpc.newStub(channel).withDeadlineAfter(2, TimeUnit.SECONDS)
                             .remoteGenerate(new StreamObserver<GenerateOutputsPB>() {
                                 public void onNext(GenerateOutputsPB output) { ended.completeExceptionally(new AssertionError("Unexpected admission")); }
                                 public void onError(Throwable failure) { ended.complete(failure); }

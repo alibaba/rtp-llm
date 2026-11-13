@@ -349,7 +349,7 @@ public final class BackendRpcClient implements AutoCloseable {
                             if (terminal) return;
                             for (int i = 0; i < expectedImageTokens.size(); i++) {
                                 int expected = expectedImageTokens.get(i);
-                                int actual = prepared.spans().get(i).getRowHashesCount();
+                                int actual = prepared.spans().get(i).rowHashes().size();
                                 if (expected > 0 && expected != actual && visionMismatches.incrementAndGet() <= 8) {
                                     LOG.log(System.Logger.Level.WARNING,
                                         "ViT replay length differs for request {0}, image {1}: captured {2}, actual {3}",

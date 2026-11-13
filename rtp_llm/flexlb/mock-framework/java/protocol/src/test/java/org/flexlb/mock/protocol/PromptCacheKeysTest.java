@@ -13,7 +13,7 @@ class PromptCacheKeysTest {
             var tokens = Collections.nCopies(length, 19);
             var media = List.of(new PromptCacheKeys.Span(0, Collections.nCopies(length, 23)));
             var original = new PromptCacheKeys(8, tokens, media, 41);
-            var wire = org.flexlb.engine.grpc.EngineRpcService.MockDecodePromptPB.parseFrom(original.toDecodePrompt().toByteArray());
+            var wire = org.flexlb.mock.protocol.grpc.MockEngineProtocol.MockDecodePromptPB.parseFrom(original.toDecodePrompt().toByteArray());
             var decoded = PromptCacheKeys.fromDecodePrompt(wire, 8);
             assertEquals(length, decoded.inputLength());
             assertEquals(original.keys(), decoded.keys());

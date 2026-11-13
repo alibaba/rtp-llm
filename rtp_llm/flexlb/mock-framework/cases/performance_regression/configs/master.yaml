@@ -55,36 +55,17 @@ FLEXLB_CONFIG: |-
     },
     "workerRegistry": {
       "health": {
-        "statusPollIntervalMs": 50,
-        "statusRpcTimeoutMs": 5000
+        "statusPollIntervalMs": 50
       },
       "cacheStatus": {
-        "targetDiffSize": 30,
-        "minRefreshIntervalMs": 400,
-        "maxRefreshIntervalMs": 3000,
-        "fullSnapshotDebugMode": false
-      }
-    },
-    "observability": {
-      "cacheHit": {
-        "recentKeyWindow": {
-          "writeEnabled": true,
-          "durationMs": 1800000,
-          "maxKeyOccurrences": 10000000
-        },
-        "metricsEnabled": true,
-        "requestTraceLogEnabled": false
+        "minRefreshIntervalMs": 400
       }
     },
     "grpcServer": {
       "executorCoreSize": 64,
       "executorMaxSize": 64,
-      "executorQueueSize": 1000,
       "receiveBudgetBytes": 17179869184,
       "maxReceivingControlRequests": 8
-    },
-    "cacheMatching": {
-      "type": "LOCAL_SYNC"
     },
     "engineGrpc": {
       "kvCacheMaxInboundMessageBytes": 268435456

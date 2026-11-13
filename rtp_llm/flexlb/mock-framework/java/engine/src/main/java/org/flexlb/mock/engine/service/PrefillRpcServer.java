@@ -6,7 +6,9 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import org.flexlb.engine.grpc.EngineRpcService.*;
-import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.DecodeFrame;
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.DecodeLayout;
+import org.flexlb.mock.protocol.grpc.MockDecodeServiceGrpc;
 import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler.RtpControl;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.*;
@@ -563,14 +565,14 @@ final class PrefillRpcServer implements AutoCloseable {
                 var inbox = new Inbox(error -> {
                     synchronized (this) { if (!prefill.result.isDone()) finish(error); }
                 });
-                var stub = RpcServiceGrpc.newStub(peer.channel);
+                var stub = MockDecodeServiceGrpc.newStub(peer.channel);
                 if (deadline != Long.MAX_VALUE) stub = stub.withDeadlineAfter(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
                 var stream = stub.remoteGenerate(inbox);
                 var allocation = frame(RemoteStage.ALLOCATE).toBuilder();
                 var allocationInput = input.toBuilder().clearGroupId().clearGroupSize().clearTokenIds();
-                var sequence = MultimodalProtocol.computePromptKeys(media, Math.toIntExact(layout.getBlockSize()), layout.getMockDecodeCacheSeed(), 1);
-                allocation.setMockDecodePrompt(sequence.toDecodePrompt());
-                if (layout.getBlockSize() == config.physicalBlockSize() && layout.getMockDecodeCacheSeed() == config.cacheKeySeed())
+                var sequence = MultimodalProtocol.computePromptKeys(media, layout.getBlockSize(), layout.getCacheKeySeed(), 1);
+                allocation.setPrompt(sequence.toDecodePrompt());
+                if (layout.getBlockSize() == config.physicalBlockSize() && layout.getCacheKeySeed() == config.cacheKeySeed())
                     prefill.prefillCacheKeys = sequence.toPrefillKeys(config.cpSize());
                 allocationInput.getGenerateConfigBuilder().clearGroupTimeout();
                 if (deadline != Long.MAX_VALUE) allocationInput.getGenerateConfigBuilder().setTimeoutMs((int) Math.min(Integer.MAX_VALUE,
@@ -646,9 +648,9 @@ final class PrefillRpcServer implements AutoCloseable {
                 throw Status.DEADLINE_EXCEEDED.withDescription("Prefill request expired before downstream preparation").asRuntimeException();
         }
 
-        GenerateRequestPB frame(RemoteStage stage) {
-            var frame = GenerateRequestPB.newBuilder().setStage(stage).setRequestId(input.getRequestId()).setClientId(config.id());
-            if (stage == RemoteStage.GENERATE) frame.setPrefillKvHandoff(PrefillKvHandoffPB.newBuilder().setComputedKvEnd(input.getTokenIdsCount()));
+        DecodeFrame frame(RemoteStage stage) {
+            var frame = DecodeFrame.newBuilder().setStage(stage).setRequestId(input.getRequestId()).setClientId(config.id());
+            if (stage == RemoteStage.GENERATE) frame.setComputedKvEnd(input.getTokenIdsCount());
             return frame.build();
         }
 
@@ -658,17 +660,17 @@ final class PrefillRpcServer implements AutoCloseable {
     /**
      * Collects Decode responses for the Prefill call that drives the transfer.
      */
-    private static final class Inbox implements ClientResponseObserver<GenerateRequestPB, GenerateOutputsPB> {
+    private static final class Inbox implements ClientResponseObserver<DecodeFrame, GenerateOutputsPB> {
         final BlockingQueue<Object> values = new LinkedBlockingQueue<>(2);
 
         volatile Throwable failure;
 
         final java.util.function.Consumer<Throwable> failed;
-        final AtomicReference<ClientCallStreamObserver<GenerateRequestPB>> stream = new AtomicReference<>();
+        final AtomicReference<ClientCallStreamObserver<DecodeFrame>> stream = new AtomicReference<>();
 
         Inbox(java.util.function.Consumer<Throwable> failed) { this.failed = failed; }
 
-        @Override public void beforeStart(ClientCallStreamObserver<GenerateRequestPB> request) { stream.set(request); request.disableAutoRequestWithInitial(1); }
+        @Override public void beforeStart(ClientCallStreamObserver<DecodeFrame> request) { stream.set(request); request.disableAutoRequestWithInitial(1); }
 
         @Override public void onNext(GenerateOutputsPB value) { values.add(value); }
 
@@ -712,11 +714,11 @@ final class PrefillRpcServer implements AutoCloseable {
     private static final class Peer {
         final ManagedChannel channel;
         private final ReentrantLock layoutLock = new ReentrantLock();
-        private volatile CacheStatusPB layout;
+        private volatile DecodeLayout layout;
 
         Peer(ManagedChannel channel) { this.channel = channel; }
 
-        CacheStatusPB decodeLayout(long deadline) {
+        DecodeLayout decodeLayout(long deadline) {
             var known = layout;
             if (known != null) return known;
             layoutLock.lock();
@@ -725,9 +727,9 @@ final class PrefillRpcServer implements AutoCloseable {
                 long budget = Math.min(TimeUnit.SECONDS.toNanos(5), deadline == Long.MAX_VALUE
                     ? Long.MAX_VALUE : deadline - System.nanoTime());
                 if (budget <= 0) throw Status.DEADLINE_EXCEEDED.withDescription("Decode layout query expired").asRuntimeException();
-                var status = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(budget, TimeUnit.NANOSECONDS)
-                    .getCacheStatus(CacheVersionPB.getDefaultInstance());
-                if (!status.hasMockDecodeCacheSeed() || status.getBlockSize() < 1)
+                var status = MockDecodeServiceGrpc.newBlockingStub(channel).withDeadlineAfter(budget, TimeUnit.NANOSECONDS)
+                    .getDecodeLayout(EmptyPB.getDefaultInstance());
+                if (status.getBlockSize() < 1)
                     throw Status.FAILED_PRECONDITION.withDescription("Decode peer requires the compact Mock protocol").asRuntimeException();
                 layout = status;
                 return layout;

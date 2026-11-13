@@ -199,7 +199,8 @@ message MultimodalInputsPB {
     int64 timeout_ms = 4;
     reserved 5;
     reserved "v41_inputs";
-    bool accept_mock_feature_seeds = 6;
+    reserved 6;
+    reserved "accept_mock_feature_seeds";
 }
 
 enum TensorDataTypePB {
@@ -253,8 +254,8 @@ message MultimodalOutputPB {
     repeated MMRdmaSlotPB output_rdma_slots = 5;
     // Compact CPU row hashes stay inline for either transport.
     TensorPB multimodal_feature_hash = 7;
-    // When requested by a Mock caller, one seed per split_size replaces the row hashes.
-    repeated fixed64 mock_feature_seeds = 8;
+    reserved 8;
+    reserved "mock_feature_seeds";
 }
 
 message ReleaseLeasePB {
@@ -462,15 +463,8 @@ message GenerateRequestPB {
     TensorPB propose_hidden = 11;
     repeated MultimodalCacheSpanPB multimodal_cache_spans = 12;
     PrefillKvHandoffPB prefill_kv_handoff = 13;
-    // Compact Mock ALLOCATE omits token_ids and spans. Decode replies omit output_ids.
-    MockDecodePromptPB mock_decode_prompt = 14;
-}
-
-// Mock Prefill has already computed the cache identity at Decode block boundaries.
-message MockDecodePromptPB {
-    int32 input_length = 1;
-    int32 block_size = 2;
-    repeated fixed64 block_keys = 3;
+    reserved 14;
+    reserved "mock_decode_prompt";
 }
 
 // In the TP case, the decode master broadcasts to decode workers.
@@ -572,10 +566,8 @@ message CacheStatusPB {
     MultimodalCacheStatusPB multimodal_cache = 6;
     // Prefer this list when nonempty; otherwise fall back to legacy cache_keys.
     repeated sfixed64 cache_key_list = 7 [packed = true];
-    // Presence advertises compact ALLOCATE at this worker's block size.
-    oneof mock_decode_layout {
-        fixed64 mock_decode_cache_seed = 8;
-    }
+    reserved 8;
+    reserved "mock_decode_cache_seed";
 }
 
 message MultimodalCacheStatusPB {
@@ -1145,7 +1137,8 @@ message MultimodalHashRequestPB {
     repeated string keys = 1;
     MultimodalInputsPB inputs = 2;
     int64 timeout_ms = 3;
-    bool accept_mock_feature_seeds = 4;
+    reserved 4;
+    reserved "accept_mock_feature_seeds";
 }
 
 message MultimodalHashEntryPB {
@@ -1158,9 +1151,8 @@ message MultimodalHashEntryPB {
     repeated uint32 split_size = 7;
     // Flattened little-endian signed int32 hashes, one per output token.
     bytes feature_hashes = 8;
-    oneof mock_feature_encoding {
-        fixed64 mock_feature_seed = 9;
-    }
+    reserved 9;
+    reserved "mock_feature_seed";
 }
 
 message MultimodalHashResponsePB {

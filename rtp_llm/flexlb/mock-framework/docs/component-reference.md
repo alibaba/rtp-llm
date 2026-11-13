@@ -118,7 +118,7 @@ mock.compute.eos.seed: 20260922
 
 ## DSV4.1 Engine 与 KVCM 接线
 
-Java Master 与 Engine RPC 的源码对照基线为 `ba26ddf1dd86c02bcee3cc6eee966ca59e4ae7a6`（`feature/dsv41-dev-main-202161013`）。直接调用 P 的多 token 请求需开启 `can_use_pd_separation`，并提供一个有效的 Decode 地址。`prefill_kv_handoff.computed_kv_end` 表示已计算 prompt 的排他边界，不含首个采样 token。
+Java Master 与 Engine RPC 的源码对照基线为 `ba26ddf1dd86c02bcee3cc6eee966ca59e4ae7a6`（`feature/dsv41-dev-main-202161013`）。直接调用 P 的多 token 请求需开启 `can_use_pd_separation`，并提供一个有效的 Decode 地址。Mock Prefill 通过 `MockDecodeService.GetDecodeLayout` 读取 Decode 的物理块大小和缓存键 seed，再通过 `MockDecodeService.RemoteGenerate` 发送紧凑请求。`DecodeFrame.computed_kv_end` 表示已计算 prompt 的排他边界，不含首个采样 token。Mock Client 和 Prefill 通过 `MockVitService` 获取特征 seed。两项服务定义在 `java/protocol/src/main/proto/mock_engine.proto`。
 
 KVCM 接入使用以下配置。
 

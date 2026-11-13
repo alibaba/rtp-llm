@@ -72,6 +72,7 @@ public final class LLMMockEngine implements AutoCloseable {
         var node = new LLMMockEngine(config, schedulers);
         try {
             var builder = NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service);
+            if (config.role() == org.flexlb.mock.protocol.Role.decode) builder.addService(node.service.mockDecodeService());
             node.rpc = builder.build().start();
             node.metrics = org.flexlb.mock.metrics.MetricsOutput.start(node::collectMetrics);
             node.api = new ControlServer(node.address.listener(controlPort)).health(node::checkHealthy);
@@ -104,7 +105,7 @@ public final class LLMMockEngine implements AutoCloseable {
         if (prefill) {
             supported.addAll(List.of("GenerateStreamCall", "FetchResponse", "Cancel"));
             if (config.groupScheduling()) supported.addAll(List.of("EnqueueBatch", "EnqueueGroup"));
-        } else supported.add("RemoteGenerate");
+        } else supported.addAll(List.of("GetDecodeLayout", "RemoteGenerate"));
         result.put("supported_rpc", List.copyOf(supported));
         var kvcm = cacheManager.kvcmStatus();
         if (!kvcm.isEmpty()) result.put("kvcm", kvcm);

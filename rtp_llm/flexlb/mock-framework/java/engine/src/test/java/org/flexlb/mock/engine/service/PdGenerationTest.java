@@ -1,5 +1,11 @@
 package org.flexlb.mock.engine.service;
 
+import org.flexlb.mock.protocol.grpc.MockDecodeServiceGrpc;
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.DecodeFrame;
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.DecodeLayout;
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.ImageSeeds;
+import org.flexlb.mock.protocol.grpc.MockVitServiceGrpc;
+import org.flexlb.mock.protocol.PromptCacheKeys.Span;
 import com.fasterxml.jackson.databind.*;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.grpc.*;
@@ -52,12 +58,11 @@ class PdGenerationTest {
         long featureSeed = 777;
         var calls = new ConcurrentHashMap<Long, Integer>();
         var vision = io.grpc.netty.NettyServerBuilder.forPort(0)
-            .addService(new org.flexlb.engine.grpc.MultimodalRpcServiceGrpc.MultimodalRpcServiceImplBase() {
-                @Override public void remoteMultimodalEmbedding(MultimodalInputsPB input, StreamObserver<MultimodalOutputPB> response) {
+            .addService(new MockVitServiceGrpc.MockVitServiceImplBase() {
+                @Override public void prepareImages(MultimodalInputsPB input, StreamObserver<ImageSeeds> response) {
                     calls.merge(input.getRequestId(), 1, Integer::sum);
-                    response.onNext(MultimodalOutputPB.newBuilder().addSplitSize(1)
-                        .setMultimodalEmbedding(TensorPB.newBuilder().setDataType(TensorPB.DataType.BF16).addShape(1).addShape(4))
-                        .addMockFeatureSeeds(featureSeed)
+                    response.onNext(ImageSeeds.newBuilder().addSplitSize(1)
+                        .addSeeds(featureSeed)
                         .build());
                     response.onCompleted();
                 }
@@ -89,7 +94,7 @@ class PdGenerationTest {
             int rowHash = org.flexlb.mock.protocol.MultimodalProtocol.expandFeatureHashes(featureSeed, 1)
                 .asReadOnlyByteBuffer().order(ByteOrder.LITTLE_ENDIAN).getInt();
             var keys = org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(new org.flexlb.mock.protocol.MultimodalProtocol.Prepared(prepared,
-                List.of(MultimodalCacheSpanPB.newBuilder().setOffset(1).addRowHashes(rowHash).build())), 2, 0, 1).keys();
+                List.of(new Span(1, List.of(rowHash)))), 2, 0, 1).keys();
             var cached = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).build());
             assertTrue(cached.getCacheKeyListList().containsAll(keys));
             assertEquals(6, calls.size());
@@ -104,10 +109,10 @@ class PdGenerationTest {
     }
 
     @Test void preparationIsVisibleWithoutInflatingSchedulerLoadAndFailureHasOneTerminal() throws Exception {
-        var pending = new LinkedBlockingQueue<StreamObserver<MultimodalOutputPB>>();
+        var pending = new LinkedBlockingQueue<StreamObserver<ImageSeeds>>();
         var vision = io.grpc.netty.NettyServerBuilder.forPort(0)
-            .addService(new org.flexlb.engine.grpc.MultimodalRpcServiceGrpc.MultimodalRpcServiceImplBase() {
-                @Override public void remoteMultimodalEmbedding(MultimodalInputsPB input, StreamObserver<MultimodalOutputPB> response) {
+            .addService(new MockVitServiceGrpc.MockVitServiceImplBase() {
+                @Override public void prepareImages(MultimodalInputsPB input, StreamObserver<ImageSeeds> response) {
                     pending.add(response);
                 }
             }).build().start();
@@ -142,8 +147,8 @@ class PdGenerationTest {
     @Test void localVisionFailureAndDeadlineNeverAdmitToScheduler() throws Exception {
         var calls = new java.util.concurrent.atomic.AtomicInteger();
         var vision = io.grpc.netty.NettyServerBuilder.forPort(0)
-            .addService(new org.flexlb.engine.grpc.MultimodalRpcServiceGrpc.MultimodalRpcServiceImplBase() {
-                @Override public void remoteMultimodalEmbedding(MultimodalInputsPB input, StreamObserver<MultimodalOutputPB> response) {
+            .addService(new MockVitServiceGrpc.MockVitServiceImplBase() {
+                @Override public void prepareImages(MultimodalInputsPB input, StreamObserver<ImageSeeds> response) {
                     calls.incrementAndGet();
                     if (input.getRequestId() == 1) response.onError(Status.UNAVAILABLE.withDescription("V unavailable").asRuntimeException());
                     // The second call stays pending until the original request budget expires.
@@ -169,19 +174,24 @@ class PdGenerationTest {
 
     @Test void cancelledVisionWaitCannotAllocateDecodeEvenWhenVisionCompletesLate() throws Exception {
         var entered = new CountDownLatch(1); var cancelled = new CountDownLatch(1);
-        var observer = new java.util.concurrent.atomic.AtomicReference<StreamObserver<MultimodalOutputPB>>();
+        var observer = new java.util.concurrent.atomic.AtomicReference<StreamObserver<ImageSeeds>>();
         var allocations = new java.util.concurrent.atomic.AtomicInteger();
         var vision = io.grpc.netty.NettyServerBuilder.forPort(0)
-            .addService(new org.flexlb.engine.grpc.MultimodalRpcServiceGrpc.MultimodalRpcServiceImplBase() {
-                @Override public void remoteMultimodalEmbedding(MultimodalInputsPB input, StreamObserver<MultimodalOutputPB> response) {
-                    ((io.grpc.stub.ServerCallStreamObserver<MultimodalOutputPB>) response).setOnCancelHandler(cancelled::countDown);
+            .addService(new MockVitServiceGrpc.MockVitServiceImplBase() {
+                @Override public void prepareImages(MultimodalInputsPB input, StreamObserver<ImageSeeds> response) {
+                    ((io.grpc.stub.ServerCallStreamObserver<ImageSeeds>) response).setOnCancelHandler(cancelled::countDown);
                     observer.set(response); entered.countDown();
                 }
             }).build().start();
-        var decode = io.grpc.netty.NettyServerBuilder.forPort(0).addService(new RpcServiceGrpc.RpcServiceImplBase() {
-            @Override public StreamObserver<GenerateRequestPB> remoteGenerate(StreamObserver<GenerateOutputsPB> response) {
+        var decode = io.grpc.netty.NettyServerBuilder.forPort(0).addService(new MockDecodeServiceGrpc.MockDecodeServiceImplBase() {
+            @Override public void getDecodeLayout(EmptyPB request, StreamObserver<DecodeLayout> response) {
+                response.onNext(DecodeLayout.newBuilder().setBlockSize(2).build());
+                response.onCompleted();
+            }
+
+            @Override public StreamObserver<DecodeFrame> remoteGenerate(StreamObserver<GenerateOutputsPB> response) {
                 return new StreamObserver<>() {
-                    public void onNext(GenerateRequestPB input) { allocations.incrementAndGet(); }
+                    public void onNext(DecodeFrame input) { allocations.incrementAndGet(); }
                     public void onError(Throwable error) {}
                     public void onCompleted() { response.onCompleted(); }
                 };
@@ -193,7 +203,7 @@ class PdGenerationTest {
             try (var call = new Call(p, request.build())) { assertTrue(entered.await(2, TimeUnit.SECONDS)); }
             assertTrue(cancelled.await(2, TimeUnit.SECONDS), "P cancellation must reach its active ViT RPC");
             try {
-                observer.get().onNext(MultimodalOutputPB.getDefaultInstance()); observer.get().onCompleted();
+                observer.get().onNext(ImageSeeds.getDefaultInstance()); observer.get().onCompleted();
             } catch (StatusRuntimeException expected) { assertEquals(Status.Code.CANCELLED, expected.getStatus().getCode()); }
             assertEquals(0, allocations.get());
             assertEquals(0, p.status().getRunningTaskInfoCount());
@@ -221,7 +231,7 @@ class PdGenerationTest {
                     assertEquals(1, batch.getErrorsCount());
                     assertEquals(Status.Code.UNIMPLEMENTED.value(), batch.getErrors(0).getErrorInfo().getErrorCode());
                     var rejected = new LinkedBlockingQueue<Throwable>();
-                    var remote = RpcServiceGrpc.newStub(d.channel).withDeadlineAfter(2, TimeUnit.SECONDS).remoteGenerate(new StreamObserver<GenerateOutputsPB>() {
+                    var remote = MockDecodeServiceGrpc.newStub(d.channel).withDeadlineAfter(2, TimeUnit.SECONDS).remoteGenerate(new StreamObserver<GenerateOutputsPB>() {
                         public void onNext(GenerateOutputsPB value) { fail("Unsupported input was admitted"); }
                         public void onError(Throwable error) { rejected.add(error); }
                         public void onCompleted() { fail("Unsupported input completed"); }
@@ -279,15 +289,15 @@ class PdGenerationTest {
         for (boolean cancelled : new boolean[]{false, true}) {
             var load = new CountDownLatch(1);
             var replies = new java.util.concurrent.atomic.AtomicReference<StreamObserver<GenerateOutputsPB>>();
-            var remote = io.grpc.netty.NettyServerBuilder.forPort(0).addService(new RpcServiceGrpc.RpcServiceImplBase() {
-                @Override public void getCacheStatus(CacheVersionPB request, StreamObserver<CacheStatusPB> response) {
-                    response.onNext(CacheStatusPB.newBuilder().setBlockSize(2).setMockDecodeCacheSeed(0).build());
+            var remote = io.grpc.netty.NettyServerBuilder.forPort(0).addService(new MockDecodeServiceGrpc.MockDecodeServiceImplBase() {
+                @Override public void getDecodeLayout(EmptyPB request, StreamObserver<DecodeLayout> response) {
+                    response.onNext(DecodeLayout.newBuilder().setBlockSize(2).setCacheKeySeed(0).build());
                     response.onCompleted();
                 }
-                @Override public StreamObserver<GenerateRequestPB> remoteGenerate(StreamObserver<GenerateOutputsPB> response) {
+                @Override public StreamObserver<DecodeFrame> remoteGenerate(StreamObserver<GenerateOutputsPB> response) {
                     replies.set(response);
                     return new StreamObserver<>() {
-                        public void onNext(GenerateRequestPB frame) {
+                        public void onNext(DecodeFrame frame) {
                             if (frame.getStage() == RemoteStage.ALLOCATE) response.onNext(GenerateOutputsPB.getDefaultInstance());
                             else if (frame.getStage() == RemoteStage.LOAD) load.countDown();
                             else if (frame.getStage() == RemoteStage.PREFILL_COMPLETE) response.onCompleted();
@@ -749,9 +759,9 @@ class PdGenerationTest {
     @Test void decodeComputeAndCapacityDoNotWaitForRemoteOutputConsumption() throws Exception {
         try (var d = node("decode", 2048, 0); var context = Context.current().withCancellation()) {
             var replies = new LinkedBlockingQueue<Object>();
-            var stream = context.call(() -> RpcServiceGrpc.newStub(d.channel).remoteGenerate(
-                new io.grpc.stub.ClientResponseObserver<GenerateRequestPB, GenerateOutputsPB>() {
-                    public void beforeStart(io.grpc.stub.ClientCallStreamObserver<GenerateRequestPB> request) {
+            var stream = context.call(() -> MockDecodeServiceGrpc.newStub(d.channel).remoteGenerate(
+                new io.grpc.stub.ClientResponseObserver<DecodeFrame, GenerateOutputsPB>() {
+                    public void beforeStart(io.grpc.stub.ClientCallStreamObserver<DecodeFrame> request) {
                         request.disableAutoRequestWithInitial(2);
                     }
                     public void onNext(GenerateOutputsPB output) { replies.add(output); }
@@ -761,9 +771,9 @@ class PdGenerationTest {
             var request = input(d, 2500, 3, 3000, 5000, false);
             stream.onNext(DecodeAdmissionTest.allocate("p", request));
             assertInstanceOf(GenerateOutputsPB.class, replies.poll(3, TimeUnit.SECONDS));
-            stream.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.LOAD).setClientId("p").setRequestId(2500).build());
+            stream.onNext(DecodeFrame.newBuilder().setStage(RemoteStage.LOAD).setClientId("p").setRequestId(2500).build());
             assertInstanceOf(GenerateOutputsPB.class, replies.poll(3, TimeUnit.SECONDS));
-            stream.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.GENERATE)
+            stream.onNext(DecodeFrame.newBuilder().setStage(RemoteStage.GENERATE)
                 .setClientId("p").setRequestId(2500).setFirstGenerateTokenId(3).build());
             stream.onCompleted();
             await(() -> d.status().getFinishedTaskListCount() == 1 && d.status().getAvailableKvCache() == 4096);

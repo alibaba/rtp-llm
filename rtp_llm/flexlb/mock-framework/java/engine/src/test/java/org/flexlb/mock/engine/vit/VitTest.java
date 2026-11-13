@@ -1,5 +1,7 @@
 package org.flexlb.mock.engine.vit;
 
+import org.flexlb.mock.protocol.grpc.MockVitServiceGrpc;
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.ImageSeeds;
 import org.flexlb.mock.protocol.MultimodalProtocol;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -146,17 +148,16 @@ class VitTest {
                 var rpc = MultimodalRpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS);
                 var media = input("compact");
                 var nativeOutput = rpc.remoteMultimodalEmbedding(media);
-                var compact = rpc.remoteMultimodalEmbedding(media.toBuilder().setAcceptMockFeatureSeeds(true).build());
+                var mockRpc = MockVitServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS);
+                var compact = mockRpc.prepareImages(media);
                 int rows = nativeOutput.getSplitSize(0);
                 assertEquals(List.of(rows), compact.getSplitSizeList());
-                assertFalse(compact.hasMultimodalFeatureHash());
-                long seed = compact.getMockFeatureSeeds(0);
+                long seed = compact.getSeeds(0);
                 assertEquals(nativeOutput.getMultimodalFeatureHash().getInt32Data(), MultimodalProtocol.expandFeatureHashes(seed, rows));
-                var routing = rpc.getMultimodalHashes(MultimodalHashRequestPB.newBuilder()
-                    .addKeys(MultimodalProtocol.key(media.getMultimodalInputs(0))).setInputs(media).setAcceptMockFeatureSeeds(true).build()).getEntries(0);
-                assertTrue(routing.hasMockFeatureSeed());
-                assertEquals(seed, routing.getMockFeatureSeed());
-                assertTrue(routing.getFeatureHashes().isEmpty());
+                var routing = mockRpc.getHashSeeds(MultimodalHashRequestPB.newBuilder()
+                    .addKeys(MultimodalProtocol.key(media.getMultimodalInputs(0))).setInputs(media).build()).getEntries(0);
+                assertEquals(seed, routing.getSeed());
+                assertEquals(rows, routing.getRows());
             } finally { channel.shutdownNow().awaitTermination(2, TimeUnit.SECONDS); }
         }
     }
@@ -254,13 +255,11 @@ class VitTest {
             .addAllMultimodalInputs(input("x").getMultimodalInputsList())
             .build();
         long seed = MultimodalProtocol.featureSeed(MultimodalProtocol.key(input("x").getMultimodalInputs(0)));
-        var output=MultimodalOutputPB.newBuilder().addSplitSize(2)
-            .setMultimodalEmbedding(TensorPB.newBuilder().setDataType(TensorPB.DataType.BF16).addShape(2).addShape(4))
-            .addMockFeatureSeeds(seed).build();
+        var output = ImageSeeds.newBuilder().addSplitSize(2).addSeeds(seed).build();
         var prepared=MultimodalProtocol.apply(nativeInput,output,MultimodalProtocol.IMAGE_TOKEN);assertEquals(10,prepared.input().getTokenIds(0));assertEquals(20,prepared.input().getTokenIds(3));
         assertNotEquals(nativeInput.getTokenIdsList(),prepared.input().getTokenIdsList());
-        assertThrows(StatusRuntimeException.class,()->MultimodalProtocol.apply(nativeInput,output.toBuilder().clearSplitSize().addSplitSize(1).build(),MultimodalProtocol.IMAGE_TOKEN));
-        assertThrows(StatusRuntimeException.class,()->MultimodalProtocol.apply(nativeInput,output.toBuilder().clearMockFeatureSeeds().build(),MultimodalProtocol.IMAGE_TOKEN));
+        assertThrows(StatusRuntimeException.class,()->MultimodalProtocol.apply(nativeInput,output.toBuilder().clearSplitSize().addSplitSize(0).build(),MultimodalProtocol.IMAGE_TOKEN));
+        assertThrows(StatusRuntimeException.class,()->MultimodalProtocol.apply(nativeInput,output.toBuilder().clearSeeds().build(),MultimodalProtocol.IMAGE_TOKEN));
         assertThrows(StatusRuntimeException.class,()->VitGeometry.validate(MultimodalInputsPB.getDefaultInstance(),true));
     }
 

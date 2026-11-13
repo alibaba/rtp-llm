@@ -1,5 +1,7 @@
 package org.flexlb.mock.engine.scheduler;
 
+import org.flexlb.mock.protocol.grpc.MockDecodeServiceGrpc;
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.DecodeFrame;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.*;
 import java.nio.file.Path;
@@ -34,15 +36,17 @@ public final class NativeProbe {
                 var replies = new LinkedBlockingQueue<Object>();
                 var context = Context.current().withCancellation();
                 try {
-                    var stream = context.call(() -> RpcServiceGrpc.newStub(channel).remoteGenerate(new StreamObserver<>() {
+                    var decode = MockDecodeServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS);
+                    var layout = decode.getDecodeLayout(EmptyPB.getDefaultInstance());
+                    var stream = context.call(() -> MockDecodeServiceGrpc.newStub(channel).remoteGenerate(new StreamObserver<>() {
                         @Override public void onNext(GenerateOutputsPB output) { replies.add(output); }
                         @Override public void onError(Throwable error) { replies.add(error); }
                         @Override public void onCompleted() { replies.add("completed"); }
                     }));
-                    var prompt = new org.flexlb.mock.protocol.PromptCacheKeys(Math.toIntExact(cache.getBlockSize()),
-                        List.of(1, 2, 3, 4), List.of(), cache.getMockDecodeCacheSeed()).toDecodePrompt();
-                    stream.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE).setRequestId(43).setClientId("native-probe")
-                        .setMockDecodePrompt(prompt).setInput(GenerateInputPB.newBuilder().setRequestId(43)
+                    var prompt = new org.flexlb.mock.protocol.PromptCacheKeys(layout.getBlockSize(),
+                        List.of(1, 2, 3, 4), List.of(), layout.getCacheKeySeed()).toDecodePrompt();
+                    stream.onNext(DecodeFrame.newBuilder().setStage(RemoteStage.ALLOCATE).setRequestId(43).setClientId("native-probe")
+                        .setPrompt(prompt).setInput(GenerateInputPB.newBuilder().setRequestId(43)
                             .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(4))).build());
                     if (!(replies.poll(2, TimeUnit.SECONDS) instanceof GenerateOutputsPB acknowledgement) || acknowledgement.hasFlattenOutput())
                         throw new IllegalStateException("Missing decode ALLOCATE acknowledgement");

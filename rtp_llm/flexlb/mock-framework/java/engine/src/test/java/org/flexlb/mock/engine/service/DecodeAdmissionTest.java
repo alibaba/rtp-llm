@@ -1,5 +1,9 @@
 package org.flexlb.mock.engine.service;
 
+import org.flexlb.mock.protocol.grpc.MockDecodeServiceGrpc;
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.DecodeFrame;
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.MockDecodePromptPB;
+import org.flexlb.mock.protocol.PromptCacheKeys.Span;
 import com.fasterxml.jackson.databind.*;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.grpc.*;
@@ -87,7 +91,7 @@ class DecodeAdmissionTest {
         for (boolean disabled : List.of(false, true)) {
             try (var node = node(disabled); var first = new Call(node, 0); var second = new Call(node, 0)) {
                 var request = input("p", 1, 5, 0);
-                var prompt = request.getMockDecodePrompt();
+                var prompt = request.getPrompt();
                 try (var lease = assertInstanceOf(Ready.class, node.node.cacheManager().prepare(6, List.of())).lease()) {
                     lease.publish(prompt.getBlockKeysList(), 5);
                 }
@@ -122,18 +126,18 @@ class DecodeAdmissionTest {
             try (var node = node(false); var call = new Call(node, 0)) {
                 var promptBuilder = promptInput(71, 3, 3000).toBuilder();
                 promptBuilder.getGenerateConfigBuilder().setMaxNewTokens(5).setIgnoreEos(true);
-                var spans = new ArrayList<MultimodalCacheSpanPB>();
+                var spans = new ArrayList<Span>();
                 if (media) {
                     promptBuilder.setTokenIds(2, -200);
-                    spans.add(MultimodalCacheSpanPB.newBuilder().setOffset(2).addRowHashes(777).build());
+                    spans.add(new Span(2, List.of(777)));
                 }
                 var prompt = promptBuilder.build();
                 var prepared = new org.flexlb.mock.protocol.MultimodalProtocol.Prepared(prompt, spans);
                 var promptCacheKeys = org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(prepared, 2, 0, 1);
                 call.request.onNext(allocate("p", prompt, promptCacheKeys.toDecodePrompt())); call.ack();
-                call.request.onNext(GenerateRequestPB.newBuilder().setRequestId(71).setStage(RemoteStage.LOAD).build());
+                call.request.onNext(DecodeFrame.newBuilder().setRequestId(71).setStage(RemoteStage.LOAD).build());
                 assertInstanceOf(GenerateOutputsPB.class, call.replies.poll(3, TimeUnit.SECONDS));
-                call.request.onNext(GenerateRequestPB.newBuilder().setRequestId(71).setClientId("p")
+                call.request.onNext(DecodeFrame.newBuilder().setRequestId(71).setClientId("p")
                     .setStage(RemoteStage.GENERATE).setFirstGenerateTokenId(7).build());
                 Object reply;
                 do {
@@ -153,7 +157,7 @@ class DecodeAdmissionTest {
         }
     }
 
-    static GenerateRequestPB allocate(String client, GenerateInputPB input) {
+    static DecodeFrame allocate(String client, GenerateInputPB input) {
         var sequence = org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(
             org.flexlb.mock.protocol.MultimodalProtocol.text(input), 2, 0, 1);
         return allocate(client, input, sequence.toDecodePrompt());
@@ -162,7 +166,7 @@ class DecodeAdmissionTest {
     @Test void loadUsesTheExistingConnectionAndNeedsNoCallbackAddress() throws Exception {
         try (var node = node(false); var call = new Call(node, 0)) {
             call.request.onNext(input("p", 1, 5, 0)); call.ack();
-            call.request.onNext(GenerateRequestPB.newBuilder().setRequestId(1).setStage(RemoteStage.LOAD).build());
+            call.request.onNext(DecodeFrame.newBuilder().setRequestId(1).setStage(RemoteStage.LOAD).build());
             var loaded = call.replies.poll(3, TimeUnit.SECONDS);
             assertInstanceOf(GenerateOutputsPB.class, loaded);
             assertEquals(0, ((GenerateOutputsPB) loaded).getErrorInfo().getErrorCodeValue());
@@ -177,11 +181,11 @@ class DecodeAdmissionTest {
         for (boolean wrongProducer : List.of(false,true)) {
             try (var node = node(false); var call = new Call(node, 0)) {
                 call.request.onNext(input("p", 1, 5, 0)); call.ack();
-                call.request.onNext(GenerateRequestPB.newBuilder().setRequestId(1).setStage(RemoteStage.LOAD).build());
+                call.request.onNext(DecodeFrame.newBuilder().setRequestId(1).setStage(RemoteStage.LOAD).build());
                 assertInstanceOf(GenerateOutputsPB.class,call.replies.poll(3,TimeUnit.SECONDS));
-                call.request.onNext(GenerateRequestPB.newBuilder().setRequestId(1).setStage(RemoteStage.GENERATE)
+                call.request.onNext(DecodeFrame.newBuilder().setRequestId(1).setStage(RemoteStage.GENERATE)
                     .setClientId(wrongProducer ? "" : "p")
-                    .setPrefillKvHandoff(PrefillKvHandoffPB.newBuilder().setComputedKvEnd(wrongProducer ? 5 : 6)).build());
+                    .setComputedKvEnd(wrongProducer ? 5 : 6).build());
                 call.error(Status.Code.INVALID_ARGUMENT);
                 await(() -> node.status().getAvailableKvCache() == 16);
             }
@@ -190,7 +194,7 @@ class DecodeAdmissionTest {
 
     @Test void invalidFirstFrameHas605AndHalfCloseReleasesAnAcceptedReservation() throws Exception {
         try (var node = node(false); var invalid = new Call(node, 0); var valid = new Call(node, 0)) {
-            invalid.request.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE)
+            invalid.request.onNext(DecodeFrame.newBuilder().setStage(RemoteStage.ALLOCATE)
                 .setClientId("p").setRequestId(1).setInput(promptInput(1, 5, 0)).build());
             assertEquals(605, engineCode(invalid.error(Status.Code.INVALID_ARGUMENT)));
             valid.request.onNext(input("p", 1, 5, 0)); valid.ack(); valid.request.onCompleted();
@@ -229,13 +233,13 @@ class DecodeAdmissionTest {
         return new HashSet<>(Arrays.stream(node.cacheManager().snapshot(-1, true).keys()).boxed().toList());
     }
 
-    private static GenerateRequestPB input(String client, long id, int length, int timeout) {
+    private static DecodeFrame input(String client, long id, int length, int timeout) {
         return allocate(client, promptInput(id, length, timeout));
     }
 
-    private static GenerateRequestPB allocate(String client, GenerateInputPB input, MockDecodePromptPB prompt) {
-        return GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE).setRequestId(input.getRequestId())
-            .setClientId(client).setInput(input.toBuilder().clearTokenIds()).setMockDecodePrompt(prompt).build();
+    private static DecodeFrame allocate(String client, GenerateInputPB input, MockDecodePromptPB prompt) {
+        return DecodeFrame.newBuilder().setStage(RemoteStage.ALLOCATE).setRequestId(input.getRequestId())
+            .setClientId(client).setInput(input.toBuilder().clearTokenIds()).setPrompt(prompt).build();
     }
 
     private static GenerateInputPB promptInput(long id, int length, int timeout) {
@@ -281,11 +285,11 @@ class DecodeAdmissionTest {
     private static final class Call implements AutoCloseable {
         final Context.CancellableContext context = Context.current().withCancellation();
         final BlockingQueue<Object> replies = new LinkedBlockingQueue<>();
-        final StreamObserver<GenerateRequestPB> request;
+        final StreamObserver<DecodeFrame> request;
 
         Call(Harness node, long rpcMs) throws Exception {
             request = context.call(() -> {
-                var stub = RpcServiceGrpc.newStub(node.channel);
+                var stub = MockDecodeServiceGrpc.newStub(node.channel);
                 if (rpcMs > 0) stub = stub.withDeadlineAfter(rpcMs, TimeUnit.MILLISECONDS);
                 return stub.remoteGenerate(new StreamObserver<>() {
                     @Override public void onNext(GenerateOutputsPB value) { replies.add(value); }
