@@ -63,8 +63,14 @@ void clearBitmaskTokenRange(int32_t* bitmask, size_t words, int64_t begin_token,
 
 GrammarLogitsProcessor::GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher,
                                                int64_t                            eos_token_id,
-                                               ErrorReporter                      error_reporter):
-    matcher_(std::move(matcher)), eos_token_id_(eos_token_id), error_reporter_(std::move(error_reporter)) {}
+                                               ErrorReporter                      error_reporter,
+                                               int                                update_timeout_ms,
+                                               kmonitor::MetricsReporterPtr       metrics_reporter,
+                                               std::string                        stream_log_tag):
+    matcher_(std::move(matcher)),
+    eos_token_id_(eos_token_id),
+    error_reporter_(std::move(error_reporter)),
+    timeout_state_(update_timeout_ms, std::move(metrics_reporter), std::move(stream_log_tag)) {}
 
 void GrammarLogitsProcessor::prepareNormalAsyncUpdate(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
     if (num_new_tokens <= 0) {
@@ -87,9 +93,15 @@ GrammarLogitsProcessor::DeviceMaskState GrammarLogitsProcessor::getDeviceMaskSta
     last_mask_device_ = device;
     if (pending_async_token_len_ > accepted_token_len_) {
         state_cv_.wait(lock, [this]() {
-            return pending_async_token_len_ <= accepted_token_len_ || reported_error_.load() || !matcher_
-                   || matcher_->finished();
+            return pending_async_token_len_ <= accepted_token_len_ || timeout_state_.disabled()
+                   || reported_error_.load() || !matcher_ || matcher_->finished();
         });
+    }
+
+    if (timeout_state_.disabled()) {
+        DeviceMaskState state;
+        state.mode = DeviceMaskMode::NOOP;
+        return state;
     }
 
     if (device_mask_state_.mode != DeviceMaskMode::UNSET && device_mask_state_.token_len == accepted_token_len_
@@ -240,6 +252,11 @@ void GrammarLogitsProcessor::processSpeculative(const SamplerInputs&        inpu
                     false);
 }
 
+bool GrammarLogitsProcessor::xgrammarUpdateTimedOut() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return timeout_state_.disabled();
+}
+
 bool GrammarLogitsProcessor::isSpecVerifyEligible() const {
     return matcher_ != nullptr && !reported_error_.load(std::memory_order_relaxed);
 }
@@ -249,6 +266,14 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
         return request.propose_step;
     }
 
+    std::unique_lock<std::mutex> lock(state_mutex_);
+    if (timeout_state_.disabled()) {
+        std::fill_n(request.bitmask_cpu_out,
+                    (static_cast<size_t>(request.propose_step) + 1) * request.bitmask_size_int32,
+                    SpecLogitsProcessor::kBitmaskAllowAll);
+        return request.propose_step;
+    }
+    const auto start           = std::chrono::steady_clock::now();
     const int  P               = request.propose_step;
     const auto W               = request.bitmask_size_int32;
     int        accepted_prefix = 0;
@@ -303,6 +328,15 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
     }
 
     matcher_->rollback(accepted_prefix);
+    const auto elapsed  = std::chrono::steady_clock::now() - start;
+    const bool disabled = timeout_state_.record(GrammarTimeoutState::Stage::VERIFY, elapsed);
+    lock.unlock();
+    if (disabled) {
+        state_cv_.notify_all();
+        timeout_state_.report(GrammarTimeoutState::Stage::VERIFY,
+                              std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count(),
+                              P);
+    }
     return cap;
 }
 
@@ -325,11 +359,17 @@ void GrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32
     const auto* token_ptr = tokens_cpu.data_ptr<int32_t>();
 
     std::unique_lock<std::mutex> lock(state_mutex_);
+    if (timeout_state_.disabled()) {
+        accepted_token_len_ += num_new_tokens;
+        state_cv_.notify_all();
+        return;
+    }
     if (!matcher_ || matcher_->finished()) {
         state_cv_.notify_all();
         return;
     }
 
+    const auto start = std::chrono::steady_clock::now();
     for (int32_t i = 0; i < num_new_tokens; ++i) {
         const int32_t token_id = token_ptr[i];
         if (matcher_->isTerminated()) {
@@ -359,8 +399,18 @@ void GrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32
         }
     }
 
+    // Normal async decoding builds the next mask during this update. Include
+    // that CPU work (and its asynchronous upload enqueue) in the stage budget.
     device_mask_state_ = buildDeviceMaskStateLocked(last_mask_device_.value_or(c10::Device(c10::DeviceType::CPU)));
+    const auto elapsed  = std::chrono::steady_clock::now() - start;
+    const bool disabled = timeout_state_.record(GrammarTimeoutState::Stage::UPDATE, elapsed);
+    lock.unlock();
     state_cv_.notify_all();
+    if (disabled) {
+        timeout_state_.report(GrammarTimeoutState::Stage::UPDATE,
+                              std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count(),
+                              num_new_tokens);
+    }
 }
 
 void GrammarLogitsProcessor::reportErrorOnce(ErrorCode          error_code,

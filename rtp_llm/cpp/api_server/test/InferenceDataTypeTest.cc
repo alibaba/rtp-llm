@@ -111,9 +111,11 @@ TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     aux_info.cost_time_us                        = 1000;
     aux_info.speculative_draft_rounds            = 4;
     aux_info.speculative_accepted_tokens_per_pos = {3, 2, 1};
+    aux_info.xgrammar_update_timeout             = true;
     AuxInfoAdapter aux_info_adapter(aux_info);
     std::string    jsonStr = ToJsonString(aux_info_adapter, true);
     ASSERT_TRUE(jsonStr.find(R"("cost_time":1)") != std::string::npos);
+    EXPECT_NE(jsonStr.find(R"("xgrammar_update_timeout":true)"), std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("iter_count":0)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("input_len":0)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("prefix_len":0)") != std::string::npos);
@@ -124,6 +126,16 @@ TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     ASSERT_TRUE(jsonStr.find(R"("speculative_draft_rounds":4)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("speculative_accepted_tokens_per_pos":[3,2,1])") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("cum_log_probs":)") == std::string::npos);
+}
+
+TEST(InferenceDataTypeTest, AuxInfoAdapterXgrammarTimeoutDefaultsToFalse) {
+    AuxInfoAdapter aux_info;
+    FromJsonString(aux_info, R"({"input_len":8})");
+    EXPECT_FALSE(aux_info.xgrammar_update_timeout);
+    EXPECT_NE(ToJsonString(aux_info, true).find(R"("xgrammar_update_timeout":false)"), std::string::npos);
+
+    FromJsonString(aux_info, R"({"xgrammar_update_timeout":true})");
+    EXPECT_TRUE(aux_info.xgrammar_update_timeout);
 }
 
 TEST(InferenceDataTypeTest, MultiSeqsResponse) {

@@ -411,6 +411,9 @@ struct GrammarConfig {
     int64_t              compiler_cache_bytes = 2L * 1024L * 1024L * 1024L;
     std::string          tokenizer_info_json;
     std::vector<int32_t> override_stop_tokens;
+    // Positive CPU budget per stage; three consecutive overruns disable this stream's grammar.
+    // Verification and committed updates maintain independent streaks.
+    int                  update_timeout_ms = 10;
     std::string          to_string() const;
 };
 

@@ -3,16 +3,22 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <future>
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include <xgrammar/tokenizer_info.h>
 
+#include "kmonitor/client/metric/GaugeMetric.h"
+#include "kmonitor/client/metric/QpsMetric.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackendCpp.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/models/logits_processor/ReasoningGrammarLogitsProcessor.h"
@@ -819,4 +825,273 @@ TEST(LogitsProcessorFactoryTest, GrammarThinkingInvalidResponseFormatSuppressesT
 }
 
 }  // namespace
+class GrammarStageTimeoutTest: public ::testing::TestWithParam<bool> {
+protected:
+    void SetUp() override {
+        auto backend  = makeBackend();
+        auto compiled = backend.compileNow({"regex", "a*"}).compiled;
+        ASSERT_TRUE(compiled);
+        matcher             = backend.createMatcher(compiled, false, std::nullopt);
+        auto error_reporter = [this](ErrorCode, const std::string&, bool) { ++errors; };
+        if (GetParam()) {
+            auto p = std::make_shared<ReasoningGrammarLogitsProcessor>(
+                matcher, 0, 0, std::vector<int>{}, std::vector<int>{}, 0, error_reporter);
+            timeout   = &p->timeout_state_;
+            processor = p;
+        } else {
+            auto p    = std::make_shared<GrammarLogitsProcessor>(matcher, 0, error_reporter);
+            timeout   = &p->timeout_state_;
+            processor = p;
+        }
+        spec = dynamic_cast<SpecLogitsProcessor*>(processor.get());
+        ASSERT_NE(spec, nullptr);
+    }
+
+    void slow() {
+        timeout->timeout_ms_ = 0;
+    }
+    void fast() {
+        timeout->timeout_ms_ = std::numeric_limits<int>::max();
+    }
+    void commit(int token = 'a') {
+        processor->updateStatus(torch::tensor({{token}}, torch::kInt32), 1);
+    }
+    int verify() {
+        const int32_t draft[] = {'a', 'x'};
+        masks.assign(12, SpecLogitsProcessor::kBitmaskAllowAll);
+        SpecLogitsProcessorRequest request{draft, 2, masks.data(), 4, 128};
+        return spec->tryAcceptAndFillBitmask(request);
+    }
+    void expectMask(bool disabled) {
+        SamplerInputs inputs;
+        inputs.logits = torch::zeros({1, 128}, torch::kFloat32);
+        processor->process(inputs, 0, 1);
+        EXPECT_EQ(inputs.logits[0]['x'].item<float>(), disabled ? 0.0f : BaseLogitsProcessor::neg_inf);
+    }
+
+    void expectSingleTimeoutMetric(bool verify_stage) {
+        auto monitor = std::make_shared<kmonitor::KMonitor>("grammar_timeout_test");
+        monitor->SetServiceName("");
+        auto  reporter        = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
+        auto* metrics         = reporter->getMetricsGroup<RtpLLMGrammarMetrics>();
+        auto* compile_latency = dynamic_cast<kmonitor::GaugeMetric*>(
+            metrics->compile_latency_us_metric->DeclareMetric(&reporter->getTags()));
+        auto* timeout_qps =
+            dynamic_cast<kmonitor::QpsMetric*>(metrics->update_timeout_qps_metric->DeclareMetric(&reporter->getTags()));
+        ASSERT_NE(compile_latency, nullptr);
+        ASSERT_NE(timeout_qps, nullptr);
+        timeout->reporter_ = reporter;
+        slow();
+        for (int i = 1; i <= 5; ++i) {
+            if (verify_stage) {
+                verify();
+            } else {
+                commit();
+            }
+            EXPECT_EQ(timeout_qps->value_, i < 3 ? 0 : 1);
+            EXPECT_EQ(compile_latency->calculator_.Count(), 0);
+        }
+        EXPECT_EQ(errors, 0);
+        metrics->compile_latency_us_metric->UndeclareMetric(compile_latency);
+        metrics->update_timeout_qps_metric->UndeclareMetric(timeout_qps);
+    }
+
+    std::shared_ptr<RtpGrammarMatcher> matcher;
+    BaseLogitsProcessorPtr             processor;
+    SpecLogitsProcessor*               spec    = nullptr;
+    GrammarTimeoutState*               timeout = nullptr;
+    std::vector<int32_t>               masks;
+    int                                errors = 0;
+};
+
+TEST_P(GrammarStageTimeoutTest, SlowUpdatesDisableOnlyOnThirdAndKeepCommittedLength) {
+    for (int i = 1; i <= 3; ++i) {
+        slow();
+        commit();
+        EXPECT_EQ(processor->xgrammarUpdateTimedOut(), i == 3);
+        EXPECT_EQ(processor->acceptedTokenLen(), i);
+        EXPECT_EQ(matcher->num_accepted_, i);
+        expectMask(i == 3);
+        fast();
+        EXPECT_EQ(verify(), i == 3 ? 2 : 1);
+        EXPECT_EQ(timeout->consecutive_update_timeouts_, i);
+    }
+    commit('x');
+    EXPECT_EQ(errors, 0);
+    EXPECT_EQ(processor->acceptedTokenLen(), 4);
+    EXPECT_EQ(matcher->num_accepted_, 3);
+    EXPECT_TRUE(processor->isStateful());
+    EXPECT_TRUE(processor->xgrammarUpdateTimedOut());
+    for (auto word : masks) {
+        EXPECT_EQ(word, SpecLogitsProcessor::kBitmaskAllowAll);
+    }
+}
+
+TEST_P(GrammarStageTimeoutTest, ThirdSlowVerifyPreservesCurrentMaskAndRollsBack) {
+    for (int i = 1; i <= 3; ++i) {
+        slow();
+        EXPECT_EQ(verify(), 1);
+        EXPECT_FALSE(packedBitmaskAllowsToken(masks.data(), 'x'));
+        EXPECT_EQ(processor->xgrammarUpdateTimedOut(), i == 3);
+        EXPECT_EQ(matcher->num_accepted_, i - 1);
+        fast();
+        commit();
+        EXPECT_EQ(processor->acceptedTokenLen(), i);
+        EXPECT_EQ(timeout->consecutive_verify_timeouts_, i);
+    }
+    EXPECT_EQ(matcher->num_accepted_, 2);
+    EXPECT_EQ(verify(), 2);
+    for (auto word : masks) {
+        EXPECT_EQ(word, SpecLogitsProcessor::kBitmaskAllowAll);
+    }
+    expectMask(true);
+    EXPECT_EQ(errors, 0);
+}
+
+TEST_P(GrammarStageTimeoutTest, EachStageResetsOnlyItsOwnStreakAndEmptyWorkIsNotSampled) {
+    slow();
+    for (int i = 0; i < 2; ++i) {
+        commit();
+        EXPECT_EQ(verify(), 1);
+    }
+    fast();
+    processor->updateStatus(torch::empty({1, 0}, torch::kInt32), 0);
+    EXPECT_EQ(timeout->consecutive_update_timeouts_, 2);
+    EXPECT_EQ(timeout->consecutive_verify_timeouts_, 2);
+    commit();
+    EXPECT_EQ(timeout->consecutive_update_timeouts_, 0);
+    EXPECT_EQ(timeout->consecutive_verify_timeouts_, 2);
+    slow();
+    commit();
+    fast();
+    EXPECT_EQ(verify(), 1);
+    EXPECT_EQ(timeout->consecutive_update_timeouts_, 1);
+    EXPECT_EQ(timeout->consecutive_verify_timeouts_, 0);
+    slow();
+    commit();
+    EXPECT_FALSE(processor->xgrammarUpdateTimedOut());
+    commit();
+    EXPECT_TRUE(processor->xgrammarUpdateTimedOut());
+}
+
+TEST_P(GrammarStageTimeoutTest, SlowRejectedCommitStillReportsError) {
+    slow();
+    commit();
+    commit();
+    commit('x');
+    EXPECT_EQ(errors, 1);
+    EXPECT_FALSE(processor->xgrammarUpdateTimedOut());
+    EXPECT_FALSE(spec->isSpecVerifyEligible());
+    EXPECT_EQ(timeout->consecutive_update_timeouts_, 2);
+}
+
+TEST_P(GrammarStageTimeoutTest, UpdateReportsExactlyOneTimeoutWithoutCompileSamples) {
+    expectSingleTimeoutMetric(false);
+}
+
+TEST_P(GrammarStageTimeoutTest, VerifyReportsExactlyOneTimeoutWithoutCompileSamples) {
+    expectSingleTimeoutMetric(true);
+}
+
+INSTANTIATE_TEST_SUITE_P(PlainAndReasoning, GrammarStageTimeoutTest, ::testing::Bool());
+
+TEST(GrammarTimeoutStateTest, StrictBudgetBoundaryAndOneTransition) {
+    using Stage = GrammarTimeoutState::Stage;
+    GrammarTimeoutState state(10, nullptr, "request_id=42");
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_FALSE(state.record(Stage::UPDATE, std::chrono::milliseconds(10)));
+    }
+    EXPECT_FALSE(state.disabled());
+    EXPECT_FALSE(state.record(Stage::UPDATE, std::chrono::milliseconds(11)));
+    EXPECT_FALSE(state.record(Stage::UPDATE, std::chrono::milliseconds(11)));
+    EXPECT_TRUE(state.record(Stage::UPDATE, std::chrono::milliseconds(11)));
+    EXPECT_FALSE(state.record(Stage::VERIFY, std::chrono::milliseconds(11)));
+    EXPECT_FALSE(state.record(Stage::UPDATE, std::chrono::milliseconds(0)));
+    EXPECT_TRUE(state.disabled());
+    EXPECT_THROW(GrammarTimeoutState(0, nullptr, ""), std::invalid_argument);
+    EXPECT_THROW(GrammarTimeoutState(-1, nullptr, ""), std::invalid_argument);
+}
+
+TEST(GrammarLogitsProcessorTest, TimeoutWakesPendingAsyncMaskAndDoesNotReuseCachedMask) {
+    auto backend  = makeBackend();
+    auto compiled = backend.compileNow({"regex", "a*"}).compiled;
+    ASSERT_TRUE(compiled);
+    GrammarLogitsProcessor processor(backend.createMatcher(compiled, false, std::nullopt), 0);
+    processor.timeout_state_.timeout_ms_ = 0;
+    SamplerInputs inputs;
+    inputs.logits = torch::zeros({1, 128}, torch::kFloat32);
+    processor.process(inputs, 0, 1);
+    ASSERT_EQ(inputs.logits[0]['x'].item<float>(), BaseLogitsProcessor::neg_inf);
+    const auto token = torch::tensor({{'a'}}, torch::kInt32);
+    processor.prepareNormalAsyncUpdate(token, 1);
+    auto                       pending_mask = std::async(std::launch::async, [&] {
+        inputs.logits.zero_();
+        processor.process(inputs, 0, 1);
+    });
+    const int32_t              draft[]      = {'a'};
+    std::vector<int32_t>       masks(8, -1);
+    SpecLogitsProcessorRequest request{draft, 1, masks.data(), 4, 128};
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_EQ(processor.tryAcceptAndFillBitmask(request), 1);
+    }
+    auto status = pending_mask.wait_for(std::chrono::seconds(5));
+    // Ensure failure also releases the waiter before its future is destroyed.
+    if (status != std::future_status::ready) {
+        processor.updateStatus(token, 1);
+    }
+    EXPECT_EQ(status, std::future_status::ready);
+    pending_mask.get();
+    EXPECT_TRUE(torch::equal(inputs.logits, torch::zeros_like(inputs.logits)));
+    processor.updateStatus(torch::tensor({{'x'}}, torch::kInt32), 1);
+    EXPECT_EQ(processor.acceptedTokenLen(), 1);
+}
+
+TEST(ReasoningGrammarLogitsProcessorTest, TimeoutPreservesThinkingPolicyAndNeverReentersMatcher) {
+    auto backend  = makeBackend();
+    auto compiled = backend.compileNow({"regex", "a*"}).compiled;
+    ASSERT_TRUE(compiled);
+    auto                            matcher = backend.createMatcher(compiled, false, std::nullopt);
+    ReasoningGrammarLogitsProcessor processor(matcher, 0, 32, {'<'}, {'z'}, 0);
+    processor.timeout_state_.timeout_ms_ = 0;
+    for (int i = 0; i < 3; ++i) {
+        processor.updateStatus(torch::tensor({{'b'}}, torch::kInt32), 1);
+    }
+    ASSERT_TRUE(processor.xgrammarUpdateTimedOut());
+    SamplerInputs inputs;
+    inputs.logits = torch::zeros({1, 128}, torch::kFloat32);
+    processor.process(inputs, 0, 1);
+    EXPECT_EQ(inputs.logits[0][0].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0]['<'].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0]['x'].item<float>(), 0.0f);
+    processor.updateStatus(torch::tensor({{'z', 'x'}}, torch::kInt32), 2);
+    inputs.logits.zero_();
+    processor.process(inputs, 0, 1);
+    EXPECT_TRUE(torch::equal(inputs.logits, torch::zeros_like(inputs.logits)));
+    EXPECT_EQ(matcher->num_accepted_, 0);
+    EXPECT_EQ(processor.acceptedTokenLen(), 5);
+}
+
+TEST(LogitsProcessorFactoryTest, UpdateTimeoutConfigurationReachesBothProcessors) {
+    GrammarConfig config;
+    config.tokenizer_info_json = makeTokenizerInfoJson();
+    config.update_timeout_ms   = 25;
+    LogitsProcessorFactory::init("", "", config);
+    for (bool thinking : {false, true}) {
+        auto input                                  = std::make_shared<GenerateInput>();
+        input->input_ids                            = torch::tensor({1}, torch::kInt32);
+        input->generate_config                      = std::make_shared<GenerateConfig>();
+        input->generate_config->regex               = "a*";
+        input->generate_config->in_think_mode       = thinking;
+        input->generate_config->end_think_token_ids = {'z'};
+        auto processors = LogitsProcessorFactory::createLogitsProcessors(input, 1, 1, 0, nullptr, "request_id=42");
+        ASSERT_EQ(processors.size(), 1);
+        auto* timeout = thinking ? &dynamic_cast<ReasoningGrammarLogitsProcessor&>(*processors.front()).timeout_state_ :
+                                   &dynamic_cast<GrammarLogitsProcessor&>(*processors.front()).timeout_state_;
+        EXPECT_EQ(timeout->timeout_ms_, 25);
+        EXPECT_EQ(timeout->stream_log_tag_, "request_id=42");
+    }
+    config.grammar_backend = "none";
+    LogitsProcessorFactory::init("", "", config);
+}
+
 }  // namespace rtp_llm

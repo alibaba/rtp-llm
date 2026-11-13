@@ -12,6 +12,37 @@ class ServerArgsPyEnvConfigsTest(TestCase):
 
 
 class ServerArgsSetTest(TestCase):
+    def test_grammar_update_timeout_config_and_pickle(self):
+        configs = self._setup_args([])
+        self.assertEqual(configs.grammar_config.update_timeout_ms, 10)
+        os.environ["GRAMMAR_UPDATE_TIMEOUT_MS"] = "25"
+        self.assertEqual(self._setup_args([]).grammar_config.update_timeout_ms, 25)
+        for args in (
+            ["--grammar_update_timeout_ms", "10"],
+            ["--grammar_update_timeout_ms=10"],
+        ):
+            config = self._setup_args(args).grammar_config
+            self.assertEqual(config.update_timeout_ms, 10)
+            self.assertEqual(pickle.loads(pickle.dumps(config)).update_timeout_ms, 10)
+            self.assertIn("update_timeout_ms: 10", config.to_string())
+        config = self._setup_args([]).grammar_config
+        self.assertEqual(pickle.loads(pickle.dumps(config)).update_timeout_ms, 25)
+        from rtp_llm.ops import GrammarConfig
+
+        legacy = GrammarConfig.__new__(GrammarConfig)
+        legacy.__setstate__(config.__getstate__()[:9])
+        self.assertEqual(legacy.update_timeout_ms, 10)
+
+    def test_grammar_update_timeout_rejects_nonpositive_cli_and_env(self):
+        for value in ("0", "-1", "invalid"):
+            with self.subTest(value=value):
+                os.environ.pop("GRAMMAR_UPDATE_TIMEOUT_MS", None)
+                with self.assertRaises(SystemExit):
+                    self._setup_args(["--grammar_update_timeout_ms", value])
+                os.environ["GRAMMAR_UPDATE_TIMEOUT_MS"] = value
+                with self.assertRaises(SystemExit):
+                    self._setup_args([])
+
     def test_missing_sleep_binding_fails_at_startup(self):
         from rtp_llm.server.server_args.engine_group_args import init_engine_group_args
 

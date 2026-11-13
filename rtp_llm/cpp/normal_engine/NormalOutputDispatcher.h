@@ -11,7 +11,9 @@ class NormalOutputDispatcher {
 public:
     NormalOutputDispatcher() = default;
 
-    absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
+    absl::Status dispatch(const StreamGroups&                 stream_groups,
+                          const MergedOutput&                 merge_outputs,
+                          const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr) const;
 
 private:
     void dispatchSingleStream(GenerateStreamPtr    stream,

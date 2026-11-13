@@ -88,6 +88,7 @@ public:
         json.Jsonize("reuse_len", reuse_len, reuse_len);
         json.Jsonize("output_len", output_len, output_len);
         json.Jsonize("pd_sep", pd_sep, pd_sep);
+        json.Jsonize("xgrammar_update_timeout", xgrammar_update_timeout, xgrammar_update_timeout);
         json.Jsonize("step_output_len", step_output_len, step_output_len);
         json.Jsonize("beam_responses", beam_responses, beam_responses);
         if (json.GetMode() == FastJsonizableBase::Mode::TO_JSON && cum_log_probs.has_value()) {
@@ -119,6 +120,7 @@ public:
         remote_reuse_len                    = base.remote_reuse_len;
         speculative_draft_rounds            = base.speculative_draft_rounds;
         speculative_accepted_tokens_per_pos = base.speculative_accepted_tokens_per_pos;
+        xgrammar_update_timeout             = base.xgrammar_update_timeout;
 
         cost_time_ms = cost_time_us / 1000.0;
     }

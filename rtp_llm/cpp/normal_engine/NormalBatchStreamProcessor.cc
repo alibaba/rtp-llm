@@ -7,7 +7,9 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     const PDSepConfig&                 pd_sep_config,
     const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
     const CacheConfig&                 cache_config,
-    bool                               warm_up) {
+    bool                               warm_up,
+    kmonitor::MetricsReporterPtr       metrics_reporter):
+    metrics_reporter_(std::move(metrics_reporter)) {
     model_input_gatherer_config_.num_layers              = model_config.num_layers;
     model_input_gatherer_config_.vocab_size              = model_config.vocab_size;
     model_input_gatherer_config_.input_vocab_size        = model_config.input_vocab_size;
@@ -38,7 +40,7 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
 
 absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_groups,
                                                   const MergedOutput& merge_outputs) const {
-    return output_dispatcher_->dispatch(stream_groups, merge_outputs);
+    return output_dispatcher_->dispatch(stream_groups, merge_outputs, metrics_reporter_);
 }
 
 absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups,

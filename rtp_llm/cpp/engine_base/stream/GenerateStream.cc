@@ -106,7 +106,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
             } else {
                 reportError(error_code, error_msg);
             }
-        });
+        },
+        streamLogTag());
 
     if (generateConfig()->random_seed.has_value()) {
 #if defined(USING_CUDA) || defined(USING_ROCM)
@@ -233,6 +234,15 @@ bool GenerateStream::isStreaming() const {
 
 int64_t GenerateStream::streamId() const {
     return generate_input_->request_id;
+}
+
+bool GenerateStream::xgrammarUpdateTimedOut() const {
+    for (const auto& processor : logits_processor_list_) {
+        if (processor->xgrammarUpdateTimedOut()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 std::string GenerateStream::streamLogTag() const {

@@ -1,5 +1,8 @@
 
 #include "gtest/gtest.h"
+#include <xgrammar/tokenizer_info.h>
+#include "rtp_llm/cpp/engine_base/grammar/XGrammarBackendCpp.h"
+#include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -211,6 +214,32 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateBackCompatWrappers) {
     ASSERT_FALSE(stream->getAcceptTokensGpu().defined());
     ASSERT_FALSE(stream->getNextSeqLenGpu().defined());
     ASSERT_FALSE(stream->getProposeTokensGpu().defined());
+}
+
+TEST_F(GenerateStreamTest, GrammarTimeoutFlagIsStickyInGeneratedOutputs) {
+    std::vector<std::string> vocab;
+    for (int i = 0; i < 128; ++i) {
+        vocab.emplace_back(1, static_cast<char>(i));
+    }
+    xgrammar::TokenizerInfo info(vocab, xgrammar::VocabType::RAW, 128, std::vector<int32_t>{0});
+    XGrammarBackendOptions  options;
+    options.compile_timeout_ms = 0;
+    XGrammarBackendCpp backend(info.SerializeJSON(), options);
+    auto               compiled = backend.compileNow({"regex", "a*"}).compiled;
+    ASSERT_TRUE(compiled);
+    auto grammar = std::make_shared<GrammarLogitsProcessor>(backend.createMatcher(compiled, false, std::nullopt), 0);
+    grammar->timeout_state_.timeout_ms_ = 0;
+    auto stream = std::dynamic_pointer_cast<NormalGenerateStream>(GenerateStreamBuilder().createContextStream({1, 2}));
+    stream->logits_processor_list_ = {grammar};
+    for (int round = 0; round <= 4; ++round) {
+        if (round > 0) {
+            grammar->updateStatus(torch::tensor({{'a'}}, torch::kInt32), 1);
+        }
+        auto output = stream->prepareGenerateOutput(StreamUpdateInfo{});
+        ASSERT_EQ(output.generate_outputs.size(), 1);
+        EXPECT_EQ(output.generate_outputs[0].aux_info.xgrammar_update_timeout, round >= 3);
+        EXPECT_EQ(stream->xgrammarUpdateTimedOut(), round >= 3);
+    }
 }
 
 }  // namespace rtp_llm

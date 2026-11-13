@@ -2,11 +2,13 @@
 #include <cstring>
 #include <memory>
 #include <limits>
+#include "kmonitor/client/metric/GaugeMetric.h"
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 #define private public
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
@@ -242,7 +244,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputBuildsPositionSpec
               toVec<float>(sampler_inputs.temperature));
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens) {
+TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBeginToken) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -308,7 +310,8 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     float neg_inf = -std::numeric_limits<float>::max();
     for (int i = 0; i < 3; ++i) {
         EXPECT_EQ(neg_inf, logits_cpu[i][7].item<float>());
-        EXPECT_EQ(neg_inf, logits_cpu[i][8].item<float>());
+        // DeepSeek permits think-end tokens outside the thinking phase.
+        EXPECT_EQ(0, logits_cpu[i][8].item<float>());
         EXPECT_EQ(0, logits_cpu[i][9].item<float>());
     }
 }
@@ -468,6 +471,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {2, 1}, 2);
 
+    stream1->setIsContextStream(false);
+    stream2->setIsContextStream(false);
     auto stream_groups = StreamGroups({stream1, stream2});
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
@@ -484,12 +489,22 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     draft_prefill_output.sampler_output.all_probs =
         torch::tensor({0.2f, 0.1f, 0.3f, 0.5f, 0.3f, 0.1f, 0.4f, 0.2f}, torch::kFloat32).reshape({2, 4});
 
+    auto monitor = std::make_shared<kmonitor::KMonitor>("mtp_stream_update_test");
+    monitor->SetServiceName("");
+    auto  reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
+    auto* metrics  = reporter->getMetricsGroup<RtpLLMStreamUpdateMetrics>();
+    auto* latency =
+        dynamic_cast<kmonitor::GaugeMetric*>(metrics->latency_us_metric->DeclareMetric(&reporter->getTags()));
+    ASSERT_NE(latency, nullptr);
+
     cache_config.group_types = {CacheGroupType::FULL};
     MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false, reporter);
 
     auto status = processor.dispatchDecode(stream_groups, spec_decode_output, draft_prefill_output);
     EXPECT_TRUE(status.ok());
+    EXPECT_EQ(latency->calculator_.Count(), 1);
+    metrics->latency_us_metric->UndeclareMetric(latency);
     draft_prefill_output.model_output.all_hidden_states.fill_(9.0f);
 
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});

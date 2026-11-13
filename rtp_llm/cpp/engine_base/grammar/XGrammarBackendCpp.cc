@@ -124,6 +124,9 @@ XGrammarBackendCpp::XGrammarBackendCpp(const std::string&            tokenizer_i
               // xgrammar reads 0 as a zero-sized cache and aborts below -1, so fold our <=0 convention
               // onto its unlimited sentinel.
               options.compiler_cache_bytes > 0 ? options.compiler_cache_bytes : -1) {
+    if (options_.update_timeout_ms <= 0) {
+        throw std::invalid_argument("grammar update_timeout_ms must be greater than 0");
+    }
     if (options_.compile_timeout_ms > 0) {
         const size_t concurrency = static_cast<size_t>(std::max(1, options_.compile_concurrency));
         const size_t queue_size  = static_cast<size_t>(std::max(1, options_.compile_queue_size));

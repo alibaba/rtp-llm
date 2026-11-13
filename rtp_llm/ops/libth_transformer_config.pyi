@@ -512,6 +512,7 @@ class FIFOSchedulerConfig:
 
 
 class GrammarConfig:
+    update_timeout_ms: int
     compile_concurrency: int
     compile_queue_size: int
     compile_timeout_ms: int

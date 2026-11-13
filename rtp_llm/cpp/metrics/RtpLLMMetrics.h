@@ -364,10 +364,18 @@ public:
     int64_t cache_bytes        = 0;
 };
 
+// Report only the transition to disabled grammar per grammar processor.
+class RtpLLMGrammarUpdateMetricsCollector final {
+public:
+    bool update_timeout_qps = false;
+};
+
 class RtpLLMGrammarMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
     void report(const kmonitor::MetricsTags* tags, RtpLLMGrammarMetricsCollector* collector);
+    void                     report(const kmonitor::MetricsTags* tags, RtpLLMGrammarUpdateMetricsCollector* collector);
+    kmonitor::MutableMetric* update_timeout_qps_metric = nullptr;
 
 public:
     kmonitor::MutableMetric* compile_qps_metric         = nullptr;
@@ -380,6 +388,21 @@ public:
 
 private:
     AUTIL_LOG_DECLARE();
+};
+
+// Wall time for a whole batch's CPU stream updates, including grammar and output
+// bookkeeping, after D2H staging. Report once per nonempty decode dispatch.
+class RtpLLMStreamUpdateMetricsCollector final {
+public:
+    int64_t latency_us = 0;
+};
+
+class RtpLLMStreamUpdateMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMStreamUpdateMetricsCollector* collector);
+
+    kmonitor::MutableMetric* latency_us_metric = nullptr;
 };
 
 class RtpLLMTokenPSMetricsCollector final {

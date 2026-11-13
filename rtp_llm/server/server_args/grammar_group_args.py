@@ -1,8 +1,29 @@
+import argparse
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than 0")
+    return parsed
 
 
 def init_grammar_group_args(parser, grammar_config, grammar_admission_config):
     grammar_group = parser.add_argument_group("Grammar Configuration")
+    grammar_group.add_argument(
+        "--grammar_update_timeout_ms",
+        env_name="GRAMMAR_UPDATE_TIMEOUT_MS",
+        bind_to=(grammar_config, "update_timeout_ms"),
+        type=_positive_int,
+        default=10,
+        help=(
+            "Positive CPU budget in ms for MTP verification and committed grammar updates. "
+            "Each stage tracks its own streak; three consecutive overruns disable grammar "
+            "for the request. Synchronous xgrammar calls finish before the budget is checked."
+        ),
+    )
     grammar_group.add_argument(
         "--grammar_backend",
         env_name="GRAMMAR_BACKEND",
