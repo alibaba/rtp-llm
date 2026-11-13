@@ -444,15 +444,20 @@ class EndpointStreamTest(unittest.IsolatedAsyncioTestCase):
                     )
                     frames = [frame async for frame in response]
                     complete = await response.gen_complete_response_once()
-                    self.assertEqual(complete.choices[0].message.content, "answer ")
+                    self.assertEqual(complete.choices[0].message.content, "answer")
                     self.assertEqual(complete.choices[0].finish_reason, "stop")
                     self.assertEqual(
                         "".join(
                             frame.choices[0].delta.content or "" for frame in frames
                         ),
-                        "answer ",
+                        "answer",
                     )
                     self.assertIn("STOP", received[-1].generate_config.stop_words_str)
+                    for stop_variant in ("STOP", " STOP"):
+                        self.assertIn(
+                            endpoint.tokenizer.encode(stop_variant),
+                            received[-1].generate_config.stop_words_list,
+                        )
                     self.assertIsNone(received[-1].v41_inputs)
 
     async def test_nonstream_entrypoint_stops_before_consuming_later_backend_chunks(
