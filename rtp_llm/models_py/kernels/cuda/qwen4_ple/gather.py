@@ -6,6 +6,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.resident_weights import prepare_host_for_cuda
+
 
 @triton.jit(do_not_specialize=["N"])
 def _gather_shards(
@@ -202,7 +204,7 @@ def prepare_cpu_uva_shards(
     pointers = [0] * total_shards
     with torch.cuda.device(device):
         for index, shard in zip(shard_indices, shards):
-            owner = shard if shard.is_pinned() else shard.pin_memory()
+            owner = prepare_host_for_cuda(shard, device)
             address = ctypes.c_void_p()
             code = get_pointer(ctypes.byref(address), owner.data_ptr(), 0)
             if code or address.value is None:

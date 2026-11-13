@@ -1,4 +1,11 @@
+import gc
+import os
+import subprocess
+import sys
 import unittest
+import uuid
+import weakref
+from unittest.mock import patch
 
 import torch
 
@@ -126,5 +133,146 @@ class PLEGatherTritonTest(unittest.TestCase):
         graph.reset()
 
 
+class _HostWeights:
+    def __init__(self):
+        self.weights = [
+            {"table": torch.arange(512, dtype=torch.float32).reshape(16, 32)}
+        ]
+        self.global_weights = {}
+
+
+def _resident_ple(cold):
+    from rtp_llm.models_py.kernels.cuda.qwen4_ple.gather import prepare_cpu_uva_shards
+    from rtp_llm.resident_weights import ResidentWeights
+
+    manager = ResidentWeights("target", 0, {"model_type": "ple-test"}, False)
+    weights = _HostWeights()
+    if cold:
+        manager.move_to_vmm(weights)
+    else:
+        loaded = manager.attach()
+        assert loaded is not None
+        weights.weights = [{}]
+        for item in loaded:
+            weights.weights[item.scope][item.name] = item.tensor
+        manager.bind(weights)
+    shard = weights.weights[0]["table"]
+    assert shard.is_pinned() == (
+        not cold
+    )  # hot re-registers the published access requirement
+    owners, pointers = prepare_cpu_uva_shards([shard], [0], 1, torch.device("cuda", 0))
+    assert owners[0] is shard and owners[0].data_ptr() == shard.data_ptr()
+    assert shard.is_pinned()
+    manager.finalize()
+    return manager, weights, owners, pointers
+
+
+def _ple_shared_process(mode):
+    from rtp_llm.models_py.kernels.cuda.qwen4_ple.gather import gather_local
+
+    manager, weights, owners, pointers = _resident_ple(mode == "ple_cold")
+    ids = torch.tensor([3, 7, 15], dtype=torch.int64, device="cuda")
+    expected = weights.weights[0]["table"].index_select(0, ids.cpu()).to("cuda")
+    actual = gather_local(ids, owners, (0,), 1, pointers)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = gather_local(ids, owners, (0,), 1, pointers)
+    graph.replay()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    graph.reset()
+    if mode == "ple_gpu_write":
+
+        class CudaView:
+            __cuda_array_interface__ = {
+                "shape": (512,),
+                "typestr": "<f4",
+                "data": (pointers[0].item(), False),
+                "version": 3,
+            }
+
+        torch.as_tensor(CudaView(), device="cuda").add_(1)
+        torch.cuda.synchronize()  # expected illegal access, in this isolated process only
+
+
+class ResidentPLEGatherTest(unittest.TestCase):
+    def setUp(self):
+        from rtp_llm.resident_weights import store
+
+        self.environment = patch.dict(
+            os.environ, RTP_LLM_RESIDENT_STORE=f"resident-ple-test.{uuid.uuid4().hex}"
+        )
+        self.environment.start()
+        self.store = store
+        self.name = store.default_store_name()
+        store.ensure_running(self.name, owner_pid=os.getpid())
+
+    def tearDown(self):
+        self.store.stop_store(self.name)
+        self.environment.stop()
+
+    def test_cold_exit_hot_graph_and_gpu_readonly_fault(self):
+        for mode in ("ple_cold", "ple_hot", "ple_gpu_write", "ple_hot"):
+            child = subprocess.run(
+                [sys.executable, __file__, mode], capture_output=True, text=True
+            )
+            if mode == "ple_gpu_write":
+                self.assertNotEqual(child.returncode, 0)
+                self.assertIn("illegal memory access", child.stdout + child.stderr)
+            else:
+                self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+
+    def test_async_reader_finishes_before_last_host_view_is_unmapped(self):
+        from rtp_llm.models_py.kernels.cuda.qwen4_ple.gather import gather_local
+
+        manager, weights, owners, pointers = _resident_ple(True)
+        shard = weights.weights[0]["table"]
+        ref = weakref.ref(manager.allocation_of(shard))
+        ids = torch.tensor([3, 7, 15], dtype=torch.int64, device="cuda")
+        expected = shard.index_select(0, ids.cpu()).to("cuda")
+        gather_local(
+            ids, owners, (0,), 1, pointers
+        )  # compile outside the queued interval
+        torch.cuda.synchronize()
+        torch.cuda._sleep(20_000_000)
+        actual = gather_local(ids, owners, (0,), 1, pointers)
+        del (
+            owners,
+            weights,
+            shard,
+        )  # no pre-delete sync: the buffer destructor must wait
+        gc.collect()
+        self.assertIsNone(ref())
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_release_inside_graph_capture_is_deferred(self):
+        from rtp_llm.models_py.kernels.cuda.qwen4_ple.gather import gather_local
+        from rtp_llm.resident_weights import cpu
+
+        manager, weights, owners, pointers = _resident_ple(True)
+        ids = torch.tensor([3, 7, 15], dtype=torch.int64, device="cuda")
+        expected = owners[0].index_select(0, ids.cpu()).to("cuda")
+        gather_local(ids, owners, (0,), 1, pointers)
+        torch.cuda.synchronize()
+        before = len(cpu._deferred_releases)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = gather_local(ids, owners, (0,), 1, pointers)
+            del owners, weights
+            gc.collect()
+        self.assertEqual(len(cpu._deferred_releases), before + 1)
+        graph.replay()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        graph.reset()
+        # A later registered release outside capture drains deferred mappings, as for VMM.
+        manager2, weights2, owners2, pointers2 = _resident_ple(True)
+        del owners2, weights2
+        gc.collect()
+        self.assertEqual(len(cpu._deferred_releases), 0)
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if len(sys.argv) > 1 and sys.argv[1].startswith("ple_"):
+        _ple_shared_process(sys.argv[1])
+    else:
+        unittest.main()

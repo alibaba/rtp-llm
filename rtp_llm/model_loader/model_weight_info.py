@@ -240,7 +240,8 @@ class ModelDeployWeightInfo:
     # processed (for example the MoE strategy transforming them in initialize()). Resident weights
     # put their values into the fingerprint. Config fields count only when
     # BaseModel._resident_fingerprint lists them; to_string() omits Python-only fields.
-    resident_weights_env_vars: Tuple[str, ...] = ()
+    # MOE_MEGA_SHARED_EXPERT: the fused-MoE factory then fuses the shared expert into MegaMoE.
+    resident_weights_env_vars: Tuple[str, ...] = ("MOE_MEGA_SHARED_EXPERT",)
 
     TRT_ENGINE_LAYER_WEIGHT_MAP = {
         W.pre_ln_beta: "transformer.layers.{i}.input_layernorm.bias",
