@@ -138,8 +138,8 @@ class Qwen4Exp(Qwen35Moe):
     @staticmethod
     def _configure_precision_recipe(config: ModelConfig) -> None:
         if getattr(config, "_qwen4_mxfp4_source", False):
-            if config.quantization:
-                raise ValueError("Qwen4 MXFP4 uses the checkpoint's native precision")
+            if config.quantization and not config.online_mxfp8:
+                raise ValueError("Qwen4 MXFP4 supports --quantization MXFP8")
             config._qwen4_dense_storage = "source_bf16"
             config.dense_weight_dtype = "bf16"
             config.expert_weight_dtype = "fp4"

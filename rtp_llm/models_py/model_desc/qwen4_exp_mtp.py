@@ -15,7 +15,7 @@ from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     exact_head_rms_norm,
 )
 from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
-    Qwen4LinearFactory as LinearFactory,
+    Qwen4LinearFactory,
 )
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs
@@ -320,15 +320,16 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
         if getattr(model_config, "enable_qwen4_ple", False):
             raise RuntimeError("qwen4_exp MTP model descriptor does not support PLE")
         weights = self.weight
+        linear_factory = Qwen4LinearFactory()
         self.mtp_input_projection = Qwen4ExpMTPInputProjection(
             weights.get_global_weight(W.multi_tokens_predict_enorm),
             weights.get_global_weight(W.multi_tokens_predict_hnorm),
-            LinearFactory.create_linear_from_weights(
+            linear_factory.create_linear_from_weights(
                 weights.global_weights,
                 W.qwen4_mtp_fc_embedding_w,
                 hw_kernel_config=py_hw_kernel_config,
             ),
-            LinearFactory.create_linear_from_weights(
+            linear_factory.create_linear_from_weights(
                 weights.global_weights,
                 W.qwen4_mtp_fc_hidden_w,
                 hw_kernel_config=py_hw_kernel_config,

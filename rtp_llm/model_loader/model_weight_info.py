@@ -821,12 +821,38 @@ class ModelWeights:
         self.weights: List[Dict[str, torch.Tensor]] = []
         self.global_weights: Dict[str, torch.Tensor] = {}
         self._dtype = dtype
+        # Converted model-local compute weights can outlive their checkpoint
+        # tensors. Keep only metadata here so updates cannot recreate or write
+        # an obsolete source allocation after it has been retired.
+        self._retired_weights = {}
 
         for _ in range(num_layers):
             self.weights.append({})
 
     def set_layer_weight(self, layer_id: int, name: str, tensor: torch.Tensor):
         self.weights[layer_id][name] = tensor
+
+    def assert_weight_update_supported(self, layer_id, name: str):
+        if (layer_id, name) in getattr(self, "_retired_weights", {}):
+            raise PermissionError(
+                f"weight {name!r} was converted to a model-local compute format; "
+                "a service restart is required to update it"
+            )
+
+    def retire_weight(self, layer_id, name: str):
+        """Release an initialization-only source after its consumers detach.
+
+        Model-specific callers must first remove every actual source consumer;
+        this method never resizes storage, migrates tensors or frees aliases.
+        """
+        entries = self.global_weights if layer_id is None else self.weights[layer_id]
+        tensor = entries[name]
+        self._retired_weights[(layer_id, name)] = (
+            tuple(tensor.shape),
+            str(tensor.dtype),
+            str(tensor.device),
+        )
+        del entries[name]
 
     def update_layer_weight(self, layer_id: int, name: str, data: torch.Tensor):
         if not isinstance(layer_id, int):
@@ -846,6 +872,7 @@ class ModelWeights:
                 f"but received {type(data).__name__}.\n"
                 "Please provide the weight data as a PyTorch tensor."
             )
+        self.assert_weight_update_supported(layer_id, name)
         layer_weight_dict: dict[str, torch.Tensor] = self.weights[layer_id]
         if name not in layer_weight_dict:
             raise KeyError(
@@ -879,6 +906,7 @@ class ModelWeights:
                 f"Invalid 'name' type. Expected a string, but received {type(name).__name__}.\n"
                 "Please provide the name of the global weight as a string."
             )
+        self.assert_weight_update_supported(None, name)
         if name not in self.global_weights:
             raise KeyError(
                 f"Global weight with name '{name}' not found.\n"

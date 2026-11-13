@@ -53,7 +53,14 @@ def is_supported(x: torch.Tensor, gamma: torch.Tensor, group_size: int) -> bool:
         and x.dim() >= 2
         and gamma.dim() == 1
         and group_size > 0
-        and group_size <= 4096
+        and (
+            group_size <= 4096
+            or (
+                group_size == 8192
+                and x.shape[-1] == 32768
+                and torch.cuda.get_device_capability(x.device) == (10, 3)
+            )
+        )
         and x.shape[-1] == gamma.numel()
         and x.shape[-1] % group_size == 0
     )

@@ -114,7 +114,9 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             layernorm_eps,
             quant_config,
             hw_kernel_config=hw_kernel_config,
-            linear_factory=Qwen4LinearFactory,
+            linear_factory=Qwen4LinearFactory(
+                getattr(model_config, "online_mxfp8", False)
+            ),
         )
         self.layer_idx = layer_idx
         self.is_mtp_draft = bool(getattr(model_config, "is_mtp", False))
@@ -505,7 +507,6 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
     ``input_layernorm`` / ``post_attention_layernorm``.
     """
 
-    _linear_factory = Qwen4LinearFactory
     _moe_layer_cls = Qwen4MoeLayer
 
     def __init__(
@@ -519,6 +520,9 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
         enable_cuda_graph: bool = False,
         hw_kernel_config: Optional[HWKernelConfig] = None,
     ) -> None:
+        self._linear_factory = Qwen4LinearFactory(
+            getattr(config, "online_mxfp8", False)
+        )
         self._execution_role = getattr(parallelism_config, "role_type", "PDFUSION")
         super().__init__(
             config,
@@ -772,6 +776,16 @@ class Qwen4ExpModel(Qwen35Model):
         py_hw_kernel_config=None,
     ):
         config = model_config
+        if getattr(config, "online_mxfp8", False):
+            if (
+                config.compute_dtype != torch.bfloat16
+                or torch.cuda.get_device_capability(parallelism_config.local_rank)[0]
+                != 10
+            ):
+                raise ValueError(
+                    "Qwen4 online MXFP8 requires BF16 activations on SM10x"
+                )
+            self._decoder_layer_cls = self._build_mxfp8_decoder_layer
         compute_weights = (
             prepare_compute_weights(weights)
             if getattr(config, "_qwen4_full_fp8_nvfp4", False)
@@ -828,6 +842,15 @@ class Qwen4ExpModel(Qwen35Model):
         if dispatch is not None:
             for layer in self.layers:
                 install_target_graph_all_reduce(layer.self_attn, layer.mlp, dispatch)
+
+    def _build_mxfp8_decoder_layer(self, *args, **kwargs):
+        from rtp_llm.models_py.modules.qwen4_exp.mxfp8_weight_retirement import (
+            retire_layer_sources,
+        )
+
+        layer = Qwen4ExpDecoderLayer(*args, **kwargs)
+        retire_layer_sources(self.weight, layer.layer_idx, layer)
+        return layer
 
     def _ple_coordinator(self) -> PLETransactionCoordinator:
         coordinator = self.__dict__.get("_ple_transaction_coordinator")

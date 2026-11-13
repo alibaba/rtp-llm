@@ -871,7 +871,7 @@ class ModelConfig(CppModelConfig):
         """
         quant_config = QuantizationConfig.load_from_ckpt(self.ckpt_path)
         requested = None
-        if self.quantization:
+        if self.quantization and not getattr(self, "online_mxfp8", False):
             try:
                 requested = init_quant_config(self.quantization)
             except ValueError:

@@ -10,7 +10,9 @@ import torch
 
 from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
 from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
+from rtp_llm.models_py.modules.qwen4_exp.mxfp8_linear import maybe_make_mxfp8_projection
 from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
+from rtp_llm.utils.model_weight import W
 
 
 class PreparedWeightDict(dict):
@@ -68,9 +70,11 @@ def mark_projection_for_restart(weights, module):
 
 
 class Qwen4LinearFactory:
-    @classmethod
+    def __init__(self, online_mxfp8=False):
+        self.online_mxfp8 = online_mxfp8
+
     def create_linear_from_weights(
-        cls,
+        self,
         weights,
         weight_key,
         scale_key=None,
@@ -89,6 +93,30 @@ class Qwen4LinearFactory:
             )
             mark_projection_for_restart(weights, module)
             return module
+        # Router logits and the shared scalar gate retain their original BF16
+        # producer. Shared FFNs use their separately configured MoE strategy.
+        if (
+            self.online_mxfp8
+            and weight_key
+            in (
+                W.attn_qkv_w,
+                W.attn_o_w,
+                W.attn_gate_w,
+                W.linear_attn_qkvz_w,
+                W.linear_attn_ba_w,
+                W.linear_attn_out_w,
+            )
+            and (scale_key is None or weights.get(scale_key) is None)
+            and (weight_scale_2_key is None or weights.get(weight_scale_2_key) is None)
+            and (input_scale_key is None or weights.get(input_scale_key) is None)
+        ):
+            module = maybe_make_mxfp8_projection(
+                weights[weight_key].t(), weights.get(bias_key) if bias_key else None
+            )
+            if module is not None:
+                weights[weight_key]._rtp_requires_restart_for_update = True
+                mark_projection_for_restart(weights, module)
+                return module
         return LinearFactory.create_linear_from_weights(
             weights,
             weight_key,
@@ -100,5 +128,36 @@ class Qwen4LinearFactory:
             input_scale_key,
         )
 
-    create_linear = LinearFactory.create_linear
-    create_merged_linear = LinearFactory.create_merged_linear
+    def create_linear(
+        self,
+        weight,
+        bias,
+        weight_scales,
+        quant_config,
+        hw_kernel_config=None,
+        weight_scale_2=None,
+        input_scale=None,
+    ):
+        # Qwen3NextGatedDeltaNet builds its merged BF16 QKVZ/BA projection
+        # through this entry rather than create_linear_from_weights.
+        if (
+            self.online_mxfp8
+            and weight_scales is None
+            and weight_scale_2 is None
+            and input_scale is None
+        ):
+            module = maybe_make_mxfp8_projection(weight.t(), bias)
+            if module is not None:
+                weight._rtp_requires_restart_for_update = True
+                return module
+        return LinearFactory.create_linear(
+            weight,
+            bias,
+            weight_scales,
+            quant_config,
+            hw_kernel_config,
+            weight_scale_2,
+            input_scale,
+        )
+
+    create_merged_linear = staticmethod(LinearFactory.create_merged_linear)

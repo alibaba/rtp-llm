@@ -39,6 +39,13 @@ class Qwen4ModelConfig(ModelConfig):
         "linear_attn_norm_activation",
     }
 
+    @property
+    def online_mxfp8(self) -> bool:
+        return (
+            getattr(self, "_qwen4_mxfp4_source", False)
+            and (self.quantization or "").upper() == "MXFP8"
+        )
+
     # Checkpoint capabilities are read-only; they are not model options.
     @property
     def enable_qwen4_ple(self) -> bool:
