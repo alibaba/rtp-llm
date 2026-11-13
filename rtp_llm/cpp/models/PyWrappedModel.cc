@@ -1133,9 +1133,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     const auto capture_input_ids     = capture_hidden_states ? inputs.combo_tokens : torch::Tensor();
 
     const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
-    if (has_context_request && graph_runner_ != nullptr && inputs.input_lengths.defined()
-        && inputs.input_lengths.numel() > 0
-        && inputs.input_lengths.max().item<int>() > 65536) {
+    if (graph_runner_ != nullptr && inputs.combo_tokens.defined()
+        && inputs.combo_tokens.numel() > 65536) {
         // Keep the graph-private pool out of the full-context prefill window.
         // This runs before microbatch/CP dispatch so every topology observes it.
         // Graph destruction releases Python-owned replay state and needs the GIL.
