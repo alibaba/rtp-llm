@@ -1541,23 +1541,28 @@ class Qwen3NextModel(GptModelBase):
             TritonFusedMoeExecutor,
         )
 
+        decode_concurrency = int(os.environ.get("RTP_CONCURRENCY_LIMIT", "8"))
         if (
             os.environ.get("RTP_LLM_RL_WORLD32") != "1"
             or os.environ.get("RTP_LLM_RL_METADATA_BOOTSTRAP") != "1"
             or config.model_type != "qwen38_moe_text"
             or self.layer_num != 92
             or (parallel.world_size, parallel.tp_size, parallel.dp_size, parallel.ep_size) != (32, 8, 4, 32)
-            or decode_batch != 8
+            or decode_concurrency <= 0
+            or decode_batch not in (8, decode_concurrency)
             or full_graph
         ):
-            raise RuntimeError("Qwen3.8 expert graph requires the paused EP32 profile and decode concurrency 8")
+            raise RuntimeError("Qwen3.8 expert graph requires the paused EP32 profile and its configured decode concurrency")
         backends = [layer.mlp.fused_moe for layer in self.layers]
         if any(moe.strategy_name != "nccl_bf16_reference"
                or not isinstance(moe.fused_experts, TritonFusedMoeExecutor)
                for moe in backends):
             raise RuntimeError("Qwen3.8 expert graph requires the BF16 reference MoE strategy")
         executors = [moe.fused_experts for moe in backends]
-        run = register_run(parallel.world_rank, executors[0].w1.device, self.layer_num)
+        # Each TP group shards its tokens before the padded all-rank EP gather.
+        rows_per_rank = (decode_concurrency + parallel.tp_size - 1) // parallel.tp_size
+        captured_rows = rows_per_rank * parallel.ep_size
+        run = register_run(parallel.world_rank, executors[0].w1.device, self.layer_num, captured_rows)
         for layer, executor in enumerate(executors):
             executor.qwen38_decode_graph = DecodeExpertGraph(run, layer, executor.w1, executor.w2)
 

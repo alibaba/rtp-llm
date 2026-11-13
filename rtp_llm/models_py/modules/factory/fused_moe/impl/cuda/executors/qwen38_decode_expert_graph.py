@@ -34,21 +34,26 @@ def _cuda_device(device):
 
 
 class ExpertGraphRun:
-    def __init__(self, rank, device, num_layers, receipt_dir, incarnation):
+    def __init__(self, rank, device, num_layers, receipt_dir, incarnation, captured_rows=32):
         self.rank = rank
         self.device = _cuda_device(device)
         self.num_layers = num_layers
+        self.captured_rows = captured_rows
         self.incarnation = incarnation
         self.refit_epoch = 0
         self.refitting = False
         self.decode_forwards = 0
         self.capture_stream = None
+        self.capture_pool = None
+        self.replay_stream = None
+        self.next_replay_layer = 0
+        self.inputs = None
         self.graphs = []
         self.fallback_attempts = Counter()
         self.receipt = Path(receipt_dir) / f"q38-expert-graph-rank-{rank:05d}.jsonl"
         with self.receipt.open("x"):
             pass
-        self.emit("configured", layers=num_layers, captured_rows=32, eager_fallback=True)
+        self.emit("configured", layers=num_layers, captured_rows=captured_rows, eager_fallback=True)
 
     def emit(self, event, **fields):
         record = {
@@ -111,13 +116,15 @@ class ExpertGraphRun:
             self.emit_progress("epoch_progress")
 
 
-def register_run(rank, device, num_layers):
+def register_run(rank, device, num_layers, captured_rows=32):
     device = _cuda_device(device)
     if device in RUNS:
         raise RuntimeError("Qwen3.8 expert graph requires one rank-local policy per device")
     directory = Path(os.environ["RTP_WEIGHT_MANIFEST_DIR"])
     directory.mkdir(parents=True, exist_ok=True)
-    run = ExpertGraphRun(rank, device, num_layers, directory, os.environ["RTP_LLM_RL_RUN_ID"])
+    run = ExpertGraphRun(
+        rank, device, num_layers, directory, os.environ["RTP_LLM_RL_RUN_ID"], captured_rows
+    )
     RUNS[device] = run
     return run
 
@@ -140,8 +147,6 @@ class DecodeExpertGraph:
         self.layer = layer
         self.weight_ptrs = (w1.data_ptr(), w2.data_ptr())
         self.graph = None
-        self.stream = None
-        self.inputs = None
         self.output = None
         self.verified_epoch = 0
         self.epoch_replays = 0
@@ -150,23 +155,23 @@ class DecodeExpertGraph:
         run.graphs.append(self)
 
     def _stage_inputs(self, inputs):
-        for dest, src in zip(self.inputs, inputs):
+        for dest, src in zip(self.run.inputs, inputs):
             dest.copy_(src)
 
     def _capture(self, compute, inputs, stream):
-        self.inputs = tuple(torch.empty_like(x) for x in inputs)
-        self._stage_inputs(inputs)
-        self.stream = stream
         if self.run.capture_stream is None:
+            self.run.inputs = tuple(torch.empty_like(x) for x in inputs)
             self.run.capture_stream = torch.cuda.Stream(device=self.run.device)
+            self.run.capture_pool = torch.cuda.graph_pool_handle()
+        self._stage_inputs(inputs)
         capture_stream = self.run.capture_stream
         capture_stream.wait_stream(stream)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.stream(capture_stream):
-            reference = compute(*self.inputs)
-            graph.capture_begin(capture_error_mode="thread_local")
+            reference = compute(*self.run.inputs)
+            graph.capture_begin(pool=self.run.capture_pool, capture_error_mode="thread_local")
             try:
-                output = compute(*self.inputs)
+                output = compute(*self.run.inputs)
             except BaseException:
                 try:
                     graph.capture_end()
@@ -185,7 +190,8 @@ class DecodeExpertGraph:
             raise RuntimeError("Qwen3.8 expert graph requires a successful local refit and healthy capture")
         if self.weight_ptrs != (w1.data_ptr(), w2.data_ptr()):
             raise RuntimeError("Qwen3.8 expert graph persistent weight addresses changed")
-        specs = (((32, 8192), torch.bfloat16), ((32, 10), torch.int32), ((32, 10), torch.float32))
+        rows = self.run.captured_rows
+        specs = (((rows, 8192), torch.bfloat16), ((rows, 10), torch.int32), ((rows, 10), torch.float32))
         if all(x.shape == shape and x.dtype == dtype and x.device == self.run.device and x.is_contiguous()
                for x, (shape, dtype) in zip(inputs, specs)):
             output = self._replay(compute, inputs)
@@ -203,13 +209,14 @@ class DecodeExpertGraph:
 
     def _replay(self, compute, inputs):
         stream = torch.cuda.current_stream(self.run.device)
-        if self.stream is not None and self.stream != stream:
-            raise RuntimeError("Qwen3.8 expert graph decode stream changed")
-
         needs_capture = self.graph is None
         needs_check = self.verified_epoch != self.run.refit_epoch
-        reference = None
         try:
+            # Static inputs and capture scratch are shared across the ordered layer loop.
+            if self.run.replay_stream is None:
+                self.run.replay_stream = stream
+            if self.run.replay_stream != stream or self.run.next_replay_layer != self.layer:
+                raise RuntimeError("Qwen3.8 expert graphs require one decode stream and fixed layer order")
             if needs_capture:
                 started = time.monotonic_ns()
                 reference = self._capture(compute, inputs, stream)
@@ -217,7 +224,7 @@ class DecodeExpertGraph:
                 self._stage_inputs(inputs)
                 if needs_check:
                     started = time.monotonic_ns()
-                    reference = compute(*inputs)
+                    reference = compute(*self.run.inputs)
 
             self.graph.replay()
             if needs_check:
@@ -228,6 +235,7 @@ class DecodeExpertGraph:
                     "layer_replay_verified",
                     layer=self.layer,
                     captured=needs_capture,
+                    captured_rows=self.run.captured_rows,
                     validation_wall_ns=time.monotonic_ns() - started,
                 )
         except BaseException as exc:
@@ -235,4 +243,5 @@ class DecodeExpertGraph:
             self.run.emit("failure", layer=self.layer, error=repr(exc))
             raise
 
+        self.run.next_replay_layer = (self.layer + 1) % self.run.num_layers
         return self.output
