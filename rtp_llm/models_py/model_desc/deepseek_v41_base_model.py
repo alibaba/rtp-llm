@@ -555,428 +555,443 @@ class DeepSeekV4Model(GptModelBase):
             v4._allocate_mtp_last_hidden_buffer(device, mtp_last_hidden_capacity)
 
     def _initialize_impl(self, init_resource: PyModelInitResources) -> bool:
-        super().initialize(init_resource)
-        self._max_prefill_batch_tokens = int(
-            getattr(init_resource, "max_batch_tokens_size", 0)
-        )
-        if self._materialized:
-            if self._v4_args.v41_config is not None:
+        import faulthandler
+
+        logging.info("[ARM_INIT_DIAG] _initialize_impl begin class=%s", type(self).__name__)
+        faulthandler.dump_traceback_later(120, repeat=True)
+        try:
+            super().initialize(init_resource)
+            self._max_prefill_batch_tokens = int(
+                getattr(init_resource, "max_batch_tokens_size", 0)
+            )
+            if self._materialized:
+                if self._v4_args.v41_config is not None:
+                    from rtp_llm.models_py.modules.dsv41.dsv41_kernel_jit_warmup import (
+                        warmup_v41_decode_jit,
+                        warmup_v41_prefill_jit,
+                    )
+
+                    warmup_device = (
+                        self.main_proj.weight.device
+                        if getattr(self._v4_args, "commit_only", False)
+                        else self.v4.embed.weight.device
+                    )
+                    if self._is_decode_role:
+                        warmup_v41_decode_jit(self, device=warmup_device)
+                    else:
+                        warmup_v41_prefill_jit(self, device=warmup_device)
+                return True
+            device = (
+                next(iter(self.weight.global_weights.values())).device
+                if self.weight.global_weights
+                else "cuda:0"
+            )
+            device_str = str(device)
+            self._is_speculative = bool(init_resource.is_speculative)
+            self._is_decode_role = bool(init_resource.is_decode_role)
+            self._max_context_batch_size = init_resource.max_context_batch_size
+            self._v4_args.is_decode_role = self._is_decode_role
+            moe_budget = int(self._v4_args.max_tokens_per_rank)
+            if (
+                self._v4_args.v41_config is not None
+                and (not self._is_decode_role)
+                and (self._max_prefill_batch_tokens > 0)
+            ):
+                moe_budget = cp_padded_batch_tokens_per_rank_bound(
+                    self._max_prefill_batch_tokens,
+                    self._prefill_cp_size,
+                    self._max_generate_batch_size,
+                )
+            runtime_resolved_max_tokens_per_rank = resolve_moe_max_tokens_per_rank(
+                max_seq_len=int(self._v4_args.max_seq_len),
+                current_max_tokens_per_rank=moe_budget,
+                cp_size=1,
+                max_generate_batch_size=int(self._max_generate_batch_size),
+                is_decode_role=self._is_decode_role,
+                is_speculative=self._is_speculative,
+                gen_num_per_cycle=self._gen_num_per_cycle,
+                chunking_enabled=chunked_moe_enabled(),
+                chunk_tokens=moe_chunk_tokens_from_env(),
+            )
+            if runtime_resolved_max_tokens_per_rank != self._v4_args.max_tokens_per_rank:
+                chunk_tokens_env_for_log = (
+                    DSV4_CHUNK_TOKENS_ENV
+                    if dsv4_global_chunk_tokens_configured()
+                    else "DSV4_MOE_CHUNK_TOKENS"
+                )
+                chunk_tokens_for_log = -1
+                if not self._is_decode_role and (
+                    dsv4_global_chunk_tokens_configured()
+                    or os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
+                ):
+                    chunk_tokens_for_log = moe_chunk_tokens_from_env()
+                logging.info(
+                    "[DeepSeekV4Model] runtime MoE token budget: max_tokens_per_rank %d -> %d (%s=%d, role=%s, speculative=%s, gen_num_per_cycle=%d)",
+                    self._v4_args.max_tokens_per_rank,
+                    runtime_resolved_max_tokens_per_rank,
+                    chunk_tokens_env_for_log,
+                    chunk_tokens_for_log,
+                    "DECODE" if self._is_decode_role else "PREFILL",
+                    self._is_speculative,
+                    self._gen_num_per_cycle,
+                )
+                self._v4_args.max_tokens_per_rank = runtime_resolved_max_tokens_per_rank
+            if bool(getattr(self._v4_args, "commit_only", False)):
+                return self._initialize_commit_only(init_resource, device_str)
+            logging.info(
+                "[DeepSeekV4Model] building V4Transformer via factory (layers=%d, globals=%d) ...",
+                len(self.weight.weights),
+                len(self.weight.global_weights),
+            )
+            prev_dtype = torch.get_default_dtype()
+            torch.set_default_dtype(torch.bfloat16)
+            try:
+                with torch.device("meta"):
+                    logging.info("[ARM_INIT_DIAG] V4Transformer ctor begin class=%s device=%s role=%s speculative=%s", type(self).__name__, device_str, self._is_decode_role, self._is_speculative)
+                    self.v4 = V4Transformer(self._v4_args, mw=self.weight)
+                    logging.info("[ARM_INIT_DIAG] V4Transformer ctor end class=%s device=%s", type(self).__name__, device_str)
+                    if self.v4.embed is not None:
+                        from rtp_llm.models_py.modules.dsv41.utils import V41Embedding
+
+                        self.v4.embed = V41Embedding(
+                            self.config, self.parallelism_config, self.v4.embed.weight
+                        )
+            finally:
+                torch.set_default_dtype(prev_dtype)
+            if self._captures_aux_hidden:
+                self.v4.set_aux_hidden_capture_layer_ids(self._capture_aux_hidden_layer_ids)
+            for diagnostic_layer_index, layer in enumerate(self.v4.layers):
+                logging.info("[ARM_INIT_DIAG] init_rope_cache begin class=%s device=%s layer=%d", type(self).__name__, device_str, diagnostic_layer_index)
+                layer.attn.init_rope_cache(device=device_str)
+                logging.info("[ARM_INIT_DIAG] init_rope_cache end class=%s device=%s layer=%d", type(self).__name__, device_str, diagnostic_layer_index)
+            logging.info("[ARM_INIT_DIAG] _load_scoped_extra_weights begin class=%s device=%s", type(self).__name__, device_str)
+            self._load_scoped_extra_weights(self.weight)
+            logging.info("[ARM_INIT_DIAG] _load_scoped_extra_weights end class=%s device=%s", type(self).__name__, device_str)
+            del self.weight
+            if torch.cuda.is_available() and device_str.startswith("cuda"):
+                gpu_mem_gb = torch.cuda.memory_allocated(torch.device(device_str)) / 1024**3
+                logging.info("[DeepSeekV4Model] GPU mem after load: %.1f GB", gpu_mem_gb)
+            logging.info("[ARM_INIT_DIAG] after load memory log class=%s device=%s", type(self).__name__, device_str)
+            model_warm_up = model_warm_up_enabled()
+            if (
+                device_str.startswith("cuda")
+                and model_warm_up
+                and (self._v4_args.v41_config is None)
+            ):
+                from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
+
+                first_attn = self.v4.layers[0].attn
+                _tl_kernels.prewarm(
+                    first_attn.n_heads,
+                    first_attn.head_dim,
+                    first_attn.softmax_scale,
+                    device_str,
+                )
+                import torch as _torch
+
+                from rtp_llm.models_py.modules.dsv41._indexer_score_triton import (
+                    v4_indexer_score as _v4_idx,
+                )
+                from rtp_llm.models_py.modules.dsv41.dsv4_kernel_jit_warmup import (
+                    _run_triton_warmup_launch_with_retry,
+                )
+
+                if len(self.v4.layers) > 2 and self.v4.layers[2].attn.indexer is not None:
+                    _idx = self.v4.layers[2].attn.indexer
+                    _H = int(_idx.n_heads)
+                    _D = int(_idx.head_dim)
+                    _ratio = max(int(_idx.compress_ratio), 1)
+                    _T_dec = int(self._v4_args.max_seq_len) // _ratio
+                    _q_dec = _torch.zeros(
+                        (1, 1, _H, _D), dtype=_torch.bfloat16, device=device_str
+                    )
+                    _kv_dec = _torch.zeros(
+                        (1, _T_dec, _D), dtype=_torch.bfloat16, device=device_str
+                    )
+                    _w_dec = _torch.zeros(
+                        (1, 1, _H), dtype=_torch.bfloat16, device=device_str
+                    )
+                    _run_triton_warmup_launch_with_retry(
+                        "DSV4IndexerScore",
+                        f"decode shape S=1 T={_T_dec} H={_H} D={_D}",
+                        lambda: _v4_idx(
+                            _q_dec, _kv_dec, _w_dec, q_pos=None, compress_ratio=1
+                        ),
+                        device=_torch.device(device_str),
+                    )
+                    _q_pos_dec = _torch.zeros((1, 1), dtype=_torch.int32, device=device_str)
+                    _run_triton_warmup_launch_with_retry(
+                        "DSV4IndexerScore",
+                        f"prefill-mask shape S=1 T={_T_dec} H={_H} D={_D} ratio={_ratio}",
+                        lambda: _v4_idx(
+                            _q_dec, _kv_dec, _w_dec, q_pos=_q_pos_dec, compress_ratio=_ratio
+                        ),
+                        device=_torch.device(device_str),
+                    )
+                try:
+                    from flash_mla import flash_mla_sparse_fwd as _flash_mla_sparse_fwd
+
+                    _swa_attn = self.v4.layers[0].attn
+                    _H_swa = int(_swa_attn.n_heads)
+                    _D_swa = int(_swa_attn.head_dim)
+                    _W_swa = int(_swa_attn.window_size)
+                    _q_swa = _torch.zeros(
+                        (2, _H_swa, _D_swa), dtype=_torch.bfloat16, device=device_str
+                    )
+                    _kv_swa = _torch.zeros(
+                        (5, 1, _D_swa), dtype=_torch.bfloat16, device=device_str
+                    )
+                    _idx_swa = _torch.full(
+                        (2, 1, _W_swa), -1, dtype=_torch.int32, device=device_str
+                    )
+                    _cp_rank_swa = 0
+                    try:
+                        import torch.distributed as _dist
+
+                        if _dist.is_available() and _dist.is_initialized():
+                            _cp_rank_swa = int(_dist.get_rank())
+                    except Exception:
+                        _cp_rank_swa = 0
+                    _first_topk_len_swa = min(_cp_rank_swa + 1, 5, _W_swa)
+                    _idx_swa[0, 0, :_first_topk_len_swa] = _torch.arange(
+                        _first_topk_len_swa, dtype=_torch.int32, device=device_str
+                    )
+                    _idx_swa[1, 0, :5] = _torch.arange(
+                        5, dtype=_torch.int32, device=device_str
+                    )
+                    _topk_len_swa = _torch.tensor(
+                        [_first_topk_len_swa, 5], dtype=_torch.int32, device=device_str
+                    )
+                    _flash_mla_sparse_fwd(
+                        q=_q_swa,
+                        kv=_kv_swa,
+                        indices=_idx_swa,
+                        sm_scale=float(_swa_attn.softmax_scale),
+                        attn_sink=_swa_attn.attn_sink,
+                        topk_length=_topk_len_swa,
+                    )
+                    logging.info("[DeepSeekV4Model] flash_mla SWA kv_full prewarm done")
+                except Exception:
+                    logging.exception(
+                        "[DeepSeekV4Model] flash_mla SWA kv_full prewarm failed"
+                    )
+                    raise
+                try:
+                    import torch.distributed as _dist
+
+                    _moe_layer = self.v4.layers[0].ffn
+                    if getattr(_moe_layer, "strategy_name", None) in (
+                        "mega_moe",
+                        "mega_moe_se",
+                    ):
+                        _executor = _moe_layer.fused_moe.fused_experts
+                        if _dist.is_available() and _dist.is_initialized():
+                            _dist.barrier()
+                        _cfg = _executor.cfg
+                        _x_moe = _torch.zeros(
+                            (1, int(_cfg.dim)), dtype=_torch.bfloat16, device=device_str
+                        )
+                        _w_moe = _torch.zeros(
+                            (1, int(_cfg.n_activated_experts)),
+                            dtype=_torch.float32,
+                            device=device_str,
+                        )
+                        _w_moe[:, 0] = 1.0
+                        _start = int(_cfg.local_expert_start)
+                        _end = max(int(_cfg.local_expert_end), _start + 1)
+                        _idx_vals = (
+                            _torch.arange(
+                                int(_cfg.n_activated_experts),
+                                dtype=_torch.int64,
+                                device=device_str,
+                            )
+                            % (_end - _start)
+                            + _start
+                        )
+                        _idx_moe = _idx_vals.unsqueeze(0).contiguous()
+                        _executor(_x_moe, _w_moe, _idx_moe)
+                        _torch.cuda.synchronize()
+                        if _dist.is_available() and _dist.is_initialized():
+                            _dist.barrier()
+                        logging.info("[DeepSeekV4Model] MegaMoE prewarm done")
+                except Exception:
+                    logging.exception("[DeepSeekV4Model] MegaMoE prewarm failed")
+                    raise
+                try:
+                    from rtp_llm.models_py.modules.dsv41.dsv4_kernel_jit_warmup import (
+                        _collect_dsv4_batched_fp8_einsum_shapes,
+                        _collect_dsv4_dense_gemm_shapes,
+                        _collect_dsv4_fp8_mqa_logits_shapes,
+                        _collect_dsv4_mhc_head_fused_shapes,
+                        _collect_dsv4_mhc_prenorm_shapes,
+                        resolve_cp_metadata_warmup_max_batch_size,
+                        resolve_dense_gemm_warmup_max_m,
+                        warmup_batched_fp8_einsum_jit,
+                        warmup_compressor_combine_branch_kernels,
+                        warmup_dense_gemm_jit,
+                        warmup_dsv4_fp8_swa_slot_dequant_jit,
+                        warmup_fp8_mqa_logits_jit,
+                        warmup_mhc_head_fused_jit,
+                        warmup_mhc_prenorm_gemm_jit,
+                        warmup_prefill_cp_metadata_jit,
+                    )
+
+                    _jit_device = _torch.device(device_str)
+                    _fixed_region_cp_size = 1
+                    _fixed_region_prefill_sliced = False
+                    _fixed_region_cp_config = getattr(
+                        self.parallelism_config, "prefill_cp_config", None
+                    )
+                    if _fixed_region_cp_config is not None and bool(
+                        getattr(_fixed_region_cp_config, "kv_cache_sharded", False)
+                    ):
+                        if self._is_decode_role:
+                            try:
+                                _decode_prefill_cp = bool(
+                                    _fixed_region_cp_config.is_prefill_enabled()
+                                )
+                            except Exception:
+                                _decode_prefill_cp = False
+                            if _decode_prefill_cp:
+                                _fixed_region_cp_size = max(
+                                    int(
+                                        getattr(
+                                            _fixed_region_cp_config, "prefill_cp_size", 0
+                                        )
+                                        or 1
+                                    ),
+                                    1,
+                                )
+                        else:
+                            _fixed_region_cp_size = max(
+                                int(getattr(self.parallelism_config, "tp_size", 1) or 1), 1
+                            )
+                            _fixed_region_prefill_sliced = _fixed_region_cp_size > 1
+                    warmup_compressor_combine_branch_kernels(
+                        v4=self.v4,
+                        v4_args=self._v4_args,
+                        device=_jit_device,
+                        gen_num_per_cycle=self._gen_num_per_cycle,
+                        fixed_region_cp_size=_fixed_region_cp_size,
+                        fixed_region_prefill_sliced=_fixed_region_prefill_sliced,
+                    )
+                    _dense_shapes = _collect_dsv4_dense_gemm_shapes(self)
+                    _dense_gemm_prefill_chunk_size = 0
+                    if not self._is_decode_role and chunked_moe_enabled():
+                        _dense_gemm_prefill_chunk_size = max(
+                            int(moe_chunk_tokens_from_env()), 0
+                        )
+                    _prefill_cp_config = getattr(
+                        self.parallelism_config, "prefill_cp_config", None
+                    )
+                    _prefill_cp_enabled = False
+                    if _prefill_cp_config is not None:
+                        try:
+                            _prefill_cp_enabled = bool(_prefill_cp_config.is_enabled())
+                        except Exception:
+                            _prefill_cp_enabled = False
+                    _prefill_kv_cache_sharded = bool(
+                        getattr(_prefill_cp_config, "kv_cache_sharded", False)
+                    )
+                    _prefill_cp_size = (
+                        int(getattr(self.parallelism_config, "tp_size", 1) or 1)
+                        if _prefill_cp_enabled
+                        else 1
+                    )
+                    warmup_prefill_cp_metadata_jit(
+                        is_decode_role=self._is_decode_role,
+                        cp_enabled=_prefill_cp_enabled,
+                        cp_size=_prefill_cp_size,
+                        max_batch_size=resolve_cp_metadata_warmup_max_batch_size(
+                            self._max_context_batch_size, self._max_generate_batch_size
+                        ),
+                        fp8_kv_cache=self.fp8_kv_cache,
+                        kv_cache_sharded=_prefill_kv_cache_sharded,
+                        device=_jit_device,
+                    )
+                    _dense_gemm_max_m = resolve_dense_gemm_warmup_max_m(
+                        max_seq_len=int(self._v4_args.max_seq_len),
+                        max_batch_size=int(self._v4_args.max_batch_size),
+                        role_type_name=(
+                            RoleType.DECODE if self._is_decode_role else RoleType.PREFILL
+                        ),
+                        prefill_chunk_size=_dense_gemm_prefill_chunk_size,
+                        max_tokens_per_rank=int(self._v4_args.max_tokens_per_rank),
+                        is_speculative=self._is_speculative,
+                        gen_num_per_cycle=self._gen_num_per_cycle,
+                        cp_size=_prefill_cp_size,
+                        cp_enabled=_prefill_cp_enabled,
+                    )
+                    logging.info(
+                        "[DeepSeekV4Model] DenseGEMM JIT warmup max_m=%d prefill_chunk_size=%d max_tokens_per_rank=%d role=%s cp_enabled=%s cp_size=%d",
+                        _dense_gemm_max_m,
+                        _dense_gemm_prefill_chunk_size,
+                        int(self._v4_args.max_tokens_per_rank),
+                        "DECODE" if self._is_decode_role else "PREFILL",
+                        _prefill_cp_enabled,
+                        _prefill_cp_size,
+                    )
+                    warmup_dense_gemm_jit(
+                        _dense_shapes, max_m=_dense_gemm_max_m, device=_jit_device
+                    )
+                    _batched_fp8_einsum_shapes = _collect_dsv4_batched_fp8_einsum_shapes(
+                        self.v4
+                    )
+                    warmup_batched_fp8_einsum_jit(
+                        _batched_fp8_einsum_shapes,
+                        max_m=_dense_gemm_max_m,
+                        device=_jit_device,
+                    )
+                    _mhc_prenorm_shapes = _collect_dsv4_mhc_prenorm_shapes(self.v4)
+                    warmup_mhc_prenorm_gemm_jit(
+                        _mhc_prenorm_shapes, max_m=_dense_gemm_max_m, device=_jit_device
+                    )
+                    _mhc_head_fused_shapes = _collect_dsv4_mhc_head_fused_shapes(self.v4)
+                    warmup_mhc_head_fused_jit(_mhc_head_fused_shapes, device=_jit_device)
+                    if (
+                        self.fp8_kv_cache
+                        and (not self._is_decode_role)
+                        and _prefill_cp_enabled
+                        and (_prefill_cp_size > 1)
+                        and _prefill_kv_cache_sharded
+                    ):
+                        warmup_dsv4_fp8_swa_slot_dequant_jit(
+                            kv_cache=self.kv_cache,
+                            cp_size=_prefill_cp_size,
+                            device=_jit_device,
+                        )
+                    _fp8_mqa_logits_shapes = _collect_dsv4_fp8_mqa_logits_shapes(self.v4)
+                    warmup_fp8_mqa_logits_jit(_fp8_mqa_logits_shapes, device=_jit_device)
+                    logging.info("[DeepSeekV4Model] kernel JIT prewarm done")
+                except Exception:
+                    logging.exception("[DeepSeekV4Model] kernel JIT prewarm failed")
+                    raise
+                _torch.cuda.synchronize()
+            if (
+                device_str.startswith("cuda")
+                and model_warm_up
+                and (self._v4_args.v41_config is not None)
+            ):
                 from rtp_llm.models_py.modules.dsv41.dsv41_kernel_jit_warmup import (
                     warmup_v41_decode_jit,
                     warmup_v41_prefill_jit,
                 )
 
-                warmup_device = (
-                    self.main_proj.weight.device
-                    if getattr(self._v4_args, "commit_only", False)
-                    else self.v4.embed.weight.device
-                )
                 if self._is_decode_role:
-                    warmup_v41_decode_jit(self, device=warmup_device)
+                    warmup_v41_decode_jit(self, device=torch.device(device_str))
                 else:
-                    warmup_v41_prefill_jit(self, device=warmup_device)
-            return True
-        device = (
-            next(iter(self.weight.global_weights.values())).device
-            if self.weight.global_weights
-            else "cuda:0"
-        )
-        device_str = str(device)
-        self._is_speculative = bool(init_resource.is_speculative)
-        self._is_decode_role = bool(init_resource.is_decode_role)
-        self._max_context_batch_size = init_resource.max_context_batch_size
-        self._v4_args.is_decode_role = self._is_decode_role
-        moe_budget = int(self._v4_args.max_tokens_per_rank)
-        if (
-            self._v4_args.v41_config is not None
-            and (not self._is_decode_role)
-            and (self._max_prefill_batch_tokens > 0)
-        ):
-            moe_budget = cp_padded_batch_tokens_per_rank_bound(
-                self._max_prefill_batch_tokens,
-                self._prefill_cp_size,
-                self._max_generate_batch_size,
-            )
-        runtime_resolved_max_tokens_per_rank = resolve_moe_max_tokens_per_rank(
-            max_seq_len=int(self._v4_args.max_seq_len),
-            current_max_tokens_per_rank=moe_budget,
-            cp_size=1,
-            max_generate_batch_size=int(self._max_generate_batch_size),
-            is_decode_role=self._is_decode_role,
-            is_speculative=self._is_speculative,
-            gen_num_per_cycle=self._gen_num_per_cycle,
-            chunking_enabled=chunked_moe_enabled(),
-            chunk_tokens=moe_chunk_tokens_from_env(),
-        )
-        if runtime_resolved_max_tokens_per_rank != self._v4_args.max_tokens_per_rank:
-            chunk_tokens_env_for_log = (
-                DSV4_CHUNK_TOKENS_ENV
-                if dsv4_global_chunk_tokens_configured()
-                else "DSV4_MOE_CHUNK_TOKENS"
-            )
-            chunk_tokens_for_log = -1
-            if not self._is_decode_role and (
-                dsv4_global_chunk_tokens_configured()
-                or os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
-            ):
-                chunk_tokens_for_log = moe_chunk_tokens_from_env()
+                    warmup_v41_prefill_jit(self, device=torch.device(device_str))
+            self._bind_runtime_buffers(torch.device(device_str))
             logging.info(
-                "[DeepSeekV4Model] runtime MoE token budget: max_tokens_per_rank %d -> %d (%s=%d, role=%s, speculative=%s, gen_num_per_cycle=%d)",
-                self._v4_args.max_tokens_per_rank,
-                runtime_resolved_max_tokens_per_rank,
-                chunk_tokens_env_for_log,
-                chunk_tokens_for_log,
-                "DECODE" if self._is_decode_role else "PREFILL",
-                self._is_speculative,
-                self._gen_num_per_cycle,
+                "[DeepSeekV4Model] bound runtime buffers: prefill_ws_q_tokens=%d (per-forward) mtp_hidden_enabled=%s",
+                self._resolve_prefill_q_token_capacity(),
+                self._shared_runtime_buffers.mtp_hidden_enabled,
             )
-            self._v4_args.max_tokens_per_rank = runtime_resolved_max_tokens_per_rank
-        if bool(getattr(self._v4_args, "commit_only", False)):
-            return self._initialize_commit_only(init_resource, device_str)
-        logging.info(
-            "[DeepSeekV4Model] building V4Transformer via factory (layers=%d, globals=%d) ...",
-            len(self.weight.weights),
-            len(self.weight.global_weights),
-        )
-        prev_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(torch.bfloat16)
-        try:
-            with torch.device("meta"):
-                self.v4 = V4Transformer(self._v4_args, mw=self.weight)
-                if self.v4.embed is not None:
-                    from rtp_llm.models_py.modules.dsv41.utils import V41Embedding
-
-                    self.v4.embed = V41Embedding(
-                        self.config, self.parallelism_config, self.v4.embed.weight
-                    )
+            self._materialized = True
+            return True
         finally:
-            torch.set_default_dtype(prev_dtype)
-        if self._captures_aux_hidden:
-            self.v4.set_aux_hidden_capture_layer_ids(self._capture_aux_hidden_layer_ids)
-        for layer in self.v4.layers:
-            layer.attn.init_rope_cache(device=device_str)
-        self._load_scoped_extra_weights(self.weight)
-        del self.weight
-        if torch.cuda.is_available() and device_str.startswith("cuda"):
-            gpu_mem_gb = torch.cuda.memory_allocated(torch.device(device_str)) / 1024**3
-            logging.info("[DeepSeekV4Model] GPU mem after load: %.1f GB", gpu_mem_gb)
-        model_warm_up = model_warm_up_enabled()
-        if (
-            device_str.startswith("cuda")
-            and model_warm_up
-            and (self._v4_args.v41_config is None)
-        ):
-            from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
-
-            first_attn = self.v4.layers[0].attn
-            _tl_kernels.prewarm(
-                first_attn.n_heads,
-                first_attn.head_dim,
-                first_attn.softmax_scale,
-                device_str,
-            )
-            import torch as _torch
-
-            from rtp_llm.models_py.modules.dsv41._indexer_score_triton import (
-                v4_indexer_score as _v4_idx,
-            )
-            from rtp_llm.models_py.modules.dsv41.dsv4_kernel_jit_warmup import (
-                _run_triton_warmup_launch_with_retry,
-            )
-
-            if len(self.v4.layers) > 2 and self.v4.layers[2].attn.indexer is not None:
-                _idx = self.v4.layers[2].attn.indexer
-                _H = int(_idx.n_heads)
-                _D = int(_idx.head_dim)
-                _ratio = max(int(_idx.compress_ratio), 1)
-                _T_dec = int(self._v4_args.max_seq_len) // _ratio
-                _q_dec = _torch.zeros(
-                    (1, 1, _H, _D), dtype=_torch.bfloat16, device=device_str
-                )
-                _kv_dec = _torch.zeros(
-                    (1, _T_dec, _D), dtype=_torch.bfloat16, device=device_str
-                )
-                _w_dec = _torch.zeros(
-                    (1, 1, _H), dtype=_torch.bfloat16, device=device_str
-                )
-                _run_triton_warmup_launch_with_retry(
-                    "DSV4IndexerScore",
-                    f"decode shape S=1 T={_T_dec} H={_H} D={_D}",
-                    lambda: _v4_idx(
-                        _q_dec, _kv_dec, _w_dec, q_pos=None, compress_ratio=1
-                    ),
-                    device=_torch.device(device_str),
-                )
-                _q_pos_dec = _torch.zeros((1, 1), dtype=_torch.int32, device=device_str)
-                _run_triton_warmup_launch_with_retry(
-                    "DSV4IndexerScore",
-                    f"prefill-mask shape S=1 T={_T_dec} H={_H} D={_D} ratio={_ratio}",
-                    lambda: _v4_idx(
-                        _q_dec, _kv_dec, _w_dec, q_pos=_q_pos_dec, compress_ratio=_ratio
-                    ),
-                    device=_torch.device(device_str),
-                )
-            try:
-                from flash_mla import flash_mla_sparse_fwd as _flash_mla_sparse_fwd
-
-                _swa_attn = self.v4.layers[0].attn
-                _H_swa = int(_swa_attn.n_heads)
-                _D_swa = int(_swa_attn.head_dim)
-                _W_swa = int(_swa_attn.window_size)
-                _q_swa = _torch.zeros(
-                    (2, _H_swa, _D_swa), dtype=_torch.bfloat16, device=device_str
-                )
-                _kv_swa = _torch.zeros(
-                    (5, 1, _D_swa), dtype=_torch.bfloat16, device=device_str
-                )
-                _idx_swa = _torch.full(
-                    (2, 1, _W_swa), -1, dtype=_torch.int32, device=device_str
-                )
-                _cp_rank_swa = 0
-                try:
-                    import torch.distributed as _dist
-
-                    if _dist.is_available() and _dist.is_initialized():
-                        _cp_rank_swa = int(_dist.get_rank())
-                except Exception:
-                    _cp_rank_swa = 0
-                _first_topk_len_swa = min(_cp_rank_swa + 1, 5, _W_swa)
-                _idx_swa[0, 0, :_first_topk_len_swa] = _torch.arange(
-                    _first_topk_len_swa, dtype=_torch.int32, device=device_str
-                )
-                _idx_swa[1, 0, :5] = _torch.arange(
-                    5, dtype=_torch.int32, device=device_str
-                )
-                _topk_len_swa = _torch.tensor(
-                    [_first_topk_len_swa, 5], dtype=_torch.int32, device=device_str
-                )
-                _flash_mla_sparse_fwd(
-                    q=_q_swa,
-                    kv=_kv_swa,
-                    indices=_idx_swa,
-                    sm_scale=float(_swa_attn.softmax_scale),
-                    attn_sink=_swa_attn.attn_sink,
-                    topk_length=_topk_len_swa,
-                )
-                logging.info("[DeepSeekV4Model] flash_mla SWA kv_full prewarm done")
-            except Exception:
-                logging.exception(
-                    "[DeepSeekV4Model] flash_mla SWA kv_full prewarm failed"
-                )
-                raise
-            try:
-                import torch.distributed as _dist
-
-                _moe_layer = self.v4.layers[0].ffn
-                if getattr(_moe_layer, "strategy_name", None) in (
-                    "mega_moe",
-                    "mega_moe_se",
-                ):
-                    _executor = _moe_layer.fused_moe.fused_experts
-                    if _dist.is_available() and _dist.is_initialized():
-                        _dist.barrier()
-                    _cfg = _executor.cfg
-                    _x_moe = _torch.zeros(
-                        (1, int(_cfg.dim)), dtype=_torch.bfloat16, device=device_str
-                    )
-                    _w_moe = _torch.zeros(
-                        (1, int(_cfg.n_activated_experts)),
-                        dtype=_torch.float32,
-                        device=device_str,
-                    )
-                    _w_moe[:, 0] = 1.0
-                    _start = int(_cfg.local_expert_start)
-                    _end = max(int(_cfg.local_expert_end), _start + 1)
-                    _idx_vals = (
-                        _torch.arange(
-                            int(_cfg.n_activated_experts),
-                            dtype=_torch.int64,
-                            device=device_str,
-                        )
-                        % (_end - _start)
-                        + _start
-                    )
-                    _idx_moe = _idx_vals.unsqueeze(0).contiguous()
-                    _executor(_x_moe, _w_moe, _idx_moe)
-                    _torch.cuda.synchronize()
-                    if _dist.is_available() and _dist.is_initialized():
-                        _dist.barrier()
-                    logging.info("[DeepSeekV4Model] MegaMoE prewarm done")
-            except Exception:
-                logging.exception("[DeepSeekV4Model] MegaMoE prewarm failed")
-                raise
-            try:
-                from rtp_llm.models_py.modules.dsv41.dsv4_kernel_jit_warmup import (
-                    _collect_dsv4_batched_fp8_einsum_shapes,
-                    _collect_dsv4_dense_gemm_shapes,
-                    _collect_dsv4_fp8_mqa_logits_shapes,
-                    _collect_dsv4_mhc_head_fused_shapes,
-                    _collect_dsv4_mhc_prenorm_shapes,
-                    resolve_cp_metadata_warmup_max_batch_size,
-                    resolve_dense_gemm_warmup_max_m,
-                    warmup_batched_fp8_einsum_jit,
-                    warmup_compressor_combine_branch_kernels,
-                    warmup_dense_gemm_jit,
-                    warmup_dsv4_fp8_swa_slot_dequant_jit,
-                    warmup_fp8_mqa_logits_jit,
-                    warmup_mhc_head_fused_jit,
-                    warmup_mhc_prenorm_gemm_jit,
-                    warmup_prefill_cp_metadata_jit,
-                )
-
-                _jit_device = _torch.device(device_str)
-                _fixed_region_cp_size = 1
-                _fixed_region_prefill_sliced = False
-                _fixed_region_cp_config = getattr(
-                    self.parallelism_config, "prefill_cp_config", None
-                )
-                if _fixed_region_cp_config is not None and bool(
-                    getattr(_fixed_region_cp_config, "kv_cache_sharded", False)
-                ):
-                    if self._is_decode_role:
-                        try:
-                            _decode_prefill_cp = bool(
-                                _fixed_region_cp_config.is_prefill_enabled()
-                            )
-                        except Exception:
-                            _decode_prefill_cp = False
-                        if _decode_prefill_cp:
-                            _fixed_region_cp_size = max(
-                                int(
-                                    getattr(
-                                        _fixed_region_cp_config, "prefill_cp_size", 0
-                                    )
-                                    or 1
-                                ),
-                                1,
-                            )
-                    else:
-                        _fixed_region_cp_size = max(
-                            int(getattr(self.parallelism_config, "tp_size", 1) or 1), 1
-                        )
-                        _fixed_region_prefill_sliced = _fixed_region_cp_size > 1
-                warmup_compressor_combine_branch_kernels(
-                    v4=self.v4,
-                    v4_args=self._v4_args,
-                    device=_jit_device,
-                    gen_num_per_cycle=self._gen_num_per_cycle,
-                    fixed_region_cp_size=_fixed_region_cp_size,
-                    fixed_region_prefill_sliced=_fixed_region_prefill_sliced,
-                )
-                _dense_shapes = _collect_dsv4_dense_gemm_shapes(self)
-                _dense_gemm_prefill_chunk_size = 0
-                if not self._is_decode_role and chunked_moe_enabled():
-                    _dense_gemm_prefill_chunk_size = max(
-                        int(moe_chunk_tokens_from_env()), 0
-                    )
-                _prefill_cp_config = getattr(
-                    self.parallelism_config, "prefill_cp_config", None
-                )
-                _prefill_cp_enabled = False
-                if _prefill_cp_config is not None:
-                    try:
-                        _prefill_cp_enabled = bool(_prefill_cp_config.is_enabled())
-                    except Exception:
-                        _prefill_cp_enabled = False
-                _prefill_kv_cache_sharded = bool(
-                    getattr(_prefill_cp_config, "kv_cache_sharded", False)
-                )
-                _prefill_cp_size = (
-                    int(getattr(self.parallelism_config, "tp_size", 1) or 1)
-                    if _prefill_cp_enabled
-                    else 1
-                )
-                warmup_prefill_cp_metadata_jit(
-                    is_decode_role=self._is_decode_role,
-                    cp_enabled=_prefill_cp_enabled,
-                    cp_size=_prefill_cp_size,
-                    max_batch_size=resolve_cp_metadata_warmup_max_batch_size(
-                        self._max_context_batch_size, self._max_generate_batch_size
-                    ),
-                    fp8_kv_cache=self.fp8_kv_cache,
-                    kv_cache_sharded=_prefill_kv_cache_sharded,
-                    device=_jit_device,
-                )
-                _dense_gemm_max_m = resolve_dense_gemm_warmup_max_m(
-                    max_seq_len=int(self._v4_args.max_seq_len),
-                    max_batch_size=int(self._v4_args.max_batch_size),
-                    role_type_name=(
-                        RoleType.DECODE if self._is_decode_role else RoleType.PREFILL
-                    ),
-                    prefill_chunk_size=_dense_gemm_prefill_chunk_size,
-                    max_tokens_per_rank=int(self._v4_args.max_tokens_per_rank),
-                    is_speculative=self._is_speculative,
-                    gen_num_per_cycle=self._gen_num_per_cycle,
-                    cp_size=_prefill_cp_size,
-                    cp_enabled=_prefill_cp_enabled,
-                )
-                logging.info(
-                    "[DeepSeekV4Model] DenseGEMM JIT warmup max_m=%d prefill_chunk_size=%d max_tokens_per_rank=%d role=%s cp_enabled=%s cp_size=%d",
-                    _dense_gemm_max_m,
-                    _dense_gemm_prefill_chunk_size,
-                    int(self._v4_args.max_tokens_per_rank),
-                    "DECODE" if self._is_decode_role else "PREFILL",
-                    _prefill_cp_enabled,
-                    _prefill_cp_size,
-                )
-                warmup_dense_gemm_jit(
-                    _dense_shapes, max_m=_dense_gemm_max_m, device=_jit_device
-                )
-                _batched_fp8_einsum_shapes = _collect_dsv4_batched_fp8_einsum_shapes(
-                    self.v4
-                )
-                warmup_batched_fp8_einsum_jit(
-                    _batched_fp8_einsum_shapes,
-                    max_m=_dense_gemm_max_m,
-                    device=_jit_device,
-                )
-                _mhc_prenorm_shapes = _collect_dsv4_mhc_prenorm_shapes(self.v4)
-                warmup_mhc_prenorm_gemm_jit(
-                    _mhc_prenorm_shapes, max_m=_dense_gemm_max_m, device=_jit_device
-                )
-                _mhc_head_fused_shapes = _collect_dsv4_mhc_head_fused_shapes(self.v4)
-                warmup_mhc_head_fused_jit(_mhc_head_fused_shapes, device=_jit_device)
-                if (
-                    self.fp8_kv_cache
-                    and (not self._is_decode_role)
-                    and _prefill_cp_enabled
-                    and (_prefill_cp_size > 1)
-                    and _prefill_kv_cache_sharded
-                ):
-                    warmup_dsv4_fp8_swa_slot_dequant_jit(
-                        kv_cache=self.kv_cache,
-                        cp_size=_prefill_cp_size,
-                        device=_jit_device,
-                    )
-                _fp8_mqa_logits_shapes = _collect_dsv4_fp8_mqa_logits_shapes(self.v4)
-                warmup_fp8_mqa_logits_jit(_fp8_mqa_logits_shapes, device=_jit_device)
-                logging.info("[DeepSeekV4Model] kernel JIT prewarm done")
-            except Exception:
-                logging.exception("[DeepSeekV4Model] kernel JIT prewarm failed")
-                raise
-            _torch.cuda.synchronize()
-        if (
-            device_str.startswith("cuda")
-            and model_warm_up
-            and (self._v4_args.v41_config is not None)
-        ):
-            from rtp_llm.models_py.modules.dsv41.dsv41_kernel_jit_warmup import (
-                warmup_v41_decode_jit,
-                warmup_v41_prefill_jit,
-            )
-
-            if self._is_decode_role:
-                warmup_v41_decode_jit(self, device=torch.device(device_str))
-            else:
-                warmup_v41_prefill_jit(self, device=torch.device(device_str))
-        self._bind_runtime_buffers(torch.device(device_str))
-        logging.info(
-            "[DeepSeekV4Model] bound runtime buffers: prefill_ws_q_tokens=%d (per-forward) mtp_hidden_enabled=%s",
-            self._resolve_prefill_q_token_capacity(),
-            self._shared_runtime_buffers.mtp_hidden_enabled,
-        )
-        self._materialized = True
-        return True
+            faulthandler.cancel_dump_traceback_later()
+            logging.info("[ARM_INIT_DIAG] _initialize_impl exit class=%s", type(self).__name__)
 
     def _should_capture_cuda_graph(self, attn: Any, is_target_verify: bool) -> bool:
         """Default: capture decode + verify, skip plain prefill.  MTP
