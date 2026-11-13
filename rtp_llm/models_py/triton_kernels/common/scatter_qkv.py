@@ -109,7 +109,7 @@ if gluon is not None:
 
     @gluon.jit(do_not_specialize=["m"])
     def _scatter_qkv_l2norm_sm90_multi_head(
-        packed, q_out, k_out, v_out, m, H: gl.constexpr
+        packed, q_out, k_out, v_out, m, H: gl.constexpr, COPY_V: gl.constexpr = True
     ):
         # Four warps own the 128 columns of each head, preserving the 1D
         # reference reduction tree. An eight-warp CTA tiles four Q/K pairs
@@ -129,10 +129,15 @@ if gluon is not None:
         ki = 1.0 / gl.sqrt(gl.sum(k * k, axis=1) + 1e-6)
         gl.store(q_out + dst, q * qi[:, None], valid)
         gl.store(k_out + dst, k * ki[:, None], valid)
-        for part in gl.static_range(3):
-            v_col = (head * 3 + part)[:, None] * 128 + col[None, :]
-            v = gl.load(packed + token[:, None] * row_width + 2 * H * 128 + v_col, valid, other=0)
-            gl.store(v_out + token[:, None] * (3 * H * 128) + v_col, v, valid)
+        if COPY_V:
+            for part in gl.static_range(3):
+                v_col = (head * 3 + part)[:, None] * 128 + col[None, :]
+                v = gl.load(
+                    packed + token[:, None] * row_width + 2 * H * 128 + v_col,
+                    valid,
+                    other=0,
+                )
+                gl.store(v_out + token[:, None] * (3 * H * 128) + v_col, v, valid)
 
 
 def try_scatter_qkv_l2norm_sm90(
@@ -141,8 +146,13 @@ def try_scatter_qkv_l2norm_sm90(
     num_v_heads: int,
     head_k_dim: int,
     head_v_dim: int,
+    *,
+    copy_v: bool = True,
 ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-    """Return normalized Q/K and raw V for qualified Qwen4 prefill geometry."""
+    """Return normalized Q/K and raw V for qualified Qwen4 prefill geometry.
+
+    With copy_v=False, the caller must fill V before consuming the result.
+    """
     if not (
         gluon is not None
         # TP1/2/4/8 keeps three consecutive V heads per Q/K head. The
@@ -165,6 +175,14 @@ def try_scatter_qkv_l2norm_sm90(
     k = torch.empty_like(q)
     v = packed.new_empty((1, m, num_v_heads, 128))
     _scatter_qkv_l2norm_sm90_multi_head[(triton.cdiv(m * num_k_heads, 4),)](
-        packed, q, k, v, m, H=num_k_heads, num_warps=8, num_stages=1
+        packed,
+        q,
+        k,
+        v,
+        m,
+        H=num_k_heads,
+        COPY_V=copy_v,
+        num_warps=8,
+        num_stages=1,
     )
     return q, k, v

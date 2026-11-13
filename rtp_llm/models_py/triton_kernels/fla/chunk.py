@@ -35,6 +35,8 @@ from rtp_llm.models_py.triton_kernels.fla.utils import (
 from rtp_llm.models_py.triton_kernels.fla.wy_fast import recompute_w_u_fwd
 
 RCP_LN2 = 1.0 / 0.6931471805599453
+SM90_CHUNK = True
+
 logger = logging.getLogger(__name__)
 
 # All Qwen3.5/Qwen3.6 runtime (Hg, H, K, V) shapes that the FlyDSL megakernel
@@ -164,6 +166,23 @@ def _validate_flydsl_chunk_gdn_inputs(
         )
 
 
+def _use_sm90_chunk(k, v, beta):
+    return (
+        SM90_CHUNK
+        and k.is_cuda
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability(k.device) == (9, 0)
+        and k.dtype == v.dtype == torch.bfloat16
+        and beta.dtype in (torch.bfloat16, torch.float32)
+        and k.shape[-1] == v.shape[-1] == 128
+        and (k.shape[-2], v.shape[-2]) in ((2, 6), (4, 12), (8, 24), (16, 48))
+        and 2048 <= k.shape[1] <= 32768
+        and k.is_contiguous()
+        and v.is_contiguous()
+        and beta.is_contiguous()
+    )
+
+
 def chunk_gated_delta_rule_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -174,6 +193,7 @@ def chunk_gated_delta_rule_fwd(
     initial_state: Optional[torch.Tensor],
     output_final_state: bool,
     cu_seqlens: Optional[torch.LongTensor] = None,
+    page_state_store=None,
 ):
     # AMD: scale g to log2 domain (multiply cumsum by 1/ln2) so AMD-side
     # downstream kernels can use the single-instruction exp2.
@@ -198,16 +218,28 @@ def chunk_gated_delta_rule_fwd(
         # The public API must return per-chunk h/v_new. The production FlyDSL
         # path is Qwen3Next's direct-store helper, which skips materialized h.
     else:
-        g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
-        # Original pipeline: separate kkt -> solve_tril -> recompute_w_u
+        # H20 D=128 prefill uses smaller CTAs for prefix/KKT/merge and wider V tiles.
+        sm90 = _use_sm90_chunk(k, v, beta)
+        g = chunk_local_cumsum(
+            g,
+            chunk_size=64,
+            cu_seqlens=cu_seqlens,
+            num_warps=2 if sm90 else 8,
+        )
         A = chunk_scaled_dot_kkt_fwd(
             k=k,
             beta=beta,
             g_cumsum=g,
             cu_seqlens=cu_seqlens,
             output_dtype=torch.float32,
+            num_warps=2 if sm90 else 8,
         )
-        A = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
+        A = solve_tril(
+            A=A,
+            cu_seqlens=cu_seqlens,
+            output_dtype=k.dtype,
+            num_warps=2 if sm90 else 4,
+        )
         w, u = recompute_w_u_fwd(
             k=k,
             v=v,
@@ -215,6 +247,7 @@ def chunk_gated_delta_rule_fwd(
             A=A,
             g_cumsum=g,
             cu_seqlens=cu_seqlens,
+            value_tile_size=128 if sm90 else 64,
         )
 
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
@@ -225,6 +258,7 @@ def chunk_gated_delta_rule_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        page_state_store=page_state_store,
     )
     o = chunk_fwd_o(
         q=q,
@@ -404,6 +438,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         output_final_state: bool,
         cu_seqlens: Optional[torch.LongTensor] = None,
         use_qk_l2norm_in_kernel: bool = False,
+        page_state_store=None,
     ):
         q_orig = q
         k_orig = k
@@ -427,6 +462,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
+            page_state_store=page_state_store,
         )
         return o.to(q.dtype), h, final_state
 
@@ -444,6 +480,7 @@ def chunk_gated_delta_rule(
     cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    page_state_store=None,
 ):
     r"""
     Args:
@@ -579,6 +616,7 @@ def chunk_gated_delta_rule(
         output_final_state,
         cu_seqlens,
         use_qk_l2norm_in_kernel,
+        page_state_store,
     )
     if head_first:
         o = rearrange(o, "b t h ... -> b h t ...")

@@ -182,6 +182,7 @@ def chunk_local_cumsum_scalar(
     cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
     output_dtype: torch.dtype | None = torch.float,
+    num_warps: int = 8,
 ) -> torch.Tensor:
     if head_first:
         B, H, T = g.shape
@@ -209,7 +210,7 @@ def chunk_local_cumsum_scalar(
         BT=BT,
         HEAD_FIRST=head_first,
         REVERSE=reverse,
-        num_warps=8,
+        num_warps=num_warps,
         num_stages=3,
     )
     return g
@@ -273,6 +274,7 @@ def chunk_local_cumsum(
     cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
     output_dtype: torch.dtype | None = torch.float,
+    num_warps: int = 8,
     **kwargs,
 ) -> torch.Tensor:
     if cu_seqlens is not None:
@@ -288,6 +290,7 @@ def chunk_local_cumsum(
             cu_seqlens=cu_seqlens,
             head_first=head_first,
             output_dtype=output_dtype,
+            num_warps=num_warps,
         )
     elif len(g.shape) == 4:
         return chunk_local_cumsum_vector(

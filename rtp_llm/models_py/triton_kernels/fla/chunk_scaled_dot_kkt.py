@@ -112,6 +112,7 @@ def chunk_scaled_dot_kkt_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32,
+    num_warps: int = 8,
 ) -> torch.Tensor:
     r"""
     Compute beta * K * K^T.
@@ -159,7 +160,7 @@ def chunk_scaled_dot_kkt_fwd(
         BT=BT,
         BK=64,
         IS_LOG2=is_amd,
-        num_warps=8,
+        num_warps=num_warps,
         num_stages=3,
     )
     return A

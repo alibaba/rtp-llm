@@ -14,7 +14,9 @@ import torch
 import triton
 import triton.language as tl
 
-from .prefill_filtered_topk import BLOCK_SELECTION_WIDTH
+from rtp_llm.models_py.modules.qwen4_exp.qsa.prefill_filtered_topk import (
+    BLOCK_SELECTION_WIDTH,
+)
 
 
 @triton.jit
