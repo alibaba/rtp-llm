@@ -229,7 +229,7 @@ class DPPrefillCapacityCPU(unittest.TestCase):
                     self.assertEqual(list(state.routed_rows.values()), [0] * 40)
 
     @torch.inference_mode()
-    def test_typed_receipt_preserves_legacy_eplb_decision_and_raw_cp8(self):
+    def test_mapping_is_independent_of_typed_receipt_and_raw_cp8(self):
         ids = torch.tensor([[0, 1, 2, -1, 3, 0, -1, -1], [3, 2, 1, 0, -1, -1, -1, -1]])
         weights = (ids >= 0).float()
         for mapping in (torch.tensor([[2], [0], [3], [1]]),
@@ -243,17 +243,18 @@ class DPPrefillCapacityCPU(unittest.TestCase):
                 layer.map_ids = MethodType(EplbLayer.map_ids, layer)
                 engine._weights[0], engine._eplb_layers[0] = (), layer
                 hidden = torch.ones(2, 5120, dtype=torch.bfloat16)
+                expected = layer.map_ids(ids)
                 with patch.dict(os.environ, {"RTP_V41_PPU_CP8_YOCO_FAST_PREFILL": "1"}), patch.object(
                     engine, "_forward_megamoe", return_value=hidden,
                 ) as native, patch.object(engine, "_map_expert_ids", wraps=engine._map_expert_ids) as mapped:
                     engine.forward(hidden, ids, weights, layer_id=0)
-                    expected = native.call_args.args[1].clone()
+                    self.assertTrue(torch.equal(native.call_args.args[1], expected))
                     engine.forward(hidden, ids, weights, layer_id=0, prepared_buffer=receipt)
-                    self.assertFalse(mapped.call_args.kwargs["single_replica"])
+                    self.assertEqual(mapped.call_args.kwargs, {})
                     self.assertTrue(torch.equal(native.call_args.args[1], expected))
                     self.assertIs(native.call_args.kwargs["prepared_buffer"], receipt.buffer)
                     engine.forward(hidden, ids, weights, layer_id=0, prepared_buffer=receipt.buffer)
-                    self.assertTrue(mapped.call_args.kwargs["single_replica"])
+                    self.assertEqual(mapped.call_args.kwargs, {})
                     self.assertTrue(torch.equal(native.call_args.args[1], expected))
                 engine.finish_dp_prefill_forward(receipt)
                 with self.assertRaises(ValueError):

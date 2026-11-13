@@ -77,15 +77,15 @@ class _SourceFixture:
 
 
 def _bank_reads(cache):
-    original = cache._copy_rows
+    original = cache._try_read_local_source_pool
     reads = []
 
-    def copy(key, request, positions, rows=None):
-        if rows is None and key[1] in _FULL:
-            reads.append((key, request, positions.numel()))
-        return original(key, request, positions, rows)
+    def copy(key, request, count, **kwargs):
+        if key[1] in _FULL:
+            reads.append((key, request, count))
+        return original(key, request, count, **kwargs)
 
-    return reads, patch.object(cache, "_copy_rows", new=copy)
+    return reads, patch.object(cache, "_try_read_local_source_pool", new=copy)
 
 
 class _SourceCacheCases:
@@ -257,8 +257,7 @@ class _SourceCacheCases:
                 layout = NS(chunk_lengths_per_req=chunks, prefix_lengths_host=fixture.prefixes)
 
                 def workspace():
-                    with patch.dict(os.environ, {"RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE": "1",
-                                                 "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE_FUSED": "1"}):
+                    with patch.dict(os.environ, {"RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE": "1"}):
                         return prefill.build_cp_prefill_workspace(
                             **args, cp=layout, shared={"local_prefill_workspace_layout": layout}, q8=False,
                         )
@@ -419,9 +418,11 @@ class LocalPrefillSourceCacheDevice(_SourceCacheCases, unittest.TestCase):
                 pool_indices = [event for event in events if event.get("cat") == "cpu_op"
                                 and event["name"] == "aten::index"
                                 and tuple(event.get("args", {}).get("Input Dims", [()])[0]) in pool_shapes]
-                self.assertEqual(len(pool_indices), expected_reads * ((count + 4095) // 4096))
-                self.assertTrue(any(event.get("cat") == "kernel" and "index_elementwise_kernel" in event["name"]
-                                    for event in events), "actual native pool GPU gather must execute")
+                self.assertEqual(len(pool_indices), 0)
+                restores = [event for event in events if event.get("cat") == "kernel"
+                            and "_restore_rows" in event["name"]]
+                self.assertEqual(len(restores), expected_reads,
+                                 "each cache miss must execute the existing native restore")
             for left, right in zip(outputs[1], outputs[0]):
                 assert_bytes(self, left, right)
 

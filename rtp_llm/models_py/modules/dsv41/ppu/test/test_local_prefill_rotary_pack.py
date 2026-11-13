@@ -66,7 +66,9 @@ def _fixture(device, ratio=2, prefixes=(129,), lengths=(9,), *, op=None, carry=T
     # table/row birth proof must survive without recertifying a pool key.
     stage(state, args)
     positions, requests = args[:2]
-    values = source.values(positions, 3).float()
+    values = source.values(positions, 3)
+    if ratio == 2:
+        values = values.float()  # CSA fields; ratio1 emits BF16 before norm.
     scores = source.values(positions, 7).float() * 0.25 if ratio == 2 else None
     if ratio == 2:
         for rid, prefix in enumerate(prefixes):
@@ -166,8 +168,16 @@ class LocalPrefillRotaryPackCPU(_ProducerCases, unittest.TestCase):
     def setUp(self):
         self.device = "cpu"
         super().setUp()
-        # Only CPU protocol tests substitute the primitive. The real codec,
-        # norms, linear modules and native insert/read paths remain in use.
+        # CPU protocol tests use test-only pack/norm providers. Device cases
+        # retain the real native providers; production has no CPU norm fallback.
+        def reference_norm(value, weight, *, eps):
+            values = value.float()
+            return (values * torch.rsqrt(values.square().mean(-1, keepdim=True) + eps)
+                    * weight.float()).to(value.dtype)
+
+        norm = patch("rtp_llm.models_py.modules.dsv41.ppu.rmsnorm._flashinfer_rmsnorm", return_value=reference_norm)
+        norm.start()
+        self.addCleanup(norm.stop)
         primitive = patch.object(_quant, "try_pack_rotary_fp4_rows", new=lambda kv, freqs, positions, global_pool:
                                  encode_kv(prefill._rope_tail(kv, freqs[positions.clamp_max(freqs.shape[0] - 1)]),
                                            pool_tag="global_kv_1" if global_pool else "indexer_kv"))
@@ -242,7 +252,7 @@ class LocalPrefillRotaryPackCPU(_ProducerCases, unittest.TestCase):
         ))
         with patch.dict(os.environ, {ENV: "0"}):
             later = _fixture("cpu")
-        self.assertIsNone(later.proof)
+        self.assertIsNotNone(later.proof, "cache provenance is independent of rotary packing")
         self.assertIsNotNone(prefill._make_local_producer_rotary_proof(
             later.args[-1], cache=later.source.cache, layer_id=0, prefixes=(129,), lengths=(9,),
         ), "a local selector needs no new latch when the original A08 birth proof exists")
@@ -353,7 +363,7 @@ class LocalPrefillRotaryPackCPU(_ProducerCases, unittest.TestCase):
                  patch.object(attention_layer, "_produce_global", new=producer_probe):
                 with self.assertRaises(Captured):
                     attn._body(torch.zeros(5, 8, dtype=torch.bfloat16))
-            if enabled and not invalidate:
+            if not invalidate:
                 self.assertIs(produced["positions"], seen["positions"])
                 self.assertIs(produced["request_ids"], seen["request_ids"])
                 self.assertIsInstance(produced["local_rotary_proof"], prefill._LocalProducerRotaryProof)

@@ -180,7 +180,7 @@ class LocalQORopeDevice(unittest.TestCase):
         self.assertTrue(is_ppu(), "in-place RoPE qualification requires a ZW PPU")
         self.environment = patch.dict(os.environ, {
             ENV: "1", "RTP_V41_PPU_FUSED_BF16_ROPE": "1",
-            "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE": "1", "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE_FUSED": "0",
+            "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE": "1",
             attention_layer.FUSION_ENV: "0", attention_layer.STREAMS_ENV: "0",
         })
         self.environment.start()

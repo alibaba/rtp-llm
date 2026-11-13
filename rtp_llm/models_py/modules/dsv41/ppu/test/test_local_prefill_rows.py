@@ -96,6 +96,42 @@ def legacy_rows(state, context=None, *, full=False, selected_only=False):
 
 
 class _LocalRowsCases:
+    def test_row_views_preserve_cached_tuple_and_selector_identity(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.row_metadata import RowLayout, SelectorKind
+
+        with patch.dict(os.environ, {ENV: "1", LOCAL_PREFILL_FULL_ROWS_ENV: "1"}):
+            state = state_for(self.device)
+            rows = state.rows()
+            view = state.row_view().validate()
+            self.assertIs(view.as_rows(), rows)
+            self.assertIs(view.layout, RowLayout.LOCAL_QUERY)
+            self.assertIs(view.selector.value, rows[3])
+            self.assertIs(view.selector.kind, SelectorKind.MASK)
+            full = state.full_row_view(None).validate()
+            self.assertIs(full.positions, rows[0])
+            self.assertIs(full.request_ids, rows[1])
+            self.assertIs(full.selector.value, full.as_full_rows()[2])
+            self.assertIs(full.selector.kind, SelectorKind.ALL)
+            self.assertFalse(view.selector.belongs_to(full))
+            context = cp1_context(state)
+            contextual = state.full_row_view(context)
+            self.assertIs(contextual.as_full_rows(), state.full_rows(context))
+            self.assertIs(contextual.layout, RowLayout.FULL)
+            self.assertIs(contextual.scope.context, context)
+
+    def test_fresh_description_rejects_rebound_sources_and_new_forward(self):
+        with patch.dict(os.environ, {ENV: "1"}):
+            state = state_for(self.device)
+            context = cp1_context(state)
+            view = state.row_view(context)
+            selector = view.selector
+            context.global_positions = context.global_positions.clone()
+            current = state.row_view(context)
+            self.assertFalse(selector.belongs_to(current))
+            self.assertIs(current.positions, context.global_positions)
+            next_state = state_for(self.device, inputs=state.inputs, cu=state.attn.cu_seqlens)
+            self.assertFalse(current.selector.belongs_to(next_state.row_view(context)))
+
     def test_full_row_slice_preserves_kv_producer_and_metadata_bytes(self):
         for prefixes, lengths in (
             ((17, 99, 64), (3, 0, 5)), ((4, 10), (0, 0)), ((126976,), (4096,)),

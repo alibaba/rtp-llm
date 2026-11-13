@@ -76,7 +76,7 @@ class LocalSplitL20Routing(unittest.TestCase):
             state = _state()
             state.cache.sharded = sharded
             if sharded:
-                state.context = NS(cp_size=8, kv_cache_sharded=True)
+                state.context = NS(cp_size=8, kv_cache_sharded=True, gather_restore_positions=None)
             block = _bare_block(state)
             block._forward_compact_l20 = Mock(return_value="split")
             with patch.dict(os.environ, {ENV: local, "RTP_V41_PPU_CP8_YOCO_SPLIT_L20": cp8_switch}), patch(
@@ -305,7 +305,6 @@ def _component(device, rows, *, native=False, eps=1e-6):
 class _SplitCases:
     def _run(self, rows=4096, eps=1e-6, *, backend="mega"):
         environment = {ENV: "1", "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE": "1",
-                       "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE_FUSED": "0",
                        "RTP_V41_PPU_LOCAL_PREFILL_AIU_PRENORM": "0", "RTP_V41_PPU_MHC_BACKEND": backend,
                        "RTP_V41_PPU_QUANT_MODE": "mxfp4_fp8_ptpc", "RTP_V41_PPU_PTPC_FUSION": "1",
                        attention_layer.FUSION_ENV: "0", attention_layer.STREAMS_ENV: "0"}

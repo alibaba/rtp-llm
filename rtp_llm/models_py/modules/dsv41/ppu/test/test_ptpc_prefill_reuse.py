@@ -218,7 +218,7 @@ def prefill_component(rows, *, indexed=True, device="cpu", mixed=False, compact=
         stack.enter_context(patch.dict(os.environ, environment))
         for name, replacement in (
             ("optimized_diagnostics_enabled", lambda: False),
-            ("cp8_yoco_small_ops_enabled", lambda state: False),
+            ("cp8_yoco_operator_eligible", lambda state: False),
             ("cp_all_gather_full", lambda value, context, **kwargs: value),
             ("_rope_tail", rope),
             ("build_cp_prefill_workspace", boundary),

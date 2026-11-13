@@ -46,14 +46,26 @@ def aten_mean_launch_config(rows, width):
     return block_width, block_height, factor
 
 
-def is_supported(hidden, gamma, eps):
+def is_supported(hidden, gamma, eps, *, allow_strided=False):
     if (
         not torch.__version__.startswith("2.11.")
         or not hidden.is_cuda
         or hidden.dtype != torch.bfloat16
         or hidden.layout != torch.strided
         or hidden.ndim not in (2, 3)
-        or not hidden.is_contiguous()
+        or (allow_strided and (hidden.is_conj() or hidden.is_neg()))
+        or not (
+            hidden.is_contiguous()
+            or (
+                allow_strided
+                and hidden.ndim == 2
+                and hidden.shape[-1] in (512, 1280)
+                and hidden.stride(1) == 1
+                and hidden.stride(0) >= hidden.shape[-1]
+                and not hidden.is_conj()
+                and not hidden.is_neg()
+            )
+        )
         or hidden.shape[-1] not in WIDTHS
         or gamma.dtype != torch.bfloat16
         or gamma.layout != torch.strided
@@ -100,7 +112,7 @@ def _kernels():
 
     @triton.jit
     def norm_quant(
-        X, Gamma, Norm, Quant, Scale,
+        X, Gamma, Norm, Quant, Scale, stride_x,
         WIDTH: tl.constexpr,
         LANES: tl.constexpr,
         LOG_LANES: tl.constexpr,
@@ -118,7 +130,7 @@ def _kernels():
         # by block_width. Each of the four components has its own accumulator.
         for chunk in tl.static_range(0, triton.cdiv(WIDTH, LANES * 4)):
             columns = vector_col + chunk * LANES * 4
-            values = widen_bf16(tl.load(X + row * WIDTH + columns, columns < WIDTH, 0))
+            values = widen_bf16(tl.load(X + row * stride_x + columns, columns < WIDTH, 0))
             square = mul_rn(values, values)
             accum = tl.where(columns < WIDTH, add_rn(accum, square), accum)
         even, odd = tl.split(tl.reshape(accum, (LANES, 2, 2)))
@@ -144,7 +156,7 @@ def _kernels():
 
         columns = tl.arange(0, BLOCK)
         mask = columns < WIDTH
-        values = widen_bf16(tl.load(X + row * WIDTH + columns, mask, 0))
+        values = widen_bf16(tl.load(X + row * stride_x + columns, mask, 0))
         gamma = widen_bf16(tl.load(Gamma + columns, mask, 0))
         normalized = mul_rn(mul_rn(values, inverse), gamma).to(tl.bfloat16)
         tl.store(Norm + row * WIDTH + columns, normalized, mask)
@@ -163,19 +175,33 @@ def _kernels():
     return triton, norm_quant
 
 
-def _candidate(hidden, gamma, eps, make_quant):
-    if not is_supported(hidden, gamma, eps):
+def _candidate(hidden, gamma, eps, make_quant, *, allow_strided=False):
+    if not is_supported(hidden, gamma, eps, allow_strided=allow_strided):
         return None
     width = hidden.shape[-1]
     rows = hidden.numel() // width
-    normalized = torch.empty_like(hidden)
-    quantized = torch.empty_like(hidden, dtype=torch.float8_e4m3fn) if make_quant else normalized
+    # Gapped Q/KV views keep their original input storage; all consumers still
+    # receive the same dense output ABI as the existing contiguous kernel.
+    normalized = (
+        torch.empty_like(hidden)
+        if hidden.is_contiguous()
+        else torch.empty(hidden.shape, dtype=hidden.dtype, device=hidden.device)
+    )
+    quantized = (
+        (
+            torch.empty_like(hidden, dtype=torch.float8_e4m3fn)
+            if hidden.is_contiguous()
+            else torch.empty(hidden.shape, dtype=torch.float8_e4m3fn, device=hidden.device)
+        )
+        if make_quant else normalized
+    )
     scales = torch.empty((*hidden.shape[:-1], 1), dtype=torch.float32, device=hidden.device) if make_quant else normalized
     if rows:
         lanes, _, factor = aten_mean_launch_config(rows, width)
         triton, kernel = _kernels()
         kernel[(rows,)](
             hidden, gamma, normalized, quantized, scales,
+            width if hidden.is_contiguous() else hidden.stride(0),
             WIDTH=width, LANES=lanes, LOG_LANES=lanes.bit_length() - 1,
             FACTOR=factor, EPS=_f32(eps), INV_MAX=FP8_INV_MAX,
             BLOCK=triton.next_power_of_2(width), MAKE_QUANT=make_quant,
@@ -185,21 +211,21 @@ def _candidate(hidden, gamma, eps, make_quant):
     return (normalized, quantized, scales) if make_quant else normalized
 
 
-def ptpc_rms_norm_candidate(hidden, gamma, eps=1e-6):
+def ptpc_rms_norm_candidate(hidden, gamma, eps=1e-6, *, allow_strided=False):
     """Return one-kernel norm candidate, or None for unsupported metadata.
 
     Inputs are finite BF16 inference tensors on the Torch2.11 PPU runtime.
     Its rsqrt and BF16 landing match the installed provider in the native
     bitwise and changed-input/gamma Graph component matrix.
     """
-    return _candidate(hidden, gamma, eps, False)
+    return _candidate(hidden, gamma, eps, False, allow_strided=allow_strided)
 
 
-def ptpc_rms_norm_quant_candidate(hidden, gamma, eps=1e-6):
+def ptpc_rms_norm_quant_candidate(hidden, gamma, eps=1e-6, *, allow_strided=False):
     """Return (BF16 norm, E4M3 payload, FP32 [...,1] scale), or None.
 
     This is an explicit producer result. A consumer must use the returned
     payload/scale directly to avoid running a second activation quantizer.
     There is no global tensor cache or stale Graph-replay reuse.
     """
-    return _candidate(hidden, gamma, eps, True)
+    return _candidate(hidden, gamma, eps, True, allow_strided=allow_strided)

@@ -16,9 +16,10 @@ import torch
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_swa_metadata as metadata
 from rtp_llm.models_py.modules.dsv41.ppu import _quant, prefill_swa
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import (
-    LOCAL_PREFILL_SWA_NATIVE_READ_ENV, LOCAL_PREFILL_SWA_NATIVE_WRITE_ENV,
-    SharedNativeCache, _LocalSwaWriteGeometry,
+    SharedNativeCache,
+    _LocalSwaWriteGeometry,
 )
+
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_fused import assert_bytes
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_operator_flags import _trace_events
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_swa_native_write import (
@@ -28,9 +29,29 @@ from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_swa_segments im
     FLAGS, arguments, compact_plan, stage,
 )
 
+# Legacy names only verify that retired selectors no longer affect dispatch.
+LOCAL_PREFILL_SWA_NATIVE_READ_ENV = 'RTP_V41_PPU_LOCAL_PREFILL_SWA_NATIVE_READ'
+LOCAL_PREFILL_SWA_NATIVE_WRITE_ENV = 'RTP_V41_PPU_LOCAL_PREFILL_SWA_NATIVE_WRITE'
+
 
 ENV = LOCAL_PREFILL_SWA_NATIVE_READ_ENV
 WRITE = LOCAL_PREFILL_SWA_NATIVE_WRITE_ENV
+
+
+
+def _kernel_mode(enabled):
+    """Keep an independent fallback arm after rollout flags retire."""
+    from contextlib import nullcontext
+
+    return (
+        nullcontext()
+        if enabled
+        else patch.object(
+            SharedNativeCache,
+            "_try_local_swa_native_tail",
+            return_value=None,
+        )
+    )
 
 
 class _RestoreCPU:
@@ -63,7 +84,7 @@ class _ReadCases:
         for prefixes, lengths, entries, span in cases:
             arms = []
             for enabled in (False, True):
-                with patch.dict(os.environ, {ENV: str(int(enabled))}):
+                with _kernel_mode(enabled):
                     state = fixture(self.device, prefixes, lengths, entries=entries, span=span)
                     args = arguments(state)
                     stage(state, args)
@@ -93,7 +114,7 @@ class _ReadCases:
                     table[0, 1] = table[0, 0]
             arms = []
             for enabled in (False, True):
-                with patch.dict(os.environ, {ENV: str(int(enabled))}):
+                with _kernel_mode(enabled):
                     state = fixture(self.device, (257,) if kind == "duplicate" else (128,),
                                     (1,), configure=configure)
                     stage(state, arguments(state))
@@ -115,7 +136,7 @@ class _ReadCases:
                     else:
                         rid = int(kind == "second-rid")
                         table[rid, 0] = -1 if kind in ("hole", "second-rid") else -2 if kind == "negative" else table.numel()
-                with patch.dict(os.environ, {ENV: str(int(enabled))}):
+                with _kernel_mode(enabled):
                     prefixes = (128, 128) if kind == "second-rid" else (512,) if kind == "columns" else (128,)
                     state = fixture(self.device, prefixes, (256,) * len(prefixes), configure=configure, seed=False)
                     with self.assertRaises(ValueError) as error:
@@ -132,7 +153,7 @@ class _ReadCases:
             table[1].copy_(table[0])
         arms = []
         for enabled in (False, True):
-            with patch.dict(os.environ, {ENV: str(int(enabled))}):
+            with _kernel_mode(enabled):
                 state = fixture(self.device, (128, 256), (128, 1), span=1024,
                                 configure=alias, cross_layer_alias=True)
                 for layer in (0, 1):
@@ -168,7 +189,7 @@ class _ReadCases:
             args = arguments(state)
             stage(state, args)
             cache = state.cache
-            with patch.dict(os.environ, {ENV: "0"}):
+            with patch.object(cache, "_local_swa_read_enabled", False):
                 meta = cache.inputs["swa_kv"]
                 if kind == "positions":
                     args[0].add_(1).sub_(1)
@@ -199,7 +220,7 @@ class _ReadCases:
             with patch.dict(os.environ, env):
                 state = fixture(self.device, (128,), (140,))
             stage(state, arguments(state))
-            self.assertEqual(state.cache._local_swa_native_read_stats["launches"], 0)
+            self.assertEqual(state.cache._local_swa_native_read_stats["launches"], 1)
         first = fixture(self.device, (128,), (140,))
         second = fixture(self.device, (128,), (140,))
         self.assertIsNot(first.cache._local_swa_read_nonce, second.cache._local_swa_read_nonce)
@@ -354,7 +375,7 @@ class LocalSwaNativeReadDevice(_ReadCases, unittest.TestCase):
     def test_actual_twentyone_restore_kernels_no_tail_scalar_fences_and_exact_pools(self):
         arms = []
         for enabled in (False, True):
-            with patch.dict(os.environ, {ENV: str(int(enabled))}):
+            with _kernel_mode(enabled):
                 state = fixture(self.device, (128,), (140,), layers=21)
                 args = [arguments(state, layer=layer) for layer in range(21)]
                 with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,

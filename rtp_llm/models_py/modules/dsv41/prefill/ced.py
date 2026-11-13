@@ -748,6 +748,7 @@ class CEDPlan:
         *,
         prepare_hidden_fn=None,
         bounded_replay=False,
+        bounded_replay_keep_tokens=128,
     ):
         # Host metadata and the request gate are broadcast by the engine to all
         # TP ranks. No extra device->host voting in the prefill critical path.
@@ -831,7 +832,9 @@ class CEDPlan:
         if bounded_replay:
             # Only live decode state is produced. Native cache policy must
             # exclude these decoder/draft SWA pools from prefix reuse.
-            starts = tuple(max(n - 128, 0) for n in lengths)
+            if type(bounded_replay_keep_tokens) is not int or bounded_replay_keep_tokens < 128:
+                raise ValueError("bounded replay must retain at least the complete 128-row window")
+            starts = tuple(max(n - bounded_replay_keep_tokens, 0) for n in lengths)
             selected = _bounded_replay_selected(lengths, starts)
         else:
             selected = checkpoint_positions(

@@ -6,6 +6,7 @@ CPU tests use an explicit test-only native double; device tests require ZW89.
 """
 
 import json
+from contextlib import nullcontext
 import math
 import os
 from pathlib import Path
@@ -418,13 +419,17 @@ class LocalPrefillTokenTopKDevice(unittest.TestCase):
         visible = torch.full((140,), 65536, device="cuda", dtype=torch.int32)
         bounds = (torch.full_like(visible, 7), visible.clone())
         token.try_select_tokens(base.clone(), visible, disposable=True)  # JIT outside capture.
+        with patch.object(token, "_hierarchical_ops", return_value=None):
+            token.try_select_tokens(base.clone(), visible, disposable=True)
         token.try_select_tokens(base.clone(), visible, bounds=bounds, disposable=True)
         reference(base, visible)
         traces = []
-        for name, native, prepared in (("torch", False, None), ("checked", True, None), ("radix", True, bounds)):
+        for name, native, prepared in (("torch", False, None), ("checked", True, None),
+                                       ("automatic", True, None), ("radix", True, bounds)):
             logits = base.clone()
             torch.cuda.synchronize()
-            with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+            reference_provider = patch.object(token, "_hierarchical_ops", return_value=None) if name == "checked" else nullcontext()
+            with reference_provider, torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
                                                     torch.profiler.ProfilerActivity.CUDA], record_shapes=True) as profile:
                 got = token.try_select_tokens(logits, visible, bounds=prepared, disposable=True) if native else reference(logits, visible)
                 torch.cuda.synchronize()
@@ -436,16 +441,21 @@ class LocalPrefillTokenTopKDevice(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 profile.export_chrome_trace(str(path))
                 traces.append(json.loads(path.read_text())["traceEvents"])
-        old, checked, radix = traces
+        old, checked, automatic, radix = traces
         self.assertTrue(any(e.get("name") == "aten::topk" for e in old))
         self.assertTrue(any(e.get("cat") == "kernel" and "gatherTopK" in e["name"] for e in old))
-        for current, backend in ((checked, "topk_prefill_bf16_checked_kernel"), (radix, "_selective_scatter")):
+        for current, backend in ((checked, "topk_prefill_bf16_checked_kernel"),
+                                 (automatic, "topk_prefill_bf16_register_kernel"), (radix, "_selective_scatter")):
             self.assertFalse(any(e.get("name") == "aten::topk" for e in current))
             self.assertFalse(any(e.get("cat") == "kernel" and "mbtopk::" in e["name"] for e in current))
             self.assertTrue(any(e.get("name") == "aten::nan_to_num_" for e in current))
             kernels = [e["name"] for e in current if e.get("cat") == "kernel"]
             for required in (backend, "_prefill_topk_bounds_kernel", "_prefill_topk_finite_kernel", "_canonicalize_indices"):
                 self.assertTrue(any(required in name for name in kernels), required)
+        kernels = [e["name"] for e in automatic if e.get("cat") == "kernel"]
+        self.assertEqual(sum("topk_prefill_bf16_register_kernel" in name for name in kernels), 2)
+        for helper in ("_bf16_max8_keys", "_bf16_gather_block_candidates", "_remap_block_candidate_slots"):
+            self.assertEqual(kernels.count(helper), 1, helper)
 
 
 if __name__ == "__main__":

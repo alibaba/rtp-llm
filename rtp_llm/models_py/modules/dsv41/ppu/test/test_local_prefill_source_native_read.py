@@ -24,9 +24,10 @@ from rtp_llm.models_py.modules.dsv41.ppu import _quant, graph_cache_kernels, pre
 from rtp_llm.models_py.modules.dsv41.ppu.kv_codec import decode_kv
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache import _WIDTH
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import (
-    LOCAL_PREFILL_SOURCE_CACHE_ENV, LOCAL_PREFILL_SOURCE_NATIVE_READ_ENV,
+    LOCAL_PREFILL_SOURCE_CACHE_ENV,
     SharedNativeCache,
 )
+
 from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import PrefillPolicy
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_fused import assert_bytes
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_operator_flags import _trace_events
@@ -34,9 +35,28 @@ from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_source_cache im
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_swa_native_write import fixture as swa_fixture
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_swa_segments import arguments, compact_plan, stage
 
+# Legacy names only verify that retired selectors no longer affect dispatch.
+LOCAL_PREFILL_SOURCE_NATIVE_READ_ENV = 'RTP_V41_PPU_LOCAL_PREFILL_SOURCE_NATIVE_READ'
+
 
 ENV, SCC = LOCAL_PREFILL_SOURCE_NATIVE_READ_ENV, LOCAL_PREFILL_SOURCE_CACHE_ENV
 _DEVICE_GUARD = SharedNativeCache._local_source_native_read_device
+
+
+
+def _kernel_mode(enabled):
+    """Keep an independent fallback arm after rollout flags retire."""
+    from contextlib import nullcontext
+
+    return (
+        nullcontext()
+        if enabled
+        else patch.object(
+            SharedNativeCache,
+            "_try_read_local_source_pool",
+            return_value=None,
+        )
+    )
 
 
 class _FullNative:
@@ -332,7 +352,7 @@ class _ReadCases:
             cache = fixture(self.device)
         for new, old in zip(read(cache, 2), original(cache, 2)):
             assert_bytes(self, new, old)
-        self.assertEqual(cache._local_source_native_read_stats['reads'], 0)
+        self.assertEqual(cache._local_source_native_read_stats['reads'], 2)
         for field in ('_is_prefill', 'sharded'):
             cache = fixture(self.device)
             setattr(cache, field, field == 'sharded')
@@ -556,7 +576,7 @@ class LocalSourceNativeReadDevice(_ReadCases, unittest.TestCase):
                 )
         arms = []
         for enabled in (False, True):
-            with patch.dict(os.environ, {ENV: str(int(enabled))}), patch.object(
+            with _kernel_mode(enabled), patch.object(
                 prefill_readback, 'gather_pool', side_effect=AssertionError('no whole-pool wrapper'),
             ), patch.object(prefill_readback, 'cp_gather_rank_major', side_effect=AssertionError('no collective')), patch.object(
                 cp, 'cp_gather_rank_major', side_effect=AssertionError('no collective'),

@@ -9,6 +9,10 @@ from types import SimpleNamespace
 import torch
 
 from rtp_llm.models_py.modules.dsv41.ppu import _quant
+from rtp_llm.models_py.modules.dsv41.ppu.topk import (
+    native_topk_op as _verify_topk_op,
+    select_tokens,
+)
 
 _INDEXER_POOL = "indexer_kv"
 _MAX_SPARSE_BLOCKS = 4096
@@ -20,7 +24,6 @@ _SPARSE_INDEXER_ENV = "RTP_V41_PPU_GRAPH_SPARSE_INDEXER"
 _VERIFY_FUSED_INDEXER_ENV = "RTP_V41_PPU_VERIFY_FUSED_INDEXER"
 _VERIFY_FUSED_TOPK_ENV = "RTP_V41_PPU_VERIFY_FUSED_INDEXER_TOPK"
 _VERIFY_COMPACT_TOPK_ENV = "RTP_V41_PPU_VERIFY_COMPACT_TOPK"
-_VERIFY_BF16_TOPK_ENV = "RTP_V41_PPU_VERIFY_BF16_TOPK"
 
 
 def indexer_scores(
@@ -843,28 +846,6 @@ def _select_verify_topk_tiled(score_tiles, visible, valid_mask, topk):
     return _select_compact_topk(tiles, visible, valid_mask, topk)
 
 
-def _verify_topk_op(rows, device, topk, *, bf16_provenance=False):
-    """Choose before capture using producer proof, never scanning scores.
-
-    Both callers allocate contiguous FP32 logits, int32 lengths/output and
-    a contiguous 1 MiB workspace on this device. The proof additionally
-    requires an actual BF16 prefix producer and the known Verify tail reducer.
-    """
-    from rtp_llm.ops.compute_ops import rtp_llm_ops
-
-    use_bf16 = (
-        bf16_provenance and device.type == "cuda" and _quant.is_ppu()
-        and 0 < rows <= 32 and topk == 512
-        and os.environ.get(_VERIFY_BF16_TOPK_ENV, "1") != "0"
-        and hasattr(rtp_llm_ops, "dsv4_persistent_topk_bf16_scores")
-    )
-    return (
-        rtp_llm_ops.dsv4_persistent_topk_bf16_scores if use_bf16
-        else rtp_llm_ops.dsv4_persistent_topk,
-        use_bf16,
-    )
-
-
 def _select_verify_topk(score_tiles, visible, valid_mask, topk, *, bf16_tail_provenance=False):
     """Use native cooperative TopK once over the full Verify score domain.
 
@@ -1412,6 +1393,10 @@ def select_verify_indices(
 
 
 def select_topk(scores, visible, valid_mask, topk) -> torch.Tensor:
+    return select_tokens(scores, visible, contract="graph", valid_mask=valid_mask, topk=topk)
+
+
+def _select_dense_topk(scores, visible, valid_mask, topk) -> torch.Tensor:
     """Select request-local IDs, using ordinal order for short rows."""
     lengths = torch.where(valid_mask, visible.clamp_min(0), 0).to(torch.int32)
     columns = torch.arange(topk, dtype=torch.int32, device=scores.device)[None, :]

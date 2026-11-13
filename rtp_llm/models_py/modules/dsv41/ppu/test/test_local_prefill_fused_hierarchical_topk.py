@@ -1,6 +1,6 @@
 """Exact fused metadata helpers around the two unchanged raw BF16 TopKs."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 import json
 import math
@@ -33,7 +33,7 @@ HELPERS = ("_bf16_max8_keys", "_bf16_gather_block_candidates", "_remap_block_can
 
 @contextmanager
 def _scoped(name, scores):
-    """Explicit provider experiment; root public rollout is off in BOTH arms."""
+    """Explicit reference providers, independent of automatic dispatch."""
     original = token._native_ops
     narrow = (scores.dtype == torch.bfloat16 and scores.ndim == 2
               and 1 <= scores.shape[0] <= 4096
@@ -50,7 +50,7 @@ def _scoped(name, scores):
         seen.append(prepared)
         return ops
 
-    with patch.dict(os.environ, {ENV: "0"}), patch.object(token, "_native_ops", new=factory):
+    with patch.object(token, "_hierarchical_ops", return_value=None), patch.object(token, "_native_ops", new=factory):
         yield seen
 
 
@@ -58,7 +58,7 @@ def _scoped(name, scores):
 def _public(name):
     if name not in ARMS:
         raise ValueError(name)
-    with patch.dict(os.environ, {ENV: "1" if name == "fused" else "0"}):
+    with (patch.object(token, "_hierarchical_ops", return_value=None) if name == "checked" else nullcontext()):
         yield
 
 

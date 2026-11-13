@@ -633,14 +633,16 @@ def _launch_rotate_q_and_store(q, kv, freqs, slots, pool, generations, entries, 
     heads = q.shape[1]
     rotate_q_store_swa[(q.shape[0], (heads + 7) // 8 + 1)](
         q, kv, torch.view_as_real(freqs), slots, pool, generations, heads, entries,
-        pool.shape[0], pool.stride(0), journal, journal or slots is None,
+        pool.shape[0], pool.stride(0), journal, True,
         num_warps=4, enable_fp_fusion=False,
     )
 
 
 def try_rotate_q_and_pack_swa(q, kv, freqs):
     """Rotate proposal Q and encode the whole ephemeral query block."""
-    if not _can_rotate_q_and_kv(q, kv, freqs):
+    from rtp_llm.models_py.modules.dsv41.ppu.rope import can_overwrite
+
+    if not _can_rotate_q_and_kv(q, kv, freqs) or not can_overwrite(q, kv, freqs):
         return None
     packed = torch.empty((q.shape[0], SWA_KV_ENTRY_BYTES), device=q.device, dtype=torch.uint8)
     _launch_rotate_q_and_store(q, kv, freqs, None, packed, None, 1, False)
@@ -834,7 +836,9 @@ def unique_commit_swa_slots(slots):
     return unique
 
 
-def try_rotate_q_and_write_swa(q, kv, freqs, cache, layer_id, slots, *, journal=False):
+def try_rotate_q_and_write_swa(
+    q, kv, freqs, cache, layer_id, slots, *, journal=False, live_inputs=(),
+):
     """Rotate an owned Q and write normalized KV into native slots or a journal.
 
     Q must be the fresh projection result with no live aliases. KV and the
@@ -842,6 +846,10 @@ def try_rotate_q_and_write_swa(q, kv, freqs, cache, layer_id, slots, *, journal=
     A Verify journal receives raw generations and one payload per query row.
     Unsupported layouts return None before any write.
     """
+    from rtp_llm.models_py.modules.dsv41.ppu.rope import can_overwrite
+
+    if not can_overwrite(q, kv, freqs, slots, *live_inputs):
+        return None
     if not _can_rotate_q_and_kv(q, kv, freqs) or not (
         slots.shape == (q.shape[0],)
         and slots.device == q.device
@@ -861,11 +869,13 @@ def try_rotate_q_and_write_swa(q, kv, freqs, cache, layer_id, slots, *, journal=
         if target is None:
             return None
         pool, entries = target
+    if not can_overwrite(q, pool, generations):
+        return None
     _launch_rotate_q_and_store(q, kv, freqs, slots, pool, generations, entries, journal)
     return q
 
 
-def try_rope_(output, freqs, *, inverse=False, valid_mask=None, preserve_signed_zero=False, positions=None):
+def try_rope_(output, freqs, *, inverse=False, valid_mask=None, preserve_signed_zero=True, positions=None):
     """Rotate an owned tensor, optionally zeroing padded rows before RoPE.
 
     With positions, freqs is the full complex64 [F,32] table. The caller proves

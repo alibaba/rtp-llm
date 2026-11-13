@@ -15,13 +15,16 @@ from rtp_llm.models_py.modules.dsv41.ppu.layers import (
     PPUSharedRMSNorm,
     _ordinary_decode_graph,
     cp8_yoco_fast_prefill_enabled,
+    cp8_yoco_operator_eligible,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.mhc import _prefer_triton
 from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
+    enabled as optimization_enabled,
+)
 from rtp_llm.utils.model_weight import W
 
 
-LOCAL_PREFILL_MEGA_MHC_ENV = "RTP_V41_PPU_LOCAL_PREFILL_MEGA_MHC"
 LOCAL_PREFILL_SPLIT_L20_ENV = "RTP_V41_PPU_LOCAL_PREFILL_SPLIT_L20"
 LOCAL_PREFILL_ENGRAM_GATE_ENV = "RTP_V41_PPU_LOCAL_PREFILL_ENGRAM_GATE"
 
@@ -56,11 +59,10 @@ def _local_prefill_engram_gate_enabled(state):
     )
 
 
-def _local_prefill_mega_mhc_enabled(state):
+def _local_prefill_mega_mhc_eligible(state):
     """Admit rowwise transitions without changing local CED/cache transport."""
     if (
-        os.environ.get(LOCAL_PREFILL_MEGA_MHC_ENV, "0") != "1"
-        or state is None
+        state is None
         or not state.prefill
         or state.idle
         or getattr(state, "is_graph", False)
@@ -90,7 +92,7 @@ def _local_prefill_mega_mhc_enabled(state):
 def _local_prefill_split_l20_enabled(state):
     """Reuse the full-producer/compact-query seam for a local bounded plan."""
     if (
-        os.environ.get(LOCAL_PREFILL_SPLIT_L20_ENV, "0") != "1"
+        not optimization_enabled(LOCAL_PREFILL_SPLIT_L20_ENV)
         or not getattr(state, "prefill", False)
         or getattr(state, "idle", True)
         or getattr(state, "compacted", True)
@@ -178,8 +180,8 @@ class SharedPPUBlock(Block):
         self.bind_execution_context(
             "prefill", ced=(
                 state.runtime.policy.mode != "full"
-                and not fast_yoco
-                and not _local_prefill_mega_mhc_enabled(state)
+                and not cp8_yoco_operator_eligible(state)
+                and not _local_prefill_mega_mhc_eligible(state)
             ),
         )
         if self.engram is not None:
@@ -198,7 +200,7 @@ class SharedPPUBlock(Block):
             self.layer_id == 20 and state.plan is not None
             and (
                 (fast_yoco and state.cache.sharded
-                 and os.environ.get("RTP_V41_PPU_CP8_YOCO_SPLIT_L20", "1") == "1")
+                 and optimization_enabled("RTP_V41_PPU_CP8_YOCO_SPLIT_L20", default=True))
                 or _local_prefill_split_l20_enabled(state)
             )
             and self.attn.is_kv_source and self.attn.is_index_source

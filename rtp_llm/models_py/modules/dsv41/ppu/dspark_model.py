@@ -175,11 +175,6 @@ class DeepSeekV41PPUDSparkModel(DeepSeekV41DSparkModel):
         self._load_extra_weights(self.weight)
         self._materialized = True
         self.shared_runtime = SharedNativeRuntime(self)
-        if self._is_decode_role:
-            # Commit has its own Graph state and can capture before proposal.
-            self.main_norm._full_graph_runtime = self.shared_runtime
-            for layer in self.v4.layers:
-                layer.attn.kv_norm._full_graph_runtime = self.shared_runtime
         if hasattr(self, "_shared_stop_callbacks"):
             self.shared_runtime.bind_native_stop(*self._shared_stop_callbacks)
         return True

@@ -5,7 +5,6 @@ provides its real projection/normalization inputs, rather than constructing
 a CUDA Attention object or presenting a placeholder as AttentionFP8.
 """
 
-import importlib.util
 import os
 import weakref
 from dataclasses import replace
@@ -35,8 +34,13 @@ from rtp_llm.models_py.modules.dsv41.ppu.weight import (
     _load_dense,
     _load_engram_shard,
 )
-from rtp_llm.utils.model_weight import W
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
+    DIRECT_MOE_ROUTES,
+    enabled as optimization_enabled,
+)
 from rtp_llm.models_py.modules.dsv41.ppu.quant_mode import MXFP4_FP8_PTPC, quant_mode
+from rtp_llm.models_py.modules.dsv41.ppu.rmsnorm import rms_norm, try_rms_norm_quant
+from rtp_llm.utils.model_weight import W
 
 
 def _ordinary_decode_graph(runtime):
@@ -65,13 +69,6 @@ def _proposal_exact_ops(state):
     )
 
 
-def full_graph_rmsnorm_enabled(state):
-    return (
-        (getattr(state, "is_graph", False) or getattr(state, "is_graph_commit", False))
-        and os.environ.get("RTP_V41_PPU_GRAPH_FULL_RMSNORM", "1") == "1"
-    )
-
-
 def _full_cp8_prefill_context(state):
     cp = state.context if getattr(state, "prefill", False) else None
     if (
@@ -85,11 +82,11 @@ def _full_cp8_prefill_context(state):
     return None
 
 
-def cp8_yoco_small_ops_enabled(state):
+def cp8_yoco_operator_eligible(state):
+    """Existing compact CP8 operator domain, independent of rollout profiles."""
     policy = getattr(getattr(state, "runtime", None), "policy", None)
     return (
-        os.environ.get("RTP_V41_PPU_CP8_YOCO_SMALL_OPS", "1") == "1"
-        and getattr(state, "prefill", False)
+        getattr(state, "prefill", False)
         and not state.idle
         and getattr(policy, "mode", None) == "compact"
         and (
@@ -100,18 +97,18 @@ def cp8_yoco_small_ops_enabled(state):
 
 
 def cp8_yoco_fast_prefill_enabled(state):
+    """Retained framework/communication profile; never an operator selector."""
     return (
         os.environ.get("RTP_V41_PPU_CP8_YOCO_FAST_PREFILL", "0") == "1"
-        and cp8_yoco_small_ops_enabled(state)
+        and cp8_yoco_operator_eligible(state)
     )
 
 
 LOCAL_PREFILL_AIU_PRENORM_ENV = "RTP_V41_PPU_LOCAL_PREFILL_AIU_PRENORM"
-LOCAL_PREFILL_EXACT_SHARED_SWIGLU_ENV = "RTP_V41_PPU_LOCAL_PREFILL_EXACT_SHARED_SWIGLU"
 
 
 def _local_prefill_business_phase(state):
-    """Metadata-only scope shared by the two independent local options."""
+    """Metadata-only qualification shared by local Prefill consumers."""
     if (not getattr(state, "prefill", False) or getattr(state, "idle", True)
             or torch.is_grad_enabled()
             or any(getattr(state, flag, False) for flag in (
@@ -140,15 +137,10 @@ def _local_prefill_business_phase(state):
     )
 
 
-def _local_prefill_exact_shared_swiglu_enabled(state):
-    return (os.environ.get(LOCAL_PREFILL_EXACT_SHARED_SWIGLU_ENV, "0") == "1"
-            and _local_prefill_business_phase(state))
-
-
 def _local_prefill_aiu_prenorm_enabled(state, residual):
     """Admit the existing rowwise AIU projection without a CP8 context."""
     if (
-        os.environ.get(LOCAL_PREFILL_AIU_PRENORM_ENV, "0") != "1"
+        not optimization_enabled(LOCAL_PREFILL_AIU_PRENORM_ENV)
         or not getattr(state, "prefill", False)
         or getattr(state, "idle", True)
         or any(getattr(state, flag, False) for flag in (
@@ -188,7 +180,7 @@ LOCAL_PREFILL_DIRECT_MOE_ROUTES_ENV = "RTP_V41_PPU_LOCAL_PREFILL_DIRECT_MOE_ROUT
 def _local_prefill_direct_moe_real(state, flat):
     """Return the current local layout's mask for the existing direct gate."""
     if (
-        os.environ.get(LOCAL_PREFILL_DIRECT_MOE_ROUTES_ENV, "0") != "1"
+        not optimization_enabled(LOCAL_PREFILL_DIRECT_MOE_ROUTES_ENV)
         or not getattr(state, "prefill", False)
         or getattr(state, "idle", True)
         or any(getattr(state, flag, False) for flag in (
@@ -242,28 +234,6 @@ def _local_prefill_direct_moe_real(state, flat):
     return real
 
 
-def try_graph_rms_norm(hidden_states, weight, eps) -> torch.Tensor | None:
-    """Normalize BF16 Graph activations with one FP32 reduction and BF16 store."""
-    if (
-        weight is None
-        or not hidden_states.is_cuda
-        or hidden_states.dtype != torch.bfloat16
-        or hidden_states.ndim not in (2, 3)
-        or not hidden_states.is_contiguous()
-        or weight.dtype not in (torch.bfloat16, torch.float32)
-        or weight.ndim != 1
-        or not weight.is_contiguous()
-        or weight.device != hidden_states.device
-        or not 0 < hidden_states.shape[-1] == weight.numel() <= 8192
-        or torch.is_grad_enabled()
-        or importlib.util.find_spec("triton") is None
-    ):
-        return None
-    from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import strided_q_rmsnorm
-
-    return strided_q_rmsnorm(hidden_states, weight, eps)
-
-
 class PPUSharedEmbedding(EmbeddingTorch):
     """Keep public V4.1 feature-row injection at the embedding boundary."""
 
@@ -277,7 +247,7 @@ class PPUSharedEmbedding(EmbeddingTorch):
 
 
 class PPUSharedRMSNorm(BaseNorm):
-    """Stored gamma, no offset transform; one FP32 norm and BF16 landing."""
+    """Standalone norm policy shared by Prefill, Decode and speculative calls."""
 
     def __init__(self, weight, eps=1e-6):
         if weight.ndim != 1 or weight.dtype != torch.bfloat16:
@@ -286,118 +256,22 @@ class PPUSharedRMSNorm(BaseNorm):
         self.calls = 0
         self._ptpc = quant_mode() == MXFP4_FP8_PTPC
 
-    def forward_with_ptpc_input(self, hidden_states):
-        """Return the unchanged BF16 norm and an optional ephemeral PTPC pair."""
+    def forward_with_ptpc_input(self, hidden_states, *, allow_strided=False):
+        """Prefer a fused producer only when an explicit PTPC consumer asks."""
         if self._ptpc:
-            from rtp_llm.models_py.modules.dsv41.ppu.ptpc_norm import (
-                can_fuse_ptpc_rms_norm,
+            result = try_rms_norm_quant(
+                hidden_states, self.weight, self.variance_epsilon,
             )
+            if result is not None:
+                self.calls += 1
+                normalized, payload, scale = result
+                return normalized, (payload, scale)
+        return self(hidden_states, allow_strided=allow_strided), None
 
-            if can_fuse_ptpc_rms_norm(hidden_states, self.weight):
-                from rtp_llm.models_py.modules.dsv41.ppu.ptpc_norm_quant import (
-                    ptpc_rms_norm_quant_candidate,
-                )
-
-                result = ptpc_rms_norm_quant_candidate(
-                    hidden_states, self.weight, self.variance_epsilon
-                )
-                if result is not None:
-                    self.calls += 1
-                    normalized, payload, scale = result
-                    return normalized, (payload, scale)
-        return self(hidden_states), None
-
-    def forward(self, hidden_states):
+    def forward(self, hidden_states, *, allow_strided=False):
+        # Retain the QKV keyword ABI; actual strides select the provider.
         self.calls += 1
-        if self._ptpc:
-            # A one-ULP BF16 norm difference can cross the following FP8
-            # boundary. Keep ATen's reduction and separate FP32 rounds while
-            # reusing the existing fused square/epilogue on supported inputs.
-            from rtp_llm.models_py.modules.dsv41.ppu.ptpc_norm import ptpc_rms_norm
-
-            return ptpc_rms_norm(hidden_states, self.weight, self.variance_epsilon)
-        runtime = getattr(self, "runtime", None)
-        state = runtime.current if runtime is not None else None
-        graph_runtime = getattr(self, "_full_graph_runtime", runtime)
-        graph_state = graph_runtime.current if graph_runtime is not None else None
-        if _ordinary_decode_graph(runtime) or full_graph_rmsnorm_enabled(graph_state):
-            normalized = try_graph_rms_norm(
-                hidden_states, self.weight, self.variance_epsilon
-            )
-            if normalized is not None:
-                return normalized
-        verify_epilogue = (
-            _verify_packed_attention_graph(state)
-            and os.environ.get("RTP_V41_PPU_VERIFY_RMSNORM_EPILOGUE", "1") == "1"
-        )
-        proposal_epilogue = _proposal_exact_ops(state)
-        if (
-            (
-                proposal_epilogue
-                or (
-                    verify_epilogue
-                    and os.environ.get("RTP_V41_PPU_VERIFY_RMSNORM_WIDEN_SQUARE", "1") == "1"
-                )
-            )
-            and hidden_states.is_cuda
-            and hidden_states.dtype == torch.bfloat16
-            and hidden_states.ndim >= 2
-            and hidden_states.shape[-1] == self.weight.numel()
-            and hidden_states.is_contiguous()
-            and self.weight.is_contiguous()
-            and self.weight.device == hidden_states.device
-            and not torch.is_grad_enabled()
-            and importlib.util.find_spec("triton") is not None
-        ):
-            from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import verify_rmsnorm_bf16
-
-            return verify_rmsnorm_bf16(hidden_states, self.weight, self.variance_epsilon)
-        prefill_runtime = getattr(self, "_cp8_prefill_runtime", runtime)
-        prefill_state = prefill_runtime.current if prefill_runtime is not None else None
-        cp8_prefill = (
-            _full_cp8_prefill_context(state) is not None
-            or cp8_yoco_small_ops_enabled(prefill_state)
-        )
-        if (
-            cp8_prefill
-            and os.environ.get("RTP_V41_PPU_CP8_FLASHINFER_RMSNORM", "1") == "1"
-            and hidden_states.is_cuda
-            and hidden_states.dtype == torch.bfloat16
-            and hidden_states.ndim >= 2
-            and hidden_states.shape[-1] in (512, 1280, 5120)
-            and hidden_states.is_contiguous()
-            and not torch.is_grad_enabled()
-            and importlib.util.find_spec("flashinfer") is not None
-        ):
-            from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import rms_norm
-
-            return rms_norm(hidden_states, self.weight, self.variance_epsilon)
-        x = hidden_states.float()
-        inv = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.variance_epsilon)
-        if (
-            (
-                verify_epilogue
-                or (
-                    cp8_prefill
-                    and os.environ.get("RTP_V41_PPU_CP8_RMSNORM_EPILOGUE", "0") == "1"
-                )
-            )
-            and hidden_states.is_cuda
-            and hidden_states.dtype == torch.bfloat16
-            and x.ndim >= 2
-            and x.shape[-1] == self.weight.numel()
-            and x.is_contiguous()
-            and self.weight.is_contiguous()
-            and self.weight.device == x.device
-            and not torch.is_grad_enabled()
-            and importlib.util.find_spec("triton") is not None
-        ):
-            from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import (
-                prefill_rmsnorm_epilogue,
-            )
-
-            return prefill_rmsnorm_epilogue(x, inv, self.weight)
-        return (x * inv * self.weight.float()).to(hidden_states.dtype)
+        return rms_norm(hidden_states, self.weight, self.variance_epsilon)
 
 
 class PPUSharedHCUnit(HCUnitBase):
@@ -460,8 +334,8 @@ class PPUSharedHCUnit(HCUnitBase):
         state = getattr(getattr(self, "runtime", None), "current", None)
         aiu_prenorm = (
             self.name == "attn"
-            and os.environ.get("RTP_V41_PPU_CP8_YOCO_AIU_PRENORM", "0") == "1"
-            and cp8_yoco_fast_prefill_enabled(state)
+            and optimization_enabled("RTP_V41_PPU_CP8_YOCO_AIU_PRENORM")
+            and cp8_yoco_operator_eligible(state)
             and _full_cp8_prefill_context(state) is not None
             and not torch.is_grad_enabled()
             and not torch.cuda.is_current_stream_capturing()
@@ -607,6 +481,11 @@ class PPUAttentionProjections(nn.Module):
         self.v41_config = views.config
         self.wq_b = views.linear(layer_id, W.v4_attn_wq_b_w)
         self.wkv = views.linear(layer_id, W.v4_attn_wkv_w)
+        self._local_prefill_qkv = None
+        if os.environ.get("RTP_V41_PPU_LOCAL_PREFILL_DENSE_PROJECTIONS", "0") == "1":
+            from rtp_llm.models_py.modules.dsv41.ppu.local_prefill_qkv import PreparedQKV
+
+            self._local_prefill_qkv = PreparedQKV.try_prepare(self.wq_a, self.wkv)
         self.wo_a = views.linear(layer_id, W.v4_attn_wo_a_w)
         self.wo_b = views.linear(layer_id, W.v4_attn_wo_b_w)
         if hasattr(self.wo_a, "prepare_grouped"):
@@ -641,23 +520,35 @@ class PPUAttentionProjections(nn.Module):
         return self.q_norm(self.wq_a(normalized_hidden))
 
     def project_query_kv(
-        self, x, *, prepare_indexer=False, reuse_ptpc=False, fuse_qr_norm=False
+        self, x, *, prepare_indexer=False, reuse_ptpc=False, fuse_qr_norm=False,
+        fused_qkv=False, query_rows=None,
     ):
         """Keep projection order while sharing identical PTPC input rows.
 
         The optional pairs are local to this invocation. Graph capture records
         their producers before every consumer; replay recomputes their values.
         """
+        if query_rows is not None and not (
+            isinstance(query_rows, slice) and query_rows.step in (None, 1)
+            and type(query_rows.start) is int and type(query_rows.stop) is int
+            and 0 <= query_rows.start < query_rows.stop == x.shape[0]
+            and x.ndim == 2
+        ):
+            raise ValueError("query projection requires an admitted contiguous row suffix")
+        prepared = getattr(self, "_local_prefill_qkv", None) if fused_qkv else None
+        joined = prepared.project(x) if prepared is not None else None
         x_pair = (
             prepare_shared_ptpc_input(x, (self.wq_a, self.wkv))
-            if reuse_ptpc else None
+            if reuse_ptpc and joined is None else None
         )
-        raw_qr = (
+        raw_qr = joined[0] if joined is not None else (
             self.wq_a(x) if x_pair is None else self.wq_a.forward_quantized(*x_pair)
         )
+        if query_rows is not None:
+            raw_qr = raw_qr[query_rows]
         qr_consumers = (self.wq_b, self.index_wq) if prepare_indexer else (self.wq_b,)
         can_prepare_qr = (
-            fuse_qr_norm
+            fuse_qr_norm and joined is None
             and reuse_ptpc
             and raw_qr.shape[-1] == 1280
             and all(
@@ -670,12 +561,23 @@ class PPUAttentionProjections(nn.Module):
         if can_prepare_qr:
             qr, qr_pair = self.q_norm.forward_with_ptpc_input(raw_qr)
         else:
-            qr, qr_pair = self.q_norm(raw_qr), None
+            qr = (
+                self.q_norm(raw_qr, allow_strided=True)
+                if joined is not None else self.q_norm(raw_qr)
+            )
+            qr_pair = None
         if qr_pair is None and reuse_ptpc and prepare_indexer:
             qr_pair = prepare_shared_ptpc_input(qr, qr_consumers)
         q = self.wq_b(qr) if qr_pair is None else self.wq_b.forward_quantized(*qr_pair)
-        raw_kv = self.wkv(x) if x_pair is None else self.wkv.forward_quantized(*x_pair)
-        return qr, q, self.kv_norm(raw_kv), qr_pair
+        raw_kv = joined[1] if joined is not None else (
+            self.wkv(x) if x_pair is None else self.wkv.forward_quantized(*x_pair)
+        )
+        kv = (
+            self.kv_norm(raw_kv, allow_strided=True)
+            if joined is not None else self.kv_norm(raw_kv)
+        )
+        self._last_local_prefill_qkv_joined = joined is not None
+        return qr, q, kv, qr_pair
 
     def project_indexer_query(self, qr, *, quantized_input=None):
         if quantized_input is None:
@@ -718,13 +620,10 @@ class PPUSharedExpert(nn.Module):
         self.w2 = views.linear(layer_id, W.v4_shared_w2_w)
         self.swiglu_limit = views.geometry.swiglu_limit
 
-    def forward(self, hidden, *, fused_activation=False, prefill_exact=False, local_prefill_exact=False, local_prefill_sg=False):
+    def forward(self, hidden, *, allow_quant=True):
         return shared_expert_forward(
             hidden, self.w13, self.w2, self.swiglu_limit,
-            fused_activation=fused_activation,
-            prefill_exact=prefill_exact,
-            **({"local_prefill_exact": True} if local_prefill_exact is True else {}),
-            **({"local_prefill_sg": True} if local_prefill_sg is True else {}),
+            allow_quant=allow_quant,
         )
 
 
@@ -782,11 +681,15 @@ class PPUSharedMoE(nn.Module):
                     expert_load=expert_load, return_shared=_return_shared,
                 )
             if state.grouped_moe is None and (
-                ordinary
-                or proposal
+                (
+                    (ordinary or proposal)
+                    and optimization_enabled(DIRECT_MOE_ROUTES, default=True)
+                )
                 or (
                     verify
-                    and os.environ.get("RTP_V41_PPU_VERIFY_DIRECT_MOE_ROUTES", "1") == "1"
+                    and optimization_enabled(
+                        "RTP_V41_PPU_VERIFY_DIRECT_MOE_ROUTES", default=True,
+                    )
                 )
             ):
                 ids, weights = self.gate(
@@ -817,12 +720,9 @@ class PPUSharedMoE(nn.Module):
                     flat, physical, weights, layer_id=self.layer_id, expert_load=expert_load
                 )
             if self.shared_expert is not None:
-                if proposal or (
-                    verify and os.environ.get("RTP_V41_PPU_VERIFY_EXACT_SWIGLU", "1") == "1"
-                ):
-                    shared = self.shared_expert(flat, prefill_exact=True)
-                else:
-                    shared = self.shared_expert(flat, fused_activation=ordinary)
+                # SG cannot be captured: warmup must select the same fast
+                # activation as capture/replay for every Graph phase.
+                shared = self.shared_expert(flat, allow_quant=False)
                 if _return_shared:
                     return routed.reshape(shape), shared.reshape(shape)
                 routed = combine_routed_and_shared(routed, shared)
@@ -838,7 +738,7 @@ class PPUSharedMoE(nn.Module):
         direct_routes = (
             routing_cp is not None
             and flat.is_cuda
-            and os.environ.get("RTP_V41_PPU_CP8_DIRECT_MOE_ROUTES", "0") == "1"
+            and optimization_enabled("RTP_V41_PPU_CP8_DIRECT_MOE_ROUTES")
         )
         direct_real = (
             routing_cp.local_is_real if direct_routes
@@ -882,27 +782,8 @@ class PPUSharedMoE(nn.Module):
 
         if self.shared_expert is None:
             return run_routed(flat).reshape(shape)
-        prefill_exact = (
-            cp8_yoco_small_ops_enabled(state)
-            or (
-                cp is not None
-                and os.environ.get("RTP_V41_PPU_CP8_FUSED_SHARED_SWIGLU", "0") == "1"
-            )
-        )
-        fused_swiglu = (
-            cp is not None and cp8_yoco_fast_prefill_enabled(state)
-            and os.environ.get("RTP_V41_PPU_CP8_YOCO_FUSED_SWIGLU", "0") == "1"
-        )
-
         def run_shared(value):
-            return self.shared_expert(
-                value, fused_activation=fused_swiglu,
-                prefill_exact=prefill_exact and not fused_swiglu,
-                **({"local_prefill_exact": True}
-                   if _local_prefill_exact_shared_swiglu_enabled(state) else {}),
-                **({"local_prefill_sg": True}
-                   if getattr(state, "local_prefill_sg_align", False) else {}),
-            )
+            return self.shared_expert(value)
 
         if (
             cp is not None and prefill_buffer is not None

@@ -75,7 +75,6 @@ class _PackCases:
             **FLAGS, "TP_SIZE": "1", "PREFILL_CP_SIZE": "1",
             LOCAL_PREFILL_SOURCE_CACHE_ENV: "1",
             "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE": "1",
-            "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE_FUSED": "1",
         })
         environment.start()
         self.addCleanup(environment.stop)

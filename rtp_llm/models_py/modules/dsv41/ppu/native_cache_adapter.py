@@ -21,20 +21,21 @@ from rtp_llm.models_py.modules.dsv41.ppu.native_cache import (
     _Pool,
     _WIDTH,
 )
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
+    enabled as optimization_enabled,
+)
 from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import PrefillPolicy
+from rtp_llm.models_py.modules.dsv41.ppu.row_metadata import (
+    is_plain_tensor as _local_swa_raw_tensor,
+    tensor_metadata_key,
+)
 
 
 _LOGGER = logging.getLogger(__name__)
 CP8_ROW_PREP_ENV = "RTP_V41_PPU_CP8_PREFILL_ROW_PREP"
-CP8_WORKSPACE_DEQUANT_ENV = "RTP_V41_PPU_CP8_FUSED_WORKSPACE_DEQUANT"
 CP8_GATHER_RECEIVE_ENV = "RTP_V41_PPU_CP8_REUSE_GATHER_RECEIVE"
 LOCAL_PREFILL_SOURCE_CACHE_ENV = "RTP_V41_PPU_LOCAL_PREFILL_SOURCE_CACHE"
 LOCAL_PREFILL_SWA_SEGMENTS_ENV = "RTP_V41_PPU_LOCAL_PREFILL_SWA_SEGMENTS"
-LOCAL_PREFILL_SWA_NATIVE_WRITE_ENV = "RTP_V41_PPU_LOCAL_PREFILL_SWA_NATIVE_WRITE"
-LOCAL_PREFILL_SWA_NATIVE_READ_ENV = "RTP_V41_PPU_LOCAL_PREFILL_SWA_NATIVE_READ"
-LOCAL_PREFILL_SOURCE_NATIVE_READ_ENV = "RTP_V41_PPU_LOCAL_PREFILL_SOURCE_NATIVE_READ"
-LOCAL_PREFILL_SOURCE_NATIVE_WRITE_ENV = "RTP_V41_PPU_LOCAL_PREFILL_SOURCE_NATIVE_WRITE"
-LOCAL_PREFILL_CSA_NATIVE_WRITE_ENV = "RTP_V41_PPU_LOCAL_PREFILL_CSA_NATIVE_WRITE"
 LOCAL_PREFILL_LAZY_PRODUCER_SLOTS_ENV = "RTP_V41_PPU_LOCAL_PREFILL_LAZY_PRODUCER_SLOTS"
 LOCAL_PREFILL_SG_ALIGN_ENV = "RTP_V41_PPU_LOCAL_PREFILL_SG_ALIGN"
 
@@ -44,9 +45,7 @@ def _source_tensor_key(tensor):
         return None
     if not isinstance(tensor, torch.Tensor):
         return type(tensor), id(tensor)
-    version = None if tensor.is_inference() else tensor._version
-    return (tensor._cdata, tensor.data_ptr(), tensor.shape, tensor.stride(),
-            tensor.storage_offset(), tensor.dtype, tensor.device, version)
+    return tensor_metadata_key(tensor)
 
 
 class _StagedSwaSegments(NamedTuple):
@@ -77,11 +76,6 @@ class _LocalSwaWriteGeometry(NamedTuple):
     slice_elements: int
 
 
-def _local_swa_raw_tensor(tensor):
-    return (isinstance(tensor, torch.Tensor) and tensor.layout == torch.strided
-            and not tensor.is_neg() and not tensor.is_conj())
-
-
 def _latest_csa_indices(blocks, offsets, positions):
     """Stable maximum raw position per real physical slot; ties keep first."""
     latest = {}
@@ -91,6 +85,96 @@ def _latest_csa_indices(blocks, offsets, positions):
         if previous is None or position > positions[previous]:
             latest[key] = index
     return sorted(latest.values())
+
+
+def _verified_cache_table(
+    cache,
+    pool,
+    *,
+    source,
+    field,
+    mirrors,
+    invalid,
+    invalid_key,
+    stats,
+    counter,
+    mirror_keys=None
+):
+    """Validate a constructor-owned table and reuse one exact host mirror.
+
+    Pool-specific bindings are checked by the caller. A changed/rebound table
+    or mirror is permanently declined for this forward, including mutations
+    subsequently changed back. Read and write users share the same proof.
+    """
+    tag = pool.framework_tag
+    if source is None or invalid_key in invalid:
+        return None
+    meta, owners, birth = source
+
+    def current():
+        live = cache.inputs.get(tag)
+        values = (getattr(live, field, None), getattr(live, field + "_device", None))
+        return (
+            live is meta
+            and all(_local_swa_raw_tensor(value) for value in (*values, pool.table))
+            and tuple(_source_tensor_key(value) for value in values) == birth
+            and tuple(_source_tensor_key(value) for value in owners) == birth
+            and _source_tensor_key(pool.table) == birth[1]
+        )
+
+    if not current():
+        invalid.add(invalid_key)
+        return None
+    host, device = owners
+    if (
+        host.device.type != "cpu"
+        or host.ndim != 2
+        or device.ndim != 2
+        or host.dtype not in (torch.int32, torch.int64)
+        or device.dtype != host.dtype
+        or host.shape != device.shape
+        or device.device != pool.tensor.device
+        or any(stride <= 0 for stride in (*host.stride(), *device.stride()))
+        or host.shape[0] < len(cache.lengths)
+        or torch._C._is_alias_of(pool.tensor, device)
+    ):
+        return None
+    saved = mirrors.get(tag)
+    if saved is not None:
+        mirror, stamp = saved if mirror_keys is None else (saved, mirror_keys.get(tag))
+        if _source_tensor_key(mirror) != stamp:
+            invalid.add(invalid_key)
+            return None
+        return mirror
+    mirror = device.detach().to(device="cpu", copy=True)
+    stats[counter] += 1
+    if "mirror_bytes" in stats:
+        stats["mirror_bytes"] += mirror.numel() * mirror.element_size()
+    if not current() or not torch.equal(host, mirror):
+        invalid.add(invalid_key)
+        return None
+    stamp = _source_tensor_key(mirror)
+    if mirror_keys is None:
+        mirrors[tag] = mirror, stamp
+    else:
+        mirrors[tag], mirror_keys[tag] = mirror, stamp
+    return mirror
+
+
+def _local_pool_binding_valid(key, pool, binding, layout, invalid):
+    if binding is None or key in invalid:
+        return False
+    tensors = pool.tensor, pool.handle.kv_cache_base
+    if (
+        pool is not binding[0]
+        or pool.handle is not binding[1]
+        or not all(_local_swa_raw_tensor(value) for value in tensors)
+        or tuple(_source_tensor_key(value)[:-1] for value in tensors) != binding[3]
+        or layout != binding[4:]
+    ):
+        invalid.add(key)
+        return False
+    return True
 
 
 class SharedNativeCache(NativeCacheBridge):
@@ -122,9 +206,10 @@ class SharedNativeCache(NativeCacheBridge):
         self.writes = []
         self._local_swa_write_sources = {}
         self._local_swa_write_mirrors = {}
+        self._local_swa_write_mirror_keys = {}
         self._local_swa_write_invalid = set()
         self._local_swa_native_write_stats = dict(mirrors=0, launches=0, requests=0, fallbacks=0)
-        self._local_swa_read_enabled = os.environ.get(LOCAL_PREFILL_SWA_NATIVE_READ_ENV, "0") == "1"
+        self._local_swa_read_enabled = prefill and not self.sharded
         self._local_swa_read_nonce = object()
         self._local_swa_read_rows = None
         self._local_swa_read_mirrors = {}
@@ -183,8 +268,7 @@ class SharedNativeCache(NativeCacheBridge):
             hits=0, packed_rebuilds=0, closed=False,
         )
         self._init_local_csa_native_writes()
-        if (os.environ.get(LOCAL_PREFILL_SWA_NATIVE_WRITE_ENV, "0") == "1"
-                and self._is_prefill and not self.sharded):
+        if self._is_prefill and not self.sharded:
             for (owner, tag), pool in self.pools.items():
                 if tag != "swa_kv" or pool.framework_tag in self._local_swa_write_sources:
                     continue
@@ -197,13 +281,13 @@ class SharedNativeCache(NativeCacheBridge):
                     meta, owners, tuple(_source_tensor_key(value) for value in owners),
                 )
         self._local_producer_slot_stats = dict(
-            enabled=os.environ.get(LOCAL_PREFILL_LAZY_PRODUCER_SLOTS_ENV, "0") == "1",
+            enabled=optimization_enabled(LOCAL_PREFILL_LAZY_PRODUCER_SLOTS_ENV),
             deferred=False, materializations=0, closed=False,
         )
         self._slots = None
         if not defer_producer_slots and not (
             self.cp8_row_prep_enabled()
-            and os.environ.get("RTP_V41_PPU_CP8_LAZY_PRODUCER_SLOTS", "0") == "1"
+            and optimization_enabled("RTP_V41_PPU_CP8_LAZY_PRODUCER_SLOTS")
         ) and not self._local_lazy_producer_slots_enabled():
             self._slots = self._build_producer_slots()
             self._local_producer_slot_stats["materializations"] += 1
@@ -212,11 +296,7 @@ class SharedNativeCache(NativeCacheBridge):
     def _local_lazy_producer_slots_enabled(self):
         if (not self._local_producer_slot_stats["enabled"]
                 or not self._local_source_native_read_business() or torch.is_grad_enabled()
-                or any(length < 0 for length in self.lengths)
-                or any(os.environ.get(flag, "0") != "1" for flag in (
-                    LOCAL_PREFILL_SOURCE_NATIVE_READ_ENV, LOCAL_PREFILL_SOURCE_NATIVE_WRITE_ENV,
-                    LOCAL_PREFILL_SWA_NATIVE_WRITE_ENV,
-                ))):
+                or any(length < 0 for length in self.lengths)):
             return False
         full = [(key, pool) for key, pool in self.pools.items() if key[1] in _FULL]
         if not full or not self._local_source_native_read_device(full[0][1]):
@@ -330,11 +410,16 @@ class SharedNativeCache(NativeCacheBridge):
             and os.environ.get(CP8_ROW_PREP_ENV, "1") == "1"
         )
 
-    def insert_request_rows(self, layer, tag, request, positions, rows, *, start=None):
-        """Write raw positions already grouped by the caller's request."""
+    def insert_request_rows(self, layer, tag, request, positions, rows, *, start=None,
+                            proof=None, prefill_layout=None):
+        """Select a qualified local/CP store, otherwise use logical row copying."""
         if not positions.numel():
             return
         key = layer, tag
+        if start is not None and proof is not None and tag in _FULL and self.try_insert_local_source_rows(
+            layer, tag, request, start, rows, proof=proof, prefill_layout=prefill_layout,
+        ):
+            return
         if start is not None and self._try_store_prefill_range(key, request, start, rows):
             return
         owned = self.owned_positions(key, positions)
@@ -363,7 +448,7 @@ class SharedNativeCache(NativeCacheBridge):
         self._copy_rows(key, request, positions, rows)
         self.writes.append(write)
 
-    def try_insert_csa_fields(self, layer, request, start, values, scores):
+    def try_insert_csa_fields(self, layer, request, start, values, scores, *, proof=None, prefill_layout=None):
         """Write separate producer fields directly into the existing CSA row."""
         if not (
             values.shape == scores.shape
@@ -373,6 +458,10 @@ class SharedNativeCache(NativeCacheBridge):
             and scores.device == values.device
         ):
             return False
+        if proof is not None and self.try_insert_local_csa_fields(
+            layer, request, start, values, scores, proof=proof, prefill_layout=prefill_layout,
+        ):
+            return True
         return self._try_store_prefill_range((layer, "csa_state"), request, start, values, scores=scores)
 
     def _try_store_prefill_range(self, key, request, start, rows, *, scores=None):
@@ -381,8 +470,7 @@ class SharedNativeCache(NativeCacheBridge):
             # Clear before launch, including writes through aliased requests.
             self._invalidate_local_source_reads()
         if (
-            os.environ.get("RTP_V41_PPU_CP8_FUSED_COMPRESSED_STORE", "1") != "1"
-            or not self.cp8_row_prep_enabled()
+            not self.cp8_row_prep_enabled()
             or start < 0
             or not rows.is_cuda
             or not rows.is_contiguous()
@@ -475,8 +563,11 @@ class SharedNativeCache(NativeCacheBridge):
         )
 
     def _init_local_source_native_reads(self):
-        self._local_source_native_read_enabled = os.environ.get(LOCAL_PREFILL_SOURCE_NATIVE_READ_ENV, "0") == "1"
-        self._local_source_native_write_enabled = os.environ.get(LOCAL_PREFILL_SOURCE_NATIVE_WRITE_ENV, "0") == "1"
+        # One constructor-owned binding serves reads and writes. No opposite
+        # operation or rollout flag is needed to establish table provenance.
+        eligible = self._local_source_native_read_business()
+        self._local_source_native_read_enabled = eligible
+        self._local_source_native_write_enabled = eligible
         self._local_source_native_write_stats = dict(
             enabled=self._local_source_native_write_enabled, writes=0, rows=0,
             launches=0, bytes=0, fallbacks=0, fallback_reasons={}, geometries=[], closed=False,
@@ -539,7 +630,7 @@ class SharedNativeCache(NativeCacheBridge):
             stats["closed"] = True
 
     def _init_local_csa_native_writes(self):
-        self._local_csa_native_write_enabled = os.environ.get(LOCAL_PREFILL_CSA_NATIVE_WRITE_ENV, "0") == "1"
+        self._local_csa_native_write_enabled = self._local_source_native_read_business()
         self._local_csa_native_write_nonce = object()
         self._local_csa_native_write_birth_nonce = self._local_csa_native_write_nonce
         self._local_csa_native_write_sources = {}
@@ -580,59 +671,21 @@ class SharedNativeCache(NativeCacheBridge):
             stats["closed"] = True
 
     def _verified_local_csa_native_table(self, key, pool):
-        binding = self._local_csa_native_write_bindings.get(key)
-        tag = pool.framework_tag
-        if binding is None or key in self._local_csa_native_write_invalid:
+        if not _local_pool_binding_valid(
+            key, pool, self._local_csa_native_write_bindings.get(key),
+            (pool.entries, pool.span, self.lengths), self._local_csa_native_write_invalid,
+        ):
             return None
-        tensors = pool.tensor, pool.handle.kv_cache_base
-        if (pool is not binding[0] or pool.handle is not binding[1]
-                or not all(_local_swa_raw_tensor(value) for value in tensors)
-                or tuple(_source_tensor_key(value)[:-1] for value in tensors) != binding[3]
-                or (pool.entries, pool.span, self.lengths) != binding[4:]):
-            self._local_csa_native_write_invalid.add(key)
-            return None
-        source = self._local_csa_native_write_sources.get(tag)
-        if source is None:
-            return None
-        meta, owners, birth = source
-
-        def current():
-            live = self.inputs.get(tag)
-            values = (getattr(live, "kv_cache_block_id", None), getattr(live, "kv_cache_block_id_device", None))
-            return (live is meta and all(_local_swa_raw_tensor(value) for value in (*values, pool.table))
-                    and tuple(_source_tensor_key(value) for value in values) == birth
-                    and _source_tensor_key(pool.table) == birth[1])
-
-        if not current():
-            self._local_csa_native_write_invalid.add(key)
-            return None
-        host, device = owners
-        if (host.device.type != "cpu" or host.ndim != 2 or device.ndim != 2
-                or host.dtype not in (torch.int32, torch.int64) or device.dtype != host.dtype
-                or host.shape != device.shape or device.device != pool.tensor.device
-                or host.shape[0] < len(self.lengths)
-                or any(stride <= 0 for stride in (*host.stride(), *device.stride()))
-                or torch._C._is_alias_of(pool.tensor, device)):
-            return None
-        saved = self._local_csa_native_write_mirrors.get(tag)
-        if saved is not None:
-            mirror, mirror_key = saved
-            if _source_tensor_key(mirror) == mirror_key:
-                return mirror
-            self._local_csa_native_write_invalid.add(key)
-            return None
-        mirror = device.detach().to(device="cpu", copy=True)
-        self._local_csa_native_write_stats["table_mirrors"] += 1
-        if not current() or not torch.equal(host, mirror):
-            self._local_csa_native_write_invalid.add(key)
-            return None
-        self._local_csa_native_write_mirrors[tag] = mirror, _source_tensor_key(mirror)
-        return mirror
+        return _verified_cache_table(
+            self, pool, source=self._local_csa_native_write_sources.get(pool.framework_tag),
+            field="kv_cache_block_id", mirrors=self._local_csa_native_write_mirrors,
+            invalid=self._local_csa_native_write_invalid, invalid_key=key,
+            stats=self._local_csa_native_write_stats, counter="table_mirrors",
+        )
 
     def try_insert_local_csa_fields(self, layer, request, start, values, scores, *, proof, prefill_layout):
         """Store the old FP32 cat fields with an independent CSA table birth."""
-        if (not getattr(self, "_local_csa_native_write_enabled", False)
-                or os.environ.get(LOCAL_PREFILL_CSA_NATIVE_WRITE_ENV, "0") != "1"):
+        if not getattr(self, "_local_csa_native_write_enabled", False):
             return False
         stats = self._local_csa_native_write_stats
 
@@ -722,8 +775,7 @@ class SharedNativeCache(NativeCacheBridge):
 
     def try_insert_local_source_rows(self, layer, tag, request, start, rows, *, proof, prefill_layout):
         """Bit-copy a proved local FULL suffix; no CP placement is constructed."""
-        if (not getattr(self, "_local_source_native_write_enabled", False)
-                or os.environ.get(LOCAL_PREFILL_SOURCE_NATIVE_WRITE_ENV, "0") != "1"):
+        if not getattr(self, "_local_source_native_write_enabled", False):
             return False
         stats = self._local_source_native_write_stats
 
@@ -733,9 +785,7 @@ class SharedNativeCache(NativeCacheBridge):
             reasons[reason] = reasons.get(reason, 0) + 1
             return False
 
-        if (stats["closed"] or not self._local_source_native_read_enabled
-                or os.environ.get(LOCAL_PREFILL_SOURCE_NATIVE_READ_ENV, "0") != "1"
-                or self._local_source_native_read_stats["closed"]
+        if (stats["closed"] or self._local_source_native_read_stats["closed"]
                 or not self._local_source_native_read_business() or torch.is_grad_enabled()):
             return decline("scope")
         if self._local_source_native_read_nonce is not self._local_source_native_read_birth_nonce:
@@ -809,69 +859,24 @@ class SharedNativeCache(NativeCacheBridge):
         return True
 
     def _local_source_native_binding_valid(self, key, pool):
-        binding = self._local_source_native_read_bindings.get(key)
-        if binding is None or key in self._local_source_native_read_invalid_pools:
-            return False
-        tensors = pool.tensor, pool.handle.kv_cache_base
-        if (pool is not binding[0] or pool.handle is not binding[1]
-                or not all(_local_swa_raw_tensor(value) for value in tensors)
-                or tuple(_source_tensor_key(value)[:-1] for value in tensors) != binding[3]
-                or (pool.entries, pool.span, self.geometry.ratio(key[0]), self.lengths) != binding[4:]):
-            self._local_source_native_read_invalid_pools.add(key)
-            return False
-        return True
+        return _local_pool_binding_valid(
+            key, pool, self._local_source_native_read_bindings.get(key),
+            (pool.entries, pool.span, self.geometry.ratio(key[0]), self.lengths),
+            self._local_source_native_read_invalid_pools,
+        )
 
     def _verified_local_source_native_table(self, key, pool):
-        tag = pool.framework_tag
-        if tag in self._local_source_native_read_invalid or key in self._local_source_native_read_invalid_pools:
+        if not self._local_source_native_binding_valid(key, pool):
             return None
-        source = self._local_source_native_read_sources.get(tag)
-        if source is None or not self._local_source_native_binding_valid(key, pool):
-            return None  # Never mint a new birth after construction.
-        meta, owners, birth = source
-        current_meta = self.inputs.get(tag)
-        current = (getattr(current_meta, "kv_cache_kernel_block_id", None),
-                   getattr(current_meta, "kv_cache_kernel_block_id_device", None))
-        if (current_meta is not meta or not all(_local_swa_raw_tensor(value) for value in (*current, pool.table))
-                or tuple(_source_tensor_key(value) for value in current) != birth
-                or _source_tensor_key(pool.table) != birth[1]):
-            self._local_source_native_read_invalid.add(tag)
-            return None
-        host, device = owners
-        if (host.device.type != "cpu" or host.ndim != 2 or device.ndim != 2
-                or host.dtype not in (torch.int32, torch.int64) or device.dtype != host.dtype
-                or host.shape != device.shape or device.device != pool.tensor.device
-                or any(stride <= 0 for stride in (*host.stride(), *device.stride()))
-                or host.shape[0] < len(self.lengths)
-                or torch._C._is_alias_of(pool.tensor, device)):
-            return None
-        saved = self._local_source_native_read_mirrors.get(tag)
-        if saved is not None:
-            mirror, mirror_key = saved
-            if _source_tensor_key(mirror) != mirror_key:
-                self._local_source_native_read_invalid.add(tag)
-                return None
-            return mirror
-        mirror = device.detach().to(device="cpu", copy=True)
-        stats = self._local_source_native_read_stats
-        stats["mirrors"] += 1
-        stats["mirror_bytes"] += mirror.numel() * mirror.element_size()
-        current_meta = self.inputs.get(tag)
-        current = (getattr(current_meta, "kv_cache_kernel_block_id", None),
-                   getattr(current_meta, "kv_cache_kernel_block_id_device", None))
-        if (current_meta is not meta or not all(_local_swa_raw_tensor(value) for value in (*current, pool.table))
-                or tuple(_source_tensor_key(value) for value in current) != birth
-                or _source_tensor_key(pool.table) != birth[1]
-                or tuple(_source_tensor_key(value) for value in owners) != birth
-                or not torch.equal(host, mirror)):
-            self._local_source_native_read_invalid.add(tag)
-            return None
-        self._local_source_native_read_mirrors[tag] = mirror, _source_tensor_key(mirror)
-        return mirror
+        return _verified_cache_table(
+            self, pool, source=self._local_source_native_read_sources.get(pool.framework_tag),
+            field="kv_cache_kernel_block_id", mirrors=self._local_source_native_read_mirrors,
+            invalid=self._local_source_native_read_invalid, invalid_key=pool.framework_tag,
+            stats=self._local_source_native_read_stats, counter="mirrors",
+        )
 
     def _try_read_local_source_pool(self, key, request, count, *, split_indexer=False):
-        if (not getattr(self, "_local_source_native_read_enabled", False)
-                or os.environ.get(LOCAL_PREFILL_SOURCE_NATIVE_READ_ENV, "0") != "1"):
+        if not getattr(self, "_local_source_native_read_enabled", False):
             return None
         stats = self._local_source_native_read_stats
 
@@ -1025,6 +1030,23 @@ class SharedNativeCache(NativeCacheBridge):
             saved = None
         return local, saved
 
+    def _read_source_rows(self, source, request, count, *, split_indexer=False):
+        """Read both source pools through the same kernel/fallback boundary."""
+        ratio = self.geometry.ratio(source)
+        tag = "global_kv_2" if ratio == 2 else "global_kv_1"
+        banks, positions = [], None
+        for kind in (tag, "indexer_kv"):
+            rows = self._try_read_local_source_pool(
+                (source, kind), request, count,
+                split_indexer=split_indexer and kind == "indexer_kv",
+            )
+            if rows is None:
+                if positions is None:
+                    positions = torch.arange(count, device=self.device) * ratio
+                rows = self._copy_rows((source, kind), request, positions)
+            banks.append(rows)
+        return tuple(banks)
+
     def _read_local_sg_source(self, source, request, count):
         """Read-only banks; old packed ABI is assembled only when requested."""
         if (not getattr(self, "_local_sg_source_enabled", False)
@@ -1039,18 +1061,7 @@ class SharedNativeCache(NativeCacheBridge):
             if isinstance(saved[1], tuple):
                 return saved
         else:
-            ratio = self.geometry.ratio(source)
-            tag = "global_kv_2" if ratio == 2 else "global_kv_1"
-            banks, positions = [], None
-            for kind in (tag, "indexer_kv"):
-                rows = self._try_read_local_source_pool((source, kind), request, count,
-                                                        split_indexer=kind == "indexer_kv")
-                if rows is None:
-                    if positions is None:
-                        positions = torch.arange(count, device=self.device) * ratio
-                    rows = self._copy_rows((source, kind), request, positions)
-                banks.append(rows)
-            saved = tuple(banks)
+            saved = self._read_source_rows(source, request, count, split_indexer=True)
         if not isinstance(saved[1], tuple):
             from rtp_llm.models_py.modules.dsv41.ppu._quant import _bytes_to_sf
 
@@ -1090,22 +1101,7 @@ class SharedNativeCache(NativeCacheBridge):
             return global_rows[:global_entries], indexer[:global_entries]
         # Publish only AFTER both old packed reads and all their native checks
         # succeed. Never fill inactive requests or read beyond this call's count.
-        if (not getattr(self, "_local_source_native_read_enabled", False)
-                or os.environ.get(LOCAL_PREFILL_SOURCE_NATIVE_READ_ENV, "0") != "1"):
-            positions = torch.arange(global_entries, device=self.device) * self.geometry.ratio(source)
-            tag = "global_kv_2" if self.geometry.ratio(source) == 2 else "global_kv_1"
-            packed = self._copy_rows((source, tag), request, positions), self._copy_rows((source, "indexer_kv"), request, positions)
-        else:
-            tag = "global_kv_2" if self.geometry.ratio(source) == 2 else "global_kv_1"
-            positions, packed = None, []
-            for kind in (tag, "indexer_kv"):
-                rows = self._try_read_local_source_pool((source, kind), request, global_entries)
-                if rows is None:
-                    if positions is None:
-                        positions = torch.arange(global_entries, device=self.device) * self.geometry.ratio(source)
-                    rows = self._copy_rows((source, kind), request, positions)
-                packed.append(rows)
-            packed = tuple(packed)
+        packed = self._read_source_rows(source, request, global_entries)
         if local:
             banks = self._source_bank_tensors(packed)
             owners = list(banks)
@@ -1342,59 +1338,13 @@ class SharedNativeCache(NativeCacheBridge):
         return _LocalSwaWriteGeometry(0, pool.entries, pool.tensor.shape[1])
 
     def _verified_local_swa_write_table(self, pool):
-        """One exact mirror per constructor-owned tag/device table and forward.
-
-        Inference metadata has no version counter and follows the existing
-        read-only-within-forward contract. Unknown external native metadata
-        writes are outside this eager local capability.
-        """
-        tag = pool.framework_tag
-        if (os.environ.get(LOCAL_PREFILL_SWA_NATIVE_WRITE_ENV, "0") != "1"
-                or tag in self._local_swa_write_invalid):
-            return None
-        source = self._local_swa_write_sources.get(tag)
-        if source is None:
-            return None  # A flag opened mid-forward cannot mint provenance.
-        meta, owners, birth = source
-        def current_key():
-            current_meta = self.inputs.get(tag)
-            if current_meta is not meta:
-                return None
-            current = tuple(getattr(current_meta, field, None) for field in (
-                "kv_cache_block_id", "kv_cache_block_id_device",
-            ))
-            if not all(_local_swa_raw_tensor(value) for value in current):
-                return None
-            return tuple(_source_tensor_key(value) for value in current)
-
-        if (not _local_swa_raw_tensor(pool.table)
-                or current_key() != birth or _source_tensor_key(pool.table) != birth[1]):
-            self._local_swa_write_invalid.add(tag)
-            return None
-        host, device = owners
-        if (
-            not all(isinstance(t, torch.Tensor) for t in owners)
-            or host.device.type != "cpu" or host.ndim != 2
-            or host.dtype not in (torch.int32, torch.int64) or device.dtype != host.dtype
-            or device.shape != host.shape or device.device != pool.tensor.device
-            or device.ndim != 2 or any(stride <= 0 for stride in device.stride())
-            or host.shape[0] < len(self.lengths)
-            or torch._C._is_alias_of(pool.tensor, device)
-        ):
-            return None
-        if tag not in self._local_swa_write_mirrors:
-            # Blocking D2H on the engine stream is intentional qualification;
-            # matching shapes or a copied Python wrapper is not a value proof.
-            mirror = device.detach().to(device="cpu", copy=True)
-            self._local_swa_native_write_stats["mirrors"] += 1
-            if (not _local_swa_raw_tensor(pool.table)
-                    or current_key() != birth or tuple(_source_tensor_key(t) for t in owners) != birth
-                    or _source_tensor_key(pool.table) != birth[1]
-                    or not torch.equal(host, mirror)):
-                self._local_swa_write_invalid.add(tag)
-                return None
-            self._local_swa_write_mirrors[tag] = mirror
-        return self._local_swa_write_mirrors[tag]
+        return _verified_cache_table(
+            self, pool, source=self._local_swa_write_sources.get(pool.framework_tag),
+            field="kv_cache_block_id", mirrors=self._local_swa_write_mirrors,
+            mirror_keys=self._local_swa_write_mirror_keys,
+            invalid=self._local_swa_write_invalid, invalid_key=pool.framework_tag,
+            stats=self._local_swa_native_write_stats, counter="mirrors",
+        )
 
     def _checked_local_swa_ranges(self, layer, positions, requests, packed, prefixes,
                                   retain_rows, retain_prefix_tail, bounded_starts, ticket):
@@ -1480,8 +1430,7 @@ class SharedNativeCache(NativeCacheBridge):
                    for current, owner, key in zip(rows, owners, keys))
 
     def _try_local_swa_native_tail(self, layer, request, prefix, ticket, local_write):
-        if (not getattr(self, "_local_swa_read_enabled", False)
-                or os.environ.get(LOCAL_PREFILL_SWA_NATIVE_READ_ENV, "0") != "1"):
+        if not getattr(self, "_local_swa_read_enabled", False):
             return None
         stats = self._local_swa_native_read_stats
 
@@ -1495,7 +1444,6 @@ class SharedNativeCache(NativeCacheBridge):
         if pool.framework_tag in self._local_swa_write_invalid:
             return decline(close=True)
         if (stats["closed"] or local_write is None
-                or os.environ.get(LOCAL_PREFILL_SWA_NATIVE_WRITE_ENV, "0") != "1"
                 or torch.is_grad_enabled() or not self._local_swa_native_read_stream(pool)):
             return decline()
         geometry, mirror = local_write
@@ -1585,15 +1533,14 @@ class SharedNativeCache(NativeCacheBridge):
             retain_prefix_tail, bounded_starts, local_ranges,
         )
         local_write = None
-        if local_ranges is not None and os.environ.get(LOCAL_PREFILL_SWA_NATIVE_WRITE_ENV, "0") == "1":
+        if local_ranges is not None:
             geometry = self._local_swa_native_geometry(self.pools[layer, "swa_kv"], packed)
             if geometry is not None:
                 table = self._verified_local_swa_write_table(self.pools[layer, "swa_kv"])
                 if table is not None:
                     local_write = geometry, table
         if (getattr(self, "_local_swa_read_enabled", False) and not self._local_swa_native_read_stats["closed"]
-                and self._local_swa_read_rows is not None
-                and os.environ.get(LOCAL_PREFILL_SWA_NATIVE_READ_ENV, "0") == "1"):
+                and self._local_swa_read_rows is not None):
             owners, keys = self._local_swa_read_rows
             if (tuple(_source_tensor_key(value) for value in owners) != keys
                     or not isinstance(local_ticket, _LocalSwaStageRanges) or not local_ticket.guard()
@@ -1629,7 +1576,6 @@ class SharedNativeCache(NativeCacheBridge):
             plans = getattr(self, "prefill_plans", None)
             if (
                 lengths is not None
-                and os.environ.get("RTP_V41_PPU_CP8_FUSED_SWA_WRITE", "1") == "1"
                 and len(lengths) == len(fresh_starts) == len(self.lengths)
                 and sum(lengths) == positions.numel() == requests.numel() == packed.shape[0]
                 and all(
@@ -1687,7 +1633,6 @@ class SharedNativeCache(NativeCacheBridge):
             fresh_lengths is not None
             and packed.is_contiguous()
             and self.cp8_row_prep_enabled()
-            and os.environ.get(CP8_WORKSPACE_DEQUANT_ENV, "1") == "1"
             and os.environ.get("RTP_V41_PPU_CP8_DIRECT_SWA_WORKSPACE", "1") == "1"
         )
         offset = 0

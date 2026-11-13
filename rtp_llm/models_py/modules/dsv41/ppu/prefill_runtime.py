@@ -19,6 +19,13 @@ from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import (
     LOCAL_PREFILL_SWA_SEGMENTS_ENV,
     SharedNativeCache,
 )
+from rtp_llm.models_py.modules.dsv41.ppu.row_metadata import (
+    RowLayout,
+    RowScope,
+    RowView,
+    is_plain_tensor,
+    tensor_metadata_key as _row_tensor_key,
+)
 from rtp_llm.models_py.modules.dsv41.prefill.ced import permits_ced
 from rtp_llm.models_py.modules.dsv41.prefill.ced import CEDPlan, _DERIVED_KEYS, _MIN_TOKENS
 
@@ -102,18 +109,6 @@ class _NextAttnMHCTicket:
     target_key: tuple
     epoch: tuple
     owners: tuple
-
-
-def _row_tensor_key(tensor):
-    if tensor is None:
-        return None
-    # PyAttentionInputs.def_readwrite can return another Python wrapper for
-    # the same TensorImpl. Keep the native identity, not id(wrapper).
-    version = None if tensor.is_inference() else tensor._version
-    return (
-        tensor._cdata, tensor.data_ptr(), tensor.shape, tensor.stride(),
-        tensor.storage_offset(), tensor.dtype, tensor.device, version,
-    )
 
 
 class _Overlay:
@@ -208,6 +203,7 @@ class SharedForwardState:
         self._local_prefill_rows = {}
         self._local_prefill_full_rows = {}
         self._local_compact_row_proof = None
+        self._l20_query_projection_proof = None
         self._local_compact_full_rows = None
         self.original_context = self.context = None
         self.prefill_mega_buffer = None
@@ -343,10 +339,16 @@ class SharedForwardState:
             "global_positions", "req_id_per_token", "local_is_real", "unpad_restore", "gather_restore_positions",
         )) + (getattr(exchange, "send_indices", None), getattr(exchange, "receive_positions", None), ids, cu)
         if (not all(_cross_normal_tensor(t) for t in sources)
-                or not isinstance(ids, torch.Tensor) or not isinstance(cu, torch.Tensor)
-                or not self.use_local_compact_rows(cp)):
+                or not isinstance(ids, torch.Tensor) or not isinstance(cu, torch.Tensor)):
             return None
-        current = self._local_compact_rows_key(cp)
+        if os.environ.get("RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA", "0") == "1":
+            current = self._validated_local_compact_rows_key(cp)
+            if current is None:
+                return None
+        else:
+            if not self.use_local_compact_rows(cp):
+                return None
+            current = self._local_compact_rows_key(cp)
         key = (id(cp), id(plan), id(proof), current[0],
                _row_tensor_key(ids), _row_tensor_key(cu))
         return key, (cp, plan, proof, ids, cu, *current[1])
@@ -625,8 +627,7 @@ class SharedForwardState:
     @staticmethod
     def _sg_rows_keys(rows):
         if (not isinstance(rows, tuple) or len(rows) != 4
-                or any(not isinstance(value, torch.Tensor) or value.layout != torch.strided
-                       or value.is_neg() or value.is_conj() for value in rows)):
+                or any(not is_plain_tensor(value) for value in rows)):
             return None
         return tuple(_row_tensor_key(value) for value in rows)
 
@@ -675,7 +676,37 @@ class SharedForwardState:
             return None
         return (slice(0, query_rows),)
 
+    def _describe_rows(self, rows, context, *, query, selected_only=False):
+        # This is a description, not a new activation/eligibility boundary.
+        scope = RowScope(
+            self, context, getattr(self, "plan", None),
+            getattr(self, "_local_compact_row_proof", None),
+            self.lengths, self.query_prefixes,
+            tuple(context.chunk_lengths_per_req) if context is not None else (),
+        )
+        if context is None:
+            sources = (getattr(getattr(self, "attn", None), "cu_seqlens", None),)
+        else:
+            sources = tuple(getattr(context, name, None) for name in (
+                "global_positions", "req_id_per_token", "local_is_real",
+                "gather_restore_positions", "unpad_restore",
+            ))
+        if query:
+            layout = RowLayout.LOCAL_QUERY if context is None else RowLayout.CP_QUERY
+            if (context is not None and getattr(self, "compacted", False)
+                    and context is getattr(self, "context", None)):
+                layout = RowLayout.COMPACT_QUERY
+        else:
+            layout = RowLayout.SELECTED if selected_only and context is not None else RowLayout.FULL
+        return RowView(rows, layout, scope, query, sources)
+
+    def row_view(self, context=None):
+        return self._describe_rows(self._rows_legacy(context), context, query=True)
+
     def rows(self, context=None):
+        return self.row_view(context).as_rows()
+
+    def _rows_legacy(self, context=None):
         local = self._local_row_cache_key(context)
         slot = id(context)
         if local is not None:
@@ -743,18 +774,19 @@ class SharedForwardState:
             and os.environ.get("RTP_V41_PPU_CP8_COMPACT_PREFILL_OPS", "1") == "1"
         )
 
-    def _local_compact_rows_key(self, context):
+    def _local_compact_rows_key(self, context, *, before_l20=False):
         """Recognize the bounded CP1 plan at its trusted activation boundary."""
         plan, policy = self.plan, self.runtime.policy
         exchange = getattr(plan, "exchange", None)
         if (
-            not self.prefill or self.idle or not self.compacted or self.cache.sharded
+            not self.prefill or self.idle or self.compacted == before_l20 or self.cache.sharded
             or getattr(self, "is_graph", False) or getattr(self.attn, "is_cuda_graph", False)
             or getattr(self.runtime.model, "_is_speculative", False)
             or policy.mode != "compact" or getattr(policy, "encoder_replay", False)
             or getattr(policy, "max_rollback_tokens", 0) != 0
             or self.plan_reason != "compact140"
-            or not isinstance(context, CPContext) or context is not self.context
+            or not isinstance(context, CPContext)
+            or (not before_l20 and context is not self.context)
             or getattr(plan, "context", None) is not context
             or not isinstance(exchange, _LocalRowExchange) or exchange.group is not None
             or context.cp_size != 1 or context.cp_rank != 0 or context.kv_cache_sharded
@@ -766,15 +798,23 @@ class SharedForwardState:
         keep = getattr(policy, "keep_tokens", None)
         if keep != 140 or starts != tuple(max(n - keep, 0) for n in self.lengths):
             return None
-        chunks = tuple((n - s + 1) // 2 * 2 for n, s in zip(self.lengths, starts))
-        selected, receive = [], []
-        original_offset = compact_offset = 0
-        for n, start, chunk in zip(self.lengths, starts, chunks):
-            selected.extend(range(original_offset + start, original_offset + n))
-            receive.extend(range(compact_offset, compact_offset + n - start))
-            original_offset += n
-            compact_offset += chunk
-        selected, receive = tuple(selected), tuple(receive)
+        use_host_geometry = os.environ.get("RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA", "0") == "1"
+        geometry_key = self.lengths, starts
+        saved = getattr(self, "_local_compact_host_geometry", None) if use_host_geometry else None
+        if saved is not None and saved[0] == geometry_key:
+            chunks, selected, receive = saved[1]
+        else:
+            chunks = tuple((n - s + 1) // 2 * 2 for n, s in zip(self.lengths, starts))
+            selected, receive = [], []
+            original_offset = compact_offset = 0
+            for n, start, chunk in zip(self.lengths, starts, chunks):
+                selected.extend(range(original_offset + start, original_offset + n))
+                receive.extend(range(compact_offset, compact_offset + n - start))
+                original_offset += n
+                compact_offset += chunk
+            selected, receive = tuple(selected), tuple(receive)
+            if use_host_geometry:
+                self._local_compact_host_geometry = geometry_key, (chunks, selected, receive)
         if (
             not selected or context.chunk_lengths_per_req != chunks
             or context.seq_len_full != sum(self.lengths)
@@ -801,19 +841,51 @@ class SharedForwardState:
                tuple(_row_tensor_key(tensor) for tensor in sources))
         return key, sources
 
+    def local_l20_query_slice(self, rows):
+        """Prove a B1 suffix against the plan's creation-stamped transport.
+
+        This only changes query consumers. Full L20 KV producers and the
+        existing compact-state callback retain their original row epoch.
+        """
+        proof = self._l20_query_projection_proof
+        if (
+            os.environ.get("RTP_V41_PPU_LOCAL_PREFILL_DENSE_PROJECTIONS", "0") != "1"
+            or not self.local_prefill_sg_align or proof is None
+            or self.compacted or len(self.lengths) != 1 or self.lengths != (rows,)
+            or rows <= 140 or self.runtime.policy.window != 128
+            or proof[0] is not self.plan or proof[1] is not self.plan.context
+        ):
+            return None
+        current = self._local_compact_rows_key(self.plan.context, before_l20=True)
+        if current is None or current[0] != proof[2]:
+            return None
+        return slice(rows - 140, rows)
+
     def use_local_compact_rows(self, context):
+        return self._validated_local_compact_rows_key(context) is not None
+
+    def _validated_local_compact_rows_key(self, context):
         if os.environ.get(LOCAL_PREFILL_COMPACT_ROWS_ENV, "0") != "1":
-            return False
+            return None
         proof = self._local_compact_row_proof
         if proof is None or proof[0] is not context or proof[1] is not self.plan:
-            return False
+            return None
         current = self._local_compact_rows_key(context)
         # Ordinary version changes invalidate even before the first consumer.
         # Inference metadata follows the existing read-only-within-forward
         # contract; every new forward creates a fresh state/proof/storage owner.
-        return current is not None and current[0] == proof[2]
+        return current if current is not None and current[0] == proof[2] else None
+
+    def full_row_view(self, context, *, selected_only=False):
+        return self._describe_rows(
+            self._full_rows_legacy(context, selected_only=selected_only), context,
+            query=False, selected_only=selected_only,
+        )
 
     def full_rows(self, context, *, selected_only=False):
+        return self.full_row_view(context, selected_only=selected_only).as_full_rows()
+
+    def _full_rows_legacy(self, context, *, selected_only=False):
         if selected_only and self.use_local_compact_rows(context):
             if self._local_compact_full_rows is None:
                 selected = context.unpad_restore
@@ -876,11 +948,11 @@ class SharedForwardState:
             if self._restored_rows is not None and self._restored_rows[0] == key:
                 return self._restored_rows[1], self._restored_rows[2], slice(None)
 
-        from rtp_llm.models_py.modules.dsv41.ppu.layers import cp8_yoco_small_ops_enabled
+        from rtp_llm.models_py.modules.dsv41.ppu.layers import cp8_yoco_operator_eligible
 
         if (
             reuse
-            and cp8_yoco_small_ops_enabled(self)
+            and cp8_yoco_operator_eligible(self)
             and self.lengths
             and self.lengths[0] > 0
             and all(length == self.lengths[0] for length in self.lengths)
@@ -950,6 +1022,12 @@ class SharedForwardState:
         if os.environ.get("RTP_V41_SHARED_VALIDATE_STATE", "0") == "1" and context.seq_len_full < _MIN_TOKENS:
             self.exact_short_fallback_observed = CEDPlan.create(self.v4, context, self.attn, self.cache.native, bounded_replay=False) is None
         self.plan, self.plan_reason = bounded_plan(self.v4, context, self.attn, self.cache.native, policy)
+        if (self.local_prefill_sg_align and self.plan is not None
+                and os.environ.get("RTP_V41_PPU_LOCAL_PREFILL_DENSE_PROJECTIONS", "0") == "1"):
+            proof = self._local_compact_rows_key(self.plan.context, before_l20=True)
+            self._l20_query_projection_proof = (
+                (self.plan, self.plan.context, proof[0], proof[1]) if proof is not None else None
+            )
 
     def before_block(self, block, hidden, ids, positions, cu):
         layer = block.layer_id

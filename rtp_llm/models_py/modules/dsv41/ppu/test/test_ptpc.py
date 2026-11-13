@@ -75,20 +75,22 @@ class PTPCContracts(unittest.TestCase):
         self.assertIs(model.v4._ppu_runtime, runtime)
         self.assertFalse(hasattr(layer, "attn_hc"))
 
-    def test_ptpc_norm_keeps_arithmetic_across_runtime_modes(self):
+    def test_ptpc_norm_uses_shared_provider_across_runtime_modes(self):
         from rtp_llm.models_py.modules.dsv41.ppu.layers import PPUSharedRMSNorm
 
         with patch.dict(os.environ, {QUANT_MODE_ENV: MXFP4_FP8_PTPC}):
             op = PPUSharedRMSNorm(torch.ones(1280, dtype=torch.bfloat16))
         x = torch.randn(4, 1280, dtype=torch.bfloat16)
         op.runtime = SimpleNamespace(current=None)
-        eager = op(x)
-        op.runtime.current = SimpleNamespace(is_graph=True, verify=False)
-        with patch.dict(os.environ, {QUANT_MODE_ENV: "legacy"}), patch(
-            "rtp_llm.models_py.modules.dsv41.ppu.layers.try_graph_rms_norm",
-            side_effect=AssertionError("PTPC arithmetic must remain fixed"),
-        ):
-            self.assertTrue(torch.equal(eager, op(x)))
+        with patch(
+            "rtp_llm.models_py.modules.dsv41.ppu.layers.rms_norm", return_value=x
+        ) as native:
+            self.assertIs(op(x), x)
+            op.runtime.current = SimpleNamespace(is_graph=True, verify=False)
+            with patch.dict(os.environ, {QUANT_MODE_ENV: "legacy"}):
+                self.assertIs(op(x), x)
+        self.assertEqual(native.call_count, 2)
+        native.assert_called_with(x, op.weight, op.variance_epsilon)
 
     def test_layout_check_rejects_two_missing_inventories(self):
         from rtp_llm.tools.v41.validate_ptpc import check_layouts

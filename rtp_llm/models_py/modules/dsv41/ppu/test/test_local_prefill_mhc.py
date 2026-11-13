@@ -22,9 +22,8 @@ from rtp_llm.models_py.modules.dsv41.block import Block
 from rtp_llm.models_py.modules.dsv41.cp import CPContext
 from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
 from rtp_llm.models_py.modules.dsv41.ppu.block import (
-    LOCAL_PREFILL_MEGA_MHC_ENV,
     SharedPPUBlock,
-    _local_prefill_mega_mhc_enabled,
+    _local_prefill_mega_mhc_eligible,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.ced import _bounded_query_layout
 from rtp_llm.models_py.modules.dsv41.ppu.layers import PPUSharedHCUnit, PPUSharedRMSNorm
@@ -42,7 +41,7 @@ from rtp_llm.models_py.modules.dsv41.prefill.ced import _bounded_replay_selected
 from rtp_llm.utils.model_weight import W
 
 
-ENV = LOCAL_PREFILL_MEGA_MHC_ENV
+ENV = "RTP_V41_PPU_LOCAL_PREFILL_MEGA_MHC"  # Retired selector, ignored by production.
 
 
 def local_state(*, policy=None):
@@ -65,9 +64,9 @@ def bare_block(state):
 
 class LocalPrefillMHCContract(unittest.TestCase):
     @torch.inference_mode()
-    def test_forward_phase_opt_in_rollback_and_cp_are_independent(self):
+    def test_forward_phase_automatic_local_and_cp8_eligibility(self):
         for flag, mode, sharded, cp, fast_cp, expected in (
-            ("0", "compact", False, None, False, "ced"),
+            ("0", "compact", False, None, False, "prefill"),
             ("1", "compact", False, None, False, "prefill"),
             ("1", "compact", False, NS(cp_size=1), False, "prefill"),
             ("1", "exact", False, None, False, "ced"),
@@ -81,8 +80,11 @@ class LocalPrefillMHCContract(unittest.TestCase):
                 block = bare_block(state)
                 marker = object()
                 with patch.dict(os.environ, {ENV: flag}), patch(
-                    "rtp_llm.models_py.modules.dsv41.ppu.block.cp8_yoco_fast_prefill_enabled",
+                    "rtp_llm.models_py.modules.dsv41.ppu.block.cp8_yoco_operator_eligible",
                     return_value=fast_cp,
+                ), patch(
+                    "rtp_llm.models_py.modules.dsv41.ppu.block.cp8_yoco_fast_prefill_enabled",
+                    return_value=False,
                 ), patch.object(Block, "forward", return_value=marker) as parent:
                     self.assertIs(block.forward(None, None, None, None), marker)
                 self.assertEqual(block._mhc_phase, expected)
@@ -90,27 +92,27 @@ class LocalPrefillMHCContract(unittest.TestCase):
 
     def test_grad_idle_graph_decode_and_speculative_do_not_admit(self):
         with patch.dict(os.environ, {ENV: "0"}):
-            self.assertFalse(_local_prefill_mega_mhc_enabled(None))
+            self.assertFalse(_local_prefill_mega_mhc_eligible(None))
         with patch.dict(os.environ, {ENV: "1"}):
-            self.assertFalse(_local_prefill_mega_mhc_enabled(local_state()))
+            self.assertFalse(_local_prefill_mega_mhc_eligible(local_state()))
             with torch.inference_mode():
                 for field in ("idle", "is_graph", "verify"):
                     state = local_state()
                     setattr(state, field, True)
-                    self.assertFalse(_local_prefill_mega_mhc_enabled(state))
+                    self.assertFalse(_local_prefill_mega_mhc_eligible(state))
                 state = local_state()
                 state.prefill = False
-                self.assertFalse(_local_prefill_mega_mhc_enabled(state))
+                self.assertFalse(_local_prefill_mega_mhc_eligible(state))
                 state = local_state()
                 state.runtime.model._is_speculative = True
-                self.assertFalse(_local_prefill_mega_mhc_enabled(state))
+                self.assertFalse(_local_prefill_mega_mhc_eligible(state))
                 state = local_state()
                 state.cache = None
-                self.assertFalse(_local_prefill_mega_mhc_enabled(state))
+                self.assertFalse(_local_prefill_mega_mhc_eligible(state))
                 for policy in (SharedPrefillPolicy(mode="compact", max_rollback_tokens=4),
                                SharedPrefillPolicy(mode="compact", encoder_replay=True)):
-                    self.assertFalse(_local_prefill_mega_mhc_enabled(local_state(policy=policy)))
-                self.assertFalse(_local_prefill_mega_mhc_enabled(
+                    self.assertFalse(_local_prefill_mega_mhc_eligible(local_state(policy=policy)))
+                self.assertFalse(_local_prefill_mega_mhc_eligible(
                     local_state(policy=NS(mode="compact")),
                 ))
 
@@ -145,7 +147,7 @@ def _device_block(ops, inputs, attention_state):
     block.attn_hc.state = attention_state
     block.ffn_norm = PPUSharedRMSNorm(inputs["rmsnorm_weight"], eps)
     block.bind_execution_context(
-        "prefill", ced=not _local_prefill_mega_mhc_enabled(block.attn.runtime.current),
+        "prefill", ced=not _local_prefill_mega_mhc_eligible(block.attn.runtime.current),
     )
     return block
 
@@ -181,7 +183,7 @@ class LocalPrefillMHCDevice(unittest.TestCase):
     def setUp(self):
         self.assertTrue(is_ppu(), "native qualification requires a ZW PPU")
         self.environment = patch.dict(os.environ, {
-            ENV: "1", "RTP_V41_PPU_MHC_BACKEND": "mega",
+            ENV: "0", "RTP_V41_PPU_MHC_BACKEND": "mega",
             "RTP_V41_PPU_QUANT_MODE": "mxfp4_fp8_ptpc", "RTP_V41_PPU_PTPC_FUSION": "1",
         })
         self.environment.start()
@@ -191,11 +193,17 @@ class LocalPrefillMHCDevice(unittest.TestCase):
         self.addCleanup(setattr, torch.backends.cuda.matmul, "allow_tf32", self.saved_tf32)
         self.reports = []
 
-    def qualify(self, ops, inputs, state=None):
+    def qualify(self, ops, inputs, state=None, *, cp8=False):
         eps = ops._mhc.config.rms_eps
         state = _mix(inputs) if state is None else state
         original = {name: value.clone() for name, value in inputs.items()}
         block = _device_block(ops, inputs, state)
+        if cp8:
+            forward = block.attn.runtime.current
+            forward.context = NS(cp_size=8, kv_cache_sharded=True, gather_restore_positions=None)
+            forward.cache.sharded = True
+            with patch.object(Block, "forward", return_value=None):
+                block.forward(None, None, None, None)
         self.assertEqual(block._mhc_phase, "prefill")
         actual = block._try_mega_mhc(inputs["x"], inputs["residual"], state.post_mix, state.residual_mix)
         self.assertIsNotNone(actual, ops.mhc_execution_stats())
@@ -243,6 +251,16 @@ class LocalPrefillMHCDevice(unittest.TestCase):
         self.reports.append({"rows": inputs["x"].shape[0], "eps": eps,
                              "phase": block._mhc_phase, "outputs": metrics})
         return final, accepted
+
+    @torch.inference_mode()
+    def test_cp8_compact_transition_ignores_retired_and_framework_flags(self):
+        ops = PPUOps(num_local_experts=384, mhc_config=MHCConfig(rms_eps=1e-6))
+        inputs, _, _, _ = _make_case(torch, 140, "cuda:0", "normal")
+        with patch.dict(os.environ, {"RTP_V41_PPU_CP8_YOCO_FAST_PREFILL": "0",
+                                     "RTP_V41_PPU_CP8_YOCO_SMALL_OPS": "0"}):
+            self.qualify(ops, inputs, cp8=True)
+        self.assertEqual(ops.mhc_execution_stats()["calls"], {"prefill": 1})
+        self.write_report("cp8-auto-selector")
 
     @torch.inference_mode()
     def test_actual_full_compact_and_lookahead_rows_meet_existing_contract(self):

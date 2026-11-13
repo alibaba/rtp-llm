@@ -45,7 +45,7 @@ def _variant(arm, *, ops=None):
         seen.append(prepared)
         return resolved
 
-    with patch.object(token, "_native_ops", new=load):
+    with patch.object(token, "_hierarchical_ops", return_value=None), patch.object(token, "_native_ops", new=load):
         yield seen
 
 

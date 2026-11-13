@@ -23,10 +23,9 @@ from rtp_llm.models_py.modules.dsv41.ppu.kv_codec import decode_kv, encode_kv
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache import _WIDTH
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import (
     LOCAL_PREFILL_SOURCE_CACHE_ENV as SCC,
-    LOCAL_PREFILL_SOURCE_NATIVE_READ_ENV as READ,
-    LOCAL_PREFILL_SOURCE_NATIVE_WRITE_ENV as ENV,
     SharedNativeCache,
 )
+
 from rtp_llm.models_py.modules.dsv41.ppu.ops import PPUOps
 from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import SharedPrefillPolicy
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_fused import assert_bytes
@@ -42,8 +41,28 @@ from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_swa_segments im
     FLAGS, arguments, compact_plan,
 )
 
+# Legacy names only verify that retired selectors no longer affect dispatch.
+READ = 'RTP_V41_PPU_LOCAL_PREFILL_SOURCE_NATIVE_READ'
+ENV = 'RTP_V41_PPU_LOCAL_PREFILL_SOURCE_NATIVE_WRITE'
+
 
 ROTARY = prefill.LOCAL_PREFILL_ROTARY_PACK_ENV
+
+
+
+def _kernel_mode(enabled):
+    """Keep an independent fallback arm after rollout flags retire."""
+    from contextlib import nullcontext
+
+    return (
+        nullcontext()
+        if enabled
+        else patch.object(
+            SharedNativeCache,
+            "try_insert_local_source_rows",
+            return_value=False,
+        )
+    )
 
 
 class _StoreCPU:
@@ -134,6 +153,16 @@ def _pool_oracle(before, table, *, start, ratio, span, entries, tag, rows):
     return expected
 
 
+def _reference_norm_provider(value, weight, *, eps):
+    """Test-only CPU provider; production norm requires a native library."""
+    values = value.float()
+    return (
+        values
+        * torch.rsqrt(values.square().mean(-1, keepdim=True) + eps)
+        * weight.float()
+    ).to(value.dtype)
+
+
 class _Cases:
     def setUp(self):
         env = patch.dict(os.environ, {**FLAGS, ENV: "1", READ: "1", SCC: "0", ROTARY: "1",
@@ -141,6 +170,42 @@ class _Cases:
                                       "RTP_V41_PPU_LOCAL_PREFILL_SWA_NATIVE_READ": "0"})
         env.start()
         self.addCleanup(env.stop)
+
+    @torch.no_grad()
+    def test_public_request_entry_selects_kernel_or_fallback_without_flags(self):
+        for flag, proved in (("0", True), ("1", True), ("0", False)):
+            with patch.dict(os.environ, {ENV: flag, READ: flag, ROTARY: "0"}):
+                f = _fixture(self.device)
+                tag = "global_kv_2"
+                rows = _rows(f, 2, tag)
+                pool = f.cache.pools[2, tag]
+                expected = _pool_oracle(
+                    pool.tensor.clone(),
+                    pool.table[0],
+                    start=f.prefixes[0],
+                    ratio=2,
+                    span=pool.span,
+                    entries=pool.entries,
+                    tag=tag,
+                    rows=rows,
+                )
+                positions = (
+                    torch.arange(rows.shape[0], device=self.device) * 2 + f.prefixes[0]
+                )
+                f.cache.insert_request_rows(
+                    2,
+                    tag,
+                    0,
+                    positions,
+                    rows,
+                    start=f.prefixes[0],
+                    proof=f.proofs[2] if proved else None,
+                    prefill_layout=(f.prefixes, f.lengths),
+                )
+                assert_bytes(self, pool.tensor.cpu(), expected)
+                self.assertEqual(
+                    f.cache._local_source_native_write_stats["launches"], int(proved)
+                )
 
     @torch.no_grad()
     def test_true_geometry_raw_byte_oracle_padding_zero_and_reordered_pages(self):
@@ -182,7 +247,7 @@ class _Cases:
             for enabled in (False, True):
                 f = _fixture(self.device, (256, 512, 0), (140, 0, 8), ratios={2: ratio})
                 tag = "global_kv_2" if ratio == 2 else "global_kv_1"
-                with patch.dict(os.environ, {ENV: str(int(enabled))}):
+                with _kernel_mode(enabled):
                     for rid in (0, 1, 2):
                         for kind in (tag, "indexer_kv"):
                             start = f.prefixes[rid] + min(f.lengths[rid], 4)
@@ -231,7 +296,7 @@ class _Cases:
             for enabled in (False, True):
                 f = _fixture(self.device, (256,), (512,), ratios={2: 2}, configure=configure)
                 error = None
-                with patch.dict(os.environ, {ENV: str(int(enabled))}):
+                with _kernel_mode(enabled):
                     try:
                         for kind in ("global_kv_2", "indexer_kv"):
                             rows = torch.full_like(_rows(f, 2, kind), 37)
@@ -297,7 +362,7 @@ class _Cases:
         ):
             results = []
             for enabled in (False, True):
-                with patch.dict(os.environ, {ENV: str(int(enabled))}):
+                with _kernel_mode(enabled):
                     f = producer_fixture(self.device, ratio, prefixes, lengths)
                     self.assertIsNotNone(f.proof)
                     _produce(f, ops, append_starts=append)
@@ -309,7 +374,7 @@ class _Cases:
                 self.assertIsNone(results[1][0].source.cache._slots)
         errors = []
         for enabled in (False, True):
-            with patch.dict(os.environ, {ENV: str(int(enabled))}):
+            with _kernel_mode(enabled):
                 f = producer_fixture(self.device, 2, (129,), (9,), carry=False)
                 with self.assertRaises(RuntimeError) as err:
                     _produce(f, ops)
@@ -348,7 +413,8 @@ class LocalSourceNativeWriteCPU(_Cases, unittest.TestCase):
     def setUp(self):
         super().setUp()
         patches = (
-            patch.object(SharedNativeCache, "_local_source_native_read_device", new=lambda self, pool: True),
+            patch.object(SharedNativeCache, "_local_source_native_read_device", new=lambda self, pool: pool.tensor.dtype == torch.uint8),
+            patch("rtp_llm.models_py.modules.dsv41.ppu.rmsnorm._flashinfer_rmsnorm", return_value=_reference_norm_provider),
             patch.object(graph_cache_kernels, "_kernels", new=lambda: NS(
                 store_cp_prefill_rows=_StoreCPU(), triton=NS(next_power_of_2=lambda n: 1 << (n - 1).bit_length()))),
             patch.object(prefill_readback, "_restore_rows", _RestoreCPU()),
@@ -364,7 +430,7 @@ class LocalSourceNativeWriteCPU(_Cases, unittest.TestCase):
 
     @torch.no_grad()
     def test_default_latch_read0_phase_and_proof_fail_before_store(self):
-        for env in ({ENV: "0"}, {READ: "0"}, {"TP_SIZE": "8"}, {"PREFILL_CP_SIZE": "8"}):
+        for env in ({"TP_SIZE": "8"}, {"PREFILL_CP_SIZE": "8"}):
             with patch.dict(os.environ, env):
                 f = _fixture("cpu")
                 before = f.cache.pools[2, "global_kv_2"].tensor.clone()
@@ -372,7 +438,7 @@ class LocalSourceNativeWriteCPU(_Cases, unittest.TestCase):
                 assert_bytes(self, before, f.cache.pools[2, "global_kv_2"].tensor)
         with patch.dict(os.environ, {ENV: "0"}):
             f = _fixture("cpu")
-        self.assertFalse(_try(f, 2, "global_kv_2", _rows(f, 2, "global_kv_2")))
+        self.assertTrue(_try(f, 2, "global_kv_2", _rows(f, 2, "global_kv_2")))
         for mutate in (lambda f: setattr(f.cache, "_is_prefill", False),
                        lambda f: setattr(f.cache, "sharded", True),
                        lambda f: f.proofs.__setitem__(2, None),

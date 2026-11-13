@@ -28,6 +28,7 @@ def record_reference_prefill(state):
             "sg_topk_calls": list(state.shared.get("sg_topk_calls", ())),
             "sg_paged_layers": list(state.shared.get("sg_paged_layers", ())),
             "sg_rope_calls": list(state.shared.get("sg_rope_calls", ())),
+            "dense_projection_calls": list(state.shared.get("dense_projection_calls", ())),
             "sg_source_read": getattr(getattr(state, "cache", None), "_local_sg_source_stats", None) or {},
             "mega_mhc_transitions": state.normalization["mega_transitions"],
             "mhc_normalization": dict(state.normalization),

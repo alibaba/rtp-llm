@@ -116,7 +116,7 @@ def _serial(owner, flat, shape, state, load, *, return_shared=False):
     routed = owner.ops.moe_engine.forward_shared_graph(
         flat, ids, weights, layer_id=owner.layer_id, expert_load=load, fused_expert_load=False,
     )
-    shared = owner.shared_expert(flat, prefill_exact=True)
+    shared = owner.shared_expert(flat, allow_quant=False)
     if return_shared:
         return routed.reshape(shape), shared.reshape(shape)
     return (routed + shared.to(routed.dtype)).reshape(shape)
@@ -226,7 +226,7 @@ class VerifyMoEOverlapDevice(unittest.TestCase):
         plan, caller = VerifyMoEOverlap(self.device, engine), torch.cuda.Stream()
         caller.wait_stream(torch.cuda.current_stream())
         plan.bind_caller(caller)
-        with torch.cuda.stream(caller), patch.dict("os.environ", {"RTP_V41_PPU_VERIFY_EXACT_SWIGLU": "1"}):
+        with torch.cuda.stream(caller):
             for separate in (False, True):
                 _copy_inputs(reference, actual)
                 expected = _serial(reference[2], reference[3], (8, 4, 5120), reference[1], reference[4], return_shared=separate)

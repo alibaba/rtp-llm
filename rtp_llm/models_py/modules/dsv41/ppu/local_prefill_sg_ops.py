@@ -1,7 +1,8 @@
-"""Explicit SG-aligned local Prefill primitives; business routing is caller-owned.
+"""SG SwiGLU/quant for supported shared experts and local Prefill HC broadcast.
 
 The SwiGLU entry uses the frozen SG BF16-SiLU/BF16-multiply contract, not
-the legacy FP32 activation contract. Neither entry reads environment flags.
+the fast FP32 activation contract. Shared experts select it by provider/W2
+capability; HC broadcast remains caller-owned. Neither reads environment flags.
 """
 
 from functools import lru_cache

@@ -138,7 +138,7 @@ def main():
     env.pop("CP_ROTATE_METHOD", None)
     env.update({SELECTOR: "1", "RTP_V41_PPU_MOE_BACKEND": "megamoe",
                 "RTP_V41_PPU_MOE_PRECISION": "w4a4", "RTP_V41_PPU_QUANT_MODE": MXFP4_FP8_PTPC,
-                REPORT_ENV: str(reports), "RTP_V41_PPU_VERIFY_EXACT_SWIGLU": "1",
+                REPORT_ENV: str(reports),
                 "LOG_PATH": str(output / "logs"), "ENABLE_CUDA_GRAPH": "0",
                 "FT_SERVER_TEST": "0", "CONCURRENCY_LIMIT": "8",
                 "MAX_GENERATE_BATCH_SIZE": "8", "RTP_V41_PPU_MAX_ROLLBACK_TOKENS": "0",

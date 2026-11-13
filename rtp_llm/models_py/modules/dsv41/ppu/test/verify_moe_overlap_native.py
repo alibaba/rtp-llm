@@ -249,8 +249,6 @@ def run_native(model):
                               or not isinstance(owner.shared_expert.w13, PPUPTPCLinear)
                               or not isinstance(owner.shared_expert.w2, PPUPTPCLinear) for owner in owners):
         raise AssertionError("actual checkpoint router and shared PTPC modules required")
-    if os.environ.get("RTP_V41_PPU_VERIFY_EXACT_SWIGLU", "1") != "1":
-        raise ValueError("native qualifier retains the existing exact shared SwiGLU")
     if any(os.environ.get(flag) != "0" for flag in MEGAMOE_DSPARK_ASYNC_FLAGS):
         raise ValueError("native qualifier requires all four async flags explicitly zero")
     directory = Path(os.environ[REPORT_ENV])

@@ -17,6 +17,10 @@ from rtp_llm.config.v41_runtime import env_bool
 from rtp_llm.models_py.modules.dsv41.ppu._quant import prepare_e2m1_codebooks
 from rtp_llm.models_py.modules.dsv41.ppu.graph_engram import GraphEngram
 from rtp_llm.models_py.modules.dsv41.ppu.graph_metadata import increment_decode_counters
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
+    enabled as optimization_enabled,
+    graph_mhc_options,
+)
 from rtp_llm.ops import PyModelOutputs
 
 
@@ -138,17 +142,6 @@ class SharedGraphRuntime:
                 [index in g.engram_layer_ids for index in range(g.num_layers)],
                 dtype=torch.bool, device=self.device,
             )
-            model.v4.norm.runtime = model.shared_runtime
-        elif (draft or row_width > 1) and self.grouped is None and model._is_speculative:
-            # Verify and proposal RMSNorm read the current Graph state.
-            model.v4.norm.runtime = model.shared_runtime
-            for layer in layers:
-                layer.ffn_norm.runtime = model.shared_runtime
-        # Bind the optional full-fusion path independently of the existing
-        # Verify epilogue, which stays available for unsupported inputs.
-        model.v4.norm._full_graph_runtime = model.shared_runtime
-        for layer in layers:
-            layer.ffn_norm._full_graph_runtime = model.shared_runtime
         self.engram = GraphEngram(
             self.ops, g, device=self.device, max_batch_size=self.max_rows,
             fuse_metadata=self._bulk_counters,
@@ -197,39 +190,22 @@ class SharedGraphRuntime:
             and impl.width == 3
             and metadata.valid_mask.numel() == 24
         )
-        mhc_post_mode = None
-        mhc_reduce_block_m = None
+        mhc_phase = None
         if (
             mode == "dense"
             and self.grouped is None
             and getattr(impl, "packed_attention", None) is not None
             and metadata.q_len_per_req == 4
         ):
-            selected = os.environ.get("RTP_V41_PPU_VERIFY_MHC_POST", "dot")
-            if selected != "off":
-                if selected not in ("dot", "epilogue"):
-                    raise ValueError("RTP_V41_PPU_VERIFY_MHC_POST must be off, dot or epilogue")
-                mhc_post_mode = selected
-            if metadata.valid_mask.numel() == 32:
-                rows = os.environ.get("RTP_V41_PPU_VERIFY_MHC_REDUCE_BLOCK_M", "1")
-                if rows not in ("0", "1", "2", "4", "8"):
-                    raise ValueError("RTP_V41_PPU_VERIFY_MHC_REDUCE_BLOCK_M must be 0, 1, 2, 4 or 8")
-                if rows != "0":
-                    mhc_reduce_block_m = int(rows)
+            mhc_phase = "VERIFY"
         elif proposal_q3:
-            selected = os.environ.get("RTP_V41_PPU_PROPOSAL_MHC_POST", "dot")
-            if selected not in ("off", "dot", "epilogue"):
-                raise ValueError("RTP_V41_PPU_PROPOSAL_MHC_POST must be off, dot or epilogue")
-            if selected != "off":
-                mhc_post_mode = selected
-            rows = os.environ.get("RTP_V41_PPU_PROPOSAL_MHC_REDUCE_BLOCK_M", "1")
-            if rows not in ("0", "1", "2", "4", "8"):
-                raise ValueError("RTP_V41_PPU_PROPOSAL_MHC_REDUCE_BLOCK_M must be 0, 1, 2, 4 or 8")
-            if rows != "0":
-                mhc_reduce_block_m = int(rows)
+            mhc_phase = "PROPOSAL"
+        mhc_post_mode, mhc_reduce_block_m = graph_mhc_options(
+            mhc_phase, reduce_block_m=proposal_q3 or metadata.valid_mask.numel() == 32,
+        )
         mhc_post = (mhc_post_mode, proposal_q3) if mhc_post_mode is not None else None
-        proposal_batched_wo_a = proposal_q3 and env_bool(
-            os.environ, "RTP_V41_PPU_PROPOSAL_BATCHED_WO_A", default=True,
+        proposal_batched_wo_a = proposal_q3 and optimization_enabled(
+            "RTP_V41_PPU_PROPOSAL_BATCHED_WO_A", default=True,
         )
         bulk_counters = self._bulk_counters and not verify
         hashes = None

@@ -26,6 +26,32 @@ py_library(
         "modules/dsv41/ppu/pd_handoff.py",
         "modules/dsv41/ppu/replay_policy.py",
         "modules/dsv41/ppu/dspark_modes.py",
+        "modules/dsv41/ppu/optimization_config.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "v41_ppu_row_metadata",
+    srcs = ["modules/dsv41/ppu/row_metadata.py"],
+    deps = [
+        ":v41_ppu_contract",
+        "//rtp_llm:torch",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "v41_ppu_overlap",
+    srcs = [
+        "modules/dsv41/ppu/overlap_resources.py",
+        "modules/dsv41/ppu/projection_streams.py",
+        "modules/dsv41/ppu/verify_moe_overlap.py",
+        "modules/dsv41/ppu/_quant.py",
+    ],
+    deps = [
+        ":v41_ppu_contract",
+        "//rtp_llm:torch",
     ],
     visibility = ["//visibility:public"],
 )
@@ -33,7 +59,11 @@ py_library(
 py_library(
     name = "v41_ppu_moe",
     srcs = [
+        "kernels/ppu/jit/sglang_jit.py",
+        "modules/dsv41/ppu/_quant.py",
+        "modules/dsv41/ppu/grouped_projection.py",
         "modules/dsv41/ppu/linear.py",
+        "modules/dsv41/ppu/local_prefill_sg_ops.py",
         "modules/dsv41/ppu/ptpc_quant.py",
         "modules/dsv41/ppu/quant_conversion.py",
         "modules/dsv41/ppu/moe.py",
@@ -46,6 +76,10 @@ py_library(
 )
 
 _DSV41_PPU_SHARED_MODULES = [
+    "modules/dsv41/ppu/rmsnorm.py",
+    "modules/dsv41/ppu/rope.py",
+    "modules/dsv41/ppu/optimization_config.py",
+    "modules/dsv41/ppu/grouped_projection.py",
     "modules/dsv41/ppu/model.py",
     "modules/dsv41/ppu/model_weights.py",
     "modules/dsv41/ppu/eplb.py",
@@ -56,9 +90,12 @@ _DSV41_PPU_SHARED_MODULES = [
     "modules/dsv41/ppu/ptpc_norm_quant.py",
     "modules/dsv41/ppu/attention_layer.py",
     "modules/dsv41/ppu/prefill_runtime.py",
+    "modules/dsv41/ppu/row_metadata.py",
     "modules/dsv41/ppu/local_prefill_attention_provider.py",
     "modules/dsv41/ppu/local_prefill_hierarchical_topk.py",
+    "modules/dsv41/ppu/topk.py",
     "modules/dsv41/ppu/local_prefill_sg_ops.py",
+    "modules/dsv41/ppu/local_prefill_qkv.py",
     "modules/dsv41/ppu/local_prefill_sg_topk.py",
     "modules/dsv41/ppu/local_prefill_sg_paged_indexer.py",
     "modules/dsv41/prefill/_hc_expand_triton.py",
@@ -95,6 +132,7 @@ _DSV41_PPU_SHARED_MODULES = [
     "modules/dsv41/ppu/packed_decode.py",
     "modules/dsv41/ppu/fused_ops.py",
     "modules/dsv41/ppu/projection_streams.py",
+    "modules/dsv41/ppu/overlap_resources.py",
     "modules/dsv41/ppu/tools/driver_optimized.py",
     "modules/dsv41/ppu/tools/driver_cp_sharding.py",
     "modules/dsv41/ppu/tools/driver_dspark_modes.py",

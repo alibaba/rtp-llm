@@ -108,7 +108,7 @@ def _arm(name, scores, *, raw=None, canonicalize=None, observe=None):
         seen.append(prepared)
         return ops
 
-    with patch.object(token, "_native_ops", new=factory):
+    with patch.object(token, "_hierarchical_ops", return_value=None), patch.object(token, "_native_ops", new=factory):
         yield seen
 
 

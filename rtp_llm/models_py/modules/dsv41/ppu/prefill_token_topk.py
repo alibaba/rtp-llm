@@ -17,7 +17,6 @@ from rtp_llm.models_py.modules.dsv41.ppu import _quant
 
 
 ENV = "RTP_V41_PPU_LOCAL_PREFILL_TOKEN_TOPK"
-HIERARCHICAL_ENV = "RTP_V41_PPU_LOCAL_PREFILL_HIERARCHICAL_TOPK"
 K = 512
 MAX_WIDTH = 262144
 
@@ -114,16 +113,17 @@ def try_select_tokens(logits, visible, *, bounds=None, out=None, disposable=Fals
         return None
     try:
         select, canonicalize = _native_ops(bounds is not None)
-        hierarchy = None
-        if bounds is None and os.environ.get(HIERARCHICAL_ENV, "0") == "1":
-            from rtp_llm.models_py.modules.dsv41.ppu import local_prefill_hierarchical_topk
-            from rtp_llm.models_py.kernels.ppu.attention.ppu_bf16_radix_topk import canonicalize_topk_indices
-
-            hierarchy = local_prefill_hierarchical_topk
     except ImportError:
         return None
     rows, width = logits.shape
     ends = torch.empty((rows,), dtype=torch.int32, device=logits.device)
+    output = out if out is not None else torch.empty((rows, K), dtype=torch.int32, device=logits.device)
+    try:
+        hierarchical = _hierarchical_ops(logits, ends, output) if bounds is None else None
+    except ImportError:
+        return None
+    if hierarchical is not None:
+        select, canonicalize = hierarchical
     _topk._prefill_topk_bounds_kernel[((rows + 255) // 256,)](
         visible, ends, rows, width, visible.stride(0), 256,
     )
@@ -132,20 +132,25 @@ def try_select_tokens(logits, visible, *, bounds=None, out=None, disposable=Fals
     else:
         ends = torch.minimum(ends, bounds[1].clamp(0, width))
         starts = torch.minimum(bounds[0].clamp(0, width), ends)
-    output = out if out is not None else torch.empty((rows, K), dtype=torch.int32, device=logits.device)
-    hierarchical = hierarchy is not None and hierarchy.is_supported(logits, ends, output)
-    if hierarchical:
-        canonicalize = canonicalize_topk_indices
     # Candidate block pooling/publication must already be complete. Collapse
     # both NaN signs above finite values, preserving the legacy finite count.
     logits.nan_to_num_(nan=torch.inf, posinf=torch.inf, neginf=-torch.inf)
-    if hierarchical:
-        if hierarchy.select(logits, starts, ends, output) is not output:
-            raise RuntimeError("local Prefill hierarchical TopK admission changed before launch")
-    else:
-        select(logits, starts, ends, output)
+    result = select(logits, starts, ends, output)
+    if hierarchical is not None and result is not output:
+        raise RuntimeError("local Prefill hierarchical TopK admission changed before launch")
     if canonicalize is not None:
         canonicalize(output)
     # This ABI addresses output as row*K; strided destinations are rejected.
     # Native selection already enforces start <= index < end.
     return _topk.finish_tokens(logits, ends, output)
+
+
+def _hierarchical_ops(logits, ends, output):
+    """Choose only from the existing start-zero, default-stream BF16 domain."""
+    from rtp_llm.models_py.modules.dsv41.ppu import local_prefill_hierarchical_topk
+
+    if not local_prefill_hierarchical_topk.is_supported(logits, ends, output):
+        return None
+    from rtp_llm.models_py.kernels.ppu.attention.ppu_bf16_radix_topk import canonicalize_topk_indices
+
+    return local_prefill_hierarchical_topk.select, canonicalize_topk_indices

@@ -43,6 +43,14 @@ def old_quant(value):
 
 
 def old_norm(value, norm):
+    if not value.numel():
+        return torch.empty_like(value)
+    if value.is_cuda:
+        # Standalone norm now has the library's numerical contract. Reuse
+        # tests compare the projection/quant scheduling around that boundary.
+        from flashinfer.norm import rmsnorm
+
+        return rmsnorm(value, norm.weight, eps=norm.variance_epsilon)
     values = value.float()
     inverse = torch.rsqrt(values.square().mean(-1, keepdim=True) + norm.variance_epsilon)
     return (values * inverse * norm.weight.float()).to(torch.bfloat16)
@@ -212,6 +220,21 @@ class _PTPCInputReuseBase(unittest.TestCase):
 
 
 class PTPCInputReuseCPU(_PTPCInputReuseBase):
+    def setUp(self):
+        super().setUp()
+
+        def test_norm(value, weight, *, eps):
+            return old_norm(value, SimpleNamespace(weight=weight, variance_epsilon=eps))
+
+        # CPU exercises orchestration using a test-only provider. Production
+        # dispatch has no CPU arithmetic fallback and still requires FlashInfer.
+        provider = patch(
+            "rtp_llm.models_py.modules.dsv41.ppu.rmsnorm._flashinfer_rmsnorm",
+            return_value=test_norm,
+        )
+        provider.start()
+        self.addCleanup(provider.stop)
+
     @torch.no_grad()
     def test_exact_projection_reduces_three_or_four_quantizers_to_two(self):
         op, hidden = make_projection()

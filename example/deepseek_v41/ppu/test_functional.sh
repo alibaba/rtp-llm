@@ -50,6 +50,8 @@ if [[ "$v41_role" == local-prefill-workspace-contracts || "$v41_role" == local-p
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_moe_routes \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_compact_rows \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_split_l20 \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_dense_projections \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_l20_query_projection \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_source_cache \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_qo_rope \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_dp_prefill_mega_capacity \

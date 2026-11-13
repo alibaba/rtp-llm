@@ -454,7 +454,10 @@ class PagedGraphIndexerTest(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "PPU required")
     def test_verify_compact_provider_tail_math_and_replay(self):
-        with patch.dict("os.environ", {"RTP_V41_PPU_VERIFY_BF16_TOPK": "0"}):
+        from rtp_llm.models_py.modules.dsv41.ppu import graph_indexer
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        with patch.object(graph_indexer, "_verify_topk_op", return_value=(rtp_llm_ops.dsv4_persistent_topk, False)):
             self._assert_verify_sparse_tiles_match_dense(nonuniform=True, compact=True)
 
     @unittest.skipUnless(torch.cuda.is_available(), "PPU required")
@@ -491,7 +494,7 @@ class PagedGraphIndexerTest(unittest.TestCase):
             for args in ({"proof": False}, {"rows": 33}, {"rows": 0}, {"k": 1024}, {"device": "cpu"}):
                 self.assertEqual(select(**args), (generic, False))
             with patch.dict("os.environ", {"RTP_V41_PPU_VERIFY_BF16_TOPK": "0"}):
-                self.assertEqual(select(), (generic, False))
+                self.assertEqual(select(), (specialized, True))
             del ops.dsv4_persistent_topk_bf16_scores
             self.assertEqual(select(), (generic, False))
 

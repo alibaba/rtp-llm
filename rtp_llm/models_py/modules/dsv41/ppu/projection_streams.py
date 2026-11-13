@@ -5,9 +5,12 @@ KV projections or shared experts. Both results join on the caller stream
 before their consumers run.
 """
 
-import threading
-
 import torch
+
+from rtp_llm.models_py.modules.dsv41.ppu.overlap_resources import (
+    OverlapResources,
+    record_stream as _record_stream,
+)
 
 
 def is_supported(state, x):
@@ -55,19 +58,6 @@ def is_supported(state, x):
     )
 
 
-def _record_stream(value, stream):
-    """Retain nested callback results until their consuming stream finishes."""
-    if isinstance(value, torch.Tensor):
-        if value.is_cuda:
-            value.record_stream(stream)
-    elif isinstance(value, (tuple, list)):
-        for item in value:
-            _record_stream(item, stream)
-    elif isinstance(value, dict):
-        for item in value.values():
-            _record_stream(item, stream)
-
-
 class QKVStreams:
     """One side stream and two reusable events, owned for the model lifetime.
 
@@ -81,11 +71,25 @@ class QKVStreams:
         self.device = torch.device(device)
         if self.device.type != "cuda":
             raise ValueError("QKVStreams requires a PPU torch.cuda device")
-        self.side_stream = torch.cuda.Stream(device=self.device)
-        self.producer = torch.cuda.Event(enable_timing=False)
-        self.done = torch.cuda.Event(enable_timing=False)
-        self._lock = threading.Lock()
+        self._resources = OverlapResources(self.device, name="QKVStreams")
+        self.device = self._resources.device
+        self._lock = self._resources.lock
         self.calls = 0
+
+    @property
+    def side_stream(self):
+        return self._resources.side_stream
+
+    @property
+    def producer(self):
+        return self._resources.producer
+
+    @property
+    def done(self):
+        return self._resources.done
+
+    def close(self):
+        self._resources.close()
 
     def run(self, x, query_fn, kv_fn):
         """Enqueue independent branches and join before returning to consumers.
@@ -103,26 +107,23 @@ class QKVStreams:
             or torch.cuda.is_current_stream_capturing()
         ):
             raise ValueError("QKVStreams requires its device's default eager stream")
-        if not self._lock.acquire(blocking=False):
-            raise RuntimeError("QKVStreams does not permit overlapping event reuse")
         done_recorded = False
-        try:
-            self.producer.record(current)
-            with torch.cuda.stream(self.side_stream):
-                self.side_stream.wait_event(self.producer)
-                x.record_stream(self.side_stream)
-                try:
-                    kv_result = kv_fn(x)
-                finally:
-                    # Also join work submitted by a callback that raises.
-                    self.done.record(self.side_stream)
-                    done_recorded = True
-            query_result = query_fn(x)
-            _record_stream(kv_result, current)
-            _record_stream(query_result, current)
-            self.calls += 1
-            return query_result, kv_result
-        finally:
-            if done_recorded:
-                current.wait_event(self.done)
-            self._lock.release()
+        with self._resources.submission():
+            try:
+                self._resources.fork(current)
+                with torch.cuda.stream(self.side_stream):
+                    _record_stream(x, self.side_stream)
+                    try:
+                        kv_result = kv_fn(x)
+                    finally:
+                        # Also join work submitted by a callback that raises.
+                        self._resources.record_done()
+                        done_recorded = True
+                query_result = query_fn(x)
+                _record_stream(kv_result, current)
+                _record_stream(query_result, current)
+                self.calls += 1
+                return query_result, kv_result
+            finally:
+                if done_recorded:
+                    self._resources.wait_done(current)

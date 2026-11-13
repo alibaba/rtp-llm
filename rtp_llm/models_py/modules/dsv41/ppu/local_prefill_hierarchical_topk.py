@@ -12,7 +12,11 @@ import torch
 import triton as tr
 import triton.language as tl
 
-from rtp_llm.models_py.modules.dsv41.ppu import _quant
+from rtp_llm.models_py.modules.dsv41.ppu.topk import (
+    local_device_supported as _device_supported,
+    overlaps as _overlap,
+    raw_tensor as _raw,
+)
 
 
 K = 512
@@ -71,38 +75,6 @@ def _remap_block_candidate_slots(Chosen, Blocks, Ends, Out, WIDTH):
     end = tl.minimum(tl.maximum(tl.load(Ends + row), 0), WIDTH)
     valid = valid & (block >= 0) & (block < WIDTH // 8) & (position >= 0) & (position < end)
     tl.store(Out + row * 512 + slot, tl.where(valid, position, -1).to(tl.int32))
-
-
-def _raw(tensor):
-    return (isinstance(tensor, torch.Tensor) and tensor.layout == torch.strided
-            and not tensor.is_neg() and not tensor.is_conj() and not tensor.requires_grad)
-
-
-def _overlap(left, right):
-    if left.untyped_storage().data_ptr() == right.untyped_storage().data_ptr():
-        return True
-    # Include source row padding conservatively, also catching independent
-    # Storage wrappers around overlapping native pointer intervals.
-    def span(value):
-        elements = ((value.shape[0] - 1) * value.stride(0) + value.shape[1]
-                    if value.ndim == 2 else value.numel())
-        begin = value.data_ptr()
-        return begin, begin + elements * value.element_size()
-
-    a, b = span(left), span(right)
-    return a[0] < b[1] and b[0] < a[1]
-
-
-def _device_supported(scores):
-    if not scores.is_cuda or torch.version.hip is not None or not _quant.is_ppu():
-        return False
-    try:
-        return (torch.cuda.current_device() == scores.device.index
-                and torch.cuda.get_device_capability(scores.device) == (8, 9)
-                and not torch.cuda.is_current_stream_capturing()
-                and torch.cuda.current_stream(scores.device) == torch.cuda.default_stream(scores.device))
-    except (AssertionError, RuntimeError):
-        return False
 
 
 def is_supported(scores, ends, out=None):

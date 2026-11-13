@@ -17,12 +17,12 @@ from rtp_llm.models_py.modules.dsv41.ppu import prefill_swa
 from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
 from rtp_llm.models_py.modules.dsv41.ppu.kv_codec import encode_kv
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import (
-    LOCAL_PREFILL_SWA_NATIVE_WRITE_ENV,
     LOCAL_PREFILL_SOURCE_CACHE_ENV,
     SharedNativeCache,
     _LocalSwaWriteGeometry,
     _local_swa_raw_tensor,
 )
+
 from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import PrefillPolicy, SharedPrefillPolicy
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_fused import _NativePools, assert_bytes
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_operator_flags import _trace_events
@@ -31,8 +31,27 @@ from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_swa_segments im
     FLAGS, arguments, compact_plan, stage, values,
 )
 
+# Legacy names only verify that retired selectors no longer affect dispatch.
+LOCAL_PREFILL_SWA_NATIVE_WRITE_ENV = 'RTP_V41_PPU_LOCAL_PREFILL_SWA_NATIVE_WRITE'
+
 
 ENV = LOCAL_PREFILL_SWA_NATIVE_WRITE_ENV
+
+
+
+def _kernel_mode(enabled):
+    """Keep an independent fallback arm after rollout flags retire."""
+    from contextlib import nullcontext
+
+    return (
+        nullcontext()
+        if enabled
+        else patch.object(
+            SharedNativeCache,
+            "_local_swa_native_geometry",
+            return_value=None,
+        )
+    )
 
 
 def fixture(device, prefixes=(129,), lengths=(4096,), *, entries=128, span=256,
@@ -112,7 +131,7 @@ class _WriteCases:
         ):
             results = []
             for enabled in (False, True):
-                with patch.dict(os.environ, {ENV: str(int(enabled))}):
+                with _kernel_mode(enabled):
                     state = fixture(self.device, prefixes, lengths)
                     if compact:
                         compact_plan(state)
@@ -153,7 +172,7 @@ class _WriteCases:
         for count in (384, 768):
             arms = []
             for enabled in (False, True):
-                with patch.dict(os.environ, {ENV: str(int(enabled))}):
+                with _kernel_mode(enabled):
                     state = fixture(self.device, (0,), (count,),
                                     configure=lambda host: host.__setitem__((0, 0), -1))
                     stage(state, arguments(state))
@@ -169,7 +188,7 @@ class _WriteCases:
 
         arms = []
         for enabled in (False, True):
-            with patch.dict(os.environ, {ENV: str(int(enabled))}):
+            with _kernel_mode(enabled):
                 state = fixture(self.device, (128, 256), (128, 1), entries=128, span=1024,
                                 configure=alias, cross_layer_alias=True)
                 stage(state, arguments(state))
@@ -193,7 +212,7 @@ class _WriteCases:
                         host.resize_(1, 1).zero_()
                     else:
                         host[0, 0] = host.numel()
-                with patch.dict(os.environ, {ENV: str(int(enabled))}):
+                with _kernel_mode(enabled):
                     state = fixture(self.device, (129,) if kind == "tail-zero" else (0,),
                                     (0,) if kind == "tail-zero" else (768,),
                                     configure=configure, seed=False)
@@ -252,7 +271,7 @@ class _WriteCases:
         with patch.dict(os.environ, {ENV: "0"}):
             late = fixture(self.device)
         with patch.dict(os.environ, {ENV: "1"}):
-            self.assertIsNone(late.cache._verified_local_swa_write_table(late.cache.pools[0, "swa_kv"]))
+            self.assertIsNotNone(late.cache._verified_local_swa_write_table(late.cache.pools[0, "swa_kv"]))
 
     @torch.no_grad()
     def test_source_banks_survive_swa_and_full_payload_overlap_uses_old_writer(self):
@@ -270,7 +289,7 @@ class _WriteCases:
         for overlap in (False, True):
             arms = []
             for enabled in (False, True):
-                with patch.dict(os.environ, {ENV: str(int(enabled))}):
+                with _kernel_mode(enabled):
                     state = fixture(self.device, (0,), (140,))
                     cache = state.cache
                     pool = cache.pools[0, "swa_kv"]
@@ -383,7 +402,7 @@ class LocalSwaNativeWriteDevice(_WriteCases, unittest.TestCase):
     def test_l20_full_and_l21_compact_real_native_kernel_and_mirrors(self):
         arms = []
         for enabled in (False, True):
-            with patch.dict(os.environ, {ENV: str(int(enabled))}):
+            with _kernel_mode(enabled):
                 state = fixture(self.device, (126976,), (4096,), layers=22, decoder=True)
                 full = arguments(state, layer=20)
                 with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,

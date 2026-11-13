@@ -55,12 +55,10 @@ BASE_ENV = {
     ENV: "1", "RTP_V41_PPU_MHC_BACKEND": "mega",
     "RTP_V41_PPU_LOCAL_PREFILL_ROWS": "1",
     "RTP_V41_PPU_LOCAL_PREFILL_COMPACT_ROWS": "1",
-    "RTP_V41_PPU_LOCAL_PREFILL_MEGA_MHC": "0",
     "RTP_V41_PPU_LOCAL_PREFILL_SPLIT_L20": "1",
     "RTP_V41_PPU_LOCAL_PREFILL_AIU_PRENORM": "0",
     "RTP_V41_PPU_LOCAL_PREFILL_ENGRAM_GATE": "0",
     "RTP_V41_PPU_LOCAL_PREFILL_SWA_SEGMENTS": "0",
-    "RTP_V41_PPU_LOCAL_PREFILL_EXACT_SHARED_SWIGLU": "0",
     "RTP_V41_PPU_CP8_YOCO_FAST_PREFILL": "0",
     "MOEDBG": "0", "DSV4_CP_SYNC_AFTER_ATTN_ONCE": "0",
 }
@@ -256,6 +254,11 @@ class LocalCrossLayerMHCContract(unittest.TestCase):
         self.stack.enter_context(torch.no_grad())
         self.stack.enter_context(patch.dict(os.environ, BASE_ENV))
         self.stack.enter_context(patch.object(layer_module, "is_ppu", return_value=True))
+        # U1 production norms require a native library. Only this CPU branch
+        # fixture supplies its independent normalization boundary.
+        self.stack.enter_context(patch.object(layer_module, "rms_norm", side_effect=lambda x, w, eps:
+            (x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + eps)
+             * w.float()).to(x.dtype)))
         self.stack.enter_context(patch("torch.cuda.is_current_stream_capturing", return_value=False))
         self.stack.enter_context(patch(
             "rtp_llm.models_py.modules.dsv41.ppu.attention_layer.optimized_diagnostics_enabled", return_value=False))
@@ -428,7 +431,9 @@ class LocalCrossLayerMHCContract(unittest.TestCase):
         self.assertEqual(candidate._cross_mhc_evidence["published"], 2)
         self.assertEqual(candidate._cross_mhc_evidence["consumed"], 2)
         self.assertEqual([block.attn_norm.calls for block in new_blocks], [1, 1, 0, 0])
-        self.assertEqual([block.ffn_norm.calls for block in new_blocks], [1] * 4)
+        self.assertEqual([block.ffn_norm.calls for block in new_blocks], [0] * 4)
+        self.assertEqual(state.runtime.model.v4.layers[0].ops.native_calls, 4)
+        self.assertEqual(new_blocks[0].ops.native_calls, 6)
         self.assertIsNone(new_blocks[0].attn_hc._previous_ref)
         self.assertIsNotNone(new_blocks[-1].ffn_hc.state.pre_mix)
 
@@ -558,7 +563,9 @@ class LocalCrossLayerMHCDevice(unittest.TestCase):
             {"src": 2, "dst": 3, "rows": 140, "compacted": False},
         ])
         self.assertEqual([block.attn_norm.calls for block in blocks], [1, 1, 0, 0])
-        self.assertEqual(ops.mhc_execution_stats()["calls"], {"prefill": 2})
+        self.assertEqual(old_ops.mhc_execution_stats()["calls"], {"prefill": 4})
+        self.assertEqual(ops.mhc_execution_stats()["calls"], {"prefill": 6})
+        self.assertEqual([block.ffn_norm.calls for block in blocks], [0] * 4)
         self.report("block-head")
 
     def test_actual_split_l20_has_no_pending_full_ticket_transport(self):
@@ -594,7 +601,8 @@ class LocalCrossLayerMHCDevice(unittest.TestCase):
                 self.assertEqual(blocks[20].ffn.rows, [140 if split else rows])
                 self.assertEqual(blocks[21].attn.rows, [140])
                 self.assertTrue(torch.equal(state.compact_ids, plan.exchange.compact(state.inputs.input_ids)))
-                self.assertEqual(ops.mhc_execution_stats()["calls"], {"prefill": expected_count})
+                self.assertEqual(old_ops.mhc_execution_stats()["calls"], {"prefill": 22})
+                self.assertEqual(ops.mhc_execution_stats()["calls"], {"prefill": 22 + expected_count})
                 self.assertEqual(sum(block.attn_norm.calls for block in blocks), 3 if split else 4)
         self.report("split-l20")
 

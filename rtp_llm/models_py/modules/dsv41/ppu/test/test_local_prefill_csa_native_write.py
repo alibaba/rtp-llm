@@ -20,19 +20,42 @@ from rtp_llm.models_py.modules.dsv41 import cp
 from rtp_llm.models_py.modules.dsv41.ppu import _quant, graph_cache_kernels, prefill
 from rtp_llm.models_py.modules.dsv41.ppu.kv_codec import encode_kv
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import (
-    LOCAL_PREFILL_CSA_NATIVE_WRITE_ENV as ENV, SharedNativeCache, _latest_csa_indices,
+    SharedNativeCache,
+    _latest_csa_indices,
 )
+
 from rtp_llm.models_py.modules.dsv41.ppu.ops import PPUOps
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_fused import assert_bytes
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_operator_flags import _trace_events
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_rotary_pack import (
     _fixture as producer_fixture, _produce,
 )
-from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_source_native_write import _fixture as full_fixture
+from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_source_native_write import (
+    _fixture as full_fixture, _reference_norm_provider,
+)
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_swa_segments import FLAGS, compact_plan
+
+# Legacy names only verify that retired selectors no longer affect dispatch.
+ENV = 'RTP_V41_PPU_LOCAL_PREFILL_CSA_NATIVE_WRITE'
 
 
 ROTARY = prefill.LOCAL_PREFILL_ROTARY_PACK_ENV
+
+
+
+def _kernel_mode(enabled):
+    """Keep an independent fallback arm after rollout flags retire."""
+    from contextlib import nullcontext
+
+    return (
+        nullcontext()
+        if enabled
+        else patch.object(
+            SharedNativeCache,
+            "try_insert_local_csa_fields",
+            return_value=False,
+        )
+    )
 
 
 def _fixture(device, prefixes=(256,), lengths=(140,), *, entries=2, span=256,
@@ -156,6 +179,26 @@ class _Cases:
         self.addCleanup(env.stop)
 
     @torch.no_grad()
+    def test_public_fields_entry_selects_local_kernel_without_flags(self):
+        for flag in ("0", "1"):
+            with patch.dict(os.environ, {ENV: flag}):
+                f = _fixture(self.device)
+                values, scores = _fields(f)
+                expected, _ = _oracle(f, 2, values, scores)
+                self.assertTrue(
+                    f.cache.try_insert_csa_fields(
+                        2,
+                        0,
+                        f.prefixes[0],
+                        values,
+                        scores,
+                        proof=f.proofs[2],
+                        prefill_layout=(f.prefixes, f.lengths),
+                    )
+                )
+                assert_bytes(self, f.cache.pools[2, "csa_state"].tensor.cpu(), expected)
+
+    @torch.no_grad()
     def test_ieee_exact_pool_oracle_padding_physical_zero_and_real_ring_geometry(self):
         def reorder(tag, table, blocks):
             table.copy_(table.flip(1))
@@ -199,7 +242,7 @@ class _Cases:
                     table[0, 0] = {"historical": -1, "negative": -2, "oob": blocks}[bad]
             results = []
             for enabled in (False, True):
-                with patch.dict(os.environ, {ENV: str(int(enabled))}):
+                with _kernel_mode(enabled):
                     f = _fixture(self.device, (0,), (512 if bad == "all_history" else 513,), configure=configure)
                     values, scores = _fields(f)
                     # Duplicate physical destinations intentionally take the
@@ -221,7 +264,7 @@ class _Cases:
         for enabled in (False, True):
             f = _fixture(self.device, (129, 256, 0), (9, 0, 140), configure=lambda tag, table, blocks:
                          table[2].copy_(table[0]) if tag == "csa_state" else None)
-            with patch.dict(os.environ, {ENV: str(int(enabled))}):
+            with _kernel_mode(enabled):
                 for rid in (0, 1, 2):
                     start = f.prefixes[rid] + min(f.lengths[rid], 3)
                     values, scores = _fields(f, rid, start=start)
@@ -275,7 +318,7 @@ class _Cases:
                                           ((128,), (4096,), {0: 132}), ((129, 256), (9, 0), None)):
             results = []
             for enabled in (False, True):
-                with patch.dict(os.environ, {ENV: str(int(enabled))}):
+                with _kernel_mode(enabled):
                     f = producer_fixture(self.device, 2, prefixes, lengths)
                     _produce(f, ops, append_starts=append)
                     results.append(([p.tensor.clone() for p in f.source.cache.pools.values()],
@@ -291,7 +334,7 @@ class _Cases:
                     self.assertEqual(tags[-3:], ["global_kv_2", "indexer_kv", "csa_state"])
         errors = []
         for enabled in (False, True):
-            with patch.dict(os.environ, {ENV: str(int(enabled))}):
+            with _kernel_mode(enabled):
                 f = producer_fixture(self.device, 2, (129,), (9,), carry=False)
                 with self.assertRaises(RuntimeError) as err:
                     _produce(f, ops)
@@ -306,7 +349,8 @@ class LocalCsaNativeWriteCPU(_Cases, unittest.TestCase):
     def setUp(self):
         super().setUp()
         for item in (
-            patch.object(SharedNativeCache, "_local_source_native_read_device", new=lambda self, pool: True),
+            patch.object(SharedNativeCache, "_local_source_native_read_device", new=lambda self, pool: pool.tensor.dtype == torch.float32),
+            patch("rtp_llm.models_py.modules.dsv41.ppu.rmsnorm._flashinfer_rmsnorm", return_value=_reference_norm_provider),
             patch.object(graph_cache_kernels, "_kernels", new=lambda: NS(store_prefill_csa=_StoreCPU())),
             patch.object(_quant, "try_pack_rotary_fp4_rows", new=lambda kv, freqs, positions, global_pool:
                          encode_kv(prefill._rope_tail(kv, freqs[positions.clamp_max(freqs.shape[0] - 1)]),
@@ -319,8 +363,8 @@ class LocalCsaNativeWriteCPU(_Cases, unittest.TestCase):
     def test_default_latch_phase_proof_and_read0_independence(self):
         with patch.dict(os.environ, {ENV: "0"}):
             f = _fixture("cpu")
-        self.assertFalse(_try(f, 2, *_fields(f)))
-        for env in ({ENV: "0"}, {"TP_SIZE": "8"}, {"PREFILL_CP_SIZE": "8"}):
+        self.assertTrue(_try(f, 2, *_fields(f)))
+        for env in ({"TP_SIZE": "8"}, {"PREFILL_CP_SIZE": "8"}):
             with patch.dict(os.environ, env):
                 f = _fixture("cpu")
                 self.assertFalse(_try(f, 2, *_fields(f)))

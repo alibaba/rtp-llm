@@ -17,8 +17,8 @@ strategy ``bf16_dense_w4a16_moe_sparse_mla_host_enp_v1``:
     grouped GEMMs. The default W4A8 path uses per-row E4M3 activations and
     MXFP4 weights. ``RTP_V41_PPU_MOE_PRECISION=w4a4`` selects the original
     MXFP4 activation path. CPU/diagnostic execution uses a dequant reference.
-  * ``shared_expert_forward`` / ``combine_routed_and_shared`` — BF16-resident
-    shared expert with the clamp-10 SwiGLU convention.
+  * ``shared_expert_forward`` / ``combine_routed_and_shared`` — BF16-output
+    shared expert with SG quantization or fast clamp-10 SwiGLU.
 
 Top-k weight application (IMPORTANT):
   rtp-llm's ``DeepEPStrategy`` passes ``weights_p`` through
@@ -1796,17 +1796,18 @@ class PPUMoE:
 
     # -- forward ----------------------------------------------------------
 
-    def _map_expert_ids(self, ids, weights, layer_id, *, single_replica=False):
+    def _map_expert_ids(self, ids, weights, layer_id):
         if not self._eplb_layers:
             return ids
         layer = self._eplb_layers.get(self._resolve_layer_id(layer_id))
         if layer is None:
             return ids
-        if single_replica and layer.logical_to_physical.shape[1] == 1:
+        mapping = layer.logical_to_physical
+        if mapping.shape[1] == 1 and ids.dtype in (torch.int32, torch.int64):
             # EplbLayer validates exactly one valid slot per logical expert
             # for a one-column map. There is no replica rotation to compute.
             lookup = ids.reshape(-1).clamp_min(0)
-            physical = layer.logical_to_physical.reshape(-1).index_select(0, lookup).view_as(ids)
+            physical = mapping.reshape(-1).index_select(0, lookup).view_as(ids).to(ids.dtype)
             physical.masked_fill_(ids < 0, -1)
         else:
             physical = layer.map_ids(ids)
@@ -1831,21 +1832,13 @@ class PPUMoE:
         plus ``-1`` padding); ``expert_weights`` is the matching fp32
         ``[T, 8]`` slot weights (zero on padding slots).
         """
-        dp_prepared = isinstance(prepared_buffer, _DPForwardMegaBuffer)
-        if dp_prepared:
+        if isinstance(prepared_buffer, _DPForwardMegaBuffer):
             self._validate_dp_preparation(prepared_buffer, x.shape[0])
             prepared_buffer = prepared_buffer.buffer
         expert_ids, expert_weights = self._apply_fake_balance(
             expert_ids, expert_weights
         )
-        expert_ids = self._map_expert_ids(
-            expert_ids, expert_weights, layer_id,
-            single_replica=(
-                prepared_buffer is not None
-                and not dp_prepared
-                and os.environ.get("RTP_V41_PPU_CP8_YOCO_FAST_PREFILL", "0") == "1"
-            ),
-        )
+        expert_ids = self._map_expert_ids(expert_ids, expert_weights, layer_id)
         if self.backend == "megamoe":
             # Empty owners must still enter MegaMoE's cross-rank protocol.
             return self._forward_megamoe(
@@ -1945,7 +1938,16 @@ class PPUMoE:
         if self._mega_device is not None and self._mega_device != x.device:
             raise RuntimeError("a MegaMoE workspace cannot move between devices")
 
-    def _ensure_mega_buffer(self, x):
+    def _ensure_mega_buffer(self, x, *, prepared_buffer=None):
+        """Consume a raw prepared handle at the original native-stage boundary.
+
+        Public forward validates/unwraps a DP receipt before routing. CP's raw
+        handle retains its later identity/capacity check, with no negotiation.
+        """
+        if prepared_buffer is not None:
+            if prepared_buffer is not self._mega_buffer or x.shape[0] > self._mega_capacity:
+                raise ValueError("prepared MegaMoE capacity does not cover this forward")
+            return prepared_buffer
         return self._ensure_mega_capacity(x.device, x.shape[0])
 
     def _validate_dp_preparation(self, receipt, rows):
@@ -2159,12 +2161,7 @@ class PPUMoE:
             expert_weights.to(torch.float32),
             slots=COMM_SLOTS,
         )
-        if prepared_buffer is None:
-            buffer = self._ensure_mega_buffer(x)
-        else:
-            if prepared_buffer is not self._mega_buffer or x.shape[0] > self._mega_capacity:
-                raise ValueError("prepared MegaMoE capacity does not cover this forward")
-            buffer = prepared_buffer
+        buffer = self._ensure_mega_buffer(x, prepared_buffer=prepared_buffer)
         mega = self._get_mega_module()
         counts = (
             self._expert_load_counts(expert_load, x.device)
@@ -2701,88 +2698,50 @@ def shared_expert_forward(
     w2: PPUResidentBF16Linear,
     swiglu_limit: float = SWIGLU_LIMIT,
     *,
-    fused_activation: bool = False,
-    prefill_exact: bool = False,
-    local_prefill_exact: bool = False,
-    local_prefill_sg: bool = False,
+    allow_quant: bool = True,
 ) -> torch.Tensor:
-    """Shared-expert SwiGLU forward on BF16-resident weights.
+    """Shared-expert SwiGLU forward on BF16-output projections.
 
     Same clamp convention as the routed experts (sglang ``_apply_swiglu_limit``
     / rtp ``silu_mul_split``): clamp ``up`` to ``[-limit, limit]`` and ``gate``
     to ``[-inf, limit]`` BEFORE the SiLU, then ``silu(gate) * up`` and the w2
     projection. Returns BF16.
 
-    The independent local option reuses only clamp/widen fusion after W13's
-    actual output is qualified; SiLU, multiplication and BF16 landing stay ATen.
+    Prefer SG's BF16-SiLU/BF16-multiply plus row FP8 quantization when the
+    PTPC W2 and existing SG provider support it. Otherwise use fast BF16
+    SwiGLU. Graph callers disable quantization during both warmup and capture
+    because the SG provider does not support capture. CPU/unsupported tensor
+    metadata retains the portable ATen reference.
     """
     gate_up = w13(x)
-    if local_prefill_sg:
+    if allow_quant:
         from rtp_llm.models_py.modules.dsv41.ppu.linear import PPUPTPCLinear
-        from rtp_llm.models_py.modules.dsv41.ppu.local_prefill_sg_ops import (
-            supports_swiglu,
-            swiglu_quant,
-        )
 
-        if isinstance(w2, PPUPTPCLinear) and supports_swiglu(gate_up, swiglu_limit):
-            payload, scale = swiglu_quant(gate_up, swiglu_limit)
-            return w2.forward_quantized(payload, scale)
+        if isinstance(w2, PPUPTPCLinear):
+            from rtp_llm.models_py.modules.dsv41.ppu.local_prefill_sg_ops import (
+                supports_swiglu,
+                swiglu_quant,
+            )
+
+            if supports_swiglu(gate_up, swiglu_limit):
+                payload, scale = swiglu_quant(gate_up, swiglu_limit)
+                return w2.forward_quantized(payload, scale)
     if (
-        local_prefill_exact is True
-        and isinstance(gate_up, torch.Tensor)
+        gate_up.is_cuda
         and gate_up.layout == torch.strided
         and gate_up.dtype == torch.bfloat16
         and gate_up.ndim == 2
-        and 0 < gate_up.shape[0] <= 16384
-        and gate_up.shape[1] == 4608
         and gate_up.is_contiguous()
         and not gate_up.is_neg()
         and not gate_up.is_conj()
         and not gate_up.requires_grad
         and not torch.is_grad_enabled()
-        and isinstance(swiglu_limit, (int, float))
-        and swiglu_limit == 10.0
-        and gate_up.is_cuda
-    ):
-        from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
-
-        if (
-            is_ppu()
-            and torch.cuda.get_device_capability(gate_up.device) == (8, 9)
-            and not torch.cuda.is_current_stream_capturing()
-            and importlib.util.find_spec("triton") is not None
-        ):
-            from rtp_llm.models_py.modules.dsv41.moe._silu_mul_bf16_triton import (
-                silu_mul_split_bf16_torch_exact,
-            )
-
-            return w2(silu_mul_split_bf16_torch_exact(gate_up, clamp_limit=swiglu_limit))
-    if (
-        prefill_exact
-        and gate_up.is_cuda
-        and gate_up.dtype == torch.bfloat16
-        and gate_up.ndim == 2
-        and gate_up.is_contiguous()
         and importlib.util.find_spec("triton") is not None
     ):
         from rtp_llm.models_py.modules.dsv41.moe._silu_mul_bf16_triton import (
-            silu_mul_split_bf16_torch_exact,
+            silu_mul_split_bf16 as activate,
         )
-
-        return w2(silu_mul_split_bf16_torch_exact(gate_up, clamp_limit=swiglu_limit))
-    if (
-        fused_activation
-        and gate_up.is_cuda
-        and gate_up.dtype == torch.bfloat16
-        and gate_up.ndim == 2
-        and gate_up.is_contiguous()
-        and importlib.util.find_spec("triton") is not None
-    ):
-        from rtp_llm.models_py.modules.dsv41.moe._silu_mul_bf16_triton import (
-            silu_mul_split_bf16,
-        )
-
-        return w2(silu_mul_split_bf16(gate_up, clamp_limit=swiglu_limit))
+        return w2(activate(gate_up, clamp_limit=swiglu_limit))
     gate, up = gate_up.chunk(2, dim=-1)
     if swiglu_limit and swiglu_limit > 0:
         up = up.clamp(min=-float(swiglu_limit), max=float(swiglu_limit))

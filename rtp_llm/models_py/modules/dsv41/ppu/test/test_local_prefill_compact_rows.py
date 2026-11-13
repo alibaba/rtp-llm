@@ -12,13 +12,14 @@ from pathlib import Path
 import tempfile
 import unittest
 from types import SimpleNamespace as NS
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 import torch
 
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.modules.dsv41 import cp as cp_module
 from rtp_llm.models_py.modules.dsv41.ppu import attention_layer
+from rtp_llm.models_py.modules.dsv41.ppu import ced as ppu_ced
 from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
 from rtp_llm.models_py.modules.dsv41.ppu.ced import _bounded_query_layout
 from rtp_llm.models_py.modules.dsv41.ppu.kv_codec import encode_kv
@@ -29,8 +30,9 @@ from rtp_llm.models_py.modules.dsv41.ppu.prefill_runtime import (
 from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import SharedPrefillPolicy
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_fused import _NativeFixture, assert_bytes
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_rows import state_for
-from rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc_prefill_reuse import _ProjectionBoundary, prefill_component
+from rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc_prefill_reuse import _ProjectionBoundary, original_norm, prefill_component
 from rtp_llm.models_py.modules.dsv41.prefill.ced import CEDPlan, _bounded_replay_selected
+from rtp_llm.models_py.modules.dsv41.prefill import ced as public_ced
 
 
 ENV = LOCAL_PREFILL_COMPACT_ROWS_ENV
@@ -79,6 +81,94 @@ def selected_rows(state, values):
 
 
 class _CompactRowsCases:
+    def test_descriptions_distinguish_compact_query_selected_and_full_domains(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.row_metadata import RowLayout, SelectorKind
+
+        with patch.dict(os.environ, {ENV: "1", LOCAL_PREFILL_ROWS_ENV: "1"}):
+            state = compact_state(self.device)
+            proof = state._local_compact_row_proof
+            query = state.row_view(state.context).validate()
+            selected = state.full_row_view(state.context, selected_only=True).validate()
+            full = state.full_row_view(state.context).validate()
+            self.assertIs(query.layout, RowLayout.COMPACT_QUERY)
+            self.assertIs(selected.layout, RowLayout.SELECTED)
+            self.assertIs(full.layout, RowLayout.FULL)
+            self.assertIs(selected.as_full_rows(), state.full_rows(state.context, selected_only=True))
+            self.assertIs(selected.selector.kind, SelectorKind.ALL)
+            self.assertIs(full.selector.kind, SelectorKind.MASK)
+            self.assertFalse(selected.selector.belongs_to(full))
+            state.context.global_positions.add_(1)
+            self.assertFalse(state.use_local_compact_rows(state.context))
+            # Description construction cannot replace the activation-born proof.
+            state.row_view(state.context)
+            state.full_row_view(state.context, selected_only=True)
+            self.assertIs(state._local_compact_row_proof, proof)
+            self.assertFalse(state.use_local_compact_rows(state.context))
+
+    def test_single_layout_matches_old_admission_transport_and_restore(self):
+        for prefix, length in ((0, 129), (17, 140), (126976, 4096), (31, 4097)):
+            with self.subTest(prefix=prefix, length=length):
+                state = state_for(self.device, (prefix,), (length,))
+                context = state.identity_context()
+                table = torch.zeros((1, 32), dtype=torch.int32, device=self.device)
+                base = torch.empty((2, 136 * 528), dtype=torch.uint8, device=self.device)
+                native = NS(group_tags=(public_ced.DECODER_SWA_KV,),
+                            get_seq_size_per_block=lambda tag: 256,
+                            get_entries_per_block=lambda tag: 136,
+                            get_layer_cache=lambda layer, tag: NS(kv_cache_base=base))
+                model = NS(capture_aux_hidden_layer_ids=())
+                attn = NS(is_prefill=True)
+                with ExitStack() as stack:
+                    stack.enter_context(patch.object(public_ced, "_supported_model", return_value=True))
+                    stack.enter_context(patch.object(public_ced, "as_attention_inputs_by_tag", return_value={
+                        str(public_ced.DECODER_SWA_KV): NS(kv_cache_block_id=table)}))
+                    stack.enter_context(patch.object(collective_torch, "_get_group", return_value=None))
+                    stack.enter_context(patch.object(torch.distributed, "is_initialized", return_value=True))
+                    stack.enter_context(patch.object(torch.cuda, "is_current_stream_capturing", return_value=False))
+                    if self.device == "cpu":
+                        stack.enter_context(patch.object(torch.Tensor, "is_cuda", new_callable=PropertyMock, return_value=True))
+                    plans = []
+                    for enabled in ("0", "1"):
+                        with patch.dict(os.environ, {"RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA": enabled}), patch.object(
+                            public_ced, "_upload_layout_arrays", wraps=public_ced._upload_layout_arrays,
+                        ) as uploads:
+                            plan, reason = ppu_ced.bounded_plan(model, context, attn, native, SharedPrefillPolicy(mode="compact"))
+                        plans.append((plan, reason))
+                        self.assertEqual(uploads.call_count, 2 if enabled == "0" and length > 140 else 1)
+                    self.assertEqual(plans[0][1], plans[1][1])
+                    old, new = plans[0][0], plans[1][0]
+                    if old is None:
+                        self.assertIsNone(new)
+                        continue
+                    self.assertEqual(new.context.swa_replay_start, length - 140)
+                    self.assertIsNone(new.exchange.group)
+                    for name in ("global_positions", "relative_positions", "req_id_per_token", "local_is_real", "unpad_restore", "gather_restore_positions"):
+                        assert_bytes(self, getattr(new.context, name), getattr(old.context, name))
+                    assert_bytes(self, new.cu_seqlens, old.cu_seqlens)
+                    for name in ("send_indices", "receive_positions"):
+                        assert_bytes(self, getattr(new.exchange, name), getattr(old.exchange, name))
+                    for name in ("send_sizes", "receive_sizes", "candidate_rows_host", "projection_groups_host", "receive_is_identity"):
+                        self.assertEqual(getattr(new.exchange, name), getattr(old.exchange, name))
+                    value = torch.arange(length * 3, device=self.device).reshape(length, 3)
+                    assert_bytes(self, new.exchange.compact(value), old.exchange.compact(value))
+                    assert_bytes(self, new.restore_rows(new.exchange.compact(value)), old.restore_rows(old.exchange.compact(value)))
+                    with patch.dict(os.environ, {"RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA": "1"}), patch.object(
+                        public_ced, "_supported_model", return_value=False,
+                    ):
+                        self.assertIsNone(ppu_ced.bounded_plan(model, context, attn, native, SharedPrefillPolicy(mode="compact"))[0])
+
+    def test_host_geometry_reuse_keeps_live_descriptor_invalidation(self):
+        with torch.inference_mode(False), patch.dict(os.environ, {
+            ENV: "1", "RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA": "1",
+        }):
+            state = compact_state(self.device)
+            self.assertTrue(state.use_local_compact_rows(state.context))
+            saved = state._local_compact_host_geometry
+            self.assertTrue(state.use_local_compact_rows(state.context))
+            self.assertIs(saved, state._local_compact_host_geometry)
+            state.context.global_positions.copy_(state.context.global_positions.clone())
+            self.assertFalse(state.use_local_compact_rows(state.context))
+
     def test_real_bounded_order_ragged_odd_padding_empty_and_last_rows_match_old(self):
         for prefixes, lengths in (
             ((126976,), (4096,)), ((0, 31, 129), (4096, 139, 0)),
@@ -185,6 +275,13 @@ class _CompactRowsCases:
             if value is None:
                 value = torch.randn(state.context.chunk_length, hidden, device=self.device, dtype=torch.bfloat16)
             with ExitStack() as stack:
+                if self.device == "cpu":
+                    # The production norm provider requires CUDA. This CPU row
+                    # fixture uses its existing reference; PPU keeps real norms.
+                    for norm in (attn.q_norm, attn.kv_norm):
+                        stack.enter_context(patch.object(
+                            norm, "forward", side_effect=lambda value, norm=norm: original_norm(norm, value),
+                        ))
                 stack.enter_context(patch.dict(os.environ, {ENV: str(int(flag)), attention_layer.LOCAL_PREFILL_WORKSPACE_ENV: "0"}))
                 stack.enter_context(patch.object(attention_layer, "prepare_packed_attention", return_value=(None, "disabled")))
                 stack.enter_context(patch.object(attention_layer, "_build_reference_workspace", side_effect=_ProjectionBoundary))
@@ -243,6 +340,13 @@ class LocalPrefillCompactRowsCPU(_CompactRowsCases, unittest.TestCase):
                 self.assertFalse(state.use_local_compact_rows(state.context))
 
 
+class LocalPrefillHostMetadataCPU(LocalPrefillCompactRowsCPU):
+    def setUp(self):
+        flags = patch.dict(os.environ, {"RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA": "1"})
+        flags.start()
+        self.addCleanup(flags.stop)
+
+
 @unittest.skipUnless(os.environ.get("RTP_V41_TEST_LOCAL_WORKSPACE_DEVICE") == "1", "explicit PPU device test")
 class LocalPrefillCompactRowsDevice(_CompactRowsCases, unittest.TestCase):
     device = "cuda"
@@ -296,6 +400,14 @@ class LocalPrefillCompactRowsDevice(_CompactRowsCases, unittest.TestCase):
         self.assertTrue(any(event.get("cat") == "cpu_op" and event["name"] == "aten::index_select"
                             and event.get("args", {}).get("Input Dims", [None])[0] == [140, 512]
                             for event in events), "actual compact KV restore must execute")
+
+
+class LocalPrefillHostMetadataDevice(LocalPrefillCompactRowsDevice):
+    def setUp(self):
+        super().setUp()
+        flags = patch.dict(os.environ, {"RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA": "1"})
+        flags.start()
+        self.addCleanup(flags.stop)
 
 
 if __name__ == "__main__":

@@ -5,16 +5,19 @@ This plan owns only stream ordering and its capture-external resources.
 It does not establish that concurrent MegaMoE makes progress on WORLD8.
 """
 
-import os
 import threading
 
 import torch
 
 from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
-
-
-def _stream_key(stream):
-    return str(stream.device), int(stream.cuda_stream)
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
+    enabled as optimization_enabled,
+)
+from rtp_llm.models_py.modules.dsv41.ppu.overlap_resources import (
+    OverlapResources,
+    record_stream,
+    stream_key as _stream_key,
+)
 
 
 def _metadata(value):
@@ -57,16 +60,34 @@ class VerifyMoEOverlap:
             layer: (engine._processed[layer, self.device], _metadata(engine._processed[layer, self.device]))
             for layer in range(target_layers)
         }
-        with torch.cuda.device(self.device):
-            self.side_stream = torch.cuda.Stream(device=self.device)
-            self.producer = torch.cuda.Event(enable_timing=False)
-            self.done = torch.cuda.Event(enable_timing=False)
-        self._caller = None
-        self._caller_key = None
-        self._closed = False
-        self._lock = threading.Lock()
+        self._resources = OverlapResources(self.device, name="Verify MoE overlap")
+        self._lock = self._resources.lock
         self._python_calls = self._forks = self._joins = 0
         self._initial_signature = self.storage_signature()
+
+    @property
+    def side_stream(self):
+        return self._resources.side_stream
+
+    @property
+    def producer(self):
+        return self._resources.producer
+
+    @property
+    def done(self):
+        return self._resources.done
+
+    @property
+    def _caller(self):
+        return self._resources.caller
+
+    @property
+    def _caller_key(self):
+        return self._resources.caller_key
+
+    @property
+    def _closed(self):
+        return self._resources.closed
 
     def _engine_ready(self):
         engine = self.engine
@@ -95,7 +116,7 @@ class VerifyMoEOverlap:
             str(getattr(engine, "_mega_device", None)),
             getattr(engine, "backend", None), getattr(engine, "precision", None),
             _metadata(getattr(engine, "_mega_recv_stats", None)), id(getattr(engine, "_processed", None)),
-            _stream_key(self.side_stream), id(self.producer), id(self.done), self._closed,
+            *self._resources.storage_signature(),
         )
 
     def validate(self):
@@ -108,23 +129,7 @@ class VerifyMoEOverlap:
             raise RuntimeError("bind Verify MoE caller before capture")
         self.validate()
         stream = torch.cuda.current_stream(self.device) if stream is None else stream
-        if torch.device(stream.device) != self.device:
-            raise ValueError("Verify MoE caller belongs to another device")
-        key = _stream_key(stream)
-        if self._caller_key is not None:
-            if key != self._caller_key:
-                raise RuntimeError("Verify MoE caller changed; use an independent plan")
-            return
-        if not self._lock.acquire(blocking=False):
-            raise RuntimeError("Verify MoE overlap is not reentrant")
-        try:
-            self.producer.record(stream)
-            self.side_stream.wait_event(self.producer)
-            self.done.record(self.side_stream)
-            stream.wait_event(self.done)
-            self._caller, self._caller_key = stream, key
-        finally:
-            self._lock.release()
+        self._resources.bind_caller(stream)
 
     prepare_caller = bind_caller
 
@@ -133,7 +138,7 @@ class VerifyMoEOverlap:
             allowed = getattr(state, "verify_moe_overlap_allowed", False)
         if (
             not allowed or self._closed or self._caller_key is None
-            or os.environ.get("RTP_V41_PPU_VERIFY_DIRECT_MOE_ROUTES", "1") != "1"
+            or not optimization_enabled("RTP_V41_PPU_VERIFY_DIRECT_MOE_ROUTES", default=True)
             or not self._engine_ready()
             or getattr(state, "is_graph", False) is not True
             or getattr(state, "verify", False) is not True
@@ -176,25 +181,30 @@ class VerifyMoEOverlap:
         self.validate()
         if not self.supported(state, flat, owner):
             raise ValueError("unqualified Verify MoE overlap input/caller")
-        if not self._lock.acquire(blocking=False):
-            raise RuntimeError("Verify MoE overlap is not reentrant")
         caller = torch.cuda.current_stream(self.device)
+        with self._resources.submission():
+            routed, shared = self._enqueue_branches(owner, flat, state, expert_load, caller)
+        # Input/output allocator registrations remain effective after this
+        # frame releases its references, including for return_shared views.
+        if return_shared:
+            return routed.reshape(shape), shared.reshape(shape)
+        from rtp_llm.models_py.modules.dsv41.ppu.moe import combine_routed_and_shared
+
+        return combine_routed_and_shared(routed, shared).reshape(shape)
+
+    def _enqueue_branches(self, owner, flat, state, expert_load, caller):
         forked, failure = False, None
         try:
             self._python_calls += 1
-            self.producer.record(caller)
-            self.side_stream.wait_event(self.producer)
+            self._resources.fork(caller)
             forked = True
             self._forks += 1
             # Register the side read before either callback can raise. Stream
             # dependencies order execution; allocator ownership is separate.
-            flat.record_stream(self.side_stream)
+            record_stream(flat, self.side_stream)
             # Match SGLang's enqueue order: shared work can start before the
             # full-residency routed pipeline is submitted on the side stream.
-            if os.environ.get("RTP_V41_PPU_VERIFY_EXACT_SWIGLU", "1") == "1":
-                shared = owner.shared_expert(flat, prefill_exact=True)
-            else:
-                shared = owner.shared_expert(flat, fused_activation=False)
+            shared = owner.shared_expert(flat, allow_quant=False)
             with torch.cuda.stream(self.side_stream):
                 ids, weights = owner.gate(
                     flat, graph_routes=(state.metadata.valid_mask, state.routed_rows_device[owner.layer_id]),
@@ -210,29 +220,19 @@ class VerifyMoEOverlap:
                 )
                 # The result is allocated on side but its addition or tuple
                 # consumer runs on caller, potentially after this frame dies.
-                routed.record_stream(caller)
+                record_stream(routed, caller)
         except BaseException as error:
             failure = error
             raise
         finally:
-            try:
-                if forked:
-                    try:
-                        self.done.record(self.side_stream)
-                        caller.wait_event(self.done)
-                        self._joins += 1
-                    except BaseException:
-                        if failure is None:
-                            raise
-            finally:
-                self._lock.release()
-        # Input/output allocator registrations remain effective after this
-        # frame releases its references, including for return_shared views.
-        if return_shared:
-            return routed.reshape(shape), shared.reshape(shape)
-        from rtp_llm.models_py.modules.dsv41.ppu.moe import combine_routed_and_shared
-
-        return combine_routed_and_shared(routed, shared).reshape(shape)
+            if forked:
+                try:
+                    self._resources.join(caller)
+                    self._joins += 1
+                except BaseException:
+                    if failure is None:
+                        raise
+        return routed, shared
 
     def receipt(self):
         return dict(
@@ -244,12 +244,7 @@ class VerifyMoEOverlap:
 
     def close(self):
         """Reject new submissions; the runtime must retain/drain graph users."""
-        if not self._lock.acquire(blocking=False):
-            raise RuntimeError("cannot close an active Verify MoE overlap call")
-        try:
-            self._closed = True
-        finally:
-            self._lock.release()
+        self._resources.close()
 
 
 class VerifyMoEOverlapPlans:

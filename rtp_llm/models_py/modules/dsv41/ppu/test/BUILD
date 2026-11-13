@@ -1,6 +1,138 @@
 package(default_visibility = ["//visibility:public"])
 
 [
+    py_test(
+        name = "moe_routing_" + mode + "_test",
+        srcs = ["test_moe_routing.py"],
+        deps = ["//rtp_llm/models_py:v41_ppu_moe", "//rtp_llm:eplb"],
+        env = {
+            "GPU_COUNT": str(gpus),
+            "RTP_V41_TEST_LOCAL_WORKSPACE_DEVICE": str(gpus),
+        },
+        tags = ["manual", "PPU-ZW890P"],
+        target_compatible_with = select({
+            "@//:using_ppu": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+    for mode, gpus in [("contracts", 0), ("device", 1)]
+]
+
+py_test(
+    name = "topk_dispatch_test",
+    srcs = ["test_topk_dispatch.py"],
+    data = [
+        "test_local_prefill_token_topk.py",
+        "//rtp_llm/models_py:v41_ppu_shared_sources",
+        "//rtp_llm/models_py/modules/dsv41/fp8/test:test_v41_prefill_topk.py",
+    ],
+    env = {"GPU_COUNT": "0"},
+    tags = ["manual", "cpu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "yoco_operator_eligibility_test",
+    srcs = ["test_yoco_operator_eligibility.py"],
+    data = ["//rtp_llm/models_py:v41_ppu_shared_sources"],
+    env = {"GPU_COUNT": "0"},
+    tags = ["manual", "cpu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "row_metadata_test",
+    srcs = ["test_row_metadata.py"],
+    deps = ["//rtp_llm/models_py:v41_ppu_row_metadata"],
+    tags = ["cpu"],
+)
+
+py_test(
+    name = "overlap_resources_test",
+    srcs = ["test_overlap_resources.py"],
+    deps = [
+        "//rtp_llm/models_py:v41_ppu_overlap",
+        "//rtp_llm:torch",
+    ],
+    tags = ["cpu"],
+)
+
+[
+    sh_test(
+        name = "rope_" + mode + "_test",
+        srcs = ["run_rope.sh"],
+        args = [mode],
+        data = [
+            "test_rope.py",
+            "//rtp_llm/models_py:v41_ppu_shared_sources",
+            "//rtp_llm/tools/v41:tooling",
+        ],
+        env = {"GPU_COUNT": str(gpus)},
+        tags = ["manual", "PPU-ZW890P"],
+        timeout = "long",
+        target_compatible_with = select({
+            "@//:using_ppu": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+    for mode, gpus in [("contracts", 0), ("device", 1)]
+]
+
+[
+    sh_test(
+        name = "rmsnorm_" + mode + "_test",
+        srcs = ["run_rmsnorm.sh"],
+        args = [mode],
+        data = [
+            "test_rmsnorm.py",
+            "//rtp_llm/models_py:v41_ppu_shared_sources",
+            "//rtp_llm/tools/v41:tooling",
+        ],
+        env = {"GPU_COUNT": str(gpus)},
+        tags = ["manual", "PPU-ZW890P"],
+        timeout = "long",
+        target_compatible_with = select({
+            "@//:using_ppu": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+    for mode, gpus in [("contracts", 0), ("device", 1)]
+]
+
+py_test(
+    name = "optimization_config_test",
+    srcs = ["test_optimization_config.py"],
+    deps = ["//rtp_llm/models_py:v41_ppu_contract"],
+    tags = ["cpu"],
+)
+
+py_test(
+    name = "grouped_projection_test",
+    srcs = ["test_grouped_projection.py"],
+    deps = [
+        "//rtp_llm/models_py:v41_ppu_moe",
+        "//rtp_llm:torch",
+    ],
+    tags = ["cpu"],
+)
+
+py_test(
+    name = "shared_expert_activation_selection_test",
+    srcs = ["test_shared_expert_activation_selection.py"],
+    deps = [
+        "//rtp_llm/models_py:v41_ppu_moe",
+        "//rtp_llm:torch",
+    ],
+    tags = ["cpu"],
+)
+
+[
     sh_test(
         name = "local_prefill_sg_align_" + mode + "_test",
         srcs = ["//example/deepseek_v41/ppu:test_functional.sh"],
@@ -42,6 +174,8 @@ package(default_visibility = ["//visibility:public"])
             "test_local_prefill_moe_routes.py",
             "test_local_prefill_compact_rows.py",
             "test_local_prefill_split_l20.py",
+            "test_local_prefill_dense_projections.py",
+            "test_local_prefill_l20_query_projection.py",
             "test_local_prefill_source_cache.py",
             "test_local_prefill_qo_rope.py",
             "test_dp_prefill_mega_capacity.py",

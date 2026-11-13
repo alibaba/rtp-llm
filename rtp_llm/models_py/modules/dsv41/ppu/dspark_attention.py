@@ -6,6 +6,7 @@ from torch import nn
 
 from rtp_llm.models_py.modules.dsv41.ppu._quant import dequantize_swa_kv_rows
 from rtp_llm.models_py.modules.dsv41.ppu.attention import flash_mla_sparse_fwd_ppu
+from rtp_llm.models_py.modules.dsv41.ppu.grouped_projection import project_wo_a
 from rtp_llm.models_py.modules.dsv41.ppu.prefill import _rope_tail
 from rtp_llm.models_py.modules.dsv41.ppu.block import SharedPPUBlock
 from rtp_llm.models_py.modules.dsv41.ppu.layers import PPUSharedRMSNorm
@@ -136,27 +137,27 @@ def _project_query_output(
     else:
         output = _rope_tail(output, freqs, inverse=True)
     output = output.reshape(-1, g.o_groups, g.n_heads * g.head_dim // g.o_groups)
-    if hasattr(attn.wo_a, "forward_grouped"):
-        projected = attn.wo_a.forward_grouped(output)
-        return attn.wo_b(projected.flatten(1)).reshape(shape)
-    weight = attn.wo_a.weight
-    if valid_mask is not None and proposal_batched_wo_a:
-        from rtp_llm.models_py.modules.dsv41.ppu.graph_attention_layer import _try_batched_wo_a
+    def bf16_projection(output, weight):
+        if valid_mask is not None and proposal_batched_wo_a:
+            from rtp_llm.models_py.modules.dsv41.ppu.graph_attention_layer import _try_batched_wo_a
 
-        projected = _try_batched_wo_a(output, weight, proposal_q3=True)
-        if projected is not None:
-            return attn.wo_b(projected.flatten(1)).reshape(shape)
-    if valid_mask is not None and weight.is_contiguous() and not (
-        torch.is_grad_enabled() and (output.requires_grad or weight.requires_grad)
-    ):
-        projected = output.new_empty((output.shape[0], g.o_groups, g.o_lora_rank))
-        for i, group_weight in enumerate(weight.view(g.o_groups, g.o_lora_rank, -1)):
-            torch.mm(output[:, i], group_weight.T, out=projected[:, i])
-    else:
-        projected = torch.stack([
-            F.linear(output[:, i].contiguous(), weight[i * g.o_lora_rank:(i + 1) * g.o_lora_rank].contiguous())
-            for i in range(g.o_groups)
-        ], 1)
+            projected = _try_batched_wo_a(output, weight, proposal_q3=True)
+            if projected is not None:
+                return projected
+        if valid_mask is not None and weight.is_contiguous() and not (
+            torch.is_grad_enabled() and (output.requires_grad or weight.requires_grad)
+        ):
+            projected = output.new_empty((output.shape[0], g.o_groups, g.o_lora_rank))
+            for i, group_weight in enumerate(weight.view(g.o_groups, g.o_lora_rank, -1)):
+                torch.mm(output[:, i], group_weight.T, out=projected[:, i])
+        else:
+            projected = torch.stack([
+                F.linear(output[:, i].contiguous(), weight[i * g.o_lora_rank:(i + 1) * g.o_lora_rank].contiguous())
+                for i in range(g.o_groups)
+            ], 1)
+        return projected
+
+    projected = project_wo_a(output, attn.wo_a, bf16_projection=bf16_projection)
     return attn.wo_b(projected.flatten(1)).reshape(shape)
 
 

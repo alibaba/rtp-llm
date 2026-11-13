@@ -149,8 +149,8 @@ class LocalPrefillAIURouting(unittest.TestCase):
             unit.ops.mhc.reset_mock()
             unit.ops._mhc.pre.reset_mock()
             with patch.dict(os.environ, {
-                ENV: local_flag, CP_ENV: cp_flag, "RTP_V41_PPU_CP8_YOCO_FAST_PREFILL": "1",
-                "RTP_V41_PPU_CP8_YOCO_SMALL_OPS": "1",
+                ENV: local_flag, CP_ENV: cp_flag, "RTP_V41_PPU_CP8_YOCO_FAST_PREFILL": "0",
+                "RTP_V41_PPU_CP8_YOCO_SMALL_OPS": "0",
             }):
                 PPUSharedHCUnit._pre_impl(unit, residual)
             self.assertEqual(unit.ops._mhc.pre.call_count, int(expected_aiu))

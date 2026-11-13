@@ -4,6 +4,7 @@ import json
 import math
 import os
 from pathlib import Path
+from contextlib import nullcontext
 import tempfile
 import unittest
 from types import SimpleNamespace as NS
@@ -15,13 +16,13 @@ from rtp_llm.models_py.modules.dsv41.cp import CPContext
 from rtp_llm.models_py.modules.dsv41.ppu import _quant, graph_cache_kernels, prefill
 from rtp_llm.models_py.modules.dsv41.ppu.ced import _bounded_query_layout
 from rtp_llm.models_py.modules.dsv41.ppu.kv_codec import decode_kv, encode_kv
-from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import SharedNativeCache
+from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import SharedNativeCache, _StagedSwaSegments
 from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import PrefillPolicy
 from rtp_llm.models_py.modules.dsv41.prefill.ced import _bounded_replay_selected
 
 
 LOCAL_ENV = "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE"
-FUSED_ENV = prefill.LOCAL_PREFILL_WORKSPACE_FUSED_ENV
+FUSED_ENV = "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE_FUSED"
 CP_INDEX_ENV = "RTP_V41_PPU_CP8_FUSED_WORKSPACE_INDICES"
 CP_DEQUANT_ENV = "RTP_V41_PPU_CP8_FUSED_WORKSPACE_DEQUANT"
 
@@ -204,9 +205,12 @@ class _NativeFixture:
         shared = {} if shared is None else shared
         if self.full_layout:
             shared["local_prefill_workspace_layout"] = self.layout
-        with patch.dict(os.environ, {
-            LOCAL_ENV: "1", FUSED_ENV: str(int(fused)), CP_INDEX_ENV: "0", CP_DEQUANT_ENV: "0",
-        }):
+        # Keep a test-only unfused oracle after production switches retire.
+        # The fused arm uses the actual automatic metadata admission.
+        unfused = nullcontext() if fused else patch.object(
+            prefill, "_local_prefill_workspace_fusion_supported", return_value=False,
+        )
+        with unfused:
             output = prefill.build_cp_prefill_workspace(
                 **self.args(layer, starts), cp=self.layout, shared=shared, q8=False,
             )
@@ -268,18 +272,18 @@ class LocalPrefillFusedCPU(unittest.TestCase):
         exact, exact_context = _bounded_layout((17,), (9,), (0,), selected=torch.tensor([0, 0, 3, 8]))
         self.assertIsNone(prefill._local_prefill_workspace_bounds(NS(lengths=(26,)), exact_context, exact))
 
-    def test_admission_is_local_ppu_prefill_and_explicit(self):
+    def test_admission_is_local_ppu_prefill_and_ignores_retired_selectors(self):
         cache = SharedNativeCache.__new__(SharedNativeCache)
         cache._is_prefill, cache.sharded, cache.lengths = True, False, (17,)
         device = torch.device("cuda", 0)
         positions = NS(is_cuda=True, ndim=1, dtype=torch.int64, shape=(7,), device=device, numel=lambda: 7)
         context = NS(positions=positions, request_ids=NS(shape=(7,), device=device))
         layout, geometry = NS(chunk_lengths_per_req=(7,)), NS(head_dim=512)
-        with patch.dict(os.environ, {LOCAL_ENV: "1", FUSED_ENV: "1"}), patch.object(_quant, "is_ppu", return_value=True):
+        with patch.object(_quant, "is_ppu", return_value=True):
             self.assertTrue(prefill._local_prefill_workspace_fusion_supported(cache, geometry, context, layout))
-            for environment in ({LOCAL_ENV: "0"}, {FUSED_ENV: "0"}):
-                with patch.dict(os.environ, environment):
-                    self.assertFalse(prefill._local_prefill_workspace_fusion_supported(cache, geometry, context, layout))
+            for flag in ("0", "1"):
+                with patch.dict(os.environ, {FUSED_ENV: flag, CP_INDEX_ENV: flag, CP_DEQUANT_ENV: flag}):
+                    self.assertTrue(prefill._local_prefill_workspace_fusion_supported(cache, geometry, context, layout))
             for name, value in (("is_cuda", False), ("ndim", 2), ("dtype", torch.int32)):
                 old = getattr(positions, name)
                 setattr(positions, name, value)
@@ -301,7 +305,7 @@ class LocalPrefillFusedCPU(unittest.TestCase):
                 self.assertFalse(prefill._local_prefill_workspace_fusion_supported(cache, geometry, context, layout))
 
     @torch.inference_mode()
-    def test_cpu_rows_keep_reference_fallback_even_with_device_switches_set(self):
+    def test_cpu_rows_keep_reference_fallback_under_auto_selection(self):
         for ratio in (0, 1, 2):
             with self.subTest(ratio=ratio):
                 fixture = _NativeFixture("cpu", ratio=ratio, prefixes=(3, 19, 7), lengths=(4, 0, 3))
@@ -316,7 +320,7 @@ class LocalPrefillFusedCPU(unittest.TestCase):
                             assert_bytes(self, left, right)
 
     @torch.inference_mode()
-    def test_cp_flags_retain_their_existing_meaning(self):
+    def test_cp8_auto_fusion_ignores_retired_selectors_and_preserves_row_prep_gate(self):
         fixture = _NativeFixture("cpu", ratio=0, prefixes=(0,), lengths=(4,))
         with patch.object(fixture.cache, "cp8_row_prep_enabled", return_value=True), patch.object(
             prefill, "_full_cp_workspace_bounds", return_value=None,
@@ -327,12 +331,18 @@ class LocalPrefillFusedCPU(unittest.TestCase):
                         **fixture.args(), cp=fixture.layout, shared=(shared := {}), q8=False,
                     )
                 workspace = shared["prefill_kv_workspace"][2]
-                self.assertEqual(workspace.fused_dequant, flag == "1")
-                self.assertEqual(workspace.fused_indices, flag == "1")
+                self.assertTrue(workspace.fused_dequant and workspace.fused_indices)
                 expected = prefill._build_reference_workspace(**fixture.args())
                 for left, right in zip(output, expected):
                     assert_bytes(self, left, right)
-            self.assertEqual(bounds.call_count, 1)
+            self.assertEqual(bounds.call_count, 2)
+        # CP8 placement/row preparation remains an independent prerequisite.
+        with patch.object(fixture.cache, "cp8_row_prep_enabled", return_value=False):
+            prefill.build_cp_prefill_workspace(
+                **fixture.args(), cp=fixture.layout, shared=(shared := {}), q8=False,
+            )
+        workspace = shared["prefill_kv_workspace"][2]
+        self.assertFalse(workspace.fused_dequant or workspace.fused_indices)
 
 
 @unittest.skipUnless(
@@ -341,6 +351,136 @@ class LocalPrefillFusedCPU(unittest.TestCase):
 class LocalPrefillFusedDevice(unittest.TestCase):
     def setUp(self):
         self.assertTrue(_quant.is_ppu(), "local fusion qualification requires a real ZW PPU")
+
+    @torch.inference_mode()
+    def test_indices_and_dequant_decline_independently(self):
+        fixture = _NativeFixture("cuda", ratio=2, prefixes=(129,), lengths=(9,))
+        expected, _ = fixture.build(fused=False)
+        indices_op = graph_cache_kernels.try_assemble_cp_prefill_indices
+        dequant_op = _quant.try_dequantize_prefill_rows
+        for decline_indices, decline_dequant in (
+            (True, False),
+            (False, True),
+            (True, True),
+        ):
+            with self.subTest(
+                indices=decline_indices, dequant=decline_dequant
+            ), patch.object(
+                graph_cache_kernels,
+                "try_assemble_cp_prefill_indices",
+                wraps=None if decline_indices else indices_op,
+                **({"return_value": None} if decline_indices else {}),
+            ) as indices, patch.object(
+                _quant,
+                "try_dequantize_prefill_rows",
+                wraps=None if decline_dequant else dequant_op,
+                **({"return_value": False} if decline_dequant else {}),
+            ) as dequant, patch.object(
+                fixture.cache,
+                "try_decode_swa_range",
+                return_value=False,
+            ), patch.dict(
+                os.environ, {FUSED_ENV: "0", CP_INDEX_ENV: "0", CP_DEQUANT_ENV: "0"}
+            ):
+                actual, _ = fixture.build(fused=True)
+            self.assertEqual(indices.call_count, 1)
+            self.assertGreater(dequant.call_count, 0)
+            for left, right in zip(actual, expected):
+                assert_bytes(self, left, right)
+
+    @torch.inference_mode()
+    def test_cp8_query_ranks_use_auto_indices_with_padding(self):
+        # All eight zigzag query layouts against one complete synthetic bank;
+        # this is not a distributed gather/placement or full-model test.
+        for rank in range(8):
+            first, last = rank * 2, (16 - rank) * 2
+            query = list(range(first, first + 2)) + list(range(last - 2, last))
+            query = [min(p, 30) for p in query]
+            fixture = _NativeFixture(
+                "cuda", ratio=2, prefixes=(0,), lengths=(31,), queries=[query]
+            )
+            fixture.layout = NS(
+                cp_size=8,
+                cp_rank=rank,
+                chunk_lengths_per_req=(4,),
+                input_lengths_global_host=(31,),
+                prefix_lengths_host=(0,),
+                gather_restore_positions=None,
+                global_positions=fixture.context.positions,
+            )
+            expected = prefill._build_reference_workspace(**fixture.args())
+            with patch.object(
+                fixture.cache, "cp8_row_prep_enabled", return_value=True
+            ), patch.dict(
+                os.environ,
+                {FUSED_ENV: "0", CP_INDEX_ENV: "0", CP_DEQUANT_ENV: "0"},
+            ), patch.object(
+                graph_cache_kernels,
+                "try_assemble_cp_prefill_indices",
+                wraps=(graph_cache_kernels.try_assemble_cp_prefill_indices),
+            ) as indices:
+                actual, workspace = fixture.build(fused=True)
+            self.assertTrue(workspace.fused_indices and workspace.fused_dequant)
+            self.assertEqual(indices.call_count, 1)
+            for left, right in zip(actual, expected):
+                assert_bytes(self, left, right)
+
+    @torch.inference_mode()
+    def test_cp8_swa_segments_ignore_retired_dequant_selector(self):
+        from rtp_llm.models_py.modules.dsv41.ppu import prefill_swa
+        from rtp_llm.models_py.modules.dsv41.ppu.cp_sharding import PoolPlacement
+
+        fixture = _NativeFixture("cuda", ratio=0, prefixes=(129,), lengths=(9,))
+        cache = fixture.cache
+        pool = cache.pools[1, "swa_kv"]
+        # Only staging/readback is under test. Communication and native writes
+        # below are doubles; real CP metadata and the decoder remain in use.
+        cache.placements[1, "swa_kv"] = PoolPlacement.create(
+            {"size": 8, "rank": 0},
+            (1, "swa_kv"),
+            pool,
+            fixture.native,
+            cache.inputs[pool.framework_tag],
+            fixture.geometry,
+        )
+        old_positions = torch.arange(2, 129, device="cuda")
+        positions = torch.arange(129, 138, device="cuda")
+        tail = encode_kv(fixture.values(old_positions), pool_tag="swa_kv")
+        fresh = encode_kv(fixture.values(positions, 2), pool_tag="swa_kv")
+        expected = torch.empty((136, 512), dtype=torch.bfloat16, device="cuda")
+        decode_kv(torch.cat((tail, fresh)), pool_tag="swa_kv", out=expected)
+        cache.bind_swa_fresh_lengths((9,))
+        for flag in ("0", "1"):
+            with patch.object(
+                cache, "_batched_swa_enabled", return_value=True
+            ), patch.object(
+                cache,
+                "cp8_row_prep_enabled",
+                return_value=True,
+            ), patch.object(
+                prefill_swa, "gather_tails", return_value=(tail,)
+            ), patch.object(
+                prefill_swa,
+                "write_prefill_range",
+                return_value=list(range(129, 138)),
+            ), patch.dict(
+                os.environ,
+                {CP_DEQUANT_ENV: flag, "RTP_V41_PPU_CP8_DIRECT_SWA_WORKSPACE": "1",
+                 "RTP_V41_PPU_CP8_FUSED_SWA_WRITE": "0"},
+            ):
+                cache.stage_swa(
+                    1, positions, torch.zeros_like(positions), fresh, (129,)
+                )
+            saved = cache._fresh_swa[1, 0]
+            self.assertIsInstance(saved, _StagedSwaSegments)
+            output = torch.empty_like(expected)
+            self.assertTrue(cache.try_decode_swa_range(1, 0, 2, output))
+            assert_bytes(self, output, expected)
+            assert_bytes(
+                self,
+                cache.read_swa(1, 0, torch.arange(2, 138, device="cuda")),
+                torch.cat((tail, fresh)),
+            )
 
     @torch.inference_mode()
     def test_supported_host_bounds_avoid_min_max_download_and_preserve_bytes(self):

@@ -17,11 +17,9 @@ from rtp_llm.models_py.modules.dsv41.ppu import _quant, graph_cache_kernels, pre
 from rtp_llm.models_py.modules.dsv41.ppu.kv_codec import encode_kv
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import (
     LOCAL_PREFILL_LAZY_PRODUCER_SLOTS_ENV as ENV,
-    LOCAL_PREFILL_SOURCE_NATIVE_READ_ENV as READ,
-    LOCAL_PREFILL_SOURCE_NATIVE_WRITE_ENV as WRITE,
-    LOCAL_PREFILL_SWA_NATIVE_WRITE_ENV as SWA,
     SharedNativeCache,
 )
+
 from rtp_llm.models_py.modules.dsv41.ppu.ops import PPUOps
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_fused import assert_bytes
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_operator_flags import _trace_events
@@ -29,8 +27,13 @@ from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_rotary_pack imp
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_source_native_read import (
     _RestoreCPU, fixture as full_fixture, original, read,
 )
-from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_source_native_write import _StoreCPU
+from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_source_native_write import _StoreCPU, _reference_norm_provider
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_swa_segments import FLAGS, arguments
+
+# Legacy names only verify that retired selectors no longer affect dispatch.
+READ = 'RTP_V41_PPU_LOCAL_PREFILL_SOURCE_NATIVE_READ'
+WRITE = 'RTP_V41_PPU_LOCAL_PREFILL_SOURCE_NATIVE_WRITE'
+SWA = 'RTP_V41_PPU_LOCAL_PREFILL_SWA_NATIVE_WRITE'
 
 
 def _rebuild(cache, *, defer=False, prefill=True):
@@ -135,7 +138,9 @@ class _Cases:
             for old, new in zip(results[0][1], results[1][1]):
                 assert_bytes(self, old, new)
             candidate = results[1][0].source.cache
-            self.assertEqual(candidate._local_producer_slot_stats["materializations"], int(mutation))
+            # The common per-request fallback copies rows without building
+            # unused global slot tensors, including a declined native plan.
+            self.assertEqual(candidate._local_producer_slot_stats["materializations"], 0)
             self.assertEqual(candidate._local_source_native_write_stats["writes"], 1 if mutation else 2)
             for got, expected in zip(read(candidate, 0), original(results[0][0].source.cache, 0)):
                 assert_bytes(self, got, expected)
@@ -147,7 +152,8 @@ class LocalLazyProducerSlotsCPU(_Cases, unittest.TestCase):
     def setUp(self):
         super().setUp()
         for item in (
-            patch.object(SharedNativeCache, "_local_source_native_read_device", new=lambda self, pool: True),
+            patch.object(SharedNativeCache, "_local_source_native_read_device", new=lambda self, pool: pool.tensor.dtype == torch.uint8),
+            patch("rtp_llm.models_py.modules.dsv41.ppu.rmsnorm._flashinfer_rmsnorm", return_value=_reference_norm_provider),
             patch.object(graph_cache_kernels, "_kernels", new=lambda: NS(
                 store_cp_prefill_rows=_StoreCPU(), triton=NS(next_power_of_2=lambda n: 1 << (n - 1).bit_length()))),
             patch.object(prefill_readback, "_restore_rows", _RestoreCPU()),
@@ -163,8 +169,7 @@ class LocalLazyProducerSlotsCPU(_Cases, unittest.TestCase):
     @torch.no_grad()
     def test_phase_flags_device_and_missing_birth_fall_back_eager(self):
         base = full_fixture("cpu")
-        for env in ({ENV: "0"}, {READ: "0"}, {WRITE: "0"}, {SWA: "0"},
-                    {"TP_SIZE": "8"}, {"PREFILL_CP_SIZE": "8"}):
+        for env in ({ENV: "0"}, {"TP_SIZE": "8"}, {"PREFILL_CP_SIZE": "8"}):
             with patch.dict(os.environ, env):
                 cache = _rebuild(base)
                 self.assertIsNotNone(cache._slots)

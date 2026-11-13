@@ -502,7 +502,7 @@ class LocalAttentionProviderDevice(unittest.TestCase):
             arms = []
             for enabled in (False, True):
                 with patch.dict(os.environ, {**FLAGS, ENV: str(int(enabled)),
-                    "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE": "1", "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE_FUSED": "1",
+                    "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE": "1",
                     "RTP_V41_PPU_FUSED_BF16_ROPE": "1", attention_layer.FUSION_ENV: "0", attention_layer.STREAMS_ENV: "0",
                     "RTP_V41_PPU_LOCAL_PREFILL_GROUPED_QO_ROPE": "0"}):
                     state = native_fixture("cuda:0", (PREFIX,), (rows,), layers=layer + 1)

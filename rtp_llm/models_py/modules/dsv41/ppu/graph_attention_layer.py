@@ -4,12 +4,9 @@ Global/CSA production and selection are local device operations. Block mHC,
 Engram, MoE and the complete layer loop remain in their shared modules.
 """
 
-import os
-
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.config.v41_runtime import env_bool
 from rtp_llm.device.device_type import is_ppu
 from rtp_llm.models_py.modules.dsv41.ppu.attention import flash_mla_sparse_fwd_ppu
 from rtp_llm.models_py.modules.dsv41.ppu.graph_attention import (
@@ -18,15 +15,22 @@ from rtp_llm.models_py.modules.dsv41.ppu.graph_attention import (
     indexer_topk,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.graph_packed_attention import GraphPackedAttention
+from rtp_llm.models_py.modules.dsv41.ppu.grouped_projection import (
+    batched_wo_a,
+    project_wo_a,
+)
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
+    enabled as optimization_enabled,
+)
 from rtp_llm.models_py.modules.dsv41.ppu.graph_swa_write import (
     try_compress_csa,
     try_prepare_verify_csa_pairs,
-    try_rope_,
     try_rotate_q_and_write_swa,
     try_write_csa_state,
     try_write_packed_kv,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.prefill import _compress_pairs, _rms_norm as _norm, _rope_tail
+from rtp_llm.models_py.modules.dsv41.ppu.rope import rotate
 from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import mask_candidate_logits, select_candidate_blocks
 
 
@@ -58,20 +62,13 @@ def _try_batched_wo_a(
         or weight.data_ptr() % 16
         or (torch.is_grad_enabled() and (output.requires_grad or weight.requires_grad))
         or not is_ppu()
-        or not env_bool(os.environ, GRAPH_BATCHED_WO_A_ENV, default=True)
+        or not optimization_enabled(GRAPH_BATCHED_WO_A_ENV, default=True)
     ):
         return None
 
     # Like SGLang's token-major BF16 wo_a, make both transposes and the
     # batched destination views. The native GEMM rounds once into BF16.
-    grouped_weight = weight.view(8, 1024, 4096)
-    projected = output.new_empty((output.shape[0], 8, 1024))
-    torch.bmm(
-        output.transpose(0, 1),
-        grouped_weight.transpose(1, 2),
-        out=projected.transpose(0, 1),
-    )
-    return projected
+    return batched_wo_a(output, weight, 8, 1024)
 
 
 def _compact_workspace_indices(indices):
@@ -113,34 +110,16 @@ def _shared_decode_attention(
 
 
 def _rotate_graph_value(
-    value, freqs, *, inplace=False, inverse=False, valid_mask=None, preserve_signed_zero=False
+    value, freqs, *, inplace=False, inverse=False, valid_mask=None,
+    preserve_signed_zero=True, live_inputs=(),
 ):
-    if inplace:
-        rotated = try_rope_(
-            value, freqs, inverse=inverse, valid_mask=valid_mask,
-            preserve_signed_zero=preserve_signed_zero,
-        )
-        if rotated is not None:
-            return rotated
-    if valid_mask is not None:
-        value = torch.where(valid_mask[:, None, None], value, torch.zeros_like(value))
-        # An unsupported provider layout can become contiguous after masking.
-        if inplace:
-            rotated = try_rope_(
-                value, freqs, inverse=inverse, preserve_signed_zero=preserve_signed_zero
-            )
-            if rotated is not None:
-                return rotated
-    return _rope_tail(value, freqs, inverse=inverse)
+    return rotate(
+        value, freqs, inverse, inplace=inplace, valid_mask=valid_mask,
+        live_inputs=live_inputs,
+    )
 
 
-def _normalize_graph_value(value, weight, eps, *, fused=False):
-    if fused:
-        from rtp_llm.models_py.modules.dsv41.ppu.layers import try_graph_rms_norm
-
-        normalized = try_graph_rms_norm(value, weight, eps)
-        if normalized is not None:
-            return normalized
+def _normalize_graph_value(value, weight, eps):
     return _norm(value, weight, eps)
 
 
@@ -151,26 +130,23 @@ def _store_graph_compressed_key(attn, cache, tag, slots, value, rope, *, fused_g
     ):
         return
     keys = _rotate_graph_value(
-        value, rope, inplace=fused_graph or verify_rope, preserve_signed_zero=verify_rope
+        value, rope, inplace=fused_graph or verify_rope, preserve_signed_zero=True
     )
     if not fused_graph or not try_write_packed_kv(keys, cache, layer_id, tag, slots):
         cache.write_rows(layer_id, tag, slots, attn.ops.encode_kv(keys, pool_tag=tag))
 
 
 def produce_global(attn, x, state, *, fused_graph=False, verify_rope=False):
-    from rtp_llm.models_py.modules.dsv41.ppu.layers import full_graph_rmsnorm_enabled
-
     g, cache = attn.geometry, state.cache
     positions, valid = state.metadata.positions, state.metadata.valid_mask
     layer_id, ratio = attn.layer_id, attn.compress_ratio
     freqs = state.freqs[layer_id]
-    full_norm = full_graph_rmsnorm_enabled(state)
     values = attn.global_wkv(x)
     compressed = None
     verify_positions = None
     if ratio == 1:
         latent = _normalize_graph_value(
-            values, attn.global_norm, g.norm_eps, fused=fused_graph or full_norm
+            values, attn.global_norm, g.norm_eps
         ).bfloat16()
         entry_positions, commit = positions, valid
     elif ratio == 2:
@@ -220,16 +196,7 @@ def produce_global(attn, x, state, *, fused_graph=False, verify_rope=False):
                     torch.stack((previous[:, :g.head_dim].to(values.dtype), values), 1),
                     torch.stack((previous[:, g.head_dim:].to(scores.dtype), scores), 1),
                 )
-            if full_norm:
-                pair_values, pair_scores = pairs
-                weights = torch.softmax(pair_scores.float(), dim=-2)
-                # Keep the BF16 pooled boundary before normalization.
-                pooled = (pair_values.float() * weights).sum(-2).to(torch.bfloat16)
-                latent = _normalize_graph_value(
-                    pooled, attn.global_norm, g.norm_eps, fused=True
-                )
-            else:
-                latent = _compress_pairs(*pairs, attn.global_norm, g.norm_eps)
+            latent = _compress_pairs(*pairs, attn.global_norm, g.norm_eps)
         # Reads for every request must finish before any current-row write
         # can overwrite a previous slot when the CSA ring wraps.
         if not verify and (
@@ -250,7 +217,6 @@ def produce_global(attn, x, state, *, fused_graph=False, verify_rope=False):
         # The Indexer consumes the unrotated latent on this same stream.
         index = _normalize_graph_value(
             F.linear(latent, attn.index_wk.weight), attn.index_k_norm, g.norm_eps,
-            fused=fused_graph or full_norm,
         )
     tag = "global_kv_2" if ratio == 2 else "global_kv_1"
     if compressed is None:
@@ -267,7 +233,6 @@ def produce_global(attn, x, state, *, fused_graph=False, verify_rope=False):
             F.linear(latent, attn.index_wk.weight),
             attn.index_k_norm,
             g.norm_eps,
-            fused=full_norm,
         )
     if compressed is None:
         index_slots = cache.slots(layer_id, "indexer_kv", raw)
@@ -291,7 +256,7 @@ def select_indices(
         ),
         freqs,
         inplace=fused_graph or verify_rope,
-        preserve_signed_zero=verify_rope,
+        preserve_signed_zero=True, live_inputs=(x, qr),
     )
     projected_weights = F.linear(x, attn.index_weights)
     weight_scale = (g.index_head_dim * g.index_n_heads) ** -0.5
@@ -449,13 +414,15 @@ def forward_graph_attention(attn, x, state):
         )
     q_rotated = (
         try_rotate_q_and_write_swa(
-            q, kv, freqs, cache, attn.layer_id, swa_slots, journal=verify_packed
+            q, kv, freqs, cache, attn.layer_id, swa_slots, journal=verify_packed,
+            live_inputs=(x, qr, positions),
         )
         if ordinary_packed or verify_packed else None
     )
     if q_rotated is None:
         q_rotated = _rotate_graph_value(
-            q, freqs, inplace=verify_packed, preserve_signed_zero=verify_packed
+            q, freqs, inplace=verify_packed, preserve_signed_zero=True,
+            live_inputs=(x, qr, kv, positions),
         )
         kv = _rope_tail(kv, freqs)
         cache.write_rows(
@@ -497,37 +464,37 @@ def forward_graph_attention(attn, x, state):
     rotated = _rotate_graph_value(
         output, freqs, inplace=ordinary_packed or verify_packed, inverse=True,
         valid_mask=valid if inplace_rope else None,
-        preserve_signed_zero=verify_packed,
+        preserve_signed_zero=True, live_inputs=(x, qr, q, kv),
     )
     output = rotated.reshape(-1, g.o_groups, g.n_heads * g.head_dim // g.o_groups)
-    if hasattr(attn.wo_a, "forward_grouped"):
-        projected = attn.wo_a.forward_grouped(output)
-        return attn.wo_b(projected.flatten(1)).reshape(shape)
-    weight = attn.wo_a.weight
-    verify_q4 = (
-        verify_packed
-        and state.metadata.batch_size == 8
-        and state.metadata.q_len_per_req == 4
-    )
-    projected = (
-        _try_batched_wo_a(output, weight, verify_q4=verify_q4)
-        if (native_packed or verify_q4)
-        and state.grouped_moe is None and g.o_lora_rank == 1024
-        else None
-    )
-    if projected is not None:
-        state.attention_calls["batched_wo_a"] += 1
-    elif (ordinary_packed or verify_packed) and weight.is_contiguous() and not (
-        torch.is_grad_enabled() and (output.requires_grad or weight.requires_grad)
-    ):
-        # PPU GEMM accepts row strides on both sides of the contraction.
-        # Write the exact layout wo_b needs while retaining each BF16 GEMM.
-        projected = output.new_empty((output.shape[0], g.o_groups, g.o_lora_rank))
-        for i, group_weight in enumerate(weight.view(g.o_groups, g.o_lora_rank, -1)):
-            torch.mm(output[:, i], group_weight.T, out=projected[:, i])
-    else:
-        projected = torch.stack([
-            F.linear(output[:, i].contiguous(), weight[i * g.o_lora_rank:(i + 1) * g.o_lora_rank].contiguous())
-            for i in range(g.o_groups)
-        ], 1)
+    def bf16_projection(output, weight):
+        verify_q4 = (
+            verify_packed
+            and state.metadata.batch_size == 8
+            and state.metadata.q_len_per_req == 4
+        )
+        projected = (
+            _try_batched_wo_a(output, weight, verify_q4=verify_q4)
+            if (native_packed or verify_q4)
+            and state.grouped_moe is None and g.o_lora_rank == 1024
+            else None
+        )
+        if projected is not None:
+            state.attention_calls["batched_wo_a"] += 1
+        elif (ordinary_packed or verify_packed) and weight.is_contiguous() and not (
+            torch.is_grad_enabled() and (output.requires_grad or weight.requires_grad)
+        ):
+            # PPU GEMM accepts row strides on both sides of the contraction.
+            # Write the exact layout wo_b needs while retaining each BF16 GEMM.
+            projected = output.new_empty((output.shape[0], g.o_groups, g.o_lora_rank))
+            for i, group_weight in enumerate(weight.view(g.o_groups, g.o_lora_rank, -1)):
+                torch.mm(output[:, i], group_weight.T, out=projected[:, i])
+        else:
+            projected = torch.stack([
+                F.linear(output[:, i].contiguous(), weight[i * g.o_lora_rank:(i + 1) * g.o_lora_rank].contiguous())
+                for i in range(g.o_groups)
+            ], 1)
+        return projected
+
+    projected = project_wo_a(output, attn.wo_a, bf16_projection=bf16_projection)
     return attn.wo_b(projected.flatten(1)).reshape(shape)

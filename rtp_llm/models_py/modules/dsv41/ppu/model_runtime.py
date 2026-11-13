@@ -153,10 +153,6 @@ class SharedNativeRuntime:
             if getattr(layer, "ffn", None) is not None:
                 layer.ffn.runtime = self
                 layer.ffn_hc.runtime = self
-                layer.attn_norm.runtime = self
-                layer.ffn_norm._cp8_prefill_runtime = self
-                layer.attn.q_norm.runtime = self
-                layer.attn.kv_norm.runtime = self
 
     @property
     def model(self):

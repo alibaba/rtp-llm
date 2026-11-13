@@ -13,42 +13,14 @@ from functools import lru_cache
 
 import torch
 
-from rtp_llm.models_py.modules.dsv41.ppu import _quant
+from rtp_llm.models_py.modules.dsv41.ppu.topk import (
+    local_device_supported as _device_supported,
+    overlaps as _overlap,
+    raw_tensor as _raw,
+)
 
 TOKEN_K = 512
 BLOCK_SIZE = 8
-
-
-def _raw(value):
-    return (isinstance(value, torch.Tensor) and value.layout == torch.strided
-            and not value.is_neg() and not value.is_conj()
-            and not value.requires_grad)
-
-
-def _overlap(left, right):
-    if left.untyped_storage().data_ptr() == right.untyped_storage().data_ptr():
-        return True
-
-    def span(value):
-        count = ((value.shape[0] - 1) * value.stride(0) + value.shape[1]
-                 if value.ndim == 2 else value.numel())
-        return value.data_ptr(), value.data_ptr() + count * value.element_size()
-
-    a, b = span(left), span(right)
-    return a[0] < b[1] and b[0] < a[1]
-
-
-def _device_supported(scores):
-    if not scores.is_cuda or torch.version.hip is not None or not _quant.is_ppu():
-        return False
-    try:
-        return (torch.cuda.current_device() == scores.device.index
-                and torch.cuda.get_device_capability(scores.device) == (8, 9)
-                and not torch.cuda.is_current_stream_capturing()
-                and torch.cuda.current_stream(scores.device)
-                == torch.cuda.default_stream(scores.device))
-    except (AssertionError, RuntimeError):
-        return False
 
 
 def _base(scores, lengths, dtype, maximum):
