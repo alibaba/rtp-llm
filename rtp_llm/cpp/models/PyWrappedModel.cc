@@ -368,7 +368,14 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     // to host before branching.
     for (auto* t : {&py_attn_inputs.prefix_lengths, &py_attn_inputs.sequence_lengths, &py_attn_inputs.input_lengths}) {
         if (t->defined() && t->is_cuda()) {
-            *t = normalize_i32(t->cpu());
+            const torch::Tensor* host_mirror = nullptr;
+            if (t == &py_attn_inputs.prefix_lengths) {
+                host_mirror = &inputs.mtp_prefix_lengths_host;
+            } else if (t == &py_attn_inputs.input_lengths) {
+                host_mirror = &inputs.mtp_input_lengths_host;
+            }
+            *t = host_mirror && host_mirror->defined() && host_mirror->device().is_cpu()
+                             && host_mirror->sizes() == t->sizes() ? normalize_i32(*host_mirror) : normalize_i32(t->cpu());
         }
     }
 #endif
@@ -381,8 +388,15 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         && py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.is_cuda()) {
         py_attn_inputs.prefix_lengths = normalize_i32(py_attn_inputs.prefix_lengths.cpu());
     }
-    py_attn_inputs.prefix_lengths_device = to_device_i32(py_attn_inputs.prefix_lengths);
-    py_attn_inputs.input_lengths_device  = to_device_i32(py_attn_inputs.input_lengths);
+    // When MTP supplied a host mirror, retain its original GPU tensor for
+    // device consumers. Copying the mirror back would add a redundant H2D
+    // transfer to every decode round.
+    py_attn_inputs.prefix_lengths_device = inputs.mtp_prefix_lengths_host.defined() && inputs.prefix_lengths.is_cuda() ?
+                                               normalize_i32(inputs.prefix_lengths) :
+                                               to_device_i32(py_attn_inputs.prefix_lengths);
+    py_attn_inputs.input_lengths_device = inputs.mtp_input_lengths_host.defined() && inputs.input_lengths.is_cuda() ?
+                                              normalize_i32(inputs.input_lengths) :
+                                              to_device_i32(py_attn_inputs.input_lengths);
     py_attn_inputs.mtp_indexer_seed_rows = to_device_i32(inputs.lm_output_indexes);
 
     if (inputs.combo_position_ids.defined()) {
