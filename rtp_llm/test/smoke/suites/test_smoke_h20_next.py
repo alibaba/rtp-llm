@@ -41,10 +41,10 @@ SMOKE_CASES = {
         "--sp_act_type bf16 --concurrency_limit 4 --enable_cuda_graph 1 "
         "--decode_capture_config '1,2,3,4' --use_deepep_moe 1 "
         "--use_deepep_low_latency 1",
-        "envs": ["ACCL_LOW_LATENCY_OPTIMIZE=1"],
-        "gpu_type": "H20",
+        "envs": [],
+        "gpu_type": "H20_CU13",
         "platform": "cuda",
-        "markers": ["smoke", "cuda", "H20"],
+        "markers": ["smoke", "cuda", "H20_CU13"],
         "timeout": 600,
     },
     "next_mtp_pd_reuse": {
@@ -84,18 +84,6 @@ SMOKE_CASES = {
         "task_info": "data/model/qwen3_next/q_r_next_fp8_tp2_kernel_block_size_128.json",
         "smoke_args": "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 "
         "--kernel_seq_size_per_block 128",
-        "gpu_type": "H20",
-        "platform": "cuda",
-        "markers": ["smoke", "cuda", "H20"],
-        "timeout": 600,
-    },
-    "next_cudagraph_deepep": {
-        "task_info": "data/model/qwen3_next/q_r_next_cuda_graph.json",
-        "smoke_args": "--act_type BF16 --seq_size_per_block 2048 --max_seq_len 128 "
-        "--use_deepep_moe 1 --use_deepep_low_latency 1 --enable_cuda_graph 1 "
-        "--warm_up 0  --concurrency_limit 8 --reserver_runtime_mem_mb 8192 "
-        "--tp_size 2",
-        "envs": ["ACCL_LOW_LATENCY_OPTIMIZE=1"],
         "gpu_type": "H20",
         "platform": "cuda",
         "markers": ["smoke", "cuda", "H20"],

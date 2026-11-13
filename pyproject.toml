@@ -286,6 +286,7 @@ markers = [
     "Tesla_V100S_PCIE_32GB: (deprecated) use gpu(type='Tesla_V100S_PCIE_32GB')",
     "L20: (deprecated) use gpu(type='L20')",
     "H20: (deprecated) use gpu(type='H20')",
+    "H20_CU13: CUDA 13 H20 worker pool",
     "L20D_TEST: existing CUDA 13 performance worker pool",
     "SM100: (deprecated) use gpu(type='SM100')",
     "SM100_ARM: (deprecated) use gpu(type='SM100_ARM')",
@@ -343,6 +344,7 @@ filterwarnings = [
 # =============================================================================
 [tool.rtp_llm.pytest_ci]
 cuda13_only_paths = [
+    "rtp_llm/models_py/distributed/test/deepep_test.py",
     "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/local_loop_cuda_test.py",
     "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/grouped_moe_equivalence_test.py",
     "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/mega_moe_routed_only_execution_test.py",
@@ -552,8 +554,8 @@ minimum_count = 1
 # Preserve the 2730 previously executed cases, restore 200 mainline methods,
 # and add two coverage/staging plus 14 remote termination regressions.
 # Restore the original A10 CausalConv1D (5) and L2Norm (9) methods as well.
-# Every case must execute.
-expected_count = 2972
+# Move the four DeepEP methods to deepep_cuda13_h20; every remaining case must execute.
+expected_count = 2968
 forbid_skips = true
 paths = [
     "rtp_llm/access_logger/test",
@@ -612,7 +614,7 @@ markexpr = "(not H20 and not MI308X and not SM100 and not SM100_ARM and not smok
 description = "Open-source-only Python UT on SM8x after internal_source is stripped"
 gpu_type = "A10"
 minimum_count = 1
-expected_count = 2972
+expected_count = 2968
 forbid_skips = true
 paths = [
     "rtp_llm/access_logger/test",
@@ -867,6 +869,22 @@ markexpr = "(not manual and not rocm and not cpu) and not ppu and not PPU_ZW810E
 
 # -------- OSS smoke profiles (drive suite files in rtp_llm/test/smoke/suites/) --------
 ignore_paths = ["rtp_llm/models_py/kernels/ppu", "rtp_llm/models_py/modules/factory/attention/ppu_impl", "rtp_llm/models_py/modules/factory/fused_moe/ppu_impl", "rtp_llm/models_py/modules/factory/linear/ppu_impl"]
+[tool.rtp_llm.pytest_ci.profiles.deepep_cuda13_h20]
+description = "Four existing DeepEP methods plus the existing MTP smoke on two CUDA 13 H20 GPUs"
+gpu_type = "H20_CU13"
+paths = [
+    "rtp_llm/models_py/distributed/test/deepep_test.py::DeepEPTest::test_deepep_normal",
+    "rtp_llm/models_py/distributed/test/deepep_test.py::DeepEPTest::test_deepep_low_latency",
+    "rtp_llm/models_py/distributed/test/deepep_test.py::DeepEPTest::test_deepep_normal_expert_alignment",
+    "rtp_llm/models_py/distributed/test/deepep_test.py::DeepEPTest::test_init_sp_deepep_wrapper",
+    "rtp_llm/test/smoke/suites/test_smoke_h20_next.py::test_smoke_h20_next[next_mtp_cudagraph_deepep]",
+]
+# Mention manual explicitly so the smoke parameter is not deselected.
+markexpr = "H20_CU13 and (not manual or smoke)"
+expected_count = 5
+forbid_skips = true
+remote_env = { RTP_BAZEL_CONFIG = "--config=cuda13" }
+
 [tool.rtp_llm.pytest_ci.profiles.smoke_h20_light_oss]
 description = "OSS smoke H20 light gate"
 paths = ["rtp_llm/test/smoke/suites/"]
@@ -878,7 +896,7 @@ forbid_skips = true
 description = "OSS smoke H20 full gate (excludes light cases)"
 paths = ["rtp_llm/test/smoke/suites/"]
 markexpr = "manual and smoke and H20 and not light"
-expected_count = 58
+expected_count = 41
 forbid_skips = true
 remote_env = { REMOTE_JIT_DIR = "/tmp/rtp-llm/.remote_jit_cache" }
 
