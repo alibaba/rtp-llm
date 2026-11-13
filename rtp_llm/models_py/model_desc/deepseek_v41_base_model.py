@@ -63,6 +63,49 @@ from rtp_llm.models_py.modules.dsv41.transformer import V4Args, V4Transformer
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
+# A huge prefill submitted seconds after a previous huge request completed
+# OOMs on its first [T, hc_mult, dim] stream allocation while the finished
+# stream's tensors are still pending asynchronous release. Evidence: n30
+# (2026-11-12 20:39:30, image aec7d861) died allocating 39.99 GiB in
+# expand_hc with 108.59 GiB allocated (~34 GiB residual above the 73.69 GiB
+# workspace-ready baseline), 24.89 GiB free and 51.96 GiB reserved-but-
+# unallocated; n33 (2026-11-13 01:40:04, image 41482461) died on the same
+# 39.99 GiB class in the embedding all_gather 3 s after the prior generate
+# returned. Wait (bounded) for the stream lifecycle to drop those references
+# and give cached segments back BEFORE the first huge allocation, so
+# back-to-back huge requests (the evaluator's repeated full-context waves)
+# neither crash nor need artificial client-side sleeps.
+_AWI_RECLAIM_MIN_ROWS = 65536
+_AWI_RECLAIM_NEED_BYTES = 48 << 30
+_AWI_RECLAIM_MAX_WAIT_S = 120.0
+
+
+def _awi_reclaim_for_huge_prefill(num_tokens: int) -> None:
+    if num_tokens <= _AWI_RECLAIM_MIN_ROWS or not torch.cuda.is_available():
+        return
+    import time as _time
+
+    device = torch.cuda.current_device()
+    free, total = torch.cuda.mem_get_info(device)
+    gib = 1024.0**3
+    free0 = free
+    waited = 0.0
+    deadline = _time.monotonic() + _AWI_RECLAIM_MAX_WAIT_S
+    while free < _AWI_RECLAIM_NEED_BYTES and _time.monotonic() < deadline:
+        torch.cuda.empty_cache()
+        _time.sleep(1.0)
+        waited += 1.0
+        free, _ = torch.cuda.mem_get_info(device)
+    if free0 < _AWI_RECLAIM_NEED_BYTES:
+        logging.info(
+            "[awi][reclaim] huge prefill t=%d waited=%.1fs free %.2f->%.2f GiB of %.2f",
+            num_tokens,
+            waited,
+            free0 / gib,
+            free / gib,
+            total / gib,
+        )
+
 
 def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
     """Walk the module tree and replace any meta-device buffer with a
@@ -1274,6 +1317,7 @@ class DeepSeekV4Model(GptModelBase):
                 prepare_hidden_fn=prep_decode,
             )
         elif attn.is_prefill:
+            _awi_reclaim_for_huge_prefill(inputs.input_ids.numel())
             if self._lazy_mtp_hidden_prefill:
                 self._shared_runtime_buffers.ensure_mtp_hidden_capacity(
                     inputs.input_ids.numel()
