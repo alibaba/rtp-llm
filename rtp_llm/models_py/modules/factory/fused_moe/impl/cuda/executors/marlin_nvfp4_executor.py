@@ -2,10 +2,24 @@
 
 import torch
 
-from rtp_llm.models_py.kernels.cuda.marlin_nvfp4.marlin_nvfp4 import Nvfp4MarlinMoE
+from rtp_llm.models_py.kernels.cuda.marlin_nvfp4.marlin_nvfp4 import (
+    Nvfp4MarlinMoE,
+    load_library,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     FusedMoeExpertExecutor,
+)
+from rtp_llm.resident_weights import resident_init_tensors
+from rtp_llm.utils.model_weight import W
+
+_MARLIN_NAMES = (
+    W.moe_w1,
+    W.moe_w2,
+    W.moe_s1,
+    W.moe_s2,
+    W.moe_w1_s2,
+    W.moe_w2_s2,
 )
 
 
@@ -17,6 +31,25 @@ def _linear_scales(swizzled, experts, rows, cols):
         .contiguous()
         .reshape(experts, rows, cols)
     )
+
+
+def _prepare_marlin_weights(weights, ep_size, ep_rank):
+    q1 = weights[W.moe_w1].contiguous().view(torch.uint8)
+    q2 = weights[W.moe_w2].contiguous().view(torch.uint8)
+    experts, both_n, packed_k = q1.shape
+    n, k = both_n // 2, packed_k * 2
+    sf1 = _linear_scales(weights[W.moe_s1], experts, both_n, k // 16)
+    sf2 = _linear_scales(weights[W.moe_s2], experts, k, n // 16)
+    g1, g2 = weights[W.moe_w1_s2], weights[W.moe_w2_s2]
+    for scale in (sf1, sf2, g1, g2):
+        if not bool(torch.isfinite(scale.float()).all()) or bool(
+            (scale.float() < 0).any()
+        ):
+            raise ValueError("Marlin NVFP4 requires finite nonnegative scales")
+    moe = Nvfp4MarlinMoE(q1, sf1, g1, q2, sf2, g2, ep_size, ep_rank)
+    for name in _MARLIN_NAMES:
+        weights.pop(name)
+    return moe.w1, moe.w2, moe.s1, moe.s2, moe.g1, moe.g2
 
 
 class Qwen4DecodeMarlinExecutor(FusedMoeExpertExecutor):
@@ -41,76 +74,78 @@ class Qwen4DecodeMarlinExecutor(FusedMoeExpertExecutor):
         return self.moe.experts
 
     def __init__(self, native):
-        from rtp_llm.utils.model_weight import W
-
         super().__init__(native.config, native.quant_config, native.weights)
         self.ep_size, self.ep_rank = native.ep_size, native.ep_rank
         self.tp_size, self.tp_rank = native.tp_size, native.tp_rank
-        q1, q2 = native.w1.view(torch.uint8), native.w2.view(torch.uint8)
-        experts, both_n, packed_k = q1.shape
-        n, k = both_n // 2, packed_k * 2
-        owner = self.weights[W.moe_w1]
-        identity = (
-            self.ep_size,
-            self.ep_rank,
-            q2.data_ptr(),
-            native.block_scales[0].data_ptr(),
-            native.block_scales[1].data_ptr(),
+        self._initialize_weights()
+        # Callers retaining native views must release their original allocations too.
+        native.w1 = self.weights[W.moe_w1].view(torch.int64)
+        native.w2 = self.weights[W.moe_w2].view(torch.int64)
+        native.block_scales = (
+            self.weights[W.moe_s1].view(torch.int32),
+            self.weights[W.moe_s2].view(torch.int32),
         )
-        prior = getattr(owner, "_qwen4_marlin_layout", None)
-        if prior is not None:
-            if prior[:5] != identity:
+
+    def _initialize_weights(self):
+        # A Qwen compute dictionary borrows storage from the loader's WeightDict.
+        # Record at that owner, then rebind both dictionaries to the returned storage.
+        owner = getattr(self.weights, "_storage_owner", self.weights)
+        key = f"qwen4.marlin_nvfp4.v1:ep{self.ep_size}:rank{self.ep_rank}"
+        prior = getattr(owner.get(W.moe_w1), "_qwen4_marlin_layout", None)
+        if prior is None:
+            w1, w2, s1, s2, g1, g2 = resident_init_tensors(
+                owner,
+                transform_key=key,
+                output_names=tuple(
+                    f"{key}.{name}" for name in ("w1", "w2", "s1", "s2", "g1", "g2")
+                ),
+                consumed_names=_MARLIN_NAMES,
+                builder=lambda: _prepare_marlin_weights(
+                    self.weights, self.ep_size, self.ep_rank
+                ),
+            )
+            experts, k_tiles, packed_n = w1.shape
+            k, n = k_tiles * 16, packed_n // 4
+            # Preserve canonical geometry for the C++ converter; the bytes are now packed.
+            canonical = (
+                w1.view(torch.uint8).reshape(experts, 2 * n, k // 2),
+                w2.view(torch.uint8).reshape(experts, k, n // 2),
+                s1.reshape(experts, 2 * n, k // 16),
+                s2.reshape(experts, k, n // 16),
+                g1,
+                g2,
+            )
+            for name, tensor in zip(_MARLIN_NAMES, canonical):
+                self.weights[name] = tensor
+                owner[name] = tensor
+            # This process-local guard is recreated after replay. It owns no tensors.
+            canonical[0]._qwen4_marlin_layout = (
+                key,
+                tuple(tensor.data_ptr() for tensor in canonical),
+            )
+        else:
+            canonical = tuple(owner[name] for name in _MARLIN_NAMES)
+            if prior != (key, tuple(tensor.data_ptr() for tensor in canonical)):
                 raise ValueError("Changing packed Qwen MoE weights requires restart")
-            moe = object.__new__(Nvfp4MarlinMoE)
-            moe.experts, moe.n, moe.k = experts, n, k
-            moe._one_row_sm120 = (k, n) == (
-                2560,
-                640,
-            ) and torch.cuda.get_device_capability(q1.device) == (12, 0)
-            moe.first = experts * self.ep_rank
-            moe.w1 = q1.view(torch.int32).reshape(experts, k // 16, both_n * 2)
-            moe.w2 = q2.view(torch.int32).reshape(experts, n // 16, k * 2)
-            moe.s1 = (
-                native.block_scales[0]
-                .view(torch.float8_e4m3fn)
-                .reshape(experts, k // 16, both_n)
-            )
-            moe.s2 = (
-                native.block_scales[1]
-                .view(torch.float8_e4m3fn)
-                .reshape(experts, n // 16, k)
-            )
-            moe.g1, moe.g2 = prior[5:]
-            moe.workspaces = {}
-            self.moe = moe
-            return
-        sf1 = _linear_scales(native.block_scales[0], experts, both_n, k // 16)
-        sf2 = _linear_scales(native.block_scales[1], experts, k, n // 16)
-        g1, g2 = native.weights[W.moe_w1_s2], native.weights[W.moe_w2_s2]
-        for scale in (sf1, sf2, g1, g2):
-            if not bool(torch.isfinite(scale.float()).all()) or bool(
-                (scale.float() < 0).any()
-            ):
-                raise ValueError("Marlin NVFP4 requires finite nonnegative scales")
-        moe = Nvfp4MarlinMoE(q1, sf1, g1, q2, sf2, g2, self.ep_size, self.ep_rank)
-        destinations = (q1, q2, native.block_scales[0], native.block_scales[1])
-        converted = (moe.w1, moe.w2, moe.s1, moe.s2)
-        for target, source in zip(destinations, converted):
-            if (
-                target.numel() * target.element_size()
-                != source.numel() * source.element_size()
-            ):
-                raise ValueError("Marlin repack must preserve weight storage size")
-        packed = []
-        for target, source in zip(destinations, converted):
-            target.view(torch.uint8).reshape(-1).copy_(
-                source.view(torch.uint8).reshape(-1)
-            )
-            packed.append(target.view(source.dtype).reshape(source.shape))
-        moe.w1, moe.w2, moe.s1, moe.s2 = packed
-        # Keep only tiny global scales on the source Tensor. Holding the MoE
-        # here would create a cycle through its packed views and their owner.
-        owner._qwen4_marlin_layout = (*identity, moe.g1, moe.g2)
+            for name, tensor in zip(_MARLIN_NAMES, canonical):
+                self.weights[name] = tensor
+            experts, both_n, packed_k = canonical[0].shape
+            n, k = both_n // 2, packed_k * 2
+            w1 = canonical[0].view(torch.int32).reshape(experts, k // 16, 4 * n)
+            w2 = canonical[1].view(torch.int32).reshape(experts, n // 16, 2 * k)
+            s1 = canonical[2].view(torch.float8_e4m3fn).reshape(experts, k // 16, 2 * n)
+            s2 = canonical[3].view(torch.float8_e4m3fn).reshape(experts, n // 16, k)
+            g1, g2 = canonical[4:]
+
+        load_library()
+        moe = object.__new__(Nvfp4MarlinMoE)
+        moe.experts, moe.n, moe.k = experts, n, k
+        moe._one_row_sm120 = (k, n) == (2560, 640) and torch.cuda.get_device_capability(
+            w1.device
+        ) == (12, 0)
+        moe.first = experts * self.ep_rank
+        moe.w1, moe.w2, moe.s1, moe.s2, moe.g1, moe.g2 = w1, w2, s1, s2, g1, g2
+        moe.workspaces = {}
         self.moe = moe
 
     def execute(
@@ -194,8 +229,10 @@ class Qwen4MarlinExecutor(Qwen4DecodeMarlinExecutor):
         checker.check(not config.model_config.eplb_config.enable_eplb())
 
     def __init__(self, config, quant_config, weights):
-        from rtp_llm.models_py.modules.factory.fused_moe.utils.nvfp4_weights import (
-            Nvfp4WeightViews,
-        )
-
-        super().__init__(Nvfp4WeightViews(config, quant_config, weights))
+        FusedMoeExpertExecutor.__init__(self, config, quant_config, weights)
+        self.ep_size, self.ep_rank = config.ep_size, config.ep_rank
+        pc = getattr(config, "parallelism_config", None)
+        pure_tp = pc is not None and self.ep_size == 1
+        self.tp_size = pc.get_ffn_tp_size() if pure_tp else 1
+        self.tp_rank = pc.get_ffn_tp_rank() if pure_tp else 0
+        self._initialize_weights()

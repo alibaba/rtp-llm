@@ -205,6 +205,7 @@ py_library(
         ":tile_kernels_mhc",
         "//rtp_llm:warmup",
         "//rtp_llm/models_py/kernel_tuning",
+        "//rtp_llm/resident_weights",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:moriep_wrapper",
@@ -342,6 +343,7 @@ py_library(
     ] + glob(["kernels/cuda/qsa/*.cu", "kernels/cuda/qsa/*.cuh"]),
     deps = [
         ":utils",
+        "//rtp_llm/resident_weights",
         "//rtp_llm:torch",
         "//rtp_llm/models_py/triton_kernels:common",
         "//rtp_llm/models_py/triton_kernels:fla",

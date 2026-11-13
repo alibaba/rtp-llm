@@ -539,6 +539,27 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
                 os.environ["TEST_WEIGHT_LAYOUT"] = "b"
                 self.assertNotEqual(before, model._resident_fingerprint())
 
+    def test_default_fingerprint_tracks_fp4_gemm_backend(self):
+        from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo
+
+        self.assertIn(
+            "MOE_MEGA_SHARED_EXPERT",
+            ModelDeployWeightInfo.resident_weights_env_vars,
+        )
+        self.assertIn(
+            "RTP_LLM_FP4_GEMM_BACKEND",
+            ModelDeployWeightInfo.resident_weights_env_vars,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            model = self._fingerprint_model(directory)
+            model.model_weights_loader.weights_info.resident_weights_env_vars = (
+                ModelDeployWeightInfo.resident_weights_env_vars
+            )
+            with patch.dict(os.environ, {"RTP_LLM_FP4_GEMM_BACKEND": "cutlass"}):
+                cutlass_fp = model._resident_fingerprint()
+                os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = "trtllm"
+                self.assertNotEqual(cutlass_fp, model._resident_fingerprint())
+
     def test_dynamic_lora_paths_are_not_probed_during_base_weight_fingerprinting(self):
         with tempfile.TemporaryDirectory() as directory:
             model = self._fingerprint_model(directory)

@@ -1,5 +1,12 @@
+import gc
+import hashlib
 import os
+import subprocess
+import sys
+import tempfile
 import unittest
+import uuid
+import weakref
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -13,11 +20,109 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.marlin_nvfp4_executor import (
+    _MARLIN_NAMES,
     Qwen4DecodeMarlinExecutor,
+    Qwen4MarlinExecutor,
     _linear_scales,
+    _prepare_marlin_weights,
 )
-from rtp_llm.models_py.modules.qwen4_exp.weight_views import PreparedWeightDict
+from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
+    PreparedWeightDict,
+    prepare_compute_weights,
+)
+from rtp_llm.resident_weights import ResidentWeights, resident_init_tensors, store
 from rtp_llm.utils.model_weight import W
+
+_EXECUTOR_MODULE = Qwen4MarlinExecutor.__module__
+_RESIDENT_FINGERPRINT = {
+    "model_type": "qwen4_exp_mtp",
+    "checkpoint_path": "/test/modelopt-nvfp4",
+}
+
+
+def _source_mtp_config():
+    from rtp_llm.config.model_config import ModelConfig
+    from rtp_llm.config.quant_config import ModelOptFp4Config
+    from rtp_llm.config.server_config_setup import set_parallelism_config
+    from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+        MoEConfigAdapter,
+    )
+    from rtp_llm.ops import MoeConfig, ParallelismConfig
+
+    model = ModelConfig()
+    model.model_type, model.data_type = "qwen4_exp_mtp", "bf16"
+    model.is_mtp = True
+    model.expert_num, model.hidden_size, model.moe_inter_size, model.moe_k = (
+        8,
+        2560,
+        640,
+        3,
+    )
+    model._qwen4_nvfp4_source = True
+    model.quant_config = ModelOptFp4Config(bits=4, group_size=16, is_quanted=True)
+    pc = ParallelismConfig()
+    pc.tp_size = pc.ep_size = pc.world_size = pc.local_world_size = 2
+    set_parallelism_config(pc)
+    moe = MoeConfig()
+    moe.moe_strategy, moe.fp4_moe_op = "nvfp4_marlin", "marlin"
+    moe.use_all_gather, moe.use_deepep_moe = True, False
+    return MoEConfigAdapter(model, pc, moe)
+
+
+def _packed_snapshot(executor):
+    return [
+        (
+            str(tensor.dtype),
+            list(tensor.shape),
+            hashlib.sha256(
+                tensor.contiguous().view(torch.uint8).cpu().numpy().tobytes()
+            ).hexdigest(),
+        )
+        for tensor in (
+            executor.moe.w1,
+            executor.moe.w2,
+            executor.moe.s1,
+            executor.moe.s2,
+            executor.moe.g1,
+            executor.moe.g2,
+        )
+    ]
+
+
+def _resident_restart(path):
+    from rtp_llm.model_loader.model_weight_info import ModelWeights
+
+    expected = torch.load(path, weights_only=True)
+    manager = ResidentWeights("draft", 0, _RESIDENT_FINGERPRINT, False)
+    restored = manager.attach()
+    assert restored is not None
+    weights = ModelWeights(1, "cuda:0", torch.bfloat16)
+    for item in restored:
+        weights.weights[item.scope][item.name] = item.tensor
+    manager.bind(weights)
+    # A replay must not depend on raw source entries, even if canonical views exist.
+    for name in _MARLIN_NAMES:
+        weights.weights[0].pop(name, None)
+    compute = prepare_compute_weights(weights)
+    config = _source_mtp_config()
+    with patch(
+        _EXECUTOR_MODULE + "._prepare_marlin_weights",
+        side_effect=AssertionError("warm start repacked weights"),
+    ), patch(
+        _EXECUTOR_MODULE + ".resident_init_tensors",
+        wraps=resident_init_tensors,
+    ) as replay:
+        for _ in range(2):
+            executor = Qwen4MarlinExecutor(config, None, compute.weights[0])
+            assert _packed_snapshot(executor) == expected["packed"]
+            for name in _MARLIN_NAMES:
+                assert weights.weights[0][name] is compute.weights[0][name]
+            args = [tensor.cuda() for tensor in expected["inputs"]]
+            actual = executor.moe(*args)
+            torch.testing.assert_close(actual.cpu(), expected["output"], rtol=0, atol=0)
+            del executor
+        assert replay.call_count == 1
+    manager.finalize()
 
 
 @unittest.skipUnless(
@@ -99,7 +204,7 @@ class MarlinNvfp4Test(MarlinNvfp4TestFixture, unittest.TestCase):
                                 flush=True,
                             )
 
-    def test_repack_reuses_original_storage_and_executor_contract(self):
+    def test_repack_rebinds_final_storage_and_executor_contract(self):
         def swizzle(sf):
             e, n, k = sf.shape
             return (
@@ -140,17 +245,24 @@ class MarlinNvfp4Test(MarlinNvfp4TestFixture, unittest.TestCase):
         )
         ptrs = [v.data_ptr() for v in (q1, q2, sf1, sf2)]
         executor = Qwen4DecodeMarlinExecutor(native)
+        final_ptrs = [
+            v.data_ptr()
+            for v in (
+                executor.moe.w1,
+                executor.moe.w2,
+                executor.moe.s1,
+                executor.moe.s2,
+            )
+        ]
+        self.assertTrue(all(old != new for old, new in zip(ptrs, final_ptrs)))
         self.assertEqual(
-            ptrs,
-            [
-                v.data_ptr()
-                for v in (
-                    executor.moe.w1,
-                    executor.moe.w2,
-                    executor.moe.s1,
-                    executor.moe.s2,
-                )
-            ],
+            final_ptrs,
+            [v.data_ptr() for v in (native.w1, native.w2, *native.block_scales)],
+        )
+        torch.testing.assert_close(q1, self.q1, rtol=0, atol=0)
+        torch.testing.assert_close(q2, self.q2, rtol=0, atol=0)
+        torch.testing.assert_close(
+            _linear_scales(sf1, 4, 1280, 160).float(), self.s1.float(), rtol=0, atol=0
         )
         args = self.inputs(4, 1)
         payload = ExpertForwardPayload(
@@ -190,6 +302,94 @@ class MarlinNvfp4Test(MarlinNvfp4TestFixture, unittest.TestCase):
                 executor.execute(
                     payload, activation, expert_map, None, apply_input, None
                 )
+
+    def test_resident_source_mtp_restart(self):
+        from rtp_llm.device.device_impl import CudaImpl
+        from rtp_llm.model_loader.model_weight_info import ModelWeights
+        from rtp_llm.models_py.modules.factory.fused_moe.factory import FusedMoeFactory
+
+        config = _source_mtp_config()
+        name = f"rtp_llm_marlin_test.{uuid.uuid4().hex}"
+        with patch.dict(os.environ, {"RTP_LLM_RESIDENT_STORE": name}):
+            store.ensure_running(name, owner_pid=os.getpid())
+            try:
+                weights = ModelWeights(1, "cuda:0", torch.bfloat16)
+                weights.weights[0].update(
+                    {
+                        W.moe_w1: self.q1.clone(),
+                        W.moe_w2: self.q2.clone(),
+                        W.moe_s1: CudaImpl.swizzle_blockscale(self.s1.cpu()),
+                        W.moe_s2: CudaImpl.swizzle_blockscale(self.s2.cpu()),
+                        W.moe_w1_s2: self.g1.clone(),
+                        W.moe_w2_s2: self.g2.clone(),
+                        W.moe_w1_i_s: torch.ones(self.experts, device="cuda"),
+                        W.moe_w2_i_s: torch.ones(self.experts, device="cuda"),
+                    }
+                )
+                manager = ResidentWeights("draft", 0, _RESIDENT_FINGERPRINT, False)
+                manager.move_to_vmm(weights)
+                raw_allocations = [
+                    weakref.ref(manager.allocation_of(weights.weights[0][key]))
+                    for key in (W.moe_w1, W.moe_w2)
+                ]
+                compute = prepare_compute_weights(weights)
+                with patch(
+                    _EXECUTOR_MODULE + "._prepare_marlin_weights",
+                    wraps=_prepare_marlin_weights,
+                ) as pack:
+                    executor = (
+                        FusedMoeFactory()
+                        .create_fused_moe(config, compute.weights[0])
+                        .fused_experts
+                    )
+                    self.assertIsInstance(executor, Qwen4MarlinExecutor)
+                    packed = _packed_snapshot(executor)
+                    args = self.inputs(4)
+                    output = executor.moe(*args)
+                    self.assert_reference(output, self.reference(*args, 0))
+                    del executor
+                    executor = Qwen4MarlinExecutor(config, None, compute.weights[0])
+                    self.assertEqual(pack.call_count, 1)
+                    self.assertEqual(_packed_snapshot(executor), packed)
+                gc.collect()
+                self.assertTrue(all(ref() is None for ref in raw_allocations))
+                for key, tensor in zip(
+                    _MARLIN_NAMES,
+                    (
+                        executor.moe.w1,
+                        executor.moe.w2,
+                        executor.moe.s1,
+                        executor.moe.s2,
+                        executor.moe.g1,
+                        executor.moe.g2,
+                    ),
+                ):
+                    self.assertIs(weights.weights[0][key], compute.weights[0][key])
+                    self.assertEqual(
+                        weights.weights[0][key].untyped_storage().data_ptr(),
+                        tensor.untyped_storage().data_ptr(),
+                    )
+                manager.finalize()
+                self.assertTrue(manager._published)
+                with tempfile.TemporaryDirectory() as directory:
+                    path = os.path.join(directory, "expected.pt")
+                    torch.save(
+                        {
+                            "packed": packed,
+                            "inputs": [x.cpu() for x in args],
+                            "output": output.cpu(),
+                        },
+                        path,
+                    )
+                    child = subprocess.run(
+                        [sys.executable, __file__, "--resident-marlin-restart", path],
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                    )
+                    self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+            finally:
+                store.stop_store(name)
 
     def test_explicit_strategy_uses_prepared_weights(self):
         from rtp_llm.config.model_config import ModelConfig
@@ -281,4 +481,7 @@ class MarlinNvfp4Test(MarlinNvfp4TestFixture, unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    if len(sys.argv) > 1 and sys.argv[1] == "--resident-marlin-restart":
+        _resident_restart(sys.argv[2])
+    else:
+        unittest.main()

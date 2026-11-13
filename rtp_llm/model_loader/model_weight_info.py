@@ -240,7 +240,13 @@ class ModelDeployWeightInfo:
     # processed (for example the MoE strategy transforming them in initialize()). Resident weights
     # put their values into the fingerprint. Config fields count only when
     # BaseModel._resident_fingerprint lists them; to_string() omits Python-only fields.
-    resident_weights_env_vars: Tuple[str, ...] = ()
+    # MOE_MEGA_SHARED_EXPERT: the fused-MoE factory then fuses the shared expert into MegaMoE.
+    # RTP_LLM_FP4_GEMM_BACKEND: CudaImpl.convert_fp4_gemm_weight_params chooses the dense FP4
+    # weight/scale layout (trtllm vs cutlass) during loading.
+    resident_weights_env_vars: Tuple[str, ...] = (
+        "MOE_MEGA_SHARED_EXPERT",
+        "RTP_LLM_FP4_GEMM_BACKEND",
+    )
 
     TRT_ENGINE_LAYER_WEIGHT_MAP = {
         W.pre_ln_beta: "transformer.layers.{i}.input_layernorm.bias",
