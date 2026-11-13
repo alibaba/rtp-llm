@@ -880,6 +880,8 @@ public final class JavaMockEngineCluster {
          */
         private final Object completionLock = new Object();
         private final Map<Long, EngineRpcService.TaskInfoPB> runningTasks = new ConcurrentHashMap<>();
+        private final Map<Long, Long> queueEnteredNanos = new ConcurrentHashMap<>();
+        private final Map<Long, Long> observedQueueWaitMs = new ConcurrentHashMap<>();
         private final Map<Long, LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>> responseQueues = new ConcurrentHashMap<>();
         private final Map<Long, String> requestStates = new ConcurrentHashMap<>();
         // Explicit P->D ownership used by the test-only Cancel channel.  A Prefill
@@ -3935,7 +3937,15 @@ public final class JavaMockEngineCluster {
                                                  long batchId,
                                                  int dpRank,
                                                  EngineRpcService.TaskPhase phase) {
+            long id = shape.input().getRequestId();
+            if (phase == EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED) {
+                queueEnteredNanos.putIfAbsent(id, System.nanoTime());
+            } else if (phase == EngineRpcService.TaskPhase.TASK_PHASE_RUNNING) {
+                Long entered = queueEnteredNanos.remove(id);
+                if (entered != null) { observedQueueWaitMs.put(id, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - entered)); }
+            }
             return EngineRpcService.TaskInfoPB.newBuilder()
+                    .setWaitingTimeMs(observedQueueWaitMs.getOrDefault(id, 0L))
                     .setRequestId(shape.input().getRequestId())
                     .setInputLength(shape.inputLen())
                     .setPrefixLength(shape.hitTokens())
@@ -4008,6 +4018,9 @@ public final class JavaMockEngineCluster {
         }
 
         private void publishCompletion(EngineRpcService.TaskInfoPB task) {
+            Long waitingMs = observedQueueWaitMs.remove(task.getRequestId());
+            queueEnteredNanos.remove(task.getRequestId());
+            if (waitingMs != null) { task = task.toBuilder().setWaitingTimeMs(waitingMs).build(); }
             synchronized (completionLock) {
                 // status_zombie_running: drop the completion record entirely —
                 // the request finished internally but is never reported

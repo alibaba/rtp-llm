@@ -568,6 +568,7 @@ public class CostBasedPrefillStrategy {
         double minimum = Double.POSITIVE_INFINITY;
         for (int i = 0; i < candidates.size(); i++) {
             if (!PrefillTokenBalance.eligible(candidates.cacheHit(i), maxHit, cacheFirst)) { continue; }
+            if (!cacheFirst && candidates.endpoint(i).ownership.coldAdmissionBlocked()) { continue; }
             var work = candidates.endpoint(i).ownership.tokenWorkload();
             if (candidates.endpoint(i) == excluded || work.pendingTokens() + work.plannedTokens() > tokenBalance.getHotspotRescue().getMaxIdlePendingTokens()) { continue; }
             if (tokenBalance.isEnforcePendingComputeLimit() && !PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())) { continue; }
@@ -592,6 +593,7 @@ public class CostBasedPrefillStrategy {
         double minimum = Double.POSITIVE_INFINITY;
         for (int i = 0; i < candidates.size(); i++) {
             if (!PrefillTokenBalance.eligible(candidates.cacheHit(i), maxHit, cacheFirst)) { continue; }
+            if (!cacheFirst && candidates.endpoint(i).ownership.coldAdmissionBlocked()) { continue; }
             var work = candidates.endpoint(i).ownership.tokenWorkload();
             // Preserve a busy cache leader by parking globally, where existing HIT_RATE shedding applies.
             if (candidates.endpoint(i).engineQueueAdmissionBlocked()
@@ -689,7 +691,7 @@ public class CostBasedPrefillStrategy {
             for (int i = 0; i < candidates.size(); i++) {
                 var endpoint = candidates.endpoint(i);
                 var work = endpoint.ownership.tokenWorkload();
-                if ((PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())
+                if (!endpoint.ownership.coldAdmissionBlocked() && (PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())
                         || !tokenBalance.isEnforcePendingComputeLimit() && !deadlineBudgetEnabled && endpoint.engineQueueAllowsAdmission())
                         && PrefillTokenBalance.withinColdWindow(work, Math.max(0L, request.getSeqLen()), endpoint.ownership.coldWindowComputeLimit())) {
                     accepting++;

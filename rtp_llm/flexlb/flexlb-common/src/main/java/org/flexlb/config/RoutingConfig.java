@@ -57,6 +57,11 @@ public final class RoutingConfig {
          * Excludes Master queues and running requests. Null retains legacy admission limits.
          */
         private Long engineQueueAdmissionThreshold = 10L;
+        /** Optional NON_BATCH cold-work watermark while this worker has recent cache reuse.
+         * Counts actual waiting and local sends not yet observed by the Engine. Null disables it.
+         */
+        private Long coldEngineQueueAdmissionThreshold;
+
         /** Consecutive observed time above the watermark before sustained overload; actual waiting gates dispatch immediately. */
         private long engineQueueOverloadDurationMs = 5_000L;
         /** Optional rescue of small, aged requests to lightly loaded cache-eligible workers. */

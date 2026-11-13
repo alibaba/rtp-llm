@@ -52,6 +52,41 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CostBasedPrefillSelectionMetricTest {
+    @Test
+    void coldWorkCannotEnterAQueuedWarmWorkerWhileHotWorkStillCan() {
+        registry.close();
+        var balance = new RoutingConfig.TokenBalanceConfig();
+        balance.setEngineQueueAdmissionThreshold(30L);
+        balance.setColdEngineQueueAdmissionThreshold(0L);
+        balance.setEnableWindow(true);
+        config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
+        config.getDispatcher().setMaxInflightPerPrefillWorker(256);
+        registry = StrategyTestSupport.endpointRegistry(SchedulingTestConfig.configService(config));
+        publish("10.0.0.1", 8080);
+        strategy = new CostBasedPrefillStrategy(registry, cache, reporter, cacheReporter, SchedulingTestConfig.configService(config));
+        var worker = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
+        var work = (PrefillTokenWorkload) org.springframework.test.util.ReflectionTestUtils.getField(worker.ownership, "tokenWorkload");
+        work.complete(1L, true);
+        updateEngineQueue(worker, 1L, 1L);
+        var cold = StrategyTestSupport.select(strategy, context.data().getRequest(), context.data().getSchedulingMetadata(), RoleType.PREFILL, null);
+        try {
+            assertEquals(PlacementResult.Status.BLOCKED, cold.status(), "cold work must wait outside an already queued warm Engine");
+        } finally { if (cold.value() != null) { cold.value().close(); } }
+        assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission(null));
+        context.data().setRequest(context.data().getRequest().toBuilder().cacheKeyBlockSize(100L).blockCacheKeys(List.of(1L)).build());
+        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(worker.ipPort(), 9));
+        try (var hot = select()) { assertEquals(worker, hot.prefillEp()); }
+        var update = updateEngineQueue(worker, 0L, 1L);
+        assertTrue(update.reconciliation().capacityReleased(), "waiting 1 -> 0 wakes parked cold work before the ordinary 30-request gate changes");
+        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
+        try (var resumed = select()) { assertEquals(worker, resumed.prefillEp()); }
+        updateEngineQueue(worker, 31L, 1L);
+        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(worker.ipPort(), 9));
+        assertEquals(PlacementResult.Status.BLOCKED, StrategyTestSupport.select(strategy,
+                context.data().getRequest(), context.data().getSchedulingMetadata(), RoleType.PREFILL, null).status(),
+                "ordinary waiting > 30 still blocks hot work immediately");
+    }
+
     private static final int FULL_FLEET_SIZE = 750;
 
     private FlexlbConfig config;

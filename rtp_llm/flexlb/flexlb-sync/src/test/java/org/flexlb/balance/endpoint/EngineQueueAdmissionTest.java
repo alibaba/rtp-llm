@@ -5,6 +5,18 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.flexlb.balance.endpoint.EngineQueueAdmission.State.*;
 
 class EngineQueueAdmissionTest {
+    @Test void coldWatermarkSharesObservedAndUnobservedCountsWithoutChangingTheHotGate() {
+        var policy = new EngineQueueAdmission(30, 5000);
+        assertEquals(false, policy.dispatchBlocked(3L, 2L));
+        policy.observe(1L, 0L);
+        assertEquals(false, policy.dispatchBlocked(1L, 2L));
+        assertEquals(true, policy.dispatchBlocked(2L, 2L));
+        assertEquals(false, policy.dispatchBlocked(2L));
+        policy.observe(31L, 1L);
+        assertEquals(true, policy.dispatchBlocked());
+        assertEquals(AVAILABLE, policy.state());
+    }
+
     @Test void unobservedAdmissionsReserveHeadroomWithoutClaimingSustainedEngineOverload() {
         var policy = new EngineQueueAdmission(30, 5000);
         policy.observe(0, 0);

@@ -69,7 +69,10 @@ class ColdPulseReproductionTest {
         assertTrue(input % 512 == 0 && prefixBlocks < blocks && prefixBlocks * cohortsPerWorker < poolBlocks);
         assertTrue(fraction >= 0 && fraction <= 1);
         assertTrue(Double.isFinite(targetQps) && targetQps > 0 && Double.isFinite(pulseQps) && pulseQps > 0);
-        String formula = "sum(computeTokens) / " + ((input - prefixBlocks * 512) / 100.0);
+        double computeTokensPerMs = Double.parseDouble(System.getProperty("flexlb.cold.computeTokensPerMs",
+                Double.toString((input - prefixBlocks * 512) / 100.0)));
+        assertTrue(Double.isFinite(computeTokensPerMs) && computeTokensPerMs > 0);
+        String formula = "sum(computeTokens) / " + computeTokensPerMs;
         Path out = Path.of(System.getProperty("flexlb.cold.output"));
         Files.createDirectories(out);
         var manifest = new LinkedHashMap<String, Object>();
@@ -271,6 +274,7 @@ class ColdPulseReproductionTest {
             worker.put("pendingComputeTokens", ep.ownership.tokenWorkload().pendingTokens());
             worker.put("reservedRequests", ep.ownership.progress().outstandingRequests()); worker.put("localQueue", ep.ownership.progress().queueDepth());
             worker.put("accepting", ep.engineQueueAllowsAdmission());
+            worker.put("coldAdmissionBlocked", ep.ownership.coldAdmissionBlocked());
             long observed = ep.getStatus().appliedObservation().observedAtUs();
             worker.put("statusAgeMs", observed == 0 ? null : (System.nanoTime() / 1000 - observed) / 1000); workers.add(worker);
         }

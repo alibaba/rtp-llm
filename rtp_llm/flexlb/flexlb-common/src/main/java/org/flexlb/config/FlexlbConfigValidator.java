@@ -140,6 +140,12 @@ final class FlexlbConfigValidator {
         config.getDispatcher().validateFor(config.getScheduler());
         validateRequestLifecycle(config.getRequestLifecycle());
         validateRouting(config.getRouter());
+        var coldBalance = config.getRouter().getRoles().getPrefill().getTokenBalance();
+        if (coldBalance != null && coldBalance.getColdEngineQueueAdmissionThreshold() != null) {
+            require(config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH,
+                    "router.roles.prefill.tokenBalance.coldEngineQueueAdmissionThreshold", "requires NON_BATCH");
+        }
+
         validateWorkerRegistry(config.getWorkerRegistry());
         validateObservability(config.getObservability());
         FlexlbConfig.GrpcServerConfig grpc = config.getGrpcServer();
@@ -275,6 +281,14 @@ final class FlexlbConfigValidator {
             if (balance.getEngineQueueAdmissionThreshold() != null) {
                 nonNegative(balance.getEngineQueueAdmissionThreshold(),
                         "router.roles.prefill.tokenBalance.engineQueueAdmissionThreshold");
+            }
+            if (balance.getColdEngineQueueAdmissionThreshold() != null) {
+                String path = "router.roles.prefill.tokenBalance.coldEngineQueueAdmissionThreshold";
+                nonNegative(balance.getColdEngineQueueAdmissionThreshold(), path);
+                require(balance.isEnableWindow(), path, "requires enableWindow");
+                require(balance.getEngineQueueAdmissionThreshold() != null, path, "requires Engine queue admission");
+                require(balance.getColdEngineQueueAdmissionThreshold() <= balance.getEngineQueueAdmissionThreshold(),
+                        path, "must not exceed engineQueueAdmissionThreshold");
             }
             var rescue = balance.getHotspotRescue();
             if (rescue != null) {

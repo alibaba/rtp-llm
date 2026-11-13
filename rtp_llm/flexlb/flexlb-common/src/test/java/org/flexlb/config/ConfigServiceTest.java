@@ -20,6 +20,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConfigServiceTest {
     @Test
+    void coldQueueWatermarkIsOptionalAndCannotExceedOrdinaryAdmission() {
+        assertNull(new RoutingConfig.TokenBalanceConfig().getColdEngineQueueAdmissionThreshold());
+        for (String fields : java.util.List.of(
+                "\"coldEngineQueueAdmissionThreshold\":-1,\"enableWindow\":true",
+                "\"coldEngineQueueAdmissionThreshold\":0",
+                "\"coldEngineQueueAdmissionThreshold\":0,\"enableWindow\":true,\"engineQueueAdmissionThreshold\":null",
+                "\"coldEngineQueueAdmissionThreshold\":31,\"enableWindow\":true,\"engineQueueAdmissionThreshold\":30")) {
+            assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse(
+                    "{\"router\":{\"roles\":{\"prefill\":{\"tokenBalance\":{" + fields + "}}}}}"));
+        }
+        var parsed = ConfigTestFixtures.parse("""
+                {"router":{"roles":{"prefill":{"tokenBalance":{"coldEngineQueueAdmissionThreshold":0,"enableWindow":true,"engineQueueAdmissionThreshold":30}}}}}
+                """);
+        assertEquals(0L, parsed.getRouter().getRoles().getPrefill().getTokenBalance().getColdEngineQueueAdmissionThreshold());
+    }
+
+    @Test
     void coldWindowAdmissionIsExplicitAndRequiresCompletedHistory() {
         var balance = new RoutingConfig.TokenBalanceConfig();
         org.junit.jupiter.api.Assertions.assertFalse(balance.isEnforcePendingComputeLimit());

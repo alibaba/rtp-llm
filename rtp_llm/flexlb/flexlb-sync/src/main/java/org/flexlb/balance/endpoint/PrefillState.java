@@ -349,6 +349,21 @@ public final class PrefillState {
     public boolean engineQueueDispatchBlocked() { return engineQueueDispatchBlocked.getAsBoolean(); }
 
     private java.util.function.LongPredicate unobservedAdmissionBlocked = ignored -> false;
+    private java.util.function.LongPredicate coldAdmissionBlocked;
+
+    void configureColdAdmission(java.util.function.LongPredicate blocked) {
+        coldAdmissionBlocked = Objects.requireNonNull(blocked);
+    }
+
+    /** Pure-cold traffic retains ordinary admission; warm workers protect their remaining queue headroom. */
+    public boolean coldAdmissionBlocked() {
+        if (coldAdmissionBlocked == null) { return false; }
+        lock.lock();
+        try {
+            long unobserved = (long) requests.size() - engineCoveredRequests + unconfirmedDispatches.size();
+            return tokenWorkload != null && tokenWorkload.hasRecentCacheHit() && coldAdmissionBlocked.test(unobserved);
+        } finally { lock.unlock(); }
+    }
 
     void configureUnobservedAdmission(java.util.function.LongPredicate blocked) {
         unobservedAdmissionBlocked = Objects.requireNonNull(blocked);
@@ -422,6 +437,7 @@ public final class PrefillState {
     void enforceColdTokenLimit(boolean enabled) { enforceColdTokenLimit = enabled; }
 
     private boolean coldTokenCapacityAvailable(RequestRoute route) {
+        if (route.coldTokenBalance() && coldAdmissionBlocked()) { return false; }
         if (tokenWorkload == null || !enforcePendingComputeLimit
                 && !enforceColdTokenLimit && maxColdWindowComputeTokens == null) { return true; }
         var work = tokenWorkloadLocked();
@@ -1125,10 +1141,11 @@ public final class PrefillState {
             batch.lastObservedAtMs = Math.max(batch.lastObservedAtMs, reduction.nowMs);
         }
         boolean windowReleased = false;
-        if (maxColdWindowComputeTokens != null && tokenWorkload != null) {
+        if ((maxColdWindowComputeTokens != null || coldAdmissionBlocked != null) && tokenWorkload != null) {
             long completed = tokenWorkload.snapshot().completedTokens();
             boolean hotWindow = tokenWorkload.hasRecentCacheHit();
-            windowReleased = completed < lastObservedWindowTokens || lastObservedHotWindow && !hotWindow;
+            windowReleased = maxColdWindowComputeTokens != null && completed < lastObservedWindowTokens
+                    || lastObservedHotWindow && !hotWindow;
             lastObservedWindowTokens = completed;
             lastObservedHotWindow = hotWindow;
         }
