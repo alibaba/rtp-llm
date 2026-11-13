@@ -124,17 +124,23 @@ def _require_single_gpu_type(macro_name, name, gpu_type):
         fail("%s %s: gpu_type must contain exactly one hardware tag, got %s" % (macro_name, name, gpu_type))
     return gpu_type[0]
 
-def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], data=[], deps=[], test_envs={}):
+def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], data=[], deps=[], test_envs={}, gpu_count=None):
     """Defines a smoke_case py_test with its own unittest main.
 
     Bypasses the entry.py framework while inheriting the framework deps, tags,
     GPU exec_properties and legacy_create_init guarantees. smoke_args is the
-    single source for GPU reservation, server arguments and WORLD_SIZE."""
+    source for server arguments. gpu_count may reserve
+    additional devices for tests launching multiple independent server roles."""
     gpu = _require_single_gpu_type("custom_smoke_test", name, gpu_type)
-    gpu_count = get_world_size_from_smoke_args(smoke_args)
+    world_size = get_world_size_from_smoke_args(smoke_args)
+    gpu_count = world_size if gpu_count == None else gpu_count
+    if gpu_count < world_size:
+        fail("gpu_count must cover at least one server world")
     case_env = {
         "GPU_COUNT": str(gpu_count),
         "SMOKE_ARGS": smoke_args,
+        # gpu_lock reads WORLD_SIZE first. Multi-role tests must override it
+        # with the per-role size in each server subprocess.
         "WORLD_SIZE": str(gpu_count),
         "PYTHONNOUSERSITE": "1",
     }

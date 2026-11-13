@@ -3511,8 +3511,8 @@ rpds-py==0.30.0 \
     # via
     #   jsonschema
     #   referencing
-rtp-kernel==0.1.0+94fd20eb.cu132 \
-    --hash=sha256:ad078d78a5db96389febce578ac32c5667154184bcbce1748cf87373b6e52bd0
+rtp-kernel==0.1.0+70c18067.cu132 \
+    --hash=sha256:5934006529f33828a5d72349e980bdb150e6957be06c1e49a53a47e52dab97fe
     # via -r internal_source/deps/requirements_cuda13_arm.txt
 safetensors==0.7.0 \
     --hash=sha256:0071bffba4150c2f46cae1432d31995d77acfd9f8db598b5d1a2ce67e8440ad2 \

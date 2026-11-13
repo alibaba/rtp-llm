@@ -254,6 +254,14 @@ models_py_test(
     testlib = "//rtp_llm/models_py/standalone:auto_model",
 )
 
+# Host admission checks and rtp-kernel SM120 numerical/Graph tests.
+models_py_test(
+    name = "gated_residual_sm120_test",
+    src = "parity/gated_residual_sm120_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    testlib = "//rtp_llm/models_py/standalone:auto_model",
+)
+
 models_py_test(
     name = "gated_residual_bf16_test",
     src = "parity/gated_residual_bf16_test.py",
@@ -466,6 +474,7 @@ test_suite(
         ":gdn_upstream_parity_test",
         ":hc_prefill_mix_test",
         ":gated_residual_bf16_test",
+        ":gated_residual_sm120_test",
         ":compute_weight_view_test",
         "//rtp_llm/models_py/kernels/cuda/qsa/test:histogram_topk_test",
         ":upstream_parity_test",

@@ -613,6 +613,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             hc_mult=config.hc_mult,
             norm_eps=config.layernorm_eps,
             role=getattr(self, "_execution_role", "PDFUSION"),
+            is_mtp=bool(getattr(config, "is_mtp", False)),
             weight_scales=tuple(
                 weights.get(name + FP8_STORAGE_SCALE_SUFFIX)
                 for name in (
@@ -630,6 +631,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             hc_mult=config.hc_mult,
             norm_eps=config.layernorm_eps,
             role=getattr(self, "_execution_role", "PDFUSION"),
+            is_mtp=bool(getattr(config, "is_mtp", False)),
             weight_scales=tuple(
                 weights.get(name + FP8_STORAGE_SCALE_SUFFIX)
                 for name in (
@@ -787,6 +789,9 @@ class Qwen4ExpModel(Qwen35Model):
             fmha_config,
             py_hw_kernel_config,
         )
+        from rtp_llm.models_py.modules.qwen4_exp.sm120_gr import share_model_workspaces
+
+        share_model_workspaces(self)
         from rtp_llm.config.qwen4_exp_config import uses_decode_vocab_shard
 
         vocab_parallel = uses_decode_vocab_shard(config, parallelism_config)
@@ -1333,6 +1338,7 @@ class Qwen4ExpModel(Qwen35Model):
             hc_mult=model_config.hc_mult,
             norm_eps=model_config.layernorm_eps,
             role=getattr(self.parallelism_config, "role_type", "PDFUSION"),
+            is_mtp=bool(getattr(model_config, "is_mtp", False)),
             weight_scales=(
                 weights.global_weights.get(
                     W.qwen4_hc_mixer_mix_down + FP8_STORAGE_SCALE_SUFFIX
