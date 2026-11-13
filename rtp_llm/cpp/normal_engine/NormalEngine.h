@@ -83,6 +83,7 @@ private:
 
 private:
     int64_t                                       previous_execution_release_us_ = 0;
+    int64_t                                       previous_execution_begin_us_   = 0;
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
     bool                                          cpu_tp_shutdown_ = false;

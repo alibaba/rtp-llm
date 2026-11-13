@@ -367,6 +367,8 @@ private:
 class RtpLLMEngineMetricsCollector final {
 public:
     int64_t step_latency_us = 0;
+    // Start-to-start interval between non-empty executor calls; zero skips the first sample.
+    int64_t step_interval_us = 0;
 };
 
 class RtpLLMEngineMetrics: public kmonitor::MetricsGroup {
@@ -375,7 +377,8 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMEngineMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* step_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* step_latency_us_metric  = nullptr;
+    kmonitor::MutableMetric* step_interval_us_metric = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
