@@ -567,6 +567,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
     # __init__. The class default keeps __new__-constructed layers (tests) working.
     _attn_profile_range = "qwen4.attn"
     _prefill_segments = None
+    _prefill_compact_moe = None
 
     def __init__(
         self,
@@ -679,6 +680,16 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
                 moe_graph.unified_segment = StaticPrefillSegment(
                     layer_idx, "moe", admission, mega
                 )
+                projection = self.mlp_hyper_connection.down_projection
+                if (
+                    moe_graph.max_rows >= 3072
+                    and projection is not None
+                    and projection.use_scaled_mm
+                    and tuple(projection.weight.shape) == (320, 10240)
+                ):
+                    self._prefill_compact_moe = StaticPrefillSegment(
+                        layer_idx, "hc_moe_compact", admission, mega
+                    )
 
     def _attention_quant_config(self, config, weights):
         if getattr(config, "_qwen4_nvfp4_source", False):
@@ -802,7 +813,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
         pending_injection=None,
     ) -> tuple:
         segments = self._prefill_segments
-        use_segments = (
+        can_segment = (
             segments is not None
             and attention_inputs is not None
             and bool(attention_inputs.is_prefill)
@@ -811,7 +822,15 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             and self.mlp._sm90_mega_moe.min_tokens
             <= hyper_states.shape[0]
             <= self.mlp._sm90_mega_moe.buffer.num_max_tokens_per_rank * 8
-            and segments[0].admission.supports(hyper_states)
+        )
+        use_segments = can_segment and segments[0].admission.supports(hyper_states)
+        compact_moe = self._prefill_compact_moe
+        use_compact_moe = (
+            can_segment
+            and not use_segments
+            and hyper_states.shape[0] == 3072
+            and compact_moe is not None
+            and compact_moe.admission.supports(hyper_states, moe=True)
         )
         with record_function_range("qwen4.hc.attn"):
             hc_inputs = (hyper_states,) + (
@@ -840,6 +859,14 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             return segments[1].run(
                 self._prefill_hc_moe, hyper_states, hidden_states, inject_weights
             )
+        if use_compact_moe:
+            return compact_moe.run(
+                self._prefill_hc_moe,
+                hyper_states,
+                hidden_states,
+                inject_weights,
+                capture_eager=self._prefill_hc_moe_private,
+            )
         return self._prefill_hc_moe(
             hyper_states, hidden_states, inject_weights, use_moe_graph=True
         )
@@ -852,13 +879,22 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
         return self.attn_hyper_connection(hyper_states)
 
     def _prefill_hc_moe(
-        self, hyper_states, hidden_states, inject_weights, use_moe_graph=False
+        self,
+        hyper_states,
+        hidden_states,
+        inject_weights,
+        use_moe_graph=False,
+        *,
+        inplace_residual=False,
     ):
         with record_function_range("qwen4.hc.mlp"):
             if isinstance(self.mlp_hyper_connection, GatedResidual):
                 hidden_states, hyper_states, inject_weights = (
                     self.mlp_hyper_connection.forward_with_injection(
-                        hyper_states, hidden_states, inject_weights
+                        hyper_states,
+                        hidden_states,
+                        inject_weights,
+                        inplace_residual=inplace_residual,
                     )
                 )
             else:
@@ -878,6 +914,13 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
                 else self.mlp._forward_impl(hidden_states)
             )
         return hyper_states, hidden_states, inject_weights
+
+    def _prefill_hc_moe_private(self, hyper_states, hidden_states, inject_weights):
+        # Called only on graph-owned copies. The next layer consumes the tuple
+        # before this stage reuses its slots; the caller's residual is untouched.
+        return self._prefill_hc_moe(
+            hyper_states, hidden_states, inject_weights, inplace_residual=True
+        )
 
 
 class Qwen4ExpModel(Qwen35Model):

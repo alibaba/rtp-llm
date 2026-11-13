@@ -209,7 +209,8 @@ class GatedResidual(nn.Module):
                 1 <= hyper_input.numel() // self.hc_hidden_size <= 32
                 or 8192 <= hyper_input.numel() // self.hc_hidden_size <= 12288
                 or (
-                    os.environ.get("RTP_LLM_QWEN4_HC_SM90_PREFILL_NORM_SCALE", "0") == "1"
+                    os.environ.get("RTP_LLM_QWEN4_HC_SM90_PREFILL_NORM_SCALE", "0")
+                    == "1"
                     and 33 <= hyper_input.numel() // self.hc_hidden_size <= 4096
                     and hyper_input.is_cuda
                     and torch.version.hip is None
@@ -238,6 +239,8 @@ class GatedResidual(nn.Module):
         hyper_input: torch.Tensor,
         sublayer_out: torch.Tensor,
         inject_weights: torch.Tensor,
+        *,
+        inplace_residual: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         fp8_down = (
             self.down_projection is not None
@@ -259,16 +262,30 @@ class GatedResidual(nn.Module):
 
             if fp8_down and not self._use_bf16_down_inject(hyper_input):
                 fused = try_inject_grouped_norm(
-                    hyper_input, sublayer_out, inject_weights, self.norm_gamma, self.norm_eps
+                    hyper_input,
+                    sublayer_out,
+                    inject_weights,
+                    self.norm_gamma,
+                    self.norm_eps,
+                    inplace_residual=inplace_residual,
                 )
             else:
                 fused = try_inject_grouped_norm(
-                    hyper_input, sublayer_out, inject_weights, self.norm_gamma,
-                    self.norm_eps, collect_scale=False
+                    hyper_input,
+                    sublayer_out,
+                    inject_weights,
+                    self.norm_gamma,
+                    self.norm_eps,
+                    collect_scale=False,
+                    inplace_residual=inplace_residual,
                 )
             if fused is not None:
                 residual, normed, scale = fused
                 return self._forward_normed(residual, normed, down_input_scale=scale)
+        if inplace_residual:
+            raise RuntimeError(
+                "Private HC residual requires the supported fused producer"
+            )
         return self(inject_into_residual(hyper_input, sublayer_out, inject_weights))
 
     def _forward_normed(
@@ -277,7 +294,9 @@ class GatedResidual(nn.Module):
 
         inject_weights = None
         bf16_fp8_candidate = self._use_bf16_down_inject(normed)
-        merged = self.bf16_fp8_down_inject if bf16_fp8_candidate else self.merged_down_inject
+        merged = (
+            self.bf16_fp8_down_inject if bf16_fp8_candidate else self.merged_down_inject
+        )
         rows = normed.numel() // self.hc_hidden_size
         extended_bf16 = (
             os.environ.get("RTP_LLM_QWEN4_HC_FUSION_EXTENDED", "0") == "1"
