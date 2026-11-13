@@ -166,18 +166,6 @@ def _compile_exception_reply(error: Exception) -> tuple[_WorkerStatus, bool, str
     message = (str(error) or type(error).__name__)[:_MAX_COMPILE_ERROR_MESSAGE_LENGTH]
     if _is_resource_exhaustion(error):
         return _WorkerStatus.OVERLOADED, True, message
-    # xgrammar 0.2.8 can reject valid schemas while hashing cached rules.
-    # Keep this check synchronized with XGrammarBackend::compileSync.
-    if (
-        "Check failed: (grammar_->ImplPtr()->per_rule_fsm_hashes[ref_rule_id].has_value()) is false"
-        in str(error)
-    ):
-        return (
-            _WorkerStatus.INVALID,
-            True,
-            "current structured-output compiler does not support this grammar: "
-            + message,
-        )
     if _is_deterministic_grammar_error(error):
         return _WorkerStatus.INVALID, False, message
     # Ordinary runtime/transport failures are not evidence that the grammar is bad.

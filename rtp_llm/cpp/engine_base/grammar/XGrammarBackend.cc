@@ -380,17 +380,9 @@ GrammarCompileResult XGrammarBackend::compileSync(const GrammarKeyCpp& key) {
     } catch (const std::invalid_argument& e) {
         result.status = absl::InvalidArgumentError(e.what());
     } catch (const std::runtime_error& e) {
-        // Match the known xgrammar 0.2.8 cache assertion, as in grammar_validator.py.
-        if (std::string(e.what()).find(
-                "Check failed: (grammar_->ImplPtr()->per_rule_fsm_hashes[ref_rule_id].has_value()) is false")
-            != std::string::npos) {
-            result.status = absl::InvalidArgumentError(
-                std::string("current structured-output compiler does not support this grammar: ") + e.what());
-        } else {
-            result.status = isExplicitGrammarParseError(e) ?
-                                absl::InvalidArgumentError(e.what()) :
-                                absl::UnknownError(std::string("grammar compiler runtime failure: ") + e.what());
-        }
+        result.status = isExplicitGrammarParseError(e) ?
+                            absl::InvalidArgumentError(e.what()) :
+                            absl::UnknownError(std::string("grammar compiler runtime failure: ") + e.what());
     } catch (const std::exception& e) {
         result.status = absl::UnknownError(std::string("unexpected grammar compile error: ") + e.what());
     } catch (...) {

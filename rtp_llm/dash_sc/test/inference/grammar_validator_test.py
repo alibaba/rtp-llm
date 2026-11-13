@@ -44,12 +44,6 @@ def _crash_with_faulthandler(fault_trace_fd) -> None:
         os.kill(os.getpid(), signal.SIGSEGV)
 
 
-_MISSING_RULE_HASH_ERROR = (
-    "[10:23:28] /project/cpp/grammar_functor.cc:3567: Check failed: "
-    "(grammar_->ImplPtr()->per_rule_fsm_hashes[ref_rule_id].has_value()) is false: \n"
-)
-
-
 class CompileExceptionReplyTest(unittest.TestCase):
     def test_resource_exhaustion_is_overloaded_and_retires_worker(self) -> None:
         for error in (MemoryError("out of memory"), RuntimeError("std::bad_alloc")):
@@ -102,31 +96,9 @@ class CompileExceptionReplyTest(unittest.TestCase):
                 self.assertFalse(retire_after_reply)
                 self.assertEqual(reply, message)
 
-    def test_missing_rule_hash_is_unsupported_and_retires_worker(self) -> None:
-        status, retire, message = _compile_exception_reply(
-            RuntimeError(_MISSING_RULE_HASH_ERROR)
-        )
-        self.assertIs(status, _WorkerStatus.INVALID)
-        self.assertTrue(retire)
-        self.assertIn("compiler does not support this grammar", message)
-        self.assertIn(_MISSING_RULE_HASH_ERROR, message)
-
-    def test_missing_rule_hash_does_not_override_resource_exhaustion(self) -> None:
-        for error in (
-            MemoryError(_MISSING_RULE_HASH_ERROR),
-            RuntimeError(_MISSING_RULE_HASH_ERROR + "out of memory"),
-        ):
-            with self.subTest(error=error):
-                status, retire, _ = _compile_exception_reply(error)
-                self.assertIs(status, _WorkerStatus.OVERLOADED)
-                self.assertTrue(retire)
-
     def test_generic_runtime_error_is_unavailable_and_retires_worker(self) -> None:
         messages = (
             "thread creation failed",
-            "Check failed: (other_internal_invariant) is false",
-            "per_rule_fsm_hashes[ref_rule_id].has_value()",
-            _MISSING_RULE_HASH_ERROR.replace("ref_rule_id", "other_rule_id"),
             "unexpected token: syntax error",
             "parser error",
             "token lexer error at byte 4",
@@ -600,36 +572,6 @@ class GrammarValidatorTest(unittest.TestCase):
                         self.validator.validate_and_norm_json(schema)
                 self.assertEqual(self.validator._compile_in_worker.call_count, 2)
                 self.assertIsNone(self.validator._get_cached_result(("json", schema)))
-
-    def test_missing_rule_hash_retires_worker_and_caches_rejection(self) -> None:
-        self._use_real_grammar_check()
-        del self.validator._compile_in_worker
-        self.validator._queue_timeout_s = 1.0
-        self.validator._compile_timeout_s = 1.0
-        self.validator._idle = queue.Queue()
-        self.validator._ensure_pool = MagicMock()
-        self.validator._retire = MagicMock()
-        process = MagicMock()
-        process.is_alive.return_value = True
-        connection = MagicMock()
-        connection.poll.return_value = True
-        connection.recv.return_value = _compile_exception_reply(
-            RuntimeError(_MISSING_RULE_HASH_ERROR)
-        )
-        worker = (process, connection, io.BytesIO())
-        self.validator._idle.put(worker)
-        schema = '{"type":"string","pattern":"^[a-z]{8,600}$"}'
-
-        for _ in range(2):
-            with self.assertRaisesRegex(
-                GrammarCompilationError, "compiler does not support this grammar"
-            ):
-                self.validator.validate_and_norm_json(schema)
-
-        self.validator._retire.assert_called_once_with(*worker)
-        connection.send.assert_called_once()
-        self.assertTrue(self.validator._idle.empty())
-        self.assertEqual(len(self.validator._result_cache), 1)
 
     def test_worker_crash_is_transient_and_reports_signal_and_trace(self) -> None:
         self.validator._queue_timeout_s = 1.0
