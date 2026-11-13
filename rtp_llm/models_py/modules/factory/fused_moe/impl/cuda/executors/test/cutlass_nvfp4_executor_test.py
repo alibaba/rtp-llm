@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+
 from rtp_llm.config.quant_config import QWEN4_FP8_NVFP4_RECIPE
 from rtp_llm.config.qwen4_exp_config import resolve_qwen4_parallelism
 from rtp_llm.device.device_impl import CudaImpl
@@ -451,6 +452,13 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         set_parallelism_config(pc)
         model.quant_config = ModelOptFp4Config(bits=4, group_size=16, is_quanted=True)
         self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
+        model.model_type = "qwen4_exp"
+        model._qwen4_nvfp4_source = True
+        self.assertTrue(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
+        model.model_type = "qwen4_exp_mtp"
+        self.assertTrue(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
+        model.model_type = "other_model"
+        self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
 
     @unittest.skipUnless(
         torch.cuda.is_available()
@@ -579,8 +587,11 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
             qs, ss, aa = zip(*(quantize_expert_to_nvfp4(e) for e in w))
             values[wn] = torch.stack(qs)
             values[sn] = CudaImpl.swizzle_blockscale(torch.stack(ss))
-            values[an] = torch.stack(aa)
-            values[ins] = torch.full((E,), 32 / 2688.0, device="cuda")
+            # Prequantized exports load one scalar per expert as [E, 1],
+            # while online quantization produces [E]. Both must reach the
+            # FlashInfer ABI as one-dimensional global scales.
+            values[an] = torch.stack(aa).reshape(E, 1)
+            values[ins] = torch.full((E, 1), 32 / 2688.0, device="cuda")
         ex = CutlassNvfp4Executor(
             SimpleNamespace(
                 ep_size=1,

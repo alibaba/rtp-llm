@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/normal_engine/AsyncRunner.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 
@@ -44,6 +45,7 @@ public:
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
                          int32_t                                        kv_cache_group_num = 1,
                          bool                                           warm_up            = false);
+    ~MtpExecutor() override;
 
     absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
@@ -112,6 +114,7 @@ protected:
     };
 
     bool isTpRank0() const;
+    void waitDeferredDecodeTail();
     bool finishDSparkPrefillCachePublication(const GptModelInputs&               model_input,
                                              const std::list<GenerateStreamPtr>& streams);
 
@@ -123,8 +126,8 @@ protected:
     absl::Status        rendezvousSpeculativeTargetSamplingStatus(const absl::Status& local_status);
     absl::Status
     prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, size_t batch_size, bool is_fake_stream = false);
-    void                rollbackSpeculativeTargetStateOrFailStop(const char* phase);
-    void                rollbackSpeculativeTargetStateBestEffort(const char* phase) noexcept;
+    void rollbackSpeculativeTargetStateOrFailStop(const char* phase);
+    void rollbackSpeculativeTargetStateBestEffort(const char* phase) noexcept;
 
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
     void beginProfiledWork();
@@ -311,6 +314,17 @@ private:
 
     // Keeps async copy source tensors alive across release points.
     TensorHolder buffer_holder_;
+
+    // One outstanding non-root tail at most. Keep input/output owners until
+    // the next buffer-reuse boundary, while CPU/UDS input preparation overlaps
+    // the preceding GPU work. Model TensorHolders are not released at the tail.
+    struct DeferredDecodeTail {
+        torch::Event    done{cuda_graph::makeGraphEvent()};
+        GptModelInputs  inputs;
+        GptModelOutputs target_output;
+        GptModelOutputs draft_output;
+    };
+    std::unique_ptr<DeferredDecodeTail> deferred_decode_tail_;
 
     bool     warm_up_;
     RoleType role_type_;

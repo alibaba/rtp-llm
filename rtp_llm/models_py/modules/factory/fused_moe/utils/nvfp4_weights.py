@@ -40,8 +40,8 @@ class Nvfp4WeightViews:
         return [
             weights[W.moe_w1_i_s].reciprocal().min(),
             self.block_scales[0],
-            weights[W.moe_w1_i_s] * weights[W.moe_w1_s2],
+            weights[W.moe_w1_i_s].reshape(-1) * weights[W.moe_w1_s2].reshape(-1),
             weights[W.moe_w2_i_s].reciprocal().min(),
             self.block_scales[1],
-            weights[W.moe_w2_i_s] * weights[W.moe_w2_s2],
+            weights[W.moe_w2_i_s].reshape(-1) * weights[W.moe_w2_s2].reshape(-1),
         ]
