@@ -93,13 +93,41 @@ def _norm_fp8_scale(AMAX, SCALE, N: tl.constexpr, BLOCK: tl.constexpr):
     tl.store(SCALE, scale)
 
 
+@triton.jit
+def _norm_amax_partials(AMAX, PARTIAL, N: tl.constexpr, BLOCK: tl.constexpr):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    maximum = tl.max(tl.load(AMAX + offsets, offsets < N, other=0.0), 0)
+    tl.store(PARTIAL + tl.program_id(0), maximum)
+
+
+def norm_fp8_scale(partial):
+    """Bound each reduction tile while retaining the quantizer's exact scale."""
+    count = partial.numel()
+    if count > 65536:
+        blocks = triton.cdiv(count, 4096)
+        reduced = torch.empty(blocks, device=partial.device, dtype=torch.float32)
+        _norm_amax_partials[(blocks,)](
+            partial, reduced, N=count, BLOCK=4096, num_warps=4
+        )
+        partial, count = reduced, blocks
+    scale = torch.empty(1, device=partial.device, dtype=torch.float32)
+    _norm_fp8_scale[(1,)](
+        partial,
+        scale,
+        N=count,
+        BLOCK=triton.next_power_of_2(count),
+        num_warps=4 if count < 16384 else 16,
+    )
+    return scale
+
+
 def try_grouped_rms_norm_with_fp8_scale(x, gamma, group_size, eps):
     if not (
         is_supported(x, gamma, group_size)
         and torch.cuda.get_device_capability(x.device) == (12, 0)
         and x.shape[-1] == 10240
         and group_size == 2560
-        and 256 <= x.numel() // 10240 <= 12288
+        and 256 <= x.numel() // 10240 <= 49152
         and not (x.requires_grad or gamma.requires_grad)
         and isinstance(eps, (float, int))
         and math.isfinite(eps)
@@ -109,7 +137,6 @@ def try_grouped_rms_norm_with_fp8_scale(x, gamma, group_size, eps):
     rows = x.numel() // 10240
     result = torch.empty_like(x)
     partial = torch.empty(rows * 4, device=x.device, dtype=torch.float32)
-    scale = torch.empty(1, device=x.device, dtype=torch.float32)
     _grouped_rms_norm_kernel[(rows, 4)](
         x,
         gamma,
@@ -122,14 +149,7 @@ def try_grouped_rms_norm_with_fp8_scale(x, gamma, group_size, eps):
         COLLECT_AMAX=True,
         num_warps=4,
     )
-    _norm_fp8_scale[(1,)](
-        partial,
-        scale,
-        N=rows * 4,
-        BLOCK=triton.next_power_of_2(rows * 4),
-        num_warps=4 if rows < 4096 else 16,
-    )
-    return result, scale
+    return result, norm_fp8_scale(partial)
 
 
 def try_grouped_rms_norm(x, gamma, group_size, eps):
