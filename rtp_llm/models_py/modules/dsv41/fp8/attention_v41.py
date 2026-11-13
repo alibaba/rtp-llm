@@ -2065,18 +2065,6 @@ class AttentionV41FP8(AttentionFP8):
                         )
                         if request_bounds is not None:
                             cache[bounds_key] = request_bounds
-                # Hoisted fp32 copy of the indexer keys for the non-fused
-                # selection branch. Before this, keys.float() ran per q-chunk
-                # per key-slice: with chunk_rows=8 at 1M rows that is ~131K
-                # full [key_count, d] bf16->fp32 conversions per ratio-0
-                # layer (n25 journal: 16,380 slice recomputes measured on
-                # the pre-sliced build; n30 layer cadence: slow ratio-0
-                # layers dominate the 6837s 1M prefill). One conversion per
-                # selection call, bit-identical values, 8 GiB transient at
-                # 1M keys freed at loop exit - n29/n30 telemetry shows
-                # 20-30 GiB margin at the selection peak (161.78 alloc /
-                # 171.10 reserved of 191.98).
-                keys_fp32 = None
                 # Sampled phase timing for the heavy non-fused selection
                 # (n31 evidence: the keys-fp32 hoist changed nothing - the
                 # ~16 min ratio-0 layers are dominated by the per-q-chunk
@@ -2182,20 +2170,23 @@ class AttentionV41FP8(AttentionFP8):
                             if q_lazy_roundtrip
                             else q[chunk]
                         )
-                        if keys_fp32 is None:
-                            keys_fp32 = keys.float()
                         if key_count > 65536:
-                            # Key-axis slicing over the HOISTED fp32 keys
-                            # (see keys_fp32 above): identical einsum math
-                            # as batched matmuls into the logits buffer,
-                            # ~128 MiB product temporaries per key chunk.
-                            # n25 (2026-11-12) OOMed converting the monolith
-                            # per q-chunk at the tightest point (163.02 GiB
-                            # allocated / 1.91 GiB free); the single
-                            # conversion now happens at selection entry
-                            # where n29/n30 telemetry shows 20-30 GiB
-                            # headroom (161.78 alloc / 171.10 reserved of
-                            # 191.98 at the selection peak).
+                            # bf16 MFMA slice matmuls into the fp32 logits
+                            # buffer. [awi][sel] profile (n33, layers 8/14/20):
+                            # the fp32 slice matmuls were 85-98% of heavy-layer
+                            # selection time (L20: ~860s of 874s total; topk
+                            # ~215s) - fp32 GEMM runs on the vector path, bf16
+                            # hits MFMA (>10x). Numerics: q_chunk lies on the
+                            # fp8-e4m3 grid after fp8_roundtrip (3-bit
+                            # mantissa) so the bf16 cast is LOSSLESS; keys are
+                            # natively bf16; rocBLAS accumulates in fp32 and
+                            # rounds the product once to bf16 before the
+                            # fp32-buffer assign - the same numeric class as
+                            # the CUDA fused path (quantized q/keys, bf16
+                            # logits via return_bf16). Key-axis slicing kept:
+                            # ~64 MiB bf16 product temporaries per 65536-key
+                            # slice, logits buffer ~1 GiB at chunk_rows=8.
+                            q_chunk16 = q_chunk.to(torch.bfloat16)
                             logits = torch.empty(
                                 (q_chunk.shape[0], q_chunk.shape[1], key_count),
                                 dtype=torch.float32,
@@ -2204,12 +2195,12 @@ class AttentionV41FP8(AttentionFP8):
                             for k0 in range(0, key_count, 65536):
                                 k1 = min(k0 + 65536, key_count)
                                 logits[:, :, k0:k1] = torch.matmul(
-                                    q_chunk, keys_fp32[k0:k1].t()
+                                    q_chunk16, keys[k0:k1].t()
                                 )
                             logits.relu_()
                         else:
                             logits = torch.einsum(
-                                "thd,kd->thk", q_chunk, keys_fp32
+                                "thd,kd->thk", q_chunk, keys.float()
                             ).relu_()
                         logits = (logits * weights[chunk, :, None]).sum(1)
                         ids = torch.arange(key_count, device=x.device)
@@ -2262,10 +2253,6 @@ class AttentionV41FP8(AttentionFP8):
                     # Same-stream consumers have been enqueued; release the
                     # score before allocating the next bounded chunk.
                     del logits, selected, target
-                # Release the hoisted fp32 keys before the next layer's
-                # working set builds up (same-stream consumers of the
-                # selection outputs are already enqueued).
-                del keys_fp32
                 if sel_profile:
                     torch.cuda.synchronize()
                     sel_total = _pc() - sel_t0
