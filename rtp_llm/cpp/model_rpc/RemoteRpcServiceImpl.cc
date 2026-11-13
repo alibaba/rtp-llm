@@ -11,12 +11,10 @@ grpc::Status RemoteRpcServiceImpl::init(const EngineInitParams&                 
     if (maga_init_params.pd_sep_config.role_type == RoleType::PREFILL) {
         prefill_server_ = std::make_shared<PrefillBatchRpcServer>();
         local_server_   = prefill_server_;
-        local_server_->deferServiceStart();
         return prefill_server_->init(maga_init_params, std::move(propose_params), mm_process_engine);
     } else {
         decode_server_ = std::make_shared<DecodeRpcServer>();
         local_server_  = decode_server_;
-        local_server_->deferServiceStart();
         return decode_server_->init(maga_init_params, std::move(propose_params), mm_process_engine);
     }
 }

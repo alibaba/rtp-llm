@@ -5,37 +5,19 @@ using namespace std;
 
 namespace rtp_llm {
 
-grpc::Status RemoteRpcServer::init(const EngineInitParams&                                maga_init_params,
-                                   std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                                   py::object                                             mm_process_engine) {
-    auto ret = LocalRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
-    if (!ret.ok()) {
-        return ret;
-    }
-    if (defer_cache_store_) {
-        RTP_LLM_LOG_INFO("deferring remote cache-store initialization until RPC service startup");
-    } else {
-        initLocalHostInfo();
-        initLocalPeerInfo();
-        initCacheStore(maga_init_params);
-    }
-    return grpc::Status::OK;
-}
-
-void RemoteRpcServer::startDeferredServices() {
-    if (defer_cache_store_ && !cache_store_) {
+void RemoteRpcServer::startServices() {
+    if (!resource_.cache_store) {
         // Resolve host/peer identity only after the controller releases the
         // template barrier. This keeps the source host's identity and
         // cache-store TCP/RDMA resources out of the restored service.
         initLocalHostInfo();
         initLocalPeerInfo();
         initCacheStore(maga_init_params_);
-        defer_cache_store_ = false;
     }
     // ACCL RDMA initialization calls setenv/unsetenv; finish it before starting
     // the engine. On glibc 2.32, concurrent getenv can traverse an environment
     // pointer array freed by setenv. Both stages must remain after the SCR barrier.
-    LocalRpcServer::startDeferredServices();
+    LocalRpcServer::startServices();
 }
 
 void RemoteRpcServer::initLocalHostInfo() {
@@ -102,14 +84,12 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams& init_params) {
                      params.listen_port,
                      params.rdma_listen_port,
                      params.rdma_mode);
-    cache_store_ = NormalCacheStore::createNormalCacheStore(params);
-    RTP_LLM_CHECK_WITH_INFO(cache_store_ != nullptr, "cache store init failed");
+    auto cache_store = NormalCacheStore::createNormalCacheStore(params);
+    RTP_LLM_CHECK_WITH_INFO(cache_store != nullptr, "cache store init failed");
+    cache_manager->setCacheStore(cache_store);
+    cache_manager->regUserMr(init_params.model_id, cache_store);
+    resource_.cache_store = std::move(cache_store);
     RTP_LLM_LOG_INFO("cache store init success");
-
-    cache_manager->setCacheStore(cache_store_);
-    cache_manager->regUserMr(maga_init_params_.model_id, cache_store_);
-
-    resource_.cache_store = std::dynamic_pointer_cast<NormalCacheStore>(cache_store_);
 }
 
 }  // namespace rtp_llm
