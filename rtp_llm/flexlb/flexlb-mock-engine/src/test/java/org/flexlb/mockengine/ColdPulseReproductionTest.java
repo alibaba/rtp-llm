@@ -119,7 +119,9 @@ class ColdPulseReproductionTest {
                 long first = 1L + i * 1024L;
                 var keys = LongStream.range(first, first + prefixBlocks).boxed().toList();
                 prefixes.add(keys);
-                assertTrue(MockEngineTestSupport.seedCache(caches.get(i % PREFILL), keys));
+                var seedLease = caches.get(i % PREFILL).acquire(keys.size(), keys);
+                assertNotNull(seedLease);
+                assertTrue(caches.get(i % PREFILL).admit(seedLease, keys));
             }
             var estimates = new ConcurrentHashMap<Long, Match>();
             when(h.cache.findMatchingEngines(any(), any(), any())).thenAnswer(call -> {

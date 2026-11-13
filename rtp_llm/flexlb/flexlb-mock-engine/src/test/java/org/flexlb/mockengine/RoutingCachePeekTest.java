@@ -12,7 +12,7 @@ class RoutingCachePeekTest {
     @Test
     void routingAndObservationDoNotProtectKeysFromLruEviction() {
         var cache = new MockLruBlockCache(4);
-        assertTrue(MockEngineTestSupport.seedCache(cache, List.of(1L, 2L, 3L, 4L)));
+        for (long key = 1; key <= 4; key++) { assertTrue(MockEngineTestSupport.seedCache(cache, List.of(key))); }
         assertEquals(2, cache.peekPrefixHitBlocks(List.of(1L, 2L)));
         assertEquals(1, cache.peekPrefixHitBlocks(List.of(1L, 9L, 2L)));
         assertTrue(MockEngineTestSupport.seedCache(cache, List.of(5L)));

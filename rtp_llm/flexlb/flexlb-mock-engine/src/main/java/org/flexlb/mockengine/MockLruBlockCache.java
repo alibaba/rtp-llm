@@ -1,8 +1,10 @@
 package org.flexlb.mockengine;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkState;
@@ -55,10 +57,14 @@ final class MockLruBlockCache {
     /**
      * cache key → reference count. ref == 0: pure LRU block (evictable);
      * ref > 0: referenced by in-flight requests (matchable, NOT evictable).
-     * Access-ordered so the eldest pure-LRU entry is the eviction victim
+     * Access-ordered so the eldest unreferenced leaf is the eviction victim
      * (production evicts the least-recently-used chain tail).
      */
     private final LinkedHashMap<Long, Integer> blocks;
+    // Cumulative prefix hashes form a tree. FULL cache groups evict only leaves,
+    // preserving the reusable ancestors when an old suffix is removed.
+    private final Map<Long, Long> parents = new HashMap<>();
+    private final Map<Long, Integer> childCounts = new HashMap<>();
     /** Blocks held by in-flight requests that carry no cache key (growth/empty-bh). */
     private int heldBlocks;
     private long evictions;
@@ -289,6 +295,14 @@ final class MockLruBlockCache {
                 blocks.put(key, ref); // already indexed — refresh LRU order only
             }
         }
+        for (int i = 1; i < keys.size(); i++) {
+            Long key = keys.get(i);
+            Long parent = keys.get(i - 1);
+            if (!parents.containsKey(key)) {
+                parents.put(key, parent);
+                childCounts.merge(parent, 1, Integer::sum);
+            }
+        }
         // Capacity conservation: the LRU (pure + referenced) may not crowd
         // out held blocks — evict pure-LRU tail blocks ONLY when the pool is
         // genuinely over-subscribed (free < 0). The old transferred > naked
@@ -322,6 +336,7 @@ final class MockLruBlockCache {
         for (Long key : keys) {
             Integer ref = blocks.get(key);
             if (ref != null && ref == 0 && blocks.remove(key) != null) {
+                forgetParent(key);
                 evictions++;
                 changed = true;
             }
@@ -340,6 +355,8 @@ final class MockLruBlockCache {
      */
     synchronized void clear() {
         blocks.clear();
+        parents.clear();
+        childCounts.clear();
         heldBlocks = 0;
         evictions = 0;
     }
@@ -444,14 +461,23 @@ final class MockLruBlockCache {
         }
     }
 
+    private void forgetParent(Long key) {
+        Long parent = parents.remove(key);
+        if (parent != null) {
+            childCounts.computeIfPresent(parent, (ignored, count) -> count <= 1 ? null : count - 1);
+        }
+    }
+
     /**
-     * Evict the eldest PURE-LRU entry (ref == 0). Referenced keys are skipped.
+     * Evict the eldest unreferenced leaf, as BlockTreeEvictor does for FULL groups.
      * @return true when a block was freed
      */
     private boolean evictOne() {
         for (java.util.Map.Entry<Long, Integer> entry : blocks.entrySet()) {
-            if (entry.getValue() == 0) {
-                blocks.remove(entry.getKey());
+            if (entry.getValue() == 0 && childCounts.getOrDefault(entry.getKey(), 0) == 0) {
+                Long key = entry.getKey();
+                blocks.remove(key);
+                forgetParent(key);
                 evictions++;
                 return true;
             }
