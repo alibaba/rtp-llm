@@ -29,7 +29,7 @@ class MoeTopkTritonTest(unittest.TestCase):
         torch.testing.assert_close(weights, expected_weights, atol=2e-7, rtol=2e-6)
 
     def test_large_prefill_batches_use_fused_routing_and_match_native(self):
-        for rows in (8192, 12288, 16384):
+        for rows in (8192, 12288, 16384, 16385, 24576, 32768, 49152):
             for dtype in (torch.bfloat16, torch.float32):
                 with self.subTest(rows=rows, dtype=dtype):
                     logits = torch.randn(rows, 512, device="cuda", dtype=dtype)
@@ -45,9 +45,9 @@ class MoeTopkTritonTest(unittest.TestCase):
                     self.compare(logits, ids, weights)
 
     def test_batches_above_prefill_limit_delegate(self):
-        logits = torch.empty(16385, 512, device="cuda", dtype=torch.bfloat16)
-        ids = torch.empty(16385, 10, device="cuda", dtype=torch.int32)
-        weights = torch.empty(16385, 10, device="cuda")
+        logits = torch.empty(49153, 512, device="cuda", dtype=torch.bfloat16)
+        ids = torch.empty(49153, 10, device="cuda", dtype=torch.int32)
+        weights = torch.empty(49153, 10, device="cuda")
         with patch.object(self.native, "forward") as call:
             self.fused(logits, ids, weights)
         call.assert_called_once_with(logits, ids, weights)

@@ -17,7 +17,19 @@ class ResidualPrefillUpMixTest(unittest.TestCase):
 
     def test_complete_consumer_with_and_without_write_gate(self):
         oracle = ResidualFp8Fixture()
-        for rows in (4093, 4094, 4095, 4096, 12288):
+        for rows in (
+            4093,
+            4094,
+            4095,
+            4096,
+            6144,
+            8192,
+            12288,
+            16384,
+            24576,
+            32768,
+            49152,
+        ):
             for inject in (False, True):
                 model = oracle.module(inject)
                 model.up_projection.role = "PREFILL"

@@ -15,8 +15,52 @@ MODULE = "rtp_llm.models_py.triton_kernels.gated_residual.prefill_inject_norm"
 
 
 class ResidualPrefillInjectNormTest(unittest.TestCase):
+    def test_business_large_rows_inject_norm_matches_reference(self):
+        torch.manual_seed(20261105)
+        for rows in (16383, 16384, 16385, 24576, 32768, 49152):
+            with self.subTest(rows=rows):
+                x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
+                sub = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
+                gates = torch.randn(rows, 4, device="cuda", dtype=torch.bfloat16)
+                gamma = torch.zeros(10240, device="cuda", dtype=torch.bfloat16)
+                # A maximum in the final group of the final row catches lost
+                # reduction tiles and masked tails without changing norm gain.
+                x[-1].zero_()
+                sub[-1].zero_()
+                x[-1, -1] = 100
+                fused = try_inject_grouped_norm(x, sub, gates, gamma, 1e-6)
+                self.assertIsNotNone(fused, "business prefill must use fusion")
+                residual, norm, scale = fused
+                self.assertIsNotNone(scale)
+                for start in range(0, rows, 1024):
+                    stop = min(start + 1024, rows)
+                    expected_residual = inject_into_residual(
+                        x[start:stop], sub[start:stop], gates[start:stop]
+                    )
+                    expected_norm = grouped_rms_norm(
+                        expected_residual, gamma, 2560, 1e-6
+                    )
+                    torch.testing.assert_close(
+                        residual[start:stop], expected_residual, atol=0, rtol=0
+                    )
+                    torch.testing.assert_close(
+                        norm[start:stop], expected_norm, atol=0, rtol=0
+                    )
+                reference_quant, reference_scale = scaled_fp8_per_tensor_quant(norm)
+                quant, _ = scaled_fp8_per_tensor_quant(norm, scale=scale)
+                torch.testing.assert_close(scale, reference_scale, atol=0, rtol=0)
+                self.assertTrue(
+                    torch.equal(
+                        quant.view(torch.uint8), reference_quant.view(torch.uint8)
+                    )
+                )
+                self.assertEqual(
+                    norm[-1, -1].float().item(), norm.abs().max().float().item()
+                )
+                del x, sub, gates, residual, norm, fused, quant, reference_quant
+
     def test_unsupported_prefill_uses_original(self):
-        for rows in (0, 33, 257, 2048, 16385):
+        for rows in (0, 33, 257, 2048, 49153):
             x = torch.empty(rows, 10240, device="cuda", dtype=torch.bfloat16)
             sub = torch.empty(rows, 2560, device="cuda", dtype=torch.bfloat16)
             gates = torch.empty(rows, 4, device="cuda", dtype=torch.bfloat16)
