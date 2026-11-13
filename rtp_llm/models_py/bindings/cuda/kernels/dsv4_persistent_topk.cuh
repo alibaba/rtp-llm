@@ -121,7 +121,7 @@ struct PersistentTopKParams {
     int32_t* __restrict__ lengths;    // [num_rows]
     RadixRowState* row_states;        // large path: per-group state
     uint32_t       num_rows;
-    uint32_t       stride;
+    uint64_t       stride;
     uint32_t       top_k;           // actual k value for output stride
     uint32_t       chunk_size;      // large path: elements per CTA
     uint32_t       ctas_per_group;  // 1=medium, >1=large
@@ -417,8 +417,10 @@ histogram_2048_topk(const float* __restrict__ logits, int32_t* __restrict__ outp
 // which at the same time is an optimized topk kernel copied from tilelang
 // kernel
 template<int TopK>
-__device__ __noinline__ void
-histogram_256_topk(const float* __restrict__ logits, int* __restrict__ output_indices, int logits_offset, int seq_len) {
+__device__ __noinline__ void histogram_256_topk(const float* __restrict__ logits,
+                                                int* __restrict__ output_indices,
+                                                int64_t logits_offset,
+                                                int     seq_len) {
     // All shared state lives in dynamic shared memory to avoid static
     extern __shared__ char medium_smem[];
 
@@ -885,7 +887,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2) persistent_topk_kernel(Pe
 
     for (uint32_t iter = 0; iter < total_iters; iter++) {
         // Static round-robin: all CTAs in the group implicitly agree on the row
-        uint32_t row_idx = group_id + iter * num_groups;
+        const uint64_t row_idx = static_cast<uint64_t>(group_id) + static_cast<uint64_t>(iter) * num_groups;
         if (row_idx >= params.num_rows)
             break;
 
@@ -1017,12 +1019,12 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
                               const IdType* __restrict__ lengths,
                               uint32_t num_rows,
                               uint32_t top_k,
-                              uint32_t max_len) {
+                              uint64_t max_len) {
     constexpr uint32_t BLOCK_SIZE      = FILTERED_TOPK_BLOCK_THREADS;
     constexpr int      RADIX           = 256;
     constexpr int      SMEM_INPUT_SIZE = FILTERED_TOPK_SMEM_INPUT_SIZE;
 
-    const uint32_t bid = blockIdx.x;
+    const uint64_t bid = blockIdx.x;
     const int      tx  = threadIdx.x;
 
     if (bid >= num_rows)
@@ -1258,10 +1260,10 @@ constexpr uint32_t gcd(uint32_t a, uint32_t b) {
 // Compute optimal VEC_SIZE based on max_len and dtype
 // Returns 1, 2, 4, or 8
 template<typename DType>
-constexpr int ComputeFilteredTopKVecSize(uint32_t max_len) {
+constexpr int ComputeFilteredTopKVecSize(uint64_t max_len) {
     constexpr int MAX_VEC = 16 / sizeof(DType);  // 4 for float32, 8 for fp16/bf16
     // Use GCD to find largest power-of-2 divisor
-    const uint32_t g = gcd(max_len, static_cast<uint32_t>(MAX_VEC));
+    const uint32_t g = gcd(static_cast<uint32_t>(max_len % MAX_VEC), static_cast<uint32_t>(MAX_VEC));
     return static_cast<int>(g);
 }
 
@@ -1271,7 +1273,7 @@ cudaError_t FilteredTopKRaggedTransform(DType*       input,
                                         IdType*      lengths,
                                         uint32_t     num_rows,
                                         uint32_t     top_k_val,
-                                        uint32_t     max_len,
+                                        uint64_t     max_len,
                                         cudaStream_t stream = 0) {
     constexpr size_t smem_size = FILTERED_TOPK_SMEM_DYNAMIC;
     constexpr int    MAX_VEC   = 16 / sizeof(DType);

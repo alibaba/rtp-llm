@@ -24,9 +24,10 @@ def load_initial_state_from_block_map_kernel(
     SSM_PER_HEAD = K * V
     SSM_PER_BATCH = HEAD_NUM * SSM_PER_HEAD
 
-    i_b, i_h, i_v = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_b = tl.program_id(0).to(tl.int64)
+    i_h, i_v = tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
 
-    prefix = tl.load(prefix_lengths + i_b)
+    prefix = tl.load(prefix_lengths + i_b).to(tl.int64)
 
     v_offset = i_v * BLOCK_V
 
