@@ -674,7 +674,6 @@ class DashScApp:
         ``start``) because ``start`` is a blocking, main-thread lifecycle.
         """
         servicer: DashScAppServicer | None = None
-        _init_trace_telemetry()
         try:
             port = self.server_config.dash_sc_grpc_server_port
             is_proxy = _is_proxy_mode_enabled()
@@ -807,6 +806,7 @@ class DashScApp:
             )
             if on_prebind is not None:
                 on_prebind()
+            _init_trace_telemetry()
             logging.info(
                 "[DashScApp] starting gRPC server rank_id=%s server_id=%s port=%s mode=%s",
                 self.server_config.rank_id,

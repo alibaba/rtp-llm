@@ -314,7 +314,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         // Keep the loop absent until the template has been released.
         RTP_LLM_LOG_INFO("normal engine loop deferred until SCR release");
     } else {
-        (void)startLoop();
+        THROW_IF_STATUS_ERROR(startLoop());
     }
     (void)construction_guard.release();
 }
@@ -837,8 +837,7 @@ void NormalEngine::initializeAndPublishCacheManager(ResourceContext&            
     const auto& cache_config = cache_manager->cacheConfig();
     RTP_LLM_LOG_INFO("cache manager initialized with config %s", cache_config.debugString().c_str());
 
-    // Publish the cache state only after allocation, BlockTree/backend setup,
-    // and callback registration have all completed successfully.
+    // Publish the allocations only after the selected preparation has succeeded.
     kv_cache_group_num             = cache_config.groupNums();
     resource_context.cache_manager = std::move(cache_manager);
     resource_context.role_type     = role_type;
@@ -881,7 +880,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                      kv_cache_group_num_,
                                      pd_sep_config.role_type,
                                      std::move(cache_manager),
-                                     [](KVCacheManager& manager) { return manager.init(); });
+                                     [](KVCacheManager& manager) { return manager.prepare(); });
 }
 
 absl::Status NormalEngine::initSystemPrompt() {
@@ -907,6 +906,9 @@ KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_c
 absl::Status NormalEngine::startLoop() {
     if (loop_thread_) {
         return absl::OkStatus();
+    }
+    if (!resource_context_.cache_manager->startServices()) {
+        return absl::InternalError("failed to start KV cache services");
     }
     if (parallelism_config.tp_rank == 0) {
         THROW_IF_STATUS_ERROR(initSystemPrompt());

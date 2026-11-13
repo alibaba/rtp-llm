@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <memory>
 #include <tuple>
@@ -22,7 +24,7 @@
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
-#include "c10/cuda/CUDAGuard.h"
+#include "c10/core/DeviceGuard.h"
 
 using namespace std;
 namespace th = torch;
@@ -224,11 +226,11 @@ void RtpLLMOp::init(py::object model,
     // startup calls it immediately; the SCR template path calls it after the
     // control-plane barrier releases.  One ordering, one set of failure paths.
     deferred_init_params_ = std::make_unique<EngineInitParams>(std::move(params));
+    trace_config_         = std::move(telemetry_config);
     prepareRPCService(*deferred_init_params_,
                       std::move(mm_process_engine),
                       std::move(propose_params),
-                      std::move(token_processor),
-                      std::move(telemetry_config));
+                      std::move(token_processor));
     rpc_server_deferred_ = true;
     RTP_LLM_LOG_INFO("engine state prepared; RPC/HTTP listeners start from startRPCServer()");
 }
@@ -422,8 +424,7 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
 void RtpLLMOp::prepareRPCService(const EngineInitParams&                       maga_init_params,
                                  py::object                                    mm_process_engine,
                                  std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                                 py::object                                    token_processor,
-                                 telemetry::TelemetryConfig                    trace_config) {
+                                 py::object                                    token_processor) {
     std::string server_address;
     {
         pybind11::gil_scoped_acquire acquire;
@@ -432,37 +433,6 @@ void RtpLLMOp::prepareRPCService(const EngineInitParams&                       m
         auto    role_type                      = maga_init_params.pd_sep_config.role_type;
         // NOTE: ip/ip段可自定义为所需范围。
         server_address = "0.0.0.0:" + std::to_string(model_rpc_port);
-        // trace telemetry runtime: init once role/rank are known; only
-        // tp_rank==0 enables span production, and it is off unless explicitly
-        // enabled by env
-        {
-            std::string trace_role;
-            switch (role_type) {
-                case RoleType::PDFUSION:
-                    trace_role = "pdfusion";
-                    break;
-                case RoleType::PREFILL:
-                    trace_role = "prefill";
-                    break;
-                case RoleType::DECODE:
-                    trace_role = "decode";
-                    break;
-                case RoleType::VIT:
-                    trace_role = "vit";
-                    break;
-                case RoleType::FRONTEND:
-                    trace_role = "frontend";
-                    break;
-                default:
-                    trace_role = "unknown";
-                    break;
-            }
-            telemetry::TelemetryRuntime::init(trace_config,
-                                              trace_role,
-                                              maga_init_params.parallelism_config.tp_rank,
-                                              maga_init_params.parallelism_config.dp_rank,
-                                              maga_init_params.parallelism_config.world_rank);
-        }
         if (role_type == RoleType::PREFILL || role_type == RoleType::DECODE) {
             model_rpc_service_.reset(new RemoteRpcServiceImpl());
         } else {
@@ -490,7 +460,7 @@ void RtpLLMOp::startRPCServerInternal(const EngineInitParams& maga_init_params) 
 #if USING_CUDA || USING_ROCM
     // Deferred startup runs on a new thread; bind its device before cache initialization.
     const int device_id = static_cast<int>(getDeviceId());
-    const c10::cuda::CUDAGuard device_guard(static_cast<c10::DeviceIndex>(device_id));
+    const c10::DeviceGuard device_guard(c10::Device(c10::kCUDA, static_cast<c10::DeviceIndex>(device_id)));
     RTP_LLM_LOG_INFO("deferred RPC startup bound to device_id=%d", device_id);
 #endif
     int64_t model_rpc_port = -1;
@@ -498,6 +468,16 @@ void RtpLLMOp::startRPCServerInternal(const EngineInitParams& maga_init_params) 
         pybind11::gil_scoped_acquire acquire;
         model_rpc_port = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
     }
+    // The exporter reads process identity and creates worker threads.
+    auto trace_role = roleTypeToString(maga_init_params.pd_sep_config.role_type);
+    std::transform(trace_role.begin(), trace_role.end(), trace_role.begin(), [](unsigned char c) {
+        return std::tolower(c);
+    });
+    telemetry::TelemetryRuntime::init(trace_config_,
+                                      trace_role,
+                                      maga_init_params.parallelism_config.tp_rank,
+                                      maga_init_params.parallelism_config.dp_rank,
+                                      maga_init_params.parallelism_config.world_rank);
     // Start workers and transports even on ranks without a model RPC port.
     model_rpc_service_->startServices();
     if (model_rpc_port < 0) {

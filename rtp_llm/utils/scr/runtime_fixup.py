@@ -159,6 +159,7 @@ def fixup_runtime_after_restore(
         else:
             os.environ[key] = value
     os.environ["RequestedIP"] = pod_ip
+    os.environ["POD_IP"] = pod_ip
     if refresh_logger is not None:
         refresh_logger(pod_ip)
     identity = RestoreRuntimeIdentity(generation, pod_ip, tuple(sorted(updates)))

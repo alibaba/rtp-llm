@@ -153,7 +153,10 @@ class BindBarrierTest(TestCase):
             side_effect=submit,
         ), patch("rtp_llm.dash_sc.app.kmonitor.init"), patch(
             "rtp_llm.dash_sc.app.get_log_path", return_value="/tmp"
-        ):
+        ), patch(
+            "rtp_llm.dash_sc.app.init_telemetry",
+            side_effect=lambda *_args: events.append("tracing"),
+        ) as init_tracing:
             ready_pipe = Mock()
             with self.assertRaisesRegex(RuntimeError, "SCR restore failed"):
                 app.start(
@@ -163,6 +166,7 @@ class BindBarrierTest(TestCase):
                     ready_pipe_writer=ready_pipe,
                 )
             app._grpc_server.start_on_loop.assert_not_called()
+            init_tracing.assert_not_called()
             on_ready.assert_not_called()
             ready_pipe.send.assert_called_once()
             self.assertEqual(ready_pipe.send.call_args.args[0]["status"], "failed")
@@ -175,7 +179,8 @@ class BindBarrierTest(TestCase):
                 on_ready=on_ready,
             )
 
-        self.assertEqual(events, ["barrier", "prebind", "start_on_loop", "ready"])
+        self.assertEqual(events, ["barrier", "prebind", "tracing", "start_on_loop", "ready"])
+        init_tracing.assert_called_once_with("dash_sc", 0)
         on_prebind.assert_called_once_with()
         on_ready.assert_called_once_with()
         app._grpc_server.start_on_loop.assert_called_once()

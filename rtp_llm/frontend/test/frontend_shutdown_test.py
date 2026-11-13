@@ -229,8 +229,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         with TestClient(app_owner.create_app()):
             self.assertEqual(ready, ["ready"])
 
-    def test_prebind_callback_runs_before_listening_socket(self):
-        """SCR arrival must gate the HTTP bind, not run after the server is ready."""
+    def test_prebind_callback_gates_tracing_and_http_bind(self):
         events = []
         app_owner = FrontendApp.__new__(FrontendApp)
         app_owner.frontend_server = FakeFrontendServer()
@@ -263,7 +262,11 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         server = Mock()
         prebind = lambda: events.append("prebind")
 
-        with patch("rtp_llm.frontend.frontend_app.socket.socket", socket_factory), \
+        with patch(
+            "rtp_llm.frontend.frontend_app.init_telemetry",
+            side_effect=lambda *_args: events.append("tracing"),
+        ) as init_tracing, \
+            patch("rtp_llm.frontend.frontend_app.socket.socket", socket_factory), \
             patch("rtp_llm.frontend.frontend_app.Config"), \
             patch(
                 "rtp_llm.frontend.frontend_app.GracefulShutdownServer",
@@ -280,13 +283,16 @@ class FrontendShutdownManagerTest(unittest.TestCase):
                     on_prebind=Mock(side_effect=RuntimeError("SCR restore failed"))
                 )
             socket_factory.assert_not_called()
+            init_tracing.assert_not_called()
             server.run.assert_not_called()
             events.clear()
 
             app_owner.start(on_prebind=prebind)
 
-        self.assertLess(events.index("prebind"), events.index("bind"))
-        self.assertEqual(events[:3], ["frontend_start", "create_app", "prebind"])
+        self.assertEqual(
+            events, ["frontend_start", "create_app", "prebind", "tracing", "socket", "bind"]
+        )
+        init_tracing.assert_called_once_with("frontend", 0)
         socket_factory.assert_called_once()
         server.run.assert_called_once_with()
 

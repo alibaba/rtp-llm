@@ -25,6 +25,7 @@ class ScrRuntimeFixupTest(unittest.TestCase):
                 os.environ,
                 {
                     "RequestedIP": "192.0.2.10",
+                    "POD_IP": "192.0.2.10",
                     "RTPLLM_ENABLE_SCR": "1",
                     "SCR_PHASE": "restore",
                 },
@@ -99,6 +100,7 @@ class ScrRuntimeFixupTest(unittest.TestCase):
                 "release",
             ],
         )
+        self.assertEqual(os.environ["POD_IP"], "192.0.2.20")
 
     def test_repeated_restore_rereads_provider_even_with_same_checkpoint_generation(
         self,
@@ -151,6 +153,7 @@ class ScrRuntimeFixupTest(unittest.TestCase):
             ):
                 runtime.fixup_runtime_after_restore("g1", lifecycle, restore_env=values)
             self.assertEqual(os.environ["RequestedIP"], "192.0.2.10")
+            self.assertEqual(os.environ["POD_IP"], "192.0.2.10")
         with patch.object(
             runtime, "current_pod_ip", side_effect=OSError("no route")
         ), self.assertRaises(OSError):

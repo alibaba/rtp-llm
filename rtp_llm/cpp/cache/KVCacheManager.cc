@@ -282,8 +282,12 @@ void KVCacheManager::stopMetricsReporter() {
 // 初始化和配置相关
 
 bool KVCacheManager::init() {
+    return prepare() && startServices();
+}
+
+bool KVCacheManager::prepare() {
     RTP_LLM_CHECK_WITH_INFO(!coordinator_manager_ && !block_tree_cache_ && !metrics_reporter_thread_.joinable(),
-                            "KVCacheManager::init called more than once");
+                            "KVCacheManager::prepare called more than once");
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache specs must not be empty");
     if (kv_cache_config_.enable_remote_cache
         && (kv_cache_config_.kvcm_asyncwrapper_thread_num == 0 || kv_cache_config_.kvcm_asyncwrapper_queue_size == 0)) {
@@ -311,6 +315,25 @@ bool KVCacheManager::init() {
     for (const auto& pool : coordinator_manager_->groupBlockPools()) {
         pool->setCapacityChangeCallback(capacity_changed);
     }
+    return true;
+}
+
+void KVCacheManager::updateRuntimeEndpoints(const RuntimeConfig& runtime_config, const std::string& pod_ip) {
+    RTP_LLM_CHECK_WITH_INFO(!block_tree_cache_, "cache endpoints can only be updated before cache services start");
+    runtime_config_.worker_addrs      = runtime_config.worker_addrs;
+    runtime_config_.worker_grpc_addrs = runtime_config.worker_grpc_addrs;
+    auto& endpoint = kv_cache_config_.kv_cache_event_host_ip_port;
+    const auto port = endpoint.rfind(':');
+    if (kv_cache_config_.kv_cache_event_publisher_type == "kvcm" && port != std::string::npos && !pod_ip.empty()) {
+        endpoint = pod_ip + endpoint.substr(port);
+    }
+}
+
+bool KVCacheManager::startServices() {
+    if (block_tree_cache_) {
+        return true;
+    }
+    RTP_LLM_CHECK_WITH_INFO(coordinator_manager_ != nullptr, "KV cache must be prepared before services start");
     const bool is_first_stage_root        = parallelism_config_.pp_rank == 0 && parallelism_config_.tp_rank == 0;
     const bool requires_broadcast_manager = is_first_stage_root
                                             && (parallelism_config_.pp_size > 1 || parallelism_config_.tp_size > 1)
@@ -349,7 +372,7 @@ bool KVCacheManager::init() {
                                              metrics_reporter_,
                                              block_tree_layout_);
     if (!block_tree_cache_) {
-        RTP_LLM_LOG_ERROR("KVCacheManager::init: failed to create BlockTreeCache");
+        RTP_LLM_LOG_ERROR("KVCacheManager::startServices: failed to create BlockTreeCache");
         return false;
     }
     coordinator_manager_->attachBlockTreeCache(block_tree_cache_);
