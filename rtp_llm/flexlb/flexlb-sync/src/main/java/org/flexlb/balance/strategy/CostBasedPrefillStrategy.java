@@ -90,6 +90,32 @@ public class CostBasedPrefillStrategy {
         cacheAffinityMinHitRate = affinity == null ? 0.0 : normalizedHitRate(affinity.getMinPrefixHitPercent());
     }
 
+    /** Payload-free token estimate for benefit ordering; no time predictor or capacity reservation. */
+    public record TokenEstimate(long inputTokens, long hitTokens) {
+        public TokenEstimate {
+            if (inputTokens < 0 || hitTokens < 0 || hitTokens > inputTokens) {
+                throw new IllegalArgumentException("invalid Prefill token estimate");
+            }
+        }
+        public long computeTokens() { return inputTokens - hitTokens; }
+    }
+
+    public TokenEstimate estimateQueuedTokens(Request request, RoleType role, String group) {
+        var fleet = endpointRegistry.prefillRoutingSnapshot(role).stream()
+                .filter(entry -> group == null || group.equals(entry.endpoint().getStatus().topologySnapshot().group()))
+                .toList();
+        if (fleet.isEmpty()) { return null; }
+        var matches = cacheAwareService.findMatchingEngines(request.getBlockCacheKeys(), role,
+                fleet.stream().map(EndpointRegistry.PrefillRoutingEntry::address).toList());
+        long hit = 0L;
+        for (var entry : fleet) {
+            hit = Math.max(hit, calculateCacheMatch(entry.endpoint(), entry.address(), matches, request).effectiveHitTokens());
+        }
+        if (tokenBalance != null && !PrefillTokenBalance.cacheFirst(
+                hit, request.getSeqLen(), tokenBalance.getMinPrefixHitPercent())) { hit = 0L; }
+        return new TokenEstimate(request.getSeqLen(), hit);
+    }
+
     /** Advisory overload estimate includes busy workers, before admission-capacity filtering. */
     public PrefillQueueShedding.Estimate estimateQueuedWork(
             Request request, RoleType role, String group) {

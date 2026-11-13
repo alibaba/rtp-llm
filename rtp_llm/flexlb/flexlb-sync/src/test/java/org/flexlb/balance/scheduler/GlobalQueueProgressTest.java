@@ -57,6 +57,69 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class GlobalQueueProgressTest {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void cachedInputBenefitPrecedesShortColdWithEqualCompute(boolean enabled) throws Exception {
+        var release = new CountDownLatch(1);
+        var cheapStarted = new CountDownLatch(1);
+        var expensiveStarted = new CountDownLatch(1);
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            configureWorkCosts(f, enabled);
+            f.aSlots.set(1);
+            f.onSelection = id -> {
+                if (id == 1801L) { cheapStarted.countDown(); await(release); } else { expensiveStarted.countDown(); }
+            };
+            var lock = (ReentrantLock) ReflectionTestUtils.getField(f.scheduler, "lock");
+            lock.lock();
+            try { f.submit(1801L, "a"); f.submit(1802L, "a"); }
+            finally { lock.unlock(); }
+            try {
+                assertTrue(cheapStarted.await(2, TimeUnit.SECONDS));
+                if (enabled) {
+                    assertFalse(expensiveStarted.await(100, TimeUnit.MILLISECONDS),
+                            "short cold work must not race higher-benefit cached admission");
+                } else {
+                    assertTrue(expensiveStarted.await(2, TimeUnit.SECONDS),
+                            "disabled ordering must preserve existing parallel planning");
+                }
+            } finally { release.countDown(); }
+            awaitCondition(() -> f.admitted.size() == 2);
+        } finally { release.countDown(); }
+    }
+
+    @Test
+    void cancelledCostOrderedWaiterDoesNotBlockLaterWorkOrStartAfterCancellation() throws Exception {
+        var release = new CountDownLatch(1);
+        var cheapStarted = new CountDownLatch(1);
+        var cancelledSelections = new AtomicInteger();
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            configureWorkCosts(f, true);
+            f.aSlots.set(1);
+            f.onSelection = id -> {
+                if (id == 1801L) { cheapStarted.countDown(); await(release); }
+                if (id == 1802L) { cancelledSelections.incrementAndGet(); }
+            };
+            f.submit(1801L, "a");
+            assertTrue(cheapStarted.await(2, TimeUnit.SECONDS));
+            f.submit(1802L, "a");
+            f.requests.get(1802L).cancel(false);
+            f.submit(1803L, "a");
+            release.countDown();
+            awaitCondition(() -> f.admitted.contains(1803L));
+            assertEquals(0, cancelledSelections.get());
+            assertFalse(f.admitted.contains(1802L));
+            awaitCondition(() -> RequestProtocolTestSupport.queuedCount(f.scheduler) == 0);
+        } finally { release.countDown(); }
+    }
+
+    private static void configureWorkCosts(Fixture f, boolean enabled) {
+        ReflectionTestUtils.setField(f.scheduler, "prefillCostOrder", enabled);
+        when(f.router.estimateQueuedTokens(any(), nullable(String.class))).thenAnswer(call -> {
+            RequestContext context = call.getArgument(0);
+            boolean cheap = context.data().getRequestId() == 1801L;
+            return new org.flexlb.balance.strategy.CostBasedPrefillStrategy.TokenEstimate(cheap ? 9216 : 1024, cheap ? 8192 : 0);
+        });
+    }
 
     @Test
     void cacheSheddingRemovesLowBenefitOnlyAndDoesNotCrossPools() throws Exception {
@@ -328,9 +391,11 @@ class GlobalQueueProgressTest {
         }
     }
 
-    @Test
-    void cancelledPlannerKeepsItsSlotUntilItsResourcesAreClosed() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void cancelledPlannerKeepsItsSlotUntilItsResourcesAreClosed(boolean enabled) throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            ReflectionTestUtils.setField(f.scheduler, "prefillCostOrder", enabled);
             CountDownLatch started = new CountDownLatch(2);
             CountDownLatch finish = new CountDownLatch(1);
             CountDownLatch thirdStarted = new CountDownLatch(1);
@@ -361,9 +426,11 @@ class GlobalQueueProgressTest {
         }
     }
 
-    @Test
-    void shutdownClosesLatePlanWithoutAdmittingIt() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void shutdownClosesLatePlanWithoutAdmittingIt(boolean enabled) throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            ReflectionTestUtils.setField(f.scheduler, "prefillCostOrder", enabled);
             CountDownLatch started = new CountDownLatch(1);
             CountDownLatch finish = new CountDownLatch(1);
             f.onSelection = id -> {

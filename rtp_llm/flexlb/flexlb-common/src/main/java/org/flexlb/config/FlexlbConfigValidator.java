@@ -66,9 +66,9 @@ final class FlexlbConfigValidator {
         }
         String type = ordering.path("type").asText("FIFO");
         if ("FIFO".equals(type)) {
-            rejectFieldsExcept(ordering, "scheduler.ordering", "type");
+            rejectFieldsExcept(ordering, "scheduler.ordering", "type", "prefillCostOrder");
         } else if ("PRIORITY".equals(type)) {
-            rejectFieldsExcept(ordering, "scheduler.ordering", "type",
+            rejectFieldsExcept(ordering, "scheduler.ordering", "type", "prefillCostOrder",
                     "defaultPriority", "preemption");
             validatePreemptionShape(ordering.path("preemption"));
         }
@@ -136,6 +136,12 @@ final class FlexlbConfigValidator {
                             || config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
                             && config.decisionPolicy().getType() == DecisionPolicyConfig.Type.SINGLE,
                     "scheduler.prefillQueueShedding", "requires tokenBalance backpressure or SINGLE decisions and NON_BATCH delivery");
+        }
+        if (config.getScheduler().getOrdering() != null && config.getScheduler().getOrdering().isPrefillCostOrder()) {
+            require(config.isQueue() && config.decisionPolicy().getType() == DecisionPolicyConfig.Type.SINGLE
+                            && config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
+                            && config.getRouter().getRoles().getPrefill().getTokenBalance() != null,
+                    "scheduler.ordering.prefillCostOrder", "requires QUEUE, SINGLE, NON_BATCH and tokenBalance");
         }
         config.getDispatcher().validateFor(config.getScheduler());
         validateRequestLifecycle(config.getRequestLifecycle());
