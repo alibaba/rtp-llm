@@ -113,9 +113,11 @@ def _ple_decode_conv_roll(
         source = tl.load(ReadBlocks + row)
         target = tl.load(WriteBlocks + row)
         direct = tl.load(WriteMode + row) == 1
-        next_history = tl.where(
-            direct, History + target * 9 * WIDTH, Scratch + row * 9 * WIDTH
-        ) + col
+        # Select an integer address so this does not depend on pointer-valued where.
+        direct_addr = (History + target * 9 * WIDTH).to(tl.uint64)
+        staged_addr = (Scratch + row * 9 * WIDTH).to(tl.uint64)
+        next_addr = tl.where(direct, direct_addr, staged_addr)
+        next_history = next_addr.to(tl.pointer_type(tl.bfloat16)) + col
     else:
         source = row
         next_history = History + row * 9 * WIDTH + col
