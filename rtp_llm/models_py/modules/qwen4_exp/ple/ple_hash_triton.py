@@ -6,6 +6,16 @@ import triton.language as tl
 
 
 @triton.jit
+def _hash_two_three(current, previous, oldest, head, vocab, offset, multipliers, EOS: tl.constexpr):
+    oldest = tl.where(previous == EOS, EOS, oldest)
+    two = (current * tl.load(multipliers)) ^ (previous * tl.load(multipliers + 1))
+    three = two ^ (oldest * tl.load(multipliers + 2))
+    mixed = tl.where(head < 8, two, three)
+    remainder = mixed % vocab
+    return tl.where(remainder < 0, remainder + vocab, remainder) + offset
+
+
+@triton.jit
 def _hash_ngram_ids(
     HISTORY,
     VOCAB,
@@ -36,16 +46,11 @@ def _hash_ngram_ids(
         (row < BATCH * SEQ) & (position >= 2),
         other=EOS,
     )
-    # A preceding EOS restarts both histories. If the second preceding token
-    # is EOS itself, its value already equals the required reset padding.
-    before_previous = tl.where(previous == EOS, EOS, before_previous)
-    two = (current * tl.load(MULTIPLIERS)) ^ (previous * tl.load(MULTIPLIERS + 1))
-    three = two ^ (before_previous * tl.load(MULTIPLIERS + 2))
-    mixed = tl.where(head[None, :] < 8, two[:, None], three[:, None])
-    vocab = tl.load(VOCAB + head)
-    remainder = mixed % vocab[None, :]
-    remainder = tl.where(remainder < 0, remainder + vocab[None, :], remainder)
-    values = remainder + tl.load(OFFSETS + head)[None, :]
+    values = _hash_two_three(
+        current[:, None], previous[:, None], before_previous[:, None],
+        head[None, :], tl.load(VOCAB + head)[None, :],
+        tl.load(OFFSETS + head)[None, :], MULTIPLIERS, EOS,
+    )
     tl.store(
         OUT + row[:, None] * 16 + head[None, :], values, row[:, None] < BATCH * SEQ
     )

@@ -288,8 +288,12 @@ py_library(
         "modules/qwen4_exp/ple/ple.py",
         "modules/qwen4_exp/ple/ple_gate_triton.py",
         "modules/qwen4_exp/ple/ple_conv_triton.py",
+        "modules/qwen4_exp/ple/ple_decode_fusion_triton.py",
         "modules/qwen4_exp/ple/ple_decode_plan_triton.py",
+        "modules/qwen4_exp/ple/ple_gather_triton.py",
+        "modules/qwen4_exp/ple/ple_hash_triton.py",
         "modules/qwen4_exp/ple/ple_page_projection.py",
+        "modules/qwen4_exp/ple/ple_prefetch.py",
     ],
     data = [
         "//rtp_llm:__init__.py",

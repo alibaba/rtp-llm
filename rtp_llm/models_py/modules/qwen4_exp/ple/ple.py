@@ -1,6 +1,6 @@
 import math
 from contextlib import contextmanager
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -527,10 +527,37 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             # its device address before capture. Capture hash + UVA gather on
             # the model stream so each replay reads its own current history.
             # Eager prefetch and its ready/consumed lifecycle remain unchanged.
+            if (
+                seq_len == 1
+                and self.ngram_size == 3
+                and self.heads_per_ngram == 8
+                and self._cpu_uva_pointers is not None
+                and type(self) is Qwen4ExpNGramEmbedding
+                and type(self).hashed_ids is _NGRAM_HASHED_IDS
+                and type(self).gather is _NGRAM_GATHER
+                and "hashed_ids" not in self.__dict__
+                and "gather" not in self.__dict__
+            ):
+                from .ple_gather_triton import try_gather_hashed_decode
+
+                rows = try_gather_hashed_decode(
+                    token_history,
+                    self.vocab_sizes,
+                    self.offsets,
+                    self.multipliers,
+                    self.shards,
+                    self._cpu_uva_pointers,
+                    self.total_shards,
+                    self.eos_token_id,
+                )
+                if rows is not None:
+                    return self._reduce_rows(rows)
         return self.gather(self.hashed_ids(token_history.long(), seq_len))
 
 
 _NGRAM_FORWARD = Qwen4ExpNGramEmbedding.forward
+_NGRAM_HASHED_IDS = Qwen4ExpNGramEmbedding.hashed_ids
+_NGRAM_GATHER = Qwen4ExpNGramEmbedding.gather
 
 
 class Qwen4ExpPLELayer(nn.Module):
@@ -583,6 +610,7 @@ class Qwen4ExpPLELayer(nn.Module):
         self.short_conv_state_len = (conv_kernel_size - 1) * self.conv_dilation
         self.key_proj = key_proj
         self.value_proj = value_proj
+        self._decode_kv_weight = None
         from rtp_llm.models_py.modules.base.common.fp8_linear import make_projection
 
         scales = projection_scales if projection_scales is not None else (None, None)
@@ -597,6 +625,37 @@ class Qwen4ExpPLELayer(nn.Module):
         self.norm_key = norm_key
         self.norm_query = norm_query
         self.norm_conv = norm_conv
+
+    def pack_decode_projections(self) -> bool:
+        """Pack qualified weights during assembly, before installing their views."""
+        if self._decode_kv_weight is not None:
+            return True
+        key, value = self.key_proj, self.value_proj
+        if not (
+            self.key_projection is None
+            and self.value_projection is None
+            and key.shape == (10240, 2560)
+            and value.shape == (2560, 2560)
+            and key.is_cuda
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(key.device) == (9, 0)
+            and all(
+                w.device == key.device
+                and w.dtype == torch.bfloat16
+                and w.is_contiguous()
+                and not w.requires_grad
+                and not getattr(w, "_rtp_requires_restart_for_update", False)
+                for w in (key, value)
+            )
+        ):
+            return False
+        # As in vLLM's PLE layer, a single GEMM produces both projections.
+        # Install the slices as the model's K/V weights so in-place updates
+        # and the prefill path see the same storage as the packed decode GEMM.
+        packed = torch.cat((key, value), dim=0)
+        self.key_proj, self.value_proj = packed.split((10240, 2560), dim=0)
+        self._decode_kv_weight = packed
+        return True
 
     def _norm(self, x: torch.Tensor, gamma: torch.Tensor) -> torch.Tensor:
         return grouped_rms_norm(x, gamma, self.hidden_size, self.norm_eps)
@@ -658,23 +717,27 @@ class Qwen4ExpPLELayer(nn.Module):
         )
         return hidden_states.transpose(1, 2)
 
-    def _gated_values(
-        self,
-        hyper_states: torch.Tensor,
-        token_history: torch.Tensor,
-        padding_mask: Optional[torch.Tensor] = None,
-        *,
-        embeddings: Optional[torch.Tensor] = None,
-    ) -> tuple:
-        """Shared front half: n-gram embed, gate against the stream, normalize.
-
-        Returns ``(gated_value, gated_value_normed)``, both ``[B, S, hc_hidden]``.
-        The short conv is applied by the caller so prefill and decode can feed it
-        different left context.
-        """
+    def _project_key_value(
+        self, hyper_states, token_history, embeddings, *, decode=False
+    ):
         seq_len = hyper_states.shape[1]
         if embeddings is None:
             embeddings = self.ple_embedding(token_history, seq_len)
+
+        packed = self._decode_kv_weight
+        if (
+            decode
+            and packed is not None
+            and seq_len == 1
+            and embeddings.shape == (hyper_states.shape[0], 1, packed.shape[1])
+            and embeddings.device == packed.device
+            and embeddings.dtype == packed.dtype
+            and embeddings.is_contiguous()
+            and not embeddings.requires_grad
+        ):
+            return F.linear(embeddings, packed).split(
+                (self.hc_hidden_size, self.hidden_size), dim=-1
+            )
 
         from rtp_llm.models_py.modules.base.common.fp8_linear import project_fp8_pair
 
@@ -694,6 +757,21 @@ class Qwen4ExpPLELayer(nn.Module):
                 if self.value_projection is not None
                 else F.linear(embeddings, self.value_proj)
             )
+        return key, value
+
+    def _gated_values(
+        self,
+        hyper_states: torch.Tensor,
+        token_history: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
+        *,
+        embeddings: Optional[torch.Tensor] = None,
+    ) -> tuple:
+        """Return the gated values and normalized convolution inputs."""
+        key, value = self._project_key_value(hyper_states, token_history, embeddings)
+        return self._gate_projected_values(key, value, hyper_states, padding_mask)
+
+    def _gate_projected_values(self, key, value, hyper_states, padding_mask=None):
         if hyper_states.is_cuda and torch.version.hip is None:
             from .ple_gate_triton import try_ple_gate
 
@@ -996,6 +1074,12 @@ class Qwen4ExpPLELayer(nn.Module):
         conv_buffer: torch.Tensor,
         *,
         embeddings: Optional[torch.Tensor] = None,
+        add_residual: bool = False,
+        reuse_conv_buffer: bool = False,
+        conv_read_blocks: Optional[torch.Tensor] = None,
+        conv_write_blocks: Optional[torch.Tensor] = None,
+        conv_write_mode: Optional[torch.Tensor] = None,
+        context_write: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> tuple:
         """One decode token: PLE output plus the rolled conv buffer.
 
@@ -1003,10 +1087,47 @@ class Qwen4ExpPLELayer(nn.Module):
         ``[B, context_len + 1]`` (cached context ids followed by the new token);
         ``conv_buffer`` is ``[B, state_len, hc_hidden]`` of prior conv inputs.
         Unlike prefill's ``_short_conv``, the real cached history is used instead
-        of a zero left pad.
+        of a zero left pad. With ``add_residual``, the output includes the
+        outer addition of ``hyper_state`` after the PLE output is rounded.
+        Set ``reuse_conv_buffer`` only for a disposable history buffer. The
+        qualified fused path may write the rolled history into that buffer.
+        With validated ``conv_read_blocks`` from the decode plan,
+        ``conv_buffer`` is the history pool. A plan with ``conv_write_blocks``
+        and ``conv_write_mode`` can commit directly to it and return no buffer.
+        ``context_write`` supplies the matching context pool and destination IDs.
         """
-        gated_value, gated_value_normed = self._gated_values(
-            hyper_state, token_history_step, embeddings=embeddings
+        key, value = self._project_key_value(
+            hyper_state, token_history_step, embeddings, decode=True
+        )
+        if hyper_state.is_cuda and torch.version.hip is None:
+            from .ple_decode_fusion_triton import try_ple_decode_fusion
+
+            fused = try_ple_decode_fusion(
+                key,
+                value,
+                hyper_state,
+                self.norm_key,
+                self.norm_query,
+                self.norm_conv,
+                conv_buffer,
+                self.conv_weight,
+                self.norm_eps,
+                self.conv_dilation,
+                add_residual=add_residual,
+                reuse_history=reuse_conv_buffer and conv_read_blocks is None,
+                history_read_blocks=conv_read_blocks,
+                history_write_blocks=conv_write_blocks,
+                history_write_mode=conv_write_mode,
+                context_write=(
+                    (*context_write, token_history_step) if context_write is not None else None
+                ),
+            )
+            if fused is not None:
+                return fused
+        if conv_read_blocks is not None:
+            conv_buffer = conv_buffer.index_select(0, conv_read_blocks)
+        gated_value, gated_value_normed = self._gate_projected_values(
+            key, value, hyper_state
         )
         if hyper_state.is_cuda and torch.version.hip is None:
             from .ple_conv_triton import try_ple_conv
@@ -1017,6 +1138,7 @@ class Qwen4ExpPLELayer(nn.Module):
                 conv_buffer,
                 self.conv_weight,
                 self.conv_dilation,
+                residual=hyper_state if add_residual else None,
                 roll_state=True,
             )
             if fused is not None:
@@ -1032,7 +1154,7 @@ class Qwen4ExpPLELayer(nn.Module):
         ).transpose(1, 2)
         output = gated_value + conv_out
         new_buffer = torch.cat([conv_buffer, gated_value_normed], dim=1)[:, 1:]
-        return output, new_buffer
+        return (hyper_state + output if add_residual else output), new_buffer
 
     def decode_chunk(
         self,

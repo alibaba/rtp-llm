@@ -16,6 +16,7 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_transaction import (
 from rtp_llm.models_py.modules.qwen4_exp.ple import (
     ple_commit_triton,
     ple_conv_triton,
+    ple_decode_fusion_triton,
     ple_decode_plan_triton,
 )
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpPLELayer
@@ -40,6 +41,8 @@ class _FixturePLE(Qwen4ExpPLELayer):
         self.hc_hidden_size = _WIDTH
         self.conv_dilation = 3
         self.short_conv_state_len = _STATE
+        self.norm_key = self.norm_query = self.norm_conv = None
+        self.norm_eps = 1e-6
         self.conv_weight = torch.full(
             (_WIDTH, 1, 4), 0.125, device="cuda", dtype=torch.bfloat16
         )
@@ -53,6 +56,21 @@ class _FixturePLE(Qwen4ExpPLELayer):
             token_history[:, :-2] + 2 * token_history[:, 1:-1] + token_history[:, 2:]
         ) % 8
         return hyper_states, hyper_states + code[..., None].to(torch.bfloat16) * 0.125
+
+    def _project_key_value(
+        self, hyper_states, token_history, embeddings, *, decode=False
+    ):
+        return self._gated_values(hyper_states, token_history, embeddings=embeddings)
+
+    def _gate_projected_values(self, key, value, hyper_states, padding_mask=None):
+        return key, value
+
+    def decode_step(self, *args, **kwargs):
+        # Feed the same synthetic post-gate tensors to both convolution paths.
+        with patch.object(
+            ple_decode_fusion_triton, "try_ple_decode_fusion", return_value=None
+        ):
+            return super().decode_step(*args, **kwargs)
 
 
 def _bf16_sample(shape):
@@ -242,6 +260,13 @@ class PLEDecodeExpansionTest(unittest.TestCase):
         else:
             torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
+    def _assert_s1_conv_dispatch(self, calls, residual, fused):
+        self.assertEqual(len(calls), 1)
+        kwargs, dispatched = calls[0]
+        self.assertIs(kwargs["roll_state"], True)
+        self.assert_exact(kwargs["residual"], residual)
+        self.assertIs(dispatched, fused)
+
     @torch.inference_mode()
     def test_s1_runtime_batch_expansion(self):
         for batch in _S1_BATCHES:
@@ -260,8 +285,11 @@ class PLEDecodeExpansionTest(unittest.TestCase):
                     _record_dispatch(ple_conv_triton, "try_ple_conv") as conv,
                 ):
                     actual = fixture.forward()
-                self.assertEqual(plan, [({"graph_mode": False}, True)])
-                self.assertEqual(conv, [({"roll_state": True}, True)])
+                self.assertEqual(
+                    [(kw["graph_mode"], dispatched) for kw, dispatched in plan],
+                    [(False, True)],
+                )
+                self._assert_s1_conv_dispatch(conv, fixture.hidden, fused=True)
                 self.assert_exact(actual, expected)
                 self.assert_exact((fixture.state, fixture.context), expected_pools)
 
@@ -293,11 +321,10 @@ class PLEDecodeExpansionTest(unittest.TestCase):
                     with torch.cuda.graph(graph):
                         output = fixture.forward()
                 self.assertEqual(
-                    plan, [({"graph_mode": True}, True)] if enabled else []
+                    [(kw["graph_mode"], dispatched) for kw, dispatched in plan],
+                    [(True, True)] if enabled else [],
                 )
-                self.assertEqual(
-                    conv, [({"roll_state": True}, enabled)]
-                )
+                self._assert_s1_conv_dispatch(conv, fixture.hidden, fused=enabled)
             return graph, output
 
         baseline, expected = capture(False, before)
