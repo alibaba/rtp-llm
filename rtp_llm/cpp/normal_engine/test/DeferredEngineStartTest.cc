@@ -31,7 +31,7 @@ TEST_F(DeferredEngineStartTest, OrdinaryStartupStillStartsImmediately) {
     EXPECT_NE(engine->loop_thread_, nullptr);
 }
 
-TEST_F(DeferredEngineStartTest, RpcReleaseStartsLeaderAndFollowerWithoutBroadcaster) {
+TEST_F(DeferredEngineStartTest, RpcReleaseStartsEachRankAndOnlyLeaderCreatesBroadcaster) {
     for (int tp_rank : {0, 1}) {
         SCOPED_TRACE(tp_rank);
         auto engine = prepareEngine();
@@ -39,17 +39,21 @@ TEST_F(DeferredEngineStartTest, RpcReleaseStartsLeaderAndFollowerWithoutBroadcas
         server.engine_ = engine;
         // Only RPC role selection varies here; the mock engine uses one GPU.
         server.maga_init_params_.parallelism_config.tp_rank = tp_rank;
-        if (tp_rank != 0) {
-            server.maga_init_params_.runtime_config.worker_grpc_addrs = {"127.0.0.1:1"};
-        }
+        RuntimeConfig restored_runtime;
+        restored_runtime.worker_grpc_addrs = {"127.0.0.1:1"};
+        ASSERT_NO_THROW(server.updateRuntimeEndpoints(restored_runtime));
         ASSERT_EQ(engine->loop_thread_, nullptr);
+        ASSERT_EQ(server.tp_broadcaster_, nullptr);
         ASSERT_NO_THROW(server.startServices());
         EXPECT_TRUE(engine->running_.load());
         auto first_thread = engine->loop_thread_;
         ASSERT_NE(first_thread, nullptr);
-        EXPECT_EQ(server.tp_broadcaster_, nullptr);
+        auto first_broadcaster = server.tp_broadcaster_;
+        EXPECT_EQ(first_broadcaster != nullptr, tp_rank == 0);
         ASSERT_NO_THROW(server.startServices());
         EXPECT_EQ(engine->loop_thread_, first_thread);
+        EXPECT_EQ(server.tp_broadcaster_, first_broadcaster);
+        EXPECT_ANY_THROW(server.updateRuntimeEndpoints(restored_runtime));
     }
 }
 
