@@ -43,6 +43,7 @@
 #include <pybind11/embed.h>
 #include <torch/extension.h>
 #include "torch/all.h"
+#include "autil/EnvUtil.h"
 #include "autil/TimeUtility.h"
 #include "kmonitor/client/common/MinMaxCalculator.h"
 #include "kmonitor/client/core/MetricsCollector.h"
@@ -1026,27 +1027,23 @@ protected:
         return params;
     }
 
-    /** Install the draft model for a speculative type and return its recorded inputs; SP_TYPE_NONE installs nothing.
-     * Optional callbacks attach to the installed model so a test can observe forward and publication. */
-    static std::vector<GptModelInputs>* installDraftModel(PPExecutor&                  executor,
-                                                          SpeculativeType              type,
-                                                          int64_t                      width,
-                                                          std::function<void()>        on_forward       = {},
-                                                          std::function<std::string()> wait_publication = {}) {
+    /** Install the draft model for a speculative type and return its recorded inputs; SP_TYPE_NONE installs nothing. */
+    static std::vector<GptModelInputs>* installDraftModel(PPExecutor&           executor,
+                                                          SpeculativeType       type,
+                                                          int64_t               width,
+                                                          std::function<void()> on_forward = {}) {
         if (type == SP_TYPE_DSPARK) {
-            auto calls              = installDSparkModels(executor, width);
-            calls->on_forward       = std::move(on_forward);
-            calls->wait_publication = std::move(wait_publication);
+            auto calls        = installDSparkModels(executor, width);
+            calls->on_forward = std::move(on_forward);
             return &calls->inputs;
         }
         if (type == SP_TYPE_NONE) {
             return nullptr;
         }
-        auto draft              = std::make_unique<RecordingDraftModel>();
-        draft->on_forward       = std::move(on_forward);
-        draft->wait_publication = std::move(wait_publication);
-        auto* inputs            = &draft->inputs;
-        executor.draft_model_   = std::move(draft);
+        auto  draft           = std::make_unique<RecordingDraftModel>();
+        draft->on_forward     = std::move(on_forward);
+        auto* inputs          = &draft->inputs;
+        executor.draft_model_ = std::move(draft);
         return inputs;
     }
 
@@ -4625,23 +4622,14 @@ TEST_F(PPExecutorTest, LastPrefillOnlyRunsNormalDraftWorkOnRealKvWithoutTargetSa
                     plan.model_input.kv_cache_block_id        = intTensor({5, 6, 7, 8}).reshape({1, 2, 2});
                     plan.model_input.kv_cache_kernel_block_id = plan.model_input.kv_cache_block_id.clone();
                     enqueuePlan(*wire, plan);
-                    auto* target             = installModel<RecordingDraftModel>(executor);
-                    int   publication_waits  = 0;
-                    target->wait_publication = [&] {
-                        ++publication_waits;
-                        return std::string();
-                    };
-                    auto* drafts = installDraftModel(executor, type, width, {}, [&] {
-                        ++publication_waits;
-                        return std::string();
-                    });
+                    auto* target = installModel<RecordingDraftModel>(executor);
+                    auto* drafts = installDraftModel(executor, type, width);
                     ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
                     executor.waitLastRun();
                     ASSERT_EQ(target->inputs.size(), 1u);
                     EXPECT_TRUE(target->inputs[0].skip_lm_head);
                     EXPECT_TRUE(executor.sampling_states_.empty());
                     EXPECT_TRUE(executor.dspark_q_.empty());
-                    EXPECT_EQ(publication_waits, 0);
                     ASSERT_EQ(wire->sent_tensors.size(), 2u);
                     const auto result = lastResult(*wire);
                     EXPECT_EQ(result.new_token_ids.sizes().vec(), (std::vector<int64_t>{2, 1}));
@@ -4718,22 +4706,8 @@ TEST_F(PPExecutorTest, LastPrefillProducesOnlyTheDraftWorkRequiredByItsRole) {
                 auto* recorded_target = target.get();
                 target->next_tokens   = {7, 8};
                 executor.setModel(std::move(target));
-                bool profiling                    = false;
-                int  target_waits                 = 0;
-                int  draft_waits                  = 0;
-                recorded_target->wait_publication = [&] {
-                    ++target_waits;
-                    return std::string();
-                };
-                auto* draft_inputs = installDraftModel(
-                    executor,
-                    type,
-                    width,
-                    [&] { EXPECT_TRUE(profiling); },
-                    [&] {
-                        ++draft_waits;
-                        return std::string();
-                    });
+                bool  profiling    = false;
+                auto* draft_inputs = installDraftModel(executor, type, width, [&] { EXPECT_TRUE(profiling); });
                 const int offset = type == SP_TYPE_EAGLE ? 17 : 0;
                 if (offset) {
                     auto mapping = (torch::arange(64, torch::TensorOptions(torch::kLong).device(torch::kCUDA)) + offset)
@@ -4756,8 +4730,6 @@ TEST_F(PPExecutorTest, LastPrefillProducesOnlyTheDraftWorkRequiredByItsRole) {
                 EXPECT_EQ(tensorToVector<int32_t>(result.new_token_ids), (std::vector<int32_t>{7, 8}));
                 EXPECT_EQ(tensorToVector<int32_t>(result.new_token_lengths), (std::vector<int32_t>{1, 1}));
                 const bool commit_only = type == SP_TYPE_DSPARK && role == RoleType::PREFILL;
-                EXPECT_EQ(target_waits, 0);
-                EXPECT_EQ(draft_waits, 0);
                 const int count = role == RoleType::PREFILL ? 1 : width;
                 ASSERT_EQ(draft_inputs->size(), type == SP_TYPE_DSPARK ? (commit_only ? 1u : 2u) : count);
                 const auto& first = draft_inputs->front();
@@ -4820,7 +4792,7 @@ TEST_F(PPExecutorTest, LastPrefillProducesOnlyTheDraftWorkRequiredByItsRole) {
     }
 }
 
-TEST_F(PPExecutorTest, DSparkPublicationSkipsUpstreamFusedAndWarmupWork) {
+TEST_F(PPExecutorTest, DSparkPublicationDrainsUpstreamPrefillButSkipsFusedAndWarmupWork) {
     for (const auto& config : std::vector<std::pair<int, bool>>{{1, false}, {2, false}, {2, true}}) {
         const auto stage  = config.first;
         const auto warmup = config.second;
@@ -4829,9 +4801,10 @@ TEST_F(PPExecutorTest, DSparkPublicationSkipsUpstreamFusedAndWarmupWork) {
         params.pd_sep_config.role_type = stage == 2 && !warmup ? RoleType::PDFUSION : RoleType::PREFILL;
         auto       propose             = makeMtpProposeParams(params);
         PPExecutor executor(params, nullptr, warmup, nullptr, nullptr, propose.get());
-        auto*      wire          = attachTransport(executor);
-        int        waits         = 0;
-        auto       target        = std::make_unique<RecordingStageModel>(params.parallelism_config);
+        auto*      wire               = attachTransport(executor);
+        int        waits              = 0;
+        const bool tracks_publication = !warmup && stage == 1;
+        auto       target             = std::make_unique<RecordingStageModel>(params.parallelism_config);
         target->wait_publication = [&] {
             ++waits;
             return std::string();
@@ -4856,18 +4829,16 @@ TEST_F(PPExecutorTest, DSparkPublicationSkipsUpstreamFusedAndWarmupWork) {
             ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
             executor.waitLastRun();
             EXPECT_FALSE(wire->sent_tensors.empty());
+            EXPECT_EQ(waits, tracks_publication ? 1 : 0);
+            enqueuePlan(*wire, makeShutdownPlan());
+            ASSERT_TRUE(executor.finish().ok());
         }
-        EXPECT_EQ(waits, 0);
+        EXPECT_EQ(waits, tracks_publication ? 2 : 0);
     }
 }
 
-TEST_F(PPExecutorTpTest, LastDSparkPrefillDoesNotWaitOrReducePublication) {
+TEST_F(PPExecutorTpTest, LastDSparkPrefillDrainsPublicationAfterResultAndBeforeNextForward) {
     ReplayTpBroadcast broadcasts;
-    int               reductions = 0;
-    broadcasts.reduce_status     = [&](bool local_ok) {
-        ++reductions;
-        return local_ok;
-    };
     for (int rank : {0, 1}) {
         SCOPED_TRACE(rank);
         if (rank != 0) {
@@ -4875,42 +4846,98 @@ TEST_F(PPExecutorTpTest, LastDSparkPrefillDoesNotWaitOrReducePublication) {
         }
         auto params                    = makeTpStageParams(2, rank, SP_TYPE_DSPARK);
         params.pd_sep_config.role_type = RoleType::PREFILL;
-        auto       propose             = makeMtpProposeParams(params);
+        auto               propose = makeMtpProposeParams(params);
+        ResultTaskGate     result_gate;
+        std::promise<void> first_drain;
         PPExecutor executor(params, nullptr, false, nullptr, nullptr, propose.get());
         auto*      wire = attachTransport(executor);
         enqueuePlan(*wire, makePlan(params), rank != 0);
-        int  publication_waits = 0;
-        auto publication       = [&] {
-            ++publication_waits;
-            return std::string("publication failure is not collected by PP");
+        size_t target_drained = 0;
+        size_t draft_drained  = 0;
+        auto   publication    = [&](size_t& drained, size_t forwards) {
+            if (drained == forwards) {
+                return std::string();
+            }
+            if (target_drained == 0 && draft_drained == 0) {
+                first_drain.set_value();
+            }
+            {
+                std::lock_guard<std::mutex> lock(executor.result_send_mutex_);
+                EXPECT_FALSE(executor.result_send_task_.has_value());
+            }
+            EXPECT_EQ(forwards, drained + 1);
+            drained = forwards;
+            EXPECT_EQ(wire->receive_index.load(), wire->received_tensors.size());
+            return std::string("local publication failed");
         };
-        auto target              = std::make_unique<RecordingDraftModel>();
-        target->wait_publication = publication;
-        executor.setModel(std::move(target));
-        auto draft              = installDSparkModels(executor, 3);
-        draft->wait_publication = publication;
-        std::shared_ptr<RecordingLogitsProcessor> state;
+        auto* target             = installModel<RecordingDraftModel>(executor);
+        auto  draft              = installDSparkModels(executor, 3);
+        target->wait_publication = [&] { return publication(target_drained, target->inputs.size()); };
+        draft->wait_publication  = [&] { return publication(draft_drained, draft->inputs.size()); };
         if (rank == 0) {
-            state = recordState(executor, 101);
+            recordState(executor, 101)->on_update = [&] { result_gate.wait(); };
         }
         ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
-        executor.waitLastRun();
-        EXPECT_EQ(publication_waits, 0);
-        EXPECT_EQ(reductions, 0);
+        EXPECT_EQ(target_drained, 0u);
+        EXPECT_EQ(draft_drained, 0u);
         ASSERT_EQ(draft->inputs.size(), 1u);
+
+        auto next_plan                  = makePlan(params);
+        next_plan.finished_request_ids = {101, 202};
+        enqueuePlan(*wire, next_plan, rank != 0);
+        const auto expect_previous_publication_drained = [&] {
+            EXPECT_EQ(target_drained, 1u);
+            EXPECT_EQ(draft_drained, 1u);
+        };
+        target->on_forward = expect_previous_publication_drained;
+        draft->on_forward  = expect_previous_publication_drained;
         if (rank == 0) {
-            EXPECT_EQ(state->committed_tokens.size(), 1u);
-            const auto result = lastResult(*wire);
+            const bool result_pending = result_gate.waitUntilEntered();
+            if (!result_pending) {
+                result_gate.release();
+            }
+            ASSERT_TRUE(result_pending);
+
+            std::promise<void> activation_received;
+            auto               activation_ready = activation_received.get_future();
+            auto               drain_started    = first_drain.get_future();
+            wire->on_receive                    = [&](const torch::Tensor& tensor) {
+                if (tensor.is_cuda()) {
+                    activation_received.set_value();
+                }
+            };
+            /** Hold the result to verify the next activation receive can proceed. */
+            auto release_result = std::async(std::launch::async, [&] {
+                const auto receive_status = activation_ready.wait_for(std::chrono::seconds(5));
+                const auto drain_status   = drain_started.wait_for(std::chrono::milliseconds(200));
+                result_gate.release();
+                return std::make_pair(receive_status, drain_status);
+            });
+            const auto next_status                    = executor.process(ScheduleOutput{});
+            const auto [receive_status, drain_status] = release_result.get();
+            wire->on_receive                          = {};
+            EXPECT_EQ(receive_status, std::future_status::ready);
+            EXPECT_EQ(drain_status, std::future_status::timeout);
+            EXPECT_FALSE(result_gate.timedOut());
+            ASSERT_TRUE(next_status.ok());
+        } else {
+            ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
+        }
+        ASSERT_EQ(draft->inputs.size(), 2u);
+
+        enqueuePlan(*wire, makeShutdownPlan(), rank != 0);
+        ASSERT_TRUE(executor.finish().ok());
+        EXPECT_EQ(target_drained, 2u);
+        EXPECT_EQ(draft_drained, 2u);
+        if (rank == 0) {
+            ASSERT_EQ(wire->sent_tensors.size(), 4u);
+            const auto result = pp_serialization::deserializeExecutionResult(wire->sent_tensors[1]);
             ASSERT_EQ(result.request_errors.size(), 2u);
             for (const auto& error : result.request_errors) {
                 EXPECT_TRUE(error.ok());
             }
-            EXPECT_FALSE(result.propose_token_ids.defined());
-        } else {
-            EXPECT_TRUE(executor.sampling_states_.empty());
-            EXPECT_TRUE(wire->sent_tensors.empty());
-            EXPECT_EQ(broadcasts.position(), broadcasts.size());
         }
+        EXPECT_EQ(broadcasts.position(), broadcasts.size());
     }
 }
 
@@ -5992,6 +6019,77 @@ TEST_F(PPExecutorTpTest, LastTpVerifySynchronizesAcceptedRowsAndKeepsPeersOutOfT
                 } else {
                     EXPECT_TRUE(torch::equal(draft_inputs->front().last_hidden_states, recorded_target->hidden_buffer));
                 }
+            }
+        }
+    }
+}
+
+TEST_F(PPExecutorTpTest, LastTpFixedVerifyKeepsAcceptedPositionsAcrossDraftSteps) {
+    autil::EnvGuard layout("RTP_LLM_PP_DRAFT_INPUT_LAYOUT", "fixed");
+    for (const auto type : {SP_TYPE_MTP, SP_TYPE_EAGLE}) {
+        SCOPED_TRACE(type);
+        ReplayTpBroadcast broadcasts;
+        torch::Tensor     accepted_tokens;
+        torch::Tensor     root_hidden;
+        for (const int rank : {0, 1}) {
+            SCOPED_TRACE(rank);
+            if (rank != 0) {
+                broadcasts.replay();
+            }
+            auto params                                               = makeTpStageParams(2, rank, type);
+            params.pd_sep_config.role_type                            = RoleType::DECODE;
+            params.model_config_.attn_config.rope_config.index_factor = 2;
+            auto       propose                                        = makeMtpProposeParams(params);
+            PPExecutor executor(params, nullptr, false, nullptr, nullptr, propose.get());
+            ASSERT_EQ(executor.draft_input_layout_, mtp::DraftInputLayout::FIXED_WIDTH);
+            auto       plan                     = makePlan(params, true);
+            const auto positions                = intTensor({2, 3, 4, 5, 3, 4, 5, 6});
+            plan.model_input.combo_position_ids = torch::stack({positions, positions + 100}, -1).flatten();
+            auto* wire = attachTransport(executor);
+            enqueuePlan(*wire, plan, rank != 0);
+
+            auto* target        = installModel<RecordingCPTargetModel>(executor, false, rank);
+            target->next_tokens = {11, 40, 13, 14, 21, 22, 23, 24};
+            std::vector<size_t> forward_positions;
+            auto* draft_inputs =
+                installDraftModel(executor, type, 3, [&] { forward_positions.push_back(broadcasts.position()); });
+            ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
+            executor.waitLastRun();
+
+            if (rank == 0) {
+                ASSERT_EQ(wire->sent_tensors.size(), 2u);
+                const auto result = lastResult(*wire);
+                ASSERT_EQ(tensorToVector<int32_t>(result.new_token_lengths), (std::vector<int32_t>{2, 4}));
+                accepted_tokens = result.new_token_ids.flatten();
+                root_hidden     = target->hidden_buffer;
+            } else {
+                EXPECT_TRUE(wire->sent_tensors.empty());
+                EXPECT_TRUE(executor.sampling_states_.empty());
+                EXPECT_EQ(broadcasts.position(), broadcasts.size());
+            }
+
+            ASSERT_EQ(draft_inputs->size(), 3u);
+            ASSERT_EQ(forward_positions.size(), 3u);
+            EXPECT_EQ(forward_positions[0], 3u);
+            EXPECT_GT(forward_positions[1], forward_positions[0]);
+            EXPECT_EQ(forward_positions[2], forward_positions[1]);
+            const auto& prefill = draft_inputs->front();
+            EXPECT_FALSE(prefill.is_target_verify);
+            EXPECT_TRUE(prefill.combo_tokens.is_cuda());
+            EXPECT_TRUE(torch::equal(prefill.combo_tokens.cpu(), accepted_tokens));
+            EXPECT_TRUE(torch::equal(prefill.last_hidden_states, root_hidden));
+            EXPECT_EQ(tensorToVector<int32_t>(prefill.input_lengths), (std::vector<int32_t>{4, 4}));
+            EXPECT_EQ(tensorToVector<int32_t>(prefill.lm_output_indexes), (std::vector<int32_t>{1, 7}));
+            for (int step = 1; step < 3; ++step) {
+                SCOPED_TRACE(step);
+                const auto& decode = draft_inputs->at(step);
+                EXPECT_EQ(tensorToVector<int32_t>(decode.combo_tokens),
+                          (std::vector<int32_t>{8 + 2 * step, 9 + 2 * step}));
+                EXPECT_TRUE(decode.sequence_lengths.is_cuda());
+                EXPECT_EQ(tensorToVector<int32_t>(decode.sequence_lengths), (std::vector<int32_t>{3 + step, 6 + step}));
+                EXPECT_TRUE(decode.combo_position_ids.is_cuda());
+                EXPECT_EQ(tensorToVector<int32_t>(decode.combo_position_ids),
+                          (std::vector<int32_t>{3 + step, 103 + step, 6 + step, 106 + step}));
             }
         }
     }

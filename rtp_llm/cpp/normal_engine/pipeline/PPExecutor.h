@@ -154,6 +154,8 @@ private:
 
     void waitLastRun();
 
+    void drainCacheStorePublication();
+
     void releaseAllModelBuffers();
 
     void ensureModelInputOnGpu(GptModelInputs& model_input);
@@ -263,6 +265,9 @@ private:
     bool    is_dspark_              = false;
     int64_t propose_step_           = 0;
     size_t  position_id_len_factor_ = 1;
+
+    const bool track_dspark_cache_store_;
+
     const mtp::DraftInputLayout                      draft_input_layout_;
     size_t                                           draft_vocab_size_   = 0;
     torch::Tensor                                    d2t_map_;

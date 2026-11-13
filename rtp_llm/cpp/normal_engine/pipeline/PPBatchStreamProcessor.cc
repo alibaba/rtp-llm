@@ -772,7 +772,7 @@ PPPendingResult PPBatchStreamProcessor::submitExecutionResult(const PPExecutionP
                                                               const PPDraftOutput&    draft_output) const {
     PPPendingResult pending;
     auto&           result = pending.result;
-    RTP_LLM_PROFILE_SCOPE("executor.pp.fill_result");
+    RTP_LLM_PROFILE_SCOPE("executor.pp.submit_result");
     result.request_ids    = plan.sampling_plan.request_ids.to(torch::kCPU).contiguous();
     result.request_errors = sampling_output.request_errors;
     result.request_outputs.resize(result.request_ids.numel());

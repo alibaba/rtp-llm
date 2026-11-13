@@ -10,6 +10,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include <ATen/record_function.h>
 #include <c10/core/InferenceMode.h>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -185,7 +186,6 @@ PPExecutionPlan PPExecutor::receivePlan(torch::Tensor& plan_payload) {
 }
 
 void PPExecutor::asyncSendExecutionResult(const PPExecutionResult& result, PPTickets& tickets) {
-    RTP_LLM_PROFILE_SCOPE("executor.pp.send_result");
     asyncSendObject(pp_serialization::serializeExecutionResult(result), tickets, kPPResultGroupName);
 }
 
@@ -319,6 +319,7 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     is_dspark_(params.sp_config.type == SP_TYPE_DSPARK),
     propose_step_(params.sp_config.gen_num_per_cycle),
     position_id_len_factor_(params.model_config_.attn_config.rope_config.index_factor),
+    track_dspark_cache_store_(is_dspark_ && role_type_ == RoleType::PREFILL && !warm_up_),
     draft_input_layout_(readPPDraftInputLayout()),
     parallelism_config_(params.parallelism_config),
     pp_layout_(RankLayout::fromParallelismConfig(parallelism_config_)),
@@ -405,7 +406,8 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
                                                   false,
                                                   sp_enabled_ && isLastStage() && !warm_up_,
                                                   DSparkModelRole::NONE,
-                                                  false);
+                                                  false,
+                                                  track_dspark_cache_store_);
     } else if (test_model_factory) {
         RTP_LLM_LOG_INFO("init executor with test model factory");
         model_ = test_model_factory(model_init_params);
@@ -460,7 +462,8 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
                                                                            false,
                                                                            false,
                                                                            DSparkModelRole::COMMIT,
-                                                                           draft_graph_allowed);
+                                                                           draft_graph_allowed,
+                                                                           track_dspark_cache_store_);
                 }
             } else if (test_model_factory) {
                 if (!is_dspark_ || role_type_ != RoleType::PREFILL) {
@@ -559,6 +562,28 @@ void PPExecutor::waitLastRun() {
     }
 }
 
+void PPExecutor::drainCacheStorePublication() {
+    if (!track_dspark_cache_store_) {
+        return;
+    }
+    RTP_LLM_PROFILE_SCOPE("executor.pp.cache_publication");
+    const auto drain = [this](ModelBase* model, const char* role) {
+        if (model == nullptr) {
+            return;
+        }
+        const auto error = model->waitCacheStorePublication();
+        if (!error.empty()) {
+            RTP_LLM_LOG_ERROR("PP DSpARK %s cache-store publication failed: pp_rank=%ld tp_rank=%ld error=%s",
+                              role,
+                              parallelism_config_.pp_rank,
+                              parallelism_config_.tp_rank,
+                              error.c_str());
+        }
+    };
+    drain(model_.get(), "target");
+    drain(draft_commit_model_.get(), "draft");
+}
+
 void PPExecutor::releaseAllModelBuffers() {
     buffer_holder_.release();
     /** model_ is unset in test mode (py_model is None); nothing to release then. */
@@ -574,9 +599,6 @@ void PPExecutor::releaseAllModelBuffers() {
 }
 
 void PPExecutor::ensureModelInputOnGpu(GptModelInputs& model_input) {
-    if (model_input.skip_run) {
-        return;
-    }
     /** Keep CPU multimodal tensors alive until their asynchronous H2D copies finish. */
     for (auto* tensors : {&model_input.multimodal_features, &model_input.mm_extra_input}) {
         if (!tensors->has_value()) {
@@ -718,7 +740,6 @@ absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&       
 }
 
 void PPExecutor::advanceSamplingStates(const PPSamplingPlan& sampling_plan, PPExecutionResult& result) {
-    RTP_LLM_PROFILE_SCOPE("executor.pp.update_sampling_states");
     const auto stream_count = sampling_plan.request_ids.size(0);
 
     const auto* request_ids      = sampling_plan.request_ids.data_ptr<RequestId>();
@@ -1205,9 +1226,11 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
         waitLastRun();
         executor_collector.last_run_wait_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+    /** Drain the previous batch before writer reuse, even on empty rounds.
+     * Log failures locally and let D-side KV load determine whether decode can proceed. */
+    drainCacheStorePublication();
     reapCompletedActivationSends();
     releaseAllModelBuffers();
-    ensureModelInputOnGpu(model_input);
 
     if (isLastStage() && isStageRoot()) {
         for (const auto request_id : plan.finished_request_ids) {
@@ -1216,7 +1239,10 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
         }
     }
 
+    mtp::DSparkCacheStoreDrainGuard cache_store_drain_guard{
+        track_dspark_cache_store_, model_.get(), draft_commit_model_.get()};
     if (!model_input.skip_run) {
+        ensureModelInputOnGpu(model_input);
         std::optional<GrammarPrefetchContext> grammar_prefetch;
         if (isLastStage() && isStageRoot() && !prefill_only && !model_input.is_fake_stream) {
             RTP_LLM_PROFILE_SCOPE("executor.pp.grammar_prefetch");
@@ -1320,6 +1346,7 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
             requestResultRecvStop();
         }
     }
+    cache_store_drain_guard.disarm();
     return absl::OkStatus();
 }
 
@@ -1332,6 +1359,7 @@ void PPExecutor::enqueueResultSendTask(ResultSendTask task) {
 }
 
 void PPExecutor::resultSendLoop() {
+    at::DisableRecordFunctionGuard record_function_guard;
     cuda_graph::setDevice(static_cast<int>(recv_stream_.device_index()));
     c10::InferenceMode inference_guard(true);
     while (true) {
@@ -1356,10 +1384,7 @@ void PPExecutor::resultSendLoop() {
 }
 
 void PPExecutor::processResultAndSend(ResultSendTask& task) {
-    {
-        RTP_LLM_PROFILE_SCOPE("executor.pp.result_sync");
-        last_compute_done_.synchronize();
-    }
+    last_compute_done_.synchronize();
     const auto& plan   = task.plan;
     auto&       result = task.pending.result;
     batch_stream_processor_->finishExecutionResult(plan, task.pending);
@@ -1393,6 +1418,7 @@ void PPExecutor::enqueueResultRecvTask(ResultRecvTask task) {
 }
 
 void PPExecutor::resultRecvLoop() {
+    at::DisableRecordFunctionGuard record_function_guard;
     cuda_graph::setDevice(static_cast<int>(recv_stream_.device_index()));
     /** Inference mode is thread-local; dispatch updates tensors created by the engine thread. */
     c10::InferenceMode inference_guard(true);
@@ -1424,11 +1450,7 @@ void PPExecutor::receiveAndProcessResult(const StreamGroups&             stream_
                                          int64_t                         schedule_time_us,
                                          RtpLLMExecutorMetricsCollector& executor_collector) {
     /** Fake batches still complete the PP round trip before their result is discarded. */
-    PPExecutionResult result;
-    {
-        RTP_LLM_PROFILE_SCOPE("executor.pp.recv_result");
-        result = pp_serialization::deserializeExecutionResult(receiveObject(kPPResultGroupName));
-    }
+    auto result = pp_serialization::deserializeExecutionResult(receiveObject(kPPResultGroupName));
     if (stream_groups.isFakeStream()) {
         RTP_LLM_LOG_DEBUG("PP fake batch completed: dp_rank=%ld", parallelism_config_.dp_rank);
         return;
@@ -1442,7 +1464,6 @@ void PPExecutor::receiveAndProcessResult(const StreamGroups&             stream_
     collectTokenCounts(stream_groups, result, token_counts_by_priority, sp_collector);
 
     {
-        RTP_LLM_PROFILE_SCOPE("executor.pp.dispatch_result");
         const auto start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         batch_stream_processor_->dispatchExecutionResult(stream_groups, result);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
