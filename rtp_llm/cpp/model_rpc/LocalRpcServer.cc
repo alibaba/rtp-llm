@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <unistd.h>
 #include <c10/core/InferenceMode.h>
+#include "autil/EnvUtil.h"
 #include "autil/Scope.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -302,6 +303,8 @@ void LocalRpcServer::updateRuntimeEndpoints(const RuntimeConfig& runtime_config)
     if (services_started_) {
         RTP_LLM_FAIL("runtime endpoints can only be updated before services start");
     }
+    engine_->resourceContext().cache_manager->updateRuntimeEndpoints(
+        runtime_config, autil::EnvUtil::getEnv("RequestedIP", ""));
     maga_init_params_.runtime_config.worker_addrs      = runtime_config.worker_addrs;
     maga_init_params_.runtime_config.worker_grpc_addrs = runtime_config.worker_grpc_addrs;
 }
