@@ -9,6 +9,7 @@ from rtp_llm.models_py.sampling.adaptive_verification import (
     AdaptiveBudgetInputError,
     allocate_draft_token_budget,
     assign_draft_token_budget,
+    pack_verification_rows,
     select_draft_token_budget,
 )
 
@@ -47,7 +48,10 @@ class BudgetSelectionTest(unittest.TestCase):
                             for step in range(length)
                         )
                         options.append(
-                            (expected / (draft_costs[2] + verify_costs[2 + budget]), -budget)
+                            (
+                                expected / (draft_costs[2] + verify_costs[2 + budget]),
+                                -budget,
+                            )
                         )
                     expected_budget = -max(options)[1]
 
@@ -150,6 +154,83 @@ class BudgetSelectionTest(unittest.TestCase):
                 num_non_draft_tokens=1,
                 num_sampling_requests=1,
             )
+
+
+class VerificationPackingTest(unittest.TestCase):
+    def test_strided_and_broadcast_capacities(self) -> None:
+        for dtype in (torch.int32, torch.int64):
+            backing = torch.tensor([3, 99, 0, 99, 2, 99], dtype=dtype, device="cuda")
+            self.assertEqual(
+                pack_verification_rows(backing[::2], 3, 8).tolist(),
+                [0, 1, 2, 3, 4, 8, 9, 10],
+            )
+            caps = torch.tensor([1], dtype=dtype, device="cuda").expand(3)
+            self.assertEqual(
+                pack_verification_rows(caps, 3, 6).tolist(), [0, 1, 4, 5, 8, 9]
+            )
+
+    def test_invalid_packing_metadata_fails_before_launch(self) -> None:
+        caps = torch.tensor([1, 2], dtype=torch.int32, device="cuda")
+        for bad_caps, steps, total in [
+            (caps.reshape(1, 2), 3, 5),
+            (caps.float(), 3, 5),
+            (caps, -1, 5),
+            (caps, True, 5),
+            (caps, 3, 1),
+            (caps, 3, 9),
+            (caps, 3, 5.5),
+        ]:
+            with self.assertRaises(AdaptiveBudgetInputError):
+                pack_verification_rows(bad_caps, steps, total)
+
+    def test_all_small_prefix_combinations(self) -> None:
+        for steps in (1, 3, 5):
+            for values in itertools.product(range(steps + 1), repeat=3):
+                with self.subTest(steps=steps, caps=values):
+                    caps = torch.tensor(values, dtype=torch.int32, device="cuda")
+                    expected = [
+                        i * (steps + 1) + j
+                        for i, cap in enumerate(values)
+                        for j in range(cap + 1)
+                    ]
+                    actual = pack_verification_rows(caps, steps, len(expected))
+                    self.assertEqual(actual.tolist(), expected)
+
+    def test_large_odd_batches_and_empty(self) -> None:
+        for batch in (0, 1, 21, 255, 256, 257, 1025, 4097):
+            for steps in (1, 5, 8):
+                for mode in ("zero", "full", "mixed"):
+                    with self.subTest(batch=batch, steps=steps, mode=mode):
+                        values = [
+                            (
+                                0
+                                if mode == "zero"
+                                else steps if mode == "full" else (i * 7) % (steps + 1)
+                            )
+                            for i in range(batch)
+                        ]
+                        caps = torch.tensor(values, dtype=torch.int32, device="cuda")
+                        expected = [
+                            i * (steps + 1) + j
+                            for i, cap in enumerate(values)
+                            for j in range(cap + 1)
+                        ]
+                        self.assertEqual(
+                            pack_verification_rows(caps, steps, len(expected)).tolist(),
+                            expected,
+                        )
+
+    def test_graph_replay_uses_new_capacities_with_same_budget(self) -> None:
+        caps = torch.tensor([0, 5, 2], dtype=torch.int32, device="cuda")
+        for _ in range(3):
+            pack_verification_rows(caps, 5, 10)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            result = pack_verification_rows(caps, 5, 10)
+        caps.copy_(torch.tensor([4, 1, 2], dtype=torch.int32, device="cuda"))
+        graph.replay()
+        self.assertEqual(result.tolist(), [0, 1, 2, 3, 4, 6, 7, 12, 13, 14])
 
 
 class DraftAllocationTest(unittest.TestCase):

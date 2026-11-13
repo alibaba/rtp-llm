@@ -5,10 +5,12 @@ from numbers import Integral
 
 import numpy as np
 import torch
+
 from rtp_llm.models_py.sampling.acceptance_estimator import OnlineAcceptanceEstimator
 from rtp_llm.models_py.sampling.adaptive_verification import (
     AdaptiveBudgetInputError,
     assign_draft_token_budget,
+    pack_verification_rows,
     select_draft_token_budget,
 )
 
@@ -214,16 +216,86 @@ class AdaptiveDraftController:
                     self.confidence_probs, mapping, caps, budget, self._survival
                 )
         total_tokens = len(slots) + budget
-        dense = torch.arange(len(slots) * (self.num_steps + 1), device=self.device)
-        valid = dense % (self.num_steps + 1) <= caps.repeat_interleave(
-            self.num_steps + 1
-        )
-        order = torch.argsort(torch.where(valid, dense, dense + dense.numel()))
-        packed = dense.index_select(0, order[:total_tokens])
+        packed = pack_verification_rows(caps, self.num_steps, total_tokens)
         self._pending = PendingVerification(
             tuple(request_ids), slots, caps.clone(), known
         )
         return caps, packed, total_tokens
+
+    def prepare_from_host(
+        self,
+        request_ids: Sequence[int],
+        *,
+        confidence: np.ndarray | None,
+        draft_cost_ms: np.ndarray,
+        verify_cost_ms: np.ndarray,
+        fixed_cap: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        """Plan from completed prior-round feedback, never read the GPU here.
+
+        This is a performance prediction, not a sampling decision. A missing
+        snapshot keeps every draft; rejection still uses the current logits.
+        Planning does not freeze training features: current-round predict()
+        runs before commit_prepared() marks the verification pending.
+        """
+        slots = self._slots(request_ids)
+        batch = len(slots)
+        scheduled = np.full(batch, self.num_steps, dtype=np.int32)
+        if fixed_cap is not None:
+            if type(fixed_cap) is not int or not 0 <= fixed_cap <= self.num_steps:
+                raise AdaptiveBudgetInputError(
+                    "fixed_cap", "outside speculative positions"
+                )
+            scheduled.fill(fixed_cap)
+        elif confidence is not None:
+            budget = select_draft_token_budget(
+                confidence,
+                scheduled,
+                draft_cost_ms=draft_cost_ms,
+                verify_cost_ms=verify_cost_ms,
+                num_non_draft_tokens=batch,
+                num_sampling_requests=batch,
+            )
+            # Stable ties keep earlier positions before later positions of the
+            # same request, so every selected set remains a valid prefix.
+            survival = np.cumprod(confidence.astype(np.float64), axis=1)
+            chosen = np.argsort(-survival.reshape(-1), kind="stable")[:budget]
+            scheduled = np.bincount(chosen // self.num_steps, minlength=batch).astype(
+                np.int32
+            )
+        self.host_cap_counts = (
+            int(np.count_nonzero(scheduled == 0)),
+            int(np.count_nonzero(scheduled == self.num_steps)),
+        )
+        width = self.num_steps + 1
+        dense = np.arange(batch * width, dtype=np.int64)
+        rows = dense[dense % width <= np.repeat(scheduled, width)]
+        return (
+            self._device_indices(scheduled, torch.int32),
+            self._device_indices(rows, torch.int64),
+            len(rows),
+        )
+
+    def commit_prepared(
+        self, request_ids: Sequence[int], capacities: torch.Tensor
+    ) -> None:
+        """Commit after current predictions, before verification feedback."""
+        slots = self._slots(request_ids)
+        if self._pending is not None:
+            raise AdaptiveBudgetInputError("request_ids", "observe previous plan first")
+        if (
+            capacities.shape != (len(slots),)
+            or capacities.device != self.device
+            or capacities.dtype != torch.int32
+        ):
+            raise AdaptiveBudgetInputError(
+                "capacities", "prepared batch/device mismatch"
+            )
+        known = tuple(bool(self._ready[slot].all()) for slot in slots)
+        # Prepared index-cache tensors are immutable, including across eviction.
+        self._pending = PendingVerification(
+            tuple(request_ids), slots, capacities, known
+        )
 
     def observe(
         self,
@@ -232,6 +304,7 @@ class AdaptiveDraftController:
         forced: Sequence[bool],
         *,
         asynchronous: bool = False,
+        effective_capacities: torch.Tensor | None = None,
     ) -> None:
         slots = self._slots(request_ids)
         if accepted_drafts.shape != (len(slots),) or accepted_drafts.dtype not in (
@@ -246,6 +319,11 @@ class AdaptiveDraftController:
         ):
             raise AdaptiveBudgetInputError("forced", "expected one boolean per request")
         if not slots:
+            if self._pending is not None and self._pending.request_ids:
+                raise AdaptiveBudgetInputError(
+                    "request_ids", "must match the pending plan"
+                )
+            self._pending = None
             return
         pending = self._pending
         if pending is None or set(request_ids) != set(pending.request_ids):
@@ -255,7 +333,25 @@ class AdaptiveDraftController:
         }
         order = [positions[request_id] for request_id in request_ids]
         admitted = pending.capacities.index_select(0, self._device_indices(order))
-        valid = ((accepted_drafts >= 0) & (accepted_drafts <= admitted)).all()
+        planned = admitted
+        if effective_capacities is not None:
+            if (
+                effective_capacities.shape != (len(slots),)
+                or effective_capacities.device != self.device
+                or effective_capacities.dtype not in (torch.int32, torch.int64)
+            ):
+                raise AdaptiveBudgetInputError(
+                    "effective_capacities", "invalid shape, device or dtype"
+                )
+            # Grammar can censor a planned suffix. It is not a rejection label.
+            # The supplied caps follow request_ids order, like accepted_drafts.
+            admitted = effective_capacities
+        valid = (
+            (accepted_drafts >= 0)
+            & (accepted_drafts <= admitted)
+            & (admitted >= 0)
+            & (admitted <= planned)
+        ).all()
         if asynchronous:
             torch._assert_async(valid, "accepted_drafts outside admitted counts")
         elif not valid.item():

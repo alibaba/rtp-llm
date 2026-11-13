@@ -10,6 +10,75 @@ import triton.language as tl
 
 
 @triton.jit
+def _pack_verification_rows_kernel(
+    caps_ptr,
+    ends_ptr,
+    output_ptr,
+    num_rows,
+    CAPS_STRIDE: tl.constexpr,
+    WIDTH: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    dense = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    request = dense // WIDTH
+    position = dense % WIDTH
+    valid = dense < num_rows
+    cap = tl.load(caps_ptr + request * CAPS_STRIDE, valid, other=0)
+    end = tl.load(ends_ptr + request, valid, other=0)
+    output_row = end - cap - 1 + position
+    tl.store(output_ptr + output_row, dense.to(tl.int64), valid & (position <= cap))
+
+
+def pack_verification_rows(
+    capacities: torch.Tensor, num_steps: int, total_tokens: int
+) -> torch.Tensor:
+    """Pack validated per-request prefixes without sorting or device readback.
+
+    The controller owns the invariant total_tokens == sum(capacities + 1),
+    with every capacity in [0, num_steps]. Use its already-known CPU budget;
+    recomputing it from the device would introduce a synchronization point.
+    """
+    if (
+        capacities.ndim != 1
+        or not capacities.is_cuda
+        or capacities.dtype not in (torch.int32, torch.int64)
+    ):
+        raise AdaptiveBudgetInputError("capacities", "expected a CUDA integer vector")
+    if (
+        isinstance(num_steps, bool)
+        or not isinstance(num_steps, Integral)
+        or num_steps < 0
+    ):
+        raise AdaptiveBudgetInputError("num_steps", "expected a nonnegative integer")
+    if isinstance(total_tokens, bool) or not isinstance(total_tokens, Integral):
+        raise AdaptiveBudgetInputError("total_tokens", "expected an integer budget")
+    width = int(num_steps) + 1
+    dense_rows = capacities.numel() * width
+    if not capacities.numel() <= total_tokens <= dense_rows:
+        raise AdaptiveBudgetInputError("total_tokens", "outside prefix bounds")
+    if total_tokens == dense_rows:
+        return torch.arange(dense_rows, dtype=torch.int64, device=capacities.device)
+    if total_tokens == capacities.numel():
+        return torch.arange(
+            0, dense_rows, width, dtype=torch.int64, device=capacities.device
+        )
+    output = torch.empty(total_tokens, dtype=torch.int64, device=capacities.device)
+    if capacities.numel() == 0:
+        return output
+    ends = torch.cumsum(capacities + 1, dim=0, dtype=torch.int64)
+    _pack_verification_rows_kernel[(triton.cdiv(dense_rows, 256),)](
+        capacities,
+        ends,
+        output,
+        dense_rows,
+        CAPS_STRIDE=capacities.stride(0),
+        WIDTH=width,
+        BLOCK=256,
+    )
+    return output
+
+
+@triton.jit
 def _count_survival_at_least(
     survival_ptr, num_slots, threshold, BLOCK_SIZE: tl.constexpr
 ):
@@ -149,9 +218,10 @@ def select_draft_token_budget(
     """
     if confidence_probs.ndim != 2 or confidence_probs.dtype.kind not in "fiu":
         raise AdaptiveBudgetInputError("confidence_probs", "expected a numeric matrix")
-    if not np.isfinite(confidence_probs).all() or not (
-        (confidence_probs >= 0) & (confidence_probs <= 1)
-    ).all():
+    if (
+        not np.isfinite(confidence_probs).all()
+        or not ((confidence_probs >= 0) & (confidence_probs <= 1)).all()
+    ):
         raise AdaptiveBudgetInputError("confidence_probs", "must be finite in [0, 1]")
     num_reqs, num_steps = confidence_probs.shape
     if capacities.shape != (num_reqs,) or capacities.dtype.kind not in "iu":
@@ -190,7 +260,9 @@ def select_draft_token_budget(
         num_non_draft_tokens : num_non_draft_tokens + limit + 1
     ].astype(np.float64)
     if not np.isfinite(draft_ms) or draft_ms < 0:
-        raise AdaptiveBudgetInputError("draft_cost_ms", "must be finite and nonnegative")
+        raise AdaptiveBudgetInputError(
+            "draft_cost_ms", "must be finite and nonnegative"
+        )
     if not np.isfinite(verify_ms).all() or (verify_ms <= 0).any():
         raise AdaptiveBudgetInputError("verify_cost_ms", "must be finite and positive")
     with np.errstate(over="ignore"):
@@ -245,10 +317,14 @@ def allocate_draft_token_budget(
     if ((capacities < 0) | (capacities > num_steps)).any().item():
         raise AdaptiveBudgetInputError("capacities", "must lie in [0, num_steps]")
     if (
-        ~torch.isfinite(confidence_probs)
-        | (confidence_probs < 0)
-        | (confidence_probs > 1)
-    ).any().item():
+        (
+            ~torch.isfinite(confidence_probs)
+            | (confidence_probs < 0)
+            | (confidence_probs > 1)
+        )
+        .any()
+        .item()
+    ):
         raise AdaptiveBudgetInputError("confidence_probs", "must be finite in [0, 1]")
     if isinstance(draft_budget, bool) or not isinstance(draft_budget, Integral):
         raise AdaptiveBudgetInputError("draft_budget", "expected an integer")

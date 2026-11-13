@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 import torch
+
 from rtp_llm.models_py.sampling.adaptive_controller import AdaptiveDraftController
 from rtp_llm.models_py.sampling.adaptive_runtime import create_controller
 from rtp_llm.models_py.sampling.adaptive_session import AdaptiveVerificationSession
@@ -28,6 +29,262 @@ def ready_controller(request_ids: list[int]) -> AdaptiveDraftController:
 
 
 class AdaptiveControllerTest(unittest.TestCase):
+    def test_external_caps_do_not_train_unverified_rejections(self) -> None:
+        controller = ready_controller([10, 20])
+        caps, _, _ = controller.prepare_from_host(
+            [10, 20],
+            confidence=None,
+            fixed_cap=3,
+            draft_cost_ms=np.zeros(3),
+            verify_cost_ms=np.ones(9),
+        )
+        controller.commit_prepared([10, 20], caps)
+        # Reordered rows: request20 has cap0, request10 has cap1 and accepted it.
+        effective = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
+        with patch.object(
+            controller.estimator, "step", wraps=controller.estimator.step
+        ) as step:
+            controller.observe(
+                [20, 10],
+                effective.clone(),
+                [False, False],
+                effective_capacities=effective,
+            )
+        torch.testing.assert_close(
+            step.call_args.args[1],
+            torch.tensor([1, 2], device="cuda", dtype=torch.int32),
+        )
+        torch.testing.assert_close(
+            step.call_args.args[2], torch.zeros(2, device="cuda", dtype=torch.int32)
+        )
+        torch.testing.assert_close(
+            controller.estimator.counts,
+            torch.tensor([1.0, 0.0, 0.0], device="cuda"),
+        )
+        self.assertIsNone(controller._pending)
+
+    def test_session_forwards_external_caps(self) -> None:
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "3"}):
+            session = AdaptiveVerificationSession(4, 3, "cuda")
+        session.begin([10, 20])
+        accepted = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
+        effective = torch.tensor([1, 1], device="cuda", dtype=torch.int32)
+        with patch.object(session.controller, "observe") as observe:
+            session.observe(accepted, [False, True], effective)
+        args, kwargs = observe.call_args
+        self.assertEqual(args[0], [10, 20])
+        self.assertIs(args[1], accepted)
+        self.assertEqual(args[2], [False, True])
+        self.assertIs(kwargs["effective_capacities"], effective)
+        self.assertTrue(kwargs["asynchronous"])
+
+    def test_external_cap_validation_preserves_pending_plan(self) -> None:
+        controller = ready_controller([10, 20])
+        caps, _, _ = controller.prepare_from_host(
+            [10, 20],
+            confidence=None,
+            fixed_cap=1,
+            draft_cost_ms=np.zeros(3),
+            verify_cost_ms=np.ones(9),
+        )
+        controller.commit_prepared([10, 20], caps)
+        accepted = torch.zeros(2, dtype=torch.int32, device="cuda")
+        for effective in (
+            torch.zeros(1, device="cuda", dtype=torch.int32),
+            torch.zeros(2, dtype=torch.int32),
+            torch.zeros(2, device="cuda"),
+            torch.tensor([-1, 1], device="cuda", dtype=torch.int32),
+            torch.tensor([2, 1], device="cuda", dtype=torch.int32),
+        ):
+            with self.subTest(effective=effective):
+                with self.assertRaises(AdaptiveBudgetInputError):
+                    controller.observe(
+                        [10, 20],
+                        accepted,
+                        [False, False],
+                        effective_capacities=effective,
+                    )
+                self.assertIsNotNone(controller._pending)
+        controller.observe(
+            [10, 20],
+            accepted,
+            [False, False],
+            effective_capacities=caps,
+            asynchronous=True,
+        )
+        self.assertIsNone(controller._pending)
+
+    def test_metrics_host_counts_and_decision_modes(self) -> None:
+        for cap in (0, 1, 2):
+            with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": str(cap)}):
+                session = AdaptiveVerificationSession(2, 2, "cuda")
+            session.begin([10, 20])
+            with (
+                patch.object(
+                    torch.Tensor, "cpu", side_effect=AssertionError("GPU read")
+                ),
+                patch.object(
+                    torch.Tensor, "item", side_effect=AssertionError("GPU read")
+                ),
+            ):
+                mode, zero, full, latency = session.metrics_snapshot()
+            self.assertEqual(
+                (mode, zero, full), (0, 2 if cap == 0 else 0, 2 if cap == 2 else 0)
+            )
+            self.assertGreaterEqual(latency, 0)
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(2, 2, "cuda")
+        session.begin([10, 20])
+        self.assertEqual(session.metrics_snapshot()[:3], (1, 0, 2))
+        session.round_costs[2] = {2: 1.0, 4: 2.0, 6: 3.0}
+        session._prepare_plan()
+        self.assertEqual(session.metrics_snapshot()[:3], (3, 0, 2))
+        session._host_predictions = {
+            i: (session.round, np.array([0.9, 0.8])) for i in (10, 20)
+        }
+        session._prepare_plan()
+        self.assertEqual(session.metrics_snapshot()[0], 2)
+        session.begin([])
+        self.assertEqual(session.metrics_snapshot()[1:3], (0, 0))
+
+    def test_dynamic_session_plan_does_not_wait_for_gpu(self) -> None:
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(2, 2, "cuda")
+        logits = torch.tensor([[4.0, 0.0], [0.0, 1.0]], device="cuda")
+
+        def run_round() -> None:
+            session.begin([10, 20])
+            for step in range(2):
+                session.predict([10, 20], step, logits)
+            caps, _, _ = session.plan()
+            session.observe(caps, [False, False])
+            session.finish()
+
+        for _ in range(4):
+            run_round()
+            torch.cuda.synchronize()
+        # Force the learned-budget branch, independently of noisy GPU timing.
+        session.round_costs[2] = {2: 1.0, 4: 1.5, 6: 2.0}
+        session.pending_costs = []
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ]
+        ) as profile:
+            with torch.profiler.record_function("adaptive_dynamic_round"):
+                run_round()
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "trace.json"
+            profile.export_chrome_trace(str(path))
+            events = json.loads(path.read_text())["traceEvents"]
+        scope = next(e for e in events if e.get("name") == "adaptive_dynamic_round")
+        waits = [
+            e["name"]
+            for e in events
+            if e.get("ph") == "X"
+            and e.get("tid") == scope["tid"]
+            and scope["ts"] <= e["ts"] < scope["ts"] + scope["dur"]
+            and ("Synchronize" in e["name"] or e["name"] == "aten::item")
+        ]
+        self.assertEqual(waits, [])
+        self.assertFalse(session._calibration)
+
+    def test_unmeasured_rows_do_not_invent_fractional_graph_savings(self) -> None:
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(2, 2, "cuda")
+        session.begin([10, 20])
+        session.round_costs[2] = {2: 1.0, 4: 3.0, 6: 5.0}
+        with patch.object(
+            session.controller,
+            "prepare_from_host",
+            wraps=session.controller.prepare_from_host,
+        ) as prepare:
+            session._prepare_plan()
+        np.testing.assert_array_equal(
+            prepare.call_args.kwargs["verify_cost_ms"][2:], [1.0, 3.0, 3.0, 5.0, 5.0]
+        )
+        # Preserve real nonmonotonic measurements; do not inflate full-cap costs.
+        session.round_costs[2][4] = 0.5
+        with patch.object(
+            session.controller,
+            "prepare_from_host",
+            wraps=session.controller.prepare_from_host,
+        ) as prepare:
+            session._prepare_plan()
+        np.testing.assert_array_equal(
+            prepare.call_args.kwargs["verify_cost_ms"][2:], [1.0, 1.0, 0.5, 5.0, 5.0]
+        )
+
+    def test_host_plan_keeps_prefixes_and_matches_budget(self) -> None:
+        controller = ready_controller([10, 20])
+        costs = dict(draft_cost_ms=np.zeros(3), verify_cost_ms=np.ones(9))
+        for cap in (0, 1, 3):
+            caps, rows, total = controller.prepare_from_host(
+                [20, 10], confidence=None, fixed_cap=cap, **costs
+            )
+            self.assertEqual(caps.tolist(), [cap, cap])
+            self.assertEqual(
+                rows.tolist(), list(range(cap + 1)) + list(range(4, 5 + cap))
+            )
+            self.assertEqual(total, 2 * (cap + 1))
+        with patch.object(torch.Tensor, "cpu", side_effect=AssertionError("GPU read")):
+            caps, rows, total = controller.prepare_from_host(
+                [10, 20],
+                confidence=np.array([[0.8, 0.6, 0.3], [0.9, 0.4, 0.1]]),
+                **costs,
+            )
+        expected = [
+            r * 4 + j for r, cap in enumerate(caps.tolist()) for j in range(cap + 1)
+        ]
+        self.assertEqual(rows.tolist(), expected)
+        self.assertEqual(total, len(expected))
+        controller.commit_prepared([10, 20], caps)
+        controller.observe([20, 10], caps.flip(0), [False, False])
+        self.assertIsNone(controller._pending)
+
+    def test_snapshot_wait_is_nonblocking_and_reused_id_is_isolated(self) -> None:
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(2, 2, "cuda")
+        session.begin([10])
+        epoch = session._request_epochs[10]
+        ready = Mock(spec=torch.cuda.Event)
+        ready.query.return_value = False
+        host = torch.tensor([[0.2, 0.1]])
+        session._pending_predictions.append(((10,), (epoch,), 0, host, ready))
+        session._collect_predictions()
+        self.assertEqual(session._host_predictions, {})
+        ready.synchronize.assert_not_called()
+        session.begin([20])
+        session.begin([10])
+        self.assertNotEqual(epoch, session._request_epochs[10])
+        ready.query.return_value = True
+        session._collect_predictions()
+        self.assertEqual(session._host_predictions, {})
+        self.assertEqual(session._pending_predictions, [])
+
+    def test_real_async_snapshot_reorders_without_changing_prepared_plan(self) -> None:
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(2, 2, "cuda")
+        session.begin([10, 20])
+        first_caps, first_rows, first_total = session.prepared_plan()
+        for step in range(2):
+            session.predict(
+                [10, 20], step, torch.tensor([[4.0, 0.0], [0.0, 1.0]], device="cuda")
+            )
+        caps, rows, total = session.plan()
+        self.assertEqual(caps.data_ptr(), first_caps.data_ptr())
+        self.assertEqual(rows.data_ptr(), first_rows.data_ptr())
+        self.assertEqual(total, first_total)
+        session.observe(caps, [False, False])
+        session.finish()
+        session._feedback_stream.synchronize()
+        expected = session.controller.confidence_probs.cpu().numpy().copy()
+        session.begin([20, 10])
+        np.testing.assert_array_equal(session._host_predictions[10][1], expected[0])
+        np.testing.assert_array_equal(session._host_predictions[20][1], expected[1])
+        self.assertEqual(session.ids, [20, 10])
+
     def test_unfinished_round_is_invalidated_before_retry(self) -> None:
         with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "3"}):
             session = AdaptiveVerificationSession(2, 5, "cuda")
@@ -38,8 +295,8 @@ class AdaptiveControllerTest(unittest.TestCase):
         session.begin([20])
         caps, _, total = session.plan()
         self.assertEqual((caps.item(), total), (3, 4))
-        session.target_done()
         session.observe(torch.tensor([3], device="cuda"), [False])
+        session.finish()
         self.assertEqual(session.controller.estimator.counts.tolist(), [0] * 5)
 
     def test_five_proposals_fixed_three_verification_rows(self) -> None:
@@ -52,8 +309,8 @@ class AdaptiveControllerTest(unittest.TestCase):
         self.assertEqual(caps.tolist(), [3, 3])
         self.assertEqual(rows.tolist(), [0, 1, 2, 3, 6, 7, 8, 9])
         self.assertEqual(total, 8)
-        session.target_done()
         session.observe(torch.tensor([3, 1], device="cuda"), [False, False])
+        session.finish()
         self.assertEqual(session.controller.estimator.counts.tolist(), [0] * 5)
         self.assertIsNone(session.events)
         self.assertEqual(session.pending_costs, [])
@@ -69,29 +326,89 @@ class AdaptiveControllerTest(unittest.TestCase):
             for step in range(5):
                 session.predict([10], step, torch.ones((1, 8), device="cuda"))
             caps, _, _ = session.plan()
-            session.target_done()
             session.observe(caps, [False])
+            session.finish()
             predict.assert_not_called()
             train.assert_not_called()
+
+    def test_round_cost_is_finished_after_sampling_and_includes_host_tail(self) -> None:
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(1, 2, "cuda")
+        session.begin([10])
+        caps, _, total = session.plan()
+        session.observe(caps, [False])
+        self.assertEqual(session.pending_costs, [])
+        self.assertIsNotNone(session.events)
+        events = [Mock(spec=torch.cuda.Event) for _ in range(2)]
+        events[1].query.return_value = True
+        events[0].elapsed_time.return_value = 2.0
+        session.events = events
+        session.finish(7.0)
+        events[1].record.assert_called_once()
+        session.finish(99.0)  # Finishing twice cannot add duplicate observations.
+        self.assertEqual(len(session.pending_costs), 1)
+        session._collect_costs()
+        self.assertEqual(session.round_costs[1][total], 7.0)  # max, not 2+7.
+        events[1].synchronize.assert_not_called()
+
+    def test_bad_wall_clock_telemetry_cannot_fail_forward(self) -> None:
+        for invalid in (-1.0, float("nan"), float("inf")):
+            with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+                session = AdaptiveVerificationSession(1, 2, "cuda")
+            session.begin([10])
+            events = [Mock(spec=torch.cuda.Event) for _ in range(2)]
+            events[1].query.return_value = True
+            events[0].elapsed_time.return_value = 2.0
+            session.events = events
+            with patch(
+                "rtp_llm.models_py.sampling.adaptive_session.time.perf_counter",
+                return_value=session._cpu_round_start + 0.004,
+            ):
+                session.finish(invalid)
+            session._collect_costs()
+            self.assertAlmostEqual(session.round_costs[1][session.total], 4.0, places=4)
+
+    def test_invalid_prediction_snapshot_falls_back_without_gpu_read(self) -> None:
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(1, 2, "cuda")
+        session.begin([10])
+        session.round_costs[1] = {1: 1.0, 2: 2.0, 3: 3.0}
+        ready = Mock(spec=torch.cuda.Event)
+        ready.query.return_value = True
+        for bad in (float("nan"), float("inf"), -0.1, 1.1):
+            session._host_predictions[10] = (0, np.array([0.2, 0.1]))
+            session._pending_predictions.append(
+                (
+                    (10,),
+                    (session._request_epochs[10],),
+                    0,
+                    torch.tensor([[bad, 0.1]]),
+                    ready,
+                )
+            )
+            session._collect_predictions()
+            with patch.object(
+                torch.Tensor, "cpu", side_effect=AssertionError("GPU read")
+            ):
+                session._prepare_plan()
+            self.assertEqual(session.prepared_plan()[0].tolist(), [2])
+        ready.synchronize.assert_not_called()
 
     def test_unfinished_costs_are_deferred_without_waiting(self) -> None:
         with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
             session = AdaptiveVerificationSession(2, 5, "cuda")
-        events = [Mock(spec=torch.cuda.Event) for _ in range(4)]
-        events[3].query.return_value = False
-        session.pending_costs.append((1, 4, events))
+        events = [Mock(spec=torch.cuda.Event) for _ in range(2)]
+        events[1].query.return_value = False
+        session.pending_costs.append((1, 4, events, 3.0))
         session._collect_costs()
         self.assertEqual(len(session.pending_costs), 1)
         events[0].elapsed_time.assert_not_called()
-        events[2].elapsed_time.assert_not_called()
-        events[3].synchronize.assert_not_called()
-        events[3].query.return_value = True
+        events[1].synchronize.assert_not_called()
+        events[1].query.return_value = True
         events[0].elapsed_time.return_value = 2.0
-        events[2].elapsed_time.return_value = 3.0
         session._collect_costs()
         self.assertEqual(session.pending_costs, [])
-        self.assertEqual(session.draft_costs[1], 2.0)
-        self.assertEqual(session.target_costs[1][4], 3.0)
+        self.assertEqual(session.round_costs[1][4], 3.0)
         self.assertEqual(session.event_pool, [events])
 
     def test_async_prediction_and_feedback_do_not_synchronize_host(self) -> None:
@@ -160,11 +477,11 @@ class AdaptiveControllerTest(unittest.TestCase):
             caps, _, total = session.plan()
             observed.append(caps.item())
             torch.ones((total, 128), device="cuda").square()
-            session.target_done()
             session.observe(caps, [False])
+            session.finish()
         self.assertEqual(observed[:3], [2, 1, 0])
         self.assertIn(observed[3], (0, 1, 2))
-        self.assertTrue(all(cost > 0 for cost in session.target_costs[1].values()))
+        self.assertTrue(all(cost > 0 for cost in session.round_costs[1].values()))
 
     def test_opt_in_is_independent_and_can_be_disabled_for_next_start(self) -> None:
         for gumbel in ("0", "1"):
@@ -368,6 +685,7 @@ class AdaptiveControllerTest(unittest.TestCase):
             [], [], draft_cost_ms=np.array([]), verify_cost_ms=np.array([])
         )
         controller.observe([], torch.empty(0, dtype=torch.int32, device="cuda"), [])
+        self.assertIsNone(controller._pending)
         self.assertEqual((caps.numel(), rows.numel(), total), (0, 0, 0))
         controller.register(10)
 

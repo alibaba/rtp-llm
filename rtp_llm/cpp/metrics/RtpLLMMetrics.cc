@@ -451,6 +451,19 @@ bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager* manager
     REGISTER_GAUGE_MUTABLE_METRIC(sp_avg_accept_rate_metric, "rtp_llm_sp_avg_accept_rate");
     REGISTER_GAUGE_MUTABLE_METRIC(sp_avg_fix_accept_rate_metric, "rtp_llm_sp_avg_fix_accept_rate");
     REGISTER_GAUGE_MUTABLE_METRIC(sp_estimate_tpot_us_metric, "rtp_llm_sp_estimate_tpot_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(verify_batch_size_metric, "rtp_llm_sp_verify_batch_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(verify_target_rows_metric, "rtp_llm_sp_verify_target_rows");
+    REGISTER_GAUGE_MUTABLE_METRIC(verify_rows_per_request_metric, "rtp_llm_sp_verify_rows_per_request");
+    REGISTER_GAUGE_MUTABLE_METRIC(verify_saved_row_ratio_metric, "rtp_llm_sp_verify_saved_row_ratio");
+    REGISTER_GAUGE_MUTABLE_METRIC(verify_draft_accept_rate_metric, "rtp_llm_sp_verify_draft_accept_rate");
+    REGISTER_GAUGE_MUTABLE_METRIC(adaptive_enabled_metric, "rtp_llm_sp_adaptive_enabled");
+    REGISTER_GAUGE_MUTABLE_METRIC(adaptive_calibration_metric, "rtp_llm_sp_adaptive_calibration");
+    REGISTER_GAUGE_MUTABLE_METRIC(adaptive_confidence_fallback_metric, "rtp_llm_sp_adaptive_confidence_fallback");
+    REGISTER_GAUGE_MUTABLE_METRIC(adaptive_learned_metric, "rtp_llm_sp_adaptive_learned");
+    REGISTER_GAUGE_MUTABLE_METRIC(adaptive_zero_cap_ratio_metric, "rtp_llm_sp_adaptive_zero_cap_ratio");
+    REGISTER_GAUGE_MUTABLE_METRIC(adaptive_full_cap_ratio_metric, "rtp_llm_sp_adaptive_full_cap_ratio");
+    REGISTER_GAUGE_MUTABLE_METRIC(adaptive_plan_us_metric, "rtp_llm_sp_adaptive_plan_us");
+
     return true;
 }
 
@@ -460,6 +473,26 @@ void RtpLLMSpeculativeEngineMetrics::report(const kmonitor::MetricsTags*        
     RTP_REPORT_MUTABLE_METRIC(propose_step_latency_us_metric, collector->propose_step_latency_us);
     RTP_REPORT_MUTABLE_METRIC(score_step_latency_us_metric, collector->score_step_latency_us);
     RTP_REPORT_MUTABLE_METRIC(speculative_sampler_latency_us_metric, collector->speculative_sampler_latency_us);
+
+    const auto& v = collector->verification;
+    if (v.valid()) {
+        RTP_REPORT_MUTABLE_METRIC(verify_batch_size_metric, v.batch_size);
+        RTP_REPORT_MUTABLE_METRIC(verify_target_rows_metric, v.target_rows);
+        RTP_REPORT_MUTABLE_METRIC(verify_rows_per_request_metric, v.rowsPerRequest());
+        RTP_REPORT_MUTABLE_METRIC(verify_saved_row_ratio_metric, v.savedRowRatio());
+        RTP_REPORT_MUTABLE_METRIC(adaptive_enabled_metric, v.adaptive_enabled);
+        RTP_REPORT_MUTABLE_METRIC(adaptive_calibration_metric, v.adaptive_enabled && v.decision_mode == 1);
+        RTP_REPORT_MUTABLE_METRIC(adaptive_confidence_fallback_metric, v.adaptive_enabled && v.decision_mode == 3);
+        RTP_REPORT_MUTABLE_METRIC(adaptive_learned_metric, v.adaptive_enabled && v.decision_mode == 2);
+        RTP_REPORT_MUTABLE_METRIC(adaptive_zero_cap_ratio_metric, double(v.zero_cap_requests) / v.batch_size);
+        RTP_REPORT_MUTABLE_METRIC(adaptive_full_cap_ratio_metric, double(v.full_cap_requests) / v.batch_size);
+        RTP_REPORT_MUTABLE_METRIC(adaptive_plan_us_metric, v.plan_us);
+        // CAP=0 has no verified draft: an acceptance rate would be undefined.
+        if (v.target_rows > v.batch_size) {
+            RTP_REPORT_MUTABLE_METRIC(verify_draft_accept_rate_metric,
+                                      v.verifiedDraftAcceptRate(collector->total_accepted_token_num));
+        }
+    }
 
     if (collector->total_propose_token_num > 0 && collector->total_stream_num > 0) {
         RTP_REPORT_MUTABLE_METRIC(total_propose_token_num_metric, collector->total_propose_token_num);
