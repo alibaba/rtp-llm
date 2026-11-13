@@ -152,7 +152,13 @@ class RtpModule(nn.Module):
         return None
 
     def requires_staged_device_postprocess(self) -> bool:
-        """Whether this leaf must postprocess immediately after device migration."""
+        """Request per-leaf migration and immediate post-load conversion.
+
+        All checkpoint tensors are loaded and validated before this phase.
+        Only leaves without shared tensor aliases may opt in. Their post-load
+        hook is visited again during whole-model finalization and must avoid
+        repeating completed conversion (see process_weights_after_loading).
+        """
         return False
 
     def _apply(self, fn, recurse=True):
@@ -427,4 +433,19 @@ class RtpModule(nn.Module):
             )
 
     def process_weights_after_loading(self) -> None:
-        """Perform device-dependent layout conversion after integrity validation."""
+        """Finalize loaded weights on the target device.
+
+        Staged leaves run once immediately after their individual migration,
+        then are visited again in the final model.modules() traversal. They
+        must guard completed work so quantization, scale fusion and executor
+        construction are not repeated; set the guard only after success.
+
+        The final traversal is parent-before-child, not a bottom-up dependency
+        barrier. Parents may consume completed staged leaves, but cannot assume
+        that non-staged child hooks have already run.
+
+        Completeness is checked again after staged conversion and whole-model
+        migration, before final hooks. Preserve checkpoint provenance across
+        parameter replacement. Derived-only buffers should be non-persistent
+        unless a specialized loader/completeness validator owns their contract.
+        """

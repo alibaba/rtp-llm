@@ -575,6 +575,9 @@ class NewModelLoader:
 
     @staticmethod
     def _run_post_load_hooks(model: nn.Module) -> None:
+        # Keep this whole-model pass: non-staged leaves and model-level derived
+        # state still need finalization. Already processed staged leaves must
+        # guard their completed work. modules() visits parents before children.
         for module in model.modules():
             hook = getattr(module, "process_weights_after_loading", None)
             if callable(hook):

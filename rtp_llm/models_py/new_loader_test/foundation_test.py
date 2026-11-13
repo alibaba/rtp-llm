@@ -176,6 +176,154 @@ class FoundationLoaderTest(unittest.TestCase):
             ],
         )
 
+    def test_full_load_preserves_two_stage_postprocess_contract(self):
+        # Exercise real checkpoint IO, dispatch, migration and both hook passes.
+        # CPU arithmetic stands in for device conversion, not for GPU quantization.
+        events = []
+        validation_dtypes = []
+
+        class LifecycleLeaf(RtpModule):
+            def __init__(self, name, staged):
+                super().__init__()
+                self.name = name
+                self.staged = staged
+                self.weight = nn.Parameter(torch.empty(2))
+                self.bias = nn.Parameter(torch.empty(2))
+                self.hook_calls = 0
+                self.conversions = 0
+                self._post_load_done = False
+
+            def requires_staged_device_postprocess(self):
+                return self.staged
+
+            def to(self, *args, **kwargs):
+                events.append(self.name + ".move")
+                return super().to(*args, **kwargs)
+
+            def process_weights_after_loading(self):
+                self.hook_calls += 1
+                if self._post_load_done:
+                    events.append(self.name + ".skip")
+                    return
+                # Both tensors must be loaded even though they live in separate
+                # checkpoint files. Rebind a parameter and add derived state.
+                self.weight = nn.Parameter(
+                    self.weight.double() * 2 + self.bias.double(),
+                    requires_grad=False,
+                )
+                self.register_buffer("runtime_sum", self.weight.sum(), persistent=False)
+                self.conversions += 1
+                self._post_load_done = True
+                events.append(self.name + ".convert")
+
+        class LifecycleModel(RtpModule):
+            def __init__(self, model_config, load_config):
+                super().__init__()
+                self.first = LifecycleLeaf("first", True)
+                self.second = LifecycleLeaf("second", True)
+                self.regular = LifecycleLeaf("regular", False)
+                self.parent_calls = 0
+
+            def validate_weights_loaded(self, loaded_tensor_ids=None):
+                super().validate_weights_loaded(loaded_tensor_ids)
+                validation_dtypes.append(
+                    tuple(child.weight.dtype for child in self.children())
+                )
+                events.append("validate")
+
+            def to(self, *args, **kwargs):
+                events.append("model.move")
+                return super().to(*args, **kwargs)
+
+            def process_weights_after_loading(self):
+                # Parent-before-child traversal may rely on staged children,
+                # but the regular child's hook has not run yet.
+                if not (self.first._post_load_done and self.second._post_load_done):
+                    raise RuntimeError("staged children were not finalized")
+                if self.regular._post_load_done:
+                    raise RuntimeError("unexpected bottom-up hook traversal")
+                self.register_buffer(
+                    "derived_sum",
+                    self.first.runtime_sum + self.second.runtime_sum,
+                    persistent=False,
+                )
+                self.parent_calls += 1
+                events.append("parent.finalize")
+
+        names = ("first", "second", "regular")
+        weights = {
+            name + ".weight": torch.tensor([index + 1.0, index + 2.0])
+            for index, name in enumerate(names)
+        }
+        biases = {name + ".bias": torch.tensor([10.0, 20.0]) for name in names}
+        for missing_bias in (False, True):
+            with self.subTest(missing_bias=missing_bias):
+                events.clear()
+                validation_dtypes.clear()
+                checkpoint_biases = dict(biases)
+                if missing_bias:
+                    checkpoint_biases.pop("second.bias")
+                with tempfile.TemporaryDirectory() as model_path:
+                    save_file(
+                        weights, os.path.join(model_path, "model-00001.safetensors")
+                    )
+                    save_file(
+                        checkpoint_biases,
+                        os.path.join(model_path, "model-00002.safetensors"),
+                    )
+                    with mock.patch(
+                        "rtp_llm.models_py.model_loader.get_model_class",
+                        return_value=LifecycleModel,
+                    ):
+                        if missing_bias:
+                            with self.assertRaisesRegex(RuntimeError, "second.bias"):
+                                self._loader(model_path).load()
+                            self.assertEqual(events, [])
+                            continue
+                        model = self._loader(model_path).load()
+
+                self.assertEqual(
+                    events,
+                    [
+                        "validate",
+                        "first.move",
+                        "first.convert",
+                        "second.move",
+                        "second.convert",
+                        "model.move",
+                        "validate",
+                        "parent.finalize",
+                        "first.skip",
+                        "second.skip",
+                        "regular.convert",
+                    ],
+                )
+                self.assertEqual(
+                    validation_dtypes,
+                    [
+                        (torch.float32, torch.float32, torch.float32),
+                        (torch.float64, torch.float64, torch.float32),
+                    ],
+                )
+                for name in names:
+                    leaf = getattr(model, name)
+                    expected = (
+                        weights[name + ".weight"].double() * 2
+                        + biases[name + ".bias"].double()
+                    )
+                    torch.testing.assert_close(leaf.weight, expected)
+                    torch.testing.assert_close(leaf.runtime_sum, expected.sum())
+                    self.assertEqual(leaf.conversions, 1)
+                    self.assertEqual(leaf.hook_calls, 2 if leaf.staged else 1)
+                    self.assertNotIn(name + ".runtime_sum", model.state_dict())
+                torch.testing.assert_close(
+                    model.derived_sum,
+                    model.first.runtime_sum + model.second.runtime_sum,
+                )
+                self.assertEqual(model.parent_calls, 1)
+                self.assertNotIn("derived_sum", model.state_dict())
+                self.assertTrue(all(not module.training for module in model.modules()))
+
     def test_staged_module_rejects_shared_weight_aliases(self):
         class StagedLeaf(RtpModule):
             def requires_staged_device_postprocess(self):
@@ -398,7 +546,6 @@ class FoundationLoaderTest(unittest.TestCase):
         self.assertEqual(model.parent_weight.dtype, torch.float64)
         self.assertEqual(model.child.child_weight.dtype, torch.float64)
         self.assertIs(model.parent_weight, model.child.child_weight)
-
 
     def test_recursive_apply_converts_shared_tensor_once(self):
         class TiedTree(RtpModule):
