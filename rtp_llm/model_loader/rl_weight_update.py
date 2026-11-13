@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import queue
 import threading
+import time
 from concurrent.futures import Future
 
 import torch
@@ -81,6 +84,20 @@ class RlWeightUpdate:
         targets.update({(layer, key): value for layer, group in enumerate(self.weights.weights) for key, value in group.items()})
         return targets
 
+    def _allocator_memory(self):
+        stats = torch.cuda.memory_stats(self.device)
+        device_free, device_total = torch.cuda.mem_get_info(self.device)
+        return {
+            "torch_allocated_bytes": stats["allocated_bytes.all.current"],
+            "torch_reserved_bytes": stats["reserved_bytes.all.current"],
+            "torch_active_bytes": stats["active_bytes.all.current"],
+            "torch_inactive_split_bytes": stats["inactive_split_bytes.all.current"],
+            "torch_peak_allocated_bytes": stats["allocated_bytes.all.peak"],
+            "torch_peak_reserved_bytes": stats["reserved_bytes.all.peak"],
+            "device_free_bytes": device_free,
+            "device_total_bytes": device_total,
+        }
+
     def _inputs(self):
         while True:
             item = self._queue.get()
@@ -111,8 +128,10 @@ class RlWeightUpdate:
     def _run(self):
         try:
             with torch.inference_mode():
-                if self.device.type == "cuda":
+                is_cuda = self.device.type == "cuda"
+                if is_cuda:
                     torch.cuda.set_device(self.device)
+                    before_refit = self._allocator_memory()
                 for layer, name, value in self.loader.prepare_weights_from_tensors(
                     self._inputs(),
                     str(self.device),
@@ -145,14 +164,29 @@ class RlWeightUpdate:
                     raise RuntimeError("weight update replaced live tensor storage")
                 if any(not torch.equal(live_targets[key], before) for key, before in self._static_snapshots.items()):
                     raise RuntimeError("weight update changed the fixed expert placement map")
-                if self.device.type == "cuda":
+                result = {
+                    "hf_sources": len(self.received),
+                    "internal_tensors": len(self.applied),
+                }
+                if is_cuda:
                     torch.cuda.current_stream(self.device).synchronize()
-                self._done.set_result(
-                    {
-                        "hf_sources": len(self.received),
-                        "internal_tensors": len(self.applied),
+                    self._static_snapshots.clear()
+                    before_trim = self._allocator_memory()
+                    # The conversion stream is done and the engine is still
+                    # paused. Return unused allocator blocks before publication.
+                    started = time.monotonic_ns()
+                    torch.cuda.empty_cache()
+                    trim_wall_ns = time.monotonic_ns() - started
+                    allocator_memory = {
+                        "device": str(self.device),
+                        "before_refit": before_refit,
+                        "before_trim": before_trim,
+                        "after_trim": self._allocator_memory(),
+                        "trim_wall_ns": trim_wall_ns,
                     }
-                )
+                    result["allocator_memory"] = allocator_memory
+                    logging.info("RL refit allocator memory %s", json.dumps(allocator_memory))
+                self._done.set_result(result)
         except BaseException as exc:
             self._done.set_exception(exc)
             if self._current is not None and not self._current.done():
