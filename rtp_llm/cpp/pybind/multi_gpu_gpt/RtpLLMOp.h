@@ -36,12 +36,6 @@ public:
     void restart();
 
 private:
-    void             _init(int64_t                                       model_rpc_port,
-                           int64_t                                       http_port,
-                           const EngineInitParams                        maga_init_params,
-                           std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                           py::object                                    token_processor,
-                           py::object                                    mm_process_engine);
     EngineInitParams initModel(py::object model, py::object engine_config, py::object vit_config);
     std::unique_ptr<ProposeModelEngineInitParams> initProposeModel(py::object              propose_model,
                                                                    const EngineInitParams& base_params);
@@ -62,9 +56,6 @@ private:
     std::atomic<bool>               is_server_shutdown_{false};
     std::atomic<bool>               rpc_server_deferred_{false};
     std::unique_ptr<EngineInitParams> deferred_init_params_;
-    py::object                      deferred_mm_process_engine_ = py::none();
-    std::unique_ptr<ProposeModelEngineInitParams> deferred_propose_params_;
-    py::object                      deferred_token_processor_ = py::none();
     std::string                     deferred_server_address_;
     std::atomic<bool>               server_start_failed_{false};
     std::atomic<bool>               stop_requested_{false};

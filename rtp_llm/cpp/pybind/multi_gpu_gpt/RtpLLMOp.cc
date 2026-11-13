@@ -223,14 +223,11 @@ void RtpLLMOp::init(py::object model,
     // here, then start the network listeners from startRPCServer().  Normal
     // startup calls it immediately; the SCR template path calls it after the
     // control-plane barrier releases.  One ordering, one set of failure paths.
-    deferred_init_params_       = std::make_unique<EngineInitParams>(std::move(params));
-    deferred_mm_process_engine_ = std::move(mm_process_engine);
-    deferred_propose_params_    = std::move(propose_params);
-    deferred_token_processor_   = std::move(token_processor);
+    deferred_init_params_ = std::make_unique<EngineInitParams>(std::move(params));
     prepareRPCService(*deferred_init_params_,
-                      std::move(deferred_mm_process_engine_),
-                      std::move(deferred_propose_params_),
-                      std::move(deferred_token_processor_),
+                      std::move(mm_process_engine),
+                      std::move(propose_params),
+                      std::move(token_processor),
                       std::move(telemetry_config));
     rpc_server_deferred_ = true;
     RTP_LLM_LOG_INFO("engine state prepared; RPC/HTTP listeners start from startRPCServer()");
@@ -625,9 +622,6 @@ void RtpLLMOp::stop() {
             http_server_.reset();
         }
         deferred_init_params_.reset();
-        deferred_propose_params_.reset();
-        deferred_mm_process_engine_ = py::object();
-        deferred_token_processor_   = py::object();
         is_server_shutdown_ = true;
         // bounded flush of remaining spans; never blocks process exit
         {
