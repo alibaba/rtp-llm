@@ -12,6 +12,11 @@ from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.metric_base import (
     MetricBase,
     MetricDataPoint,
 )
+from rtp_llm.aios.kmonitor.python_client.kmonitor.reporting import (
+    reporting_epoch,
+    reporting_lock,
+    reporting_send_lock,
+)
 from rtp_llm.aios.kmonitor.python_client.kmonitor.utils.hippo_helper import HippoHelper
 
 _ReportWorker__REPORT_HOST = os.getenv("HIPPO_SLAVE_IP", "localhost")
@@ -34,22 +39,31 @@ class ReportWorker(object):
         )
         self.metrics: Dict[str, MetricBase] = {}
         self.metric_lock: Lock = Lock()
+        self.send_lock: Lock = Lock()
+        self.flume_enabled = HippoHelper.is_hippo_env()
+        self.flume = None
         self.started = False
-        if HippoHelper.is_hippo_env():
-            self.flume = FlumeClient(
-                _ReportWorker__REPORT_HOST,
-                _ReportWorker__REPORT_PORT,
-                timeout=_ReportWorker__FLUME_CLIENT_TIMEOUT_MS,
-            )
-            self.start()
+        # Construction follows the same pause fence as later reconnects.
+        # A reporter created while sleeping stays disconnected until wake.
+        with reporting_send_lock():
+            self.reporting_epoch = reporting_epoch()
+            if self.flume_enabled and self.reporting_epoch % 2 == 0:
+                self.flume = self._connect_flume()
+        self.start()
+        if self.flume_enabled:
             logging.info(
                 f"hippo role [{HippoHelper.role}] at host [{HippoHelper.host_ip}-{HippoHelper.container_ip}] "
                 "started reporting kmonitor."
             )
         else:
-            self.flume = None
-            self.start()
             logging.info("test mode, kmonitor metrics not reported.")
+
+    def _connect_flume(self):
+        return FlumeClient(
+            _ReportWorker__REPORT_HOST,
+            _ReportWorker__REPORT_PORT,
+            timeout=_ReportWorker__FLUME_CLIENT_TIMEOUT_MS,
+        )
 
     def parse_kmon_tags(self, kmon_tags_str: str) -> Dict[str, str]:
         kmon_tags: Dict[str, str] = {}
@@ -84,25 +98,38 @@ class ReportWorker(object):
         return ThriftFlumeEvent(_ReportWorker__REPORT_HEADERS, report_message)
 
     def get_report_events(self) -> List[ThriftFlumeEvent]:
-        events: List[ThriftFlumeEvent] = []
         timestamp: int = int(round(time.time()))
-        with self.metric_lock:
-            for metric_name, metric in self.metrics.items():
-                reported_data = metric.fetch_reported_data()
-                for data_point in reported_data:
-                    event = self.render_event(metric_name, timestamp, data_point)
-                    events.append(event)
-        return events
+        with reporting_lock(), self.metric_lock:
+            snapshots = [
+                (metric_name, metric.fetch_reported_data())
+                for metric_name, metric in self.metrics.items()
+            ]
+        # Rendering can be much slower than taking the collector snapshots.
+        # Keep it outside producer locks; do_report still owns the send fence.
+        return [
+            self.render_event(metric_name, timestamp, data_point)
+            for metric_name, reported_data in snapshots
+            for data_point in reported_data
+        ]
 
     def do_report(self) -> None:
-        events = self.get_report_events()
-        # logging.debug(f'kmonitor collected {len(events)} events.')
-        if self.flume:
-            self.flume.send_batch(events)
-        else:
-            for event in events:
-                pass
-                # logging.debug(event.body)
+        # Fence local senders without holding the state/producer lock over I/O.
+        # Keep draining/resetting collectors while paused, without sending even
+        # an empty batch (the transport would otherwise reconnect itself).
+        with reporting_send_lock(), self.send_lock:
+            epoch = reporting_epoch()
+            if epoch != self.reporting_epoch:
+                if self.flume is not None:
+                    self.flume.close()
+                    self.flume = None
+                self.reporting_epoch = epoch
+            events = self.get_report_events()
+            if epoch % 2:
+                return
+            if self.flume is None and self.flume_enabled:
+                self.flume = self._connect_flume()
+            if self.flume is not None:
+                self.flume.send_batch(events)
 
     def report_cycle(self) -> None:
         try:

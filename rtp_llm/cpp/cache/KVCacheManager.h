@@ -102,6 +102,9 @@ public:
     // releaseKVCacheMemoryBacking: releases the physical pages of the KV big buffer while keeping its VA.
     //   The caller (SleepLifecycleController) must guarantee the engine is drained and
     //   MRs are deregistered before calling.
+    //   Preflight returns false without mutation for observed request/connector refs or transfers.
+    //   This is not a concurrency barrier. Violating quiescence can still raise a lower-layer
+    //   invariant exception; the lifecycle hook adapter catches it and fails the operation closed.
     // restoreKVCacheMemoryBackingAndResetMetadata: re-maps physical pages at the same VA
     //   (content discarded), then resets all KV metadata: BlockPool::resetMetadata +
     //   BlockCache::clear (generation++).
@@ -166,6 +169,8 @@ public:
     }
 
 private:
+    // Defensive preflight, not a substitute for closing admission and quiescing the engine.
+    bool        memoryUsersDrained(const char* operation) const;
     void        initKVMemoryController();
     void        initConnectorCoordinator();
     void        allocateAndSync();

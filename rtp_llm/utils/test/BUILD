@@ -14,6 +14,24 @@ filegroup(
 )
 
 py_test(
+    name = "lifecycle_controller_test",
+    srcs = ["lifecycle_controller_test.py"],
+    deps = [
+        "//rtp_llm:utils",
+        "//rtp_llm:protobuf",
+        "//rtp_llm/cpp/model_rpc:grpcio",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+        "//rtp_llm/metrics:metrics",
+    ],
+)
+
+py_test(
+    name = "backend_shutdown_test",
+    srcs = ["backend_shutdown_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+py_test(
     name = "jit_cache_manager_test",
     srcs = [
         "jit_cache_manager_test.py",

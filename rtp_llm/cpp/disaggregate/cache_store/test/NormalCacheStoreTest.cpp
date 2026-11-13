@@ -8,6 +8,7 @@
 #include "c10/cuda/CUDAGuard.h"
 #include <cuda_runtime.h>
 #include <atomic>
+#include <future>
 #include <thread>
 
 namespace rtp_llm {
@@ -214,42 +215,251 @@ TEST(NormalCacheStoreSleepCpuTest, testDuplicatePendingStoreDoesNotStrandTransfe
     EXPECT_TRUE(store.store_tasks_.empty());
 }
 
-TEST(NormalCacheStoreSleepCpuTest, testDisabledSleepDoesNotCountTransfers) {
+TEST(NormalCacheStoreSleepCpuTest, testDisabledSleepStillCountsTransfersForShutdown) {
     NormalCacheStore store;
-    store.request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
-    int calls = 0;
+    store.request_block_buffer_store_    = std::make_shared<RequestBlockBufferStore>(nullptr);
+    int                         calls    = 0;
     CacheStoreStoreDoneCallback callback = [&](bool, CacheStoreErrorCode) { ++calls; };
-    auto untracked = store.countTransfer(callback);
-    EXPECT_EQ(store.activeTransferCount(), 0);
-    untracked(true, CacheStoreErrorCode::None);
+    auto                        counted  = store.countTransfer(callback);
+    EXPECT_EQ(store.activeTransferCount(), 1);
+    counted(true, CacheStoreErrorCode::None);
+    counted(false, CacheStoreErrorCode::StoreFailed);
     EXPECT_EQ(calls, 1);
     EXPECT_EQ(store.activeTransferCount(), 0);
 }
 
-TEST(NormalCacheStoreSleepCpuTest, testDisabledSleepKeepsDuplicatePendingStoreBehavior) {
+TEST(NormalCacheStoreSleepCpuTest, testDisabledSleepRejectsDuplicateWithoutLosingCompletion) {
     NormalCacheStore store;
     store.request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
-    auto buffer = std::make_shared<RequestBlockBuffer>("duplicate-sleep-disabled");
+    auto buffer                       = std::make_shared<RequestBlockBuffer>("duplicate-sleep-disabled");
     buffer->addBlock("a", std::make_shared<char>('0'), 1, false, false);
-    int first_calls = 0;
+    int first_calls  = 0;
     int second_calls = 0;
-    store.store(buffer, [&](bool, CacheStoreErrorCode) { ++first_calls; });
-    store.store(buffer, [&](bool, CacheStoreErrorCode) { ++second_calls; });
-    EXPECT_EQ(first_calls, 0);
-    EXPECT_EQ(second_calls, 0);
-    EXPECT_EQ(store.activeTransferCount(), 0);
-    store.markRequestEnd(buffer->getRequestId());
+    store.store(buffer, [&](bool ok, CacheStoreErrorCode ec) {
+        EXPECT_FALSE(ok);
+        EXPECT_EQ(ec, CacheStoreErrorCode::StoreFailed);
+        ++first_calls;
+    });
+    store.store(buffer, [&](bool ok, CacheStoreErrorCode ec) {
+        EXPECT_FALSE(ok);
+        EXPECT_EQ(ec, CacheStoreErrorCode::InvalidParams);
+        ++second_calls;
+    });
     EXPECT_EQ(first_calls, 0);
     EXPECT_EQ(second_calls, 1);
+    EXPECT_EQ(store.activeTransferCount(), 1);
+    store.markRequestEnd(buffer->getRequestId());
+    EXPECT_EQ(first_calls, 1);
+    EXPECT_EQ(second_calls, 1);
+    EXPECT_EQ(store.activeTransferCount(), 0);
+}
+
+TEST(NormalCacheStoreSleepCpuTest, testDisabledSleepKeepsCancelledOrTimedOutLoadCountedUntilCallback) {
+    class DelayedLoadStore: public NormalCacheStore {
+    public:
+        void load(const std::shared_ptr<RequestBlockBuffer>&,
+                  CacheStoreLoadDoneCallback callback,
+                  const std::string&,
+                  uint32_t,
+                  uint32_t,
+                  uint32_t,
+                  int,
+                  int) override {
+            completion = countTransfer(std::move(callback));
+        }
+        CacheStoreLoadDoneCallback completion;
+    };
+    for (bool cancelled : {false, true}) {
+        SCOPED_TRACE(cancelled ? "cancel" : "timeout");
+        auto store                         = std::make_shared<DelayedLoadStore>();
+        store->params_.enable_sleep_mode   = false;
+        store->request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
+        auto buffer                        = std::make_shared<RequestBlockBuffer>("late-callback");
+        buffer->addBlock("a", std::make_shared<char>('0'), 1, false, false);
+        auto context = std::make_shared<LoadContext>(store, false);
+        context->load({buffer}, "127.0.0.1", 1, 0, cancelled ? 60000 : 0, [cancelled]() { return cancelled; }, 1, 0);
+        ASSERT_TRUE(static_cast<bool>(store->completion));
+        context->waitDone();
+        EXPECT_FALSE(context->success());
+        // The RPC waiter has left, but the transport has not delivered its
+        // completion. Shutdown must not treat cancellation as a transfer ACK.
+        EXPECT_EQ(store->activeTransferCount(), 1);
+        store->completion(false, CacheStoreErrorCode::LoadErrorUnknown);
+        EXPECT_EQ(store->activeTransferCount(), 0);
+        store->completion(false, CacheStoreErrorCode::LoadErrorUnknown);
+        EXPECT_EQ(store->activeTransferCount(), 0);
+    }
+}
+
+namespace {
+class DelayedTransferMessager: public Messager {
+public:
+    explicit DelayedTransferMessager(const std::shared_ptr<RequestBlockBufferStore>& buffers):
+        Messager(nullptr, buffers, nullptr) {}
+    bool init(MessagerInitParams) override {
+        return true;
+    }
+    void load(const std::shared_ptr<LoadRequest>&,
+              const std::shared_ptr<CacheStoreClientLoadMetricsCollector>&) override {}
+    void transfer(const std::shared_ptr<TransferRequest>& request) override {
+        pending.push_back(request);
+    }
+    bool generateBlockInfo(BlockBufferInfo*, const std::shared_ptr<BlockBuffer>&, uint32_t, uint32_t) override {
+        return false;
+    }
+    std::vector<std::shared_ptr<TransferRequest>> pending;
+};
+}  // namespace
+
+TEST(NormalCacheStoreSleepCpuTest, testRemoteTransferStaysCountedAfterTaskCancelAndRelease) {
+    for (bool sleep_enabled : {false, true}) {
+        SCOPED_TRACE(sleep_enabled ? "sleep enabled" : "sleep disabled");
+        NormalCacheStore store;
+        store.params_.enable_sleep_mode   = sleep_enabled;
+        store.request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
+        auto messager   = std::make_shared<DelayedTransferMessager>(store.request_block_buffer_store_);
+        store.messager_ = messager;
+        bool cancelled  = false;
+        auto request =
+            std::make_shared<RemoteStoreRequest>("client", "cancel-transfer", "127.0.0.1", 0, 0, 0, 1, 0, 1, 0);
+        request->buffer_pairs = {{"wanted", "remote-wanted"}};
+        auto collector        = std::make_shared<CacheStoreRemoteStoreMetricsCollector>(nullptr, 1);
+        auto task             = std::dynamic_pointer_cast<RemoteStoreTaskImpl>(
+            store.submitRemoteStoreTask(request, collector, [&] { return cancelled; }));
+        auto buffer = store.request_block_buffer_store_->getRequestBlockBuffer(request->request_id);
+        ASSERT_NE(buffer, nullptr);
+        buffer->addBlock("wanted", std::make_shared<char>('0'), 1, false, false);
+        ASSERT_EQ(messager->pending.size(), 1);
+        cancelled = true;
+        task->waitDone();
+        ASSERT_TRUE(task->done());
+        EXPECT_EQ(store.activeTransferCount(), 1);
+        store.releaseRemoteStoreTask(task);
+        task.reset();
+        EXPECT_EQ(store.activeTransferCount(), 1);
+        auto transfer = messager->pending.front();
+        transfer->callback(false, CacheStoreErrorCode::LoadErrorUnknown, transfer->buffer_pairs);
+        EXPECT_EQ(store.activeTransferCount(), 0);
+        transfer->callback(false, CacheStoreErrorCode::LoadErrorUnknown, transfer->buffer_pairs);
+        EXPECT_EQ(store.activeTransferCount(), 0);
+    }
+}
+
+TEST(NormalCacheStoreSleepCpuTest, testRemoteTransferPartialFailureKeepsOtherSubmittedTransferCounted) {
+    NormalCacheStore store;
+    store.request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
+    auto messager                     = std::make_shared<DelayedTransferMessager>(store.request_block_buffer_store_);
+    store.messager_                   = messager;
+    auto request = std::make_shared<RemoteStoreRequest>("client", "partial-transfer", "127.0.0.1", 0, 0, 0, 1, 0, 1, 0);
+    request->buffer_pairs = {{"a", "remote-a"}, {"b", "remote-b"}};
+    auto collector        = std::make_shared<CacheStoreRemoteStoreMetricsCollector>(nullptr, 2);
+    auto task =
+        std::dynamic_pointer_cast<RemoteStoreTaskImpl>(store.submitRemoteStoreTask(request, collector, nullptr));
+    auto buffer = store.request_block_buffer_store_->getRequestBlockBuffer(request->request_id);
+    ASSERT_NE(buffer, nullptr);
+    buffer->addBlock("a", std::make_shared<char>('0'), 1, false, false);
+    buffer->addBlock("b", std::make_shared<char>('1'), 1, false, false);
+    ASSERT_EQ(messager->pending.size(), 2);
+    auto first = messager->pending[0];
+    first->callback(false, CacheStoreErrorCode::LoadErrorUnknown, first->buffer_pairs);
+    ASSERT_TRUE(task->done());
+    EXPECT_EQ(store.activeTransferCount(), 1);
+    store.releaseRemoteStoreTask(task);
+    task.reset();
+    EXPECT_EQ(store.activeTransferCount(), 1);
+    auto second = messager->pending[1];
+    second->callback(true, CacheStoreErrorCode::None, second->buffer_pairs);
+    EXPECT_EQ(store.activeTransferCount(), 0);
+}
+
+TEST(NormalCacheStoreSleepCpuTest, testTransferCountSnapshotCannotMissTaskToCallbackHandoff) {
+    NormalCacheStore store;
+    store.request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
+    auto request = std::make_shared<RemoteStoreRequest>("client", "count-handoff", "127.0.0.1", 0, 0, 0, 1, 0, 1, 0);
+    request->buffer_pairs                         = {{"a", "remote-a"}};
+    auto                                collector = std::make_shared<CacheStoreRemoteStoreMetricsCollector>(nullptr, 1);
+    auto                                task      = store.submitRemoteStoreTask(request, collector, nullptr);
+    std::unique_lock<std::shared_mutex> lock(store.remote_store_tasks_mutex_);
+    std::promise<void>                  querying;
+    auto                                count = std::async(std::launch::async, [&] {
+        querying.set_value();
+        return store.activeTransferCount();
+    });
+    querying.get_future().wait();
+    EXPECT_EQ(count.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    // Simulate the indivisible task -> callback handoff while the map is locked.
+    auto callback = store.countTransfer(CacheStoreStoreDoneCallback([](bool, CacheStoreErrorCode) {}));
+    store.remote_store_tasks_.clear();
+    lock.unlock();
+    EXPECT_EQ(count.get(), 1);
+    callback(true, CacheStoreErrorCode::None);
+    EXPECT_EQ(store.activeTransferCount(), 0);
+}
+
+TEST(NormalCacheStoreSleepCpuTest, testRemoteTransferLateWatcherCannotAttachToReusedRequestId) {
+    NormalCacheStore store;
+    store.request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
+    auto messager                     = std::make_shared<DelayedTransferMessager>(store.request_block_buffer_store_);
+    store.messager_                   = messager;
+    auto request = std::make_shared<RemoteStoreRequest>("client", "reused-id", "127.0.0.1", 0, 0, 0, 1, 0, 1, 0);
+    request->buffer_pairs = {{"a", "remote-a"}};
+    auto collector        = std::make_shared<CacheStoreRemoteStoreMetricsCollector>(nullptr, 1);
+    auto old_task         = store.submitRemoteStoreTask(request, collector, nullptr);
+    store.releaseRemoteStoreTask(old_task);
+    // Keep the old task alive so its previously registered weak watcher can run.
+    auto new_task = store.submitRemoteStoreTask(request, collector, nullptr);
+    auto buffer   = store.request_block_buffer_store_->getRequestBlockBuffer(request->request_id);
+    ASSERT_NE(buffer, nullptr);
+    buffer->addBlock("a", std::make_shared<char>('0'), 1, false, false);
+    EXPECT_EQ(messager->pending.size(), 1);
+    for (const auto& transfer : messager->pending) {
+        transfer->callback(true, CacheStoreErrorCode::None, transfer->buffer_pairs);
+    }
+    store.releaseRemoteStoreTask(new_task);
+    EXPECT_EQ(store.activeTransferCount(), 0);
+}
+
+TEST(NormalCacheStoreSleepCpuTest, testRemoteTransferSelectionHoldsCountAcrossConcurrentRelease) {
+    NormalCacheStore store;
+    store.request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
+    auto messager                     = std::make_shared<DelayedTransferMessager>(store.request_block_buffer_store_);
+    store.messager_                   = messager;
+    auto request = std::make_shared<RemoteStoreRequest>("client", "select-race", "127.0.0.1", 0, 0, 0, 1, 0, 1, 0);
+    request->buffer_pairs = {{"a", "remote-a"}};
+    auto collector        = std::make_shared<CacheStoreRemoteStoreMetricsCollector>(nullptr, 1);
+    auto task =
+        std::dynamic_pointer_cast<RemoteStoreTaskImpl>(store.submitRemoteStoreTask(request, collector, nullptr));
+    auto buffer = store.request_block_buffer_store_->getRequestBlockBuffer(request->request_id);
+    ASSERT_NE(buffer, nullptr);
+    std::unique_lock<std::shared_mutex> selecting(task->buffers_mutex_);
+    std::promise<void>                  entering;
+    auto                                dispatch = std::async(std::launch::async, [&] {
+        entering.set_value();
+        buffer->addBlock("a", std::make_shared<char>('0'), 1, false, false);
+    });
+    entering.get_future().wait();
+    const auto dispatch_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (store.active_transfer_count_.load() == 0 && std::chrono::steady_clock::now() < dispatch_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(dispatch.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    store.releaseRemoteStoreTask(task);
+    // Selection is blocked, but its dispatch already owns a count even though
+    // the pending task has been detached. A concurrent cancellation now wins.
+    EXPECT_EQ(store.active_transfer_count_.load(), 1);
+    task->done_ = true;
+    selecting.unlock();
+    dispatch.get();
+    EXPECT_TRUE(messager->pending.empty());
     EXPECT_EQ(store.activeTransferCount(), 0);
 }
 
 TEST(NormalCacheStoreSleepCpuTest, testRequestEndOnlyRemovesItsOwnBucket) {
     NormalCacheStore store;
-    store.params_.enable_sleep_mode = true;
+    store.params_.enable_sleep_mode   = true;
     store.request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
-    int completed = 0;
-    int unrelated = 0;
+    int completed                     = 0;
+    int unrelated                     = 0;
     for (const auto& id : {"request-a", "request-a", "request-b"}) {
         auto buffer = std::make_shared<RequestBlockBuffer>(id);
         buffer->addBlock("a", std::make_shared<char>('0'), 1, false, false);

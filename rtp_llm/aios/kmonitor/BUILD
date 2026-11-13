@@ -23,3 +23,17 @@ py_test(
     main = "python_client/test/kmon_test.py",
     deps = [":kmonitor_py"],
 )
+
+py_test(
+    name = "sleep_reporting_test",
+    srcs = ["python_client/test/sleep_reporting_test.py"],
+    main = "python_client/test/sleep_reporting_test.py",
+    deps = [":kmonitor_py"],
+)
+
+py_test(
+    name = "sleep_reporting_transport_test",
+    srcs = ["python_client/test/sleep_reporting_transport_test.py"],
+    main = "python_client/test/sleep_reporting_transport_test.py",
+    deps = [":kmonitor_py"],
+)

@@ -1,3 +1,4 @@
+#include <c10/util/ScopeExit.h>
 #include "rtp_llm/cpp/model_rpc/PrefillBatchRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorMessage.h"
 
@@ -23,6 +24,18 @@
 
 using namespace std;
 namespace rtp_llm {
+
+DeferredPrefillContext::~DeferredPrefillContext() {
+    // Match the former lease's last-destroyed ordering, without transferring
+    // ownership of a lease into this request context.
+    ttl_alarm.reset();
+    context.reset();
+    input.reset();
+    request_guard.reset();
+    if (admission_complete) {
+        admission_complete();
+    }
+}
 
 // Dedicated managed executor for idle priority-cancel cleanup. Tasks submitted
 // here never wait for a prepare/Fetch operation to exit; operation owners only
@@ -809,12 +822,21 @@ grpc::Status PrefillBatchRpcServer::admitGroup(const EnqueueGroupRequestPB* requ
             addBatchError(response, input->request_id(), admission.detail.error_code, admission.detail.message);
             continue;
         }
+        auto complete_on_failure = c10::make_scope_exit([&]() {
+            if (admission.complete) {
+                admission.complete();
+            }
+        });
+        // Establish the existing final-cleanup owner before any preparation
+        // can throw; only the notification, never a lease, is handed over.
+        auto deferred                = std::make_shared<DeferredPrefillContext>();
+        deferred->admission_complete = std::exchange(admission.complete, {});
         auto input_copy = std::make_shared<GenerateInputPB>(*input);
         // Worker status derives batch_id from stream metadata; the batch RPC envelope is authoritative.
         input_copy->mutable_group_id()->set_value(request->batch_id());
 
         BatchSlot slot;
-        slot.admission_lease         = std::move(admission.lease);
+        slot.deferred                = std::move(deferred);
         slot.input                   = std::move(input_copy);
         slot.fetch_attach_timeout_ms = request->fetch_attach_timeout_ms();
         slots.push_back(std::move(slot));
@@ -912,8 +934,7 @@ void PrefillBatchRpcServer::buildSlotContexts(std::vector<BatchSlot>& slots) {
         pfx_ctx->onflight_requests      = &onflight_requests_;
         pfx_ctx->loading_cache_requests = &loading_cache_requests_;
         auto guard                      = std::make_shared<AtomicGuard>(onflight_requests_);
-        auto deferred                   = std::make_shared<DeferredPrefillContext>();
-        deferred->admission_lease       = std::move(slot.admission_lease);
+        auto deferred                   = slot.deferred;
         deferred->context               = std::move(pfx_ctx);
         deferred->input                 = slot.input;
         deferred->request_guard         = std::move(guard);

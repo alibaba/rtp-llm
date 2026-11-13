@@ -1,4 +1,8 @@
+import asyncio
 import unittest
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import grpc
 
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
@@ -43,9 +47,9 @@ class GrpcClientWrapperTest(unittest.IsolatedAsyncioTestCase):
         }
 
         async def ensure_connection(address):
-            client._dp_stubs[address] = stubs[address]
+            client._control_rpc.stubs[address] = stubs[address]
 
-        client._ensure_dp_connection = ensure_connection
+        client._control_rpc.ensure = ensure_connection
         result = await client.dump_torch_allocator()
 
         self.assertEqual(result["status"], "ok")
@@ -69,9 +73,9 @@ class GrpcClientWrapperTest(unittest.IsolatedAsyncioTestCase):
         }
 
         async def ensure_connection(address):
-            client._dp_stubs[address] = stubs[address]
+            client._control_rpc.stubs[address] = stubs[address]
 
-        client._ensure_dp_connection = ensure_connection
+        client._control_rpc.ensure = ensure_connection
         result = await client.dump_torch_allocator()
 
         self.assertEqual(result["status"], "error")
@@ -87,14 +91,116 @@ class GrpcClientWrapperTest(unittest.IsolatedAsyncioTestCase):
         stub = _Stub(response)
 
         async def ensure_connection(address):
-            client._dp_stubs[address] = stub
+            client._control_rpc.stubs[address] = stub
 
-        client._ensure_dp_connection = ensure_connection
+        client._control_rpc.ensure = ensure_connection
         result = await client.dump_torch_allocator()
 
         self.assertEqual(result["status"], "error")
         self.assertEqual(len(result["backends"]), 1)
         self.assertEqual(result["errors"], ["dp0:10000/world_rank=0: snapshot failed"])
+
+    async def test_health_check_failure_preserves_lifecycle_channels(self):
+        # Regression: a routine health probe timing out during a sleep/wake
+        # drain must NOT tear down the addressed control channels. Closing a
+        # channel under a genuinely in-flight SleepServing/WakeUpServing call
+        # raises asyncio.CancelledError into that RPC (a BaseException that
+        # bypasses every ``except Exception``), cancelling the operation and
+        # returning HTTP 500 while the backend keeps transitioning -- a
+        # control-plane split brain. health_check may only reset its own
+        # channel.
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        wrapper = GrpcClientWrapper(server_port=12345, control_addresses=addresses)
+        for address in addresses:
+            wrapper._control_rpc.channels[address] = MagicMock()
+            wrapper._control_rpc.stubs[address] = MagicMock()
+        wrapper.channel = MagicMock()
+        wrapper.channel.close = AsyncMock()
+        wrapper.stub = MagicMock()
+        wrapper.stub.CheckHealth = AsyncMock(
+            side_effect=grpc.aio.AioRpcError(
+                grpc.StatusCode.DEADLINE_EXCEEDED,
+                grpc.aio.Metadata(),
+                grpc.aio.Metadata(),
+                "backend draining",
+            )
+        )
+        dp_channels_before = dict(wrapper._control_rpc.channels)
+        dp_stubs_before = dict(wrapper._control_rpc.stubs)
+
+        result = await wrapper.health_check()
+
+        self.assertEqual(result["status"], "error")
+        # Only the health channel is reset; lifecycle channels stay intact.
+        self.assertIsNone(wrapper.channel)
+        self.assertIsNone(wrapper.stub)
+        self.assertEqual(wrapper._control_rpc.channels, dp_channels_before)
+        self.assertEqual(wrapper._control_rpc.stubs, dp_stubs_before)
+        for address in addresses:
+            self.assertFalse(wrapper._control_rpc.channels[address].close.called)
+
+    async def test_public_lifecycle_routes_delegate_to_controller(self):
+        client = GrpcClientWrapper(server_port=10000)
+        for uri, method in (
+            ("sleep", "sleep_serving"),
+            ("wake_up", "wake_up_serving"),
+            ("sleep_status", "get_sleep_status"),
+            ("is_sleeping", "is_sleeping"),
+        ):
+            with self.subTest(uri=uri):
+                request = {"reason": "boundary-test"}
+                response = {"marker": uri}
+                with patch.object(
+                    client._lifecycle, method, AsyncMock(return_value=response)
+                ) as action:
+                    self.assertIs(await client.post_request(uri, request), response)
+                    action.assert_awaited_once_with(request)
+
+    async def test_controller_owns_coordination_and_uses_all_ranks(self):
+        client = GrpcClientWrapper(
+            server_port=10000,
+            dp_addresses=["rank-0"],
+            control_addresses=["rank-0", "rank-1"],
+            expected_control_address_count=2,
+        )
+        self.assertEqual(client.dp_addresses, ["rank-0"])
+        self.assertEqual(client._lifecycle.control_addresses, ["rank-0", "rank-1"])
+        self.assertIs(client._lifecycle._rpc, client._control_rpc)
+        # No duplicate orchestration state or obsolete compatibility aliases.
+        for attribute in (
+            "_lifecycle_lock",
+            "_lifecycle_lease",
+            "control_addresses",
+            "_dp_channels",
+            "_dp_stubs",
+            "_converge_commit",
+        ):
+            self.assertNotIn(attribute, vars(client))
+        self.assertIsInstance(client._lifecycle._lifecycle_lock, asyncio.Lock)
+
+    async def test_close_releases_shared_transport_once(self):
+        client = GrpcClientWrapper(server_port=10000)
+        client.channel = MagicMock(close=AsyncMock())
+        health_channel = client.channel
+        client._control_rpc.close = AsyncMock()
+        await client.close()
+        health_channel.close.assert_awaited_once()
+        client._control_rpc.close.assert_awaited_once()
+        self.assertIsNone(client.channel)
+        self.assertIsNone(client.stub)
+
+    async def test_normal_status_rpcs_keep_their_metrics_and_main_channel(self):
+        client = GrpcClientWrapper(server_port=10000)
+        client.channel = MagicMock()
+        client.stub = MagicMock(
+            GetCacheStatus=AsyncMock(return_value=pb2.EmptyPB()),
+            GetWorkerStatus=AsyncMock(return_value=pb2.EmptyPB()),
+        )
+        with patch("rtp_llm.utils.grpc_client_wrapper.kmonitor.report") as report:
+            self.assertEqual(await client.get_cache_status({}), {})
+            self.assertEqual(await client.get_worker_status({}), {})
+            self.assertEqual(report.call_count, 4)
+        self.assertEqual(client._control_rpc.channels, {})
 
 
 if __name__ == "__main__":

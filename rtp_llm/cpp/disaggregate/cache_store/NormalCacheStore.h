@@ -67,13 +67,11 @@ public:
 private:
     bool init(const CacheStoreInitParams& params);
 
-    // Wraps a done callback so the global active transfer counter is
-    // incremented now and decremented exactly once when the callback fires.
+    // Shared by sleep and graceful shutdown, including sleep-disabled engines.
+    // A request timeout/cancel does not retire this transport-owned completion.
+    // Increment now and decrement exactly once when the actual callback fires.
     template<typename Callback>
     Callback countTransfer(Callback callback) {
-        if (!params_.enable_sleep_mode) {
-            return callback;
-        }
         active_transfer_count_.fetch_add(1, std::memory_order_relaxed);
         auto done = std::make_shared<std::atomic<bool>>(false);
         return [this, callback = std::move(callback), done](auto&&... args) {

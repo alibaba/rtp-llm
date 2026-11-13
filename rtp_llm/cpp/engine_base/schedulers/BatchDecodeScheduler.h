@@ -150,10 +150,20 @@ public:
         }
     }
 
-    void evaluateWaitingStreams() {
-        // 清理 waiting_streams_ 中有错误的 stream
-        waiting_streams_.remove_if([](const auto& s) { return s->hasError(); });
+    void retireTerminalWaitingStreams() {
+        for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
+            if ((*it)->hasError() || (*it)->getStatus() == StreamState::FINISHED) {
+                // Cancellation only posts an event. Drive final cleanup even
+                // when the queue never reaches the configured batch size.
+                (*it)->moveToNext();
+                it = waiting_streams_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
 
+    void evaluateWaitingStreams() {
         std::list<GenerateStreamPtr> new_streams;
         for (auto it = waiting_streams_.begin(); it != waiting_streams_.end(); it++) {
             // 先检查是否有错误，避免错误请求占用资源
@@ -172,14 +182,13 @@ public:
                 while (stream->getStatus() != StreamState::FINISHED && stream->moveToNext() != StreamState::RUNNING) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
+                // Retire every selected stream, including one that failed
+                // during cache allocation/loading before it became RUNNING.
+                waiting_streams_.remove(stream);
             }
             // 过滤 FINISHED stream，仅将 RUNNING stream 加入 running_streams_
             new_streams.remove_if([](const auto& s) { return s->getStatus() == StreamState::FINISHED; });
             running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
-            // 从waiting_streams_中移除已调度的stream
-            for (auto& stream : new_streams) {
-                waiting_streams_.remove(stream);
-            }
         }
     }
 
@@ -217,6 +226,7 @@ public:
         // LOADING_CACHE -> DONE/WAITING: error / load cache done
         evaluateAndUpdateStreams(loading_cache_streams_);
         evaluateAndUpdateStreams(running_streams_);
+        retireTerminalWaitingStreams();
 
         if (running_streams_.empty() && waiting_streams_.size() >= batch_size_) {
             evaluateWaitingStreams();

@@ -17,7 +17,10 @@ from rtp_llm.server.server_args.device_resource_group_args import (
     init_device_resource_group_args,
 )
 from rtp_llm.server.server_args.embedding_group_args import init_embedding_group_args
-from rtp_llm.server.server_args.engine_group_args import init_engine_group_args
+from rtp_llm.server.server_args.engine_group_args import (
+    configure_sleep_args,
+    init_engine_group_args,
+)
 from rtp_llm.server.server_args.fifo_scheduler_group_args import (
     init_fifo_scheduler_group_args,
 )
@@ -477,24 +480,10 @@ def setup_args() -> PyEnvConfigs:
 
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args()
-    # Sleep mode is parsed into RuntimeConfig, but Python weight allocation
-    # wrappers run before C++ hooks. Mirror these switches into the process
-    # environment so ENABLE_SLEEP_MODE / SLEEP_MODE_LEVEL work the same from CLI
-    # and env. SLEEP_MODE_LEVEL is read at weight-load time to decide whether the
-    # torch_memory_saver weights region is opened with host cpu_backup (level 1)
-    # or as discard-only (level 2).
-    os.environ["ENABLE_SLEEP_MODE"] = (
-        "1" if getattr(parsed_args, "enable_sleep_mode", False) else "0"
-    )
-    os.environ["SLEEP_MODE_LEVEL"] = str(
-        getattr(parsed_args, "sleep_mode_level", 1) or 1
-    )
-    # Same reason, one layer deeper: the NCCL release switch is read from a leaf
-    # utils module on the sleep hook path, which has no access to the parsed
-    # config object.
-    os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"] = (
-        "1" if getattr(parsed_args, "sleep_release_collective_memory", False) else "0"
-    )
+    try:
+        configure_sleep_args(parsed_args, py_env_configs.runtime_config)
+    except ValueError as error:
+        parser.error(str(error))
 
     # Normalize the two switches before model construction and process spawn.
     from rtp_llm.utils.warmup import configure_warmup

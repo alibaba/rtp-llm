@@ -3,7 +3,10 @@ from typing import Any, Dict, Optional
 from fastapi import Body, FastAPI
 from fastapi.responses import ORJSONResponse
 
-from rtp_llm.frontend.sleep_validation import unsupported_lifecycle_control_field
+from rtp_llm.frontend.sleep_validation import (
+    unsupported_lifecycle_control_field,
+    validate_sleep_request,
+)
 
 
 def sleep_error_status(response: Dict[str, Any]) -> int:
@@ -27,52 +30,10 @@ def register_sleep_routes(app: FastAPI, grpc_client: Any) -> None:
     @app.post("/sleep")
     async def sleep(req: Optional[Dict[Any, Any]] = Body(None)):
         req = req or {}
-        unsupported_field = unsupported_lifecycle_control_field(req)
-        if unsupported_field:
-            return ORJSONResponse(
-                status_code=400,
-                content={"error": f"sleep {unsupported_field} is unsupported"},
-            )
         try:
-            level = int(req.get("level", 1))
-            if "timeout_ms" in req:
-                int(req["timeout_ms"])
-        except (TypeError, ValueError):
-            return ORJSONResponse(
-                status_code=400,
-                content={"error": "sleep level and timeout_ms must be integers"},
-            )
-        if level not in (0, 1, 2):
-            return ORJSONResponse(
-                status_code=400,
-                content={"error": "sleep level must be 0, 1 or 2"},
-            )
-        mode = req.get("mode", "wait")
-        if mode not in ("wait", "abort"):
-            return ORJSONResponse(
-                status_code=400,
-                content={"error": 'sleep mode must be "wait" or "abort"'},
-            )
-        tags = req.get("tags", [])
-        if tags is None:
-            tags = []
-        if not isinstance(tags, list):
-            return ORJSONResponse(
-                status_code=400,
-                content={"error": "sleep tags must be a list"},
-            )
-        if any(not isinstance(tag, str) or not tag for tag in tags):
-            return ORJSONResponse(
-                status_code=400,
-                content={"error": "sleep tags must be non-empty strings"},
-            )
-        if tags:
-            return ORJSONResponse(
-                status_code=400,
-                content={
-                    "error": "non-empty sleep tags are unsupported; partial sleep is not implemented"
-                },
-            )
+            validate_sleep_request(req)
+        except ValueError as error:
+            return ORJSONResponse(status_code=400, content={"error": str(error)})
         response = await grpc_client.post_request("sleep", req)
         if "error" in response:
             return ORJSONResponse(

@@ -7,9 +7,6 @@
 #include <mutex>
 #include <string>
 #include <vector>
-
-#include "rtp_llm/cpp/engine_base/sleep/SleepLifecycleController.h"
-
 namespace rtp_llm {
 
 // Aggregates in-flight counters from every layer (frontend, rpc, scheduler,
@@ -24,12 +21,10 @@ namespace rtp_llm {
 //   - wait: waitDrained(timeout_ms) polls until all counters reach zero or
 //     the timeout expires. On timeout it returns false and the caller stays in
 //     DRAINING without releasing GPU resources.
-//   - abort: an injected cancel callback is invoked first (the callback owner
-//     is responsible for cancelling non-streaming requests and exempting
-//     streaming ones), then drain is awaited as usual.
+//   - cancel: an injected callback is invoked first, then drain is awaited.
+//     The operation owner defines which work may be cancelled.
 //
-// Acts as the SleepHooks drain provider for SleepLifecycleController via
-// installHooks(). Thread-safe.
+// Owned by SchedulerBase. Business lifecycle adapters install their policies.
 class DrainManager {
 public:
     using CounterFn = std::function<size_t()>;
@@ -53,12 +48,8 @@ public:
     // are rejected. Safe to call concurrently with drained()/waitDrained().
     void registerCounter(const std::string& name, CounterFn fn, CounterKind kind = CounterKind::REQUEST);
 
-    // Remove a counter provider; no-op when the name is unknown.
-    void unregisterCounter(const std::string& name);
-
-    // Inject the abort callback. The provider must cancel non-streaming
-    // requests only; streaming exemption is its responsibility. DrainManager
-    // just invokes it and keeps waiting for the counters to reach zero.
+    // Inject cancellation policy. This manager does not decide whether
+    // streaming or non-streaming requests are eligible for cancellation.
     void setCancelCallback(CancelFn fn);
 
     // True iff every registered counter currently reads zero.
@@ -68,9 +59,8 @@ public:
     // single immediate check. Returns false on timeout (caller keeps DRAINING).
     bool waitDrained(int64_t timeout_ms);
 
-    // SleepHooks::drain entry: applies abort policy (cancel callback) when
-    // requested, then waits for drain up to opt.timeout_ms.
-    bool drain(const SleepOptions& opt);
+    // Optionally request cancellation, then await actual cleanup completion.
+    bool drain(int64_t timeout_ms, bool cancel = false);
 
     // Invoke the injected cancel callback (if any). Called outside the internal
     // lock so the callback may freely query this DrainManager.
@@ -80,9 +70,8 @@ public:
     int64_t activeRequestCount() const;
     int64_t activeCacheTransferCount() const;
 
-    // Wire this manager into SleepHooks (drain + the two count hooks).
-    // The DrainManager must outlive the controller that holds the hooks.
-    void installHooks(SleepHooks& hooks);
+    // Named counters, not a deduplicated number of requests.
+    std::string pendingCountersDebugString() const;
 
     // Wake up waitDrained() pollers early, e.g. when a counter source knows it
     // just dropped to zero. Purely an optimization; polling still converges.
@@ -102,9 +91,6 @@ private:
     std::vector<std::pair<std::string, CounterEntry>> snapshotCounters() const;
 
     int64_t sumByKind(CounterKind kind) const;
-
-    // Human-readable "name=value" list of non-zero counters (for logging).
-    std::string pendingCountersDebugString() const;
 
     mutable std::mutex                  mutex_;  // guards counters_ / cancel_callback_ / poll_interval_ms_
     std::map<std::string, CounterEntry> counters_;

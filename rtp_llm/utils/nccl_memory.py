@@ -21,7 +21,7 @@ instead of a recapture.
 The bytes are not free: everything NCCL suspends is classified ``ncclMemOffload``
 (not ``ncclMemScratch``), i.e. copied to *pinned host* memory and copied back on
 resume. GPU memory is traded for host memory one-for-one, which is an accepted
-trade here but is the reason this is opt-in rather than always-on. NVLS and
+trade here but can be disabled with SLEEP_RELEASE_COLLECTIVE_MEMORY=0. NVLS and
 NET/RDMA buffers are ``ncclMemPersist`` and are never released.
 
 Measured on DSV4-Flash PD (decode tp1/dp2/ep2, prefill tp2/ep2, single
@@ -101,7 +101,8 @@ the ``--sleep_release_collective_memory`` commit message.
    collective is worse than a refusal. What is kept is the diagnosis: if rc=7 ever
    does appear, it names the cause instead of reading as a bare failure.
 
-Enabled by ``--sleep_release_collective_memory``; inert (and loud about it) when
+Enabled by default with sleep, with ``--sleep_release_collective_memory=0`` as
+an opt-out; inert (and loud about it) when
 the runtime NCCL predates the API, so the version pin can be bumped
 independently.
 """

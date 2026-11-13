@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <utility>
+#include <optional>
 
 #include "absl/status/status.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -18,6 +19,8 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 
 namespace rtp_llm {
+
+class CpuQuiesceCoordinator;
 
 enum preRunMode {
     prefill_warm_up     = 0,
@@ -45,18 +48,43 @@ public:
 
     void initRuntime(const EngineInitParams& params);
 
+    // These are rank-local execution guarantees, not a distributed lifecycle
+    // coordinator. The caller owns admission/drain and all-rank acknowledgement.
+    // Unsupported engines must never report a safe resource-release boundary.
+    virtual absl::Status start() {
+        return absl::UnimplementedError("first execution start is not supported");
+    }
+    virtual absl::Status quiesce(int64_t timeout_ms, std::optional<uint64_t> target_round = std::nullopt) {
+        (void)timeout_ms;
+        (void)target_round;
+        return absl::UnimplementedError("safe execution quiesce is not supported");
+    }
+    // Admission must already be sealed/drained on every rank. The backend
+    // chooses the common execution boundary; callers never handle round IDs.
+    absl::Status         coordinatedQuiesce(const std::string& token, int64_t timeout_ms);
+    void                 setQuiesceCoordinator(std::shared_ptr<CpuQuiesceCoordinator> coordinator);
+    virtual absl::Status resume() {
+        return absl::UnimplementedError("safe execution resume is not supported");
+    }
+    virtual absl::Status terminate() {
+        return absl::UnimplementedError("safe execution termination is not supported");
+    }
+    virtual bool executionQuiesceSupported() const {
+        return false;
+    }
+    // Irreversible intent: drain/quiesce may continue, but resume may not reopen
+    // execution. This is separate from terminating/joining the engine thread.
+    virtual void requestTermination();
+    bool         terminationRequested() const {
+        return termination_requested_.load(std::memory_order_acquire);
+    }
+
     virtual void pause() {
         pause_.store(true, std::memory_order_release);
     }
 
     virtual void restart() {
         pause_.store(false, std::memory_order_release);
-    }
-
-    virtual absl::Status pauseAndWaitQuiesced(int64_t timeout_ms) {
-        (void)timeout_ms;
-        pause();
-        return absl::OkStatus();
     }
 
     // Keep empty DP/EP peers polling during drain, before the control plane
@@ -69,11 +97,6 @@ public:
     virtual uint64_t freezeSleepRounds() {
         return 0;
     }
-    virtual absl::Status pauseAtSleepRound(uint64_t round, int64_t timeout_ms) {
-        (void)round;
-        return pauseAndWaitQuiesced(timeout_ms);
-    }
-
     virtual std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) = 0;
 
     virtual void enqueue(std::shared_ptr<GenerateStream>& stream) = 0;
@@ -131,6 +154,8 @@ public:
     }
 
 protected:
+    std::shared_ptr<CpuQuiesceCoordinator> quiesce_coordinator_;
+    std::atomic<bool> termination_requested_{false};
     SleepLifecycleController sleep_controller_;
 
     ResourceContext                resource_context_;

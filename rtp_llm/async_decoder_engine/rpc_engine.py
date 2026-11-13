@@ -73,3 +73,8 @@ class LanguageCppEngine(BaseEngine):
     @override
     def _stop(self) -> None:
         self.rtp_llm_op_.stop()
+
+    @property
+    def lifecycle_control(self):
+        """Local backend control; it remains alive after frontend shutdown."""
+        return self.rtp_llm_op_.ft_op

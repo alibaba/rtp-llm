@@ -1,4 +1,4 @@
-"""Transport for lifecycle control RPCs."""
+"""Shared addressed RPC transport, independent of lifecycle policy."""
 
 import asyncio
 import logging
@@ -13,8 +13,8 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStu
 from rtp_llm.utils.sleep_timing import log_sleep_timing
 
 
-class LifecycleRpcTransport:
-    """Own lifecycle channels and fan-out; policy remains in the controller."""
+class ControlRpcTransport:
+    """Own addressed control/maintenance channels and fan-out, not policy."""
 
     def __init__(self, client_config: Dict[str, int]):
         self._client_config = client_config

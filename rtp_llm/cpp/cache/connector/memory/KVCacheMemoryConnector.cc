@@ -739,6 +739,25 @@ bool KVCacheMemoryConnector::releaseMemoryCacheBacking() {
     if (pools.empty()) {
         return true;
     }
+    // Check all owners before clearing either index or releasing any pool.
+    // Cache-retained blocks alone are expected and may be discarded on sleep.
+    if ((block_cache_ && block_cache_->hasInFlightReferences())
+        || (prefix_block_cache_ && prefix_block_cache_->hasInFlightReferences())) {
+        RTP_LLM_LOG_ERROR("releaseMemoryCacheBacking rejected: cache entries are still pinned by transfers");
+        return false;
+    }
+    for (const auto& pool : pools) {
+        const auto requests  = pool->requestRefBlocksNum();
+        const auto transfers = pool->connectorRefBlocksNum();
+        if (requests != 0 || transfers != 0) {
+            RTP_LLM_LOG_ERROR(
+                "releaseMemoryCacheBacking rejected: pool=%s request_ref_blocks=%zu connector_ref_blocks=%zu",
+                pool->poolName().c_str(),
+                requests,
+                transfers);
+            return false;
+        }
+    }
     const auto release_start = std::chrono::steady_clock::now();
     // The cache-key -> block index maps point into the buffers we are about to free.
     // Clear in place (keeping the cache object's address stable) so lock-free readers that
@@ -768,6 +787,13 @@ bool KVCacheMemoryConnector::restoreMemoryCacheBacking() {
     const auto                  pools = allHostPools();
     if (pools.empty()) {
         return true;
+    }
+    for (const auto& pool : pools) {
+        if (pool->requestRefBlocksNum() != 0 || pool->connectorRefBlocksNum() != 0) {
+            RTP_LLM_LOG_ERROR("restoreMemoryCacheBacking rejected: pool=%s still has active references",
+                              pool->poolName().c_str());
+            return false;
+        }
     }
     const auto allocation_start = std::chrono::steady_clock::now();
     for (const auto& pool : pools) {

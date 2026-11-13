@@ -72,6 +72,9 @@ public:
     // reallocate it on wake. Drops the cache-key->block LRU (block_cache_) since it
     // indexes into the freed buffer. Runs under malloc_mutex_. No-op-safe if the
     // block pool was never created.
+    // Caller must seal/quiesce all transfer entries first. Observed live refs/pins
+    // return false before mutation; violated lower-layer invariants can still throw
+    // and are converted to a closed failure by the lifecycle hook adapter.
     bool releaseMemoryCacheBacking();
     bool restoreMemoryCacheBacking();
 

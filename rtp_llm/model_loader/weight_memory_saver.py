@@ -9,7 +9,7 @@ virtual addresses used by CUDA graphs and the C++ ``weights_`` aliases.
 Activation
 ----------
 Disabled by default. Enable by setting the environment variable
-``ENABLE_SLEEP_MODE=1`` (or programmatically from the parsed runtime config)
+``SLEEP_MODE_LEVEL=1`` or ``2`` (legacy ``ENABLE_SLEEP_MODE=1`` selects level 1)
 and having ``torch_memory_saver`` importable (typically via its LD_PRELOAD
 hook shim). ``RTP_LLM_WEIGHT_MEMORY_SAVER=1`` is kept as a
 low-level developer override for isolated memory-saver tests. When the switch
@@ -67,9 +67,11 @@ import threading
 from contextlib import contextmanager
 from typing import Any, Iterator, Optional
 
-ENV_SWITCH: str = "ENABLE_SLEEP_MODE"
-ENV_LEVEL: str = "SLEEP_MODE_LEVEL"
-ENV_COLLECTIVE_RELEASE: str = "SLEEP_RELEASE_COLLECTIVE_MEMORY"
+from rtp_llm.config.sleep_mode import COLLECTIVE_MEMORY_ENV as ENV_COLLECTIVE_RELEASE
+from rtp_llm.config.sleep_mode import ENABLE_ENV as ENV_SWITCH
+from rtp_llm.config.sleep_mode import LEVEL_ENV as ENV_LEVEL
+from rtp_llm.config.sleep_mode import resource_release_enabled, sleep_level_from_env
+
 LEGACY_ENV_SWITCH: str = "RTP_LLM_WEIGHT_MEMORY_SAVER"
 WEIGHTS_TAG: str = "weights"
 
@@ -219,45 +221,39 @@ def is_enabled() -> bool:
     """Whether the feature switch env var is on (does not check importability)."""
     if _enabled_override is not None:
         return _enabled_override
-    return (
-        os.environ.get(ENV_SWITCH, "0") == "1"
-        or os.environ.get(LEGACY_ENV_SWITCH, "0") == "1"
-    )
+    return sleep_level_from_env() > 0 or os.environ.get(LEGACY_ENV_SWITCH, "0") == "1"
 
 
 def sleep_mode_level() -> int:
-    """Startup-selected sleep level for this process (1 = host backup, 2 = discard).
+    """Startup-selected level (0 = disabled, 1 = host backup, 2 = discard).
 
     Reads the explicit override first (set via :func:`configure_from_runtime`),
     then the ``SLEEP_MODE_LEVEL`` env var (mirrored from the parsed runtime
-    config in server_args), defaulting to 1.
+    config in server_args). Isolated allocator-only/runtime enable overrides
+    without a level keep the legacy level-1 backup policy.
     """
     if _level_override is not None:
         return _level_override
-    try:
-        return int(os.environ.get(ENV_LEVEL, "1"))
-    except (TypeError, ValueError):
+    if _enabled_override is False:
+        return 0
+    level = sleep_level_from_env()
+    if level == 0 and (
+        _enabled_override is True or os.environ.get(LEGACY_ENV_SWITCH) == "1"
+    ):
         return 1
+    return level
 
 
 def release_collective_memory() -> bool:
     """Whether sleep should also release NCCL communicator GPU memory.
 
-    Independent of the sleep level: the level selects what happens to the
-    *weights* (host backup vs discard-and-reload), whereas this selects whether
-    the communicator's transport buffers are handed back too. It is a separate
-    switch because it carries costs the level does not -- pinned host memory
-    equal to the GPU bytes released, a few seconds on each of sleep and wake, and
-    a runtime NCCL new enough to expose ``ncclCommSuspend`` -- so a deployment
-    that wants level 2 does not implicitly opt into those.
-
-    Defaults to off. The feature is fail-closed when the runtime NCCL does not
-    expose the suspend/resume API, and an explicit ``1`` opts into the
-    pinned-host-memory/latency trade-off.
+    Defaults to enabled with either sleep level; explicit 0 opts out of the
+    pinned-host-memory/latency trade-off. The NCCL resource owner still checks
+    capabilities and obtains a unanimous vote before touching communicators.
     """
     if _collective_release_override is not None:
         return _collective_release_override
-    return os.environ.get(ENV_COLLECTIVE_RELEASE, "0") == "1"
+    return resource_release_enabled(ENV_COLLECTIVE_RELEASE, default=is_enabled())
 
 
 def _get_tms() -> Optional[Any]:
@@ -285,7 +281,7 @@ def _get_tms() -> Optional[Any]:
         except Exception:
             _tms = None
             logging.warning(
-                f"WeightMemorySaver: {ENV_SWITCH}=1 or {LEGACY_ENV_SWITCH}=1 but torch_memory_saver is not "
+                "WeightMemorySaver: sleep/allocator saving is enabled but torch_memory_saver is not "
                 "importable; weight memory pause/resume degrades to no-op",
                 exc_info=True,
             )

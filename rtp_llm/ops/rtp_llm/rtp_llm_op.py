@@ -33,6 +33,8 @@ class RtpLLMOp:
         self.token_processor = token_processor
 
     def start(self):
+        from rtp_llm.models_py.distributed.lifecycle_group import get_lifecycle_group
+
         self.weight = self.model.weight
         logging.info("engine_config: %s", self.engine_config.to_string())
         self.ft_op.init(  # type: ignore
@@ -42,6 +44,7 @@ class RtpLLMOp:
             self.mm_engine,
             self.propose_model,
             self.token_processor,
+            get_lifecycle_group(),
         )
 
     def stop(self):

@@ -7,40 +7,6 @@ namespace rtp_llm {
 
 namespace {
 
-std::string jsonEscape(const std::string& input) {
-    std::string out;
-    out.reserve(input.size());
-    for (const char c : input) {
-        switch (c) {
-            case '"':
-                out += "\\\"";
-                break;
-            case '\\':
-                out += "\\\\";
-                break;
-            case '\n':
-                out += "\\n";
-                break;
-            case '\r':
-                out += "\\r";
-                break;
-            case '\t':
-                out += "\\t";
-                break;
-            default:
-                if (const auto byte = static_cast<unsigned char>(c); byte < 0x20) {
-                    constexpr char kHex[] = "0123456789abcdef";
-                    out += "\\u00";
-                    out += kHex[byte >> 4];
-                    out += kHex[byte & 0x0f];
-                } else {
-                    out += c;  // Preserve UTF-8 bytes, including on signed-char platforms.
-                }
-        }
-    }
-    return out;
-}
-
 AdmissionCheckResult makeCheckResult(const std::string& instance_id, SleepState state, int64_t sleep_epoch) {
     AdmissionCheckResult result;
     result.instance_id = instance_id;
@@ -60,24 +26,17 @@ AdmissionCheckResult makeCheckResult(const std::string& instance_id, SleepState 
 }  // namespace
 
 AdmissionCheckResult AdmissionGate::checkDetail() const {
-    if (controller_ == nullptr) {
-        return makeCheckResult(instance_id_, SleepState::RUNNING, 0);
+    auto state = controller_ ? controller_->state() : SleepState::RUNNING;
+    if (!admission_) {
+        state = SleepState::ERROR;
+    } else if (!admission_->rootsOpen() && state == SleepState::RUNNING) {
+        state = SleepState::DRAINING;
     }
-    return makeCheckResult(instance_id_, controller_->state(), controller_->sleepEpoch());
+    return makeCheckResult(instance_id_, state, controller_ ? controller_->sleepEpoch() : 0);
 }
 
 AdmissionAcquireResult AdmissionGate::acquire() const {
-    AdmissionAcquireResult result;
-    if (controller_ == nullptr) {
-        return result;
-    }
-    auto controller_result = controller_->acquireAdmission();
-    // Normal requests need only the lease, not copies of instance/state strings.
-    if (!controller_result.admitted()) {
-        result.detail = makeCheckResult(instance_id_, controller_result.state, controller_result.sleep_epoch);
-    }
-    result.lease           = std::move(controller_result.lease);
-    return result;
+    return acquireImpl(false);
 }
 
 grpc::Status AdmissionGate::check() const {
@@ -85,14 +44,23 @@ grpc::Status AdmissionGate::check() const {
 }
 
 AdmissionAcquireResult AdmissionGate::acquireCacheTransfer() const {
+    return acquireImpl(true);
+}
+
+AdmissionAcquireResult AdmissionGate::acquireImpl(bool continuation) const {
     AdmissionAcquireResult result;
-    if (controller_ == nullptr) {
+    if (!admission_) {
+        result.detail = makeCheckResult(instance_id_, SleepState::ERROR, 0);
         return result;
     }
-    auto controller_result = controller_->acquireCacheTransferAdmission();
-    if (!controller_result.admitted()) {
-        result.detail = makeCheckResult(instance_id_, controller_result.state, controller_result.sleep_epoch);
-        if (controller_result.state == SleepState::DRAINING) {
+    auto acquired = admission_->admit(continuation);
+    if (!acquired.accepted) {
+        auto state = controller_ ? controller_->state() : SleepState::DRAINING;
+        if (state == SleepState::RUNNING) {
+            state = SleepState::DRAINING;
+        }
+        result.detail = makeCheckResult(instance_id_, state, controller_ ? controller_->sleepEpoch() : 0);
+        if (continuation && state == SleepState::DRAINING) {
             // Unlike a new root, a continuation can enter DRAINING until the
             // freeze barrier closes its gate. Describe that distinct phase
             // without changing the retryable domain code or wire schema.
@@ -102,7 +70,7 @@ AdmissionAcquireResult AdmissionGate::acquireCacheTransfer() const {
                 + "), retry the inference request after wake or on another engine";
         }
     }
-    result.lease = std::move(controller_result.lease);
+    result.complete = std::move(acquired.complete);
     return result;
 }
 
@@ -122,13 +90,6 @@ grpc::Status AdmissionGate::toGrpcStatus(const AdmissionCheckResult& result) {
         return grpc::Status(grpc::StatusCode::UNAVAILABLE, result.message, serialized);
     }
     return grpc::Status(grpc::StatusCode::UNAVAILABLE, result.message);
-}
-
-std::string AdmissionGate::toJson(const AdmissionCheckResult& result) {
-    return "{\"error_code\":" + std::to_string(result.error_code) + ",\"error_code_str\":\""
-           + jsonEscape(result.error_code_str) + "\",\"message\":\"" + jsonEscape(result.message)
-           + "\",\"instance_id\":\"" + jsonEscape(result.instance_id) + "\",\"sleep_epoch\":"
-           + std::to_string(result.sleep_epoch) + ",\"state\":\"" + jsonEscape(result.state) + "\"}";
 }
 
 }  // namespace rtp_llm

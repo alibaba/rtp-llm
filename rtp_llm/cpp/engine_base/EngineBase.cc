@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/engine_base/CpuQuiesceCoordinator.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "autil/EnvUtil.h"
@@ -13,6 +14,43 @@ EngineBase::EngineBase(const EngineInitParams& params) {
 }
 
 EngineBase::~EngineBase() {}
+
+void EngineBase::setQuiesceCoordinator(std::shared_ptr<CpuQuiesceCoordinator> coordinator) {
+    quiesce_coordinator_ = std::move(coordinator);  // startup only, before RPC publication
+}
+
+absl::Status EngineBase::coordinatedQuiesce(const std::string& token, int64_t timeout_ms) {
+    if (timeout_ms < 0) {
+        return absl::InvalidArgumentError("negative execution quiesce timeout");
+    }
+    if (!requiresCoordinatedSleepQuiesce()) {
+        return quiesce(timeout_ms);
+    }
+    if (!quiesce_coordinator_) {
+        return absl::FailedPreconditionError("CPU execution coordinator is not initialized");
+    }
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms > 0 ? timeout_ms : 60000);
+    // freeze() is idempotent; the earlier freeze phase has already sealed all
+    // peers. No GIL/CUDA work is allowed on this control path.
+    auto target = quiesce_coordinator_->targetRound(token, freezeSleepRounds(), deadline);
+    if (!target.ok()) {
+        return target.status();
+    }
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+    if (remaining.count() <= 0) {
+        return absl::DeadlineExceededError("CPU coordination exhausted execution quiesce deadline");
+    }
+    return quiesce(remaining.count(), *target);
+}
+
+void EngineBase::requestTermination() {
+    termination_requested_.store(true, std::memory_order_release);
+    if (scheduler_) {
+        scheduler_->admission()->beginTermination();
+    }
+}
 
 std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
 EngineBase::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {

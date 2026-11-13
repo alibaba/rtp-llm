@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <torch/version.h>
@@ -587,6 +588,9 @@ BlockCachePtr BlockPool::blockCache() {
 
 void BlockPool::resetMetadata() {
     std::scoped_lock lock(ref_mu_, free_mu_);
+    if (request_ref_counter_.busyBlockNum() != 0 || connector_ref_counter_.busyBlockNum() != 0) {
+        throw std::runtime_error("cannot reset KV metadata before request and connector references drain");
+    }
     free_block_ids_.clear();
     // block 0 is reserved, same as initFreeBlocks()
     for (BlockIdxType i = 1; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
@@ -612,6 +616,9 @@ void BlockPool::releaseHostBuffer() {
     {
         // Prevent malloc() from handing out blocks that point into the freed buffer.
         std::scoped_lock lock(ref_mu_, free_mu_);
+        if (request_ref_counter_.busyBlockNum() != 0 || connector_ref_counter_.busyBlockNum() != 0) {
+            throw std::runtime_error("cannot release host KV backing before request and connector references drain");
+        }
         free_block_ids_.clear();
     }
     // Drop everything that views into cache_aligned_buffer_ so the tensor's refcount
@@ -651,6 +658,12 @@ void BlockPool::reallocateHostBuffer() {
                             "reallocateHostBuffer is only valid for HOST block pool");
     if (!host_released_) {
         return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(ref_mu_);
+        if (request_ref_counter_.busyBlockNum() != 0 || connector_ref_counter_.busyBlockNum() != 0) {
+            throw std::runtime_error("cannot restore host KV backing before request and connector references drain");
+        }
     }
     // Mirror init(): re-create the pinned buffer and every derived layer view/layout.
     initializeCacheBuffer();
