@@ -66,6 +66,7 @@ from rtp_llm.dash_sc.codec import (
     DASH_ERROR_CAPACITY,
     DASH_ERROR_INTERNAL,
     DASH_ERROR_INVALID_OUTPUT,
+    DASH_ERROR_MEDIA_DOWNLOAD,
     DASH_ERROR_RESOURCE_EXHAUSTED,
     DASH_ERROR_TIMEOUT,
     DASH_ERROR_TOO_LONG,
@@ -326,6 +327,9 @@ def _dash_error_mapping_for_ft_exception(
     """
 
     exception_type = exc.exception_type
+    if exception_type == ExceptionType.MM_DOWNLOAD_FAILED:
+        # Unavailable upstream media is not an engine abort or scheduler capacity failure.
+        return _DashFtErrorMapping(DASH_ERROR_MEDIA_DOWNLOAD)
     if exception_type in (
         ExceptionType.UNSAFE_INPUT_CONTENT,
         ExceptionType.UNSAFE_OUTPUT_CONTENT,

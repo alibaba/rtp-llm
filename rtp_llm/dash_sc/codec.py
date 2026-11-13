@@ -125,6 +125,14 @@ DASH_ERROR_CAPACITY = DashErrorSpec(
     status_code=503,
     status_name="ServiceUnavailable",
 )
+# Keep the legacy download-failure error_no for metrics without labelling an
+# unavailable media source as engine abort or scheduling capacity exhaustion.
+DASH_ERROR_MEDIA_DOWNLOAD = DashErrorSpec(
+    error_no=DASHSERVING_INNER_ENGINE_ERROR_NO,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=503,
+    status_name="ServiceUnavailable",
+)
 # Auto-TPM victim preemption (Master 8429 PRIORITY_PREEMPTED): the request was
 # already dispatched and then cancelled as a victim of a strictly
 # higher-priority request.  Distinct from generic capacity backpressure

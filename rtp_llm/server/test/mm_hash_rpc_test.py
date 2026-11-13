@@ -18,6 +18,7 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheVersionPB,
+    ErrorDetailsPB,
     MultimodalHashRequestPB,
     MultimodalHashResponsePB,
     MultimodalInputsPB,
@@ -27,6 +28,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     add_MultimodalRpcServiceServicer_to_server,
 )
 from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCache, MMHashKeyCache
+from rtp_llm.multimodal.mm_error_messages import MediaDownloadError, MMErr
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
 from rtp_llm.multimodal.mm_request_context import (
     MEDIA_REQUEST_CONTEXT,
@@ -109,6 +111,25 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         )
         return MultimodalHashRequestPB(
             keys=keys or self.keys, inputs=inputs, timeout_ms=2000
+        )
+
+    async def test_dns_error_retains_typed_details_over_real_rpc(self):
+        self.engine.get_embedding_result.side_effect = MediaDownloadError(
+            ExceptionType.MM_WRONG_FORMAT_ERROR,
+            MMErr.DNS_FAILED,
+            "dns_error",
+            None,
+            "media.example",
+            1.5,
+            0,
+        )
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await self.stub.GetMultimodalHashes(self.wire_request(), timeout=2)
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+        details = raised.exception.trailing_metadata()["grpc-status-details-bin"]
+        self.assertEqual(ErrorDetailsPB.FromString(details).error_code, 902)
+        self.assertEqual(
+            ErrorDetailsPB.FromString(details).error_message, MMErr.DNS_FAILED
         )
 
     async def test_binary_source_identity_reaches_embedding_handler(self):
