@@ -118,6 +118,23 @@ sh_test(
     data = ["update_cuda13_locks.sh"],
 )
 
+sh_binary(
+    name = "requirements_xpu.update",
+    srcs = ["update_xpu_lock.sh"],
+    data = [
+        "requirements_base.txt",
+        "requirements_xpu.txt",
+        "requirements_xpu_overrides.txt",
+    ],
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "update_xpu_lock_test",
+    srcs = ["update_xpu_lock_test.sh"],
+    data = ["update_xpu_lock.sh"],
+)
+
 compile_pip_requirements(
     name = "requirements_rocm",
     src = "requirements_rocm.txt",
