@@ -1119,38 +1119,58 @@ def forward_prefill(
         and cu_seqlens.numel() == 2
     ):
         full_tokens = int(input_ids.numel())
+        # Engram token state is prepared once for the full request before this
+        # loop.  Each chunk below is a different row window, so slice the state
+        # with the same [start:end] window; otherwise Engram builds KV rows for
+        # the whole prompt while attention receives only chunk_tokens rows.
+        engram_state = [
+            (layer, layer.engram_hashes, layer.engram_token_mask)
+            for layer in v4.layers
+            if getattr(layer, "engram", None) is not None
+            and getattr(layer, "engram_hashes", None) is not None
+        ]
         chunk_out = None
-        for start in range(0, full_tokens, chunk_tokens):
-            end = min(start + chunk_tokens, full_tokens)
-            length = end - start
-            tagged_entries = (
-                attn.items() if hasattr(attn, "items") else [("default", attn)]
-            )
-            chunk_attn = TaggedAttentionInputs(
-                {
-                    tag: _chunk_attention_entry(entry, start, length, input_ids.device)
-                    for tag, entry in tagged_entries
-                }
-            )
-            chunk_hidden = forward_layers(
-                v4,
-                kv_cache,
-                input_ids[start:end],
-                positions[start:end],
-                torch.tensor([0, length], dtype=torch.int32, device=input_ids.device),
-                block_tables_by_type,
-                attn_inputs=chunk_attn,
-                prepare_hidden_fn=None,
-                allow_ced=False,
-                expert_token_counts=None,
-            )
-            if chunk_out is None:
-                chunk_out = torch.empty(
-                    (full_tokens, chunk_hidden.size(1)),
-                    dtype=chunk_hidden.dtype,
-                    device=chunk_hidden.device,
+        try:
+            for start in range(0, full_tokens, chunk_tokens):
+                end = min(start + chunk_tokens, full_tokens)
+                length = end - start
+                for layer, hashes, mask in engram_state:
+                    layer.engram_hashes = hashes[start:end]
+                    layer.engram_token_mask = (
+                        None if mask is None else mask[start:end]
+                    )
+                tagged_entries = (
+                    attn.items() if hasattr(attn, "items") else [("default", attn)]
                 )
-            chunk_out[start:end].copy_(chunk_hidden)
+                chunk_attn = TaggedAttentionInputs(
+                    {
+                        tag: _chunk_attention_entry(entry, start, length, input_ids.device)
+                        for tag, entry in tagged_entries
+                    }
+                )
+                chunk_hidden = forward_layers(
+                    v4,
+                    kv_cache,
+                    input_ids[start:end],
+                    positions[start:end],
+                    torch.tensor([0, length], dtype=torch.int32, device=input_ids.device),
+                    block_tables_by_type,
+                    attn_inputs=chunk_attn,
+                    prepare_hidden_fn=None,
+                    allow_ced=False,
+                    expert_token_counts=None,
+                )
+                if chunk_out is None:
+                    chunk_out = torch.empty(
+                        (full_tokens, chunk_hidden.size(1)),
+                        dtype=chunk_hidden.dtype,
+                        device=chunk_hidden.device,
+                    )
+                chunk_out[start:end].copy_(chunk_hidden)
+        finally:
+            for layer, hashes, mask in engram_state:
+                layer.engram_hashes = hashes
+                layer.engram_token_mask = mask
         return PyModelOutputs(chunk_out)
 
     hidden = forward_layers(
