@@ -86,6 +86,12 @@ class Qwen4MoeLayer(GenericMoeLayer):
         self._shared_output_ready = torch.cuda.Event()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        reduce_shared = getattr(self, "_reduce_shared_gate", None)
+        if reduce_shared is not None and reduce_shared.supports(hidden_states):
+            experts = self._forward_routed(hidden_states, skip_tp_allreduce=True)
+            shared = self.shared_expert(hidden_states, skip_allreduce=True)
+            gate = self.shared_expert_gate(hidden_states)
+            return reduce_shared(experts, shared, gate)
         stream = self._shared_stream
         # Larger shapes did not improve in the complete TP2 consumer. Keep
         # their established schedule and each layer's distinct event pair.
