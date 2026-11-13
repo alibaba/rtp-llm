@@ -87,8 +87,11 @@ struct GroupSetResource {
         return transfer_state == GroupSetTransferState::IDLE && is_empty();
     }
     bool isMatchUsable() const {
+        // DEVICE demotion only reads the source. The loader pins it with REQUEST
+        // references under the cache mutex before eviction can release CACHE refs.
         return !transfer_detached
-               && (transfer_state == GroupSetTransferState::IDLE || transfer_state == GroupSetTransferState::LOADING);
+               && (transfer_state == GroupSetTransferState::IDLE || transfer_state == GroupSetTransferState::LOADING
+                   || (transfer_state == GroupSetTransferState::DEMOTING && hasCompleteDeviceValue()));
     }
     bool hasCompleteDeviceValue() const {
         return !device_blocks.empty()

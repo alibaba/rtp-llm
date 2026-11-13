@@ -2045,14 +2045,44 @@ TEST_F(BlockTreeCacheTest, MatchFailsFastAtIdleResourceWithMultipleServingTiers)
     first_node->group_set_resources[0].host_block = NULL_BLOCK_IDX;
 }
 
-TEST_F(BlockTreeCacheTest, MatchDoesNotReuseBusyFullResource) {
+TEST_F(BlockTreeCacheTest, MatchKeepsLinearTailWhenMiddleFullDeviceSourceIsDemoting) {
+    auto full = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+    auto linear = std::make_shared<LinearGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(1)}, nullptr, nullptr);
+    auto cache = makeBlockTreeCacheForTest({full, linear});
+    ASSERT_NE(cache, nullptr);
+
+    const CacheKeysType                        keys{100, 200, 300, 400};
+    std::vector<std::vector<GroupSetResource>> resources(4, std::vector<GroupSetResource>(2));
+    for (size_t i = 0; i < resources.size(); ++i) {
+        resources[i][0].device_blocks = {static_cast<BlockIdxType>(10 + i)};
+    }
+    resources.back()[1].device_blocks = {23};
+    cache->insert(keys, resources, Tier::DEVICE);
+    TreeNode* middle                              = cache->tree()->findNode(keys)[1];
+    middle->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
+
+    auto result = cache->match(keys);
+    EXPECT_EQ(result.matched_device_blocks, 4u);
+    EXPECT_EQ(cache->matchedBlocksForGroup("group0", result.matched_device_resources),
+              (BlockIndicesType{10, 11, 12, 13}));
+    EXPECT_EQ(cache->matchedBlocksForGroup("group1", result.matched_device_resources), (BlockIndicesType{23}));
+    EXPECT_EQ(full->devicePools()[0]->refCount(11), 2u);
+    EXPECT_EQ(middle->group_set_resources[0].transfer_state, GroupSetTransferState::DEMOTING);
+
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, result.matched_device_resources);
+    middle->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
+}
+
+TEST_F(BlockTreeCacheTest, MatchDoesNotReuseLoadPendingFullResource) {
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {10};
     resources[1][0].device_blocks = {11};
     cache_->insert({100, 200}, resources, Tier::DEVICE);
 
     TreeNode* first_node                              = cache_->tree()->root()->children.at(100);
-    first_node->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
+    first_node->group_set_resources[0].transfer_state = GroupSetTransferState::LOAD_PENDING;
 
     const BlockTreeMatchResult result = cache_->match({100, 200});
     EXPECT_EQ(result.matched_device_blocks, 0u);
@@ -2103,8 +2133,8 @@ TEST_F(BlockTreeCacheTest, MatchSkipsBusySwaResourceWithoutTruncatingFullPrefix)
     }
 }
 
-TEST_F(BlockTreeCacheTest, MatchStillTruncatesAtBusyFullResource) {
-    // The FULL prefix latch must keep truncating when the FULL resource itself is busy.
+TEST_F(BlockTreeCacheTest, MatchStillTruncatesAtLoadPendingFullResource) {
+    // The FULL prefix latch must keep truncating when the FULL resource has a pending load.
     auto full_group = std::make_shared<FullGroupSet>(
         std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
     auto swa_group = std::make_shared<SWAGroupSet>(
@@ -2121,7 +2151,7 @@ TEST_F(BlockTreeCacheTest, MatchStillTruncatesAtBusyFullResource) {
     multi_cache->insert({100, 200, 300}, resources, Tier::DEVICE);
 
     TreeNode* busy_node                              = multi_cache->tree()->root()->children.at(100)->children.at(200);
-    busy_node->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
+    busy_node->group_set_resources[0].transfer_state = GroupSetTransferState::LOAD_PENDING;
 
     BlockTreeMatchResult result = multi_cache->match({100, 200, 300});
     EXPECT_EQ(result.matched_device_blocks, 1u);

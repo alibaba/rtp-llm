@@ -27,6 +27,37 @@ MultiNodeResource makeTwoNodeDeviceResource(BlockIdxType first, BlockIdxType sec
     return MultiNodeResource{0, Tier::DEVICE, {{nullptr, {first}}, {nullptr, {second}}}};
 }
 
+TEST(GroupSetResourceTest, CompleteDeviceSourceRemainsMatchableDuringDemotion) {
+    GroupSetResource resource;
+    resource.device_blocks  = {10, 11};
+    resource.transfer_state = GroupSetTransferState::DEMOTING;
+
+    EXPECT_TRUE(resource.isMatchUsable());
+}
+
+TEST(GroupSetResourceTest, DemotionDoesNotExposeDetachedPartialOrLowerTierSources) {
+    GroupSetResource resource;
+    resource.transfer_state = GroupSetTransferState::DEMOTING;
+    resource.device_blocks  = {10, NULL_BLOCK_IDX};
+    EXPECT_FALSE(resource.isMatchUsable());
+
+    resource.device_blocks.clear();
+    resource.host_block = 12;
+    EXPECT_FALSE(resource.isMatchUsable());
+    resource.host_block = NULL_BLOCK_IDX;
+    resource.disk_block = 13;
+    EXPECT_FALSE(resource.isMatchUsable());
+
+    resource.disk_block        = NULL_BLOCK_IDX;
+    resource.device_blocks     = {10, 11};
+    resource.transfer_detached = true;
+    EXPECT_FALSE(resource.isMatchUsable());
+
+    resource.transfer_detached = false;
+    resource.transfer_state    = GroupSetTransferState::LOAD_PENDING;
+    EXPECT_FALSE(resource.isMatchUsable());
+}
+
 TEST(GroupSetTest, StoresOrderedTagMembershipAndLogicalPayload) {
     const auto topology = makeTestTopology({makeGroupBase({0, 1}), makeGroupBase({0})});
     const auto pool_a   = makeTestDevicePool({{80, 16}, {96, 24}}, 4, "group_set_a");
