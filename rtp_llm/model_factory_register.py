@@ -353,6 +353,14 @@ def _register_builtin_lazy_models() -> None:
         "kimi_k3_mtp", "rtp_llm.models.kimi_k3.kimi_k3", ["KimiK3MTPModel"]
     )
     register_lazy_model(
+        "kimi_k31",
+        "rtp_llm.models.kimi_k3.kimi_k31",
+        ["KimiK31ForConditionalGeneration"],
+    )
+    register_lazy_model(
+        "kimi_k31_mtp", "rtp_llm.models.kimi_k3.kimi_k31", ["KimiK31MTPModel"]
+    )
+    register_lazy_model(
         "kimi_linear",
         "rtp_llm.models.kimi_linear.kimi_linear",
         ["KimiLinearForCausalLM"],

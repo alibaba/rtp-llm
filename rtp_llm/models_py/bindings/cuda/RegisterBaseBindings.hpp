@@ -251,6 +251,28 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("workspace"),
                   py::arg("k"),
                   py::arg("max_seq_len"));
+    rtp_ops_m.def("dsa_select_topk_candidates",
+                  &dsa_select_topk_candidates,
+                  "Bounded deterministic score/global-position radix selection",
+                  py::arg("scores"),
+                  py::arg("positions"),
+                  py::arg("starts"),
+                  py::arg("ends"),
+                  py::arg("output_scores"),
+                  py::arg("output_positions"),
+                  py::arg("topk"));
+    rtp_ops_m.def("dsa_select_page_rr_candidates",
+                  &dsa_select_page_rr_candidates,
+                  "Select exact K3.1 Decode candidates from rank-major PageRR scores",
+                  py::arg("received"),
+                  py::arg("query_positions"),
+                  py::arg("output_scores"),
+                  py::arg("output_positions"),
+                  py::arg("topk"),
+                  py::arg("shards"),
+                  py::arg("shard_rank"),
+                  py::arg("page"),
+                  py::arg("start"));
 #endif  // !USE_PPU
 
     // Vendored from vLLM (csrc/sampler.cu::top_k_per_row_prefill).
@@ -309,7 +331,8 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("kv_cache"),
                   py::arg("slot_mapping"),
                   py::arg("kv_cache_dtype"),
-                  py::arg("scale"));
+                  py::arg("scale"),
+                  py::arg("use_ue8m0") = false);
 
     rtp_ops_m.def("mla_decode_q_concat_cache_insert",
                   &rtp_llm::mla_decode_q_concat_cache_insert,

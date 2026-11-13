@@ -63,6 +63,8 @@ class KimiK3MainCacheConfigTest(unittest.TestCase):
                     ):
                         config = KimiK3ModelConfig()
                         config.model_type = model_type
+                        # ModelFactory sets the draft role before precision setup.
+                        config.is_mtp = model_type == "kimi_k3_mtp"
                         config.config_dtype = "bfloat16"
                         config.quantization = quantization
                         cache_config = None

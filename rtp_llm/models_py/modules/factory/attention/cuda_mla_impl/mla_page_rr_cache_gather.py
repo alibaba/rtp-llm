@@ -166,6 +166,10 @@ def _pack_mla_page_rr_prefix(
     local_block_table: torch.Tensor,
     descriptor: MlaPageRRChunkDescriptor,
     shard_rank: int,
+    out: Optional[torch.Tensor] = None,
+    *,
+    indexer_fp8: bool = False,
+    allow_reserved_block_zero: bool = False,
 ) -> torch.Tensor:
     page_tokens = descriptor.page_tokens
     if not isinstance(local_block_table, torch.Tensor) or local_block_table.dim() != 2:
@@ -195,28 +199,54 @@ def _pack_mla_page_rr_prefix(
         page_tokens,
         descriptor.feature_width,
     )
+    payload = raw_cache.new_empty(output_shape) if out is None else out
+    if (
+        tuple(payload.shape) != output_shape
+        or payload.dtype != raw_cache.dtype
+        or payload.device != raw_cache.device
+        or not payload.is_contiguous()
+    ):
+        raise ValueError("prefix pack output must match the descriptor/cache")
     if descriptor.total_local_pages == 0:
-        return raw_cache.new_empty(output_shape)
+        return payload
 
     from rtp_llm.models_py.triton_kernels.mla.page_rr import pack_prefix_cuda
 
-    payload = raw_cache.new_empty(output_shape)
-    pack_prefix_cuda(raw_cache, local_block_table, descriptor, shard_rank, payload)
+    pack_prefix_cuda(
+        raw_cache,
+        local_block_table,
+        descriptor,
+        shard_rank,
+        payload,
+        indexer_fp8=indexer_fp8,
+        allow_reserved_block_zero=allow_reserved_block_zero,
+    )
     return payload
 
 
 def _restore_mla_page_rr_prefix(
     gathered_payload: torch.Tensor,
     descriptor: MlaPageRRChunkDescriptor,
+    out: Optional[torch.Tensor] = None,
+    *,
+    indexer_fp8: bool = False,
 ) -> torch.Tensor:
     """Remove rank/stripe padding into newly allocated request-major rows."""
-    output = gathered_payload.new_empty(
-        (descriptor.total_tokens, descriptor.feature_width)
-    )
+    shape = (descriptor.total_tokens, descriptor.feature_width)
+    output = gathered_payload.new_empty(shape) if out is None else out
+    if (
+        tuple(output.shape) != shape
+        or output.dtype != gathered_payload.dtype
+        or output.device != gathered_payload.device
+        or not output.is_contiguous()
+    ):
+        raise ValueError("prefix restore output must match the descriptor/payload")
     if output.shape[0]:
         from rtp_llm.models_py.triton_kernels.mla.page_rr import restore_prefix_cuda
 
-        restore_prefix_cuda(gathered_payload, descriptor, output)
+        restore_prefix_cuda(
+            gathered_payload, descriptor, output, indexer_fp8=indexer_fp8
+        )
     return output
 
 
@@ -250,9 +280,13 @@ class MlaPageRRCacheGather:
         descriptor = self._prefix_descriptor
         gathered = payload.new_empty((self.shard_size, *payload.shape))
         if descriptor.total_local_pages:
-            wire_dtype = torch.uint8 if payload.dtype == torch.float8_e4m3fn else payload.dtype
+            wire_dtype = (
+                torch.uint8 if payload.dtype == torch.float8_e4m3fn else payload.dtype
+            )
             collective_torch.all_gather_into(
-                payload.view(wire_dtype), gathered.flatten(0, 1).view(wire_dtype), Group.TP
+                payload.view(wire_dtype),
+                gathered.flatten(0, 1).view(wire_dtype),
+                Group.TP,
             )
         return _restore_mla_page_rr_prefix(gathered, descriptor)
 
@@ -280,27 +314,118 @@ class MlaPageRRCacheGather:
         raw_cache: torch.Tensor,
         local_block_table: torch.Tensor,
         descriptor: MlaPageRRChunkDescriptor,
-    ) -> torch.Tensor:
-        """Pack, AllGather, and restore one launch-local canonical chunk."""
+        *,
+        workspace=None,
+        indexer_fp8: bool = False,
+        allow_reserved_block_zero: bool = False,
+        split_out: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Restore canonical rows, or write dense MLA latent and RoPE separately."""
+        if split_out is not None:
+            if indexer_fp8 or raw_cache.dtype not in (
+                torch.bfloat16,
+                torch.float8_e4m3fn,
+            ):
+                raise ValueError("split prefix restore requires BF16 or E4M3 MLA pages")
+            latent, rope = split_out
+            if (
+                any(
+                    output.ndim != 2
+                    or output.shape[0] != descriptor.total_tokens
+                    or output.shape[1] == 0
+                    or output.dtype != torch.bfloat16
+                    or output.device != raw_cache.device
+                    or not output.is_contiguous()
+                    for output in split_out
+                )
+                or latent.shape[1] + rope.shape[1] != descriptor.feature_width
+            ):
+                raise ValueError(
+                    "split prefix outputs must match the descriptor and cache"
+                )
 
+        gathered = self.gather_prefix_chunk(
+            raw_cache,
+            local_block_table,
+            descriptor,
+            workspace=workspace,
+            indexer_fp8=indexer_fp8,
+            allow_reserved_block_zero=allow_reserved_block_zero,
+        )
+        if split_out is not None:
+            if descriptor.total_tokens:
+                from rtp_llm.models_py.triton_kernels.mla.page_rr import (
+                    restore_prefix_cuda,
+                )
+
+                restore_prefix_cuda(gathered, descriptor, latent, suffix=rope)
+            return split_out
+        shape = (descriptor.total_tokens, descriptor.feature_width)
+        out = (
+            None
+            if workspace is None
+            else workspace("cache.restore", shape, raw_cache.dtype)
+        )
+        return _restore_mla_page_rr_prefix(
+            gathered, descriptor, out=out, indexer_fp8=indexer_fp8
+        )
+
+    def gather_prefix_chunk(
+        self,
+        raw_cache: torch.Tensor,
+        local_block_table: torch.Tensor,
+        descriptor: MlaPageRRChunkDescriptor,
+        *,
+        workspace=None,
+        indexer_fp8: bool = False,
+        allow_reserved_block_zero: bool = False,
+    ) -> torch.Tensor:
+        """Return rank-major pages for consumers that address physical slots."""
+
+        def buffer(name, shape):
+            return (
+                None
+                if workspace is None
+                else workspace("cache." + name, shape, raw_cache.dtype)
+            )
+
+        payload_shape = (
+            descriptor.total_local_pages,
+            self.page_tokens,
+            descriptor.feature_width,
+        )
         payload = self._pack_prefix_chunk(
             raw_cache,
             local_block_table,
             descriptor,
+            out=buffer("pack", payload_shape),
+            indexer_fp8=indexer_fp8,
+            allow_reserved_block_zero=allow_reserved_block_zero,
         )
-        gathered = payload.new_empty((self.shard_size, *payload.shape))
+        gather_shape = (self.shard_size, *payload.shape)
+        gathered = buffer("gather", gather_shape)
+        if gathered is None:
+            gathered = payload.new_empty(gather_shape)
         if descriptor.total_local_pages:
-            wire_dtype = torch.uint8 if payload.dtype == torch.float8_e4m3fn else payload.dtype
-            collective_torch.all_gather_into(
-                payload.view(wire_dtype), gathered.flatten(0, 1).view(wire_dtype), Group.TP
+            wire_dtype = (
+                torch.uint8 if payload.dtype == torch.float8_e4m3fn else payload.dtype
             )
-        return _restore_mla_page_rr_prefix(gathered, descriptor)
+            collective_torch.all_gather_into(
+                payload.view(wire_dtype),
+                gathered.flatten(0, 1).view(wire_dtype),
+                Group.TP,
+            )
+        return gathered
 
     def _pack_prefix_chunk(
         self,
         raw_cache: torch.Tensor,
         local_block_table: torch.Tensor,
         descriptor: MlaPageRRChunkDescriptor,
+        *,
+        out: Optional[torch.Tensor] = None,
+        indexer_fp8: bool = False,
+        allow_reserved_block_zero: bool = False,
     ) -> torch.Tensor:
         _validate_raw_cache(raw_cache, self.kernel_page_tokens)
         if (
@@ -314,6 +439,9 @@ class MlaPageRRCacheGather:
             local_block_table,
             descriptor,
             self.shard_rank,
+            out=out,
+            indexer_fp8=indexer_fp8,
+            allow_reserved_block_zero=allow_reserved_block_zero,
         )
 
     def _pack_prefix(
@@ -343,8 +471,239 @@ class MlaPageRRCacheGather:
             raw_cache, local_block_table, descriptor, self.shard_rank
         )
 
+    def slot_mapping(
+        self,
+        positions: torch.Tensor,
+        batch_indices: torch.Tensor,
+        local_block_table: torch.Tensor,
+        *,
+        valid_token_count: Optional[int] = None,
+        valid_token_mask: Optional[torch.Tensor] = None,
+        allow_reserved_block_zero: bool = False,
+    ) -> torch.Tensor:
+        """Return owner-only physical slots; non-owner rows map to ``-1``."""
+
+        return build_mla_page_rr_slot_mapping(
+            positions,
+            batch_indices,
+            local_block_table,
+            self.page_tokens,
+            self.shard_size,
+            self.shard_rank,
+            valid_token_count=valid_token_count,
+            valid_token_mask=valid_token_mask,
+            allow_reserved_block_zero=allow_reserved_block_zero,
+            kernel_page_tokens=self.kernel_page_tokens,
+        )
+
+    def validate_block_table_capacity(
+        self,
+        local_block_table: torch.Tensor,
+        sequence_lens: Sequence[int],
+    ) -> None:
+        """Fail before execution if this rank cannot store its owned pages."""
+
+        sequence_values = _host_int_values("sequence_lens", sequence_lens)
+        if local_block_table.dim() != 2:
+            raise ValueError("local block table must be 2D")
+        if int(local_block_table.shape[0]) != len(sequence_values):
+            raise ValueError(
+                "local block table batch does not match sequence lengths: "
+                f"table={local_block_table.shape[0]} sequences={len(sequence_values)}"
+            )
+        if any(length < 0 for length in sequence_values):
+            raise ValueError("sequence lengths must be non-negative")
+        table_width = int(local_block_table.shape[1])
+        max_pages = (
+            max(sequence_values, default=0) + self.page_tokens - 1
+        ) // self.page_tokens
+        required_local_pages = (
+            max_pages + self.shard_size - 1 - self.shard_rank
+        ) // self.shard_size
+        required_kernel_pages = required_local_pages * (
+            self.page_tokens // self.kernel_page_tokens
+        )
+        if required_kernel_pages > table_width:
+            raise RuntimeError(
+                "MLA page-RR sequence exceeds the rank-local block table: "
+                f"required_kernel_pages={required_kernel_pages} width={table_width} "
+                f"shard_size={self.shard_size} shard_rank={self.shard_rank}"
+            )
+
 
 __all__ = [
     "MlaPageRRCacheGather",
     "MlaPageRRChunkDescriptor",
 ]
+
+
+def _validate_slot_mapping_inputs(
+    positions: torch.Tensor,
+    batch_indices: torch.Tensor,
+    local_block_table: torch.Tensor,
+) -> None:
+    for name, tensor in (
+        ("positions", positions),
+        ("batch_indices", batch_indices),
+        ("local_block_table", local_block_table),
+    ):
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"{name} must be a torch.Tensor")
+
+    if positions.dim() != 1:
+        raise ValueError(f"positions must be 1D, got shape {tuple(positions.shape)}")
+    if batch_indices.dim() != 1:
+        raise ValueError(
+            f"batch_indices must be 1D, got shape {tuple(batch_indices.shape)}"
+        )
+    if positions.numel() != batch_indices.numel():
+        raise ValueError(
+            "positions and batch_indices must have the same length, got "
+            f"{positions.numel()} and {batch_indices.numel()}"
+        )
+    if local_block_table.dim() != 2:
+        raise ValueError(
+            "local_block_table must be 2D, got shape "
+            f"{tuple(local_block_table.shape)}"
+        )
+
+    tensors = (positions, batch_indices, local_block_table)
+    if any(tensor.dtype != positions.dtype for tensor in tensors[1:]):
+        raise TypeError(
+            "positions, batch_indices, and local_block_table must have the same dtype"
+        )
+    if positions.dtype not in _INTEGER_DTYPES:
+        raise TypeError(
+            "page-RR metadata must use an integer dtype (torch.int32 or torch.int64), "
+            f"got {positions.dtype}"
+        )
+    if any(tensor.device != positions.device for tensor in tensors[1:]):
+        raise ValueError(
+            "positions, batch_indices, and local_block_table must be on the same device"
+        )
+
+
+def build_mla_page_rr_slot_mapping(
+    positions: torch.Tensor,
+    batch_indices: torch.Tensor,
+    local_block_table: torch.Tensor,
+    page_tokens: int,
+    shard_size: int,
+    shard_rank: int,
+    *,
+    valid_token_count: Optional[int] = None,
+    valid_token_mask: Optional[torch.Tensor] = None,
+    kernel_page_tokens: Optional[int] = None,
+    allow_reserved_block_zero: bool = False,
+) -> torch.Tensor:
+    """Build owner-only MLA cache slots for a page-round-robin shard.
+
+    ``positions`` are absolute positions within each request. Global page
+    ``g`` of ``page_tokens`` tokens belongs to rank ``g % shard_size``.
+    The table and raw cache use ``kernel_page_tokens``-sized subpages; all
+    subpages of one physical page stay on the same owner. Non-owner rows
+    receive ``-1``, which the cache-write kernel treats as a no-op.
+
+    The returned tensor is int64 because that is the cache-write kernel ABI.
+    ``valid_token_count`` excludes a contiguous physical-padding tail before
+    validating owner pages. Those rows map directly to ``-1`` and therefore
+    never require an allocated cache block. ``valid_token_mask`` also supports
+    interspersed padding in a zigzag/transport layout. Runtime value checks use
+    device-side asynchronous assertions so the valid CUDA path does not
+    introduce host synchronization.
+    """
+
+    kernel_page_tokens = _validate_geometry(
+        page_tokens, shard_size, shard_rank, kernel_page_tokens
+    )
+    _validate_slot_mapping_inputs(positions, batch_indices, local_block_table)
+
+    positions_i64 = positions.to(torch.int64)
+    batch_indices_i64 = batch_indices.to(torch.int64)
+    skipped = torch.full_like(positions_i64, -1)
+    if positions_i64.numel() == 0:
+        return skipped
+
+    token_count = int(positions_i64.numel())
+    if valid_token_count is None:
+        valid_token_count = token_count
+    if not isinstance(valid_token_count, Integral):
+        raise TypeError("valid_token_count must be an integer")
+    valid_token_count = int(valid_token_count)
+    if not 0 <= valid_token_count <= token_count:
+        raise ValueError(
+            "valid_token_count must be within the slot-mapping extent: "
+            f"valid={valid_token_count}, tokens={token_count}"
+        )
+    valid_rows = (
+        torch.arange(token_count, device=positions.device, dtype=torch.int64)
+        < valid_token_count
+    )
+    if valid_token_mask is not None:
+        if (
+            valid_token_mask.shape != positions.shape
+            or valid_token_mask.device != positions.device
+            or valid_token_mask.dtype != torch.bool
+        ):
+            raise ValueError(
+                "valid_token_mask must be a bool tensor matching positions"
+            )
+        valid_rows = valid_rows & valid_token_mask
+
+    torch._assert_async(
+        torch.all((~valid_rows) | (positions_i64 >= 0)),
+        "positions must be non-negative",
+    )
+
+    request_count = int(local_block_table.shape[0])
+    if request_count == 0:
+        if valid_token_mask is not None:
+            torch._assert_async(
+                torch.all(~valid_rows), "valid rows require a local block table"
+            )
+        elif valid_token_count:
+            raise RuntimeError(
+                "batch index out of range for an empty local block table"
+            )
+        return skipped
+    batch_in_range = (batch_indices_i64 >= 0) & (batch_indices_i64 < request_count)
+    torch._assert_async(
+        torch.all((~valid_rows) | batch_in_range), "batch index out of range"
+    )
+    safe_batch_indices = torch.clamp(batch_indices_i64, 0, request_count - 1)
+
+    global_pages = torch.div(positions_i64, page_tokens, rounding_mode="floor")
+    owner_rows = valid_rows & (torch.remainder(global_pages, shard_size) == shard_rank)
+    local_pages = torch.div(global_pages, shard_size, rounding_mode="floor")
+    local_pages = local_pages * (page_tokens // kernel_page_tokens) + torch.div(
+        torch.remainder(positions_i64, page_tokens),
+        kernel_page_tokens,
+        rounding_mode="floor",
+    )
+
+    table_width = int(local_block_table.shape[1])
+    if table_width == 0:
+        torch._assert_async(
+            torch.all(~owner_rows),
+            "local block table width is insufficient for an owner page",
+        )
+        return skipped
+
+    page_in_range = (local_pages >= 0) & (local_pages < table_width)
+    torch._assert_async(
+        torch.all((~owner_rows) | page_in_range),
+        "local block table width is insufficient for an owner page",
+    )
+    safe_local_pages = torch.clamp(local_pages, 0, table_width - 1)
+    block_ids = local_block_table[safe_batch_indices, safe_local_pages].to(torch.int64)
+    valid_block = block_ids >= (0 if allow_reserved_block_zero else 1)
+    torch._assert_async(
+        torch.all((~owner_rows) | (~page_in_range) | valid_block),
+        "owner page points to a null or unused local block",
+    )
+
+    valid_owner_rows = owner_rows & batch_in_range & page_in_range & valid_block
+    slots = block_ids * kernel_page_tokens + torch.remainder(
+        positions_i64, kernel_page_tokens
+    )
+    return torch.where(valid_owner_rows, slots, skipped)

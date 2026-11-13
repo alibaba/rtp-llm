@@ -3,7 +3,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import patch
 
 from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3, KimiK3Mtp
-from rtp_llm.ops import RoleType
+from rtp_llm.ops import CPRotateMethod, ParallelismConfig, RoleType
 
 
 class KimiK3MoeCapacityTest(unittest.TestCase):
@@ -16,6 +16,7 @@ class KimiK3MoeCapacityTest(unittest.TestCase):
             gen_num_per_cycle=width - 1,
             mm_model_config=NS(is_multimodal=False),
             moe_prefill_max_tokens_per_rank=999999,
+            k3_runtime_config=NS(dsa=None),
         )
         model.runtime_config = NS(
             fifo_scheduler_config=NS(
@@ -31,10 +32,12 @@ class KimiK3MoeCapacityTest(unittest.TestCase):
                 batch_decode_scheduler_batch_size=batch,
             ),
         )
-        model.parallelism_config = NS(
-            role_type=role,
-            tp_size=tp,
-        )
+        model.parallelism_config = ParallelismConfig()
+        model.parallelism_config.role_type = role
+        model.parallelism_config.tp_size = tp
+        cp = model.parallelism_config.prefill_cp_config
+        cp.method = CPRotateMethod.DISABLED
+        cp.preserve_tp_layout = False
         model.hw_kernel_config = NS(
             enable_cuda_graph=False,
             decode_capture_batch_sizes=[],
@@ -48,6 +51,7 @@ class KimiK3MoeCapacityTest(unittest.TestCase):
         return model
 
     def capacity(self, model):
+        self.assertFalse(model.parallelism_config.prefill_cp_config.is_enabled())
         with (
             patch("rtp_llm.models_py.model_desc.kimi_k3.KimiK3Model") as target,
             patch("rtp_llm.models_py.model_desc.kimi_k3_mtp.KimiK3MtpModel") as draft,
@@ -57,6 +61,7 @@ class KimiK3MoeCapacityTest(unittest.TestCase):
             ctor = draft if isinstance(model, KimiK3Mtp) else target
             self.assertIs(result, ctor.return_value)
             self.assertIs(model.py_model, result)
+            self.assertIsNone(ctor.call_args.kwargs["prefill_staging_tokens"])
             return ctor.call_args.kwargs["max_moe_tokens"]
 
     def test_chunk_budget_is_not_clamped_to_fifo_admission_budget(self):
@@ -72,9 +77,7 @@ class KimiK3MoeCapacityTest(unittest.TestCase):
                     with self.subTest(owner=owner, role=role, tp=tp, width=width):
                         model = self.model(owner, role, tp, batch, width, chunk=1)
                         model.hw_kernel_config.enable_cuda_graph = True
-                        model.hw_kernel_config.decode_capture_batch_sizes = [
-                            1, bucket
-                        ]
+                        model.hw_kernel_config.decode_capture_batch_sizes = [1, bucket]
                         # Independently enumerate valid request padding.
                         physical_rows = []
                         for requests in range(1, max(batch, bucket) + 1):
@@ -102,9 +105,7 @@ class KimiK3MoeCapacityTest(unittest.TestCase):
 
         model = self.model(role=RoleType.PDFUSION)
         model.hw_kernel_config.enable_cuda_graph = True
-        model.hw_kernel_config.generation_prefill_capture_token_buckets = [
-            256, 1024
-        ]
+        model.hw_kernel_config.generation_prefill_capture_token_buckets = [256, 1024]
         self.assertEqual(self.capacity(model), 1024)
 
     def test_unchunked_single_prompt_and_full_warmup(self):

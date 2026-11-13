@@ -1051,6 +1051,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     SamplerOutput   draft_sampler_output;
     torch::Tensor   draft_last_hidden_states;
     const bool      cp_enabled = parallelism_config_.prefill_cp_config.is_enabled();
+    const bool      global_mla_draft_hidden =
+        cp_enabled && !is_dspark_ && draft_model_ && draft_model_->requiresGlobalMtpPrefillHidden();
 
     // placeholder for some tensors
     torch::Tensor                      draft_probs;
@@ -1215,7 +1217,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
         // CP and DSpARK target hidden states are rank-local. Do not broadcast
         // rank 0's copy; after syncing the remaining inputs, every rank binds
-        // the normalized output produced by its own target forward.
+        // the pre-final-norm output produced by its own target forward.
         if (cp_enabled || is_dspark_) {
             model_input.last_hidden_states = torch::Tensor();
         }
@@ -1229,6 +1231,11 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         mtp::applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
         if (cp_enabled || is_dspark_) {
             model_input.last_hidden_states = model_output.all_hidden_states;
+        }
+        if (global_mla_draft_hidden) {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(restore_target_hidden_for_mla_draft)");
+            model_input.last_hidden_states =
+                model_->restoreMtpPrefillHiddenStates(model_input.last_hidden_states, model_input);
         }
         if (is_dspark_) {
             batch_stream_processor_->validatePrefillDSparkCommitInput(model_input);
@@ -1294,7 +1301,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         return absl::OkStatus();
     }
 
-    if (cp_enabled && !is_dspark_) {
+    if (cp_enabled && !is_dspark_ && !global_mla_draft_hidden) {
         draft_last_hidden_states = draft_model_->getMtpLastHiddenStates(stream_groups.totalSamplerBatchSizeOut());
         RTP_LLM_CHECK_WITH_INFO(draft_last_hidden_states.defined() && draft_last_hidden_states.numel() > 0,
                                 "CP MTP draft last-hidden buffer must contain per-request rows");

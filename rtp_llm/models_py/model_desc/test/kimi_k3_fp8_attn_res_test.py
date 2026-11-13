@@ -46,9 +46,14 @@ class KimiK3Fp8AttnResTest(unittest.TestCase):
     def test_producer_falls_back_before_fp8_ag_capacity(self):
         class Hidden:
             is_cuda = True
+            dtype = torch.bfloat16
+            device = torch.device("cuda:0")
 
             def __init__(self, rows):
                 self.shape = (rows, 7168)
+
+            def is_contiguous(self):
+                return True
 
             def __add__(self, other):
                 return self
@@ -71,9 +76,12 @@ class KimiK3Fp8AttnResTest(unittest.TestCase):
         collective.decode_staging = False
         collective.world_size = 8
         collective.max_m = 65536
+        self.assertTrue(collective.can_run_ag(8192))
+        self.assertFalse(collective.can_run_ag(8193))
 
         class Attention:
-            _fp8_collective = collective
+            _fp8_input_collective = collective
+            supports_fp8_activation = True
 
             def __call__(self, hidden, *args):
                 return hidden
@@ -91,8 +99,12 @@ class KimiK3Fp8AttnResTest(unittest.TestCase):
         layer.apply_mlp = layer._apply_regular_mlp
         inputs = SimpleNamespace(is_prefill=True, is_mtp_draft_update=False)
         with patch("torch.cuda.is_current_stream_capturing", return_value=False):
-            metadata = SimpleNamespace(is_target_verify=False)
+            metadata = SimpleNamespace(
+                is_target_verify=False, query_layout=None, outer_layout=None
+            )
             layer.forward(Hidden(8192), None, None, None, inputs, metadata, None)
+            self.assertEqual(layer.attention_residual.fp8_calls, 1)
+            self.assertEqual(layer.attention_residual.bf16_calls, 0)
             layer.forward(Hidden(8193), None, None, None, inputs, metadata, None)
         self.assertEqual(layer.attention_residual.fp8_calls, 1)
         self.assertEqual(layer.attention_residual.bf16_calls, 1)

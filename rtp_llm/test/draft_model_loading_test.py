@@ -1,3 +1,4 @@
+import copy
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -64,7 +65,7 @@ class DraftModelLoadingTest(unittest.TestCase):
                     attn_config=SimpleNamespace(tokens_per_block=16),
                     to_string=lambda: "target",
                 )
-                model_cls = MagicMock(__name__="TestTarget")
+                model_cls = MagicMock(spec=BaseModel, __name__="TestTarget")
                 model_cls._create_config.return_value = model
 
                 def apply_overrides(**kwargs):
@@ -116,7 +117,7 @@ class DraftModelLoadingTest(unittest.TestCase):
                     ckpt_path="draft",
                     tokenizer_path="",
                 )
-                model_cls = MagicMock()
+                model_cls = MagicMock(spec=BaseModel)
                 model_cls._create_config.return_value = draft
 
                 def check_draft_role(model_config, *_args, **_kwargs):
@@ -196,7 +197,8 @@ class DraftModelLoadingTest(unittest.TestCase):
                     draft_config = SimpleNamespace(
                         model_type="test_draft", num_layers=2, is_mtp=True
                     )
-                    model_cls = MagicMock()
+                    # Ordinary models do not declare the optional parallelism hook.
+                    model_cls = MagicMock(spec=BaseModel)
                     with patch.object(
                         ModelFactory, "get_model_cls", return_value=model_cls
                     ), patch("rtp_llm.model_factory.configure_warmup"):
@@ -235,6 +237,44 @@ class DraftModelLoadingTest(unittest.TestCase):
                         ),
                         (pp_size, pp_rank),
                     )
+
+    def test_draft_loading_uses_explicit_model_parallelism_hook(self):
+        for pp_size, pp_rank in ((1, 0), (3, 2)):
+            with self.subTest(pp_size=pp_size, pp_rank=pp_rank):
+                engine_config = make_engine_config(
+                    SpeculativeType.MTP, pp_size, pp_rank
+                )
+                original_parallelism = engine_config.parallelism_config
+                original_values = copy.deepcopy(vars(original_parallelism))
+                private_parallelism = copy.deepcopy(original_parallelism)
+                model_cls = MagicMock(spec=BaseModel)
+                model_cls.speculative_parallelism_config = MagicMock(
+                    return_value=private_parallelism
+                )
+                draft_config = SimpleNamespace(
+                    model_type="test_draft", num_layers=2, is_mtp=True
+                )
+                with patch.object(
+                    ModelFactory, "get_model_cls", return_value=model_cls
+                ), patch("rtp_llm.model_factory.configure_warmup"):
+                    propose = ModelFactory.get_sp_model(
+                        SimpleNamespace(max_seq_len=128, gen_num_per_cycle=2),
+                        draft_config,
+                        engine_config,
+                    )
+
+                model_cls.speculative_parallelism_config.assert_called_once_with(
+                    original_parallelism
+                )
+                model_cls.from_config.assert_called_once()
+                self.assertIs(
+                    model_cls.from_config.call_args.kwargs["parallelism_config"],
+                    private_parallelism,
+                )
+                self.assertIsNot(private_parallelism, original_parallelism)
+                self.assertIs(engine_config.parallelism_config, original_parallelism)
+                self.assertEqual(vars(original_parallelism), original_values)
+                self.assertIs(propose.model, model_cls.from_config.return_value)
 
     def test_non_last_stage_normalizes_speculative_type(self):
         for model_type, expected in (

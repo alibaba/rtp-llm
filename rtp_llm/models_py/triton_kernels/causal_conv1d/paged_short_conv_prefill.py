@@ -61,12 +61,29 @@ def prepare_paged_short_conv_metadata(
 
 @triton.jit
 def _short_conv_checkpoint(
-    x, conv_state, current_conv_state,
-    sequence_start, sequence_length, local_end, i_b, i_d,
-    initial_block, has_initial, use_current_state,
-    stride_x_t, stride_x_d, stride_s_block, stride_s_w, stride_s_d,
-    stride_cs_b, stride_cs_w, stride_cs_d,
-    D: tl.constexpr, W: tl.constexpr, BW: tl.constexpr, BD: tl.constexpr,
+    x,
+    conv_state,
+    current_conv_state,
+    sequence_start,
+    sequence_length,
+    local_end,
+    i_b,
+    i_d,
+    initial_block,
+    has_initial,
+    use_current_state,
+    stride_x_t,
+    stride_x_d,
+    stride_s_block,
+    stride_s_w,
+    stride_s_d,
+    stride_cs_b,
+    stride_cs_w,
+    stride_cs_d,
+    D: tl.constexpr,
+    W: tl.constexpr,
+    BW: tl.constexpr,
+    BD: tl.constexpr,
     HAS_CURRENT_STATE: tl.constexpr,
 ):
     """Gather the last W-1 raw inputs at a request-local checkpoint."""
@@ -76,22 +93,26 @@ def _short_conv_checkpoint(
     history_idx = source_t + W - 1
     mask = (o_d[:, None] < D) & (state_w[None, :] < W - 1)
     from_x = tl.load(
-        x + (sequence_start + source_t.to(tl.int64))[None, :] * stride_x_t
+        x
+        + (sequence_start + source_t.to(tl.int64))[None, :] * stride_x_t
         + o_d[:, None] * stride_x_d,
-        mask=mask & (source_t[None, :] >= 0)
-        & (source_t[None, :] < sequence_length),
+        mask=mask & (source_t[None, :] >= 0) & (source_t[None, :] < sequence_length),
         other=0,
     )
     from_history = tl.load(
-        conv_state + initial_block * stride_s_block
-        + history_idx[None, :] * stride_s_w + o_d[:, None] * stride_s_d,
-        mask=has_initial & mask & (source_t[None, :] < 0),
+        conv_state
+        + initial_block * stride_s_block
+        + history_idx[None, :] * stride_s_w
+        + o_d[:, None] * stride_s_d,
+        mask=has_initial & ~use_current_state & mask & (source_t[None, :] < 0),
         other=0,
     )
     if HAS_CURRENT_STATE:
         from_current = tl.load(
-            current_conv_state + i_b * stride_cs_b
-            + history_idx[None, :] * stride_cs_w + o_d[:, None] * stride_cs_d,
+            current_conv_state
+            + i_b * stride_cs_b
+            + history_idx[None, :] * stride_cs_w
+            + o_d[:, None] * stride_cs_d,
             mask=use_current_state & mask & (source_t[None, :] < 0),
             other=0,
         )
@@ -224,9 +245,11 @@ def _paged_short_conv_prefill_kernel(
                 None, :
             ]
             history_idx = source_t + W - 1
-            m_h = (has_initial & (source_t >= -W + 1) & (source_t < 0))[:, None] & m_d[
-                None, :
-            ]
+            # Substitution with tl.where alone still issues the aliased load.
+            # A separate CTA may already be overwriting that address.
+            m_h = (
+                has_initial & ~use_current_state & (source_t >= -W + 1) & (source_t < 0)
+            )[:, None] & m_d[None, :]
             b_yi = tl.load(
                 x
                 + (sequence_start + source_t_i64)[:, None] * stride_x_t
@@ -279,9 +302,7 @@ def _paged_short_conv_prefill_kernel(
         aux_t = (sequence_start + output_t).to(tl.int64)
         aux_mask = (output_t[:, None] < sequence_length) & (o_h[None, :] < AUX_HEADS)
         aux_values = tl.load(
-            aux
-            + aux_t[:, None] * stride_aux_t
-            + o_h_i64[None, :] * stride_aux_h,
+            aux + aux_t[:, None] * stride_aux_t + o_h_i64[None, :] * stride_aux_h,
             mask=aux_mask,
             other=0,
         )
@@ -307,45 +328,89 @@ def _paged_short_conv_prefill_kernel(
     if RETURN_FINAL_STATE:
         if local_end == sequence_length:
             final_value = _short_conv_checkpoint(
-                x, conv_state, current_conv_state,
-                sequence_start, sequence_length, local_end, i_b, i_d,
-                initial_block, has_initial, use_current_state,
-                stride_x_t, stride_x_d, stride_s_block, stride_s_w, stride_s_d,
-                stride_cs_b, stride_cs_w, stride_cs_d,
-                D, W, BW, BD, HAS_CURRENT_STATE,
+                x,
+                conv_state,
+                current_conv_state,
+                sequence_start,
+                sequence_length,
+                local_end,
+                i_b,
+                i_d,
+                initial_block,
+                has_initial,
+                use_current_state,
+                stride_x_t,
+                stride_x_d,
+                stride_s_block,
+                stride_s_w,
+                stride_s_d,
+                stride_cs_b,
+                stride_cs_w,
+                stride_cs_d,
+                D,
+                W,
+                BW,
+                BD,
+                HAS_CURRENT_STATE,
             )
             tl.store(
-                final_conv_state + i_b * stride_fs_b
+                final_conv_state
+                + i_b * stride_fs_b
                 + state_w[None, :] * stride_fs_w
                 + o_d_i64[:, None] * stride_fs_d,
-                final_value, mask=state_mask,
+                final_value,
+                mask=state_mask,
             )
 
     if HAS_CACHE:
         if PAGE_SIZE % BT == 0 and prefix % PAGE_SIZE == 0:
             # Preserve the aligned fast path used by long cold Prefill.
-            should_write = (absolute_end % PAGE_SIZE == 0) | (local_end == sequence_length)
+            should_write = (absolute_end % PAGE_SIZE == 0) | (
+                local_end == sequence_length
+            )
             write_page = (absolute_end - 1) // PAGE_SIZE
             write_page_valid = (write_page >= 0) & (write_page < max_block_count)
             write_block = tl.load(
-                block_map + i_b * stride_bm_b
+                block_map
+                + i_b * stride_bm_b
                 + tl.where(write_page_valid, write_page, 0) * stride_bm_page,
-                mask=should_write & write_page_valid, other=0,
+                mask=should_write & write_page_valid,
+                other=0,
             ).to(tl.int64)
             if should_write & (write_block > 0) & (write_block < physical_block_count):
                 state_value = _short_conv_checkpoint(
-                    x, conv_state, current_conv_state,
-                    sequence_start, sequence_length, local_end, i_b, i_d,
-                    initial_block, has_initial, use_current_state,
-                    stride_x_t, stride_x_d, stride_s_block, stride_s_w, stride_s_d,
-                    stride_cs_b, stride_cs_w, stride_cs_d,
-                    D, W, BW, BD, HAS_CURRENT_STATE,
+                    x,
+                    conv_state,
+                    current_conv_state,
+                    sequence_start,
+                    sequence_length,
+                    local_end,
+                    i_b,
+                    i_d,
+                    initial_block,
+                    has_initial,
+                    use_current_state,
+                    stride_x_t,
+                    stride_x_d,
+                    stride_s_block,
+                    stride_s_w,
+                    stride_s_d,
+                    stride_cs_b,
+                    stride_cs_w,
+                    stride_cs_d,
+                    D,
+                    W,
+                    BW,
+                    BD,
+                    HAS_CURRENT_STATE,
                 )
                 tl.store(
-                    conv_state + write_block * stride_s_block
+                    conv_state
+                    + write_block * stride_s_block
                     + state_w[None, :] * stride_s_w
                     + o_d_i64[:, None] * stride_s_d,
-                    state_value, mask=state_mask,
+                    state_value,
+                    mask=state_mask,
                 )
         else:
             # A page boundary can lie inside a tile. Publish every boundary
@@ -374,18 +439,38 @@ def _paged_short_conv_prefill_kernel(
                     ).to(tl.int64)
                     if (write_block > 0) & (write_block < physical_block_count):
                         state_value = _short_conv_checkpoint(
-                            x, conv_state, current_conv_state,
-                            sequence_start, sequence_length, finish - prefix, i_b, i_d,
-                            initial_block, has_initial, use_current_state,
-                            stride_x_t, stride_x_d, stride_s_block, stride_s_w, stride_s_d,
-                            stride_cs_b, stride_cs_w, stride_cs_d,
-                            D, W, BW, BD, HAS_CURRENT_STATE,
+                            x,
+                            conv_state,
+                            current_conv_state,
+                            sequence_start,
+                            sequence_length,
+                            finish - prefix,
+                            i_b,
+                            i_d,
+                            initial_block,
+                            has_initial,
+                            use_current_state,
+                            stride_x_t,
+                            stride_x_d,
+                            stride_s_block,
+                            stride_s_w,
+                            stride_s_d,
+                            stride_cs_b,
+                            stride_cs_w,
+                            stride_cs_d,
+                            D,
+                            W,
+                            BW,
+                            BD,
+                            HAS_CURRENT_STATE,
                         )
                         tl.store(
-                            conv_state + write_block * stride_s_block
+                            conv_state
+                            + write_block * stride_s_block
                             + state_w[None, :] * stride_s_w
                             + o_d_i64[:, None] * stride_s_d,
-                            state_value, mask=state_mask,
+                            state_value,
+                            mask=state_mask,
                         )
 
 
@@ -404,6 +489,7 @@ def paged_short_conv_prefill(
     current_conv_state: torch.Tensor | None = None,
     continuation_mask: torch.Tensor | None = None,
     return_final_state: bool = False,
+    normalize_qk: bool = False,
 ) -> (
     tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]
     | tuple[
@@ -429,6 +515,8 @@ def paged_short_conv_prefill(
             f"paged short conv channels must be divisible by 3, got {channels}"
         )
     projection_size = channels // 3
+    if normalize_qk and (projection_size % 128 or out is not None):
+        raise ValueError("combined KDA Q/K L2Norm requires planar 128-channel heads")
     if fused_weight.shape[0] != channels or fused_weight.shape[1] < 2:
         raise ValueError(
             "paged short conv weight shape does not match input: "
@@ -439,10 +527,11 @@ def paged_short_conv_prefill(
         raise ValueError("paged short conv history must fit within one token tile")
     has_cache = conv_state is not None
     if has_cache != (linear_block_map is not None):
-        raise ValueError("paged short conv cache and block map must be provided together")
+        raise ValueError(
+            "paged short conv cache and block map must be provided together"
+        )
     if has_cache and (
-        conv_state.ndim != 3
-        or tuple(conv_state.shape[1:]) != (history_size, channels)
+        conv_state.ndim != 3 or tuple(conv_state.shape[1:]) != (history_size, channels)
     ):
         raise ValueError(
             "paged short conv cache must be [physical_blocks,history,3D], got "
@@ -467,7 +556,9 @@ def paged_short_conv_prefill(
             f"prefixes={tuple(prefix_lengths.shape)}"
         )
     if page_size <= 0 or (has_cache and page_size % 8):
-        raise ValueError("paged short conv cache pages must be positive multiples of eight")
+        raise ValueError(
+            "paged short conv cache pages must be positive multiples of eight"
+        )
     tensors = (
         mixed_qkv,
         fused_weight,
@@ -526,7 +617,9 @@ def paged_short_conv_prefill(
         if not current_conv_state.is_cuda or not continuation_mask.is_cuda:
             raise ValueError("current paged short conv state requires CUDA tensors")
         if current_conv_state.dtype != mixed_qkv.dtype:
-            raise ValueError("current paged short conv state dtype must match projected QKV")
+            raise ValueError(
+                "current paged short conv state dtype must match projected QKV"
+            )
 
     if out is None:
         output = torch.empty(
@@ -541,7 +634,9 @@ def paged_short_conv_prefill(
             or out.device != mixed_qkv.device
             or not (out.is_contiguous() or out.permute(1, 0, 2).is_contiguous())
         ):
-            raise ValueError("paged short conv output must be matching planar or interleaved QKV")
+            raise ValueError(
+                "paged short conv output must be matching planar or interleaved QKV"
+            )
         output = out
     pack_aux = aux is not None and (
         aux.dtype != mixed_qkv.dtype or not aux.is_contiguous()
@@ -621,7 +716,15 @@ def paged_short_conv_prefill(
         AUX_BLOCK=(triton.next_power_of_2(aux.shape[1]) if pack_aux else 1),
         num_warps=4,
     )
-    result = (output[0], output[1], output[2], final_state)
+    q, k = output[0], output[1]
+    if normalize_qk and tokens:
+        from fla.modules.l2norm import l2norm_fwd
+
+        # Q and K are adjacent planar outputs. Flatten head vectors as a view
+        # and normalize them in one launch with cuLA's existing L2Norm.
+        qk, _ = l2norm_fwd(output[:2].view(-1, 128))
+        q, k = qk.view(2, tokens, projection_size).unbind(0)
+    result = (q, k, output[2], final_state)
     if aux is None:
         return result
     return (*result, packed_aux if packed_aux is not None else aux)

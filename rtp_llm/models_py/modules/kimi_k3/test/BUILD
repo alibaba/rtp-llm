@@ -7,6 +7,8 @@ cuda13_sm100_py_test(
     srcs = ["shared_modeling_test.py"],
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        # The decoder and MTP model import K3 checkpoint weight contracts.
+        "//rtp_llm:models",
         "//rtp_llm:flashinfer-python",
     ],
 )

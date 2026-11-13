@@ -27,12 +27,16 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d.paged_short_conv_prefill imp
     paged_short_conv_prefill,
     prepare_paged_short_conv_metadata,
 )
-from rtp_llm.ops import HybridAttentionType, RoleType
+from rtp_llm.ops import CPRotateMethod, HybridAttentionType, ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 
 
 class _LinearMetadataProbe(nn.Module):
     layer_type = HybridAttentionType.LINEAR
+
+    def __init__(self):
+        super().__init__()
+        self.attention = nn.Identity()
 
     def forward(self, hidden, *args):
         return hidden
@@ -46,6 +50,9 @@ class K3HostMetadataReproTest(unittest.TestCase):
         model.tp_rank = 0
         model.num_blocks = 0
         model.kv_cache = None
+        model.prefill_query_cp = False
+        model.config = NS(is_mtp=False, k3_runtime_config=NS(dsa=None))
+        model._setup_dsa()
         model.layers = nn.ModuleList([_LinearMetadataProbe()])
         hidden = torch.ones((8, 128), device="cuda", dtype=torch.bfloat16)
         attn = PyAttentionInputs()
@@ -205,6 +212,7 @@ class K3DecodeFp8PhaseReproTest(unittest.TestCase):
         attention = KimiK3MLA.__new__(KimiK3MLA)
         nn.Module.__init__(attention)
         attention._fp8_collective = collective
+        attention._fp8_input_collective = collective
         layer = KimiK3DecoderLayer.__new__(KimiK3DecoderLayer)
         nn.Module.__init__(layer)
         layer.index = 0
@@ -218,7 +226,7 @@ class K3DecodeFp8PhaseReproTest(unittest.TestCase):
             (rows, 1, hidden_size), device="cuda", dtype=torch.bfloat16
         )
         inputs = NS(is_prefill=True, is_mtp_draft_update=False)
-        metadata = NS(is_target_verify=False)
+        metadata = NS(is_target_verify=False, query_layout=None, outer_layout=None)
 
         class ProjectionBoundary(Exception):
             pass
@@ -264,6 +272,7 @@ class K3CapacityReproTest(unittest.TestCase):
             gen_num_per_cycle=width - 1,
             mm_model_config=NS(is_multimodal=False),
             moe_prefill_max_tokens_per_rank=token_budget,
+            k3_runtime_config=NS(dsa=None),
         )
         model.runtime_config = NS(
             fifo_scheduler_config=NS(
@@ -279,7 +288,12 @@ class K3CapacityReproTest(unittest.TestCase):
                 batch_decode_scheduler_batch_size=64,
             ),
         )
-        model.parallelism_config = NS(role_type=role, tp_size=tp)
+        model.parallelism_config = ParallelismConfig()
+        model.parallelism_config.role_type = role
+        model.parallelism_config.tp_size = tp
+        cp = model.parallelism_config.prefill_cp_config
+        cp.method = CPRotateMethod.DISABLED
+        cp.preserve_tp_layout = False
         model.hw_kernel_config = NS(enable_cuda_graph=False)
         model.kv_cache_config = NS(multi_task_prompt_tokens={})
         model.max_generate_batch_size = batch
@@ -289,10 +303,12 @@ class K3CapacityReproTest(unittest.TestCase):
     def executor(self, model):
         import deep_gemm
 
+        self.assertFalse(model.parallelism_config.prefill_cp_config.is_enabled())
         with patch("rtp_llm.models_py.model_desc.kimi_k3.KimiK3Model") as ctor, patch(
             "torch.cuda.empty_cache"
         ):
             model._create_python_model()
+        self.assertIsNone(ctor.call_args.kwargs["prefill_staging_tokens"])
         global_rows = ctor.call_args.kwargs["max_moe_tokens"]
         executor = object.__new__(MegaMoeExecutor)
         nn.Module.__init__(executor)

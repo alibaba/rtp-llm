@@ -67,3 +67,34 @@ py_test(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
 )
+
+py_test(
+    name = "dsa_kv_chunk_plan_test",
+    srcs = ["dsa_kv_chunk_plan_test.py"],
+    data = ["//rtp_llm/models_py:dsa_kv_chunk_plan_sources"],
+    env = {"GPU_COUNT": "0"},
+)
+
+py_test(
+    name = "dsa_topk_merge_test",
+    srcs = ["dsa_topk_merge_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "mla_page_rr_cache_test",
+    srcs = ["mla_page_rr_cache_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "native_fp8_indexer_score_test",
+    srcs = ["native_fp8_indexer_score_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)

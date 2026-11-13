@@ -8,7 +8,25 @@ from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfi
 from rtp_llm.ops.compute_ops import LayerKVCache, ParamsBase, PyAttentionInputs
 
 
-class MlaImplBase(object):
+class AttentionPrepareCapabilities:
+    """Conservative defaults for attention metadata preparation.
+
+    Captured preparation must use device-resident dynamic inputs and stable
+    tensor addresses/shapes, without host reads or workspace reallocation.
+    Backends opt out of host mirrors only when all of their consumers are
+    device-only; supporting graph forward alone does not imply either flag.
+    """
+
+    @property
+    def requires_host_metadata(self) -> bool:
+        return True
+
+    @property
+    def can_capture_cuda_graph_prepare(self) -> bool:
+        return False
+
+
+class MlaImplBase(AttentionPrepareCapabilities):
     """Base class for MLA attention implementations."""
 
     def __init__(
@@ -100,7 +118,7 @@ class MlaImplBase(object):
         raise NotImplementedError("forward method must be implemented by subclass")
 
 
-class FMHAImplBase(ABC):
+class FMHAImplBase(AttentionPrepareCapabilities, ABC):
     """Flash Multi-Head Attention 实现的接口基类。
     该类定义了 FMHA 实现必须提供的接口方法。
     所有具体的实现类都应该继承此类并实现这些方法。

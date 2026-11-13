@@ -167,7 +167,9 @@ class KimiK3MlaWarmupContractTest(unittest.TestCase):
                 prefill_cp_config=SimpleNamespace(kv_cache_sharded=page_rr),
             ),
             config=SimpleNamespace(
-                attn_config=SimpleNamespace(softmax_extra_scale=1.25)
+                attn_config=SimpleNamespace(softmax_extra_scale=1.25),
+                gen_num_per_cycle=3,
+                is_mtp=False,
             ),
         )
         return model, live
@@ -193,11 +195,27 @@ class KimiK3MlaWarmupContractTest(unittest.TestCase):
                 model, _ = self._model(page_rr=case != "non_page_rr")
                 if case == "unbound":
                     model.kv_cache = None
-                with patch.object(mla_jit_warmup, "_warmup_spec") as prepare:
+                with (
+                    patch.object(mla_jit_warmup, "_warmup_spec") as prepare,
+                    patch.object(
+                        mla_jit_warmup, "_warmup_decode_metadata"
+                    ) as decode_prepare,
+                    patch("torch.cuda.synchronize") as synchronize,
+                ):
                     mla_jit_warmup.warmup_kimi_k3_mla_jit(
                         model, SimpleNamespace(is_decode_role=case == "decode")
                     )
                 prepare.assert_not_called()
+                if case == "decode":
+                    # Decode skips Prefill payload warmup but now prepares
+                    # its private metadata kernels before Graph capture.
+                    decode_prepare.assert_called_once_with(
+                        64, 256, 2, 1, torch.device("cpu"), 4, draft=False
+                    )
+                    synchronize.assert_called_once_with(torch.device("cpu"))
+                else:
+                    decode_prepare.assert_not_called()
+                    synchronize.assert_not_called()
 
     def test_mla_prefix_uses_private_scratch_without_collectives(self):
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (

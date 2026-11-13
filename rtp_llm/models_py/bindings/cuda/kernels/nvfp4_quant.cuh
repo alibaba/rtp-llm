@@ -1,3 +1,5 @@
+#pragma once
+
 /* Copyright 2025 SGLang Team. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -52,7 +54,7 @@ constexpr int CVT_FP4_SF_VEC_SIZE     = 16;
 inline __device__ uint32_t fp32_vec_to_e2m1(float (&array)[8]) {
     // PTX instructions used here requires >= sm100f.
 #if CUTLASS_ARCH_MMA_SM100A_ENABLED || CUTLASS_ARCH_MMA_SM103A_ENABLED || CUTLASS_ARCH_MMA_SM120A_ENABLED              \
-    || (defined(__CUDA_ARCH_FAMILY_SPECIFIC__) && (__CUDA_ARCH_FAMILY_SPECIFIC__ > 1000))
+    || (defined(__CUDA_ARCH_FAMILY_SPECIFIC__) && (__CUDA_ARCH_FAMILY_SPECIFIC__ >= 1000))
     uint32_t val;
     asm volatile("{\n"
                  ".reg .b8 byte0;\n"
@@ -86,7 +88,7 @@ inline __device__ uint32_t fp32_vec_to_e2m1(float (&array)[8]) {
 inline __device__ uint32_t fp32_vec_to_e2m1(float2 (&array)[4]) {
     // PTX instructions used here requires >= sm100f.
 #if CUTLASS_ARCH_MMA_SM100A_ENABLED || CUTLASS_ARCH_MMA_SM103A_ENABLED || CUTLASS_ARCH_MMA_SM120A_ENABLED              \
-    || (defined(__CUDA_ARCH_FAMILY_SPECIFIC__) && (__CUDA_ARCH_FAMILY_SPECIFIC__ > 1000))
+    || (defined(__CUDA_ARCH_FAMILY_SPECIFIC__) && (__CUDA_ARCH_FAMILY_SPECIFIC__ >= 1000))
     uint32_t val;
     asm volatile("{\n"
                  ".reg .b8 byte0;\n"
@@ -178,3 +180,78 @@ template<>
 struct PackedVec<__nv_fp8_e4m3> {
     __nv_fp8x2_e4m3 elts[8];
 };
+
+// Quantizes the provided PackedVec into the uint32_t output
+template<class Type, bool UE8M0_SF = false, bool CHECK_UNROUNDED_AMAX = false, int GROUP_SHUFFLE = 1>
+__device__ uint32_t cvt_warp_fp16_to_fp4(PackedVec<Type>& vec, float SFScaleVal, uint8_t* SFout) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+    // Get absolute maximum values among the local 8 values.
+    auto localMax = __habs2(vec.elts[0]);
+
+// Local maximum value.
+#pragma unroll
+    for (int i = 1; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
+        localMax = __hmax2(localMax, __habs2(vec.elts[i]));
+    }
+
+    // Get the absolute maximum among all 16 values (two threads).
+    localMax = __hmax2(__shfl_xor_sync(uint32_t(-1), localMax, GROUP_SHUFFLE), localMax);
+    // Get the final absolute maximum values.
+    float vecMax = float(__hmax(localMax.x, localMax.y));
+
+    // Get the SF (max value of the vector / max value of e2m1).
+    // maximum value of e2m1 = 6.0.
+    // TODO: use half as compute data type.
+    float SFValue = SFScaleVal * (vecMax * reciprocal_approximate_ftz(6.0f));
+    // 8 bits representation of the SF.
+    uint8_t fp8SFVal;
+    // Write the SF to global memory (STG.8).
+    if constexpr (UE8M0_SF) {
+        // Extract the 8 exponent bits from float32.
+        // float 32bits = 1 sign bit + 8 exponent bits + 23 mantissa bits.
+        uint32_t tmp = reinterpret_cast<uint32_t&>(SFValue) >> 23;
+        fp8SFVal     = tmp & 0xff;
+        // Convert back to fp32.
+        reinterpret_cast<uint32_t&>(SFValue) = tmp << 23;
+    } else {
+        // Here SFValue is always positive, so E4M3 is the same as UE4M3.
+        __nv_fp8_e4m3 tmp                          = __nv_fp8_e4m3(SFValue);
+        reinterpret_cast<__nv_fp8_e4m3&>(fp8SFVal) = tmp;
+        // Convert back to fp32.
+        SFValue = float(tmp);
+    }
+    // Get the output scale.
+    // Recipe: final_scale = reciprocal(fp32(fp8(SFValue * SFScaleVal))) *
+    //                       reciprocal(SFScaleVal))
+    // FlashInfer's dense NVFP4 path tests the group amax before rounding to E4M3.
+    const bool nonzero = CHECK_UNROUNDED_AMAX ? vecMax != 0 : SFValue != 0;
+    float outputScale  = nonzero ? reciprocal_approximate_ftz(SFValue * reciprocal_approximate_ftz(SFScaleVal)) : 0.0f;
+
+    if (SFout) {
+        // Write the SF to global memory (STG.8).
+        *SFout = fp8SFVal;
+    }
+
+    // Convert the input to float.
+    float2 fp2Vals[CVT_FP4_ELTS_PER_THREAD / 2];
+
+#pragma unroll
+    for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
+        if constexpr (std::is_same_v<Type, half>) {
+            fp2Vals[i] = __half22float2(vec.elts[i]);
+        } else {
+            fp2Vals[i] = __bfloat1622float2(vec.elts[i]);
+        }
+        fp2Vals[i].x *= outputScale;
+        fp2Vals[i].y *= outputScale;
+    }
+
+    // Convert to e2m1 values.
+    uint32_t e2m1Vec = fp32_vec_to_e2m1(fp2Vals);
+
+    // Write the e2m1 values to global memory.
+    return e2m1Vec;
+#else
+    return 0;
+#endif
+}

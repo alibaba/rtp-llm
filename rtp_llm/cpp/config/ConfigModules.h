@@ -52,7 +52,10 @@ struct PrefillCPConfig {
     bool kv_cache_sharded = false;
     // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
     int64_t prefill_cp_size = 0;
-    bool    is_enabled() const {
+    // Hybrid attention retains TP-sharded linear weights/state while CP owns
+    // token rows. Individual attention implementations bind their head layout.
+    bool preserve_tp_layout = false;
+    bool is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;
     }
@@ -91,16 +94,16 @@ struct ParallelismConfig {
     PrefillCPConfig prefill_cp_config;
 
     int64_t get_attn_tp_size() const {
-        return prefill_cp_config.is_enabled() ? 1 : tp_size;
+        return prefill_cp_config.is_enabled() && !prefill_cp_config.preserve_tp_layout ? 1 : tp_size;
     }
     int64_t get_attn_tp_rank() const {
-        return prefill_cp_config.is_enabled() ? 0 : tp_rank;
+        return prefill_cp_config.is_enabled() && !prefill_cp_config.preserve_tp_layout ? 0 : tp_rank;
     }
     int64_t get_ffn_tp_size() const {
-        return prefill_cp_config.is_enabled() ? 1 : ffn_tp_size;
+        return prefill_cp_config.is_enabled() && !prefill_cp_config.preserve_tp_layout ? 1 : ffn_tp_size;
     }
     int64_t get_ffn_tp_rank() const {
-        return prefill_cp_config.is_enabled() ? 0 : ffn_tp_rank;
+        return prefill_cp_config.is_enabled() && !prefill_cp_config.preserve_tp_layout ? 0 : ffn_tp_rank;
     }
     std::string to_string() const;
 };
@@ -180,12 +183,12 @@ struct KVCacheConfig {
     int64_t                                 block_tree_transfer_worker_count                = 4;
     int64_t                                 block_tree_business_queue_max_size              = 10000;
     int64_t                                 block_tree_transfer_queue_max_size              = 10000;
-    double block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
-    double block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
-    double block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;
-    double block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
-    double block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
-    double block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
+    double   block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
+    double   block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
+    double   block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;
+    double   block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
+    double   block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
+    double   block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
     int      reuse_cache_tail_blocks                      = std::numeric_limits<int>::max();
     uint32_t linear_pool_blocks                           = 0;
     uint32_t swa_pool_blocks                              = 0;
@@ -258,19 +261,19 @@ struct KVCacheConfig {
 };
 
 struct ProfilingDebugLoggingConfig {
-    std::string ft_alog_conf_path         = "";
-    bool        gen_timeline_sync         = false;
-    int         timeline_start_step       = 0;
-    int         timeline_num_steps        = 3;
-    std::string timeline_trace_name       = "profiler";
-    std::string torch_cuda_profiler_dir   = "";
-    int         log_file_backup_count     = 16;
-    bool        debug_load_server         = false;
-    int         hack_layer_num            = 0;
-    bool        debug_start_fake_process  = false;
-    bool        enable_detail_log         = false;
-    bool        check_nan                 = false;
-    bool        enable_model_inputs_log   = false;
+    std::string ft_alog_conf_path        = "";
+    bool        gen_timeline_sync        = false;
+    int         timeline_start_step      = 0;
+    int         timeline_num_steps       = 3;
+    std::string timeline_trace_name      = "profiler";
+    std::string torch_cuda_profiler_dir  = "";
+    int         log_file_backup_count    = 16;
+    bool        debug_load_server        = false;
+    int         hack_layer_num           = 0;
+    bool        debug_start_fake_process = false;
+    bool        enable_detail_log        = false;
+    bool        check_nan                = false;
+    bool        enable_model_inputs_log  = false;
     // Batch recording (ExecutionRecorder) switch and tuning knobs. Enabled
     // only by the switch; queue size falls back to the default below when
     // non-positive. Disk footprint is bounded by alog rotation (256MB x 160
@@ -304,9 +307,9 @@ struct HWKernelConfig {
     // stay at or below 1023.
     static constexpr int kGenerationPrefillCudaGraphMaxRequests = 1023;
 
-    bool        use_swizzleA                 = false;
-    bool        enable_cuda_graph            = false;
-    bool        enable_cuda_graph_debug_mode = false;
+    bool use_swizzleA                 = false;
+    bool enable_cuda_graph            = false;
+    bool enable_cuda_graph_debug_mode = false;
     // Generation-prefill graph is enabled only when the CUDA graph master
     // switch is on and this capture bucket list is explicitly configured.
     int              generation_prefill_cuda_graph_max_requests = 1;
@@ -318,8 +321,8 @@ struct HWKernelConfig {
     // Comma-separated list of batch sizes, e.g., "1,2,4,8,16,32"
     std::vector<int> decode_capture_batch_sizes;
     bool             enable_decode_cascade_attention = false;
-    bool             disable_dpc_random               = false;
-    bool             rocm_disable_custom_ag           = true;
+    bool             disable_dpc_random              = false;
+    bool             rocm_disable_custom_ag          = true;
     std::string      to_string() const;
 };
 
@@ -351,12 +354,12 @@ enum SpeculativeType {
 };
 
 struct SpeculativeExecutionConfig {
-    std::string     model_type                    = "";
-    SpeculativeType type                          = SP_TYPE_NONE;
-    std::string     tree_decode_config            = "";
-    int64_t         gen_num_per_cycle             = 1;
-    std::string     quantization                  = "";
-    std::string     checkpoint_path               = "";
+    std::string     model_type         = "";
+    SpeculativeType type               = SP_TYPE_NONE;
+    std::string     tree_decode_config = "";
+    int64_t         gen_num_per_cycle  = 1;
+    std::string     quantization       = "";
+    std::string     checkpoint_path    = "";
     // DSpARK noise/mask token used to build each fixed-width draft block.
     // Filled from the draft checkpoint by ModelFactory.
     int64_t sp_dspark_mask_token_id = -1;
@@ -394,16 +397,16 @@ struct VitConfig {
 };
 
 struct CacheStoreConfig {
-    bool    cache_store_rdma_mode         = false;
-    int     thread_count                  = 32;
-    int     rdma_connect_timeout_ms       = 250;
-    int     rdma_qp_count_per_connection  = 2;
-    int     rdma_io_thread_count          = 4;
-    int     rdma_worker_thread_count      = 2;
-    int     messager_io_thread_count      = 2;
-    int     messager_worker_thread_count  = 32;
-    int64_t rdma_transfer_wait_timeout_ms = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
-    int rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
+    bool    cache_store_rdma_mode               = false;
+    int     thread_count                        = 32;
+    int     rdma_connect_timeout_ms             = 250;
+    int     rdma_qp_count_per_connection        = 2;
+    int     rdma_io_thread_count                = 4;
+    int     rdma_worker_thread_count            = 2;
+    int     messager_io_thread_count            = 2;
+    int     messager_worker_thread_count        = 32;
+    int64_t rdma_transfer_wait_timeout_ms       = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
+    int     rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
     int64_t p2p_read_steal_before_deadline_ms =
         250;  // Decode read：在此距 deadline 时从 recv store steal，阻止新 transfer 匹配
     int64_t p2p_read_return_before_deadline_ms = 100;  // Decode read 与 Prefill send：transfer 层 deadline / worker
@@ -676,16 +679,16 @@ struct DashScGrpcConfig: GrpcMapsConfig {
 };
 
 struct LinearAttentionConfig {
-    int         linear_conv_kernel_dim = 0;
-    int         linear_key_head_dim    = 0;
-    int         linear_num_key_heads   = 0;
-    int         linear_num_value_heads = 0;
-    int         linear_value_head_dim  = 0;
-    DataType    ssm_state_dtype        = DataType::TYPE_BF16;
-    DataType    conv_state_dtype       = DataType::TYPE_BF16;
+    int      linear_conv_kernel_dim = 0;
+    int      linear_key_head_dim    = 0;
+    int      linear_num_key_heads   = 0;
+    int      linear_num_value_heads = 0;
+    int      linear_value_head_dim  = 0;
+    DataType ssm_state_dtype        = DataType::TYPE_BF16;
+    DataType conv_state_dtype       = DataType::TYPE_BF16;
     // The gate is per key channel for some LINEAR implementations and scalar
     // per value head for others. Replay uses this model property, not a model name.
-    bool        replay_vector_gate      = false;
+    bool        replay_vector_gate = false;
     std::string to_string() const;
 };
 

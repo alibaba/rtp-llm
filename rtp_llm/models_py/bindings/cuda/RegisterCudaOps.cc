@@ -9,6 +9,10 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/attn_res.h"
 #endif
 
+#ifdef RTP_MEGA_TOPK
+#include "rtp_llm/models_py/bindings/cuda/kernels/mega_topk.h"
+#endif
+
 #if defined(ENABLE_FP4)
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp4_quant.h"
 #endif
@@ -92,6 +96,31 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("blocks"),
                   py::arg("threads"));
 
+#ifdef RTP_MEGA_TOPK
+    rtp_ops_m.def("mega_topk",
+                  &mega_topk,
+                  py::arg("logits"),
+                  py::arg("local_lens"),
+                  py::arg("positions"),
+                  py::arg("block_table"),
+                  py::arg("rows_per_request"),
+                  py::arg("kv_page_tokens"),
+                  py::arg("output"),
+                  py::arg("count"),
+                  py::arg("peers"),
+                  py::arg("multicast_ptr"),
+                  py::arg("epochs"),
+                  py::arg("rank"),
+                  py::arg("world"),
+                  py::arg("k"),
+                  py::arg("max_local_kvlen"),
+                  py::arg("resident"),
+                  py::arg("deterministic")      = true,
+                  py::arg("global_page_tokens") = 0);
+    rtp_ops_m.def("mega_topk_resident_clusters", &mega_topk_resident_clusters);
+    rtp_ops_m.def("mega_topk_workspace_bytes", &mega_topk_workspace_bytes, py::arg("world"), py::arg("slots"));
+#endif
+
 #if defined(USING_CUDA13) && USING_CUDA13
     rtp_ops_m.def("attn_res",
                   &attn_res,
@@ -107,7 +136,12 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("block_write_idx"),
                   py::arg("eps"),
                   py::arg("output_norm_eps"),
-                  py::arg("shared_delta") = py::none());
+                  py::arg("shared_delta")  = py::none(),
+                  py::arg("fp8_output")    = py::none(),
+                  py::arg("fp8_scales")    = py::none(),
+                  py::arg("amax_partials") = py::none(),
+                  py::arg("nvfp4_packet")  = py::none(),
+                  py::arg("nvfp4_rowwise") = false);
 #endif
 
     rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",
@@ -129,6 +163,16 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
     // NVFP4 mm/quant live in rtp_kernel.nvfp4. Keep the grouped experts
     // quantizers here; they are not part of that port.
 #if defined(ENABLE_FP4)
+#if defined(USING_CUDA13) && USING_CUDA13
+    rtp_ops_m.def("nvfp4_quantize_strided_from_amax",
+                  &nvfp4_quantize_strided_from_amax,
+                  py::arg("input"),
+                  py::arg("amax_partials"),
+                  py::arg("output"),
+                  py::arg("output_scale"),
+                  py::arg("global_scale"),
+                  py::arg("compute_amax") = false);
+#endif
     rtp_ops_m.def("scaled_fp4_experts_quant",
                   &scaled_fp4_experts_quant_sm100a,
                   py::arg("output"),

@@ -28,9 +28,30 @@ namespace torch_ext {
 //     dims of the indexer ``score [B, S, T_max]`` tensor.
 void topk_v3(const torch::Tensor& logits,
              const torch::Tensor& lengths,
-             torch::Tensor& output,
-             torch::Tensor& workspace,
-             int64_t k,
-             int64_t max_seq_len);
+             torch::Tensor&       output,
+             torch::Tensor&       workspace,
+             int64_t              k,
+             int64_t              max_seq_len);
+
+// Unordered score/global-position pairs. Bounds exclude unread MQA columns;
+// holes, non-finite values, signed zero and ties are handled inside selection.
+void dsa_select_topk_candidates(torch::Tensor                scores,
+                                torch::Tensor                positions,
+                                c10::optional<torch::Tensor> starts,
+                                c10::optional<torch::Tensor> ends,
+                                torch::Tensor                output_scores,
+                                torch::Tensor                output_positions,
+                                int64_t                      topk);
+
+// Read the rank-major All-to-All receive buffer without materializing dense scores.
+void dsa_select_page_rr_candidates(torch::Tensor received,
+                                   torch::Tensor query_positions,
+                                   torch::Tensor out_scores,
+                                   torch::Tensor out_positions,
+                                   int64_t       topk,
+                                   int64_t       shards,
+                                   int64_t       shard_rank,
+                                   int64_t       page,
+                                   int64_t       start);
 
 }  // namespace torch_ext

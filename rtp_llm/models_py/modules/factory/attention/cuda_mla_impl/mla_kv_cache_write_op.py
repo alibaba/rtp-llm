@@ -25,6 +25,7 @@ class MlaKVCacheWriteOp:
         self.kv_cache_type = (
             "fp8_ds_mla" if kv_cache_dtype == KvCacheDataType.FP8 else "auto"
         )
+        self.use_ue8m0 = False
         if fp8_compute:
             self.kv_cache_type = "fp8"
         # Scale tensor is required for concat_and_cache_mla even in non-FP8 mode
@@ -57,4 +58,5 @@ class MlaKVCacheWriteOp:
                 ),
                 self.kv_cache_type,
                 self.scale,
+                **({"use_ue8m0": True} if self.use_ue8m0 else {}),
             )

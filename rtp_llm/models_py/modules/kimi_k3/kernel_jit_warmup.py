@@ -71,20 +71,31 @@ def _warmup_replay(model, init_resource) -> None:
             hv, v = decoder.local_num_v_heads, decoder.head_v_dim
             device = state.device
             pool_key = (
-                tuple(state.shape), tuple(state.stride()), str(state.dtype),
-                tuple(conv.shape), tuple(conv.stride()), str(conv.dtype),
-                tuple(replay_cache.k.shape), tuple(replay_cache.u.shape),
-                tuple(replay_cache.g.shape), decoder.conv_weights.stride(),
-                decoder.gate_lower_bound, str(device),
+                tuple(state.shape),
+                tuple(state.stride()),
+                str(state.dtype),
+                tuple(conv.shape),
+                tuple(conv.stride()),
+                str(conv.dtype),
+                tuple(replay_cache.k.shape),
+                tuple(replay_cache.u.shape),
+                tuple(replay_cache.g.shape),
+                decoder.conv_weights.stride(),
+                decoder.gate_lower_bound,
+                str(device),
                 attention.fa_width,
-                str(attention.input.weight.dtype), tuple(attention.input.weight.shape),
-                str(attention.f_b.weight.dtype), tuple(attention.f_b.weight.shape),
+                str(attention.input.weight.dtype),
+                tuple(attention.input.weight.shape),
+                str(attention.f_b.weight.dtype),
+                tuple(attention.f_b.weight.shape),
             )
             if pool_key in prepared:
                 continue
             prepared.add(pool_key)
             if max_steps > replay_cache.k.shape[1]:
-                raise ValueError("K3 verify width exceeds the bound replay log capacity")
+                raise ValueError(
+                    "K3 verify width exceeds the bound replay log capacity"
+                )
             start = time.perf_counter()
             # A single-row QKV view is already "contiguous" to PyTorch and
             # retains the producer's row stride. Multiple rows take a compact
@@ -102,30 +113,55 @@ def _warmup_replay(model, init_resource) -> None:
                 # Run the same local projections to preserve beta/gate strides;
                 # target verify then makes qkv contiguous before the replay split.
                 hidden = torch.zeros(
-                    (tokens, model.config.hidden_size), device=device,
+                    (tokens, model.config.hidden_size),
+                    device=device,
                     dtype=model.embed_tokens.weight.dtype,
                 )
                 fused = attention.input(hidden)
-                fused = fused[..., : 4 * attention.width + attention.fa_width + attention.heads]
+                fused = fused[
+                    ..., : 4 * attention.width + attention.fa_width + attention.heads
+                ]
                 qkv, _, fa, beta = fused.split(
-                    (3 * attention.width, attention.width, attention.fa_width, attention.heads),
+                    (
+                        3 * attention.width,
+                        attention.width,
+                        attention.fa_width,
+                        attention.heads,
+                    ),
                     dim=-1,
                 )
                 gate = attention._project_forget(fa)
                 q, key, value = qkv.contiguous().split((h * k, h * k, hv * v), dim=-1)
                 linear_serial_replay(
-                    q, key, value, gate, beta, decoder.conv_weights,
-                    decoder.alog, decoder.dt_bias, state, conv, replay_cache,
-                    inputs, group_id=cache.group_id, vector_gate=True,
-                    state_v_first=False, lower_bound=decoder.gate_lower_bound,
+                    q,
+                    key,
+                    value,
+                    gate,
+                    beta,
+                    decoder.conv_weights,
+                    decoder.alog,
+                    decoder.dt_bias,
+                    state,
+                    conv,
+                    replay_cache,
+                    inputs,
+                    group_id=cache.group_id,
+                    vector_gate=True,
+                    state_v_first=False,
+                    lower_bound=decoder.gate_lower_bound,
                 )
                 finalize_linear_replay(replay_cache, inputs, steps)
             torch.cuda.synchronize(device)
             logging.info(
                 "K3 LINEAR replay JIT prepared: layer=%d group=%d steps=1..%d "
                 "slots=%d blocks=%d capacity=%d state_stride=%d cost=%.3fs",
-                layer.index, cache.group_id, max_steps, replay_cache.k.shape[0],
-                state.shape[0], replay_cache.k.shape[1], state.stride(0),
+                layer.index,
+                cache.group_id,
+                max_steps,
+                replay_cache.k.shape[0],
+                state.shape[0],
+                replay_cache.k.shape[1],
+                state.stride(0),
                 time.perf_counter() - start,
             )
 
@@ -135,13 +171,17 @@ def warmup_kimi_k3_kernel_jit(model, init_resource) -> None:
         return
     if torch.cuda.is_current_stream_capturing():
         raise RuntimeError("K3 kernel JIT warmup cannot run during CUDA Graph capture")
-    from rtp_llm.models_py.modules.kimi_k3.mla_jit_warmup import (
-        warmup_kimi_k3_mla_jit,
-    )
     from rtp_llm.models_py.modules.kimi_k3.bounded_projection_jit_warmup import (
         warmup_kimi_k3_projection_jit,
     )
+    from rtp_llm.models_py.modules.kimi_k3.mla_jit_warmup import warmup_kimi_k3_mla_jit
 
     warmup_kimi_k3_projection_jit(model, init_resource)
     warmup_kimi_k3_mla_jit(model, init_resource)
+    if getattr(model, "dsa_workspace", None) is not None:
+        from rtp_llm.models_py.modules.kimi_k3.dsa_jit_warmup import (
+            warmup_kimi_k31_dsa_jit,
+        )
+
+        warmup_kimi_k31_dsa_jit(model, init_resource)
     _warmup_replay(model, init_resource)

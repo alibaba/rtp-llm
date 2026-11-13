@@ -87,19 +87,21 @@ public:
                    bool                      track_cache_store_completion = false);
     ~PyWrappedModel();
 
-    GptModelOutputs            forward(const GptModelInputs& inputs) override;
-    PPIntermediateTensors      makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
-    void                       releaseBuffers() override;
-    torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
-    torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
-    bool                       hasMtpTargetHiddenBuffer() const override;
-    void                       prepareAttentionInputs(const GptModelInputs& inputs) override;
-    void                       prepareAttentionInputs(const GptModelInputs& inputs,
-                                                      bool                  skip_forward_event_sync,
-                                                      const GptModelInputs* publication_inputs = nullptr);
-    void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
-    std::string                waitCacheStorePublication() override;
-    HiddenStateCaptureStats    hiddenStateCaptureStats() const;
+    GptModelOutputs         forward(const GptModelInputs& inputs) override;
+    PPIntermediateTensors   makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
+    void                    releaseBuffers() override;
+    torch::Tensor           getMtpTargetHiddenStates(int64_t num_tokens) override;
+    torch::Tensor           getMtpLastHiddenStates(int64_t num_tokens) override;
+    bool                    hasMtpTargetHiddenBuffer() const override;
+    bool                    requiresGlobalMtpPrefillHidden() const override;
+    torch::Tensor           restoreMtpPrefillHiddenStates(torch::Tensor hidden, const GptModelInputs& inputs) override;
+    void                    prepareAttentionInputs(const GptModelInputs& inputs) override;
+    void                    prepareAttentionInputs(const GptModelInputs& inputs,
+                                                   bool                  skip_forward_event_sync,
+                                                   const GptModelInputs* publication_inputs = nullptr);
+    void                    updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+    std::string             waitCacheStorePublication() override;
+    HiddenStateCaptureStats hiddenStateCaptureStats() const;
     std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
     bool                       hasSpeculativeTargetCommitHooks() const override;
     std::string                prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override;
@@ -113,8 +115,10 @@ private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
 
 private:
-    bool           sequence_parallel_padding_enabled_ = false;
-    GptModelInputs padSequenceParallelInputs(const GptModelInputs& inputs);
+    bool                                              sequence_parallel_padding_enabled_  = false;
+    bool                                              requires_global_mtp_prefill_hidden_ = false;
+    std::optional<torch_ext::PyContextParallelParams> mtp_prefill_cp_params_;
+    GptModelInputs                                    padSequenceParallelInputs(const GptModelInputs& inputs);
 
     // Helper functions to reduce code duplication
     torch_ext::PyAttentionInputs  buildPyAttentionInputs(const GptModelInputs& inputs);
@@ -407,6 +411,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     sequence_parallel_padding_enabled_ = py::hasattr(py_instance, "requires_sequence_parallel_padding")
                                          && py_instance.attr("requires_sequence_parallel_padding").cast<bool>();
+    requires_global_mtp_prefill_hidden_ = py::hasattr(py_instance, "requires_global_mtp_prefill_hidden")
+                                          && py_instance.attr("requires_global_mtp_prefill_hidden").cast<bool>();
     auto py_initialize_method = py_model_.attr("initialize");
     try {
         py_init_result = py_initialize_method(init_resources);

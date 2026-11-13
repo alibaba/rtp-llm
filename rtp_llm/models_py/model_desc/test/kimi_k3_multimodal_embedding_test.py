@@ -30,6 +30,14 @@ class _IdentityLayer(nn.Module):
         return hidden
 
 
+class _UnfusedIdentityNorm(nn.Identity):
+    def __init__(self):
+        super().__init__()
+        # This layout fixture preserves identity forward rather than RMSNorm.
+        # An FP32 weight explicitly excludes the BF16 RMSNorm fusion contract.
+        self.register_buffer("weight", torch.empty(0, dtype=torch.float32))
+
+
 class _CpuEmbeddingBoundary:
     """Emulate sharded lookup/gather without indexing any unmasked hash id."""
 
@@ -129,6 +137,7 @@ def _chunk_inputs(fields, start, logical_rows, device):
             "default": SimpleNamespace(
                 is_prefill=False,
                 is_target_verify=False,
+                is_mtp_draft_update=False,
                 valid_token_mask=torch.tensor(
                     [True] * logical_rows + [False] * (physical_rows - logical_rows),
                     device=device,
@@ -236,6 +245,11 @@ class KimiK3MultimodalEmbeddingCpuTest(unittest.TestCase):
         model = object.__new__(cls)
         nn.Module.__init__(model)
         model.tp_size, model.tp_rank = 2, rank
+        # These fixtures bypass the shared K3/K3.1 constructor. Keep the
+        # ordinary K3 layout selected, as in production with Query-CP off.
+        model.prefill_query_cp = False
+        model._query_layout = None
+        model._outer_layout = None
         model.num_blocks = 0
         model.use_paged_conv_prefill = False
         model.kv_cache = None
@@ -275,7 +289,7 @@ class KimiK3MultimodalEmbeddingCpuTest(unittest.TestCase):
                 model.config.k3_runtime_config.media_placeholder_token_id
             )
             model.enorm = nn.LayerNorm(4)
-            model.hnorm = nn.Identity()
+            model.hnorm = _UnfusedIdentityNorm()
             model.eh_proj = nn.Linear(8, 4, bias=False)
             with torch.no_grad():
                 model.eh_proj.weight.copy_(
@@ -573,7 +587,7 @@ class KimiK3MultimodalEmbeddingCpuTest(unittest.TestCase):
         targets = [self._model(KimiK3Model, rank) for rank in range(2)]
         drafts = [self._model(KimiK3MtpModel, rank) for rank in range(2)]
         for model, _ in drafts:
-            model.enorm = nn.Identity()
+            model.enorm = _UnfusedIdentityNorm()
 
         def forward(inputs, *, draft=False):
             outputs = []
@@ -633,6 +647,9 @@ class KimiK3MultimodalEmbeddingCudaTest(unittest.TestCase):
         model = object.__new__(cls)
         nn.Module.__init__(model)
         model.tp_size, model.tp_rank = tp, rank
+        model.prefill_query_cp = False
+        model._query_layout = None
+        model._outer_layout = None
         model.embed_tokens = Embedding(
             SimpleNamespace(),
             SimpleNamespace(get_attn_tp_size=lambda: tp),
@@ -737,8 +754,8 @@ class KimiK3MultimodalEmbeddingCudaTest(unittest.TestCase):
                 )
             )
             model.layers = nn.ModuleList([layer])
-            model.enorm = nn.Identity()
-            model.hnorm = nn.Identity()
+            model.enorm = _UnfusedIdentityNorm()
+            model.hnorm = _UnfusedIdentityNorm()
             model.eh_proj = nn.Linear(
                 32, 16, bias=False, device="cuda", dtype=torch.bfloat16
             )
@@ -779,8 +796,8 @@ class KimiK3MultimodalEmbeddingCudaTest(unittest.TestCase):
         )
         target = self.make_model()
         draft = self.make_model(KimiK3MtpModel)
-        draft.enorm = nn.Identity()
-        draft.hnorm = nn.Identity()
+        draft.enorm = _UnfusedIdentityNorm()
+        draft.hnorm = _UnfusedIdentityNorm()
         draft.eh_proj = nn.Linear(
             16, 8, bias=False, device="cuda", dtype=torch.bfloat16
         )

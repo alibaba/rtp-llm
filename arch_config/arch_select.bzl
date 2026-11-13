@@ -169,7 +169,7 @@ def whl_deps():
             "torchvision==0.26.0+cu130",
             # DeepGEMM with the K3 Mega MoE kernels.
             "deep_gemm==2.8.2+98a672e.cu132",
-            "flash-mla==1.0.0+3ca6856.cu132",
+            "flash-mla==1.0.0+bdd41db.cu132",
             "deep-ep==2.1.0+a56d615",
             "fast-hadamard-transform==1.1.0+e7706fa.cu132.torch2.11.cxx11abitrue",
             "flash_attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1",
@@ -195,7 +195,7 @@ def whl_deps():
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
             "deep_gemm==2.8.2+98a672e.cu132",
-            "flash-mla==1.0.0+3ca6856.cu132",
+            "flash-mla==1.0.0+bdd41db.cu132",
             "deep-ep==2.1.0+a56d615",
             "flashinfer-python==0.6.9+8c4f4dcf",
             "flashinfer-cubin==0.6.9+8c4f4dcf",

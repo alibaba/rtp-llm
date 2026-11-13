@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -82,6 +83,17 @@ FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runt
                                 "intermediate_chunk_alignment=%ld; requires 0 < alignment <= prefill_chunk_size",
                                 prefill_chunk_size_,
                                 prefill_chunk_alignment_);
+        const auto& cp = parallelism_config.prefill_cp_config;
+        if (pd_sep_config.role_type == RoleType::PREFILL && parallelism_config.dp_size == 1
+            && parallelism_config.tp_size > 1 && cp.is_enabled() && cp.preserve_tp_layout) {
+            prefill_chunk_cp_size_ = parallelism_config.tp_size;
+            // Staging buffers and admission share the independently padded
+            // Zigzag sequence capacity, including expanded return sequences.
+            prefill_chunk_padded_rows_ =
+                getZigzagPaddedTokenCapacity(prefill_chunk_size_,
+                                             runtime_config.fifo_scheduler_config.max_context_batch_size,
+                                             prefill_chunk_cp_size_);
+        }
         RTP_LLM_LOG_INFO("[chunked_prefill] token_budget=%ld, intermediate_chunk_alignment=%ld",
                          prefill_chunk_size_,
                          prefill_chunk_alignment_);
@@ -175,16 +187,16 @@ absl::Status FIFOSchedulerBase::checkChunkedPrefillRequest(const GenerateStreamP
         return absl::OkStatus();
     }
 
-    const auto& cache_config = cache_manager_->cacheConfig();
-    const auto  cp_mapper    = cache_manager_->cpSlotMapper();
-    const bool  reuse_cache  = stream->streamCacheResource().reuseCache();
-    const int64_t seq_length = stream->seqLength();
-    const int64_t rows       = stream->currentBatchSize();
-    const int64_t block_size = stream->seqSizePerBlock();
+    const auto&   cache_config = cache_manager_->cacheConfig();
+    const auto    cp_mapper    = cache_manager_->cpSlotMapper();
+    const bool    reuse_cache  = stream->streamCacheResource().reuseCache();
+    const int64_t seq_length   = stream->seqLength();
+    const int64_t rows         = stream->currentBatchSize();
+    const int64_t block_size   = stream->seqSizePerBlock();
     if (seq_length > 0 && rows > 0 && block_size > 0 && prefill_chunk_alignment_ > 0) {
         for (const auto& group : cache_config.groups()) {
-            const bool linear_reuse = reuse_cache && group.policy.enable_prefix_reuse
-                                      && group.policy.group_type == CacheGroupType::LINEAR;
+            const bool linear_reuse =
+                reuse_cache && group.policy.enable_prefix_reuse && group.policy.group_type == CacheGroupType::LINEAR;
             std::string error_msg;
             // Shared LINEAR state follows checkpoint alignment below. Other
             // sparse groups still need their retained prefix to cover the prompt.
@@ -291,12 +303,13 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
         return active_streams;
     }
 
-    int64_t                      budget_left = prefill_chunk_size_;
+    int64_t                      budget_left        = prefill_chunk_size_;
+    int64_t                      padded_budget_left = prefill_chunk_padded_rows_;
     std::list<GenerateStreamPtr> selected;
 
     const auto finish_invalid_stream = [&active_streams](auto it, ErrorCode error_code, const std::string& reason) {
-        const auto error_msg = "[chunked_prefill] scheduler rejects stream[" + std::to_string((*it)->streamId())
-                               + "]: " + reason;
+        const auto error_msg =
+            "[chunked_prefill] scheduler rejects stream[" + std::to_string((*it)->streamId()) + "]: " + reason;
         (*it)->reportError(error_code, error_msg);
         (*it)->moveToNext();
         return active_streams.erase(it);
@@ -320,8 +333,8 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
         if (remaining <= 0 || block_size <= 0 || reuse < 0 || reuse % block_size != 0) {
             it = finish_invalid_stream(it,
                                        ErrorCode::EXECUTION_EXCEPTION,
-                                       "invalid chunk window (rows=" + std::to_string(rows)
-                                           + ", reuse=" + std::to_string(reuse) + ", remaining=" + std::to_string(remaining)
+                                       "invalid chunk window (rows=" + std::to_string(rows) + ", reuse="
+                                           + std::to_string(reuse) + ", remaining=" + std::to_string(remaining)
                                            + ", block_size=" + std::to_string(block_size) + ")");
             continue;
         }
@@ -330,16 +343,16 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
         // base blocks. Every middle chunk must publish a state for its next prefix.
         bool invalid_group_prefix = false;
         for (const auto& group : cache_manager_->cacheConfig().groups()) {
-            const bool cyclic_group = group.policy.group_type != CacheGroupType::FULL
-                                      && !group.policy.shared_chunk_state
-                                      && !(stream->streamCacheResource().reuseCache()
-                                           && group.policy.enable_prefix_reuse);
+            const bool cyclic_group =
+                group.policy.group_type != CacheGroupType::FULL && !group.policy.shared_chunk_state
+                && !(stream->streamCacheResource().reuseCache() && group.policy.enable_prefix_reuse);
             if (cyclic_group && reuse % group.seqSizePerBlock() != 0) {
                 // A loaded prefix can be base-page aligned but start inside a
                 // larger native state page. Cyclic remapping cannot read that prefix.
-                it = finish_invalid_stream(it,
+                it                   = finish_invalid_stream(it,
                                            ErrorCode::INVALID_PARAMS,
-                                           "cyclic cache group [" + group.tag + "] requires a native-page aligned prefix");
+                                           "cyclic cache group [" + group.tag
+                                               + "] requires a native-page aligned prefix");
                 invalid_group_prefix = true;
                 break;
             }
@@ -348,7 +361,12 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
             continue;
         }
 
-        const int64_t grant = computeChunkGrant(budget_left, rows, remaining, prefill_chunk_alignment_, reuse);
+        int64_t grant_budget = budget_left;
+        if (prefill_chunk_cp_size_ > 0) {
+            const auto stripe = 2 * prefill_chunk_cp_size_;
+            grant_budget      = std::min(grant_budget, padded_budget_left / rows / stripe * stripe * rows);
+        }
+        const int64_t grant = computeChunkGrant(grant_budget, rows, remaining, prefill_chunk_alignment_, reuse);
 
         if (grant <= 0) {
             if (!selected.empty()) {
@@ -368,6 +386,10 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
         stream->setChunkSize(static_cast<int>(grant));
         selected.push_back(stream);
         budget_left -= grant * rows;
+        if (prefill_chunk_cp_size_ > 0) {
+            const auto padded_rows = makeZigzagTokenLayout(grant, prefill_chunk_cp_size_).padded_token_count;
+            padded_budget_left -= static_cast<int64_t>(padded_rows) * rows;
+        }
         ++it;
 
         if (grant < remaining) {
@@ -547,7 +569,7 @@ int64_t FIFOSchedulerBase::onflightStreams() {
 }
 
 void FIFOSchedulerBase::appendTaskInfos(std::vector<EngineScheduleInfo::TaskInfo>& task_list,
-                                       const std::list<GenerateStreamPtr>&         streams) const {
+                                        const std::list<GenerateStreamPtr>&        streams) const {
     for (const auto& stream : streams) {
         EngineScheduleInfo::TaskInfo task_info{};
         task_info.request_id    = stream->streamId();

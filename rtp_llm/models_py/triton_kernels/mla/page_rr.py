@@ -71,12 +71,13 @@ def _request_for_index(Offsets, index, REQUESTS):
     return lo
 
 
+# Request sizes and pool bounds must reuse the kernels prepared by warmup.
 @triton.jit(
     do_not_specialize=[
         "REQUESTS",
+        "CACHE_BLOCKS",
         "TABLE_WIDTH",
         "TABLE_REQUEST_STRIDE",
-        "TABLE_PAGE_STRIDE",
     ]
 )
 def _pack_prefix_kernel(
@@ -90,13 +91,15 @@ def _pack_prefix_kernel(
     SHARDS: tl.constexpr,
     RANK: tl.constexpr,
     FEATURES: tl.constexpr,
-    CACHE_BLOCKS: tl.constexpr,
+    CACHE_BLOCKS,
     CACHE_BLOCK_STRIDE: tl.constexpr,
     CACHE_TOKEN_STRIDE: tl.constexpr,
     CACHE_FEATURE_STRIDE: tl.constexpr,
+    INDEXER_FP8: tl.constexpr,
+    ALLOW_RESERVED_ZERO: tl.constexpr,
     TABLE_WIDTH,
     TABLE_REQUEST_STRIDE,
-    TABLE_PAGE_STRIDE,
+    TABLE_PAGE_STRIDE: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     packed_page = tl.program_id(0).to(tl.int64)
@@ -135,18 +138,31 @@ def _pack_prefix_kernel(
         mask=owned & in_table,
         other=0,
     ).to(tl.int64)
-    valid_block = (block_id > 0) & (block_id < CACHE_BLOCKS) & in_table
+    valid_block = (
+        (block_id >= (0 if ALLOW_RESERVED_ZERO else 1))
+        & (block_id < CACHE_BLOCKS)
+        & in_table
+    )
     # debug=True is part of the launch contract: these checks remain enabled.
     tl.device_assert(
         (~owned) | valid_block,
         "packed owner page points to a null, reserved, or out-of-range block",
     )
     live = owned & valid_block
+    if INDEXER_FP8:
+        # The opaque 132-byte entry is block-planar: every K vector precedes
+        # the page's FP32 scales. Its [page,132] view is not a token record.
+        cache_offset = tl.where(
+            feature < 128,
+            (token % KERNEL_PAGE_TOKENS) * 128 + feature,
+            KERNEL_PAGE_TOKENS * 128 + (token % KERNEL_PAGE_TOKENS) * 4 + feature - 128,
+        )
+    else:
+        cache_offset = (
+            token % KERNEL_PAGE_TOKENS
+        ) * CACHE_TOKEN_STRIDE + feature * CACHE_FEATURE_STRIDE
     values = tl.load(
-        Cache
-        + block_id * CACHE_BLOCK_STRIDE
-        + (token % KERNEL_PAGE_TOKENS) * CACHE_TOKEN_STRIDE
-        + feature * CACHE_FEATURE_STRIDE,
+        Cache + block_id * CACHE_BLOCK_STRIDE + cache_offset,
         mask=live,
         other=0.0,
     )
@@ -157,16 +173,20 @@ def _pack_prefix_kernel(
     )
 
 
-@triton.jit(do_not_specialize=["REQUESTS", "LOCAL_PAGES"])
+@triton.jit(do_not_specialize=["REQUESTS", "LOCAL_PAGES", "TOTAL_TOKENS"])
 def _restore_prefix_kernel(
     Gathered,
     Metadata,
     Output,
+    Suffix,
     REQUESTS,
     PAGE_TOKENS: tl.constexpr,
     SHARDS: tl.constexpr,
     LOCAL_PAGES,
     FEATURES: tl.constexpr,
+    SUFFIX_WIDTH: tl.constexpr,
+    INDEXER_FP8: tl.constexpr,
+    TOTAL_TOKENS,
     BLOCK: tl.constexpr,
 ):
     tile = tl.program_id(0).to(tl.int64)
@@ -192,11 +212,45 @@ def _restore_prefix_kernel(
     ) * FEATURES + feature
     live = position < tl.load(prefix_lens + request)
     values = tl.load(Gathered + source, mask=live, other=0.0)
-    output_start = tl.load(output_token_offsets + request) * FEATURES
-    tl.store(Output + output_start + elements, values, mask=live)
+    output_token = tl.load(output_token_offsets + request) + position
+    if SUFFIX_WIDTH:
+        latent_width: tl.constexpr = FEATURES - SUFFIX_WIDTH
+        is_latent = feature < latent_width
+        tl.store(
+            Output + output_token * latent_width + feature,
+            values,
+            mask=live & is_latent,
+        )
+        tl.store(
+            Suffix + output_token * SUFFIX_WIDTH + feature - latent_width,
+            values,
+            mask=live & ~is_latent,
+        )
+    elif INDEXER_FP8:
+        # Canonical workspace has contiguous K[N,128], then FP32 scales[N].
+        # The gather payload remains interleaved bytes for the common reader.
+        destination = tl.where(
+            feature < 128,
+            output_token * 128 + feature,
+            TOTAL_TOKENS.to(tl.int64) * 128 + output_token * 4 + feature - 128,
+        )
+        tl.store(Output + destination, values, mask=live)
+    else:
+        tl.store(Output + output_token * FEATURES + feature, values, mask=live)
 
 
-def pack_prefix_cuda(cache, table, descriptor, rank, output):
+def pack_prefix_cuda(
+    cache,
+    table,
+    descriptor,
+    rank,
+    output,
+    *,
+    indexer_fp8=False,
+    allow_reserved_block_zero=False
+):
+    if indexer_fp8 and (cache.dtype != torch.uint8 or descriptor.feature_width != 132):
+        raise ValueError("FP8 Indexer pages require 132 raw bytes per token")
     with torch.cuda.device(cache.device):
         metadata = _metadata(descriptor, cache.device)
         features = descriptor.feature_width
@@ -220,6 +274,8 @@ def pack_prefix_cuda(cache, table, descriptor, rank, output):
             cache.stride(0),
             cache.stride(1),
             cache.stride(2),
+            indexer_fp8,
+            allow_reserved_block_zero,
             table.shape[1],
             table.stride(0),
             table.stride(1),
@@ -229,18 +285,28 @@ def pack_prefix_cuda(cache, table, descriptor, rank, output):
         )
 
 
-def restore_prefix_cuda(gathered, descriptor, output):
+def restore_prefix_cuda(
+    gathered, descriptor, output, *, indexer_fp8=False, suffix=None
+):
+    if indexer_fp8 and (
+        gathered.dtype != torch.uint8 or descriptor.feature_width != 132
+    ):
+        raise ValueError("FP8 Indexer payload requires 132 raw bytes per token")
     with torch.cuda.device(gathered.device):
         metadata = _metadata(descriptor, gathered.device)
         _restore_prefix_kernel[(metadata.restore_tiles,)](
             gathered,
             metadata.device,
             output,
+            output if suffix is None else suffix,
             descriptor.batch_size,
             descriptor.page_tokens,
             descriptor.shard_size,
             descriptor.total_local_pages,
             descriptor.feature_width,
+            0 if suffix is None else suffix.shape[1],
+            indexer_fp8,
+            descriptor.total_tokens,
             _BLOCK_ELEMENTS,
             num_warps=4,
         )
@@ -248,9 +314,16 @@ def restore_prefix_cuda(gathered, descriptor, output):
 
 @triton.jit(do_not_specialize=["table_width", "table_stride"])
 def _page_rr_cache_slot(
-    position, batch, active, table, table_width, table_stride,
-    page_size: tl.constexpr, kernel_page_size: tl.constexpr,
-    cp_size: tl.constexpr, cp_rank: tl.constexpr,
+    position,
+    batch,
+    active,
+    table,
+    table_width,
+    table_stride,
+    page_size: tl.constexpr,
+    kernel_page_size: tl.constexpr,
+    cp_size: tl.constexpr,
+    cp_rank: tl.constexpr,
     check_owner: tl.constexpr = False,
 ):
     # Ownership uses physical pages; tables and cache writers use kernel subpages.
@@ -265,8 +338,14 @@ def _page_rr_cache_slot(
     )
     if check_owner:
         tl.device_assert((~active) | (position >= 0), "positions must be non-negative")
-        tl.device_assert((~owner) | in_table, "local block table width is insufficient for an owner page")
-        tl.device_assert((~owner) | (~in_table) | (physical_page > 0), "owner page points to a null or unused local block")
+        tl.device_assert(
+            (~owner) | in_table,
+            "local block table width is insufficient for an owner page",
+        )
+        tl.device_assert(
+            (~owner) | (~in_table) | (physical_page > 0),
+            "owner page points to a null or unused local block",
+        )
     slot = physical_page.to(tl.int64) * kernel_page_size + offset % kernel_page_size
     # Page zero is reserved for padding, and non-owner writes are no-ops.
     return tl.where(owner & in_table & (physical_page > 0), slot, -1)
@@ -316,8 +395,17 @@ def _prepare_prefill_metadata(
     tl.device_assert((~active) | in_batch, "batch index out of range")
     position = tl.load(prefix_lengths + batch, valid & in_batch, other=0) + offset
     slot = _page_rr_cache_slot(
-        position, batch, active & in_batch, table, table_width, table_stride,
-        page_size, kernel_page_size, cp_size, cp_rank, check_owner=True,
+        position,
+        batch,
+        active & in_batch,
+        table,
+        table_width,
+        table_stride,
+        page_size,
+        kernel_page_size,
+        cp_size,
+        cp_rank,
+        check_owner=True,
     )
     tl.store(slots + row, slot, valid)
 
@@ -377,11 +465,13 @@ def _prepare_decode_metadata(
     column = tl.program_id(1) * table_block + tl.arange(0, table_block)
     page = tl.load(
         table + batch[:, None] * table_stride + column[None, :],
-        copy_row[:, None] & (column[None, :] < table_width), other=0,
+        copy_row[:, None] & (column[None, :] < table_width),
+        other=0,
     )
     width = tl.maximum(table_width, 1)
     tl.store(
-        query_tables + table_row[:, None] * width + column[None, :], page,
+        query_tables + table_row[:, None] * width + column[None, :],
+        page,
         copy_row[:, None] & (column[None, :] < width),
     )
     # Other column tiles only copy their disjoint part of the page table.
@@ -424,7 +514,15 @@ def _prepare_decode_metadata(
         )
 
     slot = _page_rr_cache_slot(
-        position, batch, active, table, table_width, table_stride,
-        page_size, kernel_page_size, cp_size, cp_rank,
+        position,
+        batch,
+        active,
+        table,
+        table_width,
+        table_stride,
+        page_size,
+        kernel_page_size,
+        cp_size,
+        cp_rank,
     )
     tl.store(slots + row, slot, valid)

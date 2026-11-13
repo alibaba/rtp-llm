@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -275,6 +276,15 @@ public:
     // hand-off exists before admitting CPRR execution.
     virtual bool hasMtpTargetHiddenBuffer() const {
         return false;
+    }
+
+    // Some drafts consume global natural-order rows after a query-CP target.
+    virtual bool requiresGlobalMtpPrefillHidden() const {
+        return false;
+    }
+
+    virtual torch::Tensor restoreMtpPrefillHiddenStates(torch::Tensor /*hidden*/, const GptModelInputs& /*inputs*/) {
+        throw std::runtime_error("model cannot restore CP MTP prefill hidden states");
     }
 
     // Optional CP-prefill companion: expose one final pre-hc row per request

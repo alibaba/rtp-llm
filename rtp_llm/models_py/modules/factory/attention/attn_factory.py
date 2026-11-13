@@ -86,6 +86,7 @@ def get_mla_impl(
     cuda_graph_selection_mode: Optional[Union[str, CudaGraphSelectionMode]] = None,
     *,
     implementations: Optional[Sequence[type[MlaImplBase]]] = None,
+    prefill_kv_workspace_budget_bytes: Optional[int] = None,
 ) -> MlaImplBase:
     """Select registered or model-scoped MLA implementations using one contract."""
 
@@ -141,6 +142,11 @@ def get_mla_impl(
             max_seq_len=max_seq_len,
             is_cuda_graph=is_cuda_graph,
             parallelism_config=parallelism_config,
+            **(
+                {"prefill_kv_workspace_budget_bytes": prefill_kv_workspace_budget_bytes}
+                if prefill_kv_workspace_budget_bytes is not None
+                else {}
+            ),
         )
         if selection_mode == CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH:
             if not _matches_cuda_graph_selection_mode(instance, selection_mode):

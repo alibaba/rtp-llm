@@ -324,6 +324,23 @@ bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
     return has_mtp_hidden_buffer_;
 }
 
+bool PyWrappedModel::requiresGlobalMtpPrefillHidden() const {
+    return requires_global_mtp_prefill_hidden_;
+}
+
+torch::Tensor PyWrappedModel::restoreMtpPrefillHiddenStates(torch::Tensor hidden, const GptModelInputs& inputs) {
+    RTP_LLM_CHECK_WITH_INFO(context_parallel_processor_ && mtp_prefill_cp_params_.has_value(),
+                            "MTP CP restore requires the current prefill layout");
+    const auto& cp = *mtp_prefill_cp_params_;
+    RTP_LLM_CHECK_WITH_INFO(hidden.defined() && hidden.dim() == 2
+                                && hidden.size(0) * device_props_.tp_size == cp.prefill_qkv_restore_indice.numel(),
+                            "MTP CP hidden rows do not match the current rank-local layout");
+    const auto rows = context_parallel_processor_->handleOutputs(hidden, inputs, cp);
+    RTP_LLM_CHECK_WITH_INFO(rows == static_cast<size_t>(inputs.combo_tokens.numel()),
+                            "restored MTP hidden rows must match the global draft tokens");
+    return hidden;
+}
+
 bool PyWrappedModel::hasSpeculativeTargetCommitHooks() const {
     return has_speculative_target_commit_hooks_;
 }
@@ -1107,6 +1124,7 @@ PyModelInputs PyWrappedModel::buildPyModelInputs(const GptModelInputs& inputs) {
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
+    mtp_prefill_cp_params_.reset();
     // Reset the per-forward prepared flag even if input preparation throws.
     struct PreparedFlagGuard {
         std::atomic<bool>& flag;
@@ -1158,6 +1176,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
         if (device_props_.enable_prefill_cp && has_context_request) {
             /** Build rank-local inputs and CP metadata, including configured MTP hidden-state layout. */
             context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
+            if (use_spec_decoding_) {
+                mtp_prefill_cp_params_ = cp_params;
+            }
         }
 
         if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {

@@ -688,8 +688,8 @@ flash-linear-attention @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_lin
     # via
     #   -r deps/requirements_cuda13_arm.txt
     #   cuda-linear-attention
-flash-mla @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_mla/flash_mla-1.0.0%2B3ca6856.cu132-cp310-cp310-linux_aarch64.whl#sha256=d960b9b2ae558f7c088af277657dc8814a8802dee1df5b1eca24573490a2f94d \
-    --hash=sha256:d960b9b2ae558f7c088af277657dc8814a8802dee1df5b1eca24573490a2f94d
+flash-mla @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_mla/flash_mla-1.0.0%2Bbdd41db.cu132-cp310-cp310-linux_aarch64.whl#sha256=dc9876a2df6ed59f34d08a01488da5e43c7bc593be7c317505d5040b29b617c1 \
+    --hash=sha256:dc9876a2df6ed59f34d08a01488da5e43c7bc593be7c317505d5040b29b617c1
     # via -r deps/requirements_cuda13_arm.txt
 flashinfer-cubin==0.6.9+8c4f4dcf \
     --hash=sha256:6e4a9132f5096b7a6d7904a90efd90a90573c365e5250237bc37f1812ab15b9f
