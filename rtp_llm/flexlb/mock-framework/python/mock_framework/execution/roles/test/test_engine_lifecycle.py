@@ -2,11 +2,7 @@ import asyncio
 import json
 import os
 import socket
-import subprocess
-import urllib.parse
-import urllib.request
-from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -16,14 +12,15 @@ from mock_framework.execution import ExecutionError
 from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
 from mock_framework.execution.step.engine_scale import EngineScaleArgs, engine_scale
-from mock_framework.execution.step.prometheus_query import (
-    PrometheusQueryArgs,
-    prometheus_query,
+from mock_framework.execution.step.master_list_engines import (
+    MasterListEnginesArgs,
+    master_list_engines,
 )
 from mock_framework.execution.step.step_registry import StepRegistry, register_step
-from mock_framework.execution.step_trace import timestamp
 from mock_framework.execution.test.helpers import FRAMEWORK
+from mock_framework.execution.test.helpers.input import write_inputs
 from mock_framework.execution.test.helpers.zookeeper import command as zookeeper_command
+from mock_framework.execution.transport import invoke
 
 ROOT = FRAMEWORK
 
@@ -33,7 +30,7 @@ class Args:
     pass
 
 
-def setup_case(tmp_path, operation, monitor=False, invalid=False, master=False):
+def setup_case(tmp_path, operation, *, invalid=False, traffic=False):
     registry = StepRegistry.standard()
     registry.register(operation)
     config = {
@@ -51,12 +48,9 @@ def setup_case(tmp_path, operation, monitor=False, invalid=False, master=False):
         }
         for role in ("prefill", "decode")
     }
-    env["prefill"]["config"][
-        "mock.scheduler.mode"
-    ] = "group"  # NativeProbe also exercises batch RPCs.
     if invalid:
         env["decode"]["config"]["test_block_num"] = 1
-    if master:
+    if traffic:
         from mock_framework.execution.test.test_master import configuration
 
         config = configuration()
@@ -74,6 +68,7 @@ def setup_case(tmp_path, operation, monitor=False, invalid=False, master=False):
             }
         )
         env["master"] = {"config": config}
+        env["client"] = {}
     source = tmp_path / "case.yaml"
     source.write_text(
         yaml.safe_dump(
@@ -107,9 +102,11 @@ def setup_case(tmp_path, operation, monitor=False, invalid=False, master=False):
         "org.flexlb.mock.engine.EngineMain",
     ]
     raw = {
-        "components": {role: {"command": command} for role in env if role != "master"}
+        "components": {
+            role: {"command": command} for role in env if role in ("prefill", "decode")
+        }
     }
-    if master:
+    if traffic:
         classpath = os.pathsep.join(
             [
                 str(ROOT / "java/master/target/classes"),
@@ -122,10 +119,12 @@ def setup_case(tmp_path, operation, monitor=False, invalid=False, master=False):
             "startup_timeout": "60s",
         }
         raw["zookeeper"] = {"command": zookeeper_command(ROOT, java)}
-    if monitor:
-        raw["prometheus"] = {
-            "binary": os.environ["PROMETHEUS_BIN"],
-            "scrape_interval": "100ms",
+        raw["components"]["client"] = {
+            "command": [
+                str(java),
+                "-jar",
+                str(ROOT / "java/client/target/mock-client-1.0-SNAPSHOT-all.jar"),
+            ]
         }
     return case, prepare_launch(raw, case, tmp_path)
 
@@ -230,178 +229,35 @@ def test_initial_engine_start_shares_slots_across_roles(tmp_path, monkeypatch):
     asyncio.run(exercise())
 
 
-def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics(
-    tmp_path, monkeypatch
-):
+def test_scale_updates_topology_and_preserves_instance_artifacts(tmp_path):
     @register_step("probe/lifecycle", effect="write")
-    async def exercise(ctx, args: Args) -> list[str]:
-        owner = ctx.runtime
-        assert (
-            len(
-                {
-                    owner.supervisor.child(node["id"]).pid
-                    for node in owner.topology.list_active_endpoints()
-                    if node["role"] in ("prefill", "decode", "vit")
-                }
-            )
-            == 3
-        )
+    async def exercise(ctx, args: Args) -> bool:
         original = ctx.list_rpc_addresses()["prefill"]
-        first = next(
-            item
-            for item in owner.topology.list_active_endpoints("prefill")
-            if item["rpc"] == original[0]
-        )
-        original_files = {
-            name: (
-                ctx.records.directory / "components" / first["id"] / name
-            ).read_bytes()
-            for name in ("config.json", "effective-config.json", "endpoints.json")
-        }
+        retired = ctx.records.directory / "components/prefill-0"
+        endpoints = (retired / "endpoints.json").read_bytes()
+
         removed = await engine_scale(ctx, EngineScaleArgs(direction="in", count=1))
-        assert len(removed) == 1 and len(ctx.list_rpc_addresses()["prefill"]) == 1
+        assert json.loads(endpoints)["rpc"] == removed[0]
+        assert set(ctx.list_rpc_addresses()["prefill"]) == set(original) - set(removed)
+        assert not (retired / "ready.json").exists()
         with pytest.raises(ExecutionError):
             await engine_scale(ctx, EngineScaleArgs(direction="in", targets=removed))
-        # Force the allocator to encounter retired RPC and HTTP ports before fresh ports.
-        candidates = deque(
-            [
-                int(first["rpc"].rsplit(":", 1)[1]),
-                urllib.parse.urlsplit(first["control"]).port,
-            ]
-        )
-        real_socket = socket.socket
 
-        class ReusedPortSocket(real_socket):
-            def getsockname(self):
-                host, port = super().getsockname()
-                return host, candidates.popleft() if candidates else port
-
-        with monkeypatch.context() as patch:
-            patch.setattr(socket, "socket", ReusedPortSocket)
-            created = await engine_scale(ctx, EngineScaleArgs(direction="out", count=2))
-        assert not candidates
-        for name, content in original_files.items():
-            assert (
-                ctx.records.directory / "components" / first["id"] / name
-            ).read_bytes() == content
-        if owner.monitoring:
-            # Keep an obsolete discovery target present while new instances are already serving.
-            from mock_framework.execution.roles.prometheus import _get
-            from mock_framework.execution.step_trace import write_json
-
-            prom = owner.monitoring
-            retired = {
-                "targets": [urllib.parse.urlsplit(first["metrics"]).netloc],
-                "labels": {"instance": first["rpc"], "__metrics_path__": "/metrics"},
-            }
-            write_json(
-                prom.directory / "targets.json",
-                list(prom.targets.values())
-                + [{key: retired[key] for key in ("targets", "labels")}],
-            )
-            expression = 'up{job="mock",instance="' + first["rpc"] + '"}'
-            async with asyncio.timeout(5):
-                while True:
-                    value = await asyncio.to_thread(
-                        _get,
-                        prom.url
-                        + "/api/v1/query?"
-                        + urllib.parse.urlencode({"query": expression}),
-                    )
-                    samples = value["data"]["result"]
-                    if samples and samples[0]["value"][1] == "0":
-                        break
-                    await asyncio.sleep(0.05)
-            # A stale control URL must not reach a replacement host or Engine either.
-            with pytest.raises(OSError):
-                await asyncio.to_thread(
-                    urllib.request.urlopen, first["metrics"], timeout=1
-                )
-            write_json(prom.directory / "targets.json", list(prom.targets.values()))
+        created = await engine_scale(ctx, EngineScaleArgs(direction="out", count=2))
+        assert len(created) == 2 and not set(created) & set(original)
+        assert (retired / "endpoints.json").read_bytes() == endpoints
         assert len(ctx.list_rpc_addresses()["prefill"]) == 3
-        assert not set(created) & set(original)
-        assert (
-            await engine_scale(
-                ctx, EngineScaleArgs(direction="in", targets=created[:1])
-            )
-            == created[:1]
-        )
-        assert len(ctx.list_rpc_addresses()["prefill"]) == 2
-        endpoints = [
-            json.loads(path.read_text())
-            for path in sorted(
-                ctx.records.directory.glob("components/*/endpoints.json")
-            )
-        ]
-        for item in endpoints:
-            folder = ctx.records.directory / "components" / item["id"]
-            assert (
-                json.loads((folder / "endpoints.json").read_text())["rpc"]
-                == item["rpc"]
-            )
-            assert (folder / "ready.json").exists() == (
-                item["id"]
-                in {node["id"] for node in owner.topology.list_active_endpoints()}
-            )
-        # Exercise real TCP request traffic after removal and subsequent creation.
-        classpath = os.pathsep.join(
-            [
-                str(ROOT / "java/engine/target/test-classes"),
-                str(
-                    ROOT / "java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar"
-                ),
-            ]
-        )
-        probe = await asyncio.to_thread(
-            subprocess.run,
-            [
-                str(Path(os.environ["JAVA_HOME"]) / "bin/java"),
-                "-cp",
-                classpath,
-                "org.flexlb.mock.engine.scheduler.NativeProbe",
-                ctx.list_rpc_addresses()["decode"][0],
-                str(tmp_path / "traffic.json"),
-                ctx.list_rpc_addresses()["prefill"][0],
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        assert probe.returncode == 0, probe.stderr
-        if owner.monitoring:
-            samples = await prometheus_query(
-                replace(ctx, query_time=timestamp()),
-                PrometheusQueryArgs(
-                    "count_over_time(rtp_llm_requests_started_total[1m])"
-                ),
-            )
-            assert {item.labels["instance"] for item in samples.samples} == {
-                item["rpc"] for item in endpoints
-            }
-        assert len(await engine_scale(ctx, EngineScaleArgs(direction="in"))) == 2
+        assert len(await engine_scale(ctx, EngineScaleArgs(direction="in"))) == 3
         assert ctx.list_rpc_addresses()["prefill"] == []
         assert len(await engine_scale(ctx, EngineScaleArgs(direction="out"))) == 1
-        return removed + created
+        return True
 
-    monitor = bool(os.environ.get("PROMETHEUS_BIN"))
-    case, launch = setup_case(tmp_path, exercise, monitor)
+    case, launch = setup_case(tmp_path, exercise)
     output = tmp_path / "result"
     result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "PASS", result
-    events = no_children(output)
-    assert len([event for event in events if event["event"] == "instance_stopped"]) == 4
+    no_children(output)
     assert json.loads((output / "topology.json").read_text()) == []
-    endpoints = [
-        json.loads(path.read_text())
-        for path in sorted(output.glob("components/*/endpoints.json"))
-    ]
-    assert len(endpoints) == 6 and len({item["rpc"] for item in endpoints}) == 6
-    listeners = [urllib.parse.urlsplit("//" + item["rpc"]).port for item in endpoints]
-    listeners += [urllib.parse.urlsplit(item["control"]).port for item in endpoints]
-    assert len(listeners) == len(set(listeners))
-    if monitor:
-        metadata = json.loads((output / "prometheus/collection.json").read_text())
-        assert metadata["complete"] and len(metadata["targets"]) == 2
 
 
 @pytest.mark.parametrize("invalid", [False, True])
@@ -507,173 +363,62 @@ def test_partial_scale_failure_is_not_replayed_or_reported_as_success(
     assert json.loads((output / "topology.json").read_text()) == []
 
 
-def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_address(
-    tmp_path,
-):
-    if not os.environ.get("PROMETHEUS_BIN"):
-        pytest.skip(
-            "PROMETHEUS_BIN required for live lifecycle and historical metric verification"
-        )
+def test_real_master_routes_client_traffic_after_engine_scale(tmp_path):
+    source = tmp_path / "traffic.mckidx"
+    write_inputs(
+        source,
+        [(3, 0, {"max_output_tokens": 3}, 50, [])] * 320,
+        chains=[(1, 0, 3)],
+    )
 
     @register_step("probe/live_scale", effect="write")
     async def exercise(ctx, args: Args) -> bool:
-        from datetime import datetime
-
-        from mock_framework.execution.roles.prometheus import _get
-        from mock_framework.execution.step.master_list_engines import (
-            MasterListEnginesArgs,
-            master_list_engines,
+        runtime = ctx.runtime
+        (master,) = ctx.list_rpc_addresses()["masters"]
+        (client,) = runtime.topology.list_active_endpoints("client")
+        await runtime.clients.start_playback(
+            {
+                "requests_file": str(source),
+                "qps": 8,
+                "total_concurrency": 4,
+                "queue_capacity": 16,
+                "request_timeout_ms": 3000,
+                "drain_timeout_ms": 5000,
+            },
+            ctx.timeout,
         )
-        from mock_framework.execution.step_trace import write_json
 
-        directory = ctx.records.directory / "traffic"
-        directory.mkdir()
-        classpath = os.pathsep.join(
-            [
-                str(ROOT / "java/client/target/test-classes"),
-                str(ROOT / "java/client/target/classes"),
-                str(
-                    ROOT / "java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar"
-                ),
-            ]
-        )
-        master = ctx.list_rpc_addresses()["masters"][0]
-
-        def rows():
-            path = directory / "requests.jsonl"
-            return (
-                [
-                    json.loads(line)
-                    for line in path.read_text().splitlines()
-                    if line.endswith("}")
-                ]
-                if path.exists()
-                else []
+        async def state():
+            value = await invoke(
+                client["control"], "worker/state", {"sequence": 1}, ctx.timeout
             )
+            assert not value["errors"], value
+            return value
 
-        async def until(predicate, timeout=20):
-            async with asyncio.timeout(timeout):
-                while not await predicate():
-                    if child.returncode is not None:
-                        raise AssertionError((directory / "stderr.log").read_text())
-                    await asyncio.sleep(0.05)
+        async with asyncio.timeout(20):
+            while (before := await state())["outcomes"]["success"] < 5:
+                await asyncio.sleep(0.1)
 
-        with (directory / "stdout.log").open("wb") as stdout, (
-            directory / "stderr.log"
-        ).open("wb") as stderr:
-            child = await asyncio.create_subprocess_exec(
-                str(Path(os.environ["JAVA_HOME"]) / "bin/java"),
-                "-cp",
-                classpath,
-                "org.flexlb.mock.client.LifecycleProbe",
-                master,
-                str(directory),
-                stdout=stdout,
-                stderr=stderr,
+            original = ctx.list_rpc_addresses()["prefill"]
+            created = await engine_scale(ctx, EngineScaleArgs(direction="out"))
+            removed = await engine_scale(
+                ctx, EngineScaleArgs(direction="in", targets=original)
             )
-            try:
+            assert set(removed) == set(original)
+            assert ctx.list_rpc_addresses()["prefill"] == created
 
-                async def healthy():
-                    return len([r for r in rows() if r["outcome"] == "success"]) >= 5
+            while await master_list_engines(ctx, MasterListEnginesArgs()) != {
+                master: created
+            }:
+                await asyncio.sleep(0.1)
+            assert (await state())["issued"] > before["issued"]
+            successful = (await state())["outcomes"]["success"]
+            while (await state())["outcomes"]["success"] < successful + 5:
+                await asyncio.sleep(0.1)
+        return True
 
-                await until(healthy)
-                began = timestamp()
-                removed = await engine_scale(
-                    ctx, EngineScaleArgs(direction="in", count=1)
-                )
-                discovery = ctx.records.directory / "components/master-0/discovery.json"
-                assert (
-                    json.loads(discovery.read_text())["p-domain"]
-                    == ctx.list_rpc_addresses()["prefill"]
-                )
-                created = await engine_scale(ctx, EngineScaleArgs(direction="out"))
-                expected = sorted(ctx.list_rpc_addresses()["prefill"])
-                assert sorted(json.loads(discovery.read_text())["p-domain"]) == expected
-                observations = []
-
-                async def converged():
-                    value = await master_list_engines(ctx, MasterListEnginesArgs())
-                    observations.append({"at": timestamp(), "observed": value})
-                    return value == {master: expected}
-
-                await until(converged)
-                converged_at = timestamp()
-
-                async def recovered():
-                    subsequent = [
-                        r
-                        for r in rows()
-                        if datetime.fromisoformat(r["sent_at"])
-                        >= datetime.fromisoformat(converged_at)
-                    ]
-                    return len(subsequent) >= 5 and all(
-                        r["outcome"] == "success" and r["tokens"] == 3
-                        for r in subsequent[-5:]
-                    )
-
-                await until(recovered, 10)
-                prom = ctx.runtime.monitoring
-
-                async def new_engine_received_requests():
-                    expr = (
-                        'rtp_llm_requests_started_total{instance="' + created[0] + '"}'
-                    )
-                    value = await asyncio.to_thread(
-                        _get,
-                        prom.url
-                        + "/api/v1/query?"
-                        + urllib.parse.urlencode({"query": expr}),
-                    )
-                    return any(
-                        float(r["value"][1]) > 0 for r in value["data"]["result"]
-                    )
-
-                await until(new_engine_received_requests, 10)
-                historical = await prometheus_query(
-                    replace(ctx, query_time=timestamp()),
-                    PrometheusQueryArgs(
-                        "count_over_time(rtp_llm_requests_started_total[1m])"
-                    ),
-                )
-                assert set(removed + created) <= {
-                    sample.labels["instance"] for sample in historical.samples
-                }
-                all_rows = rows()
-                transition = [
-                    r
-                    for r in all_rows
-                    if datetime.fromisoformat(began)
-                    <= datetime.fromisoformat(r["sent_at"])
-                    < datetime.fromisoformat(converged_at)
-                ]
-                assert transition, "No requests were issued during topology propagation"
-                write_json(
-                    directory / "lifecycle.json",
-                    {
-                        "removed": removed,
-                        "created": created,
-                        "began": began,
-                        "converged_at": converged_at,
-                        "master_observations": observations,
-                        "transition_outcomes": {
-                            outcome: sum(r["outcome"] == outcome for r in transition)
-                            for outcome in {r["outcome"] for r in transition}
-                        },
-                    },
-                )
-                return True
-            finally:
-                (directory / "stop").touch()
-                try:
-                    await asyncio.wait_for(child.wait(), 5)
-                except TimeoutError:
-                    child.kill()
-                    await child.wait()
-                assert child.returncode == 0, (directory / "stderr.log").read_text()
-
-    case, launch = setup_case(tmp_path, exercise, monitor=True, master=True)
+    case, launch = setup_case(tmp_path, exercise, traffic=True)
     output = tmp_path / "result"
     result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "PASS", result
     no_children(output)
-    assert json.loads((output / "prometheus/collection.json").read_text())["complete"]

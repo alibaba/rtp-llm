@@ -18,7 +18,7 @@ class ClientResult:
     produced: Annotated[int, Bounds(minimum=0)]
     issued: Annotated[int, Bounds(minimum=0)]
     finished: Annotated[int, Bounds(minimum=0)]
-    unsent: Annotated[int, Bounds(minimum=0)]
+    unissued: Annotated[int, Bounds(minimum=0)]
     queued: Annotated[int, Bounds(minimum=0)]
     inflight: Annotated[int, Bounds(minimum=0)]
     outcomes: dict[str, Annotated[int, Bounds(minimum=0)]]

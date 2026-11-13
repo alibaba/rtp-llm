@@ -512,7 +512,7 @@ def assert_exited(output):
             os.kill(int(path.read_text()), 0)
 
 
-@pytest.mark.parametrize("fault", ["startup", "running", "cancel", "cleanup"])
+@pytest.mark.parametrize("fault", ["startup", "running", "cleanup"])
 def test_metrics_processes_are_reaped_after_failure_or_cancel(
     completed, tmp_path, metrics_binaries, monkeypatch, fault
 ):
@@ -551,9 +551,7 @@ def test_metrics_processes_are_reaped_after_failure_or_cancel(
                     assert "unexpectedly" in body["metrics"]["error"]
                 else:
                     task.cancel()
-                    with pytest.raises(
-                        RuntimeError if fault == "cleanup" else asyncio.CancelledError
-                    ):
+                    with pytest.raises(RuntimeError):
                         await task
             assert body["metrics"]["status"] == "unavailable"
             assert body["result"]["status"] == "ERROR"

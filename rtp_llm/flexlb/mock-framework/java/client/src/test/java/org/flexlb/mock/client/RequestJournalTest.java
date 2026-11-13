@@ -104,7 +104,7 @@ class RequestJournalTest {
             var result = zero.stopReplay(new ClientProtocol.Empty());
             assertFalse(result.errors().isEmpty()); assertEquals(2, result.clients().size());
             assertTrue(result.clients().values().stream().allMatch(ClientProtocol.State::done));
-            assertTrue(result.clients().values().stream().allMatch(s -> s.unsent() > 0));
+            assertTrue(result.clients().values().stream().allMatch(s -> s.unissued() > 0));
             assertFalse(result.clients().get(one.url()).errors().isEmpty());
         }
     }

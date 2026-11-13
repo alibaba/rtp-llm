@@ -36,7 +36,7 @@ class PlaybackTest {
             load.begin(System.currentTimeMillis() + 30);
             var result = load.await(5000);
             assertTrue(result.done()); assertFalse(result.stopped()); assertTrue(result.errors().isEmpty(), result.toString());
-            assertEquals(3, result.issued()); assertEquals(3, result.finished()); assertEquals(0, result.unsent());
+            assertEquals(3, result.issued()); assertEquals(3, result.finished()); assertEquals(0, result.unissued());
             assertEquals(3, h.schedules.get());
             assertFalse(h.generated.get().getGenerateConfig().getIgnoreEos());
             assertEquals(3, h.generated.get().getGenerateConfig().getMaxNewTokens());
@@ -60,7 +60,7 @@ class PlaybackTest {
             var result = load.await(5000);
             assertTrue(result.errors().getFirst().contains("queue full"));
             assertTrue(result.issued() <= 1); assertEquals(result.issued(), result.finished());
-            assertEquals(30 - result.issued(), result.unsent());
+            assertEquals(30 - result.issued(), result.unissued());
         }
     }
 
@@ -68,7 +68,7 @@ class PlaybackTest {
         try (var h = new BackendRpcClientTest.Harness(); var load = worker(clientReplayPlan(master(h), 3, 10, 1, 2), new ClientMetrics(), h)) {
             load.halt(); load.halt();
             var result = load.await(5000);
-            assertEquals(0, result.issued()); assertEquals(3, result.unsent()); assertTrue(result.errors().isEmpty());
+            assertEquals(0, result.issued()); assertEquals(3, result.unissued()); assertTrue(result.errors().isEmpty());
             assertThrows(IllegalStateException.class, () -> load.begin(System.currentTimeMillis() + 30));
         }
     }
@@ -203,7 +203,7 @@ class PlaybackTest {
                 assertTrue(result.errors().isEmpty(), result.toString());
                 assertEquals(early ? 1 : 6, result.clients().values().stream().mapToLong(State::issued).sum());
                 assertTrue(h.generated.get().getGenerateConfig().getReuseCache());
-                assertEquals(early ? 5 : 0, result.clients().values().stream().mapToLong(State::unsent).sum());
+                assertEquals(early ? 5 : 0, result.clients().values().stream().mapToLong(State::unissued).sum());
                 assertTrue(result.clients().values().stream().allMatch(State::done));
             }
         }

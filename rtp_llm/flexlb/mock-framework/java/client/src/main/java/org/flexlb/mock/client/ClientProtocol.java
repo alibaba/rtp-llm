@@ -100,7 +100,7 @@ public final class ClientProtocol {
 
     public record Ack(boolean accepted) {}
 
-    public record State(boolean done, boolean stopped, long produced, long issued, long finished, long unsent,
+    public record State(boolean done, boolean stopped, long produced, long issued, long finished, long unissued,
                  int queued, int inflight, Map<String, Long> outcomes, List<String> errors) {}
 
     public record Summary(Map<String, State> clients, List<String> errors) {}

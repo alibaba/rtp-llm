@@ -7,7 +7,7 @@ from mock_framework.config import ConfigError
 from mock_framework.execution import ExecutionError, metrics
 from mock_framework.execution.roles import client as client_runtime
 from mock_framework.execution.roles.client import ClientRole
-from mock_framework.execution.step.client_query_qps import client_query_qps
+from mock_framework.execution.step.metrics.client import query_qps
 from mock_framework.execution.step.step_registry import StepRegistry
 from mock_framework.execution.test.helpers import FRAMEWORK
 
@@ -94,7 +94,7 @@ def state():
         produced=1,
         issued=1,
         finished=1,
-        unsent=0,
+        unissued=0,
         queued=0,
         inflight=0,
         outcomes={"success": 1, "error": 0, "timeout": 0, "cancelled": 0},
@@ -171,7 +171,7 @@ def test_qps_reuses_metric_aggregation_and_measures_issued_not_finished(monkeypa
         return 123.0
 
     monkeypatch.setattr(metrics, "query_counter", query_counter)
-    assert asyncio.run(client_query_qps(context(), metrics.MetricArgs())) == 123.0
+    assert asyncio.run(query_qps(context(), metrics.MetricArgs())) == 123.0
 
 
 @pytest.mark.parametrize("failed", [False, True])

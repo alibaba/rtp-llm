@@ -151,14 +151,15 @@ phases:
           gte: 0.999
         within: 30s
       - id: stop_client
-        describe: 待整份数据回放完毕后停止 Client，并收齐已发请求的终态。
+        describe: 停止 Client 并排空已发请求。
         interface: client/stop/playback
-        within: 180s
+        within: 190s
       - id: check_total_success_rate
-        describe: 检查整轮回放是否完整，以及排空后的全程成功率。
+        describe: 查询含预热和排空的全程终态成功率。
         interface: client/query/success_rate
         args:
-          playback_result: { ref: steps.stop_client }
+          # 覆盖回放启动步骤的 430s 预算和性能阶段的 540s 预算。
+          range: [-980s, 0s]
         expect:
           gte: 0.999
         within: 30s

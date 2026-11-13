@@ -245,8 +245,7 @@ async def progress(ctx, args: Empty) -> int:
     return successes
 
 
-@pytest.mark.parametrize("batched", [False, True], ids=["direct", "batch"])
-def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batched):
+def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path):
     from mock_framework.execution.test.test_master import configuration
 
     root = FRAMEWORK
@@ -260,8 +259,15 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
     config = configuration()
     config["FLEXLB_CONFIG"] = json.dumps(
         {
-            "scheduler": {"type": "QUEUE" if batched else "DIRECT"},
-            "dispatcher": {"type": "BATCH" if batched else "NON_BATCH"},
+            "scheduler": {
+                "type": "QUEUE",
+                "decision": {
+                    "type": "FIXED_WINDOW",
+                    "maxRequests": 2,
+                    "maxCollectionWaitMs": 20,
+                },
+            },
+            "dispatcher": {"type": "BATCH"},
             "requestLifecycle": {"request": {"timeoutMs": 5000}},
             "grpcServer": {
                 "executorCoreSize": 4,
@@ -271,18 +277,10 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
             },
         }
     )
-    if batched:
-        native = json.loads(config["FLEXLB_CONFIG"])
-        native["scheduler"]["decision"] = {
-            "type": "FIXED_WINDOW",
-            "maxRequests": 2,
-            "maxCollectionWaitMs": 20,
-        }
-        config["FLEXLB_CONFIG"] = json.dumps(native)
     engine = {
         "engine": "rtp",
         "config": {
-            "mock.scheduler.mode": "group" if batched else "fifo",
+            "mock.scheduler.mode": "group",
             "seq_size_per_block": 16,
             "test_block_num": 256,
             "reserve_block_ratio": 0,

@@ -68,7 +68,7 @@ Case 的 `client/start/playback` 通过 Python 调用 Java client0 的 `client/s
 
 第 `i` 个 Client 负责 `i, i+N, i+2N, …`，其中 `N` 为 Client 数。各 Client 共享同一份数据文件。可选的 `warmup` 在开始阶段降低速率，之后恢复正式速率，每条请求发送一次。性能门禁使用预热后的时间范围。
 
-本地播放器将到点的请求放入有界队列，调用占用并发槽直至终态。队列满会结束整轮并记录错误。自然结束会发完队列中的请求，主动停止则把未发请求记入 `unsent`，已发请求在收尾预算内排空。`client/stop/playback` 汇总本轮结果，单请求业务失败由 Case 门禁判断。TTFT 和请求耗时从实际发起 RPC 时计量。
+本地播放器将到点的请求放入有界队列，调用占用并发槽直至终态。队列满会结束整轮并记录错误。自然结束会发完队列中的请求，主动停止后，已发请求在收尾预算内排空。`unissued` 等于该 Client 的计划请求数减去 `issued`，涵盖队列中和还未入队的请求。`client/stop/playback` 汇总本轮结果，单请求业务失败由 Case 门禁判断。TTFT 和请求耗时从实际发起 RPC 时计量。
 
 ### 共享索引回放输入
 
@@ -173,16 +173,9 @@ WorkerStatus 从接入会话与 Scheduler 采集任务快照，`TaskHistory` 提
 
 原始指标样本在对应业务事件记录。Prometheus 保存可查询的时间序列；使用 Reporter 时由独立发送线程提交样本，保留原始权重。采集快照在短锁内取值，编码和发送在锁外。指标队列溢出或上报失败会标记采集不完整，业务计算继续推进。[指标口径](../views/coverage.md#指标口径)
 
-### Client 逐请求记录与查询
+### Client 逐请求记录
 
-每个 Client 将已完成请求写入 `components/<client>/playback/<轮次>/requests.jsonl`。`client/stop/playback` 使用 Java 封口的汇总。`client/query/requests` 从已封口的逐请求记录读取，可按 Client、轮次、请求 ID、结果及发出时间筛选。返回条数限制只影响明细，匹配计数和记录完整性校验仍覆盖查询输入。
-
-```yaml
-interface: client/query/requests
-args:
-  outcome: error
-  limit: 10
-```
+每个 Client 将请求事件写入 `components/<client>/playback/<轮次>/requests.jsonl`。Java Client 测试验证请求事件和日志封口。显式停止和 Runner 自动收尾都校验 Java 返回的最终汇总。
 
 ### Step 记录、门禁与 View
 

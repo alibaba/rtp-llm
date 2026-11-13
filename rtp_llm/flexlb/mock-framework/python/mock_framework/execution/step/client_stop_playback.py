@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 
 from ..roles.client import ClientResult
@@ -14,5 +15,9 @@ class ClientStopPlaybackArgs:
 async def client_stop_playback(
     ctx: StepContext, args: ClientStopPlaybackArgs
 ) -> dict[str, ClientResult]:
-    """Stop all Clients and collect bounded cleanup; natural completion returns its saved result."""
-    return await ctx.runtime.clients.stop_playback(ctx.timeout)
+    """Stop playback, collect results and give Prometheus time to scrape."""
+    clients = ctx.runtime.clients
+    result = await clients.stop_playback(ctx.timeout)
+    if result and clients.monitoring:
+        await asyncio.sleep(10)
+    return result
