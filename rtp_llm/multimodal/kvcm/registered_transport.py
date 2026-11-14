@@ -93,7 +93,7 @@ class RegisteredObjectTransport:
             self._poisoned = True
             with self._quarantine_lock:
                 self._quarantined_transports.append(self)
-            logging.error("GDR transfer failed; arena quarantined until worker restart")
+            logging.exception("GDR operation failed; arena quarantined until worker restart")
 
     def _view(self, tensor):
         self._check_available()

@@ -188,8 +188,11 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                 native = getattr(transport._client, operation)
                 native.side_effect = TimeoutError("DMA completion is unknown")
                 buffer = torch.zeros(16, dtype=torch.uint8)
-                with self.assertRaises(TimeoutError):
-                    getattr(transport, operation)("key", buffer)
+                with self.assertLogs(level="ERROR") as logs:
+                    with self.assertRaises(TimeoutError):
+                        getattr(transport, operation)("key", buffer)
+                self.assertEqual(len(logs.output), 1)
+                self.assertIn("TimeoutError: DMA completion is unknown", logs.output[0])
                 self.assertTrue(transport._poisoned)
                 self.assertIn(
                     transport, RegisteredObjectTransport._quarantined_transports
