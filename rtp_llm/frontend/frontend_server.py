@@ -38,7 +38,7 @@ from rtp_llm.utils.concurrency_controller import (
     get_global_controller,
 )
 from rtp_llm.utils.time_util import current_time_ms
-from rtp_llm.utils.util import check_with_info
+from rtp_llm.utils.util import AtomicCounter, check_with_info
 
 USAGE_HEADER = "USAGE"
 
@@ -157,6 +157,11 @@ class FrontendServer(object):
         self.is_embedding = False
         self.thread_lock_ = threading.Lock()
         self._global_controller = get_global_controller()
+        # Dedicated sequence source for /awi/generate request ids. The shared
+        # admission controller's increment() acquires a CONCURRENCY_LIMIT slot
+        # and raises the 409 concurrency error when exhausted, which
+        # /awi/generate must not do (see awi_generate).
+        self._awi_request_counter = AtomicCounter()
         self.rank_id = str(rank_id)
         self.server_id = str(server_id)
         kmonitor.init()
@@ -831,7 +836,16 @@ class FrontendServer(object):
             # one-shot prefill/reuse event guard and the barrier internal-id
             # binding are keyed by that id, which silently suppressed events
             # for whichever colliding request reached decode second.
-            sequence = self._global_controller.increment() % 4096  # 12 bits
+            # The sequence source must NOT be _global_controller.increment():
+            # that acquires a slot of the shared multiprocessing admission
+            # counter and raises the 409 concurrency error when exhausted, so
+            # armed barrier cohorts could no longer reside simultaneously via
+            # /awi/generate (engine-side AWI capacity checks govern there),
+            # and an unpaired increment leaks the slot for the process lifetime.
+            # Uniqueness still holds: machine-id bits come from ip:port:server_id
+            # (server_id differs per frontend worker) and this counter is
+            # strictly monotonic within the worker.
+            sequence = self._awi_request_counter.increment() % 4096  # 12 bits
             internal_request_id = generate_request_id(
                 self.py_env_configs.server_config.ip,
                 self.py_env_configs.server_config.server_port,
