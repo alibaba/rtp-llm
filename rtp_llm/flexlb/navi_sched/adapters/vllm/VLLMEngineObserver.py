@@ -5545,6 +5545,16 @@ class VLLMEngineObserver:
                     actual_cache_hits, predicted_cache_hits, strict=True
                 )
             )
+            self._record_pipelined_prefill_batch_sample(
+                state,
+                admission_state,
+                start_state,
+                request_stats,
+                admission_to_first_execution_ms,
+                wall_ms,
+                finish_ns,
+                completed_time_us,
+            )
             # Pipeline steps overlap, so their summed latency can exceed wall time.
             # Match the native reporter's nonnegative gap statistic.
             inter_step_gap_ms = max(0.0, wall_ms - execution_step_ms)
@@ -5782,6 +5792,89 @@ class VLLMEngineObserver:
                 logger.error("failed to finish NaviSched vLLM batch")
         except Exception:
             logger.exception("failed to finish NaviSched vLLM batch")
+
+    def _record_pipelined_prefill_batch_sample(
+        self,
+        state,
+        admission_state,
+        start_state,
+        request_stats,
+        queue_ms,
+        execution_ms,
+        completed_ns,
+        completed_time_us,
+    ) -> None:
+        if not (
+            self._native_ingress and getattr(self, "_pp_workload_timing_enabled", False)
+        ):
+            return
+        parallel = getattr(self._vllm_config, "parallel_config", None)
+        pp_size = int(getattr(parallel, "pipeline_parallel_size", 1))
+        queue = getattr(self._engine_core, "batch_queue", None)
+        queue_capacity = getattr(queue, "maxlen", 0) or 0
+        if pp_size <= 1 or queue_capacity <= 1 or state.cancelled_request_ids:
+            return
+        try:
+            # Replay inputs come only from the frozen arrival snapshot. Actual
+            # cache hits and completion times are labels, never feature values.
+            predicted_stats = [
+                (
+                    request_id,
+                    state.admission_contributions[request_id].prompt_tokens,
+                    state.admission_contributions[request_id].total_context_tokens,
+                )
+                for request_id, _, _ in request_stats
+            ]
+            running, waiting = self._capacity_sample_features(
+                admission_state, predicted_stats
+            )
+            preceding = admission_state.preceding_workload
+            features = {
+                "batch_count": preceding.batch_count + 1,
+                "preceding_request_count": preceding.request_count,
+                "running_elapsed_time_ms": preceding.running_elapsed_time_ms,
+                "running_decode_request_count": preceding.running_decode_request_count,
+                "running_decode_generated_tokens": preceding.running_decode_generated_tokens,
+                "running_decode_remaining_token_budget": preceding.running_decode_remaining_token_budget,
+            }
+            for name, workload in (("running", running), ("waiting", waiting)):
+                features[name] = {
+                    "request_count": workload.request_count,
+                    "context_tokens": workload.context_tokens,
+                    "compute_tokens": workload.compute_tokens,
+                    "compute_token_square_sum": workload.compute_token_square_sum,
+                    "context_compute_token_product_sum": workload.context_compute_token_product_sum,
+                }
+            self.on_request_lifecycle_event(
+                {
+                    "event": "prefill_pipeline_batch_sample",
+                    "schema_version": 1,
+                    "event_time_us": completed_time_us or time.time_ns() // 1000,
+                    "native_batch_id": state.batch_id,
+                    "native_schedule_batch_id": state.schedule_batch_id,
+                    "pipeline_parallel_size": pp_size,
+                    "native_async_queue_capacity": queue_capacity,
+                    "workload_observed_perf_ns": preceding.observed_time_ns,
+                    "admission_started_perf_ns": state.admission_started_ns,
+                    "first_execution_perf_ns": state.execution_started_ns,
+                    "completed_perf_ns": completed_ns,
+                    "active_executions_at_admission": admission_state.active_executions,
+                    "active_executions_at_first_step": start_state.active_executions,
+                    "features_at_admission": features,
+                    "observed_queue_ms": queue_ms,
+                    "observed_execution_ms": execution_ms,
+                    "observed_total_ms": queue_ms + execution_ms,
+                    "observed_own_step_count": state.execution_step_count,
+                    "cache_forecast_error_abs_tokens": sum(
+                        abs(actual - predicted[2])
+                        for (_, _, actual), predicted in zip(
+                            request_stats, predicted_stats, strict=True
+                        )
+                    ),
+                }
+            )
+        except Exception:
+            logger.exception("failed to record pipelined Prefill arrival sample")
 
     def _matching_forward_batches(self, external_request_ids):
         states = {}

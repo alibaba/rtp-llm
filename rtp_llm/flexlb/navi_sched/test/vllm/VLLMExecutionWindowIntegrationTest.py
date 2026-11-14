@@ -191,5 +191,189 @@ class VLLMExecutionWindowIntegrationTest(unittest.TestCase):
                 os.close(fd)
 
 
+class VLLMPipelineBatchSampleTest(unittest.TestCase):
+    def make_case(self):
+        from collections import deque
+        from types import SimpleNamespace
+
+        from navi_sched.adapters.vllm.VLLMEngineObserver import (
+            VLLMEngineObserver,
+            _AdmissionState,
+            _ExecutionStartState,
+            _ObservedWorkload,
+            _PrefillWorkloadSlice,
+            _WorkloadContribution,
+        )
+
+        observer = VLLMEngineObserver.__new__(VLLMEngineObserver)
+        observer._native_ingress = True
+        observer._pp_workload_timing_enabled = True
+        observer._vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(pipeline_parallel_size=4)
+        )
+        observer._engine_core = SimpleNamespace(batch_queue=deque(maxlen=4))
+        events = []
+        observer.on_request_lifecycle_event = events.append
+        preceding = _ObservedWorkload(
+            batch_count=2,
+            request_count=3,
+            running_elapsed_time_ms=150.0,
+            observed_time_ns=999000000,
+            running_capacity_prefill=_PrefillWorkloadSlice(2, 300, 20, 200.0, 3000.0),
+            waiting_capacity_prefill=_PrefillWorkloadSlice(1, 400, 30, 900.0, 12000.0),
+        )
+        admission = _AdmissionState(
+            preceding_workload=preceding,
+            incoming_running_capacity_request_ids=frozenset((1,)),
+            active_executions=3,
+        )
+        state = SimpleNamespace(
+            batch_id=11,
+            schedule_batch_id=22,
+            request_ids=(1, 2),
+            cancelled_request_ids=set(),
+            admission_started_ns=1000000000,
+            execution_started_ns=1300000000,
+            execution_step_count=3,
+            admission_contributions={
+                1: _WorkloadContribution(11, 1000, 100, 900, 100, 900),
+                2: _WorkloadContribution(11, 2000, 200, 1800, 200, 1800),
+            },
+        )
+        # Actual cache hits differ after queueing; they must not enter the replay inputs.
+        args = (
+            state,
+            admission,
+            _ExecutionStartState(active_executions=3),
+            [(1, 1000, 900), (2, 2000, 1900)],
+            300.0,
+            700.0,
+            2000000000,
+            1234567,
+        )
+        return observer, args, events
+
+    def test_records_frozen_arrival_features_and_separate_completion_labels(self):
+        observer, args, events = self.make_case()
+        observer._record_pipelined_prefill_batch_sample(*args)
+        self.assertEqual(1, len(events))
+        event = events[0]
+        self.assertEqual("prefill_pipeline_batch_sample", event["event"])
+        self.assertEqual(
+            (11, 22), (event["native_batch_id"], event["native_schedule_batch_id"])
+        )
+        self.assertEqual(
+            150.0, event["features_at_admission"]["running_elapsed_time_ms"]
+        )
+        self.assertEqual(
+            400, event["features_at_admission"]["running"]["context_tokens"]
+        )
+        self.assertEqual(
+            920, event["features_at_admission"]["running"]["compute_tokens"]
+        )
+        self.assertEqual(
+            600, event["features_at_admission"]["waiting"]["context_tokens"]
+        )
+        self.assertEqual(
+            1830, event["features_at_admission"]["waiting"]["compute_tokens"]
+        )
+        self.assertEqual(2500, event["cache_forecast_error_abs_tokens"])
+        self.assertEqual(1000.0, event["observed_total_ms"])
+        self.assertEqual(1234567, event["event_time_us"])
+        self.assertEqual(3, event["observed_own_step_count"])
+        self.assertEqual(
+            300, args[1].preceding_workload.running_capacity_prefill.context_tokens
+        )
+
+    def test_non_pipeline_and_other_backend_paths_do_not_emit_samples(self):
+        for mode in ("non_native", "non_pp", "serial", "diagnostic_disabled"):
+            with self.subTest(mode=mode):
+                observer, args, events = self.make_case()
+                if mode == "non_native":
+                    observer._native_ingress = False
+                elif mode == "non_pp":
+                    observer._vllm_config.parallel_config.pipeline_parallel_size = 1
+                elif mode == "serial":
+                    observer._engine_core.batch_queue = None
+                else:
+                    observer._pp_workload_timing_enabled = False
+                observer._record_pipelined_prefill_batch_sample(*args)
+                self.assertEqual([], events)
+
+    def test_real_batch_completion_preserves_native_report_when_diagnostic_sink_fails(
+        self,
+    ):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from navi_sched.adapters.vllm.VLLMEngineObserver import _ForwardBatchState
+
+        observer, args, events = self.make_case()
+        source, admission, start = args[:3]
+        state = _ForwardBatchState(
+            batch_id=11,
+            schedule_batch_id=22,
+            schedule_batch_size=2,
+            pending_cache_tracked=False,
+            native_batch=None,
+            request_ids=(1, 2),
+            external_request_ids={1: "r1", 2: "r2"},
+            requests={
+                1: SimpleNamespace(num_prompt_tokens=1000),
+                2: SimpleNamespace(num_prompt_tokens=2000),
+            },
+            handle=object(),
+            predicted_cache_hits={1: 100, 2: 200},
+            initial_cache_hits={1: 900, 2: 1900},
+            admission_started_ns=source.admission_started_ns,
+            execution_started_ns=source.execution_started_ns,
+            execution_step_count=3,
+            admission_state=admission,
+            admission_contributions=source.admission_contributions,
+            execution_start_state=start,
+        )
+        observer._execution_geometry_enabled = False
+        observer._cleanup_released_forward_batch = mock.Mock()
+        observer._bridge = SimpleNamespace(
+            finish_batch_with_execution=mock.Mock(return_value=True)
+        )
+
+        def sink(event):
+            events.append(event)
+            if event["event"] == "prefill_pipeline_batch_sample":
+                raise RuntimeError("diagnostic sink unavailable")
+
+        observer.on_request_lifecycle_event = sink
+        with mock.patch("navi_sched.adapters.vllm.VLLMEngineObserver.logger") as logger:
+            observer._finish_batch(
+                state, completed_ns=2000000000, completed_time_us=1234567
+            )
+        observer._bridge.finish_batch_with_execution.assert_called_once()
+        observer._cleanup_released_forward_batch.assert_called_once_with(state)
+        self.assertTrue(state.released)
+        self.assertEqual(
+            ["prefill_pipeline_batch_sample", "legacy_native_batch_clock"],
+            [event["event"] for event in events],
+        )
+        logger.exception.assert_called_once()
+
+    def test_cancelled_batch_is_not_used_as_complete_arrival_sample(self):
+        observer, args, events = self.make_case()
+        args[0].cancelled_request_ids.add(1)
+        observer._record_pipelined_prefill_batch_sample(*args)
+        self.assertEqual([], events)
+
+    def test_diagnostic_failure_does_not_escape_into_batch_completion(self):
+        from unittest import mock
+
+        observer, args, _ = self.make_case()
+        observer.on_request_lifecycle_event = mock.Mock(
+            side_effect=RuntimeError("sink unavailable")
+        )
+        with mock.patch("navi_sched.adapters.vllm.VLLMEngineObserver.logger") as logger:
+            observer._record_pipelined_prefill_batch_sample(*args)
+        logger.exception.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
