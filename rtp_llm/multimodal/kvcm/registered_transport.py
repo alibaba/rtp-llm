@@ -7,9 +7,9 @@ on CPU; this is not a claim that the tensor-tree codec is GPU-only.
 import ctypes
 import logging
 import threading
+from contextlib import ExitStack, contextmanager, nullcontext
 
 import torch
-
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
 
@@ -41,9 +41,10 @@ class RegisteredObjectTransport:
     _quarantine_lock = threading.Lock()
     _quarantined_transports = []
 
-    def __init__(self, factory, *, max_object_bytes, device):
+    def __init__(self, factory, *, max_object_bytes, device, observe_stage=None):
         if max_object_bytes <= 0 or max_object_bytes > 1024**3:
             raise ValueError("invalid registered object capacity")
+        self._observe_stage = observe_stage
         self._lock = threading.Lock()
         self._closed = False
         self._poisoned = False
@@ -123,37 +124,64 @@ class RegisteredObjectTransport:
             raise ValueError("invalid registered object buffer")
         return self._arena[self._GUARD_BYTES : self._GUARD_BYTES + tensor.numel()]
 
+    def _stage(self, operation, name):
+        observe = getattr(self, "_observe_stage", None)
+        return observe(operation, name) if observe is not None else nullcontext()
+
+    @contextmanager
+    def _serialized(self, operation):
+        # Time the existing waits without adding a CUDA synchronization.
+        with ExitStack() as stack:
+            with self._stage(operation, "transport_lock_wait"):
+                stack.enter_context(self._lock)
+            with self._stage(operation, "cuda_gate_wait"):
+                stack.enter_context(cuda_graph_gate.operation())
+            stack.enter_context(torch.cuda.device(self._device))
+            yield
+
     def object_size(self, key, **kwargs):
-        with self._lock:
+        with ExitStack() as stack:
+            with self._stage("read", "metadata_lock_wait"):
+                stack.enter_context(self._lock)
             self._check_available()
             return self._client.object_size(key, **kwargs)
 
     def save_one(self, key, buffer, **kwargs):
-        with self._lock, cuda_graph_gate.operation(), torch.cuda.device(self._device):
+        with self._serialized("write"):
             transfer = self._view(buffer)
             try:
                 host = self._host_staging[: buffer.numel()]
-                host.copy_(buffer)
+                with self._stage("write", "host_copy"):
+                    host.copy_(buffer)
                 stream = torch.cuda.current_stream(self._device)
-                transfer.copy_(host, non_blocking=True)
-                stream.synchronize()
-                self._client.save_one(key, transfer, **kwargs)
-                stream.synchronize()
+                with self._stage("write", "h2d_staging"):
+                    transfer.copy_(host, non_blocking=True)
+                    stream.synchronize()
+                # Includes the native client's metadata transaction, not just IO.
+                with self._stage("write", "native_save"):
+                    self._client.save_one(key, transfer, **kwargs)
+                with self._stage("write", "gpu_ready_wait"):
+                    stream.synchronize()
             except Exception as error:
                 self._handle_failure(error)
                 raise
 
     def load_one(self, key, buffer, **kwargs):
-        with self._lock, cuda_graph_gate.operation(), torch.cuda.device(self._device):
+        with self._serialized("read"):
             transfer = self._view(buffer)
             try:
-                self._client.load_one(key, transfer, **kwargs)
+                # Includes native metadata lookup; PACE's own RT is separate.
+                with self._stage("read", "native_load"):
+                    self._client.load_one(key, transfer, **kwargs)
                 stream = torch.cuda.current_stream(self._device)
-                stream.synchronize()
+                with self._stage("read", "gpu_ready_wait"):
+                    stream.synchronize()
                 host = self._host_staging[: buffer.numel()]
-                host.copy_(transfer, non_blocking=True)
-                stream.synchronize()
-                buffer.copy_(host)
+                with self._stage("read", "d2h_staging"):
+                    host.copy_(transfer, non_blocking=True)
+                    stream.synchronize()
+                with self._stage("read", "host_copy"):
+                    buffer.copy_(host)
                 return buffer
             except Exception as error:
                 self._handle_failure(error)

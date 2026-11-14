@@ -8,11 +8,11 @@ import hashlib
 import json
 import math
 import struct
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
 import torch
-
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
 _MAGIC = b"RTPMM001"
@@ -138,22 +138,33 @@ def plan_object(value: Any, *, devices=None, max_bytes=1024**3) -> TensorObjectP
     return TensorObjectPlan(header, tensors, encoded, offset, nbytes)
 
 
-def pack_object(plan: TensorObjectPlan) -> torch.Tensor:
+def pack_object(plan: TensorObjectPlan, *, observe_stage=None) -> torch.Tensor:
     """CPU staging compatibility path for the existing one-buffer SDK."""
-    output = torch.zeros(plan.nbytes, dtype=torch.uint8)
-    for tensor, spec in zip(plan.tensors, plan.header["tensors"]):
-        if not spec["nbytes"]:
-            continue
-        start = plan.payload_offset + spec["offset"]
-        with cuda_graph_gate.operation():
-            source = tensor.detach().contiguous().reshape(-1).view(torch.uint8)
-            output[start : start + spec["nbytes"]].copy_(source, non_blocking=False)
+
+    def stage(name):
+        return (
+            observe_stage("write", name) if observe_stage is not None else nullcontext()
+        )
+
+    with stage("pack_allocate"):
+        output = torch.zeros(plan.nbytes, dtype=torch.uint8)
+    with stage("pack_payload"):
+        for tensor, spec in zip(plan.tensors, plan.header["tensors"]):
+            if not spec["nbytes"]:
+                continue
+            start = plan.payload_offset + spec["offset"]
+            with cuda_graph_gate.operation():
+                source = tensor.detach().contiguous().reshape(-1).view(torch.uint8)
+                output[start : start + spec["nbytes"]].copy_(source, non_blocking=False)
     # A memoryview avoids another full bytes copy during checksumming.
-    plan.header["sha256"] = "0" * 64
-    metadata = json.dumps(plan.header, separators=(",", ":"), allow_nan=False).encode()
-    digest = hashlib.sha256(metadata)
-    digest.update(memoryview(output.numpy())[plan.payload_offset :])
-    plan.header["sha256"] = digest.hexdigest()
+    with stage("pack_checksum"):
+        plan.header["sha256"] = "0" * 64
+        metadata = json.dumps(
+            plan.header, separators=(",", ":"), allow_nan=False
+        ).encode()
+        digest = hashlib.sha256(metadata)
+        digest.update(memoryview(output.numpy())[plan.payload_offset :])
+        plan.header["sha256"] = digest.hexdigest()
     header = json.dumps(plan.header, separators=(",", ":"), allow_nan=False).encode()
     prefix = _PREFIX.pack(_MAGIC, len(header)) + header
     output[: len(prefix)].copy_(torch.frombuffer(bytearray(prefix), dtype=torch.uint8))
@@ -161,128 +172,149 @@ def pack_object(plan: TensorObjectPlan) -> torch.Tensor:
 
 
 def unpack_object(
-    buffer: torch.Tensor, *, cuda_device=None, restore_devices=True, max_bytes=1024**3
+    buffer: torch.Tensor,
+    *,
+    cuda_device=None,
+    restore_devices=True,
+    max_bytes=1024**3,
+    observe_stage=None,
 ):
     """Validate the entire object before materializing any destination tensor."""
-    if (
-        buffer.dtype != torch.uint8
-        or buffer.device.type != "cpu"
-        or buffer.ndim != 1
-        or not buffer.is_contiguous()
-        or not _PREFIX.size <= buffer.numel() <= max_bytes
-    ):
-        raise ValueError("invalid multimodal object buffer")
-    view = memoryview(buffer.numpy())
-    magic, length = _PREFIX.unpack_from(view)
-    offset = _align(_PREFIX.size + length)
-    if magic != _MAGIC or length > _MAX_HEADER or offset > len(view):
-        raise ValueError("invalid multimodal object header")
-    try:
-        header = json.loads(bytes(view[_PREFIX.size : _PREFIX.size + length]))
-    except (ValueError, UnicodeError, RecursionError) as error:
-        raise ValueError("invalid multimodal object metadata") from error
-    if not isinstance(header, dict) or set(header) != {"tree", "tensors", "sha256"}:
-        raise ValueError("invalid multimodal object schema")
-    expected_digest = header["sha256"]
-    header["sha256"] = "0" * 64
-    metadata = json.dumps(header, separators=(",", ":"), allow_nan=False).encode()
-    digest = hashlib.sha256(metadata)
-    digest.update(view[offset:])
-    if digest.hexdigest() != expected_digest:
-        raise ValueError("multimodal object checksum mismatch")
-    specs = header["tensors"]
-    if not isinstance(specs, list) or len(specs) > _MAX_NODES:
-        raise ValueError("invalid multimodal tensor table")
-    end = 0
-    for spec in specs:
-        if not isinstance(spec, dict) or set(spec) != {
-            "shape",
-            "dtype",
-            "device",
-            "offset",
-            "nbytes",
-        }:
-            raise ValueError("invalid multimodal tensor descriptor")
-        shape = spec["shape"]
-        if (
-            not isinstance(shape, list)
-            or len(shape) > 32
-            or any(type(s) is not int or s < 0 or s > 2**31 for s in shape)
-            or spec["dtype"] not in _DTYPES
-            or spec["device"] not in ("cpu", "cuda")
-            or type(spec["offset"]) is not int
-            or type(spec["nbytes"]) is not int
-        ):
-            raise ValueError("invalid multimodal tensor metadata")
-        width = torch.empty((), dtype=_DTYPES[spec["dtype"]]).element_size()
-        if (
-            spec["nbytes"] != math.prod(shape) * width
-            or spec["offset"] != _align(end)
-            or spec["offset"] + spec["nbytes"] > len(view) - offset
-        ):
-            raise ValueError("invalid multimodal tensor range")
-        end = spec["offset"] + spec["nbytes"]
-    if end != len(view) - offset:
-        raise ValueError("invalid multimodal object length")
-    nodes, referenced = 0, set()
 
-    def rebuild(node, tensors=None, depth=0):
-        nonlocal nodes
-        nodes += 1
-        if (
-            nodes > _MAX_NODES
-            or depth > _MAX_DEPTH
-            or not isinstance(node, list)
-            or len(node) != 2
-        ):
-            raise ValueError("invalid multimodal structure")
-        kind, content = node
-        if kind == "tensor":
-            if type(content) is not int or not 0 <= content < len(specs):
-                raise ValueError("invalid multimodal tensor reference")
-            referenced.add(content)
-            return tensors[content] if tensors is not None else None
-        if kind in ("list", "tuple") and isinstance(content, list):
-            result = [rebuild(v, tensors, depth + 1) for v in content]
-            return tuple(result) if kind == "tuple" else result
-        if kind == "dict" and isinstance(content, list):
-            result = {}
-            for pair in content:
-                if (
-                    not isinstance(pair, list)
-                    or len(pair) != 2
-                    or not isinstance(pair[0], str)
-                    or pair[0] in result
-                ):
-                    raise ValueError("invalid multimodal dictionary")
-                result[pair[0]] = rebuild(pair[1], tensors, depth + 1)
-            return result
-        if kind == "scalar" and (
-            content is None
-            or type(content) in (bool, int, str)
-            or type(content) is float
-            and math.isfinite(content)
-        ):
-            return content
-        raise ValueError("invalid multimodal node")
-
-    rebuild(header["tree"])
-    if referenced != set(range(len(specs))):
-        raise ValueError("unreferenced multimodal tensor")
-    tensors = []
-    for spec in specs:
-        dtype = _DTYPES[spec["dtype"]]
-        start = offset + spec["offset"]
-        tensor = (
-            buffer[start : start + spec["nbytes"]].view(dtype).reshape(spec["shape"])
-            if spec["nbytes"]
-            else torch.empty(spec["shape"], dtype=dtype)
+    def stage(name):
+        return (
+            observe_stage("read", name) if observe_stage is not None else nullcontext()
         )
-        if restore_devices and spec["device"] == "cuda":
-            with cuda_graph_gate.operation():
-                tensor = tensor.to(
-                    cuda_device or torch.device("cuda", torch.cuda.current_device())
-                )
-        tensors.append(tensor)
-    nodes = 0
-    return rebuild(header["tree"], tensors)
+
+    with stage("decode_header"):
+        if (
+            buffer.dtype != torch.uint8
+            or buffer.device.type != "cpu"
+            or buffer.ndim != 1
+            or not buffer.is_contiguous()
+            or not _PREFIX.size <= buffer.numel() <= max_bytes
+        ):
+            raise ValueError("invalid multimodal object buffer")
+        view = memoryview(buffer.numpy())
+        magic, length = _PREFIX.unpack_from(view)
+        offset = _align(_PREFIX.size + length)
+        if magic != _MAGIC or length > _MAX_HEADER or offset > len(view):
+            raise ValueError("invalid multimodal object header")
+        try:
+            header = json.loads(bytes(view[_PREFIX.size : _PREFIX.size + length]))
+        except (ValueError, UnicodeError, RecursionError) as error:
+            raise ValueError("invalid multimodal object metadata") from error
+        if not isinstance(header, dict) or set(header) != {"tree", "tensors", "sha256"}:
+            raise ValueError("invalid multimodal object schema")
+    with stage("checksum"):
+        expected_digest = header["sha256"]
+        header["sha256"] = "0" * 64
+        metadata = json.dumps(header, separators=(",", ":"), allow_nan=False).encode()
+        digest = hashlib.sha256(metadata)
+        digest.update(view[offset:])
+        if digest.hexdigest() != expected_digest:
+            raise ValueError("multimodal object checksum mismatch")
+    with stage("decode_layout"):
+        specs = header["tensors"]
+        if not isinstance(specs, list) or len(specs) > _MAX_NODES:
+            raise ValueError("invalid multimodal tensor table")
+        end = 0
+        for spec in specs:
+            if not isinstance(spec, dict) or set(spec) != {
+                "shape",
+                "dtype",
+                "device",
+                "offset",
+                "nbytes",
+            }:
+                raise ValueError("invalid multimodal tensor descriptor")
+            shape = spec["shape"]
+            if (
+                not isinstance(shape, list)
+                or len(shape) > 32
+                or any(type(s) is not int or s < 0 or s > 2**31 for s in shape)
+                or spec["dtype"] not in _DTYPES
+                or spec["device"] not in ("cpu", "cuda")
+                or type(spec["offset"]) is not int
+                or type(spec["nbytes"]) is not int
+            ):
+                raise ValueError("invalid multimodal tensor metadata")
+            width = torch.empty((), dtype=_DTYPES[spec["dtype"]]).element_size()
+            if (
+                spec["nbytes"] != math.prod(shape) * width
+                or spec["offset"] != _align(end)
+                or spec["offset"] + spec["nbytes"] > len(view) - offset
+            ):
+                raise ValueError("invalid multimodal tensor range")
+            end = spec["offset"] + spec["nbytes"]
+        if end != len(view) - offset:
+            raise ValueError("invalid multimodal object length")
+        nodes, referenced = 0, set()
+
+        def rebuild(node, tensors=None, depth=0):
+            nonlocal nodes
+            nodes += 1
+            if (
+                nodes > _MAX_NODES
+                or depth > _MAX_DEPTH
+                or not isinstance(node, list)
+                or len(node) != 2
+            ):
+                raise ValueError("invalid multimodal structure")
+            kind, content = node
+            if kind == "tensor":
+                if type(content) is not int or not 0 <= content < len(specs):
+                    raise ValueError("invalid multimodal tensor reference")
+                referenced.add(content)
+                return tensors[content] if tensors is not None else None
+            if kind in ("list", "tuple") and isinstance(content, list):
+                result = [rebuild(v, tensors, depth + 1) for v in content]
+                return tuple(result) if kind == "tuple" else result
+            if kind == "dict" and isinstance(content, list):
+                result = {}
+                for pair in content:
+                    if (
+                        not isinstance(pair, list)
+                        or len(pair) != 2
+                        or not isinstance(pair[0], str)
+                        or pair[0] in result
+                    ):
+                        raise ValueError("invalid multimodal dictionary")
+                    result[pair[0]] = rebuild(pair[1], tensors, depth + 1)
+                return result
+            if kind == "scalar" and (
+                content is None
+                or type(content) in (bool, int, str)
+                or type(content) is float
+                and math.isfinite(content)
+            ):
+                return content
+            raise ValueError("invalid multimodal node")
+
+        rebuild(header["tree"])
+        if referenced != set(range(len(specs))):
+            raise ValueError("unreferenced multimodal tensor")
+    with stage("cpu_rebuild"):
+        tensors = []
+        for spec in specs:
+            dtype = _DTYPES[spec["dtype"]]
+            start = offset + spec["offset"]
+            tensors.append(
+                buffer[start : start + spec["nbytes"]]
+                .view(dtype)
+                .reshape(spec["shape"])
+                if spec["nbytes"]
+                else torch.empty(spec["shape"], dtype=dtype)
+            )
+    if restore_devices and any(spec["device"] == "cuda" for spec in specs):
+        with stage("h2d_restore"):
+            for index, spec in enumerate(specs):
+                if spec["device"] == "cuda":
+                    with cuda_graph_gate.operation():
+                        tensors[index] = tensors[index].to(
+                            cuda_device
+                            or torch.device("cuda", torch.cuda.current_device())
+                        )
+    with stage("tree_restore"):
+        nodes = 0
+        return rebuild(header["tree"], tensors)

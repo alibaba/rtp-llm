@@ -111,6 +111,10 @@ class AccMetrics(Enum):
     VIT_REMOTE_EMB_WRITE_ERROR_QPS_METRIC = (
         "py_rtp_vit_remote_embedding_cache_write_error_qps"
     )
+    # Per operation/stage: total = success + error + skipped. Miss is success.
+    VIT_REMOTE_EMB_OPERATION_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_operation_qps"
+    )
     VIT_REMOTE_EMB_SKIP_QPS_METRIC = "py_rtp_vit_remote_embedding_cache_skip_qps"
 
     # Creation is distinct from per-operation acquisition of a shared client.

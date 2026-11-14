@@ -1,16 +1,16 @@
 import ctypes
 import threading
+import time
 import unittest
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from unittest.mock import Mock, patch
 
 import torch
-from torch.utils._python_dispatch import TorchDispatchMode
-
 from rtp_llm.multimodal.kvcm.registered_transport import (
     RegisteredObjectTransport,
     _enable_sync_memops,
 )
+from torch.utils._python_dispatch import TorchDispatchMode
 
 
 class CudaRdmaSyncMemopsTest(unittest.TestCase):
@@ -180,6 +180,37 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         transport._pool = object()
         transport._client = Mock()
         return transport
+
+    def test_observes_contention_and_copies_without_extra_cuda_sync(self):
+        transport = self.transport()
+        stages = {}
+
+        @contextmanager
+        def observe(operation, stage):
+            started = time.perf_counter()
+            yield
+            stages[stage] = (time.perf_counter() - started) * 1000
+
+        transport._observe_stage = observe
+        transport._client.load_one.side_effect = lambda key, value, **kw: value.fill_(7)
+        target = torch.zeros(16, dtype=torch.uint8)
+        transport._lock.acquire()
+        timer = threading.Timer(0.025, transport._lock.release)
+        timer.start()
+        sync = torch.cuda.current_stream().synchronize
+        before = sync.call_count
+        try:
+            transport.load_one("key", target)
+        finally:
+            timer.join()
+        self.assertTrue(torch.equal(target, torch.full_like(target, 7)))
+        self.assertGreaterEqual(stages["transport_lock_wait"], 10)
+        self.assertTrue(
+            {"native_load", "gpu_ready_wait", "d2h_staging", "host_copy"} <= set(stages)
+        )
+        self.assertEqual(sync.call_count - before, 2)
+        transport._client.load_one.assert_called_once()
+        transport.close()
 
     def test_transfer_failure_quarantines_arena_and_blocks_reuse(self):
         for operation in ("save_one", "load_one"):

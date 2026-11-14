@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
@@ -141,6 +140,7 @@ class RemoteCacheTest(unittest.TestCase):
 
     def test_quiescent_read_and_write_failures_reuse_the_same_client(self):
         from unittest.mock import Mock
+
         from rtp_llm.multimodal.kvcm.lookup import KvMetaLookupError
 
         class RecoverableStore(Store):
@@ -356,6 +356,52 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(len(waits), 1)
         self.assertEqual(waits[0][1], {"operation": "read"})
         self.assertGreaterEqual(waits[0][0], 20)
+
+    def test_operation_totals_partition_hit_miss_failure_and_skip_once(self):
+        data = pack_object(plan_object((torch.ones(3, 4), None)))
+        remote = self.remote(Store({"key": data}), max_pending=1)
+        with patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+        ) as report:
+            self.assertIsNone(remote.load(None))
+            self.assertIsNotNone(remote.load("key"))
+            self.assertIsNone(remote.load("missing"))
+            data[-1] ^= 1
+            self.assertIsNone(remote.load("key"))
+            self.assertTrue(remote._reserve(0))
+            try:
+                self.assertIsNone(remote.load("key"))
+            finally:
+                remote._release(0)
+        counts = {}
+        for value, tags in self.metric_values(
+            report, AccMetrics.VIT_REMOTE_EMB_OPERATION_QPS_METRIC
+        ):
+            if tags["operation"] == "read":
+                self.assertEqual(tags["stage"], "all")
+                counts[tags["status"]] = counts.get(tags["status"], 0) + value
+        self.assertEqual(counts, dict(total=4, success=2, error=1, skipped=1))
+        self.assertEqual(
+            counts["total"], sum(counts[k] for k in ("success", "error", "skipped"))
+        )
+
+    def test_payload_budget_rejection_is_one_skipped_call_not_a_failure(self):
+        data = pack_object(plan_object((torch.ones(3, 4), None)))
+        remote = self.remote(Store({"key": data}), max_inflight_bytes=1)
+        with patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+        ) as report:
+            self.assertIsNone(remote.load("key"))
+        values = [
+            (n, t["status"])
+            for n, t in self.metric_values(
+                report, AccMetrics.VIT_REMOTE_EMB_OPERATION_QPS_METRIC
+            )
+            if t["operation"] == "read"
+        ]
+        self.assertEqual(
+            values, [(1, "total"), (0, "success"), (0, "error"), (1, "skipped")]
+        )
 
     def test_remote_read_metrics_separate_hit_miss_and_error(self):
         data = pack_object(plan_object((torch.ones(3, 4), None)))
@@ -746,7 +792,11 @@ class RemoteCacheTest(unittest.TestCase):
             report, AccMetrics.VIT_REMOTE_EMB_STAGE_ERROR_QPS_METRIC
         )
         self.assertEqual(
-            [t for v, t in errors if v], [{"operation": "read", "stage": "restore"}]
+            [t for v, t in errors if v],
+            [
+                {"operation": "read", "stage": "checksum"},
+                {"operation": "read", "stage": "restore"},
+            ],
         )
         self.assertGreater(
             data.numel(), 3 * 4 * 4
@@ -1666,7 +1716,6 @@ class VitRpcRemoteIdentityTest(unittest.TestCase):
         import io
 
         from PIL import Image
-
         from rtp_llm.config.generate_config import GenerateConfig
         from rtp_llm.cpp.model_rpc.model_rpc_client import trans_input
         from rtp_llm.openai.renderers.deepseekv41_renderer import _image_records_to_urls

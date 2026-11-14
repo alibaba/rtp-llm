@@ -4,12 +4,12 @@ import json
 import struct
 import unittest
 import weakref
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import grpc
 import torch
-
 from rtp_llm.multimodal.kvcm import lookup_pb2
 from rtp_llm.multimodal.kvcm.lookup import KvMetaLookup, KvMetaLookupError
 from rtp_llm.multimodal.kvcm.tensor_object import (
@@ -22,6 +22,35 @@ from rtp_llm.multimodal.kvcm.tensor_object import (
 class TensorObjectTest(unittest.TestCase):
     def roundtrip(self, value):
         return unpack_object(pack_object(plan_object(value)))
+
+    def test_observed_codec_roundtrip_and_checksum_failure_boundaries(self):
+        seen = []
+
+        @contextmanager
+        def observe(operation, stage):
+            try:
+                yield
+            except Exception:
+                seen.append((operation, stage, "error"))
+                raise
+            else:
+                seen.append((operation, stage, "success"))
+
+        value = (torch.arange(12).reshape(3, 4), {"x": torch.ones(2)})
+        blob = pack_object(plan_object(value), observe_stage=observe)
+        restored = unpack_object(blob, observe_stage=observe)
+        self.assertTrue(torch.equal(restored[0], value[0]))
+        self.assertTrue(torch.equal(restored[1]["x"], value[1]["x"]))
+        self.assertIn(("write", "pack_payload", "success"), seen)
+        self.assertIn(("read", "checksum", "success"), seen)
+        self.assertNotIn(("read", "h2d_restore", "success"), seen)
+        seen.clear()
+        blob[-1] ^= 1
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            unpack_object(blob, observe_stage=observe)
+        self.assertEqual(
+            seen, [("read", "decode_header", "success"), ("read", "checksum", "error")]
+        )
 
     def test_plan_releases_tensor_without_cyclic_gc(self):
         was_enabled = gc.isenabled()

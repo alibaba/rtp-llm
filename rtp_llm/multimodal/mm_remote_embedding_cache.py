@@ -16,7 +16,6 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import torch
-
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
@@ -157,6 +156,7 @@ class MMRemoteEmbeddingCache:
                     raw_factory,
                     max_object_bytes=vit_config.mm_remote_cache_max_object_bytes,
                     device=device,
+                    observe_stage=cls._observe_stage,
                 )
             return raw_factory()
 
@@ -353,6 +353,7 @@ class MMRemoteEmbeddingCache:
             outcome = "error"
             raise
         finally:
+            cls._report_outcome("client_create", outcome)
             tags = {"transport": transport, "status": outcome}
             cls._report_metric(
                 AccMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_QPS_METRIC, 1, tags
@@ -412,12 +413,20 @@ class MMRemoteEmbeddingCache:
             outcome = "timeout"
             raise
         finally:
+            self._report_outcome(
+                "metadata", "success" if outcome in ("hit", "miss") else "error"
+            )
             self._report_metric(
                 AccMetrics.VIT_REMOTE_EMB_METADATA_QPS_METRIC, 1, {"status": outcome}
             )
 
     def _report_operation(self, operation, started, outcome, nbytes=0):
         elapsed_ms = (time.perf_counter() - started) * 1000
+        if outcome != "admission_skip":
+            self._report_outcome(
+                operation,
+                "success" if outcome in ("hit", "miss", "success") else "error",
+            )
         if operation == "read":
             qps = AccMetrics.VIT_REMOTE_EMB_READ_QPS_METRIC
             error_qps = AccMetrics.VIT_REMOTE_EMB_READ_ERROR_QPS_METRIC
@@ -450,8 +459,9 @@ class MMRemoteEmbeddingCache:
                     tags,
                 )
 
+    @classmethod
     @contextmanager
-    def _observe_stage(self, operation, stage, nbytes=0):
+    def _observe_stage(cls, operation, stage, nbytes=0):
         """Observe completed SDK work independently of a caller's deadline.
 
         Stage values are fixed at call sites. Object bytes count fully successful
@@ -470,15 +480,16 @@ class MMRemoteEmbeddingCache:
             raise
         finally:
             elapsed_ms = (time.perf_counter() - started) * 1000
+            cls._report_outcome(operation + "_stage", outcome, stage=stage)
             tags = {"operation": operation, "stage": stage}
             outcome_tags = dict(tags, status=outcome)
-            self._report_metric(
+            cls._report_metric(
                 AccMetrics.VIT_REMOTE_EMB_STAGE_QPS_METRIC, 1, outcome_tags
             )
-            self._report_metric(
+            cls._report_metric(
                 GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC, elapsed_ms, outcome_tags
             )
-            self._report_metric(
+            cls._report_metric(
                 AccMetrics.VIT_REMOTE_EMB_STAGE_ERROR_QPS_METRIC,
                 int(outcome != "success"),
                 tags,
@@ -486,25 +497,39 @@ class MMRemoteEmbeddingCache:
             if stage == "transfer":
                 tags = {"operation": operation}
                 completed_bytes = nbytes if outcome == "success" else 0
-                self._report_metric(
+                cls._report_metric(
                     AccMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_PER_SECOND_METRIC,
                     completed_bytes,
                     tags,
                 )
                 if completed_bytes:
-                    self._report_metric(
+                    cls._report_metric(
                         GaugeMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_METRIC,
                         completed_bytes,
                         tags,
                     )
                     if elapsed_ms > 0:
-                        self._report_metric(
+                        cls._report_metric(
                             GaugeMetrics.VIT_REMOTE_EMB_SDK_EFFECTIVE_SPEED_METRIC,
                             completed_bytes * 1000 / elapsed_ms / (1024 * 1024),
                             tags,
                         )
 
+    @classmethod
+    def _report_outcome(cls, operation, outcome, *, stage="all"):
+        # One completed call has exactly one outcome. Miss is a successful
+        # lookup; non-executed work is skipped, never a transport failure.
+        status = outcome if outcome in ("success", "skipped") else "error"
+        for label in ("total", "success", "error", "skipped"):
+            cls._report_metric(
+                AccMetrics.VIT_REMOTE_EMB_OPERATION_QPS_METRIC,
+                int(label == "total" or label == status),
+                {"operation": operation, "stage": stage, "status": label},
+            )
+
     def _report_skip(self, operation, reason):
+        if operation in ("read", "write"):
+            self._report_outcome(operation, "skipped")
         self._report_metric(
             AccMetrics.VIT_REMOTE_EMB_SKIP_QPS_METRIC,
             1,
@@ -655,10 +680,11 @@ class MMRemoteEmbeddingCache:
             with self._observe_stage("write", "pack"):
                 # Host event synchronization is also forbidden during global
                 # CUDA Graph capture, even for a different producer stream.
-                with cuda_graph_gate.operation():
-                    for event in producer_events or ():
-                        event.synchronize()
-                buffer = pack_object(plan)
+                with self._observe_stage("write", "producer_wait"):
+                    with cuda_graph_gate.operation():
+                        for event in producer_events or ():
+                            event.synchronize()
+                buffer = pack_object(plan, observe_stage=self._observe_stage)
         except Exception as error:
             self.record(
                 "write_error",
@@ -846,6 +872,7 @@ class MMRemoteEmbeddingCache:
                     buffer,
                     max_bytes=self.max_object_bytes,
                     cuda_device=self.cuda_device,
+                    observe_stage=self._observe_stage,
                 )
                 value, approval = self._decode_value(value)
                 plan = plan_object(value, max_bytes=self.max_object_bytes)
