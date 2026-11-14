@@ -354,3 +354,17 @@ models_py_test(
         "//rtp_llm/models_py/triton_kernels/moe/test:small_moe_test_support",
     ],
 )
+
+cuda13_sm100_py_test(
+    name = "resident_moe_executors_test",
+    srcs = [
+        "grouped_moe_equivalence_test.py",
+        "resident_moe_executors_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/resident_weights",
+    ],
+    timeout = "long",
+)

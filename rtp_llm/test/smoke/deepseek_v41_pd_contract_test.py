@@ -21,7 +21,7 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
     # own cache history and excludes the current request's P/D transfer.
     reuse_field = "prefill_total_reuse_len"
 
-    def start_servers(self):
+    def start_servers(self, role_suffix: str = ""):
         gpu_ids = list(get_gpu_ids())
         role_size = self.prefill_cp_size
         self.assertGreaterEqual(len(gpu_ids), 2 * role_size)
@@ -87,7 +87,7 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
                 },
                 device_ids=devices,
                 port=port,
-                role_name=f"deepseek_v41_{role}_contract",
+                role_name=f"deepseek_v41_{role}_contract{role_suffix}",
                 smoke_args_str=f"{common_args} {args}",
             )
             self.addCleanup(manager.stop_server)

@@ -42,6 +42,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.se_jit_warmup im
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     sync_cuda_graph_warmup_ranks,
 )
+from rtp_llm.resident_weights import resident_init_tensors
 from rtp_llm.utils.model_weight import W
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase
@@ -129,6 +130,32 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         self._maybe_warmup_jit_once()
 
     def _setup_shared_expert_weights(self, layer_weights, deep_gemm, D, inter):
+        cfg = self.cfg
+        group = (
+            f"fp8_fp4.mega_moe_se.shared:e{cfg.n_shared_experts}:d{D}"
+            f":i{inter}:b{cfg.shared_fp8_block_size}"
+        )
+        (
+            self._se_l1_w,
+            self._se_l1_sf,
+            self._se_l2_w,
+            self._se_l2_sf,
+        ) = resident_init_tensors(
+            layer_weights,
+            transform_key=group,
+            output_names=(
+                f"{group}.l1_w",
+                f"{group}.l1_sf",
+                f"{group}.l2_w",
+                f"{group}.l2_sf",
+            ),
+            consumed_names=(W.ffn_w13, W.ffn_s13, W.ffn_w2, W.ffn_s2),
+            builder=lambda: self._build_shared_expert_weights(
+                layer_weights, deep_gemm, D, inter
+            ),
+        )
+
+    def _build_shared_expert_weights(self, layer_weights, deep_gemm, D, inter):
         w13_fp8 = layer_weights.pop(W.ffn_w13)
         w13_scale = layer_weights.pop(W.ffn_s13)
         w2_fp8 = layer_weights.pop(W.ffn_w2)
@@ -168,10 +195,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         )
         del w13_fp8, w13_sf_int, w2_fp8, w2_sf_int
         torch.cuda.empty_cache()
-        self._se_l1_w = se_l1_w
-        self._se_l1_sf = se_l1_sf
-        self._se_l2_w = se_l2_w
-        self._se_l2_sf = se_l2_sf
+        return se_l1_w, se_l1_sf, se_l2_w, se_l2_sf
 
     @staticmethod
     def _shared_expert_sf_to_int(deep_gemm, scale, mn, k, block_size):

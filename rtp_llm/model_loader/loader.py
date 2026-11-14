@@ -2,7 +2,7 @@ import gc
 import logging
 import os
 from collections import OrderedDict
-from typing import Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
+from typing import Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 import safetensors
 import torch
@@ -21,6 +21,7 @@ from rtp_llm.model_loader.model_weight_info import (
 from rtp_llm.model_loader.tensor_source import DatabaseTensorSource, TensorCollector
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight, WeightModule
 from rtp_llm.ops import TaskType, VitSeparation
+from rtp_llm.resident_weights import GLOBAL_SCOPE, RestoredTensor
 from rtp_llm.utils.database import BaseDatabase, CkptDatabase
 from rtp_llm.utils.model_weight import W, WeightStyle, identity
 from rtp_llm.utils.module_util import has_module
@@ -876,15 +877,36 @@ class ModelLoader:
             weights.update(res)
         return weights
 
-    def _load_dynamic_weights(self, weight: ModelWeights, device: str):
-        assert weight is not None, "weight is None"
+    def assemble_weights(
+        self,
+        device: str,
+        global_weight_aliases: Mapping[str, torch.Tensor],
+        restored: Sequence[RestoredTensor],
+    ) -> ModelWeights:
+        """ModelWeights from tensors resident weights mapped back, instead of the checkpoint."""
+        self._global_weight_aliases = dict(global_weight_aliases or {})
+        weights = self._create_model_weights(device)
+        for item in restored:
+            if item.scope == GLOBAL_SCOPE:
+                weights.set_global_weight(item.name, item.tensor)
+            else:
+                weights.set_layer_weight(item.scope, item.name, item.tensor)
+        self._apply_loaded_shapes(weights)
+        self._init_eplb_weight(weights, device)
+        return weights
 
+    def _apply_loaded_shapes(self, weight: ModelWeights):
         embedding_weight = weight.global_weights.get(W.embedding, None)
         if embedding_weight != None:
             self._weights_info.model_config.embedding_size = embedding_weight.shape[0]
             logging.info(
                 f"embedding_size is {self._weights_info.model_config.embedding_size}, vocab size is {self._weights_info.model_config.vocab_size}"
             )
+
+    def _load_dynamic_weights(self, weight: ModelWeights, device: str):
+        assert weight is not None, "weight is None"
+
+        self._apply_loaded_shapes(weight)
 
         if self._task_type == TaskType.LANGUAGE_MODEL:
             if self.is_global_weight_local(W.lm_head):
