@@ -1295,13 +1295,13 @@ class FlexlbServiceImplTest {
     }
 
     @Test
-    void queueTimeoutComesFromFlexlbConfigAndOverridesCallerTimeout() {
+    void dispatchTimeoutComesFromFlexlbConfigAndOverridesCallerTimeout() {
         FlexlbConfig queueConfig = ConfigService.parse("""
                 {
-                  "scheduler":{"type":"QUEUE","queueTimeoutMs":7777,
+                  "scheduler":{"type":"QUEUE",
                     "ordering":{"type":"FIFO"}},
                   "dispatcher":{"type":"NON_BATCH"},
-                  "requestLifecycle":{"request":{"timeoutMs":3600000},"decision":{"lifetime":2}}
+                  "dispatchTimeoutMs": 7777
                 }
                 """);
         when(configService.loadBalanceConfig()).thenReturn(queueConfig);
@@ -1325,12 +1325,12 @@ class FlexlbServiceImplTest {
     }
 
     @Test
-    void directModeHasNoSchedulingTimeout() {
+    void directModeUsesTheSameDispatchTimeout() {
         FlexlbConfig directConfig = ConfigService.parse("""
                 {
                   "scheduler":{"type":"DIRECT"},
                   "dispatcher":{"type":"NON_BATCH"},
-                  "requestLifecycle":{"request":{"timeoutMs":3600000},"decision":{"lifetime":2}}
+                  "dispatchTimeoutMs": 3600000
                 }
                 """);
         when(configService.loadBalanceConfig()).thenReturn(directConfig);
@@ -1349,7 +1349,8 @@ class FlexlbServiceImplTest {
                 .setRequestTimeMs(1L)
                 .build(), mock(StreamObserver.class));
 
-        assertEquals(Long.MAX_VALUE, context.getValue().data().getRequestExpiresAtMs());
+        assertEquals(context.getValue().data().getStartTime() + 3_600_000L,
+                context.getValue().data().getRequestExpiresAtMs());
     }
 
     @Test

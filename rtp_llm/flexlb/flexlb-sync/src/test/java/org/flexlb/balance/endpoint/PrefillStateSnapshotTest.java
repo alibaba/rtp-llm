@@ -43,128 +43,12 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class PrefillStateSnapshotTest {
-    @Test
-    void coldQueueAdmissionReservesUnobservedHeadroomAndReleasesExactlyOnce() {
-        var pressure = new EngineQueueAdmission(30L, 5000L);
-        pressure.observe(0L, 0L);
-        state.enableTokenWorkload(1_000_000L, () -> true, 10_000L);
-        state.configureEngineQueueAdmission(pressure::state);
-        state.configureColdAdmission(unobserved -> pressure.dispatchBlocked(unobserved, 0L));
-        var work = (org.flexlb.balance.strategy.PrefillTokenWorkload) org.springframework.test.util.ReflectionTestUtils.getField(state, "tokenWorkload");
-        work.complete(1L, true);
-        var first = item(65001); when(first.coldTokenBalance()).thenReturn(true);
-        var lease = state.reserveUnqueuedRoute(first, 1L, 256L).reservation();
-        assertNotNull(lease);
-        var second = item(65002); when(second.coldTokenBalance()).thenReturn(true);
-        assertNull(state.reserveUnqueuedRoute(second, 1L, 256L).reservation());
-        var hot = state.reserveUnqueuedRoute(item(65003), 1L, 256L).reservation();
-        assertNotNull(hot, "cold headroom does not impose a new hot concurrency limit");
-        assertFalse(state.engineQueueDispatchBlocked(), "already reserved work must remain dispatchable");
-        state.release(lease, null); state.release(lease, null); state.release(hot, null);
-        var resumed = state.reserveUnqueuedRoute(second, 1L, 256L).reservation();
-        assertNotNull(resumed);
-        state.release(resumed, null);
-        assertEquals(0L, state.tokenWorkload().pendingTokens());
-        assertEquals(0L, state.progress().outstandingRequests());
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void coldQueueHeadroomSurvivesCancellationOrTimeoutUntilRemoteCleanup(boolean timeout) {
-        var pressure = new EngineQueueAdmission(30L, 5000L);
-        pressure.observe(0L, 0L);
-        state.enableTokenWorkload(1_000_000L, () -> true, 10_000L);
-        state.configureEngineQueueAdmission(pressure::state);
-        state.configureColdAdmission(unobserved -> pressure.dispatchBlocked(unobserved, 0L));
-        var work = (org.flexlb.balance.strategy.PrefillTokenWorkload) org.springframework.test.util.ReflectionTestUtils.getField(state, "tokenWorkload");
-        work.complete(1L, true);
-        var first = item(65101); when(first.coldTokenBalance()).thenReturn(true);
-        var lease = state.reserveUnqueuedRoute(first, 1L, 256L).reservation();
-        try (var handoff = EndpointTestSupport.commitRoutes(state, List.of(first), List.of(lease), generation.tryAcquireHandoff())) {
-            assertNotNull(handoff);
-        }
-        if (timeout) {
-            clock.addAndGet(1000L);
-            assertEquals(1, state.evictExpiredInflight(1L, java.util.Set.of(first)));
-        } else { state.release(null, first, true); }
-        var second = item(65102); when(second.coldTokenBalance()).thenReturn(true);
-        assertNull(state.reserveUnqueuedRoute(second, 1L, 256L).reservation());
-        assertFalse(state.confirmUnobservedDispatchStopped(65101, 99L));
-        assertTrue(state.confirmUnobservedDispatchStopped(65101, 0L));
-        assertFalse(state.confirmUnobservedDispatchStopped(65101, 0L));
-        var next = state.reserveUnqueuedRoute(second, 1L, 256L).reservation();
-        assertNotNull(next);
-        state.release(next, null);
-        assertEquals(0L, state.tokenWorkload().pendingTokens());
-        assertEquals(0L, state.progress().outstandingRequests());
-    }
-
-    @Test
-    void coldQueueAdmissionDoesNotThrottlePureColdBatches() {
-        state.enableTokenWorkload(1_000_000L, () -> true, 10_000L);
-        state.configureColdAdmission(unobserved -> true);
-        var leases = new ArrayList<PrefillState.RouteReservation>();
-        for (int i = 0; i < 64; i++) {
-            var route = item(66000 + i); when(route.coldTokenBalance()).thenReturn(true);
-            var lease = state.reserveUnqueuedRoute(route, 1L, 256L).reservation();
-            assertNotNull(lease); leases.add(lease);
-        }
-        leases.forEach(lease -> state.release(lease, null));
-        assertEquals(0L, state.tokenWorkload().pendingTokens());
-    }
-
-    @Test
-    void coldQueueAdmissionExpiryPublishesCapacityWithoutCompletions() {
-        var work = mock(org.flexlb.balance.strategy.PrefillTokenWorkload.class);
-        org.springframework.test.util.ReflectionTestUtils.setField(state, "tokenWorkload", work);
-        when(work.snapshot()).thenReturn(new org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot(0L, 0L, 0L));
-        when(work.hasRecentCacheHit()).thenReturn(true);
-        state.configureColdAdmission(unobserved -> true);
-        assertTrue(state.coldAdmissionBlocked());
-        reconcile(Map.of(), Map.of(), unused -> 0L);
-        when(work.hasRecentCacheHit()).thenReturn(false);
-        assertFalse(state.coldAdmissionBlocked());
-        assertTrue(reconcile(Map.of(), Map.of(), unused -> 0L).capacityReleased());
-        assertFalse(reconcile(Map.of(), Map.of(), unused -> 0L).capacityReleased());
-    }
-
     private final AtomicLong clock = new AtomicLong(100);
     private final ReentrantLock lock = new ReentrantLock();
     private final PrefillActiveIndex waiting = PrefillActiveIndex.ordered(4,
             Comparator.comparingLong(RequestRoute::requestId));
     private final PrefillState state = new PrefillState(lock, waiting, clock::get);
     private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
-
-    @Test
-    void coldWindowExpiryPublishesCapacityEvenWhenNoRequestsComplete() {
-        var work = mock(org.flexlb.balance.strategy.PrefillTokenWorkload.class);
-        org.springframework.test.util.ReflectionTestUtils.setField(state, "tokenWorkload", work);
-        state.configureComputeAdmission(false, 100L);
-        when(work.snapshot()).thenReturn(new org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot(100L, 0L, 0L));
-        when(work.hasRecentCacheHit()).thenReturn(true);
-        assertEquals(100L, state.coldWindowComputeLimit());
-        reconcile(Map.of(), Map.of(), unused -> 0L);
-        when(work.snapshot()).thenReturn(new org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot(0L, 0L, 0L));
-        when(work.hasRecentCacheHit()).thenReturn(false);
-        assertNull(state.coldWindowComputeLimit(), "pure cold traffic regains ordinary admission after hot traffic disappears");
-        assertTrue(reconcile(Map.of(), Map.of(), unused -> 0L).capacityReleased(), "heartbeat must wake requests blocked only by time");
-        assertFalse(reconcile(Map.of(), Map.of(), unused -> 0L).capacityReleased());
-    }
-
-    @Test
-    void coldWindowDoesNotCapPureColdTrafficWithoutRecentReuse() {
-        state.enableTokenWorkload(100_000L, () -> true, 10_000L);
-        state.configureEngineQueueAdmission(() -> EngineQueueAdmission.State.AVAILABLE);
-        state.configureComputeAdmission(false, 100L);
-        var leases = new java.util.ArrayList<PrefillState.RouteReservation>();
-        for (int i = 0; i < 3; i++) {
-            var route = item(4400 + i); when(route.coldTokenBalance()).thenReturn(true);
-            var lease = state.reserveUnqueuedRoute(route, 1, 256).reservation();
-            assertNotNull(lease); leases.add(lease);
-        }
-        leases.forEach(lease -> state.release(lease, null));
-        assertEquals(0L, state.tokenWorkload().pendingTokens());
-    }
 
     @ParameterizedTest
     @CsvSource({"0,256", "6,256", "10,256", "11,0", "1000,0"})
@@ -284,58 +168,6 @@ class PrefillStateSnapshotTest {
         state.release(replacement, null);
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void explicitComputeWaterlineCannotBeBypassedByHotCacheOrLowEngineWaiting(boolean batch) {
-        state.enableTokenWorkload(90L, () -> true);
-        state.configureEngineQueueAdmission(() -> EngineQueueAdmission.State.AVAILABLE);
-        state.configureComputeAdmission(true, null);
-        var first = item(4201);
-        var next = item(4202);
-        if (batch) {
-            var permit = generation.tryAcquireHandoff();
-            var lease = state.reserveUnqueuedBatch(first, 4201, 256, permit).reservation();
-            assertNotNull(lease);
-            var secondPermit = generation.tryAcquireHandoff();
-            try { assertNull(state.reserveUnqueuedBatch(next, 4202, 256, secondPermit).reservation()); }
-            finally { secondPermit.close(); }
-            state.release(lease, null).generationHandoff().close();
-        } else {
-            var lease = state.reserveUnqueuedRoute(first, 1, 256).reservation();
-            assertNotNull(lease);
-            assertNull(state.reserveUnqueuedRoute(next, 1, 256).reservation());
-            state.release(lease, null);
-        }
-        var recovered = state.reserveUnqueuedRoute(next, 1, 256).reservation();
-        assertNotNull(recovered);
-        state.release(recovered, null);
-        assertEquals(0L, state.tokenWorkload().pendingTokens());
-    }
-
-    @Test
-    void coldWindowCommitRechecksWorkWithoutDoubleCountingItsOwnPlan() {
-        state.enableTokenWorkload(100_000L, () -> true, 10_000L);
-        state.configureEngineQueueAdmission(() -> EngineQueueAdmission.State.AVAILABLE);
-        state.configureComputeAdmission(false, 150L);
-        var workload = (org.flexlb.balance.strategy.PrefillTokenWorkload) org.springframework.test.util.ReflectionTestUtils.getField(state, "tokenWorkload");
-        workload.complete(0L, true);
-        var first = item(4301); var second = item(4302);
-        when(first.coldTokenBalance()).thenReturn(true);
-        when(second.coldTokenBalance()).thenReturn(true);
-        try (var plan = state.planTokenWork(100L)) {
-            var lease = state.reserveUnqueuedRoute(first, 1, 256).reservation();
-            assertNotNull(lease, "the route's soft plan must not count as another admission");
-            assertNull(state.reserveUnqueuedRoute(second, 1, 256).reservation());
-            var hot = state.reserveUnqueuedRoute(item(4303), 1, 256).reservation();
-            assertNotNull(hot, "cold window is not a steady hot-throughput cap");
-            state.release(hot, null); state.release(lease, null);
-        }
-        var recovered = state.reserveUnqueuedRoute(second, 1, 256).reservation();
-        assertNotNull(recovered, "cancellation returns unused budget");
-        state.release(recovered, null);
-        assertEquals(0L, state.tokenWorkload().score());
-    }
-
     @Test
     void queuedBatchRechecksActualWaitingWithoutLimitingBatchSizeToTheWatermark() {
         var pressure = new EngineQueueAdmission(0, 5000);
@@ -445,39 +277,6 @@ class PrefillStateSnapshotTest {
         assertNull(state.reserveUnqueuedRoute(item(4003), 1, 2).reservation());
         state.release(first, null); state.release(second, null);
         assertEquals(0, state.tokenWorkload().score());
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void deadlineBudgetRetainsColdTokenCapDespiteDelayedLowWaitingStatus(boolean batch) {
-        state.enableTokenWorkload(90L, () -> true);
-        state.configureEngineQueueAdmission(() -> EngineQueueAdmission.State.AVAILABLE);
-        state.enforceColdTokenLimit(true);
-        var first = item(4101);
-        var second = item(4102);
-        when(first.coldTokenBalance()).thenReturn(true);
-        when(second.coldTokenBalance()).thenReturn(true);
-        if (batch) {
-            var permit = generation.tryAcquireHandoff();
-            var lease = state.reserveUnqueuedBatch(first, 4101, 256, permit).reservation();
-            assertNotNull(lease, "one oversized cold request must still start on an idle worker");
-            var next = generation.tryAcquireHandoff();
-            try { assertNull(state.reserveUnqueuedBatch(second, 4102, 256, next).reservation()); }
-            finally { next.close(); }
-            state.release(lease, null).generationHandoff().close();
-        } else {
-            var lease = state.reserveUnqueuedRoute(first, 1, 256).reservation();
-            assertNotNull(lease);
-            assertNull(state.reserveUnqueuedRoute(second, 1, 256).reservation());
-            var hot = state.reserveUnqueuedRoute(item(4103), 1, 256).reservation();
-            assertNotNull(hot, "hot admission retains existing Engine queue policy");
-            state.release(hot, null);
-            state.release(lease, null);
-        }
-        assertEquals(0L, state.tokenWorkload().pendingTokens());
-        var resumed = state.reserveUnqueuedRoute(second, 1, 256).reservation();
-        assertNotNull(resumed, "real completion restores cold admission");
-        state.release(resumed, null);
     }
 
     @Test
@@ -2154,13 +1953,12 @@ class PrefillStateSnapshotTest {
     }
 
     @Test
-    void coldAdmissionAndDeadlineBudgetRequireAccurateEnginePrefixFeedback() {
+    void tokenWorkloadUsesUpdatedEnginePrefixFeedback() {
         var pressure = new EngineQueueAdmission(30L, 5_000L);
         pressure.observe(2L, 0L);
         state.configureEngineQueueAdmission(pressure::state);
         state.configureEngineQueueDispatchBlocked(pressure::dispatchBlocked);
         state.enableTokenWorkload(200_000L, () -> true);
-        state.enforceColdTokenLimit(true);
         var running = new java.util.HashMap<String, TaskInfo>();
         for (long id = 91; id <= 93; id++) {
             var hot = item(id);
@@ -2180,23 +1978,9 @@ class PrefillStateSnapshotTest {
         var cold = item(94);
         when(cold.seqLen()).thenReturn(100_000L);
         when(cold.coldTokenBalance()).thenReturn(true);
-        assertNull(state.reserveUnqueuedRoute(cold, 1, 256).reservation());
-        var budget = new org.flexlb.config.PrefillQueueSheddingConfig.DeadlineBudgetConfig();
-        budget.setTokensPerSecond(70_000);
-        var controller = new org.flexlb.balance.scheduler.PrefillDeadlineBudget();
-        var queue = List.of(new org.flexlb.balance.scheduler.PrefillDeadlineBudget.Candidate<>(
-                "cold", 50, 1L, 100_000L, true, 4_000L));
-        var inflated = new org.flexlb.balance.scheduler.PrefillDeadlineBudget.Fleet(
-                1, 1, state.tokenWorkload().pendingTokens(), true);
-        controller.victims(queue, inflated, budget, false, 0L);
-        assertEquals(List.of("cold"), controller.victims(queue, inflated, budget, false, 2_000L));
-
         running.values().forEach(report -> report.setPrefixLength(95_000L));
         reconcile(Map.of(), running, unused -> 0L);
         assertEquals(15_000L, state.tokenWorkload().pendingTokens());
-        var accurate = new org.flexlb.balance.scheduler.PrefillDeadlineBudget.Fleet(
-                1, 0, state.tokenWorkload().pendingTokens(), true);
-        assertTrue(controller.victims(queue, accurate, budget, false, 3_000L).isEmpty());
         assertNotNull(state.reserveUnqueuedRoute(cold, 1, 256).reservation());
     }
 

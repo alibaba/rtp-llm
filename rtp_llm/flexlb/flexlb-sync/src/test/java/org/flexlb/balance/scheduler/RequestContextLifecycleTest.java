@@ -463,10 +463,10 @@ class RequestContextLifecycleTest {
     }
 
     @Test
-    void globalCloseConsumesAnAcceptedInactivityFactBeforeShutdownFailure() throws Exception {
+    void globalCloseConsumesAnAcceptedDispatchTimeoutBeforeShutdownFailure() throws Exception {
         CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context(10002L));
         RequestContext context = lifecycle.requests.findActive(10002L);
-        lifecycle.onDeadline(RequestProtocolTestSupport.<ExpirationTimer.Token>field(context, "inactivityDeadline"), Long.MAX_VALUE);
+        lifecycle.onDeadline(RequestProtocolTestSupport.<ExpirationTimer.Token>field(context, "requestDeadline"), Long.MAX_VALUE);
         ((QueuedRequestScheduler) lifecycle).resolveControl(context, true);
         assertEquals(RequestState.Phase.TIMED_OUT, RequestState.from(context.snapshot()).state());
         assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
@@ -689,7 +689,7 @@ class RequestContextLifecycleTest {
             return true;
         });
         RequestContext requestContext = lifecycle.requests.findActive(708L);
-        lifecycle.onDeadline(RequestProtocolTestSupport.<ExpirationTimer.Token>field(requestContext, "inactivityDeadline"), Long.MAX_VALUE);
+        lifecycle.onDeadline(RequestProtocolTestSupport.<ExpirationTimer.Token>field(requestContext, "requestDeadline"), Long.MAX_VALUE);
         assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
         SchedulerTestSupport.awaitRequestWork(lifecycle.runtime);
         assertNotNull(cleanupThread.get());
@@ -711,7 +711,7 @@ class RequestContextLifecycleTest {
             assertEquals(PlacementResult.Status.SUCCESS, lifecycle.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)));
         }
         RequestContext requestContext = lifecycle.requests.findActive(709L);
-        lifecycle.onDeadline(RequestProtocolTestSupport.<ExpirationTimer.Token>field(requestContext, "inactivityDeadline"), Long.MAX_VALUE);
+        lifecycle.onDeadline(RequestProtocolTestSupport.<ExpirationTimer.Token>field(requestContext, "requestDeadline"), Long.MAX_VALUE);
         try {
             assertTrue(RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(lifecycle));
             lifecycle.closeOutstandingAndTerminalize();
@@ -752,7 +752,7 @@ class RequestContextLifecycleTest {
             return true;
         });
         try {
-            lifecycle.onDeadline(RequestProtocolTestSupport.<ExpirationTimer.Token>field(context, "inactivityDeadline"), Long.MAX_VALUE);
+            lifecycle.onDeadline(RequestProtocolTestSupport.<ExpirationTimer.Token>field(context, "requestDeadline"), Long.MAX_VALUE);
             assertTrue(entered.await(2, TimeUnit.SECONDS));
             lifecycle.onQueueEvent(item, AbstractRequestScheduler.QueueKind.REJECTED, null, new IllegalStateException("endpoint stopped"));
             assertEquals(RequestState.Phase.TIMED_OUT, RequestState.from(context.snapshot()).state());
@@ -999,7 +999,8 @@ class RequestContextLifecycleTest {
         DeliveryClaim delivery = RequestProtocolTestSupport.claimBatchWithoutPrediction(lifecycle, registered.item(), 17L, () -> true);
         assertNotNull(delivery);
         PreemptionRegistration preemption = lifecycle.tryClaim(new DecodeResources.ReservationHandle(1L, 703L, 1L), 19L, "victim").orElseThrow();
-        RequestProtocolTestSupport.expireInactiveRequest(lifecycle, old, RequestProtocolTestSupport.<Long>inspect(lifecycle, old, "inactivityExpiresAtMsLocked"));
+        var deadline = old.snapshot().deadlines().request();
+        lifecycle.onDeadline(deadline, deadline.atMs());
         registered.future().join();
         assertTrue(lifecycle.requests.isCurrent(old), "sender still owns prepared delivery");
         delivery.item().ctx().data().getScheduler().onDeliveryEvidence(delivery, new ContextResult.TransportResult(delivery, org.flexlb.balance.delivery.DeliveryResult.notSent(new IllegalStateException("expired before send")), System.currentTimeMillis()));

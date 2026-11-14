@@ -27,7 +27,7 @@ class RequestAcknowledgementPreemptionRaceTest {
     @Test
     void laterPreemptionCannotDiscardAlreadyConfirmedAcknowledgementTask() throws Exception {
         var config = SchedulingTestConfig.newConfig();
-        config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
+        config.getInternalRuntime().setRequestInactivityTimeoutMs(60_000L);
         var context = RequestProtocolTestSupport.context(config, 9741L);
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);

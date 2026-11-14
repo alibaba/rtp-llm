@@ -10,10 +10,8 @@ final class ConfigTestFixtures {
     static final String REQUIRED = """
             {
               "schemaVersion": 3,
-              "requestLifecycle": {
-                "request": {"timeoutMs": 60000},
-                "decision": {"lifetime": 2.0}
-              }
+              "dispatchTimeoutMs": 60000
+
             }
             """;
 

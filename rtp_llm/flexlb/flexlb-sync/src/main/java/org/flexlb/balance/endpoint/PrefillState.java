@@ -349,22 +349,6 @@ public final class PrefillState {
     public boolean engineQueueDispatchBlocked() { return engineQueueDispatchBlocked.getAsBoolean(); }
 
     private java.util.function.LongPredicate unobservedAdmissionBlocked = ignored -> false;
-    private java.util.function.LongPredicate coldAdmissionBlocked;
-
-    void configureColdAdmission(java.util.function.LongPredicate blocked) {
-        coldAdmissionBlocked = Objects.requireNonNull(blocked);
-    }
-
-    /** Pure-cold traffic retains ordinary admission; warm workers protect their remaining queue headroom. */
-    public boolean coldAdmissionBlocked() {
-        if (coldAdmissionBlocked == null) { return false; }
-        lock.lock();
-        try {
-            long unobserved = (long) requests.size() - engineCoveredRequests + unconfirmedDispatches.size();
-            return tokenWorkload != null && tokenWorkload.hasRecentCacheHit() && coldAdmissionBlocked.test(unobserved);
-        } finally { lock.unlock(); }
-    }
-
     void configureUnobservedAdmission(java.util.function.LongPredicate blocked) {
         unobservedAdmissionBlocked = Objects.requireNonNull(blocked);
     }
@@ -415,40 +399,6 @@ public final class PrefillState {
         };
     }
     private java.util.function.BooleanSupplier engineQueueAdmission = () -> false;
-    private boolean enforceColdTokenLimit;
-    private boolean enforcePendingComputeLimit;
-    private Long maxColdWindowComputeTokens;
-    private long lastObservedWindowTokens;
-    private boolean lastObservedHotWindow;
-
-    /** Serialized with status application; routing uses this only as an advisory filter. */
-    public Long coldWindowComputeLimit() {
-        if (maxColdWindowComputeTokens == null) { return null; }
-        lock.lock();
-        try { return tokenWorkload != null && tokenWorkload.hasRecentCacheHit() ? maxColdWindowComputeTokens : null; }
-        finally { lock.unlock(); }
-    }
-
-    void configureComputeAdmission(boolean enforcePendingLimit, Long coldWindowTokens) {
-        enforcePendingComputeLimit = enforcePendingLimit;
-        maxColdWindowComputeTokens = coldWindowTokens;
-    }
-
-    void enforceColdTokenLimit(boolean enabled) { enforceColdTokenLimit = enabled; }
-
-    private boolean coldTokenCapacityAvailable(RequestRoute route) {
-        if (route.coldTokenBalance() && coldAdmissionBlocked()) { return false; }
-        if (tokenWorkload == null || !enforcePendingComputeLimit
-                && !enforceColdTokenLimit && maxColdWindowComputeTokens == null) { return true; }
-        var work = tokenWorkloadLocked();
-        if ((enforcePendingComputeLimit || enforceColdTokenLimit && route.coldTokenBalance())
-                && work.pendingTokens() >= pendingTokenLimit) { return false; }
-        // Soft plans include this route; admission serializes actual reservations under queueLock.
-        return !route.coldTokenBalance() || org.flexlb.balance.strategy.PrefillTokenBalance.withinColdWindow(
-                new org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot(work.completedTokens(), work.pendingTokens(), 0L),
-                computeTokens(route), coldWindowComputeLimit());
-    }
-
     /** Installed before this endpoint generation is published. */
     void enableTokenWorkload(long pendingTokenLimit) {
         enableTokenWorkload(pendingTokenLimit, () -> false);
@@ -787,7 +737,7 @@ public final class PrefillState {
         try {
             if (requests.containsKey(route.requestId()) || unconfirmedDispatches.containsKey(new EngineWorkKey(route.requestId(), 0L))) { return new ReservationResult<>(CapacityStatus.REQUEST_ALREADY_RESERVED, null); }
             if (batches.containsKey(batchId)) { return new ReservationResult<>(CapacityStatus.BATCH_ID_ALREADY_RESERVED, null); }
-            if (batches.size() >= maximum || !coldTokenCapacityAvailable(route)
+            if (batches.size() >= maximum
                     || !admissionCapacityAvailable(tokenCapacityAvailable())) { return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null); }
             var entry = new RequestEntry(route, OwnershipStage.DIRECT_RESERVED);
             var lease = new BatchReservation(this, entry, batchId, handoff);
@@ -921,7 +871,7 @@ public final class PrefillState {
                 return new ReservationResult<>(CapacityStatus.REQUEST_ALREADY_RESERVED, null);
             }
             if ((maxOutstandingRequests > 0L && outstandingRequestCount >= maxOutstandingRequests)
-                    || !coldTokenCapacityAvailable(item) || !admissionCapacityAvailable(tokenCapacityAvailable())) {
+                    || !admissionCapacityAvailable(tokenCapacityAvailable())) {
                 return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null);
             }
             RequestEntry entry = new RequestEntry(item, OwnershipStage.DIRECT_RESERVED);
@@ -1109,8 +1059,7 @@ public final class PrefillState {
             if (removeEntry(terminal.owner) && tokenWorkload != null && terminal.errorCode() == 0L
                     && terminal.preemptionProgress() != PriorityPreemptionProgress.CANCELED) {
                 tokenWorkload.complete(terminal.owner.route.coldTokenBalance()
-                        ? computeTokens(terminal.owner.route) : terminal.computeTokens(),
-                        terminal.computeTokens() < terminal.owner.route.seqLen());
+                        ? computeTokens(terminal.owner.route) : terminal.computeTokens());
             }
         }
         for (var phase : reduction.individualPhases.entrySet()) {
@@ -1140,19 +1089,10 @@ public final class PrefillState {
             batch.phaseBaseMs = reduction.nowMs;
             batch.lastObservedAtMs = Math.max(batch.lastObservedAtMs, reduction.nowMs);
         }
-        boolean windowReleased = false;
-        if ((maxColdWindowComputeTokens != null || coldAdmissionBlocked != null) && tokenWorkload != null) {
-            long completed = tokenWorkload.snapshot().completedTokens();
-            boolean hotWindow = tokenWorkload.hasRecentCacheHit();
-            windowReleased = maxColdWindowComputeTokens != null && completed < lastObservedWindowTokens
-                    || lastObservedHotWindow && !hotWindow;
-            lastObservedWindowTokens = completed;
-            lastObservedHotWindow = hotWindow;
-        }
         var result = reduction.result;
-        if (engineWorkChanged || confirmed || windowReleased) {
+        if (engineWorkChanged || confirmed) {
             result = new StatusReconciliation(result.requestStatuses(), result.batchCompletions(), true,
-                    result.capacityReleased() || confirmed || windowReleased || tokenWorkload != null && tokenWorkloadLocked().pendingTokens() < previousPending);
+                    result.capacityReleased() || confirmed || tokenWorkload != null && tokenWorkloadLocked().pendingTokens() < previousPending);
         }
         if (result.schedulingInputsChanged()) {
             committedWorkCapture = null;

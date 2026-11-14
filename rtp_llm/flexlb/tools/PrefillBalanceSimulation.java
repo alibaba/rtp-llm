@@ -1,6 +1,5 @@
 import org.flexlb.balance.strategy.PrefillTokenBalance;
 import org.flexlb.balance.strategy.PrefillTokenWorkload;
-import org.flexlb.balance.scheduler.PrefillQueueShedding;
 
 import java.io.*;
 import java.nio.file.*;
@@ -11,7 +10,7 @@ import java.util.*;
  */
 public class PrefillBalanceSimulation {
     static final int N = 100, ROUNDS = 21;
-    static final double TPS = 70_000, TTL = 1_200_000, MAX_WAIT = 60_000, SHED_WAIT = 30_000;
+    static final double TPS = 70_000, TTL = 1_200_000, MAX_WAIT = 60_000;
     static final double[] LOADS = Arrays.stream(System.getProperty("flexlb.sim.loads", "0.1,0.3,0.5,0.8,1,1.2,1.5").split(",")).mapToDouble(Double::parseDouble).toArray();
     static final double GROWTH = growth(), MEAN_FACTOR = sumGrowth() / ROUNDS;
     enum Policy { SHORT_TTFT, SHORT_TTFT_CAPPED, CACHE_ONLY, CACHE_WINDOW }
@@ -56,8 +55,6 @@ public class PrefillBalanceSimulation {
         final Map<Long, Map<Integer, Cache>> cacheIndex=new HashMap<>();
         final double[] workScores=new double[N];
         final long[] pendingTokens=new long[N];
-        final PrefillQueueShedding.Controller sheddingController = new PrefillQueueShedding.Controller();
-        double lastShedding=-100;
         final Random roots, lengths;
         final long[] corpus = new long[50_000];
         final PriorityQueue<Event> events=new PriorityQueue<>(Comparator.comparingDouble(Event::at).thenComparingLong(Event::sequence));
@@ -187,23 +184,6 @@ public class PrefillBalanceSimulation {
                 c.routedInput+=q.tokens;c.routedHit+=hits[i];
                 if(!w.running && !w.collecting){w.collecting=true;w.collectionDue=now+20;event(w.collectionDue,2,null,i,null);}
                 if(!w.running && w.queue.size()>=8)start(i);
-            }
-            if(!waiting.isEmpty() && now-lastShedding>=PrefillQueueShedding.SOFT_INTERVAL_MS){shed();lastShedding=now;}
-        }
-        void shed() {
-            var candidates=new ArrayList<PrefillQueueShedding.Candidate<Query>>();
-            for(Query q:waiting.values()){
-                long max=0;
-                var cached=cacheIndex.get(q.session);
-                if(cached!=null)for(var entry:cached.entrySet()) {
-                    Cache cache=entry.getValue();
-                    if(now-cache.touched<TTL)max=Math.max(max,Math.min(q.prefix,cache.tokens));
-                }
-                candidates.add(new PrefillQueueShedding.Candidate<>(q,50,q.id,
-                    new PrefillQueueShedding.Estimate(q.tokens,max,Math.round((q.tokens-max)*1000/TPS),N),(long)Math.max(0,now-q.at)));
-            }
-            for(Query q:sheddingController.victims(candidates,(long)SHED_WAIT,(long)MAX_WAIT,(long)now)) {
-                if(waiting.remove(q.id)!=null){c.dropped++;if(q.session<0)c.coldDropped++;}
             }
         }
         void start(int i) {

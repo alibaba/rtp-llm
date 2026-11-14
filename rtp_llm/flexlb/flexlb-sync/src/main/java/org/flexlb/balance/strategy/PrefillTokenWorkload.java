@@ -1,6 +1,6 @@
 package org.flexlb.balance.strategy;
 
-/** Outstanding uncached work and optional completed history for ranking and opt-in cold admission. */
+/** Outstanding uncached work and optional completed history for routing scores. */
 public final class PrefillTokenWorkload {
     public record Snapshot(long completedTokens, long pendingTokens, long plannedTokens) {
         public Snapshot(long pendingTokens, long plannedTokens) { this(0L, pendingTokens, plannedTokens); }
@@ -12,7 +12,6 @@ public final class PrefillTokenWorkload {
     private final java.util.function.LongSupplier clock;
     private final java.util.ArrayDeque<Completion> completions;
     private long completedTokens;
-    private long lastCacheHitMs = Long.MIN_VALUE;
 
     public PrefillTokenWorkload() { this(0L); }
     public PrefillTokenWorkload(long windowMs) { this(windowMs, () -> System.nanoTime() / 1_000_000L); }
@@ -24,24 +23,14 @@ public final class PrefillTokenWorkload {
     }
 
     /** Record successful work separately from releasing its original reservation. */
-    public synchronized void complete(long tokens) { complete(tokens, false); }
-
-    public synchronized void complete(long tokens, boolean cacheHit) {
+    public synchronized void complete(long tokens) {
         if (tokens < 0L) { throw new IllegalArgumentException("negative completion"); }
         if (completions == null) { return; }
         long nowMs = clock.getAsLong();
-        if (cacheHit) { lastCacheHitMs = nowMs; }
         if (tokens == 0L) { return; }
         expire(nowMs);
         completedTokens = Math.addExact(completedTokens, tokens);
         completions.addLast(new Completion(nowMs, tokens));
-    }
-
-    /** Cold-only workloads need no hot-cache protection budget. */
-    public synchronized boolean hasRecentCacheHit() {
-        if (completions == null || lastCacheHitMs == Long.MIN_VALUE) { return false; }
-        long elapsed = clock.getAsLong() - lastCacheHitMs;
-        return elapsed >= 0L && elapsed < windowMs;
     }
 
     private void expire(long nowMs) {

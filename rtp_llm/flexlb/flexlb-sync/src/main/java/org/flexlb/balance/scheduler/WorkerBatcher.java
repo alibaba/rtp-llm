@@ -522,7 +522,7 @@ public final class WorkerBatcher {
                 long nowMs = System.currentTimeMillis();
                 claim.owner().data().getScheduler().onDeliveryEvidence(claim,
                         new ContextResult.RouteDelivered(claim, PrefillPredictionBoundary.predictedVisibilityDeadlineMs(precedingWork, unstarted,
-                                claim.owner().data().getConfig().getRequestLifecycle().getDecision().getLifetime(), nowMs), nowMs));
+                                claim.owner().data().getConfig().getInternalRuntime().getEngineVisibilityMultiplier(), nowMs), nowMs));
                 delivered.add(claim.item());
             } catch (Throwable problem) { failure = Failures.append(failure, problem); }
         }

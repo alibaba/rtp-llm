@@ -4,22 +4,13 @@
     "type": "QUEUE",
     "decision": {
       "type": "SINGLE"
-    },
-    "queueTimeoutMs": 120000,
-    "prefillQueueShedding": {
-      "expectedWaitThresholdMs": 60000,
-      "maxWaitMs": 120000
     }
   },
   "dispatcher": {
     "type": "NON_BATCH",
     "maxInflightPerPrefillWorker": 256
   },
-  "requestLifecycle": {
-    "request": {
-      "timeoutMs": 100000
-    }
-  },
+  "dispatchTimeoutMs": 120000,
   "router": {
     "roles": {
       "prefill": {

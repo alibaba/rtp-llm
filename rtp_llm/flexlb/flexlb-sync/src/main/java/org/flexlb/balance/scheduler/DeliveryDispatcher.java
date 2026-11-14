@@ -124,7 +124,7 @@ public class DeliveryDispatcher {
                 long now = System.currentTimeMillis();
                 claim.owner().data().getScheduler().onDeliveryEvidence(claim, new ContextResult.Prediction(claim,
                         PrefillPredictionBoundary.predictedVisibilityDeadlineMs(batch.precedingWork(), prediction,
-                                claim.owner().data().getConfig().getRequestLifecycle().getDecision().getLifetime(), now), now));
+                                claim.owner().data().getConfig().getInternalRuntime().getEngineVisibilityMultiplier(), now), now));
             }
         } catch (Throwable failure) { failBeforeSend(batch, claims, failure); return; }
         BatchCall call;

@@ -75,7 +75,7 @@ PROM_AFTER = {
 
 FLEXLB_CONFIG_DOC = {
     "schemaVersion": 3,
-    "requestLifecycle": {"request": {"timeoutMs": 60000}, "decision": {"lifetime": 2}},
+    "dispatchTimeoutMs": 60000,
     "scheduler": {"type": "QUEUE", "ordering": {"type": "PRIORITY"}},
     "dispatcher": {"type": "BATCH"},
 }

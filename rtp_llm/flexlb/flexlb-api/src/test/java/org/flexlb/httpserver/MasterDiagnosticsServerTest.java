@@ -18,24 +18,6 @@ class MasterDiagnosticsServerTest {
     private final MasterDiagnosticsServer server = new MasterDiagnosticsServer(registry, scheduler);
     private final WebTestClient client = WebTestClient.bindToRouterFunction(server.diagnosticRoutes()).build();
 
-    @Test
-    void trafficEndpointReadsPublishedStateWithoutTraversingRequests() {
-        var runtime = mock(org.flexlb.balance.scheduler.SchedulerRuntime.class);
-        var trend = new org.flexlb.balance.scheduler.PrefillTrafficTrend.Snapshot(
-                org.flexlb.balance.scheduler.PrefillTrafficTrend.State.RECOVERING,
-                100, 300, 10000000, 30000000, 35000, true, 5000);
-        when(runtime.prefillTrafficSnapshot()).thenReturn(java.util.Map.of("g", trend));
-        var diagnostics = new MasterDiagnosticsServer(registry, scheduler, runtime);
-        WebTestClient.bindToRouterFunction(diagnostics.diagnosticRoutes()).build().get()
-                .uri("/rtp_llm/debug/prefill_traffic").exchange().expectStatus().isOk()
-                .expectHeader().valueEquals("Cache-Control", "no-store")
-                .expectBody().jsonPath("$.pools.g.state").isEqualTo("RECOVERING")
-                .jsonPath("$.pools.g.arrivalQps").isEqualTo(100.0)
-                .jsonPath("$.pools.g.grace").isEqualTo(true)
-                .jsonPath("$.pools.g.graceRemainingMs").isEqualTo(5000);
-        verifyNoInteractions(registry, scheduler);
-    }
-
     private void directory(int count, boolean stable) {
         WorkerStatus status = WorkerStatus.createDiscovered(RoleType.PREFILL, "g", "127.0.0.1", 8080, 9090, "s");
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);

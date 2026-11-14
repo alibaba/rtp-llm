@@ -80,13 +80,11 @@ The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fie
 
 | Setting | Schema 3 behavior |
 | --- | --- |
+| `dispatchTimeoutMs` | Positive integer, default 60000 ms. Absolute arrival-to-dispatch budget for QUEUE and DIRECT; retries and migration never reset it. Expired requests are rejected before dispatch. |
 | `dispatcher.maxInflightPerPrefillWorker` | Positive integer, default 2 in every mode. BATCH counts batches; NON_BATCH / DIRECT count requests. |
 | `dispatcher.fetchAttachTimeoutMs` | Positive integer, default 3000 ms. BATCH sends this as Engine `fetch_attach_timeout_ms`, limiting the wait for `FetchResponse` attachment. Engine caps it by the remaining request timeout when present. Once attached, this timer does not limit generation duration. |
 | Prefill ownership | Work remains tracked until authoritative completion, safe rollback or retirement. PDFUSION has no distinct Prefill-completion signal, so its ownership lasts through request termination. |
-| `requestLifecycle.request.timeoutMs` | Required positive integer; maximum request inactivity in milliseconds, renewed by matching Engine request status. No default. |
 | `workerRegistry.health.cleanupIntervalMs` | Positive integer, default 3000 ms; scan interval for retiring workers whose status exceeds `statusStaleAfterMs`. |
-| `requestLifecycle.decision.lifetime` | Finite number ≥ 1, default 2.0. At delivery, remaining Prefill time (including waiting) × lifetime + 10000 ms sets the deadline. Only observed running predecessors consume elapsed time; unstarted work keeps its full estimate. Independent of request age. |
-| `scheduler.queueTimeoutMs` | QUEUE only, positive, default 3600000 ms; actual queue TTL. DIRECT has no queue timer and rejects this field. |
 | Removed capacity controls | `scheduler.capacity` and delivered-not-accepted count limits are removed. Per-Prefill concurrency uses the single dispatcher limit; lifetimes bound waiting. The old `maxUncachedTokens` field is rejected. |
 | Removed routing controls | Prefill candidate randomization/LRU and outlier filters, legacy Decode decay controls/outlier filters, and output-estimate truncation are rejected. |
 | `router.roles.decode.costEstimator.expression` | Default `kvcache_used_ratio`; smallest cost wins within the same availability tier. Using `max_running_size` requires a positive `availability.maxEngineRequests`. |
@@ -94,22 +92,18 @@ The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fie
 | `scheduler.ordering.preemption.timeoutMs` | Default 1000 ms, positive; Engine-owned Decode preemption only. Starts after the Cancel ACK phase and bounds the wait for the Engine terminal. ACK timeout stays internal, 50 ms. |
 | `scheduler.ordering.preemption.allowedVictimStages` | PRIORITY defaults to all three stages: `PREFILL_QUEUED`, `DECODE_RESERVED`, `DECODE_ENGINE_OWNED`, including when `preemption` is omitted. An explicit non-empty list replaces the defaults. |
 
-The request timeout below is an explicit workload value; decision lifetime 2.0 is the default:
+The example below allows up to 60 seconds before dispatch:
 
 ```bash
 export FLEXLB_CONFIG='{
   "schemaVersion": 3,
   "scheduler": {
     "type": "QUEUE",
-    "queueTimeoutMs": 3600000,
     "ordering": {"type": "FIFO"},
     "decision": {"type": "FIXED_WINDOW", "maxRequests": 8, "maxCollectionWaitMs": 300}
   },
   "dispatcher": {"type": "BATCH", "maxInflightPerPrefillWorker": 2, "fetchAttachTimeoutMs": 3000},
-  "requestLifecycle": {
-    "request": {"timeoutMs": 60000},
-    "decision": {"lifetime": 2.0}
-  },
+  "dispatchTimeoutMs": 60000,
   "router": {
     "roles": {
       "prefill": {},
@@ -128,7 +122,7 @@ Omit `router.roles.decode.costEstimator` to balance by KV usage ratio. Set its
 ```json
 {
   "schemaVersion": 3,
-  "requestLifecycle": {"request": {"timeoutMs": 60000}},
+  "dispatchTimeoutMs": 60000,
   "router": {
     "roles": {
       "decode": {
@@ -143,13 +137,13 @@ Omit `router.roles.decode.costEstimator` to balance by KV usage ratio. Set its
 ```
 
 `workerRegistry`, `observability.cacheHit`, and `router.groupSelector` remain available.
-Only schema 3 is accepted. Write the configuration directly with explicit values for
-`requestLifecycle.request.timeoutMs`, which has no default. A matching Engine request
-status renews this deadline. Once it expires, FlexLB releases the exact local
-request and its reservations even if delivery acknowledgement or Engine request status is missing.
-Only priority preemption may send an Engine Cancel RPC. Delivery uncertainty,
-request inactivity expiry, and client-cancellation bookkeeping remain local to the Master.
-`requestLifecycle.decision.lifetime` defaults to 2.0. There is no legacy-schema conversion layer.
+Only schema 3 is accepted. Configure `dispatchTimeoutMs` once. The deadline starts
+at request arrival and includes global queue, worker queue, and delivery preparation.
+BATCH checks it before starting Engine delivery; NON_BATCH / DIRECT checks it before
+publishing the route response. After dispatch starts, this budget no longer expires
+the request: it is not a TTFT or generation-duration limit. Engine status tracking
+uses an internal inactivity watchdog after dispatch. The removed `queueTimeoutMs`,
+`prefillQueueShedding`, and `requestLifecycle` fields are rejected at startup.
 
 `MODEL_SERVICE_CONFIG` still describes service discovery and endpoint topology; it is
 not a second FlexLB behavior configuration:
@@ -268,10 +262,7 @@ export FLEXLB_CONFIG='{
   "schemaVersion": 3,
   "scheduler": {"type": "DIRECT"},
   "dispatcher": {"type": "NON_BATCH", "maxInflightPerPrefillWorker": 2},
-  "requestLifecycle": {
-    "request": {"timeoutMs": 60000},
-    "decision": {"lifetime": 2.0}
-  }
+  "dispatchTimeoutMs": 60000
 }'
 ```
 

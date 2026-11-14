@@ -173,7 +173,7 @@ def main():
         assert bool(balance is not None) == (kind != "old")
         if kind in ("new", "stress"):
             assert balance["hotspotRescue"]["maxInputTokens"] == 131072
-            assert config["scheduler"]["prefillQueueShedding"]["recovery"] is not None
+            assert config["dispatchTimeoutMs"] > 0
         artifact = list(path.parent.rglob("master-artifact.json"))
         assert artifact and jar_hash in artifact[0].read_text()
         smokes.append(
@@ -386,7 +386,7 @@ def main():
             f'<p>Java 默认测试 {counts["tests"]} 项：失败/错误 0，条件跳过 1；显式启用该条件用例后 1/1 通过。全部 4 个 FlexLB smoke profile 分别在旧策略、严格新策略、迁移恢复策略、100-worker 压测配置执行，共 16/16 通过。这里的 smoke 范围是 FlexLB 调度器目录，不包含 RTP-LLM GPU 模型 golden 全量套件。</p>',
             f"<p>冻结 Master SHA256：<code>{jar_hash}</code>。每个 smoke 实际配置与同一个 jar 均核验，保留原始日志和 aggregate.json。额外 8192 无限速 API 性能断言仍有原有失败：原基线 P99 254ms、修改后 255ms，门槛 50ms，未篡改门槛；详情见原始报告。</p>",
             table(["smoke", "状态"], [[s["name"], s["status"]] for s in smokes]),
-            "<p>实时工具：<code>python3 tools/watch_prefill_traffic.py --url http://MASTER:PORT --samples 30</code>；配置与行为说明见 docs/prefill-token-balance.md。所有新功能默认关闭，建议显式配置后按命中率、实际计算 TPS、积压及超时联合评估。</p>",
+            "<p>配置与行为说明见 docs/prefill-token-balance.md。按命中率、实际计算 TPS、积压及下发前超时联合评估。</p>",
         ]
     )
     (out / "report.html").write_text("\n".join(parts))

@@ -210,8 +210,8 @@ class DecodeReuseAdmissionTest {
      * conservation, not by the lease's net-allocation arithmetic: trace
      * metadata may carry more hash keys than the token demand covers (10
      * tokens → 1 block, 2 keys), and those keys park fine while the pool
-     * has room. Genuine over-subscription evicts the pure-LRU tail (eldest
-     * first — including just-parked keys when they are the eldest).
+     * has room. Genuine over-subscription evicts unreferenced chain tails,
+     * preserving the reusable prefix of the remaining chain.
      */
     @Test
     void admitParksAllKeysWhenHashKeysExceedTokenDemand() {
@@ -228,9 +228,9 @@ class DecodeReuseAdmissionTest {
                 "hash keys beyond the token demand still park when the pool has room");
 
         // Genuine over-subscription: a 3-block pool with 2 parked keys and 1
-        // held block cannot index 4 new keys at once — the ELDEST pure-LRU
-        // entries are the victims (1, 2, then the just-parked 7), keeping
-        // the pool at capacity, never above.
+        // held block cannot index 4 new keys at once. Evict the old chain
+        // from its tail (2, then 1), then truncate the new chain at 10,
+        // retaining its reusable prefix within the pool capacity.
         MockLruBlockCache tiny = new MockLruBlockCache(3, 0.0);
         assertTrue(MockEngineTestSupport.seedCache(tiny, List.of(1L, 2L)));
         MockLruBlockCache.BlockLease over = tiny.acquireWithReuseDetailed(1, List.of(7L)).lease();
@@ -239,11 +239,9 @@ class DecodeReuseAdmissionTest {
         assertTrue(tiny.admit(over, List.of(7L, 8L, 9L, 10L)));
         assertEquals(3, tiny.snapshotKeys().size(),
                 "the pool must stay at capacity, never above");
-        assertTrue(tiny.snapshotKeys().containsAll(List.of(8L, 9L, 10L)),
-                "the eldest entries (1, 2, then 7) are the eviction victims");
-        assertFalse(tiny.snapshotKeys().contains(1L));
-        assertFalse(tiny.snapshotKeys().contains(2L));
-        assertFalse(tiny.snapshotKeys().contains(7L));
+        assertEquals(Set.of(7L, 8L, 9L), tiny.snapshotKeys(),
+                "capacity eviction must preserve a reusable prefix instead of orphaned suffix keys");
+        assertEquals(3, tiny.peekPrefixHitBlocks(List.of(7L, 8L, 9L, 10L)));
     }
 
     // ─────────────── engine level: hand-off re-match against the OWN LRU ───────────────

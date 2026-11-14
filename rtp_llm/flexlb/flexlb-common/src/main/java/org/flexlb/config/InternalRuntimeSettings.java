@@ -33,6 +33,11 @@ public final class InternalRuntimeSettings {
     /** Completion callbacks must not contend with the dispatch handoff pool. */
     private final int batchDispatchCompletionThreads = 8;
     private final long masterForwardRpcTimeoutMs = 5000;
+    /** Post-delivery watchdog; not a deadline for requests waiting to dispatch. */
+    @lombok.Setter
+    private long requestInactivityTimeoutMs = 60_000L;
+    @lombok.Setter
+    private double engineVisibilityMultiplier = 2.0;
 
     /**
      * Upper bound on the total wire-size (bytes) of concurrently in-flight

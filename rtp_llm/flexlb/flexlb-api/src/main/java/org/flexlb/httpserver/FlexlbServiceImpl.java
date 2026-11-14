@@ -837,10 +837,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.apiKey(pb.getApiKey());
         request.cacheKeyBlockSize(pb.getCacheKeyBlockSize());
 
-        // QUEUE owns one absolute scheduling deadline, measured from FlexLB
-        // admission through delivery acknowledgement. DIRECT never queues and
-        // therefore has no scheduling timeout. RequestRepository separately installs
-        // inactivity tracking from requestLifecycle.request.timeoutMs in both modes.
+        // One arrival-to-dispatch deadline for QUEUE and DIRECT; retries retain it.
         long requestExpiresAtMs = config.resolveExpiresAtMs(ctx.data().getStartTime());
         int defaultPriority = config.defaultPriority();
         SchedulingMetadata schedulingMetadata = SchedulingMetadata.of(

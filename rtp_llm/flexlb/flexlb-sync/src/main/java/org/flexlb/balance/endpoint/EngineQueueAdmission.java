@@ -33,11 +33,9 @@ public final class EngineQueueAdmission {
     boolean dispatchBlocked() { return dispatchBlocked(0L); }
 
     /** Reserve waiting headroom until Engine feedback accounts for a local send. */
-    boolean dispatchBlocked(long unobservedRequests) { return dispatchBlocked(unobservedRequests, threshold); }
-
-    boolean dispatchBlocked(long unobservedRequests, long watermark) {
+    boolean dispatchBlocked(long unobservedRequests) {
         long observedWaiting = waiting;
-        return observedWaiting >= 0L && observedWaiting > watermark - unobservedRequests;
+        return observedWaiting >= 0L && observedWaiting > threshold - unobservedRequests;
     }
 
     public State state() { return state; }

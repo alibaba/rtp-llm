@@ -1,7 +1,5 @@
 package org.flexlb.config;
 
-import org.flexlb.config.ConfigTestSupport;
-
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -316,7 +314,7 @@ class FlexlbConfigSchedulingModeTest {
         assertEquals(batchDispatch ? DispatcherConfig.Type.BATCH
                         : DispatcherConfig.Type.NON_BATCH,
                 config.getDispatcher().getType());
-        assertEquals(3_600_000L, config.queueScheduler().getQueueTimeoutMs());
+        assertEquals(60_000L, config.getDispatchTimeoutMs());
     }
 
     private static FlexlbConfig parse(String scheduler, String dispatcher, String fields) {

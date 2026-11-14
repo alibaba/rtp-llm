@@ -42,7 +42,7 @@ class LeakCanaryLongRunE2ETest {
         var decision = new org.flexlb.config.DecisionPolicyConfig();
         decision.setMaxRequests(1);
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 10, 1, 1, "5", 1.0, true, decision)) {
-            h.config.getRequestLifecycle().getRequest().setTimeoutMs(2_000L);
+            h.config.getInternalRuntime().setRequestInactivityTimeoutMs(2_000L);
             h.prefillEngines.get(0).setFaultConfig(FaultInjectionConfig.builder()
                     .failOnEnqueue(true).enqueueErrorMessage("reject before admission").build());
             h.startAutoPump(10);
@@ -68,7 +68,7 @@ class LeakCanaryLongRunE2ETest {
             // never reach Decode must settle through bounded inactivity cleanup.
             // Priority ordering and exact terminal cleanup remain active without preemption.
             // 小批次与快速派发维持持续流量。
-            h.config.getRequestLifecycle().getRequest().setTimeoutMs(INACTIVITY_TIMEOUT_MS);
+            h.config.getInternalRuntime().setRequestInactivityTimeoutMs(INACTIVITY_TIMEOUT_MS);
             h.prefillSelector = ctx -> (int) (ctx.data().getRequestId() % 2);
             h.startAutoPump(10);
 

@@ -115,19 +115,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
             ownership.configureEngineQueueAdmission(this::engineQueueAdmissionState);
             ownership.configureEngineQueueDispatchBlocked(engineQueueAdmission::dispatchBlocked);
             if (dispatcherType == DispatcherConfig.Type.NON_BATCH) {
-                Long coldWatermark = balance.getColdEngineQueueAdmissionThreshold();
-                if (coldWatermark != null) {
-                    ownership.configureColdAdmission(unobserved -> engineQueueAdmission.dispatchBlocked(unobserved, coldWatermark));
-                }
                 ownership.configureUnobservedAdmission(engineQueueAdmission::dispatchBlocked);
             }
         }
-        if (balance != null) { ownership.enableTokenWorkload(balance.getMaxPendingComputeTokens(), this::engineQueueAllowsAdmission,
-                balance.isEnableWindow() ? balance.getWindowMs() : 0L);
-            ownership.configureComputeAdmission(balance.isEnforcePendingComputeLimit(), balance.getMaxColdWindowComputeTokens());
+        if (balance != null) {
+            ownership.enableTokenWorkload(balance.getMaxPendingComputeTokens(), this::engineQueueAllowsAdmission,
+                    balance.isEnableWindow() ? balance.getWindowMs() : 0L);
         }
-        var shedding = config.isQueue() ? config.queueScheduler().getPrefillQueueShedding() : null;
-        ownership.enforceColdTokenLimit(shedding != null && shedding.getDeadlineBudget() != null);
 
     }
 
@@ -450,7 +444,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     }
                     if (reduction.predictionInputs().isEmpty() || !predictions.isEmpty()) {
                         boolean blockedBefore = ownership.engineQueueAdmissionBlocked();
-                        boolean coldBlockedBefore = ownership.coldAdmissionBlocked();
                         boolean dispatchBlockedBefore = ownership.engineQueueDispatchBlocked();
                         result = ownership.commitStatusLocked(reduction, predictions);
                         checkState(result != null, "Locked Prefill reduction changed during commit");
@@ -468,9 +461,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         boolean queueWasAvailable = queueBefore == EngineQueueAdmission.State.AVAILABLE;
                         if (prepared != null) { ws.publishPreparedStatus(prepared); }
                         observeEngineQueue();
-                        if (coldBlockedBefore != ownership.coldAdmissionBlocked() || queueBefore != engineQueueAdmissionState() || blockedBefore != ownership.engineQueueAdmissionBlocked()
+                        if (queueBefore != engineQueueAdmissionState() || blockedBefore != ownership.engineQueueAdmissionBlocked()
                                 || dispatchBlockedBefore != ownership.engineQueueDispatchBlocked()) { inputsChanged = true; }
-                        if ((coldBlockedBefore && !ownership.coldAdmissionBlocked()) || (!queueWasAvailable && engineQueueAllowsAdmission()) || (blockedBefore && !ownership.engineQueueAdmissionBlocked())
+                        if ((!queueWasAvailable && engineQueueAllowsAdmission()) || (blockedBefore && !ownership.engineQueueAdmissionBlocked())
                                 || (dispatchBlockedBefore && !ownership.engineQueueDispatchBlocked())) {
                             inputsChanged = true;
                             result = new PrefillState.StatusReconciliation(result.requestStatuses(), result.batchCompletions(),
@@ -529,17 +522,16 @@ public class PrefillEndpoint extends WorkerEndpoint {
         ownership.lock.lock();
         try {
             boolean blockedBefore = ownership.engineQueueAdmissionBlocked();
-            boolean coldBlockedBefore = ownership.coldAdmissionBlocked();
             boolean dispatchBlockedBefore = ownership.engineQueueDispatchBlocked();
             reconciliation = ownership.commitStatusLocked(PrefillObservation.prepareLocked(ownership, observation, false), Map.of());
             var queueBefore = engineQueueAdmissionState();
             if (engineQueueAdmission != null) {
                 engineQueueAdmission.observe(observation.engine().waitingQueryLen(), System.nanoTime() / 1_000_000L);
             }
-            if (coldBlockedBefore != ownership.coldAdmissionBlocked() || queueBefore != engineQueueAdmissionState() || blockedBefore != ownership.engineQueueAdmissionBlocked()
+            if (queueBefore != engineQueueAdmissionState() || blockedBefore != ownership.engineQueueAdmissionBlocked()
                     || dispatchBlockedBefore != ownership.engineQueueDispatchBlocked()) {
                 reconciliation = new PrefillState.StatusReconciliation(reconciliation.requestStatuses(),
-                        reconciliation.batchCompletions(), true, (coldBlockedBefore && !ownership.coldAdmissionBlocked()) || (blockedBefore && !ownership.engineQueueAdmissionBlocked())
+                        reconciliation.batchCompletions(), true, (blockedBefore && !ownership.engineQueueAdmissionBlocked())
                                 || (dispatchBlockedBefore && !ownership.engineQueueDispatchBlocked()) || engineQueueAllowsAdmission() || reconciliation.capacityReleased());
             }
             if (reconciliation.schedulingInputsChanged()) { ownership.schedulingInputsChangedLocked(); }

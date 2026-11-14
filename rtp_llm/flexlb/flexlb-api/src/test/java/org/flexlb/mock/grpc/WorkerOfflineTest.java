@@ -22,7 +22,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
     @Override
     protected FlexlbConfig createConfig() {
         FlexlbConfig config = super.createConfig();
-        config.getRequestLifecycle().getRequest().setTimeoutMs(1_800L);
+        config.getInternalRuntime().setRequestInactivityTimeoutMs(1_800L);
         return config;
     }
 

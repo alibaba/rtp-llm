@@ -439,8 +439,8 @@ class WorkerBatcherRequestCapacityTest {
 
     private static FlexlbConfig productionConfig() {
         FlexlbConfig config = new FlexlbConfig();
-        config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
-        config.getRequestLifecycle().getDecision().setLifetime(2.0);
+        config.getInternalRuntime().setRequestInactivityTimeoutMs(60_000L);
+        config.getInternalRuntime().setEngineVisibilityMultiplier(2.0);
         return config;
     }
 

@@ -16,6 +16,7 @@ class RequestDeadlineTokenRefreshTest {
         var fixture = RequestDeliveryClaimStateTest.fixture(DeliveryClaimKind.BATCH_ENQUEUE, false);
         var context = fixture.context();
         context.recordDeliveryResult(new Prediction(fixture.delivery(), 3000L, 1002L));
+        if (kind == ExpirationTimer.Kind.INACTIVITY) { context.beginSend(fixture.delivery(), 1002L); }
         var before = context.snapshot();
         var previous = before.deadlines().token(kind);
         assertNotNull(previous);

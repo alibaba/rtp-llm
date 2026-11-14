@@ -24,14 +24,16 @@ class ExpirationTimerInstallationRecoveryTest {
     @ParameterizedTest
     @EnumSource(ExpirationTimer.Kind.class)
     void rejectedInstallationRetriesOnlyTheFailedKindWithItsExactToken(ExpirationTimer.Kind kind) {
-        try (var f = new Fixture()) {
+        try (var f = new Fixture(kind)) {
             var before = f.context.snapshot();
             var plan = before.deadlines();
+            var activeKinds = java.util.Arrays.stream(ExpirationTimer.Kind.values())
+                    .filter(each -> plan.token(each) != null).toList();
             var count = new AtomicInteger();
             var rejected = new ArrayList<Runnable>();
             var failure = new RejectedExecutionException("first schedule rejected");
             doAnswer(call -> {
-                if (count.getAndIncrement() == kind.ordinal()) {
+                if (count.getAndIncrement() == activeKinds.indexOf(kind)) {
                     rejected.add(call.getArgument(0));
                     throw failure;
                 }
@@ -41,10 +43,10 @@ class ExpirationTimerInstallationRecoveryTest {
             assertSame(before, f.context.snapshot(), "a failed installation cannot alter domain facts");
             assertEquals(0, ReflectionTestUtils.getField(f.timer, "registrations"));
             var handles = new java.util.EnumMap<ExpirationTimer.Kind, Object>(ExpirationTimer.Kind.class);
-            for (var each : ExpirationTimer.Kind.values()) { handles.put(each, f.handle(each)); }
+            for (var each : activeKinds) { handles.put(each, f.handle(each)); }
             f.timer.update(f.context, plan);
-            assertEquals(4, count.get(), "same revision must install only the failed kind");
-            for (var each : ExpirationTimer.Kind.values()) {
+            assertEquals(activeKinds.size() + 1, count.get(), "same revision must install only the failed kind");
+            for (var each : activeKinds) {
                 if (each != kind) { assertSame(handles.get(each), f.handle(each)); }
                 assertSame(plan.token(each), ReflectionTestUtils.getField(f.handle(each), "token"));
                 assertEquals(before.deadlines().token(each).atMs(), plan.token(each).atMs());
@@ -58,7 +60,7 @@ class ExpirationTimerInstallationRecoveryTest {
             ReflectionTestUtils.invokeMethod(f.handle(kind), "fire");
             verify(f.owner).onDeadline(same(plan.token(kind)), eq(plan.token(kind).atMs()));
             f.timer.update(f.context, plan);
-            assertEquals(4, count.get(), "a claimed callback must never be installed twice");
+            assertEquals(activeKinds.size() + 1, count.get(), "a claimed callback must never be installed twice");
             assertEquals(0, ReflectionTestUtils.getField(f.timer, "registrations"));
         }
     }
@@ -120,7 +122,7 @@ class ExpirationTimerInstallationRecoveryTest {
             f.timer.update(f.context, old);
             assertSame(installed, f.handle(ExpirationTimer.Kind.REQUEST));
             assertSame(newer.request(), ReflectionTestUtils.getField(installed, "token"));
-            assertEquals(4, attempts.get());
+            assertEquals(3, attempts.get());
             assertEquals(0, ReflectionTestUtils.getField(f.timer, "registrations"));
             assertNull(f.context.snapshot().outcome());
             assertNull(f.context.snapshot().cancellation());
@@ -153,15 +155,18 @@ class ExpirationTimerInstallationRecoveryTest {
         final ExpirationTimer timer;
         final ScheduledThreadPoolExecutor executor = spy(new ScheduledThreadPoolExecutor(1));
 
-        Fixture() {
+        Fixture() { this(ExpirationTimer.Kind.REQUEST); }
+
+        Fixture(ExpirationTimer.Kind kind) {
             var delivery = RequestDeliveryClaimStateTest.fixture(DeliveryClaimKind.BATCH_ENQUEUE, false);
             context = delivery.context();
             context.recordDeliveryResult(new ContextResult.Prediction(delivery.delivery(), 3000L, 1002L));
+            if (kind == ExpirationTimer.Kind.INACTIVITY) { context.beginSend(delivery.delivery(), 1002L); }
             var request = mock(org.flexlb.dao.loadbalance.Request.class);
             when(request.getRequestId()).thenReturn(7502L);
             context.data().setRequest(request);
             context.data().setSchedulingMetadata(org.flexlb.dao.SchedulingMetadata.explicit(50, 100_000L));
-            context.data().register(owner, new RequestFuture((kind, response, failure) -> false));
+            context.data().register(owner, new RequestFuture((completion, response, failure) -> false));
             var repository = mock(RequestRepository.class);
             when(repository.isCurrent(context)).thenReturn(true);
             timer = new ExpirationTimer(repository, clock::get);

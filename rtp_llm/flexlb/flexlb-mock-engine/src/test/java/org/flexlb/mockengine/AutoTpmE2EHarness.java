@@ -229,10 +229,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         }
         // the default fixed_window algorithm reads fixedWaitMs (not windowMs):
         // hold dispatch by default so scenarios can assert stable queue state
-        if (config.getRequestLifecycle().getRequest().getTimeoutMs() == null) {
-            config.getRequestLifecycle().getRequest().setTimeoutMs(3_600_000L);
-        }
-        config.getRequestLifecycle().getDecision().setLifetime(2.0);
+        config.getInternalRuntime().setEngineVisibilityMultiplier(2.0);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         when(router.select(any(RequestContext.class), any()))

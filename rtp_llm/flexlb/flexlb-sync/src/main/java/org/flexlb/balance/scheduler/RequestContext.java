@@ -44,10 +44,6 @@ public final class RequestContext {
     private long absoluteDeadline;
     private boolean requestDeadlineConsumed;
     private long inactivityMs;
-    // Retain request policy/VIT scope after global placement transfers to a Worker queue.
-    private volatile String prefillQueuePool;
-    String prefillQueuePool() { return prefillQueuePool; }
-    void setPrefillQueuePool(String pool) { prefillQueuePool = pool; }
     /** One local queue migration per request; retries retain the source to prevent ping-pong. */
     private volatile org.flexlb.balance.endpoint.PrefillEndpoint prefillMigrationSource;
     public org.flexlb.balance.endpoint.PrefillEndpoint prefillMigrationSource() { return prefillMigrationSource; }
@@ -179,7 +175,7 @@ public final class RequestContext {
             return new Blocked<>(before, before, Blocker.PLACEMENT);
         }
         if (preemption != null) { return new Blocked<>(before, before, Blocker.PREEMPTION); }
-        if (absoluteDeadline > 0L && nowMs >= absoluteDeadline || nowMs - lastWorkerAtMs >= inactivityMs) {
+        if (absoluteDeadline > 0L && nowMs >= absoluteDeadline) {
             if (cancellation == null) {
                 cancellation = new CancellationFacts(CancelReason.DEADLINE_EXCEEDED,
                         StrategyErrorType.BATCH_SLO_EXPIRED, "request expired before delivery", null);
@@ -217,13 +213,19 @@ public final class RequestContext {
         }
         if (phase != Phase.OPEN || cancellation != null || delivery.abandonment() != null
                 || pendingEnd != null || placement != null && (placement.pendingTerminal() != null || placement.pendingRetirement() != null)
-                || preemption != null && preemption.pendingTerminal() != null
-                || absoluteDeadline > 0L && nowMs >= absoluteDeadline || nowMs - lastWorkerAtMs >= inactivityMs) {
+                || preemption != null && preemption.pendingTerminal() != null) {
             return new Rejected<>(before, before, Rejection.CANCELLED);
+        }
+        if (absoluteDeadline > 0L && nowMs >= absoluteDeadline) {
+            cancellation = new CancellationFacts(CancelReason.DEADLINE_EXCEEDED,
+                    StrategyErrorType.BATCH_SLO_EXPIRED, "request expired before Engine dispatch", null);
+            retainEnd(new EndEvidence(route, EndKind.INACTIVITY, null, false, 0L,
+                    StrategyErrorType.BATCH_SLO_EXPIRED, cancellation.detail(), false, false), nowMs);
+            return new Rejected<>(before, refresh(nowMs), Rejection.CANCELLED);
         }
         delivery = new DeliveryFacts(exact, SendState.SENDING, delivery.acknowledged(), null,
                 delivery.executionFinished(), delivery.prefillProof(), delivery.decodeProof(), true,
-                delivery.startedAtMs(), delivery.acknowledgedAtMs());
+                nowMs, delivery.acknowledgedAtMs());
         return new Granted<>(before, refresh(nowMs), exact);
     }
 
@@ -471,7 +473,7 @@ public final class RequestContext {
             }
         } else {
             requestDeadlineConsumed = true;
-            if (outcome == null && (delivery == null || placement != null)) {
+            if (outcome == null && isAwaitingDispatch()) {
                 if (cancellation == null) {
                     cancellation = new CancellationFacts(CancelReason.DEADLINE_EXCEEDED,
                             diagnosis == null ? StrategyErrorType.BATCH_SLO_EXPIRED : diagnosis.errorType(),
@@ -480,7 +482,7 @@ public final class RequestContext {
                 if (placement != null) {
                     placement = new PlacementFacts(placement.operation(), placement.acquired(), placement.published(),
                             placement.pendingTerminal(), placement.pendingRetirement(), true);
-                } else if (delivery == null && !engine.decodeAccepted()) {
+                } else {
                     retainEnd(new EndEvidence(route, EndKind.INACTIVITY, null, false, 0L,
                             StrategyErrorType.BATCH_SLO_EXPIRED, "request scheduling deadline exceeded", false, false), nowMs);
                 }
@@ -589,13 +591,21 @@ public final class RequestContext {
                             && !(delivery.send() == SendState.UNKNOWN && engine.decodeAccepted())) {
                 return new Rejected<>(before, before, Rejection.INVALID_STATE);
             }
+            if (delivery.identity().kind() == DeliveryClaimKind.ROUTE_DECISION
+                    && isAwaitingDispatch() && absoluteDeadline > 0L && candidate.nowMs() >= absoluteDeadline) {
+                cancellation = new CancellationFacts(CancelReason.DEADLINE_EXCEEDED,
+                        StrategyErrorType.BATCH_SLO_EXPIRED, "request expired before route delivery", null);
+                retainEnd(new EndEvidence(route, EndKind.INACTIVITY, null, false, 0L,
+                        StrategyErrorType.BATCH_SLO_EXPIRED, cancellation.detail(), false, false), candidate.nowMs());
+                return new Rejected<>(before, refresh(candidate.nowMs()), Rejection.CANCELLED);
+            }
             if (preemption != null && !preemption.finished() && !delivery.acknowledged()) {
                 preemption = new PreemptionFacts(preemption.identity(), preemption.phase(), preemption.cancelAcknowledged(),
                         false, preemption.pendingTerminal(), true, preemption.restorationObserved(), preemption.reconciliation());
                 return new Blocked<>(before, refresh(candidate.nowMs()), Blocker.PREEMPTION);
             }
             long activity = Math.max(lastWorkerAtMs, delivery.startedAtMs());
-            if (candidate.nowMs() - activity >= inactivityMs) {
+            if (!isAwaitingDispatch() && candidate.nowMs() - activity >= inactivityMs) {
                 if (cancellation == null) {
                     cancellation = new CancellationFacts(CancelReason.DEADLINE_EXCEEDED,
                             StrategyErrorType.BATCH_SLO_EXPIRED, "request inactive before confirmation", null);
@@ -604,10 +614,13 @@ public final class RequestContext {
                         StrategyErrorType.BATCH_SLO_EXPIRED, "request inactive before confirmation", false, false), candidate.nowMs());
                 return new Rejected<>(before, refresh(candidate.nowMs()), Rejection.CANCELLED);
             }
-            if (!delivery.acknowledged()) {
+            if (!delivery.acknowledged() || delivery.identity().kind() == DeliveryClaimKind.ROUTE_DECISION
+                    && candidate.kind() == ResponseKind.ACK) {
                 var old = delivery;
                 delivery = new DeliveryFacts(old.identity(), old.send(), true, old.abandonment(), old.executionFinished(),
-                        old.prefillProof(), old.decodeProof(), old.transferred(), old.startedAtMs(), candidate.nowMs());
+                        old.prefillProof(), old.decodeProof(), old.transferred(),
+                        old.identity().kind() == DeliveryClaimKind.ROUTE_DECISION ? candidate.nowMs() : old.startedAtMs(),
+                        candidate.nowMs());
             }
         } else if (candidate.kind() == ResponseKind.TERMINAL && outcome == null
                 || candidate.kind() == ResponseKind.CANCELLATION && cancellation == null) {
@@ -798,18 +811,32 @@ public final class RequestContext {
         return role != RoleType.DECODE || Objects.equals(route.decodeReservation(), reservation);
     }
 
+    /** BATCH starts at its send claim; NON_BATCH starts when its route response is selected. */
+    public synchronized boolean isAwaitingDispatch() {
+        return delivery == null || (delivery.identity().kind() == DeliveryClaimKind.ROUTE_DECISION
+                ? selected == null || selected.kind() != ResponseKind.ACK : delivery.send() == SendState.NOT_STARTED);
+    }
+
+    private boolean waitingForDispatchWithoutEndEvidence() {
+        return phase == Phase.OPEN && cancellation == null && pendingEnd == null
+                && (placement == null || placement.pendingTerminal() == null && placement.pendingRetirement() == null)
+                && (preemption == null || preemption.pendingTerminal() == null) && isAwaitingDispatch();
+    }
+
     private long inactivityExpiresAtMs() {
+        if (waitingForDispatchWithoutEndEvidence()) { return Long.MAX_VALUE; }
         long activeSince = Math.max(lastWorkerAtMs, delivery == null ? 0L : delivery.startedAtMs());
         return activeSince > Long.MAX_VALUE - inactivityMs ? Long.MAX_VALUE : activeSince + inactivityMs;
     }
 
     private void deriveDeadlines() {
         long requestAt = phase == Phase.OPEN && !requestDeadlineConsumed
-                && (delivery == null || !delivery.acknowledged()) ? absoluteDeadline : 0L;
+                && isAwaitingDispatch() ? absoluteDeadline : 0L;
         long visibilityAt = phase == Phase.OPEN && outcome == null ? engine.visibilityAtMs() : 0L;
         boolean settled = phase == Phase.ENDING && close.prefillSettled() && close.decodeSettled()
                 && close.notificationsDone() && close.timersDone() && canRelease() && placement == null && (preemption == null || preemption.finished());
-        long inactivityAt = phase == Phase.CLOSED || close.expired() || settled ? 0L : inactivityExpiresAtMs();
+        long inactivityAt = phase == Phase.CLOSED || close.expired() || settled
+                || waitingForDispatchWithoutEndEvidence() ? 0L : inactivityExpiresAtMs();
         var oldRequest = deadlines.request();
         var oldVisibility = deadlines.visibility();
         var oldInactivity = deadlines.inactivity();

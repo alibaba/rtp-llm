@@ -38,7 +38,7 @@ class RequestAdmissionExpirationRaceTest {
     @Test
     void shutdownPublishesEveryClaimedResponseDespiteTheFirstCleanupFailure() throws Exception {
         var config = SchedulingTestConfig.batchConfig();
-        config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
+        config.getInternalRuntime().setRequestInactivityTimeoutMs(60_000L);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         var registry = SchedulerTestSupport.create(service, mock(DeliveryMetricsReporter.class),
@@ -90,7 +90,7 @@ class RequestAdmissionExpirationRaceTest {
     @ValueSource(booleans = {false, true})
     void externalCompletionCleanupFailureStillPublishesAndClosesItsPermit(boolean asynchronous) throws Exception {
         var config = SchedulingTestConfig.batchConfig();
-        config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
+        config.getInternalRuntime().setRequestInactivityTimeoutMs(60_000L);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         var registry = SchedulerTestSupport.create(service, mock(DeliveryMetricsReporter.class),
@@ -135,7 +135,7 @@ class RequestAdmissionExpirationRaceTest {
     @ValueSource(booleans = {false, true})
     void cleanupFailureStillReleasesAdmissionAndAllowsExpiry(boolean abort) throws Exception {
         var config = SchedulingTestConfig.batchConfig();
-        config.getRequestLifecycle().getRequest().setTimeoutMs(300L);
+        config.getInternalRuntime().setRequestInactivityTimeoutMs(300L);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         var registry = org.flexlb.balance.scheduler.SchedulerTestSupport.create(service, mock(DeliveryMetricsReporter.class),
@@ -184,7 +184,7 @@ class RequestAdmissionExpirationRaceTest {
         long requestId = 301L;
         var config = SchedulingTestConfig.newConfig();
         SchedulingTestConfig.useNonBatchDispatcher(config);
-        config.getRequestLifecycle().getRequest().setTimeoutMs(300L);
+        config.getInternalRuntime().setRequestInactivityTimeoutMs(300L);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         var registry = org.flexlb.balance.scheduler.SchedulerTestSupport.create(service, mock(DeliveryMetricsReporter.class),

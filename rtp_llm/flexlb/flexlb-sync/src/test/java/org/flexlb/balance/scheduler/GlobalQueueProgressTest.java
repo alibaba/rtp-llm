@@ -87,6 +87,47 @@ class GlobalQueueProgressTest {
         } finally { release.countDown(); }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void parsedCostOrderingHonorsBusinessPriorityBeforeCacheBenefit(boolean priority) throws Exception {
+        var config = ConfigService.parse("""
+                {"scheduler":{"decision":{"type":"SINGLE"},
+                  "ordering":{"type":"%s","prefillCostOrder":true}},
+                 "dispatcher":{"type":"NON_BATCH"},
+                 "router":{"roles":{"prefill":{"tokenBalance":{}}}}}
+                """.formatted(priority ? "PRIORITY" : "FIFO"));
+        List<Long> expected = priority ? List.of(2203L, 2202L, 2201L) : List.of(2201L, 2203L, 2202L);
+        var firstStarted = new CountDownLatch(1);
+        var otherStarted = new CountDownLatch(1);
+        var finishFirst = new CountDownLatch(1);
+        try (Fixture f = new Fixture(RoleType.PREFILL, false, false, config)) {
+            when(f.router.estimateQueuedTokens(any(), nullable(String.class))).thenAnswer(call -> {
+                RequestContext context = call.getArgument(0);
+                long id = context.data().getRequestId();
+                long hit = id == 2201L ? 999L : id == 2203L ? 500L : 0L;
+                return new org.flexlb.balance.strategy.CostBasedPrefillStrategy.TokenEstimate(1000L, hit);
+            });
+            f.onSelection = id -> {
+                if (id == expected.getFirst()) { firstStarted.countDown(); await(finishFirst); }
+                else { otherStarted.countDown(); }
+            };
+            var lock = (ReentrantLock) ReflectionTestUtils.getField(f.scheduler, "lock");
+            lock.lock();
+            try {
+                f.submit(2201L, "b", 10);
+                f.submit(2202L, "b", 90);
+                f.submit(2203L, "b", 90);
+            } finally { lock.unlock(); }
+            try {
+                assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
+                assertFalse(otherStarted.await(100, TimeUnit.MILLISECONDS),
+                        "lower-priority or lower-benefit work must not consume spare planner slots");
+            } finally { finishFirst.countDown(); }
+            awaitCondition(() -> f.admitted.size() == 3);
+            assertEquals(expected, f.admissionOrder);
+        } finally { finishFirst.countDown(); }
+    }
+
     @Test
     void cancelledCostOrderedWaiterDoesNotBlockLaterWorkOrStartAfterCancellation() throws Exception {
         var release = new CountDownLatch(1);
@@ -256,33 +297,34 @@ class GlobalQueueProgressTest {
         });
     }
 
-    @Test
-    void cacheSheddingRemovesLowBenefitOnlyAndDoesNotCrossPools() throws Exception {
-        var policy = new org.flexlb.config.PrefillQueueSheddingConfig();
-        policy.setExpectedWaitThresholdMs(1_000L);
-        policy.setMaxWaitMs(3_000L);
-        try (Fixture f = new Fixture(RoleType.PREFILL, false, policy)) {
-            when(f.router.isPrefillClusterOverloaded("a")).thenReturn(true);
-            when(f.router.coldPrefillAdmission(any(), nullable(String.class)))
-                    .thenReturn(org.flexlb.balance.strategy.CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY);
-            when(f.router.estimateQueuedWork(any(), nullable(String.class))).thenAnswer(call -> {
-                RequestContext ctx = call.getArgument(0);
-                return new PrefillQueueShedding.Estimate(100, ctx.data().getRequestId() == 1201L ? 0 : 90, 600, 1);
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void slowBlockedRequestEstimateDoesNotStopHealthyPoolPlanning(boolean costOrder) throws Exception {
+        var estimating = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var healthySelected = new CountDownLatch(1);
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            ReflectionTestUtils.setField(f.scheduler, "prefillCostOrder", costOrder);
+            var blockedEstimates = new AtomicInteger();
+            when(f.router.estimateQueuedTokens(any(), nullable(String.class))).thenAnswer(call -> {
+                RequestContext context = call.getArgument(0);
+                if (context.data().getRequestId() == 1901L
+                        && blockedEstimates.incrementAndGet() > (costOrder ? 1 : 0)) {
+                    estimating.countDown();
+                    await(release);
+                }
+                return new org.flexlb.balance.strategy.CostBasedPrefillStrategy.TokenEstimate(1000L, 0L);
             });
-            doReturn(PlacementResult.blocked(new PlacementKey(RoleType.PREFILL, "a", null)))
-                    .when(f.router).select(any(), nullable(String.class));
-            f.submit(1201L, "a");
-            f.submit(1202L, "a");
-            org.junit.jupiter.api.Assertions.assertThrows(java.util.concurrent.TimeoutException.class,
-                    () -> f.requests.get(1201L).get(600, TimeUnit.MILLISECONDS));
-            f.submit(1203L, "b"); // Fresh pool must not inherit another pool's overdue pressure.
-            var response = ArgumentCaptor.forClass(Response.class);
-            verify(f.lifecycle, timeout(5_000)).publish(eq(f.contexts.get(1201L)), response.capture(), eq(false));
-            assertEquals(org.flexlb.dao.loadbalance.StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getValue().getCode());
-            verify(f.lifecycle, never()).publish(eq(f.contexts.get(1202L)), any(), eq(false));
-            verify(f.lifecycle, never()).publish(eq(f.contexts.get(1203L)), any(), eq(false));
-            verify(f.eviction, never()).tryReclaim(any(), any());
-        }
+            f.onSelection = id -> { if (id == 1902L) { healthySelected.countDown(); } };
+            try {
+                f.submit(1901L, "a");
+                assertTrue(estimating.await(2, TimeUnit.SECONDS));
+                f.submit(1902L, "b");
+                assertTrue(healthySelected.await(2, TimeUnit.SECONDS),
+                        "a blocked pool's cache estimate must not stop planning for a healthy pool");
+            } finally { release.countDown(); }
+            awaitCondition(() -> f.admitted.contains(1902L));
+        } finally { release.countDown(); }
     }
 
     @Test
@@ -402,7 +444,7 @@ class GlobalQueueProgressTest {
     @Test
     void nonTerminalControlFactRestoresTheExactGlobalQueueEntry() throws Exception {
         // Configure the spy before the decision thread can enter another mocked method.
-        try (Fixture f = new Fixture(RoleType.PREFILL, false, null, true)) {
+        try (Fixture f = new Fixture(RoleType.PREFILL, false, true)) {
             f.submit(991L, "a");
             awaitCondition(() -> f.selected.contains(991L));
             QueuedRequestScheduler queue = (QueuedRequestScheduler)
@@ -896,7 +938,7 @@ class GlobalQueueProgressTest {
 
     private static final class Fixture implements AutoCloseable {
 
-        private final FlexlbConfig config = twoPlannerConfig();
+        private final FlexlbConfig config;
 
         private final PlacementAvailability availability = new PlacementAvailability();
 
@@ -936,8 +978,8 @@ class GlobalQueueProgressTest {
 
         private final DecodeCapacityAcquirer eviction = mock(DecodeCapacityAcquirer.class);
 
-        private static FlexlbConfig twoPlannerConfig() {
-            FlexlbConfig config = spy(SchedulingTestConfig.batchConfig());
+        private static FlexlbConfig twoPlannerConfig(FlexlbConfig base) {
+            FlexlbConfig config = spy(base);
             var runtime = spy(config.getInternalRuntime());
             when(runtime.getQueuePlannerThreads()).thenReturn(2);
             when(config.getInternalRuntime()).thenReturn(runtime);
@@ -949,29 +991,33 @@ class GlobalQueueProgressTest {
         }
 
         private Fixture(RoleType role, boolean preempt) {
-            this(role, preempt, null);
+            this(role, preempt, false);
         }
 
-        private Fixture(RoleType role, boolean preempt, org.flexlb.config.PrefillQueueSheddingConfig shedding) {
-            this(role, preempt, shedding, false);
+        private Fixture(RoleType role, boolean preempt, boolean realRegistration) {
+            this(role, preempt, realRegistration, null);
         }
 
-        private Fixture(RoleType role, boolean preempt, org.flexlb.config.PrefillQueueSheddingConfig shedding,
-                boolean realRegistration) {
-            config.queueScheduler().setPrefillQueueShedding(shedding);
+        private Fixture(RoleType role, boolean preempt, boolean realRegistration, FlexlbConfig parsedConfig) {
             this.role = role;
-            SchedulingTestConfig.useFifoQueue(config);
-            if (preempt) {
-                SchedulingTestConfig.usePriorityQueue(config);
-                SchedulingTestConfig.allowVictim(config, VictimStage.PREFILL_QUEUED);
+            config = twoPlannerConfig(parsedConfig == null ? SchedulingTestConfig.batchConfig() : parsedConfig);
+            if (parsedConfig == null) {
+                SchedulingTestConfig.useFifoQueue(config);
+                if (preempt) {
+                    SchedulingTestConfig.usePriorityQueue(config);
+                    SchedulingTestConfig.allowVictim(config, VictimStage.PREFILL_QUEUED);
+                }
+                SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
             }
-            SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
             ConfigService service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
             when(router.resolvePolicyGroup(any())).thenAnswer(i -> groups.get(((RequestContext) i.getArgument(0)).data().getRequestId()));
 
             PrefillRoutingEntry a = endpoint("a");
-            lifecycle = RequestProtocolTestSupport.schedulerMock();
+            lifecycle = parsedConfig == null ? RequestProtocolTestSupport.schedulerMock()
+                    : SchedulerTestSupport.create(service, mock(DeliveryMetricsReporter.class),
+                            mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
+                            mock(org.flexlb.service.RecentCacheKeyTraceReporter.class));
             when(lifecycle.register(any(), org.mockito.ArgumentMatchers.any(Runnable.class), org.mockito.ArgumentMatchers.any())).thenAnswer(i -> {
                 RequestContext context = i.getArgument(0);
                 CompletableFuture<Response> future = realRegistration

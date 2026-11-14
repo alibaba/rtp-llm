@@ -824,7 +824,7 @@ def cancel_deadline_exempt_inflight(ctx: CaseContext):
     """M2 exemption: a queue deadline that fires AFTER the claim must not
     cancel the request.
 
-    Scenario: queueTimeoutMs=2000; every prefill engine is injected with
+    Scenario: dispatchTimeoutMs=2000; every prefill engine is injected with
     enqueue_delay=3000, so under BATCH dispatch the EnqueueBatch ACK (and
     with it the Schedule response) is in flight when the deadline expires.
     One request is sent synchronously (output_len=500 keeps decode alive
@@ -856,7 +856,7 @@ def cancel_deadline_exempt_inflight(ctx: CaseContext):
         master_profile=ctx.profile,
         master_env={
             "FLEXLB_CONFIG": flexlb_config_for_profile(
-                ctx.profile, queue_timeout_ms=2_000
+                ctx.profile, dispatch_timeout_ms=2_000
             )
         },
     )

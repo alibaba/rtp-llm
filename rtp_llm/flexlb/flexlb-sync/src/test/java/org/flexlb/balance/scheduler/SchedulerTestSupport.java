@@ -93,7 +93,7 @@ public final class SchedulerTestSupport {
             } else if (snapshot.key() == null) {
                 long now = System.currentTimeMillis();
                 context.register(route.requestId(), now, route.expiresAtMs(),
-                        context.data().getConfig().getRequestLifecycle().getRequest().getTimeoutMs());
+                        context.data().getConfig().getInternalRuntime().getRequestInactivityTimeoutMs());
                 var placement = (ContextResult.PlacementToken) ((ContextResult.Granted<?>) context.beginPlacement(null)).value();
                 context.bindPlacement(placement, route, ContextResult.PublicationResult.PREPARED);
                 context.bindPlacement(placement, route, ContextResult.PublicationResult.PUBLISHED);
@@ -225,7 +225,6 @@ public final class SchedulerTestSupport {
             ReflectionTestUtils.setField(queue, "plannerCount", Math.max(2, config.getInternalRuntime().getQueuePlannerThreads()));
             ReflectionTestUtils.setField(queue, "queueSettings", QueueExecutionSettings.capture(config));
             ReflectionTestUtils.setField(queue, "orderedQueue", new OrderedRequestQueue(config.isPriorityOrdering()));
-            ReflectionTestUtils.setField(queue, "shedding", config.queueScheduler().getPrefillQueueShedding());
             ReflectionTestUtils.setField(queue, "scanBudgetMultiplier", config.queueScheduler().getScanBudgetMultiplier());
             var oldAvailability = (PlacementAvailability) ReflectionTestUtils.getField(queue, "availability");
             var listener = (PlacementAvailability.Listener) ReflectionTestUtils.getField(queue, "availabilityListener");

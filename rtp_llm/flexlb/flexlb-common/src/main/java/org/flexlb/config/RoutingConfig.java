@@ -38,30 +38,15 @@ public final class RoutingConfig {
     public static final class TokenBalanceConfig {
         /** Above this percentage, the largest reusable prefix wins without a TTFT cap. */
         private double minPrefixHitPercent = 50.0;
-        /** Legacy token backpressure when Engine queue admission is disabled or telemetry is unknown.
-         * Also bounds cold work when deadlineBudget shedding is enabled.
-         * enforcePendingComputeLimit retains this waterline for every request.
-         */
+        /** Token backpressure when Engine queue admission is disabled or telemetry is unknown. */
         private long maxPendingComputeTokens = 2_000_000L;
-        /** Opt-in: retain the pending-work waterline for hot and cold requests even with low Engine waiting. */
-        private boolean enforcePendingComputeLimit = false;
-        /** Opt-in cold admission budget: completed window work plus outstanding and new work.
-         * Requires enableWindow; active only after a cache-hit completion in that window.
-         * Null keeps completed history as ranking-only evidence.
-         */
-        private Long maxColdWindowComputeTokens;
-        /** Include recently completed uncached tokens; ranking-only unless cold window admission is configured. */
+        /** Include recently completed uncached tokens in routing scores. */
         private boolean enableWindow = false;
         private long windowMs = 10_000L;
         /** Actual Engine waiting-stream watermark; not an inflight or unobserved-dispatch quota.
          * Excludes Master queues and running requests. Null retains legacy admission limits.
          */
         private Long engineQueueAdmissionThreshold = 10L;
-        /** Optional NON_BATCH cold-work watermark while this worker has recent cache reuse.
-         * Counts actual waiting and local sends not yet observed by the Engine. Null disables it.
-         */
-        private Long coldEngineQueueAdmissionThreshold;
-
         /** Consecutive observed time above the watermark before sustained overload; actual waiting gates dispatch immediately. */
         private long engineQueueOverloadDurationMs = 5_000L;
         /** Optional rescue of small, aged requests to lightly loaded cache-eligible workers. */

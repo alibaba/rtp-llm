@@ -103,11 +103,11 @@ class ColdPulseReproductionTest {
         var perf = Map.<String, Object>of("test_pool_blocks", poolBlocks, "jitter_pct", 0,
                 "prefill", Map.of("max_batch_requests", 32, "max_batch_tokens", 131072),
                 "decode", Map.of("tokens_per_step", 1, "step_base_ms", 1, "step_per_running_ms", 0));
-        var configuredLifetime = config.getRequestLifecycle().getDecision().getLifetime();
+        var configuredLifetime = config.getInternalRuntime().getEngineVisibilityMultiplier();
         try (var events = new Recorder(out.resolve("events.jsonl")); var samples = new Recorder(out.resolve("samples.jsonl"));
              var h = new AutoTpmE2EHarness(61000, PREFILL, DECODE, formula, 1, false, false,
                      config.queueScheduler().getDecision(), true, config, feedbackDelayMs, perf)) {
-            config.getRequestLifecycle().getDecision().setLifetime(configuredLifetime);
+            config.getInternalRuntime().setEngineVisibilityMultiplier(configuredLifetime);
             var caches = new ArrayList<MockLruBlockCache>();
             var prefixes = new ArrayList<List<Long>>();
             for (int i = 0; i < PREFILL; i++) {
@@ -276,7 +276,6 @@ class ColdPulseReproductionTest {
             worker.put("pendingComputeTokens", ep.ownership.tokenWorkload().pendingTokens());
             worker.put("reservedRequests", ep.ownership.progress().outstandingRequests()); worker.put("localQueue", ep.ownership.progress().queueDepth());
             worker.put("accepting", ep.engineQueueAllowsAdmission());
-            worker.put("coldAdmissionBlocked", ep.ownership.coldAdmissionBlocked());
             long observed = ep.getStatus().appliedObservation().observedAtUs();
             worker.put("statusAgeMs", observed == 0 ? null : (System.nanoTime() / 1000 - observed) / 1000); workers.add(worker);
         }
