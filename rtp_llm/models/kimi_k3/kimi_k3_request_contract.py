@@ -27,15 +27,31 @@ def kimi_k3_pending_prompt_token_ids(tokenizer: Any, thinking: bool) -> list[int
 
 
 def kimi_k3_prompt_channel(
-    tokenizer: Any, input_ids: Sequence[int] | None
+    tokenizer: Any, input_ids: Sequence[int] | None, *, allow_partial: bool = False
 ) -> tuple[str | None, int]:
     """Return the open channel and its public-usage token offset together."""
     if tokenizer is None or not input_ids:
         return None, 0
+    pending_channels = []
     for thinking in (False, True):
         pending_ids = kimi_k3_pending_prompt_token_ids(tokenizer, thinking)
+        channel = "think" if thinking else "response"
+        pending_channels.append((channel, pending_ids))
         if input_ids[-len(pending_ids) :] == pending_ids:
-            return ("think" if thinking else "response"), len(pending_ids)
+            return channel, len(pending_ids)
+    if allow_partial:
+        controls = [tokenizer.encode(control) for control in CONTROL_TOKENS]
+        # A partial assistant message follows its already-open channel. Stop
+        # at the last control marker so a closed history cannot become a prefix.
+        for start in range(len(input_ids) - 1, -1, -1):
+            if not any(
+                input_ids[start : start + len(ids)] == ids for ids in controls if ids
+            ):
+                continue
+            for channel, pending_ids in pending_channels:
+                if input_ids[start : start + len(pending_ids)] == pending_ids:
+                    return channel, len(pending_ids)
+            break
     return None, 0
 
 

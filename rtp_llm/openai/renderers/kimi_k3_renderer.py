@@ -889,8 +889,10 @@ class KimiK3Renderer(CustomChatRenderer):
             stop_word_slice_list,
             is_streaming,
         )
-        if isinstance(status, _KimiK3StreamStatus) and isinstance(
-            delta.output_str, str
+        if (
+            isinstance(status, _KimiK3StreamStatus)
+            and isinstance(delta.output_str, str)
+            and delta.output_str
         ):
             flush = status.finish_reason is not None
             parsed = status.xtml_decoder.decode(
@@ -943,10 +945,13 @@ class KimiK3Renderer(CustomChatRenderer):
                 pending_text, stop_words_str, is_streaming
             )
             pending_probs = (
-                self._drain_token_probabilities(buffer, len(buffer.pending_token_probs))
+                self._drain_token_probabilities(
+                    buffer, len(buffer.output_ids) - len(buffer.last_output_ids)
+                )
                 if buffer.request.logprobs
                 else None
             )
+            buffer.pending_token_probs.clear()
             parsed = buffer.xtml_decoder.decode(pending_text, pending_probs, flush=True)
             items.append(
                 _K3OutputDelta.from_parsed(
@@ -1344,3 +1349,4 @@ class KimiK3Renderer(CustomChatRenderer):
 
 
 register_renderer("kimi_k3", KimiK3Renderer)
+register_renderer("kimi_k31", KimiK3Renderer)

@@ -20,11 +20,6 @@ class KimiK31Weight(KimiK3Weight):
         )
         super().__init__(model_config, parallelism_config, *args, **kwargs)
 
-    def _mla_config(self):
-        config = super()._mla_config()
-        config.replicated = self.prefill_query_cp
-        return config
-
     def _global_weights(self):
         weights = super()._global_weights()
         if self.prefill_query_cp:

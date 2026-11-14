@@ -1,10 +1,13 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <array>
+#include <numeric>
 #include <optional>
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include <unistd.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
@@ -13,6 +16,7 @@
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/Interface.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -2515,6 +2519,426 @@ TEST(DecodeRpcServerTest, SourceTopologyIsPreservedByEveryLoadRequestBuilder) {
             EXPECT_EQ(request.prefill_tp_size(), attention_tp);
             EXPECT_EQ(request.peer_addrs_size(), 4);
             EXPECT_EQ(request.SerializeAsString(), common.SerializeAsString());
+        }
+    }
+}
+
+namespace {
+
+KVCacheSpecPtr makeRoutingLinearSpec(bool segmented, int tp_size = 2) {
+    LinearAttentionConfig linear;
+    linear.linear_conv_kernel_dim = 2;
+    linear.linear_key_head_dim = linear.linear_value_head_dim = 2;
+    linear.linear_num_key_heads = linear.linear_num_value_heads = 16;
+    ParallelismConfig parallelism;
+    parallelism.tp_size = tp_size;
+    KVCacheSpecDesc desc;
+    desc.tag              = "linear";
+    desc.cache_type       = KVCacheSpecType::LinearAttention;
+    desc.dtype            = DataType::TYPE_BF16;
+    desc.tp_transfer_mode = segmented ? TpCacheTransferMode::LINEAR_QKV : TpCacheTransferMode::LEGACY;
+    SpecBuildContext context;
+    context.dtype                   = desc.dtype;
+    context.seq_size_per_block      = 8;
+    context.linear_attention_config = &linear;
+    context.parallelism_config      = &parallelism;
+    return SpecBuilder::build(desc, context);
+}
+
+KVCacheSpecPtr makeRoutingMhaSpec(int tp_size, int heads, DataType dtype) {
+    AttentionConfigs attention;
+    attention.kv_head_num   = heads;
+    attention.size_per_head = 4;
+    ParallelismConfig parallelism;
+    parallelism.tp_size = tp_size;
+    KVCacheSpecDesc desc;
+    desc.tag              = "full";
+    desc.cache_type       = KVCacheSpecType::MultiHeadAttention;
+    desc.dtype            = dtype;
+    desc.tp_transfer_mode = TpCacheTransferMode::MHA_HEADS;
+    SpecBuildContext context;
+    context.dtype                   = dtype;
+    context.seq_size_per_block      = 8;
+    context.kernel_tokens_per_block = 4;
+    context.attn_config             = &attention;
+    context.parallelism_config      = &parallelism;
+    return SpecBuilder::build(desc, context);
+}
+
+}  // namespace
+
+TEST_F(DecodeRpcLoadRoutingTest, BroadcastLinearStagesUseTheirOwnTpPeers) {
+    for (bool segmented : {false, true}) {
+        for (int rank = 0; rank < 2; ++rank) {
+            auto config =
+                test::makeSingleGroupCacheConfig(makeRoutingLinearSpec(segmented), CacheGroupType::LINEAR, 1, 8);
+            config.model_has_multiple_cache_groups = true;
+            ASSERT_TRUE(initReceiver(true, config));
+            auto& pc                 = server_.maga_init_params_.parallelism_config;
+            pc.pp_size               = 2;
+            pc.pp_rank               = 1;
+            pc.tp_size               = 2;
+            pc.tp_rank               = rank;
+            pc.world_size            = 4;
+            pc.world_rank            = 2 + rank;
+            pc.pp_stage_layer_counts = {3, 1};
+            auto blocks              = std::make_shared<BlockIds>();
+            blocks->assign({2});
+            const std::vector<StagePeerGroup> groups = {{{0, 3}, {"first-0:1:2", "first-1:1:2"}, false},
+                                                        {{3, 1}, {"last-0:1:2", "last-1:1:2"}, true}};
+            auto                              load   = makeLoadContext(
+                "linear-stages", {"unused-flat:1:2"}, {101}, GroupBlockIds{{{"linear", 0}}, {blocks}}, 1, 0, groups);
+            load.prefill_tp_size = 2;
+            const auto request   = server_.buildBroadcastLoadRequest(load);
+            ASSERT_EQ(request.peer_addrs_size(), 0);
+            ASSERT_EQ(request.stage_peer_groups_size(), 2);
+            grpc::ServerContext     context;
+            BroadcastLoadResponsePB response;
+            ASSERT_TRUE(server_.RemoteLoad(&context, &request, &response).ok());
+            ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR)
+                << response.error_info().error_message();
+            EXPECT_EQ(response.loaded_cache_block_count(), 1);
+            ASSERT_EQ(store_->calls.size(), 1u);
+            EXPECT_EQ(store_->calls[0].peer, "last-" + std::to_string(rank));
+            ASSERT_EQ(store_->calls[0].buffers.size(), 1u);
+            const auto  key    = makeCacheKey(17, "101", 3, "linear");
+            const auto& buffer = store_->calls[0].buffers[0];
+            if (segmented) {
+                EXPECT_NE(buffer->getBlock(makeLinearCacheSegmentKey(0, key)), nullptr);
+            } else {
+                EXPECT_NE(buffer->getBlock("kv_" + key), nullptr);
+            }
+        }
+    }
+}
+
+TEST_F(DecodeRpcLoadRoutingTest, BroadcastCpFullOnlyStageUsesItsGroupPeerCount) {
+    // A hybrid model can assign its final FULL layer to a one-layer PP stage.
+    auto config                            = makeMhaCacheConfig(1, 8, 1, 4, 8, DataType::TYPE_FP16);
+    config.model_has_multiple_cache_groups = true;
+    ASSERT_TRUE(initReceiver(true, config));
+    auto& pc   = server_.maga_init_params_.parallelism_config;
+    pc.pp_size = pc.world_size = 2;
+    pc.pp_rank = pc.world_rank  = 1;
+    pc.pp_stage_layer_counts    = {3, 1};
+    pc.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
+    auto blocks                 = std::make_shared<BlockIds>();
+    blocks->assign({2, 3});
+    const std::vector<StagePeerGroup> groups = {{{0, 3}, {"first-0:1:2", "first-1:1:2"}, false},
+                                                {{3, 1}, {"last-0:1:2", "last-1:1:2"}, true}};
+    auto                              load   = makeLoadContext(
+        "full-stage-cp", {"unused-flat:1:2"}, {101, 102}, GroupBlockIds{{{"default", 0}}, {blocks}}, 2, 0, groups);
+    const auto request = server_.buildBroadcastLoadRequest(load);
+    ASSERT_EQ(request.peer_addrs_size(), 0);
+    // Isolate a bad transport plan so a zero divisor cannot kill other tests.
+    // Re-exec the fixture instead of inheriting initialized CUDA/gRPC threads.
+    const auto previous_death_test_style    = ::testing::FLAGS_gtest_death_test_style;
+    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    EXPECT_EXIT(
+        {
+            grpc::ServerContext     context;
+            BroadcastLoadResponsePB response;
+            const auto              status = server_.RemoteLoad(&context, &request, &response);
+            const bool complete = status.ok() && response.error_info().error_code() == ErrorCodePB::NONE_ERROR
+                                  && response.loaded_cache_block_count() == 2 && store_->calls.size() == 2;
+            _exit(complete ? 0 : 1);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
+    ::testing::FLAGS_gtest_death_test_style = previous_death_test_style;
+}
+
+class SourceSizedRoutingCacheStore final: public RoutingCacheStore {
+public:
+    std::map<std::string, size_t>                                       source_bytes;
+    std::map<std::pair<std::string, std::string>, std::vector<uint8_t>> source_payloads;
+
+    void load(const std::shared_ptr<RequestBlockBuffer>& buffer,
+              CacheStoreLoadDoneCallback                 callback,
+              const std::string&                         peer,
+              uint32_t,
+              uint32_t,
+              uint32_t,
+              int partitions,
+              int partition_id) override {
+        for (const auto& [key, block] : buffer->getBlocks()) {
+            const auto source = source_bytes.find(key);
+            if (source == source_bytes.end() || partitions <= 0 || source->second % partitions
+                || block->len != source->second / partitions) {
+                ADD_FAILURE() << "source payload mismatch: peer=" << peer << " key=" << key
+                              << " source_bytes=" << (source == source_bytes.end() ? 0 : source->second)
+                              << " destination_bytes=" << block->len << " partitions=" << partitions
+                              << " partition_id=" << partition_id;
+                callback(false, CacheStoreErrorCode::InvalidParams);
+                return;
+            }
+            auto bytes = torch::from_blob(
+                block->addr.get(),
+                {block->len},
+                torch::TensorOptions().dtype(torch::kUInt8).device(block->gpu_mem ? torch::kCUDA : torch::kCPU));
+            const auto payload = source_payloads.find({peer, key});
+            if (payload == source_payloads.end()) {
+                bytes.fill_(peer == "prefill-0" ? 11 : 22);
+            } else {
+                auto source = torch::from_blob(
+                    payload->second.data(), {static_cast<int64_t>(payload->second.size())}, torch::kUInt8);
+                bytes.copy_(source.narrow(0, static_cast<int64_t>(partition_id) * block->len, block->len));
+            }
+        }
+        callback(true, CacheStoreErrorCode::None);
+    }
+};
+
+TEST_F(DecodeRpcLoadRoutingTest, TypedSymmetricLinearReadsThePublishedPayloadOfItsTpPeer) {
+    for (int rank = 0; rank < 2; ++rank) {
+        auto linear             = std::dynamic_pointer_cast<LinearKVCacheSpec>(makeRoutingLinearSpec(true));
+        auto state              = test::makeResolvedOpaqueSpec(false, "state", DataType::TYPE_UINT8, 64, 8);
+        state->tp_transfer.mode = TpCacheTransferMode::REPLICATED;
+        CacheConfig config;
+        config.dtype                     = DataType::TYPE_BF16;
+        config.layer_num                 = 2;
+        config.seq_size_per_block        = 8;
+        config.use_opaque_kv_cache_store = true;
+        config.fromGroupedSpecs(
+            {linear, state}, {{0}, {1}}, {CacheGroupType::LINEAR, CacheGroupType::FULL}, {"linear", "state"});
+        config.finalizeBlockNums(8, RuntimeConfig{});
+        ASSERT_TRUE(initReceiver(false, config));
+        server_.maga_init_params_.model_config_.num_layers = 2;
+        auto& pc                                           = server_.maga_init_params_.parallelism_config;
+        pc.tp_size = pc.world_size = 2;
+        pc.tp_rank = pc.world_rank              = rank;
+        pc.pp_stage_layer_counts                = {2};
+        auto store                              = std::make_shared<SourceSizedRoutingCacheStore>();
+        store->memory_util_                     = createMemoryUtilImpl(false);
+        const auto linear_key                   = makeCacheKey(17, "101", 0, "linear");
+        store->source_bytes["kv_" + linear_key] = linear->block_size_bytes();
+        const auto& segments                    = linear->transferSegmentBytes();
+        for (size_t index = 0; index < segments.size(); ++index) {
+            store->source_bytes[makeLinearCacheSegmentKey(index, linear_key)] = segments[index];
+        }
+        store->source_bytes["kv_" + makeCacheKey(17, "101", 1, "state")] = state->block_size_bytes();
+        server_.resource_.cache_store                                    = store;
+        auto request                                                     = makeRequest(false);
+        request.clear_peer_addrs();
+        request.add_peer_addrs("prefill-0:1:2");
+        request.add_peer_addrs("prefill-1:1:2");
+        request.set_prefill_tp_size(2);
+        request.mutable_tagged_group_block_ids(0)->set_tag("linear");
+        auto* state_ids = request.add_tagged_group_block_ids();
+        state_ids->set_tag("state");
+        state_ids->add_block_ids(2);
+        grpc::ServerContext     context;
+        BroadcastLoadResponsePB response;
+        ASSERT_TRUE(server_.RemoteLoad(&context, &request, &response).ok());
+        ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR) << response.error_info().error_message();
+        EXPECT_EQ(response.loaded_cache_block_count(), 1);
+        size_t linear_sources = 0;
+        for (const auto& call : store->calls) {
+            for (const auto& buffer : call.buffers) {
+                if (buffer->getBlock("kv_" + linear_key)
+                    || buffer->getBlock(makeLinearCacheSegmentKey(0, linear_key))) {
+                    ++linear_sources;
+                    EXPECT_EQ(call.peer, "prefill-" + std::to_string(rank));
+                }
+            }
+        }
+        EXPECT_EQ(linear_sources, 1u);
+        const auto parts = cache_manager_->convertIndexToBuffer(0, "linear", 2);
+        ASSERT_EQ(parts.size(), 1u);
+        auto bytes = torch::from_blob(parts[0].addr,
+                                      {static_cast<int64_t>(parts[0].size_bytes)},
+                                      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        EXPECT_TRUE(bytes.eq(rank == 0 ? 11 : 22).all().item<bool>());
+    }
+}
+
+TEST_F(DecodeRpcLoadRoutingTest, TypedMixedLinearAndMhaUseTheirOwningTpPeers) {
+    for (int prefill_tp : {2, 4}) {
+        for (int rank = 0; rank < 2; ++rank) {
+            SCOPED_TRACE(::testing::Message() << "P=" << prefill_tp << " D=2 rank=" << rank);
+            auto       linear = std::dynamic_pointer_cast<LinearKVCacheSpec>(makeRoutingLinearSpec(true));
+            const auto source_linear =
+                std::dynamic_pointer_cast<LinearKVCacheSpec>(makeRoutingLinearSpec(true, prefill_tp));
+            auto mha                = test::makeResolvedMhaSpec(DataType::TYPE_BF16, 1, 4, 8, "full");
+            mha->tp_transfer.mode   = TpCacheTransferMode::MHA_HEADS;
+            auto state              = test::makeResolvedOpaqueSpec(false, "state", DataType::TYPE_UINT8, 64, 8);
+            state->tp_transfer.mode = TpCacheTransferMode::REPLICATED;
+            CacheConfig config;
+            config.dtype                     = DataType::TYPE_BF16;
+            config.layer_num                 = 3;
+            config.seq_size_per_block        = 8;
+            config.use_opaque_kv_cache_store = true;
+            config.fromGroupedSpecs({linear, mha, state},
+                                    {{0}, {1}, {2}},
+                                    {CacheGroupType::LINEAR, CacheGroupType::FULL, CacheGroupType::FULL},
+                                    {"linear", "full", "state"});
+            config.finalizeBlockNums(8, RuntimeConfig{});
+            ASSERT_TRUE(initReceiver(false, config));
+            server_.maga_init_params_.model_config_.num_layers              = 3;
+            server_.maga_init_params_.model_config_.attn_config.kv_head_num = 2;
+            auto& pc   = server_.maga_init_params_.parallelism_config;
+            pc.tp_size = pc.world_size = 2;
+            pc.tp_rank = pc.world_rank              = rank;
+            pc.pp_stage_layer_counts                = {3};
+            auto store                              = std::make_shared<SourceSizedRoutingCacheStore>();
+            store->memory_util_                     = createMemoryUtilImpl(false);
+            const auto linear_key                   = makeCacheKey(17, "101", 0, "linear");
+            store->source_bytes["kv_" + linear_key] = source_linear->block_size_bytes();
+            const auto& segments                    = source_linear->transferSegmentBytes();
+            for (size_t index = 0; index < segments.size(); ++index) {
+                store->source_bytes[makeLinearCacheSegmentKey(index, linear_key)] = segments[index];
+            }
+            const auto full_key           = "kv_" + makeCacheKey(17, "101", 1, "full");
+            store->source_bytes[full_key] = mha->block_size_bytes();
+            store->source_bytes["kv_" + makeCacheKey(17, "101", 2, "state")] = state->block_size_bytes();
+            server_.resource_.cache_store                                    = store;
+            auto request                                                     = makeRequest(false);
+            request.clear_peer_addrs();
+            for (int peer = 0; peer < prefill_tp; ++peer) {
+                request.add_peer_addrs("prefill-" + std::to_string(peer) + ":1:2");
+            }
+            request.set_prefill_tp_size(prefill_tp);
+            request.mutable_tagged_group_block_ids(0)->set_tag("linear");
+            for (const auto& tag : {"full", "state"}) {
+                auto* ids = request.add_tagged_group_block_ids();
+                ids->set_tag(tag);
+                ids->add_block_ids(2);
+            }
+            grpc::ServerContext     context;
+            BroadcastLoadResponsePB response;
+            ASSERT_TRUE(server_.RemoteLoad(&context, &request, &response).ok());
+            ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR)
+                << response.error_info().error_message();
+            EXPECT_EQ(response.loaded_cache_block_count(), 1);
+            size_t full_sources = 0;
+            for (const auto& call : store->calls) {
+                for (const auto& buffer : call.buffers) {
+                    if (buffer->getBlock(full_key)) {
+                        ++full_sources;
+                        // One local MHA head can be replicated on several P ranks;
+                        // select the first owner within this Decode rank's TP slice.
+                        EXPECT_EQ(call.peer, "prefill-" + std::to_string(rank * (prefill_tp / 2)));
+                    }
+                }
+            }
+            EXPECT_EQ(full_sources, 1u);
+            const auto full_parts = cache_manager_->convertIndexToBuffer(1, "full", 2);
+            ASSERT_EQ(full_parts.size(), 1u);
+            auto full_bytes = torch::from_blob(full_parts[0].addr,
+                                               {static_cast<int64_t>(full_parts[0].size_bytes)},
+                                               torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+            EXPECT_TRUE(full_bytes.eq(rank == 0 ? 11 : 22).all().item<bool>());
+        }
+    }
+}
+
+TEST_F(DecodeRpcLoadRoutingTest, MixedMhaPreservesHeadSlicesReplicasPagesAndScales) {
+    const auto packed = [](const KVCacheSpec& spec, size_t first_head, bool scales) {
+        std::vector<uint8_t> bytes;
+        const size_t         pages = spec.seq_size_per_block / spec.kernel_seq_size_per_block;
+        const size_t         heads = spec.local_kv_head_num;
+        for (size_t page = 0; page < pages; ++page) {
+            for (size_t kind = 0; kind < 2; ++kind) {
+                const size_t total =
+                    scales ? (kind == 0 ? spec.k_scale_block_size_bytes() : spec.v_scale_block_size_bytes()) :
+                             (kind == 0 ? spec.k_block_size_bytes() : spec.v_block_size_bytes());
+                for (size_t head = 0; head < heads; ++head) {
+                    bytes.insert(bytes.end(),
+                                 total / pages / heads,
+                                 static_cast<uint8_t>((scales ? 128 : 0) + page * 32 + kind * 16 + first_head + head));
+                }
+            }
+        }
+        return bytes;
+    };
+    for (const auto& geometry :
+         std::vector<std::array<int, 3>>{{2, 4, 4}, {2, 4, 2}, {1, 4, 4}, {4, 2, 4}, {4, 1, 8}, {2, 8, 4}, {4, 8, 2}}) {
+        const auto [prefill_tp, decode_tp, heads] = geometry;
+        for (DataType dtype : {DataType::TYPE_BF16, DataType::TYPE_INT8}) {
+            for (int rank = 0; rank < decode_tp; ++rank) {
+                SCOPED_TRACE(::testing::Message() << "P=" << prefill_tp << " D=" << decode_tp << " H=" << heads
+                                                  << " rank=" << rank << " dtype=" << dtype);
+                auto linear = std::dynamic_pointer_cast<LinearKVCacheSpec>(makeRoutingLinearSpec(true, decode_tp));
+                const auto source_linear =
+                    std::dynamic_pointer_cast<LinearKVCacheSpec>(makeRoutingLinearSpec(true, prefill_tp));
+                auto       mha          = makeRoutingMhaSpec(decode_tp, heads, dtype);
+                const auto source_mha   = makeRoutingMhaSpec(prefill_tp, heads, dtype);
+                auto       state        = test::makeResolvedOpaqueSpec(false, "state", DataType::TYPE_UINT8, 64, 8);
+                state->tp_transfer.mode = TpCacheTransferMode::REPLICATED;
+                CacheConfig config;
+                config.dtype                     = DataType::TYPE_BF16;
+                config.layer_num                 = 3;
+                config.seq_size_per_block        = 8;
+                config.use_opaque_kv_cache_store = true;
+                config.fromGroupedSpecs({linear, mha, state},
+                                        {{0}, {1}, {2}},
+                                        {CacheGroupType::LINEAR, CacheGroupType::FULL, CacheGroupType::FULL},
+                                        {"linear", "full", "state"});
+                config.finalizeBlockNums(8, RuntimeConfig{});
+                ASSERT_TRUE(initReceiver(false, config));
+                auto& model                   = server_.maga_init_params_.model_config_;
+                model.num_layers              = 3;
+                model.attn_config.kv_head_num = heads;
+                auto& pc                      = server_.maga_init_params_.parallelism_config;
+                pc.tp_size = pc.world_size = decode_tp;
+                pc.tp_rank = pc.world_rank              = rank;
+                pc.pp_stage_layer_counts                = {3};
+                auto store                              = std::make_shared<SourceSizedRoutingCacheStore>();
+                store->memory_util_                     = createMemoryUtilImpl(false);
+                const auto linear_key                   = makeCacheKey(17, "101", 0, "linear");
+                store->source_bytes["kv_" + linear_key] = source_linear->block_size_bytes();
+                const auto& segments                    = source_linear->transferSegmentBytes();
+                for (size_t index = 0; index < segments.size(); ++index) {
+                    store->source_bytes[makeLinearCacheSegmentKey(index, linear_key)] = segments[index];
+                }
+                const auto full_key                                              = makeCacheKey(17, "101", 1, "full");
+                store->source_bytes["kv_" + full_key]                            = source_mha->block_size_bytes();
+                store->source_bytes["kv_scale_" + full_key]                      = source_mha->scale_block_size_bytes();
+                store->source_bytes["kv_" + makeCacheKey(17, "101", 2, "state")] = state->block_size_bytes();
+                const int source_groups                                          = std::gcd(heads, prefill_tp);
+                for (int peer = 0; peer < prefill_tp; ++peer) {
+                    const auto name       = "prefill-" + std::to_string(peer);
+                    const auto first_head = (peer / (prefill_tp / source_groups)) * (heads / source_groups);
+                    store->source_payloads[{name, "kv_" + full_key}] = packed(*source_mha, first_head, false);
+                    if (source_mha->scale_block_size_bytes()) {
+                        store->source_payloads[{name, "kv_scale_" + full_key}] = packed(*source_mha, first_head, true);
+                    }
+                }
+                server_.resource_.cache_store = store;
+                auto request                  = makeRequest(false);
+                request.clear_peer_addrs();
+                for (int peer = 0; peer < prefill_tp; ++peer) {
+                    request.add_peer_addrs("prefill-" + std::to_string(peer) + ":1:2");
+                }
+                request.set_prefill_tp_size(prefill_tp);
+                request.mutable_tagged_group_block_ids(0)->set_tag("linear");
+                for (const auto& tag : {"full", "state"}) {
+                    auto* ids = request.add_tagged_group_block_ids();
+                    ids->set_tag(tag);
+                    ids->add_block_ids(2);
+                }
+                grpc::ServerContext     context;
+                BroadcastLoadResponsePB response;
+                ASSERT_TRUE(server_.RemoteLoad(&context, &request, &response).ok());
+                ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR)
+                    << response.error_info().error_message();
+                EXPECT_EQ(response.loaded_cache_block_count(), 1);
+                const int  destination_groups = std::gcd(heads, decode_tp);
+                const auto first_head = (rank / (decode_tp / destination_groups)) * (heads / destination_groups);
+                const auto parts      = cache_manager_->convertIndexToBuffer(1, "full", 2);
+                ASSERT_EQ(parts.size(), dtype == DataType::TYPE_INT8 ? 2u : 1u);
+                for (size_t part = 0; part < parts.size(); ++part) {
+                    auto actual = torch::from_blob(parts[part].addr,
+                                                   {static_cast<int64_t>(parts[part].size_bytes)},
+                                                   torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA))
+                                      .cpu();
+                    const auto expected = packed(*mha, first_head, part != 0);
+                    ASSERT_EQ(expected.size(), static_cast<size_t>(actual.numel()));
+                    EXPECT_EQ(
+                        std::vector<uint8_t>(actual.data_ptr<uint8_t>(), actual.data_ptr<uint8_t>() + actual.numel()),
+                        expected);
+                }
+            }
         }
     }
 }

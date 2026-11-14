@@ -247,7 +247,7 @@ speculative::SpeculativeSamplingParams gatherSpeculativeSamplingParams(const std
         params.do_sample.data_ptr<bool>()[row]    = stream->generateConfig()->stochastic();
         params.force_accept.data_ptr<bool>()[row] = stream->forceSpAccept();
         params.generators.push_back(stream->getGenerator());
-        params.response_modes.push_back(stream->getReturnAllProbs());
+        params.response_modes.push_back(stream->generateConfig()->return_all_probs);
     }
     return params;
 }
@@ -806,7 +806,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                        cache_config.topology().groups().end(),
                        [](const GroupBase& group) { return group.policy.group_type == CacheGroupType::LINEAR; });
     bool        request_lanes  = false;
-    const auto& draft_py_model = propose_params->getEngineInitParams().py_model;
+    const auto& draft_py_model = params.py_sp_model;
     if (Py_IsInitialized() && draft_py_model && !draft_py_model.is_none()) {
         py::gil_scoped_acquire gil;
         request_lanes = py::hasattr(draft_py_model, "cuda_graph_draft_prefill_uses_request_lanes")
@@ -1624,6 +1624,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
              tokens_ready_event = std::move(tokens_ready_event),
              spec_logits_result]() mutable {
                 RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_logits_verify_async_worker)");
+                if (speculativeTargetTransactionsEnabled() && useStreamAsync() && useDropBroadSync()) {
+                    // Only this host consumer depends on the previous processor
+                    // commit. Target verify remains free to overlap with it.
+                    spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+                }
                 *spec_logits_result =
                     buildSpecLogitsVerifyInline(spec_streams, draft_tokens, std::move(tokens_ready_event));
             });

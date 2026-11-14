@@ -2,6 +2,61 @@ py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
 
+k31_review_test_deps = py_test_deps + [
+    "//rtp_llm:models",
+    "//rtp_llm:testlib",
+    "//rtp_llm/models_py:models",
+]
+
+py_test(
+    name = "kimi_k31_review_regression_test",
+    srcs = ["kimi_k31_review_regression_test.py"],
+    deps = k31_review_test_deps,
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "kimi_k31_norm_contract_test",
+    srcs = ["kimi_k31_norm_contract_test.py"],
+    deps = k31_review_test_deps,
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "kimi_k31_device_input_test",
+    srcs = ["kimi_k31_device_input_test.py"],
+    deps = k31_review_test_deps,
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "kimi_k31_capacity_contract_test",
+    srcs = ["kimi_k31_capacity_contract_test.py"],
+    deps = k31_review_test_deps,
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "kimi_k31_cpu_weight_conversion_test",
+    srcs = ["kimi_k31_cpu_weight_conversion_test.py"],
+    deps = k31_review_test_deps,
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    tags = ["SM103_CU13"],
+)
+
+py_test(
+    name = "kimi_k31_prefill_layout_test",
+    srcs = ["kimi_k31_prefill_layout_test.py"],
+    deps = k31_review_test_deps,
+    env = {"GPU_COUNT": "2"},
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "2"},
+    tags = ["L20_CU13", "multi_device"],
+)
+
 py_test(
     name = "qwen_gdn_graph_replay_test_rocm",
     srcs = ["qwen_gdn_graph_replay_test.py"],

@@ -240,7 +240,7 @@ class _KimiExpertByteWeight(MoeAtomicWeight):
 
 
 class _MlaReplicatedWeight(MlaAttnAtomicWeight):
-    """Keep all query heads for Decode Page-RR attention."""
+    """Retain complete heads when the projection has replicated ownership."""
 
     def _get_split_func(self):
         return sp_id
@@ -620,7 +620,11 @@ class KimiK3Weight(ModelDeployWeightInfo):
         projection_tp_size, projection_tp_rank = self._mla_projection_parallelism()
 
         def _mla(name, suffix, process_fun, *, replicated=False):
-            weight_cls = _MlaReplicatedWeight if replicated else MlaAttnAtomicWeight
+            weight_cls = (
+                _MlaReplicatedWeight
+                if replicated or projection_tp_size == 1
+                else MlaAttnAtomicWeight
+            )
             return weight_cls(
                 name,
                 [CkptWeightInfo(self._layer_ckpt(suffix), identity)],

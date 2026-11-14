@@ -621,6 +621,7 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
     def prepare_fmha_impl(
         self, inputs, is_cuda_graph=False, cuda_graph_selection_mode=None
     ):
+        ensure_host_prefill_metadata(inputs)
         self._prepared_kda_prefill = None
         if self.dsa_workspace is not None:
             fmha_impl = self._prepare_dsa(inputs, is_cuda_graph)
@@ -770,7 +771,6 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
                 hidden = self._row_exchange.exchange(
                     hidden, self._routing_plan, "to_natural"
                 )
-        ensure_host_prefill_metadata(inputs)
         primary = get_primary_attention_inputs(inputs, self.kv_cache)
         # A device mask must be refreshed at replay; Python logical row counts
         # cannot be captured into the graph. The runner owns this metadata.

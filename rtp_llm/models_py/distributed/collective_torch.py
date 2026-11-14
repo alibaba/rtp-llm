@@ -1968,6 +1968,8 @@ class MlaDcpCommunicator:
     to the latent dimension or explicitly selecting a projected output width.
     LSE is base-2.
     The local MLA adapter supplies O=0/LSE=-inf for empty shards.
+    Prefill exchanges [T,local_heads,D] queries for [local_T,all_heads,D]
+    and restores the projected outputs through the inverse layout exchange.
     """
 
     def __init__(self, local_heads, q_dim, latent_dim, dtype, device):
@@ -2002,6 +2004,56 @@ class MlaDcpCommunicator:
             self.rank,
             torch.distributed.get_rank(),
             torch.distributed.get_rank() // self.size,
+        )
+
+    def scatter_queries(self, query):
+        if (
+            query.ndim != 3
+            or query.shape[1:] != (self.local_heads, self.q_dim)
+            or query.shape[0] % self.size
+            or query.dtype != self.dtype
+            or query.device != self.device
+        ):
+            raise ValueError(
+                "MLA Prefill Q must be TP-aligned [T,local_heads,D] on the configured device"
+            )
+        tokens = query.shape[0] // self.size
+        if self.size == 1 or tokens == 0:
+            return query.reshape(tokens, self.heads, self.q_dim).contiguous()
+        send = query.reshape(
+            self.size, tokens, self.local_heads, self.q_dim
+        ).contiguous()
+        wire_dtype = torch.uint8 if query.dtype == torch.float8_e4m3fn else query.dtype
+        received = all_to_all_single(send.view(wire_dtype), Group.TP).view(query.dtype)
+        return (
+            received.permute(1, 0, 2, 3)
+            .reshape(tokens, self.heads, self.q_dim)
+            .contiguous()
+        )
+
+    def restore_queries(self, output):
+        if (
+            output.ndim != 3
+            or output.shape[1] != self.heads
+            or output.shape[2] <= 0
+            or output.dtype != torch.bfloat16
+            or output.device != self.device
+        ):
+            raise ValueError(
+                "MLA Prefill O must be BF16 [local_T,all_heads,D] on the configured device"
+            )
+        tokens, _, dim = output.shape
+        if self.size == 1 or tokens == 0:
+            return output.reshape(
+                tokens * self.size, self.local_heads, dim
+            ).contiguous()
+        send = (
+            output.reshape(tokens, self.size, self.local_heads, dim)
+            .permute(1, 0, 2, 3)
+            .contiguous()
+        )
+        return all_to_all_single(send, Group.TP).reshape(
+            tokens * self.size, self.local_heads, dim
         )
 
     def query_gather(self, local_q):

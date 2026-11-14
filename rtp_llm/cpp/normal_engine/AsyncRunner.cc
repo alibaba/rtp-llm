@@ -120,7 +120,7 @@ void AsyncRunner::workerLoop() {
             pending_exception_ = exception;
             task_done_         = true;
         }
-        cv_done_.notify_one();
+        cv_done_.notify_all();
     }
 }
 

@@ -115,6 +115,18 @@ py_test(
 )
 
 py_test(
+    name = "frontend_review_repro_test",
+    srcs = ["frontend_review_repro_test.py"],
+    data = ["//rtp_llm:sdk"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+    ],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
     name = "kimi_k3_renderer_test",
     srcs = ["kimi_k3_renderer_test.py"],
     data = ["//rtp_llm:sdk"],

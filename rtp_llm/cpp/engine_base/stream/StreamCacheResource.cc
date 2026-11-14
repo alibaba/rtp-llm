@@ -271,6 +271,18 @@ absl::Status StreamCacheResource::initKVBlock() {
     MallocInfo malloc_info;
     malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
     malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
+    if (stream_->isPerfTest() && !isContextStream() && stream_->seqLength() > 1
+        && batch_kv_cache_resource_->curBlocksNum() == 0
+        && resource_context_.cache_manager->cacheConfig().linear_replay.enabled()) {
+        // Fixed Decode treats the prompt's last token as its first anchor.
+        // Initialize the processed prefix, then grow to the unchanged sequence
+        // in initMalloc's existing second phase without pruning that state.
+        malloc_info.complete_token_ids =
+            std::make_shared<CompleteTokenIds>(*malloc_info.complete_token_ids, /*share=*/true);
+        malloc_info.complete_token_ids->setSeqLength(stream_->seqLength() - 1);
+        malloc_info.complete_token_ids->setReserveStep(stream_->reserveStep());
+        malloc_info.incr_seq_len_override = stream_->seqLength();
+    }
     malloc_info.request_id              = stream_->streamId();
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
 
@@ -558,6 +570,37 @@ void StreamCacheResource::pruneKVCache(int completed_seq_len) {
     deferred_cache_prune_ = false;
 }
 
+bool StreamCacheResource::reserveLinearReplaySlot(bool* newly_reserved) {
+    std::lock_guard<std::mutex> lock(*stream_->mutex_);
+    if (newly_reserved != nullptr) {
+        *newly_reserved = false;
+    }
+    auto& manager = resource_context_.cache_manager;
+    if (!manager || !manager->cacheConfig().linear_replay.enabled() || fake_inited_ || stream_->isFakeStream()
+        || stream_->generateConfig()->isPrefillOnly()) {
+        return true;
+    }
+    if (resource_released_ || stream_->getStatus() == StreamState::FINISHED || stream_->hasErrorWithoutLock()) {
+        return false;
+    }
+    if (!linear_replay_.lease) {
+        linear_replay_.lease = manager->acquireLinearReplaySlot();
+        if (newly_reserved != nullptr) {
+            *newly_reserved = linear_replay_.lease != nullptr;
+        }
+    }
+    return linear_replay_.lease != nullptr;
+}
+
+void StreamCacheResource::releaseUnusedLinearReplaySlot() {
+    std::lock_guard<std::mutex> lock(*stream_->mutex_);
+    if (stream_->getStatus() == StreamState::WAITING && linear_replay_.initial_block_ids.empty()
+        && !linear_replay_.window && curBlocksNum() == 0 && !allocator_load_context_
+        && !stream_->hasEventWithoutLock(StreamEvents::LoadInitiated)) {
+        linear_replay_.lease.reset();
+    }
+}
+
 absl::Status StreamCacheResource::prepareLinearReplayResources(bool prepare_tails) {
     auto& manager = resource_context_.cache_manager;
     if (!manager || !manager->cacheConfig().linear_replay.enabled() || isContextStream() || fake_inited_) {
@@ -567,8 +610,10 @@ absl::Status StreamCacheResource::prepareLinearReplayResources(bool prepare_tail
     if (!linear_replay_.lease) {
         linear_replay_.lease = manager->acquireLinearReplaySlot();
         if (!linear_replay_.lease) {
-            return absl::ResourceExhaustedError("LINEAR replay log slots exhausted");
+            return absl::UnavailableError("LINEAR replay log slots are temporarily unavailable");
         }
+    }
+    if (linear_replay_.initial_block_ids.empty() && !linear_replay_.window) {
         const int processed = std::max(0, stream_->seqLength() - 1);
         linear_replay_.initial_block_ids.assign(config.groupNums(), -1);
         if (processed > 0) {
