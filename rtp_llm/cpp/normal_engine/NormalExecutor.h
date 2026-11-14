@@ -29,8 +29,13 @@ public:
                             bool                                   is_propose          = false,
                             int                                    propose_model_index = 0,
                             std::function<void()>                  profile_step_start  = nullptr,
-                            std::function<void()>                  profile_step_finish = nullptr);
+                            std::function<void()>                  profile_step_finish = nullptr,
+                            bool                                   allow_cuda_graph    = true,
+                            bool                                   accuracy_check_mode = false);
     ~NormalExecutor();
+    ModelBase* getModel() {
+        return model_.get();
+    }
     absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) override;
     void         reportMetrics(const StreamGroups&                        stream_groups,
                                RtpLLMExecutorMetricsCollector&            executor_collector,
@@ -98,6 +103,7 @@ private:
     std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
     std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
     bool                                                                     warm_up_;
+    bool                                                                     accuracy_check_mode_;
     bool                                                                     use_all_gather_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;

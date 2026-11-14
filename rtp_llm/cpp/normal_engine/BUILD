@@ -21,6 +21,7 @@ cc_library(
     hdrs = glob([
         "*.h",
         "speculative/*.h",
+        "accuracy/*.h",
     ]) + [
         "pipeline/PPBatchStreamProcessor.h",
         "pipeline/PPExecutor.h",
@@ -35,7 +36,10 @@ cc_library(
         "pipeline/PPExecutor.cc",
         "pipeline/PPSerialization.cc",
         "pipeline/PPTransport.cc",
-    ],
+    ] + select({
+        "//:using_cuda": glob(["accuracy/*.cc"]),
+        "//conditions:default": [],
+    }),
     deps = [
         "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
         ":pipeline_types",

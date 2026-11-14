@@ -44,6 +44,9 @@ public:
 
 class CudaGraphRunner: public GraphBase {
 public:
+    // Shared by startup qualification and Graph capture to keep default buckets identical.
+    static std::vector<int> defaultDecodeBatchSizesToCapture(int max_batch_size);
+
     // Stateless capture-side width helpers. They borrow the current model
     // topology but never store page geometry in GraphParams or the runner.
     static int64_t

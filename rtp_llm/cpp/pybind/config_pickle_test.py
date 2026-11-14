@@ -24,7 +24,7 @@ class DecodeGraphConfigPickleTest(unittest.TestCase):
 
     def test_previous_layouts_keep_defaults(self):
         state = HWKernelConfig().__getstate__()
-        for legacy in (state[:16], state[:14]):
+        for legacy in (state[:5], state[:7]):
             result = HWKernelConfig.__new__(HWKernelConfig)
             result.__setstate__(legacy)
             self.assertFalse(result.enable_decode_cascade_attention)
@@ -32,7 +32,7 @@ class DecodeGraphConfigPickleTest(unittest.TestCase):
             self.assertEqual(result.generation_prefill_cuda_graph_max_requests, 1)
         # The retired independent decode capacity is ignored when reading an
         # older in-flight bootstrap; the Cascade flag still round-trips.
-        previous = state[:16] + (4096, True)
+        previous = state[:8] + (4096, True)
         result = HWKernelConfig.__new__(HWKernelConfig)
         result.__setstate__(previous)
         self.assertTrue(result.enable_decode_cascade_attention)
@@ -240,6 +240,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         config.generation_prefill_capture_token_buckets = [32, 64, 96]
         config.prefill_capture_seq_lens = [17, 23]
         config.decode_capture_batch_sizes = [2, 7]
+        config.enable_dynamic_decode_backend = True
 
         restored = pickle.loads(pickle.dumps(config))
 
@@ -252,6 +253,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         )
         self.assertEqual(restored.prefill_capture_seq_lens, [17, 23])
         self.assertEqual(restored.decode_capture_batch_sizes, [2, 7])
+        self.assertTrue(restored.enable_dynamic_decode_backend)
 
     def test_core_only_tuple_uses_generation_prefill_cuda_graph_defaults(self):
         restored = pickle.loads(pickle.dumps(_LegacyHWKernelConfig()))
@@ -260,13 +262,34 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.generation_prefill_cuda_graph_max_requests, 1)
         self.assertEqual(restored.prefill_capture_seq_lens, [64, 128])
         self.assertEqual(restored.decode_capture_batch_sizes, [1, 8])
+        self.assertFalse(restored.enable_dynamic_decode_backend)
         self.assertEqual(
             restored.generation_prefill_capture_token_buckets,
             HWKernelConfig().generation_prefill_capture_token_buckets,
         )
 
+    def test_previous_7_tuple_defaults_dynamic_decode_to_off(self):
+        state = _LegacyHWKernelConfig().__reduce__()[2] + (5, [32, 64, 96])
+        restored = _new_hw_kernel_config()
+        restored.__setstate__(state)
+
+        self.assertEqual(restored.generation_prefill_cuda_graph_max_requests, 5)
+        self.assertEqual(
+            restored.generation_prefill_capture_token_buckets, [32, 64, 96]
+        )
+        self.assertFalse(restored.enable_dynamic_decode_backend)
+
+    def test_legacy_cascade_layouts_do_not_enable_dynamic_decode(self):
+        base = _LegacyHWKernelConfig().__reduce__()[2] + (5, [32, 64, 96])
+        for state in (base + (True,), base + (True, 4096), base + (False, 4096, True)):
+            with self.subTest(state=state):
+                restored = _new_hw_kernel_config()
+                restored.__setstate__(state)
+                self.assertTrue(restored.enable_decode_cascade_attention)
+                self.assertFalse(restored.enable_dynamic_decode_backend)
+
     def test_unsupported_tuple_sizes_are_rejected(self):
-        for size in (6, 11, 15, 19, 20):
+        for size in (6, 12, 15, 19, 20):
             with self.subTest(size=size), self.assertRaisesRegex(
                 RuntimeError, "Invalid state"
             ):
@@ -282,6 +305,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
             [1, 8],
             "not-an-integer",
             [32, 64],
+            True,
         )
         with self.assertRaisesRegex(RuntimeError, "HWKernelConfig unpickle error"):
             config = _new_hw_kernel_config()
