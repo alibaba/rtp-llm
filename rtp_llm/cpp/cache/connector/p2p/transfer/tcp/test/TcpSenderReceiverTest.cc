@@ -171,66 +171,18 @@ TEST_F(TcpSenderOnlyTest, D1_ConnectionFailed_ReceiverNotRunning) {
     EXPECT_EQ(code, TransferErrorCode::TIMEOUT);
 }
 
-// ===========================================================================
-// B. Timeout (integration)
-// ===========================================================================
-
-// B1: Receiver is running but has not called recv(); the RPC enters wait_tasks_
-//     and times out after the deadline.
-TEST_F(TcpSenderOnlyTest, BusyStagedScratchSelectsDirectCopyWithoutWaitingForItsOwner) {
-    std::unique_lock<std::mutex> owner(sender_->staged_scratch_mutex_);
-    auto source = torch::ones({64}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
-    auto target = torch::zeros({64}, torch::kUInt8);
-    std::vector<CopyTask> tasks(4);
-    for (size_t i = 0; i < tasks.size(); ++i) {
-        tasks[i].src_ptr = source.data_ptr<uint8_t>() + 16 * i;
-        tasks[i].dst_ptr = reinterpret_cast<char*>(target.data_ptr<uint8_t>()) + 16 * i;
-        tasks[i].size = 16;
-    }
-    auto attempt = std::async(std::launch::async, [&] {
-        return sender_->tryStagedGatherCopyToHost(tasks, 0);
-    });
-    const auto ready = attempt.wait_for(std::chrono::seconds(5));
-    // Keep the owner locked through the observation; release on every path
-    // before joining so a regression cannot hang test teardown.
-    EXPECT_EQ(ready, std::future_status::ready);
-    owner.unlock();
-    EXPECT_FALSE(attempt.get());
-}
-
-TEST_F(TcpSenderOnlyTest, MixedDeviceTasksSelectDirectCopyBeforeStagedSubmission) {
-    auto source = torch::ones({64}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
-    auto target = torch::zeros({64}, torch::kUInt8);
-    std::vector<CopyTask> tasks(4);
-    for (size_t i = 0; i < tasks.size(); ++i) {
-        tasks[i].src_ptr = source.data_ptr<uint8_t>() + 16 * i;
-        tasks[i].dst_ptr = reinterpret_cast<char*>(target.data_ptr<uint8_t>()) + 16 * i;
-        tasks[i].size = 16;
-        tasks[i].device_index = source.get_device();
-    }
-    // Metadata alone must reject this batch before dereferencing on another GPU.
-    tasks.back().device_index = source.get_device() + 1;
-    EXPECT_FALSE(sender_->tryStagedGatherCopyToHost(tasks, source.get_device()));
-    EXPECT_EQ(target.sum().item<int64_t>(), 0);
-}
-
-TEST_F(TcpSenderOnlyTest, BusyStagedScratchDirectFallbackPreservesEverySerializedByte) {
+TEST_F(TcpSenderOnlyTest, DirectCopyPreservesEverySerializedByte) {
     auto source = torch::arange(64, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
     at::cuda::getCurrentCUDAStream().synchronize();
     SendRequest request;
-    request.unique_key = "busy-staged-byte-check";
+    request.unique_key = "direct-copy-byte-check";
     for (int i = 0; i < 4; ++i) {
         auto block = std::make_shared<KeyBlockInfo>();
-        block->blocks.push_back(BlockInfo{true, 0, 0, source.data_ptr<uint8_t>() + 16 * i, 16});
+        block->blocks.push_back(BlockInfo{true, source.get_device(), 0, source.data_ptr<uint8_t>() + 16 * i, 16});
         request.block_info.emplace(100 + i, std::move(block));
     }
     auto metrics = std::make_shared<TransferClientMetricsCollector>();
-    std::unique_lock<std::mutex> owner(sender_->staged_scratch_mutex_);
-    auto building = std::async(std::launch::async, [&] { return sender_->makeTransferRequest(request, metrics); });
-    const auto ready = building.wait_for(std::chrono::seconds(5));
-    EXPECT_EQ(ready, std::future_status::ready);
-    owner.unlock();
-    auto serialized = building.get();
+    auto serialized = sender_->makeTransferRequest(request, metrics);
     ASSERT_NE(serialized, nullptr);
     ASSERT_EQ(serialized->blocks_size(), 4);
     for (const auto& block : serialized->blocks()) {
