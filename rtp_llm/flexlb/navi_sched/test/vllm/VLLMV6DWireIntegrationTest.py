@@ -194,7 +194,9 @@ class VLLMV6DWireIntegrationTest(unittest.TestCase):
                     ]
                     observers[index].on_v6d_cache_snapshots(
                         [
-                            dict(peer_cache_read_available=True, objects=objects)
+                            json.dumps(
+                                dict(peer_cache_read_available=True, objects=objects)
+                            ).encode()
                             for _ in range(4)
                         ]
                     )
@@ -384,7 +386,9 @@ class VLLMV6DWireIntegrationTest(unittest.TestCase):
                 snapshots = [
                     dict(peer_cache_read_available=True, objects=rows) for _ in range(4)
                 ]
-                observer.on_v6d_cache_snapshots(snapshots)
+                observer.on_v6d_cache_snapshots(
+                    [json.dumps(row).encode() for row in snapshots]
+                )
 
                 def switched_on(text):
                     flags = re.findall(
@@ -427,7 +431,9 @@ class VLLMV6DWireIntegrationTest(unittest.TestCase):
                     dict(peer_cache_read_available=False, objects=rows)
                     for _ in range(4)
                 ]
-                observer.on_v6d_cache_snapshots(snapshots)
+                observer.on_v6d_cache_snapshots(
+                    [json.dumps(row).encode() for row in snapshots]
+                )
                 notifications.wait(lambda text: resident(text, 1))
                 client = NaviSchedClient(
                     "v6d_wire_client",
@@ -463,7 +469,9 @@ class VLLMV6DWireIntegrationTest(unittest.TestCase):
                 self.assertEqual("127.0.0.1:17001", decision.target.address)
                 self.assertEqual(16, decision.predicted_cache_hit_tokens)
                 snapshots[2] = dict(peer_cache_read_available=False, objects=[])
-                observer.on_v6d_cache_snapshots(snapshots)
+                observer.on_v6d_cache_snapshots(
+                    [json.dumps(row).encode() for row in snapshots]
+                )
 
                 def evicted(text):
                     return resident(text, 0)

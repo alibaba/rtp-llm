@@ -217,7 +217,9 @@ class VLLMV6DCacheSourceTest(unittest.TestCase):
             {3: ()}, naviSchedModule().decode_v6d_cache_metadata([[identity], []], 4)
         )
 
-    def test_native_metadata_validates_later_workers_even_if_intersection_is_empty(self):
+    def test_native_metadata_validates_later_workers_even_if_intersection_is_empty(
+        self,
+    ):
         malformed = [
             "not json",
             "[]",
@@ -278,6 +280,123 @@ class VLLMV6DCacheSourceTest(unittest.TestCase):
             allow_worker = True
             thread.join()
 
+    def test_raw_snapshots_match_decoded_residency_and_capability_updates(self):
+        snapshots = self.snapshots()
+        variants = [
+            snapshots,
+            copy.deepcopy(snapshots),
+            copy.deepcopy(snapshots),
+            copy.deepcopy(snapshots),
+        ]
+        variants[1][2]["objects"] = []
+        variants[2][1]["objects"][0]["sealedResident"] = False
+        variants[3][3]["peer_cache_read_available"] = False
+        for rows in variants:
+            with self.subTest(rows=rows):
+                decoded, raw = self.observer(), self.observer()
+                decoded.on_v6d_cache_snapshots(rows)
+                bodies = [json.dumps(row).encode() for row in rows]
+                with mock.patch.object(
+                    json,
+                    "loads",
+                    side_effect=AssertionError("Python snapshot decoding"),
+                ):
+                    raw.on_v6d_cache_snapshots(bodies)
+                self.assertEqual(
+                    decoded.on_block_lifecycle_event.call_args,
+                    raw.on_block_lifecycle_event.call_args,
+                )
+                self.assertEqual(
+                    decoded._bridge.report_peer_cache_read_available.call_args,
+                    raw._bridge.report_peer_cache_read_available.call_args,
+                )
+
+    def test_raw_snapshot_ignores_unsealed_and_other_tier_metadata(self):
+        snapshots = self.snapshots()
+        for row in snapshots:
+            row["objects"].extend(
+                [
+                    dict(
+                        tier="tair",
+                        sealedResident=True,
+                        meta=dict(navi_sched_cache="bad metadata"),
+                    ),
+                    dict(
+                        tier="vineyard",
+                        sealedResident=False,
+                        meta=dict(navi_sched_cache="bad metadata"),
+                    ),
+                    dict(tier="vineyard", sealedResident=True, meta={}),
+                ]
+            )
+        observer = self.observer()
+        observer.on_v6d_cache_snapshots([json.dumps(row).encode() for row in snapshots])
+        self.assertEqual(
+            {3: (bytes.fromhex("01" * 32),)},
+            observer.on_block_lifecycle_event.call_args.args[2],
+        )
+
+    def test_raw_snapshot_validates_every_node_before_publishing(self):
+        good = self.snapshots()[0]
+        malformed = [
+            b"not json",
+            b'{"objects":[],"peer_cache_read_available":true}\x00junk',
+            b"[]",
+            b'{"objects":[]}',
+            b'{"objects":[],"peer_cache_read_available":1}',
+            b'{"objects":null,"peer_cache_read_available":true}',
+            b'{"objects":[],"peer_cache_read_available":true,"extra":"\xff"}',
+        ]
+        for field, value in [("tier", None), ("sealedResident", None), ("meta", None)]:
+            row = copy.deepcopy(good)
+            row["objects"][0].pop(field)
+            malformed.append(json.dumps(row).encode())
+        row = copy.deepcopy(good)
+        row["objects"][0]["meta"]["navi_sched_cache"] = dict(group_id=3)
+        malformed.append(json.dumps(row).encode())
+        empty = json.dumps(dict(peer_cache_read_available=True, objects=[])).encode()
+        for body in malformed:
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                observer = self.observer()
+                observer.on_v6d_cache_snapshots([empty, body])
+            observer.on_block_lifecycle_event.assert_not_called()
+            observer._bridge.report_peer_cache_read_available.assert_not_called()
+
+    def test_raw_snapshot_last_json_field_wins(self):
+        body = b'{"objects":[],"peer_cache_read_available":false,"peer_cache_read_available":true}'
+        self.assertEqual(
+            ({}, True), naviSchedModule().decode_v6d_cache_snapshots([body], 4)
+        )
+
+    def test_raw_snapshot_releases_gil_while_parsing_outer_inventory(self):
+        body = json.dumps(
+            dict(
+                peer_cache_read_available=True,
+                objects=[dict(tier="tair", unused=list(range(300000)))],
+            )
+        ).encode()
+        ready, ran = threading.Event(), threading.Event()
+        allow_worker = False
+
+        def worker():
+            ready.set()
+            while not allow_worker:
+                time.sleep(0)
+            ran.set()
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        ready.wait()
+        original_interval = sys.getswitchinterval()
+        try:
+            sys.setswitchinterval(60)
+            allow_worker = True
+            naviSchedModule().decode_v6d_cache_snapshots([body], 4)
+            self.assertTrue(ran.is_set(), "outer inventory parsing held the GIL")
+        finally:
+            sys.setswitchinterval(original_interval)
+            allow_worker = True
+            thread.join()
 
 
 if __name__ == "__main__":

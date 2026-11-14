@@ -279,6 +279,79 @@ py::dict decodeV6dCacheMetadata(
     return result;
 }
 
+const rapidjson::Value *lastJsonMember(const rapidjson::Value &object, const char *name)
+{
+    if (!object.IsObject()) {
+        return nullptr;
+    }
+    const rapidjson::Value *value = nullptr;
+    for (auto member = object.MemberBegin(); member != object.MemberEnd(); ++member) {
+        if (member->name == name) {
+            value = &member->value;
+        }
+    }
+    return value;
+}
+
+py::tuple decodeV6dCacheSnapshots(std::vector<std::string> snapshots, size_t groupCount)
+{
+    std::vector<std::vector<std::string>> nodeMetadata;
+    bool peerCacheReadAvailable = true;
+    {
+        py::gil_scoped_release release;
+        nodeMetadata.reserve(snapshots.size());
+        for (auto &snapshot : snapshots) {
+            rapidjson::Document document;
+            if (snapshot.find('\0') != std::string::npos) {
+                throw std::invalid_argument("invalid V6D cache snapshot JSON");
+            }
+            document.ParseInsitu<rapidjson::kParseValidateEncodingFlag>(snapshot.data());
+            if (document.HasParseError()) {
+                throw std::invalid_argument("invalid V6D cache snapshot JSON");
+            }
+            const auto *available = lastJsonMember(document, "peer_cache_read_available");
+            const auto *objects = lastJsonMember(document, "objects");
+            if (!available || !available->IsBool() || !objects || !objects->IsArray()) {
+                throw std::invalid_argument("invalid V6D cache snapshot");
+            }
+            peerCacheReadAvailable = peerCacheReadAvailable && available->GetBool();
+            auto &metadata = nodeMetadata.emplace_back();
+            for (const auto &object : objects->GetArray()) {
+                const auto *tier = lastJsonMember(object, "tier");
+                if (!tier) {
+                    throw std::invalid_argument("missing V6D object tier");
+                }
+                if (!tier->IsString() || *tier != "vineyard") {
+                    continue;
+                }
+                const auto *sealed = lastJsonMember(object, "sealedResident");
+                if (!sealed) {
+                    throw std::invalid_argument("missing V6D object residency");
+                }
+                if (!sealed->IsTrue()) {
+                    continue;
+                }
+                const auto *meta = lastJsonMember(object, "meta");
+                if (!meta || !meta->IsObject()) {
+                    throw std::invalid_argument("invalid V6D object metadata");
+                }
+                const auto *identity = lastJsonMember(*meta, "navi_sched_cache");
+                if (!identity || identity->IsNull()) {
+                    continue;
+                }
+                if (!identity->IsString()) {
+                    throw std::invalid_argument("invalid V6D cache metadata");
+                }
+                metadata.emplace_back(identity->GetString(), identity->GetStringLength());
+            }
+        }
+    }
+    // The existing decoder validates every storage node and intersects their
+    // sealed cache groups. No Python object inventory is materialized.
+    return py::make_tuple(decodeV6dCacheMetadata(nodeMetadata, groupCount),
+                          peerCacheReadAvailable);
+}
+
 void shutdownAlogAtExit()
 {
     multi_call::VIPSubscribeService::destroy();
@@ -1994,6 +2067,8 @@ void bindNaviSchedModule(py::module_ &module, const char *description)
                py::arg("token_buffer"), py::arg("block_size"), py::arg("parent_hash"));
     module.def("decode_v6d_cache_metadata", &decodeV6dCacheMetadata,
                py::arg("node_metadata"), py::arg("group_count"));
+    module.def("decode_v6d_cache_snapshots", &decodeV6dCacheSnapshots,
+               py::arg("snapshots"), py::arg("group_count"));
     module.doc() = description;
     auto naviModule = module.def_submodule("navi", "Navi runtime configuration");
     registerNaviRuntimeConfigPybind(naviModule);

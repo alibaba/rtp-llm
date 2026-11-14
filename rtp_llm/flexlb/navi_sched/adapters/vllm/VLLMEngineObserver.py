@@ -5932,31 +5932,39 @@ class VLLMEngineObserver:
             self._mark_forward_batch_released(state)
         self._cleanup_released_forward_batch(state)
 
-    def on_v6d_cache_snapshots(self, snapshots: list[dict]) -> None:
+    def on_v6d_cache_snapshots(self, snapshots: list[dict | bytes]) -> None:
         """Feed existing resident-object snapshots into the original KV path."""
         if not snapshots:
             raise ValueError("V6D snapshot requires every physical node")
-        if any(
-            type(snapshot["peer_cache_read_available"]) is not bool
-            for snapshot in snapshots
-        ):
-            raise ValueError("invalid V6D peer cache read availability")
-        peer_cache_read_available = all(
-            snapshot["peer_cache_read_available"] for snapshot in snapshots
-        )
-        node_metadata = [
-            [
-                obj["meta"]["navi_sched_cache"]
-                for obj in snapshot["objects"]
-                if obj["tier"] == "vineyard"
-                and obj["sealedResident"] is True
-                and obj["meta"].get("navi_sched_cache") is not None
+        if isinstance(snapshots[0], (bytes, str)):
+            (
+                common,
+                peer_cache_read_available,
+            ) = naviSchedModule().decode_v6d_cache_snapshots(
+                snapshots, len(self._cache_policy.group_roles)
+            )
+        else:
+            if any(
+                type(snapshot["peer_cache_read_available"]) is not bool
+                for snapshot in snapshots
+            ):
+                raise ValueError("invalid V6D peer cache read availability")
+            peer_cache_read_available = all(
+                snapshot["peer_cache_read_available"] for snapshot in snapshots
+            )
+            node_metadata = [
+                [
+                    obj["meta"]["navi_sched_cache"]
+                    for obj in snapshot["objects"]
+                    if obj["tier"] == "vineyard"
+                    and obj["sealedResident"] is True
+                    and obj["meta"].get("navi_sched_cache") is not None
+                ]
+                for snapshot in snapshots
             ]
-            for snapshot in snapshots
-        ]
-        common = naviSchedModule().decode_v6d_cache_metadata(
-            node_metadata, len(self._cache_policy.group_roles)
-        )
+            common = naviSchedModule().decode_v6d_cache_metadata(
+                node_metadata, len(self._cache_policy.group_roles)
+            )
         self.on_block_lifecycle_event(
             "snapshot",
             None,
