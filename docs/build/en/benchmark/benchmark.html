@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>RTP-LLM Performance Benchmark Tool &#8212; RTP-LLM</title>
+    <title>RTP-LLM Unified Performance Benchmark &#8212; RTP-LLM</title>
 
 
 
@@ -229,7 +229,7 @@
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmark</span></p>
 <ul class="current nav bd-sidenav">
-<li class="toctree-l1 current active"><a class="current reference internal" href="#">RTP-LLM Performance Benchmark Tool</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">RTP-LLM Unified Performance Benchmark</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">References</span></p>
 <ul class="nav bd-sidenav">
@@ -456,7 +456,7 @@ document.write(`
 
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>RTP-LLM Performance Benchmark Tool</h1>
+    <h1>RTP-LLM Unified Performance Benchmark</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
@@ -466,16 +466,12 @@ document.write(`
             </div>
             <nav aria-label="Page">
                 <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#design-principle">Design Principle</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#migrating-from-the-legacy-perf-cli">Migrating from the legacy perf CLI</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#single-node-benchmark">Single-Node Benchmark</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#multi-node-benchmark">Multi Node Benchmark</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#benchmark-yaml">Benchmark Yaml</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#run-step">Run step</a></li>
-</ul>
-</li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#result-format">Result Format</a></li>
-</ul>
-            </nav>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#multi-node-benchmark">Multi-Node Benchmark</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#benchmark-configuration">Benchmark configuration</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#results-and-profiling">Results and profiling</a></li>
+</ul></nav>
         </div>
     </div>
 </div>
@@ -484,327 +480,229 @@ document.write(`
 
 <div id="searchbox"></div>
                 <article class="bd-article">
-
-  <section class="tex2jax_ignore mathjax_ignore" id="rtp-llm-performance-benchmark-tool">
-<h1>RTP-LLM Performance Benchmark Tool<a class="headerlink" href="#rtp-llm-performance-benchmark-tool" title="Link to this heading">#</a></h1>
-<p>In this chapter, I will present the performance testing tools developed in RTP-LLM, including standalone measurement of model prefill and decode performance under various batch sizes with single-node and multi-node parallelism, timeline recording, and their usage methods.</p>
-<section id="design-principle">
-<h2>Design Principle<a class="headerlink" href="#design-principle" title="Link to this heading">#</a></h2>
-<p>RTP-LLM employs a special batch scheduler that accumulates requests until the specified batch size is reached, then all requests enter the engine simultaneously. The scheduler supports both prefill and decode modes; in decode mode, requests are only allocated KV cache without prefill, enabling accurate and efficient measurement of engine performance.
-In detail, the batch-scheduler profiler is executed three times for a single input:</p>
-<ul class="simple">
-<li><p>Warm-up run, to account for one-time setup such as JIT compilation.</p></li>
-<li><p>Timing run, to measure engine performance.</p></li>
-<li><p>Profiling run, to capture a timeline for subsequent analysis; this step may degrade end-to-end performance.</p></li>
-</ul>
-<p>For every run we use min_new_tokens and max_new_tokens to ensure that all requests perform the same number of decode steps.</p>
-<p>Since in decode mode, we not prefill the KVCache, so hidden_states after every forward step is not real. So we also hack moe gate select for moe model and speculative accept func for mtp. In that way, we get stable result for analyse result.</p>
-</section>
-<section id="single-node-benchmark">
-<h2>Single-Node Benchmark<a class="headerlink" href="#single-node-benchmark" title="Link to this heading">#</a></h2>
-<p>using commands below can start a performance benchmark, mixed prefill and decode</p>
-<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span>bazelisk<span class="w"> </span><span class="nb">test</span><span class="w"> </span>//rtp_llm/test/perf_test:perf_test<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--config<span class="o">=</span>cuda12_6<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--test_arg<span class="o">=</span>--ckpt_path<span class="o">=</span><span class="si">${</span><span class="p">/PATH/TO/CKPT</span><span class="si">}</span><span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--test_arg<span class="o">=</span>--tokenizer_path<span class="o">=</span><span class="si">${</span><span class="p">/PATH/TO/TOKENIZER</span><span class="si">}</span><span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--test_arg<span class="o">=</span>--model_type<span class="o">=</span><span class="si">${</span><span class="nv">MODEL_TYPE</span><span class="si">}</span><span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--test_arg<span class="o">=</span>--dp_size<span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--test_arg<span class="o">=</span>--tp_size<span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--test_arg<span class="o">=</span>--batch_size<span class="o">=</span><span class="s2">&quot;1,2,4,8,16,32&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--test_arg<span class="o">=</span>--input_len<span class="o">=</span><span class="s2">&quot;128,1024,2048,4096&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--test_env<span class="o">=</span><span class="nv">INT8_MODE</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="c1"># optionally using --test_env to using custom env for RTP-LLM setup</span>
-</pre></div>
-</div>
-<p>specially <code class="docutils literal notranslate"><span class="pre">batch_size</span></code> states for the batch in single DP node, when <code class="docutils literal notranslate"><span class="pre">DP_SIZE</span></code> param is setted.</p>
-<p>also we support test prefill or decode only when prefill and decode not share the same config(such as prefill use deepep normal, and decode use deepep masked), in that case user should also set <code class="docutils literal notranslate"><span class="pre">--partial={0:all(default),</span> <span class="pre">1:decode,</span> <span class="pre">2:prefill}</span></code>, below is an example of testing decode only:</p>
-<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span><span class="w">    </span>--test_arg<span class="o">=</span><span class="nv">partial</span><span class="o">=</span><span class="m">1</span>
-</pre></div>
-</div>
-</section>
-<section id="multi-node-benchmark">
-<h2>Multi Node Benchmark<a class="headerlink" href="#multi-node-benchmark" title="Link to this heading">#</a></h2>
-<p>We also provide a Python script to enable multi-node benchmark, but since it requires setting up the environment and starting the script on multiple machines, it still involves more steps than single-node testing.</p>
-<p>For each machine to be tested, you need to create an environment in which RTP-LLM can run and support passwordless SSH access from the current machine’s port.</p>
-<section id="benchmark-yaml">
-<h3>Benchmark Yaml<a class="headerlink" href="#benchmark-yaml" title="Link to this heading">#</a></h3>
-<p>Configure the parameters with reference to <code class="docutils literal notranslate"><span class="pre">rtp_llm/test/perf_test/multi_node/multi_benchmark_config.yaml</span></code>. Below is the detail explaination of yaml structure.</p>
-<p>First part is the experiment name identifier</p>
-<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">experiment_name</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;H20_Node1&quot;</span>
-</pre></div>
-</div>
-<p>Second part is the test configuration and retry settings.</p>
-<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">test_config</span><span class="p">:</span>
-<span class="w">  </span><span class="nt">num_retry_times</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span>
-<span class="w">  </span><span class="nt">build_from_scratch</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span>
-<span class="w">  </span><span class="nt">copy_test_result</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-</pre></div>
-</div>
-<p>Third part describe the machine list, user name and port to ssh.</p>
-<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">machine_config</span><span class="p">:</span>
-<span class="w">  </span><span class="nt">ip_lists</span><span class="p">:</span>
-<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;127.0.0.1&quot;</span>
-<span class="w">  </span><span class="nt">run_user</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;admin&quot;</span>
-<span class="w">  </span><span class="nt">ssh_port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2222</span>
-</pre></div>
-</div>
-<p>Fourth part is for cloning code to local in ssh machine, checkout to the branch you need to test, and compilation options.</p>
-<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">build_config</span><span class="p">:</span>
-<span class="w">  </span><span class="nt">git_repo_url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;git@gitlab.alibaba-inc.com:foundation_models/RTP-LLM.git&quot;</span>
-<span class="w">  </span><span class="nt">git_checkout_ref</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;origin/feature/yiyin_fork_rtp_llm&quot;</span>
-<span class="w">  </span><span class="c1"># open_source_url: &quot;git@github.com:alibaba/rtp-llm.git&quot;</span>
-<span class="w">  </span><span class="nt">open_source_ref</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;origin/feature/yiyin_multi_benchmark&quot;</span>
-<span class="w">  </span><span class="nt">ft_sub_dir</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;rtp_llm_perf_test&quot;</span>
-<span class="w">  </span><span class="nt">bazel_build_args</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;&quot;</span><span class="nv"> </span><span class="s">--jobs</span><span class="nv"> </span><span class="s">64</span><span class="nv"> </span><span class="s">--verbose_failures</span><span class="nv"> </span><span class="s">--config=cuda12_6</span><span class="nv"> </span><span class="s">&quot;&#39;</span>
-</pre></div>
-</div>
-<p>Fifth part is the common configuration shared across all benchmarks.</p>
-<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">common_config</span><span class="p">:</span>
-<span class="w">  </span><span class="nt">warm_up</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
-<span class="w">  </span><span class="nt">act_type</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;bf16&quot;</span>
-<span class="w">  </span><span class="nt">hack_layer_num</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4</span>
-<span class="w">  </span><span class="nt">start_port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">12333</span>
-<span class="w">  </span><span class="nt">decode_test_length</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2048</span>
-<span class="w">  </span><span class="nt">max_context_batch_size</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
-<span class="w">  </span><span class="nt">load_ckpt_num_process</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">64</span>
-<span class="w">  </span><span class="nt">reserver_runtime_mem_mb</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0</span>
-<span class="w">  </span><span class="nt">device_reserve_memory_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0</span>
-</pre></div>
-</div>
-<p>The sixth part describes the benchmark configuration structure. Each benchmark consists of four main components:</p>
-<p><strong>benchmark_name</strong>: A unique identifier for the benchmark test case.</p>
-<p><strong>fixed_config</strong>: Contains static configuration that remain constant across all test iterations. This includes model paths, model type, and other fixed settings.</p>
-<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">benchmarks</span><span class="p">:</span>
-<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">benchmark_name</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Qwen3-Coder-480B-A35B-Instruct&quot;</span>
-<span class="w">    </span><span class="nt">fixed_config</span><span class="p">:</span>
-<span class="w">      </span><span class="nt">tokenizer_path</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Qwen/Qwen3-Coder-480B-A35B-Instruct&quot;</span>
-<span class="w">      </span><span class="nt">checkpoint_path</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Qwen/Qwen3-Coder-480B-A35B-Instruct&quot;</span>
-<span class="w">      </span><span class="nt">model_type</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;qwen_3_moe&quot;</span>
-<span class="w">      </span><span class="nt">is_decode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<span class="w">      </span><span class="nt">weight_type</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;fp8&quot;</span>
-<span class="w">      </span><span class="nt">use_deepep_moe</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<span class="w">      </span><span class="nt">use_deepep_low_latency</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<span class="w">      </span><span class="nt">accl_fp8_cast_level</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
-<span class="w">      </span><span class="nt">accl_low_latency_optimize</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
-<span class="w">      </span><span class="nt">accl_dispatch_num_warp_groups</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4</span>
-<span class="w">      </span><span class="nt">accl_combine_num_warp_groups</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4</span>
-<span class="w">      </span><span class="nt">enable_merge_w13</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-</pre></div>
-</div>
-<p><strong>iterative_search_config</strong>: Defines configuration that will be tested in parallel combinations. All configuration in this section must have lists of equal length, as each index position represents one test configuration. For example, if <code class="docutils literal notranslate"><span class="pre">dp_size:</span> <span class="pre">[1,</span> <span class="pre">4]</span></code> and <code class="docutils literal notranslate"><span class="pre">tp_size:</span> <span class="pre">[8,</span> <span class="pre">8]</span></code>, the script will test two configurations: <code class="docutils literal notranslate"><span class="pre">(dp_size=1,</span> <span class="pre">tp_size=8)</span></code> and <code class="docutils literal notranslate"><span class="pre">(dp_size=4,</span> <span class="pre">tp_size=8)</span></code>.</p>
-<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="w">    </span><span class="nt">iterative_search_config</span><span class="p">:</span>
-<span class="w">      </span><span class="nt">dp_size</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">4</span><span class="p p-Indicator">]</span>
-<span class="w">      </span><span class="nt">tp_size</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">8</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">8</span><span class="p p-Indicator">]</span>
-<span class="w">      </span><span class="nt">concurrency_limit</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">8</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">4</span><span class="p p-Indicator">]</span>
-<span class="w">      </span><span class="nt">batch_size_list</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;[8]&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;[4]&quot;</span><span class="p p-Indicator">]</span>
-<span class="w">      </span><span class="nt">input_len_list</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;[2048,4096,8192]&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;[65536]&quot;</span><span class="p p-Indicator">]</span>
-</pre></div>
-</div>
-<p><strong>recursive_search_config</strong>: Defines configuration that will be tested using Cartesian product combinations. Each configuration can have multiple values, and all possible combinations will be tested. For example, with <code class="docutils literal notranslate"><span class="pre">enable_comm_overlap:</span> <span class="pre">[false,</span> <span class="pre">true]</span></code> and <code class="docutils literal notranslate"><span class="pre">enable_layer_micro_batch:</span> <span class="pre">[0,</span> <span class="pre">2]</span></code>, four combinations will be tested: <code class="docutils literal notranslate"><span class="pre">(false,</span> <span class="pre">0)</span></code>, <code class="docutils literal notranslate"><span class="pre">(false,</span> <span class="pre">2)</span></code>, <code class="docutils literal notranslate"><span class="pre">(true,</span> <span class="pre">0)</span></code>, <code class="docutils literal notranslate"><span class="pre">(true,</span> <span class="pre">2)</span></code>.</p>
-<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="w">    </span><span class="nt">recursive_search_config</span><span class="p">:</span>
-<span class="w">      </span><span class="nt">enable_comm_overlap</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">false</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">true</span><span class="p p-Indicator">]</span>
-<span class="w">      </span><span class="nt">enable_layer_micro_batch</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">2</span><span class="p p-Indicator">]</span>
-</pre></div>
-</div>
-</section>
-<section id="run-step">
-<h3>Run step<a class="headerlink" href="#run-step" title="Link to this heading">#</a></h3>
-<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span><span class="c1"># in root of RTP-LLM</span>
-<span class="nb">cd</span><span class="w"> </span>rtp_llm/test/perf_test/multi_node
-<span class="c1"># Configure multi_benchmark_config.yaml</span>
-/opt/conda310/bin/python3<span class="w"> </span>multi_benchmark.py<span class="w"> </span>-c<span class="w"> </span>multi_benchmark_config.yaml
-</pre></div>
-</div>
-<p>Ultimately, multi-node benchmark dumps trace profiles and logs to local <code class="docutils literal notranslate"><span class="pre">test_output</span></code> directory.</p>
-</section>
-</section>
-<section id="result-format">
-<h2>Result Format<a class="headerlink" href="#result-format" title="Link to this heading">#</a></h2>
-<p>Decode result, where batch size stands for per DP Rank</p>
-<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span>+---------------------------------------------------------------------------------------------+
-<span class="p">|</span><span class="w">                                        </span>Decode<span class="w"> </span>Result<span class="w">                                        </span><span class="p">|</span>
-+---------+------------+------------------+--------------+------------------+-----------------+
-<span class="p">|</span><span class="w"> </span>Seq<span class="w"> </span>Len<span class="w"> </span><span class="p">|</span><span class="w"> </span>Batch<span class="w"> </span>Size<span class="w"> </span><span class="p">|</span><span class="w"> </span>Sucess/Total<span class="w"> </span>Req<span class="w"> </span><span class="p">|</span><span class="w"> </span>Input/Output<span class="w"> </span><span class="p">|</span><span class="w"> </span>Waiting<span class="w"> </span>Time<span class="o">(</span>ms<span class="o">)</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>Decode<span class="w"> </span>Time<span class="o">(</span>ms<span class="o">)</span><span class="w"> </span><span class="p">|</span>
-+---------+------------+------------------+--------------+------------------+-----------------+
-<span class="p">|</span><span class="w"> </span><span class="m">4096</span><span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">1</span><span class="w">          </span><span class="p">|</span><span class="w"> </span><span class="m">1</span>/1<span class="w">              </span><span class="p">|</span><span class="w"> </span><span class="m">4096</span>/2048<span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">0</span>.00<span class="w">             </span><span class="p">|</span><span class="w"> </span><span class="m">1</span>.75<span class="w">            </span><span class="p">|</span>
-<span class="p">|</span><span class="w"> </span><span class="m">4096</span><span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">2</span><span class="w">          </span><span class="p">|</span><span class="w"> </span><span class="m">2</span>/2<span class="w">              </span><span class="p">|</span><span class="w"> </span><span class="m">4096</span>/2048<span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">0</span>.00<span class="w">             </span><span class="p">|</span><span class="w"> </span><span class="m">1</span>.72<span class="w">            </span><span class="p">|</span>
-<span class="p">|</span><span class="w"> </span><span class="m">4096</span><span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">4</span><span class="w">          </span><span class="p">|</span><span class="w"> </span><span class="m">4</span>/4<span class="w">              </span><span class="p">|</span><span class="w"> </span><span class="m">4096</span>/2048<span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">0</span>.00<span class="w">             </span><span class="p">|</span><span class="w"> </span><span class="m">1</span>.91<span class="w">            </span><span class="p">|</span>
-<span class="p">|</span><span class="w"> </span><span class="m">4096</span><span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">8</span><span class="w">          </span><span class="p">|</span><span class="w"> </span><span class="m">8</span>/8<span class="w">              </span><span class="p">|</span><span class="w"> </span><span class="m">4096</span>/2048<span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">0</span>.00<span class="w">             </span><span class="p">|</span><span class="w"> </span><span class="m">1</span>.93<span class="w">            </span><span class="p">|</span>
-<span class="p">|</span><span class="w"> </span><span class="m">4096</span><span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">16</span><span class="w">         </span><span class="p">|</span><span class="w"> </span><span class="m">16</span>/16<span class="w">            </span><span class="p">|</span><span class="w"> </span><span class="m">4096</span>/2048<span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">0</span>.00<span class="w">             </span><span class="p">|</span><span class="w"> </span><span class="m">2</span>.00<span class="w">            </span><span class="p">|</span>
-<span class="p">|</span><span class="w"> </span><span class="m">4096</span><span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">32</span><span class="w">         </span><span class="p">|</span><span class="w"> </span><span class="m">32</span>/32<span class="w">            </span><span class="p">|</span><span class="w"> </span><span class="m">4096</span>/2048<span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">0</span>.00<span class="w">             </span><span class="p">|</span><span class="w"> </span><span class="m">2</span>.19<span class="w">            </span><span class="p">|</span>
-<span class="p">|</span><span class="w"> </span><span class="m">4096</span><span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">48</span><span class="w">         </span><span class="p">|</span><span class="w"> </span><span class="m">48</span>/48<span class="w">            </span><span class="p">|</span><span class="w"> </span><span class="m">4096</span>/2048<span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">0</span>.00<span class="w">             </span><span class="p">|</span><span class="w"> </span><span class="m">2</span>.43<span class="w">            </span><span class="p">|</span>
-<span class="p">|</span><span class="w"> </span><span class="m">4096</span><span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">64</span><span class="w">         </span><span class="p">|</span><span class="w"> </span><span class="m">64</span>/64<span class="w">            </span><span class="p">|</span><span class="w"> </span><span class="m">4096</span>/2048<span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">0</span>.00<span class="w">             </span><span class="p">|</span><span class="w"> </span><span class="m">2</span>.60<span class="w">            </span><span class="p">|</span>
-<span class="p">|</span><span class="w"> </span><span class="m">4096</span><span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">80</span><span class="w">         </span><span class="p">|</span><span class="w"> </span><span class="m">80</span>/80<span class="w">            </span><span class="p">|</span><span class="w"> </span><span class="m">4096</span>/2048<span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">0</span>.00<span class="w">             </span><span class="p">|</span><span class="w"> </span><span class="m">2</span>.87<span class="w">            </span><span class="p">|</span>
-+---------+------------+------------------+--------------+------------------+-----------------+
-</pre></div>
-</div>
-<p>Trace files and logs</p>
-<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span>test_output/
-├──<span class="w"> </span>Experiment_H20_Node1_20251023-181554-251847
-│<span class="w">   </span>├──<span class="w"> </span>Benchmark_Qwen3-8B_20251023-184040-471413
-│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>Task_concurrency_limit-4_batch_size_list-<span class="o">[</span><span class="m">4</span><span class="o">]</span>_input_len_list-<span class="o">[</span><span class="m">8192</span><span class="o">]</span>
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>clean.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>copy.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>Decode_Result.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>kill.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>process_logs
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>process_TEST_OUTPUT_QWEN_3_1_2_0_20251023_184240.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>test.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>trace_files
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>normal_profiler_wr0_b4_s8192_prefill0_1.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>└──<span class="w"> </span>normal_profiler_wr1_b0_s0_prefill0_1.json
-│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>Task_concurrency_limit-8_batch_size_list-<span class="o">[</span><span class="m">8</span><span class="o">]</span>_input_len_list-<span class="o">[</span><span class="m">2048</span>,4096<span class="o">]</span>
-│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>clean.log
-│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>copy.log
-│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>Decode_Result.json
-│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>kill.log
-│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>process_logs
-│<span class="w">   </span>│<span class="w">       </span>│<span class="w">   </span>└──<span class="w"> </span>process_TEST_OUTPUT_QWEN_3_1_2_0_20251023_184046.log
-│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>test.log
-│<span class="w">   </span>│<span class="w">       </span>└──<span class="w"> </span>trace_files
-│<span class="w">   </span>│<span class="w">           </span>├──<span class="w"> </span>normal_profiler_wr0_b8_s2048_prefill0_1.json
-│<span class="w">   </span>│<span class="w">           </span>├──<span class="w"> </span>normal_profiler_wr0_b8_s4096_prefill0_2.json
-│<span class="w">   </span>│<span class="w">           </span>├──<span class="w"> </span>normal_profiler_wr1_b0_s0_prefill0_1.json
-│<span class="w">   </span>│<span class="w">           </span>└──<span class="w"> </span>normal_profiler_wr1_b0_s0_prefill0_2.json
-│<span class="w">   </span>├──<span class="w"> </span>Benchmark_Qwen3-Coder-480B-A35B-Instruct-FP8_20251023-181634-679473
-│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>Task_concurrency_limit-4_batch_size_list-<span class="o">[</span><span class="m">4</span><span class="o">]</span>_input_len_list-<span class="o">[</span><span class="m">8192</span><span class="o">]</span>_accl_dispatch_num_warp_groups-4_accl_combine_num_warp_groups-4
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>clean.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>copy.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>Decode_Result.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>kill.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>process_logs
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>process_TEST_OUTPUT_QWEN_3_MOE_1_2_0_20251023_183008.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>test.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>trace_files
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>normal_profiler_wr0_b4_s8192_prefill0_1.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>└──<span class="w"> </span>normal_profiler_wr1_b0_s0_prefill0_1.json
-│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>Task_concurrency_limit-4_batch_size_list-<span class="o">[</span><span class="m">4</span><span class="o">]</span>_input_len_list-<span class="o">[</span><span class="m">8192</span><span class="o">]</span>_accl_dispatch_num_warp_groups-4_accl_combine_num_warp_groups-5
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>clean.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>copy.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>Decode_Result.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>kill.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>process_logs
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>process_TEST_OUTPUT_QWEN_3_MOE_1_2_0_20251023_183240.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>test.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>trace_files
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>normal_profiler_wr0_b4_s8192_prefill0_1.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>└──<span class="w"> </span>normal_profiler_wr1_b0_s0_prefill0_1.json
-│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>Task_concurrency_limit-4_batch_size_list-<span class="o">[</span><span class="m">4</span><span class="o">]</span>_input_len_list-<span class="o">[</span><span class="m">8192</span><span class="o">]</span>_accl_dispatch_num_warp_groups-5_accl_combine_num_warp_groups-4
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>clean.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>copy.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>Decode_Result.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>kill.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>process_logs
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>process_TEST_OUTPUT_QWEN_3_MOE_1_2_0_20251023_183518.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>test.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>trace_files
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>normal_profiler_wr0_b4_s8192_prefill0_1.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>└──<span class="w"> </span>normal_profiler_wr1_b0_s0_prefill0_1.json
-│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>Task_concurrency_limit-4_batch_size_list-<span class="o">[</span><span class="m">4</span><span class="o">]</span>_input_len_list-<span class="o">[</span><span class="m">8192</span><span class="o">]</span>_accl_dispatch_num_warp_groups-5_accl_combine_num_warp_groups-5
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>clean.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>copy.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>Decode_Result.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>kill.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>process_logs
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>process_TEST_OUTPUT_QWEN_3_MOE_1_2_0_20251023_183801.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>test.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>trace_files
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>normal_profiler_wr0_b4_s8192_prefill0_1.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>└──<span class="w"> </span>normal_profiler_wr1_b0_s0_prefill0_1.json
-│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>Task_concurrency_limit-8_batch_size_list-<span class="o">[</span><span class="m">8</span><span class="o">]</span>_input_len_list-<span class="o">[</span><span class="m">2048</span>,4096<span class="o">]</span>_accl_dispatch_num_warp_groups-4_accl_combine_num_warp_groups-4
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>clean.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>copy.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>Decode_Result.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>kill.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>process_logs
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>process_TEST_OUTPUT_QWEN_3_MOE_1_2_0_20251023_181641.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>test.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>trace_files
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>normal_profiler_wr0_b8_s2048_prefill0_1.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>normal_profiler_wr0_b8_s4096_prefill0_2.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>normal_profiler_wr1_b0_s0_prefill0_1.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>└──<span class="w"> </span>normal_profiler_wr1_b0_s0_prefill0_2.json
-│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>Task_concurrency_limit-8_batch_size_list-<span class="o">[</span><span class="m">8</span><span class="o">]</span>_input_len_list-<span class="o">[</span><span class="m">2048</span>,4096<span class="o">]</span>_accl_dispatch_num_warp_groups-4_accl_combine_num_warp_groups-5
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>clean.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>copy.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>Decode_Result.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>kill.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>process_logs
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>process_TEST_OUTPUT_QWEN_3_MOE_1_2_0_20251023_182004.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>test.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>trace_files
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>normal_profiler_wr0_b8_s2048_prefill0_1.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>normal_profiler_wr0_b8_s4096_prefill0_2.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>normal_profiler_wr1_b0_s0_prefill0_1.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>└──<span class="w"> </span>normal_profiler_wr1_b0_s0_prefill0_2.json
-│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>Task_concurrency_limit-8_batch_size_list-<span class="o">[</span><span class="m">8</span><span class="o">]</span>_input_len_list-<span class="o">[</span><span class="m">2048</span>,4096<span class="o">]</span>_accl_dispatch_num_warp_groups-5_accl_combine_num_warp_groups-4
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>clean.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>copy.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>Decode_Result.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>kill.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>process_logs
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>process_TEST_OUTPUT_QWEN_3_MOE_1_2_0_20251023_182327.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>test.log
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>trace_files
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>normal_profiler_wr0_b8_s2048_prefill0_1.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>normal_profiler_wr0_b8_s4096_prefill0_2.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>normal_profiler_wr1_b0_s0_prefill0_1.json
-│<span class="w">   </span>│<span class="w">   </span>│<span class="w">       </span>└──<span class="w"> </span>normal_profiler_wr1_b0_s0_prefill0_2.json
-│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>Task_concurrency_limit-8_batch_size_list-<span class="o">[</span><span class="m">8</span><span class="o">]</span>_input_len_list-<span class="o">[</span><span class="m">2048</span>,4096<span class="o">]</span>_accl_dispatch_num_warp_groups-5_accl_combine_num_warp_groups-5
-│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>clean.log
-│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>copy.log
-│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>Decode_Result.json
-│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>kill.log
-│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>process_logs
-│<span class="w">   </span>│<span class="w">       </span>│<span class="w">   </span>└──<span class="w"> </span>process_TEST_OUTPUT_QWEN_3_MOE_1_2_0_20251023_182644.log
-│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>test.log
-│<span class="w">   </span>│<span class="w">       </span>└──<span class="w"> </span>trace_files
-│<span class="w">   </span>│<span class="w">           </span>├──<span class="w"> </span>normal_profiler_wr0_b8_s2048_prefill0_1.json
-│<span class="w">   </span>│<span class="w">           </span>├──<span class="w"> </span>normal_profiler_wr0_b8_s4096_prefill0_2.json
-│<span class="w">   </span>│<span class="w">           </span>├──<span class="w"> </span>normal_profiler_wr1_b0_s0_prefill0_1.json
-│<span class="w">   </span>│<span class="w">           </span>└──<span class="w"> </span>normal_profiler_wr1_b0_s0_prefill0_2.json
-│<span class="w">   </span>├──<span class="w"> </span>build.log
-│<span class="w">   </span>├──<span class="w"> </span>clean.log
-│<span class="w">   </span>├──<span class="w"> </span>host.log
-│<span class="w">   </span>└──<span class="w"> </span>kill.log
-└──<span class="w"> </span>Experiment_H20_Node1_20251023-200243-425716
-<span class="w">    </span>├──<span class="w"> </span>Benchmark_Qwen3-8B_20251023-205656-543908
-<span class="w">    </span>│<span class="w">   </span>├──<span class="w"> </span>Task_concurrency_limit-4_batch_size_list-<span class="o">[</span><span class="m">4</span><span class="o">]</span>_input_len_list-<span class="o">[</span><span class="m">8192</span><span class="o">]</span>
-<span class="w">    </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>clean.log
-<span class="w">    </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>copy.log
-<span class="w">    </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>Decode_Result.json
-<span class="w">    </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>kill.log
-<span class="w">    </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>process_logs
-<span class="w">    </span>│<span class="w">   </span>│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>process_TEST_OUTPUT_QWEN_3_1_2_0_20251023_205847.log
-<span class="w">    </span>│<span class="w">   </span>│<span class="w">   </span>├──<span class="w"> </span>test.log
-<span class="w">    </span>│<span class="w">   </span>│<span class="w">   </span>└──<span class="w"> </span>trace_files
-<span class="w">    </span>│<span class="w">   </span>│<span class="w">       </span>├──<span class="w"> </span>normal_profiler_wr0_b4_s8192_prefill0_1.json
-<span class="w">    </span>│<span class="w">   </span>│<span class="w">       </span>└──<span class="w"> </span>normal_profiler_wr1_b0_s0_prefill0_1.json
-<span class="w">    </span>│<span class="w">   </span>└──<span class="w"> </span>Task_concurrency_limit-8_batch_size_list-<span class="o">[</span><span class="m">8</span><span class="o">]</span>_input_len_list-<span class="o">[</span><span class="m">2048</span>,4096<span class="o">]</span>
-<span class="w">    </span>│<span class="w">       </span>├──<span class="w"> </span>clean.log
-<span class="w">    </span>│<span class="w">       </span>├──<span class="w"> </span>copy.log
-<span class="w">    </span>│<span class="w">       </span>├──<span class="w"> </span>Decode_Result.json
-<span class="w">    </span>│<span class="w">       </span>├──<span class="w"> </span>kill.log
-<span class="w">    </span>│<span class="w">       </span>├──<span class="w"> </span>process_logs
-<span class="w">    </span>│<span class="w">       </span>│<span class="w">   </span>└──<span class="w"> </span>process_TEST_OUTPUT_QWEN_3_1_2_0_20251023_205700.log
-<span class="w">    </span>│<span class="w">       </span>├──<span class="w"> </span>test.log
-<span class="w">    </span>│<span class="w">       </span>└──<span class="w"> </span>trace_files
-<span class="w">    </span>│<span class="w">           </span>├──<span class="w"> </span>normal_profiler_wr0_b8_s2048_prefill0_1.json
-<span class="w">    </span>│<span class="w">           </span>├──<span class="w"> </span>normal_profiler_wr0_b8_s4096_prefill0_2.json
-<span class="w">    </span>│<span class="w">           </span>├──<span class="w"> </span>normal_profiler_wr1_b0_s0_prefill0_1.json
-<span class="w">    </span>│<span class="w">           </span>└──<span class="w"> </span>normal_profiler_wr1_b0_s0_prefill0_2.json
-<span class="w">    </span>├──<span class="w"> </span>build.log
-<span class="w">    </span>├──<span class="w"> </span>clean.log
-<span class="w">    </span>├──<span class="w"> </span>host.log
-<span class="w">    </span>└──<span class="w"> </span>kill.log
-
-<span class="m">41</span><span class="w"> </span>directories,<span class="w"> </span><span class="m">116</span><span class="w"> </span>files
-</pre></div>
-</div>
-</section>
-</section>
-
-
-                </article>
+<h1 id="rtp-llm-unified-performance-benchmark">RTP-LLM Unified Performance Benchmark</h1>
+<p>RTP-LLM uses one strict performance-test entry for local prefill and decode:
+<code>tools/perf_test</code>. New runs accept one versioned JSON config; engine arguments,
+environment, topology, workload and output are declared in that file rather
+than forwarded as command-line flags. Regression and publishing sections remain
+accepted for schema compatibility; public runs do not invoke those helpers.</p>
+<h2 id="migrating-from-the-legacy-perf-cli">Migrating from the legacy perf CLI</h2>
+<p>The removed <code>perf_test</code> test target and <code>test_entry.py</code> flags do not work with
+<code>tools/perf_test</code>. Start from a JSON file in <code>rtp_llm/test/perf_test/examples/</code>
+and map the old options as follows:</p>
+<table>
+<thead>
+<tr>
+<th>Legacy option</th>
+<th>Unified equivalent</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--ckpt_path</code>, <code>--tokenizer_path</code>, <code>--model_type</code></td>
+<td><code>model.checkpoint</code>, <code>model.tokenizer</code>, <code>model.type</code> in the JSON config</td>
+</tr>
+<tr>
+<td><code>--dp_size</code>, <code>--tp_size</code>, <code>--pp_size</code>, <code>--ep_size</code></td>
+<td><code>model.topology.dp</code>, <code>.tp</code>, <code>.pp</code>, <code>.ep</code></td>
+</tr>
+<tr>
+<td><code>--batch_size</code>, <code>--input_len</code>, <code>--output_len</code></td>
+<td>Decode <code>workload.batch.sizes</code>, <code>workload.input_lengths</code>, <code>workload.output_lengths</code>; prefill uses <code>workload.batch_sizes</code> and its cache-grid axes</td>
+</tr>
+<tr>
+<td><code>--test_env=NAME=value</code></td>
+<td>Supported environment settings in <code>engine.env</code>; undeclared settings are rejected</td>
+</tr>
+<tr>
+<td><code>--perf_test_name</code></td>
+<td><code>model.label</code> for the descriptive name; the run ID is generated separately</td>
+</tr>
+<tr>
+<td><code>--partial=1</code> (decode), <code>--partial=2</code> (prefill)</td>
+<td><code>--mode=decode</code> or <code>--mode=prefill</code>; <code>--partial=0</code> requires two runs</td>
+</tr>
+</tbody>
+</table>
+<p>The unified entry does not download ModelScope or Hugging Face repository IDs.
+Download the model and tokenizer before running it, then set <code>model.checkpoint</code>
+and <code>model.tokenizer</code> to paths available in the runtime. The separate manual
+<code>offline_bench_test</code> still resolves Hub IDs; that behavior is not part of the
+unified entry.</p>
+<h2 id="single-node-benchmark">Single-Node Benchmark</h2>
+<p>Preview cache-aware prefill without starting a model:</p>
+<div class="highlight"><pre><code class="language-bash">./tools/perf_test --mode=prefill --action=run --config=rtp_llm/test/perf_test/examples/prefill_local.json --dry-run
+</code></pre></div>
+<p>Preview an input-length by output-length by global-batch decode grid:</p>
+<div class="highlight"><pre><code class="language-bash">./tools/perf_test --mode=decode --action=run --config=rtp_llm/test/perf_test/examples/decode_grid_local.json --dry-run
+</code></pre></div>
+<p>Remove <code>--dry-run</code> to execute. Local prefill supports run, resume, profile,
+and offline report; local decode supports run. Model and tokenizer paths must
+already be available in the runtime. Public runs accept <code>execution.backend=local</code>
+and require no internal checkout or private Bazel configuration.</p>
+<p>See <code>rtp_llm/test/perf_test/docs/reference.md</code> for the capability matrix,
+run-directory layout, result contract and exit codes. Mode-specific examples
+are in the adjacent <code>docs/</code> and <code>examples/</code> directories.</p>
+<h2 id="multi-node-benchmark">Multi-Node Benchmark</h2>
+<p>The multi-node launcher starts and stops the distributed service, then executes
+the same normalized prefill or decode plan and result contract as the local entry. Only the
+master rank measures cases and writes the final run; other ranks coordinate
+service lifetime. Each host needs a working RTP-LLM environment and passwordless
+SSH access from the launch host.</p>
+<h3 id="benchmark-configuration">Benchmark configuration</h3>
+<p>Use <code>rtp_llm/test/perf_test/multi_node/multi_benchmark_config.yaml</code> for decode,
+or <code>rtp_llm/test/perf_test/multi_node/prefill_ssh_example.yaml</code> for prefill.
+Both contain these sections:</p>
+<table>
+<thead>
+<tr>
+<th>Section</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>experiment_name</code></td>
+<td>Names the experiment output directory.</td>
+</tr>
+<tr>
+<td><code>test_config</code></td>
+<td>Configures retries, build policy and diagnostic collection.</td>
+</tr>
+<tr>
+<td><code>machine_config</code></td>
+<td>Lists host addresses, SSH user and port.</td>
+</tr>
+<tr>
+<td><code>build_config</code></td>
+<td>Selects repository, revision, remote directory and build arguments.</td>
+</tr>
+<tr>
+<td><code>common_config</code></td>
+<td>Supplies common service settings.</td>
+</tr>
+<tr>
+<td><code>benchmarks</code></td>
+<td>Defines benchmark-specific service settings and a normalized prefill or decode JSON config.</td>
+</tr>
+</tbody>
+</table>
+<p>Every benchmark requires <code>fixed_config.perf_test_config</code>. This path is resolved
+relative to the YAML file. The JSON config owns the workload, engine limits and model
+topology. The launcher validates each expanded task before building or
+contacting hosts. Its TP/DP/PP/EP settings must match the JSON config exactly.</p>
+<p>For example, create a decode JSON config based on
+<code>rtp_llm/test/perf_test/examples/decode_grid_local.json</code>, set its model and
+tokenizer paths to files available on each host, and declare the topology and
+devices for the distributed service. A two-worker DP config can be referenced
+by a launcher benchmark like this:</p>
+<div class="highlight"><pre><code class="language-yaml">benchmarks:
+  - benchmark_name: &quot;Decode_DP2&quot;
+    fixed_config:
+      perf_test_config: &quot;./configs/decode_dp2.json&quot;
+      checkpoint_path: &quot;/models/Qwen3-8B&quot;
+      tokenizer_path: &quot;/models/Qwen3-8B&quot;
+      model_type: &quot;qwen_3&quot;
+      tp_size: 1
+      dp_size: 2
+      pp_size: 1
+      ep_size: 1
+      local_world_size: 2
+</code></pre></div>
+<p>Supply the machine, build and common service sections from the launcher reference
+for your environment. In this example the JSON config must declare
+<code>model.topology = {&quot;tp&quot;: 1, &quot;dp&quot;: 2, &quot;pp&quot;: 1, &quot;ep&quot;: 1}</code> and the corresponding
+devices.</p>
+<p>An optional <code>iterative_search_config</code> zips equal-length lists by index; an optional
+<code>recursive_search_config</code> forms the Cartesian product of its values. These expand
+service configurations. If a task changes topology, it must reference a JSON
+config with that topology. For example, the following searches four combinations:</p>
+<div class="highlight"><pre><code class="language-yaml">recursive_search_config:
+  concurrency_limit: [4, 8]
+  gen_num_per_cycle: [2, 3]
+</code></pre></div>
+<p>Decode workload axes remain in the JSON config:
+fixed workloads use <code>input_lengths</code>, <code>output_lengths</code> and
+<code>batch: {&quot;strategy&quot;: &quot;fixed&quot;, &quot;sizes&quot;: [...]}</code>; TPOT workloads use
+<code>batch: {&quot;strategy&quot;: &quot;target_tpot&quot;, &quot;max_size&quot;: ..., &quot;candidate_step&quot;: ..., &quot;target_tpot_ms&quot;: ...}</code>.</p>
+<p>For prefill, the JSON workload can define cache grids, named grids, explicit
+request batches, random batches or a traffic distribution. The controller
+freezes traffic cases before delivery so the remote hosts do not need its
+source distribution file. Rank zero uses the same cache probe, measurements,
+result envelope and report generator as the local prefill path. A multi-request
+prefill batch requires DP=1. The prefill example uses two hosts with TP=2 and
+DP=1; update the model paths, revision and hosts for your environment.</p>
+<p>The prefill example checks out the public repository directly and installs
+requirements from its <code>deps/</code> directory. It does not require <code>internal_source</code>.
+SSH, rank and collection failures return nonzero; collected run artifacts and
+task logs remain available for diagnosis.</p>
+<p>Run from the repository root after preparing your YAML and JSON configs:</p>
+<div class="highlight"><pre><code class="language-bash">python -m rtp_llm.test.perf_test.multi_node.multi_benchmark \
+  -c rtp_llm/test/perf_test/multi_node/multi_benchmark_config.yaml
+</code></pre></div>
+<h3 id="results-and-profiling">Results and profiling</h3>
+<p>Decode batches are global across all DP workers. A global batch of 5 with DP=2
+allocates 3 requests to one worker and 2 to the other. Results record
+<code>global_batch_size</code> and each worker's local allocation. For target-TPOT search,
+top-level metrics describe the selected best global batch; the configured
+maximum and every attempted candidate remain in <code>metrics.search</code>.</p>
+<p>Each case retains its requested output length, batch policy, status, request
+outcomes, latency and throughput. Failed cases without formal metrics remain
+diagnostic. A partial performance run has a nonzero exit code. An inline profile
+failure preserves valid formal metrics and increments <code>profiling_failed_cases</code>.</p>
+<p>Collected artifacts are stored under a benchmark's task directory:</p>
+<div class="highlight"><pre><code class="language-text">test_output/
+└── Experiment_&lt;name&gt;_&lt;timestamp&gt;/
+    └── Benchmark_&lt;name&gt;_&lt;timestamp&gt;/
+        └── Task_hack_layer_num-4_dp_size-2/
+            ├── test.log
+            ├── copy.log
+            ├── clean.log
+            ├── process_logs/
+            ├── trace_files/
+            │   └── &lt;manifest-listed-trace&gt;.json
+            └── run/
+                ├── manifest.json
+                ├── execution_plan.json
+                ├── source_config.json
+                ├── resolved_config.json
+                ├── results/
+                │   ├── result.json
+                │   ├── summary.json
+                │   └── cases/&lt;case_id&gt;.json
+                ├── reports/
+                │   └── decode_report.json
+                └── profiles/
+                    └── &lt;case_id&gt;/profile_manifest.json
+</code></pre></div>
+<p><code>run/results/result.json</code> is the schema-v2 common envelope, containing run
+identity, fingerprints, metadata, summary and ordered cases.
+<code>run/reports/decode_report.json</code> contains flat observations and input-by-output
+matrices grouped by exact batch or TPOT strategy. Profile manifests record
+profile status, full input shape, requested output length, selected batch and
+listed artifacts. Profiling must be enabled in the workload to produce them.
+The collector always copies standard run artifacts and also preserves available
+diagnostics for partial runs; optional process logs/traces depend on diagnostic
+collection settings.</p>
+<p>To merge results, pass the benchmark directory containing <code>Task_*</code> children:</p>
+<div class="highlight"><pre><code class="language-bash">python -m rtp_llm.test.perf_test.multi_node.analyzer.merge_decode_results \
+  /path/to/Benchmark_run -o decode_results.csv
+</code></pre></div>
+<p>The merger also accepts standard run artifacts directly beneath <code>Task_*</code>.
+It validates data with the shared result schema, diagnoses invalid files/cases,
+and avoids counting the same run/case twice if direct and nested copies coexist.
+CSV rows retain input/output lengths, strategy, global/selected batch, success
+rate, latency, TPOT, throughput and status.</p>
+<p>Analyze collected traces with:</p>
+<div class="highlight"><pre><code class="language-bash">python -m rtp_llm.test.perf_test.multi_node.analyzer.batch_analyze \
+  /path/to/Benchmark_run --min-occurrences 20
+</code></pre></div>
+<p>Trace discovery reads completed profile manifests, takes DP from each task name,
+and obtains shape and artifact paths from the manifest. Different output lengths
+remain separate in every CSV/table. Failed manifests, missing artifacts and
+nonuniform input distributions that cannot fit the scalar input-length axis
+produce diagnostics.</p>
+</article>
 
 
 
@@ -848,16 +746,12 @@ In detail, the batch-scheduler profiler is executed three times for a single inp
   </div>
   <nav class="bd-toc-nav page-toc">
     <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#design-principle">Design Principle</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#migrating-from-the-legacy-perf-cli">Migrating from the legacy perf CLI</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#single-node-benchmark">Single-Node Benchmark</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#multi-node-benchmark">Multi Node Benchmark</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#benchmark-yaml">Benchmark Yaml</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#run-step">Run step</a></li>
-</ul>
-</li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#result-format">Result Format</a></li>
-</ul>
-  </nav></div>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#multi-node-benchmark">Multi-Node Benchmark</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#benchmark-configuration">Benchmark configuration</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#results-and-profiling">Results and profiling</a></li>
+</ul></nav></div>
 
 </div></div>
 

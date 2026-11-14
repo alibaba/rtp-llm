@@ -78,26 +78,12 @@ msgstr ""
 msgid "Single-Node Benchmark"
 msgstr ""
 
-#: ../../benchmark/benchmark.md:14
+#: ../../benchmark/benchmark.md:3
 msgid ""
-"using commands below can start a performance benchmark, mixed prefill and"
-" decode"
-msgstr ""
-
-#: ../../benchmark/benchmark.md:27
-msgid ""
-"specially `batch_size` states for the batch in single DP node, when "
-"`DP_SIZE` param is setted."
-msgstr ""
-
-#: ../../benchmark/benchmark.md:29
-#, python-brace-format
-msgid ""
-"also we support test prefill or decode only when prefill and decode not "
-"share the same config(such as prefill use deepep normal, and decode use "
-"deepep masked), in that case user should also set "
-"`--partial={0:all(default), 1:decode, 2:prefill}`, below is an example of"
-" testing decode only:"
+"RTP-LLM uses one strict performance-test entry for local prefill and decode: "
+"`tools/perf_test`. New runs accept one versioned JSON config; engine arguments, "
+"environment, topology, workload, output, regression, and publishing policy are "
+"declared in that file rather than forwarded as command-line flags."
 msgstr ""
 
 #: ../../benchmark/benchmark.md:33

@@ -60,6 +60,7 @@ from rtp_llm.dash_sc.inference.servicer import (
     _dash_error_spec_for_ft_exception,
     _derive_max_token_id,
     _finish_server_trace,
+    _matched_echo_prefix_ids,
     _request_qos_level,
     build_think_runtime,
     iter_real_model_stream_infer,
@@ -2757,6 +2758,14 @@ class _FakeGrpcContext:
 
 
 class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
+    def test_matches_echo_prefix_from_int32_memoryview(self) -> None:
+        input_ids = memoryview(struct.pack("<3i", 7, 128821, 198)).cast("i")
+
+        self.assertEqual(
+            _matched_echo_prefix_ids(input_ids, [128821, 198]),
+            [128821, 198],
+        )
+
     def _valid_infer_request(self) -> predict_v2_pb2.ModelInferRequest:
         req = predict_v2_pb2.ModelInferRequest()
         req.id = "srv-1"

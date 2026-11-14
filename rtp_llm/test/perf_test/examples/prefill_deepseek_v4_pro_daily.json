@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "model": {
+    "label": "dsv4-pro-prefill-daily-L20B",
+    "type": "deepseek_v4",
+    "checkpoint": "/mnt/nas1/hf/DeepSeek-V4-Pro",
+    "tokenizer": "/mnt/nas1/hf/DeepSeek-V4-Pro",
+    "topology": {
+      "tp": 8,
+      "dp": 1,
+      "pp": 1,
+      "ep": 8
+    }
+  },
+  "engine": {
+    "max_seq_len": 1048576,
+    "max_batch_tokens": 1048576,
+    "concurrency_limit": 32,
+    "args": {
+      "cp_rotate_method": "ALL_GATHER",
+      "cache_store_rdma_connect_timeout_ms": 800,
+      "reuse_cache": 1,
+      "load_cache_timeout_ms": 30000,
+      "fp8_kv_cache": 1,
+      "reserver_runtime_mem_mb": 81920,
+      "memory_cache_size_mb": 100000,
+      "enable_memory_cache": 0,
+      "cp_force_single_prefill": 0,
+      "frontend_server_count": 1,
+      "think_start_tag": "<think>",
+      "think_mode": 1,
+      "think_end_tag": "</think>",
+      "prefill_cp_kv_cache_sharded": 1,
+      "kernel_seq_size_per_block": 128,
+      "seq_size_per_block": 128,
+      "dsv4_hca_state_pool_blocks": 200,
+      "memory_cache_sync_timeout_ms": 60000,
+      "max_batch_tokens_without_cache": 50000,
+      "reserve_block_ratio": 1,
+      "grpc_config_json": "{\"client_config\":{\"grpc.max_receive_message_length\":1073741824,\"grpc.max_metadata_size\":1073741824},\"server_config\":{\"grpc.max_receive_message_length\":1073741824,\"grpc.max_metadata_size\":1073741824,\"grpc.max_concurrent_streams\":100000,\"grpc.max_connection_idle_ms\":600000,\"grpc.http2.min_recv_ping_interval_without_data_ms\":1000,\"grpc.http2.max_ping_strikes\":1000},\"max_server_pollers\":4}"
+    },
+    "env": {
+      "TOKENIZERS_PARALLELISM": "false",
+      "DG_JIT_CPP_STANDARD": "20",
+      "DG_JIT_PRINT_COMPILER_COMMAND": "1",
+      "DG_JIT_PRINT_LOAD_TIME": "1",
+      "DSV4_CHUNK_TOKENS": "8192",
+      "DSV4_TRAP_INVALID_KV_ACCESS": "0",
+      "PREFILL_CACHE_HIT_METRIC_ENABLE": "1",
+      "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True,large_segment_size_mb:1024",
+      "DG_MEGA_MOE_NVLINK_BARRIER_TIMEOUT_SECS": "300"
+    }
+  },
+  "workload": {
+    "kind": "cache_grid",
+    "transport": "dashsc_input_ids",
+    "cache_alignment": 1024,
+    "commit_tail_tokens": 1024,
+    "probe_block_size": 1024,
+    "measure_runs": 2,
+    "workspace_tokens": 1048576,
+    "seed": 2026,
+    "traffic_request_batches": {
+      "distribution_file": "req_distribution.json",
+      "num_cases": 100,
+      "batch_sizes": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        24,
+        32
+      ],
+      "min_input_tokens": 16384,
+      "max_input_tokens": 204800
+    }
+  },
+  "execution": {
+    "backend": "aone",
+    "resource": "daily",
+    "gpu_type": "SM103_CU13",
+    "shard_count": 1,
+    "max_parallel": 1
+  },
+  "output": {
+    "result_root": "perf_test_results"
+  },
+  "regression": {},
+  "publish": {}
+}

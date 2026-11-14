@@ -3,6 +3,7 @@
 # Packages that link libcudart.so.12 (flash_attn, fast_hadamard,
 # nvidia_cutlass_dsl) are deferred.
 -r requirements_base.txt
+plotly==7.1.0
 torch==2.11.0+cu130
 torchvision==0.26.0+cu130
 mysql-connector-python

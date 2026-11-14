@@ -110,7 +110,8 @@ class MagaServerManagerTest(unittest.TestCase):
                 release_health.set()
             self.assertFalse(wait_result.result(timeout=5))
 
-        process.poll.assert_called_once_with()
+        self.assertEqual(2, process.poll.call_count)
+        process.poll.assert_called_with()
         self.assertEqual(self.manager.exit_code, -signal.SIGTERM)
         self.assertIn("pid=4242 killed by SIGTERM", "\n".join(logs.output))
         self.assertNotIn("still alive", "\n".join(logs.output))

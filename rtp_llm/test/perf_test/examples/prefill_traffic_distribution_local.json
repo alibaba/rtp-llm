@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "model": {
+    "label": "qwen3-4b-traffic-prefill",
+    "type": "qwen_3",
+    "checkpoint": "/models/Qwen3-4B",
+    "tokenizer": "/models/Qwen3-4B",
+    "topology": {"tp": 1, "dp": 1, "pp": 1, "ep": 1}
+  },
+  "engine": {
+    "max_seq_len": 8193,
+    "max_batch_tokens": 32768,
+    "concurrency_limit": 4,
+    "args": {"reuse_cache": 1},
+    "env": {"TOKENIZERS_PARALLELISM": "false"}
+  },
+  "workload": {
+    "kind": "cache_grid",
+    "cache_alignment": 64,
+    "commit_tail_tokens": 64,
+    "measure_runs": 3,
+    "workspace_tokens": 32768,
+    "seed": 20261009,
+    "traffic_request_batches": {
+      "distribution_file": "req_distribution.json",
+      "num_cases": 12,
+      "batch_sizes": [1, 4],
+      "min_input_tokens": 512,
+      "max_input_tokens": 8192,
+      "kv_budget_tokens": 32768
+    }
+  },
+  "execution": {"backend": "local", "devices": [0]},
+  "output": {"result_root": "perf_test_results"},
+  "regression": {},
+  "publish": {}
+}

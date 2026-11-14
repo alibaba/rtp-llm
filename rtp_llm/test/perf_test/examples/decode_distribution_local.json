@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "model": {
+    "label": "qwen2.5-7b-decode-distribution",
+    "type": "qwen_2",
+    "checkpoint": "/data/models/Qwen2.5-7B-Instruct",
+    "tokenizer": "/data/models/Qwen2.5-7B-Instruct",
+    "topology": {
+      "tp": 1,
+      "dp": 1,
+      "pp": 1,
+      "ep": 1
+    }
+  },
+  "engine": {
+    "max_seq_len": 4097,
+    "max_batch_tokens": 8192,
+    "concurrency_limit": 4,
+    "args": {},
+    "env": {}
+  },
+  "workload": {
+    "kind": "distribution",
+    "distribution_file": "decode_distribution_requests.json",
+    "output_length": 64,
+    "batch": {
+      "strategy": "fixed",
+      "sizes": [2, 4]
+    },
+    "measure_runs": 3,
+    "warmup_runs": 1,
+    "generate_config": {
+      "top_k": 1
+    },
+    "profiling": {
+      "enabled": false
+    }
+  },
+  "execution": {
+    "backend": "local",
+    "devices": [
+      0
+    ]
+  },
+  "output": {
+    "result_root": "perf_test_results"
+  },
+  "regression": {},
+  "publish": {}
+}

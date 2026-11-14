@@ -10,8 +10,8 @@ import logging
 import os
 
 from rtp_llm.test.perf_test.dataset import extract_arg
+from rtp_llm.test.perf_test.engine_paths import resolve_engine_paths
 from rtp_llm.test.perf_test.offline_runner import OfflineBenchConfig, OfflineRunner
-from rtp_llm.test.perf_test.perf_config import resolve_perf_engine_paths
 from rtp_llm.test.perf_test.server import EngineServer
 from rtp_llm.test.utils.coredump_util import summarize_and_cleanup_coredumps
 
@@ -137,7 +137,7 @@ def main() -> str:
         remaining.extend(["--tp_size", str(tp_size)])
 
     # Resolve Hub IDs (e.g. "Qwen/Qwen3.5-35B-A3B") to local paths
-    remaining = resolve_perf_engine_paths(remaining)
+    remaining = resolve_engine_paths(remaining)
     checkpoint_path = extract_arg(remaining, "checkpoint_path") or checkpoint_path
     tokenizer_path = extract_arg(remaining, "tokenizer_path") or tokenizer_path
     model_type = extract_arg(remaining, "model_type", "") or os.environ.get(

@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <condition_variable>
 #include <list>
@@ -21,6 +22,7 @@ struct BatchDecodeSchedulerConfigLocal: public autil::legacy::Jsonizable {
     uint32_t    batch_size_;
     std::string mode_;
 };
+// Test-only scheduler that preserves explicitly requested batches.
 class BatchDecodeScheduler: public SchedulerBase {
 public:
     enum SchedulerType : std::uint8_t {
@@ -198,11 +200,31 @@ public:
 
         // Refresh the drain state from the current queue. This batch may drain a mixed-mode tail,
         // but later homogeneous arrivals must go through the normal batch-size gate.
-        draining_mixed_modes_ = has_other_mode;
+        draining_mixed_modes_     = has_other_mode;
+        bool cache_wait_timed_out = false;
         for (auto& stream : selected_streams) {
             stream->reportEvent(StreamEvents::CanRun);
             // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
-            while (stream->getStatus() != StreamState::FINISHED && stream->moveToNext() != StreamState::RUNNING) {
+            // This test-only scheduler does not evict or reschedule other streams to reclaim
+            // device KV blocks. A batch that exceeds available KV capacity can therefore keep
+            // retrying allocation in WAITING. With no request timeout, that would block the
+            // scheduler indefinitely. After one stream waits 30 seconds, later streams in this
+            // selected batch get one state-machine attempt and fail immediately unless ready.
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kCacheLoadWaitTimeoutMs);
+            while (stream->getStatus() != StreamState::FINISHED) {
+                const auto state = stream->moveToNext();
+                if (state == StreamState::RUNNING || state == StreamState::FINISHED) {
+                    break;
+                }
+                if (cache_wait_timed_out || std::chrono::steady_clock::now() >= deadline) {
+                    cache_wait_timed_out = true;
+                    stream->reportError(ErrorCode::MALLOC_FAILED,
+                                        "BatchDecodeScheduler: a stream in this batch reached the "
+                                            + std::to_string(kCacheLoadWaitTimeoutMs)
+                                            + " ms cache wait limit; failing stream that cannot enter RUNNING");
+                    stream->moveToNext();
+                    break;
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         }
@@ -288,13 +310,14 @@ private:
     std::list<GenerateStreamPtr> running_streams_;
     uint32_t                     batch_size_;
     bool                         reorder_request_;
-    uint32_t                     current_step_ = 0;
+    uint32_t                     current_step_         = 0;
     bool                         draining_mixed_modes_ = false;
 
     std::shared_ptr<KVCacheManager> cache_manager_;
     kmonitor::MetricsReporterPtr    metrics_reporter_;
     SchedulerType                   scheduler_type_;
-    int                             dp_rank_ = 0;
+    int                             dp_rank_                = 0;
+    static constexpr int64_t        kCacheLoadWaitTimeoutMs = 30000;
 };
 
 }  // namespace rtp_llm
