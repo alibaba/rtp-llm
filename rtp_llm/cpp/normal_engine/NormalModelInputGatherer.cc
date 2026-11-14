@@ -357,8 +357,9 @@ torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor, TensorHolder& host
     return tensor.to(cuda_i32, /*non_blocking=*/true);
 }
 
-void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolder& host_holder,
-                                      bool publish_page_tables) {
+void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input,
+                                        TensorHolder&   host_holder,
+                                        bool            publish_page_tables) {
     // TODO(async): stream state is still gathered through CPU pointers above.
     // Publish only device tensors at the model boundary.
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.publish_core_tensors_to_cuda");
@@ -654,7 +655,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
 
 absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&     model_input,
                                                              const StreamGroups& stream_groups,
-                                                             TensorHolder&       host_holder) const {
+                                                             TensorHolder&       host_holder,
+                                                             bool                advance_streams) const {
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_context_streams");
     std::vector<torch::Tensor> gathered_mm_features;
     std::vector<torch::Tensor> gathered_mm_extra_input;
@@ -763,7 +765,9 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
         addCacheUpdateCopy(
             ctx, stream->streamCacheResource().getKVBlockUpdateMapping(), model_input.kv_cache_group_tags);
-        stream->step();
+        if (advance_streams) {
+            stream->step();
+        }
     }
 
     if (config_.is_multimodal && !gathered_mm_features.empty()) {
@@ -886,7 +890,8 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
 absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGroups& stream_groups,
                                                                 TensorHolder&       host_holder,
                                                                 bool                defer_page_tables,
-                                                                bool                defer_token_metadata) const {
+                                                                bool                defer_token_metadata,
+                                                                bool                advance_context_streams) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d",
                       stream_groups.contextStreams().size(),
@@ -937,7 +942,7 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     model_input.capture_hidden_states = prefill_only;
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
-    RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));
+    RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder, advance_context_streams));
     // Prefill starts from known host tokens, lengths and block tables. Preserve
     // that representation for CP planning and cache-store metadata; the model
     // publishes the device views asynchronously immediately before use. Decode

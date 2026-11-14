@@ -32,11 +32,12 @@ public:
                             std::function<void()>                  profile_step_finish = nullptr);
     ~NormalExecutor();
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
-    void         reportMetrics(const StreamGroups&                        stream_groups,
-                               RtpLLMExecutorMetricsCollector&            executor_collector,
-                               RtpLLMTokenPSMetricsCollector&             tps_collector,
-                               int64_t                                    tps_execute_time_us,
-                               const StreamGroups::TokenCountsByPriority& token_counts_by_priority);
+    absl::StatusOr<PreparedPrefillInput> preparePrefillInput(const std::list<GenerateStreamPtr>& streams) override;
+    void                                 reportMetrics(const StreamGroups&                        stream_groups,
+                                                       RtpLLMExecutorMetricsCollector&            executor_collector,
+                                                       RtpLLMTokenPSMetricsCollector&             tps_collector,
+                                                       int64_t                                    tps_execute_time_us,
+                                                       const StreamGroups::TokenCountsByPriority& token_counts_by_priority);
 
     void setBatchProcessor(std::unique_ptr<NormalBatchStreamProcessor> processor) {
         batch_stream_processor_ = std::move(processor);
@@ -49,7 +50,6 @@ public:
     // Test hook: if set, used to create model when py_model is None
     using ModelFactory = std::function<std::unique_ptr<ModelBase>(const GptModelInitParams&)>;
     static ModelFactory test_model_factory;
-
 
 protected:
     // Stream-async dispatch gate. Reuses the same env var as MtpExecutor so a

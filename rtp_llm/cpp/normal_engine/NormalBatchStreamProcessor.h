@@ -37,6 +37,8 @@ public:
                                                               const GptModelInputs&  model_inputs,
                                                               const GptModelOutputs& model_output) const;
 
+    absl::StatusOr<GptModelInputs> preparePrefillInput(const StreamGroups& streams, TensorHolder& holder) const;
+
     // Build only the CUDA kv_cache_kernel_block_id tensor in group_tags row order.
     // Read-only over streams: no stream->step() and no other fields.
     // Empty input returns an undefined tensor.

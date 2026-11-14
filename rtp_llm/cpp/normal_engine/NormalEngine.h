@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <autil/LockFreeThreadPool.h>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
@@ -49,6 +50,14 @@ public:
     void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) override;
 
 private:
+    struct PreparedPrefillBatch {
+        std::list<GenerateStreamPtr>        streams;
+        std::optional<PreparedPrefillInput> input;
+        int64_t                             host_prepare_start_us = 0;
+        int64_t                             host_prepare_end_us   = 0;
+    };
+    void                            startNextPrefillPrepare();
+    PreparedPrefillBatch            prepareNextPrefillBatch();
     void                            initScheduler();
     std::shared_ptr<GenerateStream> createStream(const std::shared_ptr<GenerateInput>& input);
     bool                            validateStreamForScheduling(const GenerateStreamPtr& stream) const;
@@ -82,27 +91,29 @@ private:
     bool isDSpark() override;
 
 private:
-    int64_t                                       previous_execution_release_us_ = 0;
-    int64_t                                       previous_execution_begin_us_   = 0;
-    autil::ThreadPtr                              loop_thread_;
-    std::atomic<bool>                             running_{false};
-    bool                                          cpu_tp_shutdown_ = false;
-    std::unique_ptr<Executor>                     executor_;
-    ModelConfig                                   model_config_;
-    py::object                                    custom_output_selector_;
-    ParallelismConfig                             parallelism_config;
-    RuntimeConfig                                 runtime_config;
-    EPLBConfig                                    eplb_config;
-    PDSepConfig                                   pd_sep_config;
-    ProfilingDebugLoggingConfig                   profiling_debug_logging_config;
-    KVCacheConfig                                 kv_cache_config;
-    CacheStoreConfig                              cache_store_config;
-    FfnDisAggregateConfig                         ffn_disaggregate_config;
-    ModelSpecificConfig                           model_specific_config;
-    SpeculativeExecutionConfig                    sp_config;
-    kmonitor::MetricsReporterPtr                  metrics_reporter_;
-    std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
-    StepWindowProfiler                            step_profiler_;
+    std::unique_ptr<autil::LockFreeThreadPool>                         prefill_prepare_pool_;
+    std::optional<autil::ThreadPoolBase::Future<PreparedPrefillBatch>> prepared_prefill_batch_;
+    int64_t                                                            previous_execution_release_us_ = 0;
+    int64_t                                                            previous_execution_begin_us_   = 0;
+    autil::ThreadPtr                                                   loop_thread_;
+    std::atomic<bool>                                                  running_{false};
+    bool                                                               cpu_tp_shutdown_ = false;
+    std::unique_ptr<Executor>                                          executor_;
+    ModelConfig                                                        model_config_;
+    py::object                                                         custom_output_selector_;
+    ParallelismConfig                                                  parallelism_config;
+    RuntimeConfig                                                      runtime_config;
+    EPLBConfig                                                         eplb_config;
+    PDSepConfig                                                        pd_sep_config;
+    ProfilingDebugLoggingConfig                                        profiling_debug_logging_config;
+    KVCacheConfig                                                      kv_cache_config;
+    CacheStoreConfig                                                   cache_store_config;
+    FfnDisAggregateConfig                                              ffn_disaggregate_config;
+    ModelSpecificConfig                                                model_specific_config;
+    SpeculativeExecutionConfig                                         sp_config;
+    kmonitor::MetricsReporterPtr                                       metrics_reporter_;
+    std::unique_ptr<ProposeModelEngineInitParams>                      propose_params_;
+    StepWindowProfiler                                                 step_profiler_;
     // Engine-loop counter; advances even when profiling is disabled and never resets between captures.
     int64_t execute_step_ = 0;
     int     reserve_step_ = 0;

@@ -246,11 +246,28 @@ void GenerateStream::releaseResource() {
     RTP_LLM_PROFILE_FUNCTION();
     // Return KV blocks only after all workers that captured this stream finish.
     // Earlier release could let a worker write into blocks owned by another stream.
-    waitPendingAsyncBookkeeping();
-    std::lock_guard<std::mutex> lock(*mutex_);
-    if (!stream_cache_resource_->isResourceReleased()) {
-        stream_cache_resource_->releaseResource();
+    for (;;) {
+        waitPendingAsyncBookkeeping();
+        std::lock_guard<std::mutex> lock(*mutex_);
+        // Preparation can acquire a lease between the wait and this lock.
+        // Recheck under the same lock as tryHoldPrefillResources.
+        if (hasPendingAsyncBookkeeping()) {
+            continue;
+        }
+        if (!stream_cache_resource_->isResourceReleased()) {
+            stream_cache_resource_->releaseResource();
+        }
+        return;
     }
+}
+
+bool GenerateStream::tryHoldPrefillResources() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (hasErrorWithoutLock() || stream_cache_resource_->isResourceReleased()) {
+        return false;
+    }
+    incPendingAsyncBookkeeping();
+    return true;
 }
 
 void GenerateStream::incPendingAsyncBookkeeping() {

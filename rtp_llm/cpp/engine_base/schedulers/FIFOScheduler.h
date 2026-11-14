@@ -34,6 +34,12 @@ public:
     enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
+    bool                                         pruneInvalidPreparedPrefill(std::list<GenerateStreamPtr>& streams);
+    bool                                         beginPrefillExecution();
+    int64_t                                      completePrefillExecution();
+    void                                         discardPreparedPrefill(const std::string& error);
+    absl::Status                                 stop() override;
+    absl::Status                                 finalizeStop() override;
 
 public:
     // for test. Group-aware shadow of the FIFOSchedulerBase helper so that
@@ -97,7 +103,8 @@ private:
     // finalized. FIFOSchedulerBase::evaluateWaitingStreams() is left untouched for the other
     // FIFOSchedulerBase subclasses.
     void admitWaitingStreams(std::list<GenerateStreamPtr>&       waiting_streams,
-                             const std::list<GenerateStreamPtr>& already_admitted_streams);
+                             const std::list<GenerateStreamPtr>& already_admitted_streams,
+                             bool                                allow_admission = true);
 
     void cancelGroups(StreamGroupQueue& group_queue);
     void evaluateWaitingGroupQueue();
@@ -117,6 +124,12 @@ private:
     // Explicit request groups (enqueueGroup). Each group is admitted as a whole
     // to an isolated execution boundary; a partially admitted group keeps its
     // residual members at the queue head.
+    const bool  prefill_async_scheduling_;
+    StreamGroup executing_prefill_streams_;
+    StreamGroup completed_prefill_streams_;
+    size_t      executing_inited_kv_streams_ = 0;
+    bool        prepared_prefill_reserved_   = false;
+
     StreamGroupQueue waiting_group_queue_;
     StreamGroupQueue loading_cache_group_queue_;
 

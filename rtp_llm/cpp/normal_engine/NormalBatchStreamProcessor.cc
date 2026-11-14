@@ -62,7 +62,7 @@ absl::Status NormalBatchStreamProcessor::dispatchPrefillOnly(
     GenerationPrefillCudaGraphStatus                      generation_prefill_cuda_graph_status,
     std::optional<RemoteRestoreTiming::Clock::time_point> context_kv_all_rank_gpu_ready_at) const {
     for (const auto& stream : stream_groups.allStreams()) {
-        auto empty_token_ids = torch::empty({stream->currentBatchSize(), 0}, torch::kInt32);
+        auto             empty_token_ids = torch::empty({stream->currentBatchSize(), 0}, torch::kInt32);
         StreamUpdateInfo update_info{empty_token_ids,
                                      /*num_new_tokens=*/0,
                                      /*hidden_states=*/torch::Tensor(),
@@ -87,6 +87,11 @@ absl::Status NormalBatchStreamProcessor::dispatchPrefillOnly(
 absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups,
                                                                             TensorHolder&       host_holder) const {
     return model_input_gatherer_->gather(stream_groups, host_holder);
+}
+
+absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::preparePrefillInput(const StreamGroups& streams,
+                                                                               TensorHolder&       holder) const {
+    return model_input_gatherer_->gather(streams, holder, false, false, false);
 }
 
 absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
