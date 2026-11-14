@@ -14,6 +14,43 @@ namespace test {
 
 namespace {
 
+TEST(BlockIdsPrefillPlanTest, ExecutionAliasesNeverChangeOwnershipOrPublishTemporaryContents) {
+    auto     plan = std::make_shared<LinearPrefillPlan>(12 * 1024 + 128, 128, 1024, 5);
+    BlockIds ids;
+    ids.resize(97);
+    int physical = 10;
+    for (const auto position : plan->newPositions()) {
+        ids.setAt(position, physical++);
+    }
+    ids.setLinearPrefillPlan(plan);
+    const auto       ownership = ids.blocks();
+    BlockIndicesType execution(97);
+    int64_t          prefix = 0;
+    for (int round = 1; prefix < plan->promptTokens(); ++round) {
+        const auto query = std::min<int64_t>(2048, plan->promptTokens() - prefix);
+        ASSERT_TRUE(ids.copyLinearPrefillKernelBlocks(prefix, query, execution.data()));
+        EXPECT_EQ(ids.blocks(), ownership);
+        if (round == 2) {
+            EXPECT_EQ(execution[15], ownership[96]);  // Read temporary C2 from T.
+            EXPECT_EQ(execution[31], ownership[96]);  // Write C4 back to T.
+        }
+        if (round == 5) {
+            EXPECT_EQ(execution[63], ownership[63]);  // Read P1 / C8, not stale T.
+            EXPECT_EQ(execution[71], ownership[71]);
+            EXPECT_EQ(execution[79], ownership[79]);
+            EXPECT_EQ(execution[96], NULL_BLOCK_IDX);
+        }
+        EXPECT_FALSE(ids.canPublishLinearPrefillBlock(96));
+        ids.completeLinearPrefillChunk(prefix + query);
+        prefix += query;
+    }
+    for (const auto position : plan->checkpointPositions()) {
+        EXPECT_TRUE(ids.canPublishLinearPrefillBlock(position));
+    }
+    EXPECT_FALSE(ids.canPublishLinearPrefillBlock(96));  // Non-aligned tail is PD-only.
+    EXPECT_EQ(ids.blocks(), ownership);
+}
+
 GroupBase makeResourceGroup(std::string tag, CacheGroupType type) {
     auto spec                       = std::make_shared<MHAKVCacheSpec>();
     spec->tag                       = tag;

@@ -29,6 +29,7 @@ class HybridKVCacheSpecTest(TestCase):
             desc = KVCacheSpecDesc()
             self.assertEqual(desc.tp_transfer_mode, TpCacheTransferMode.LEGACY)
             desc.cache_type = KVCacheSpecType.LINEAR
+            desc.prefill_borrow_tail = enabled
             desc.tp_transfer_mode = (
                 TpCacheTransferMode.LINEAR_QKV
                 if enabled
@@ -36,16 +37,25 @@ class HybridKVCacheSpecTest(TestCase):
             )
             restored = pickle.loads(pickle.dumps(desc))
             self.assertEqual(restored.tp_transfer_mode, desc.tp_transfer_mode)
+            self.assertEqual(restored.prefill_borrow_tail, enabled)
 
     def test_legacy_descriptor_pickle_does_not_enable_new_wire_format(self):
         desc = KVCacheSpecDesc()
         desc.tp_transfer_mode = TpCacheTransferMode.LINEAR_QKV
         state = desc.__getstate__()
-        self.assertEqual(len(state), 21)
-        for old_width in (20,):
+        self.assertEqual(len(state), 22)
+        for old_width in (20, 21):
             restored = KVCacheSpecDesc.__new__(KVCacheSpecDesc)
             restored.__setstate__(state[:old_width])
-            self.assertEqual(restored.tp_transfer_mode, TpCacheTransferMode.LEGACY)
+            self.assertEqual(
+                restored.tp_transfer_mode,
+                (
+                    TpCacheTransferMode.LEGACY
+                    if old_width == 20
+                    else TpCacheTransferMode.LINEAR_QKV
+                ),
+            )
+            self.assertFalse(restored.prefill_borrow_tail)
 
     def test_existing_linear_models_keep_whole_block_transfer(self):
         for model in (KimiLinear, Qwen3Next):

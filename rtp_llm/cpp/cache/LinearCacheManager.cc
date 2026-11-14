@@ -157,13 +157,14 @@ NeedBlocksInfo LinearCacheManager::getNeedBlocks(int                      common
     const int      total_slots  = needBlocksNum(seq_len, 0);
 
     for (int pos = 0; pos < common_slots; ++pos) {
-        if ((pos >= reuse_slots && shouldMaterializeBlock(pos, common_seq_len, 0, reuse_enabled))
+        if ((!required_positions.exact && pos >= reuse_slots
+             && shouldMaterializeBlock(pos, common_seq_len, 0, reuse_enabled))
             || required_positions.count(static_cast<size_t>(pos)) != 0) {
             ++info.common_blocks;
         }
     }
     for (int pos = common_slots; pos < total_slots; ++pos) {
-        if ((pos >= reuse_slots && shouldMaterializeBlock(pos, seq_len, 0, reuse_enabled))
+        if ((!required_positions.exact && pos >= reuse_slots && shouldMaterializeBlock(pos, seq_len, 0, reuse_enabled))
             || required_positions.count(static_cast<size_t>(pos)) != 0) {
             ++info.extra_blocks;
         }
@@ -202,12 +203,19 @@ bool LinearCacheManager::mallocImpl(BlockIds&                block_ids,
         backfilled_positions->clear();
     }
     const int current_blocks_len = static_cast<int>(block_ids.blocksNum());
-    const int total_slots        = needBlocksNum(seq_len, 0, reserve_step);
+    const int required_slots =
+        required_positions.empty() ?
+            0 :
+            static_cast<int>(*std::max_element(required_positions.begin(), required_positions.end()) + 1);
+    const int total_slots        = std::max(needBlocksNum(seq_len, 0, reserve_step), required_slots);
     const int new_blocks_len     = std::max(total_slots - current_blocks_len, 0);
 
     auto should_materialize = [&](int pos) {
         if (required_positions.count(static_cast<size_t>(pos)) != 0) {
             return true;
+        }
+        if (is_prefill && required_positions.exact) {
+            return false;
         }
         if (is_prefill) {
             return pos >= current_blocks_len && shouldMaterializeBlock(pos, seq_len, 0, enable_reuse_cache);
@@ -283,6 +291,7 @@ bool LinearCacheManager::mallocImpl(BlockIds&                block_ids,
 }
 
 void LinearCacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+    const auto& prefill_plan  = block_ids.linearPrefillPlan();
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
         return;
@@ -293,6 +302,14 @@ void LinearCacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;
     for (int i = block_size - std::min(retainedDecodeBlocks(reserve_step), block_size) - 1; i >= 0; i--) {
+        // Preserve the original prompt checkpoints until completion-time
+        // publication. A P-side local Decode fallback still rolls its other
+        // states normally instead of retaining every generated page.
+        if (prefill_plan
+            && std::binary_search(
+                prefill_plan->checkpointPositions().begin(), prefill_plan->checkpointPositions().end(), i)) {
+            continue;
+        }
         if (isNullBlockIdx(block_indices[i])) {
             continue;
         }

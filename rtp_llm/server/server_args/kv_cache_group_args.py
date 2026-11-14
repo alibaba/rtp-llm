@@ -180,7 +180,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "reuse_cache_tail_blocks"),
         type=_reuse_tail_blocks,
         default=2147483647,
-        help="参与 reuse cache 的 Linear/SWA group 在 prefill 分配的尾部 block 数，至少保留该组 active_tail_blocks，再按实际 block 数截断；命中的复用状态单独保留；默认全保留。未参与复用的 group 和 decode 使用原有 active tail 策略。",
+        help="参与 reuse cache 的 Linear/SWA group 在 prefill 分配的尾部 block 数，至少保留该组 active_tail_blocks，再按实际 block 数截断；支持 borrowed-tail 的 LINEAR chunked prefill 按完整 CP checkpoint 计数，并另留非对齐最终状态；命中的复用状态单独保留；默认全保留。未参与复用的 group 和 decode 使用原有 active tail 策略。",
     )
     kv_cache_group.add_argument(
         "--linear_pool_blocks",

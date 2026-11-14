@@ -2,6 +2,13 @@ load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "linear_prefill_plan",
+    hdrs = ["LinearPrefillPlan.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cache_async_context",
     srcs = ["AsyncContext.cc"],
     hdrs = [
@@ -325,6 +332,7 @@ cc_library(
     deps = [
         ":cache_config",
         ":cache_group_type",
+        ":linear_prefill_plan",
         "//rtp_llm/cpp/utils:core_utils",
     ],
 )

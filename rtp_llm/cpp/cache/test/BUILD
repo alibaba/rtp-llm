@@ -3,6 +3,17 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "linear_prefill_plan_test",
+    srcs = ["LinearPrefillPlanTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache:linear_prefill_plan",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_import(
     name = "cuda13_torch_nvshmem",
     shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",

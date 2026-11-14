@@ -158,6 +158,7 @@ class KimiK31ConfigTest(unittest.TestCase):
                     linear[0].tp_transfer_mode, TpCacheTransferMode.LINEAR_QKV
                 )
                 self.assertEqual(linear[0].dtype, DataType.TYPE_BF16)
+                self.assertTrue(linear[0].prefill_borrow_tail)
                 groups = {desc.tag: desc for desc in config.kv_cache_spec_descs[1]}
                 self.assertEqual(set(groups), {"full", "indexer_kv"})
                 self.assertEqual(groups["full"].cache_type, KVCacheSpecType.MLA)

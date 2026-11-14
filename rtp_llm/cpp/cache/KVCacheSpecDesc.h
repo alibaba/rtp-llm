@@ -57,6 +57,7 @@ struct KVCacheSpecDesc {
     KVCacheSpecType cache_type     = KVCacheSpecType::MultiHeadAttention;
     DataType        dtype          = DataType::TYPE_INVALID;
     bool            is_state_cache = false;
+    bool            prefill_borrow_tail = false;
 
     uint32_t entry_elems = 0;
     DataType entry_dtype = DataType::TYPE_INVALID;

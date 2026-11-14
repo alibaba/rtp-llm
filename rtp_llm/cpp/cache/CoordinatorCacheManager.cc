@@ -54,8 +54,42 @@ inline int cpEffectiveSeqLenForReserve(const std::shared_ptr<CPSlotMapper>& mapp
     return (mapper && mapper->isSharded()) ? mapper->effectiveSeqLenForAlloc(config, tag, seq_len) : seq_len;
 }
 
-RequiredPositions chunkCachePositions(const MallocInfo& malloc_info, const GroupBase& group, int reserve_tokens) {
+std::shared_ptr<const LinearPrefillPlan>
+borrowedLinearPrefillPlan(const MallocInfo&                    malloc_info,
+                          const CacheConfig&                   config,
+                          const GroupBase&                     group,
+                          const std::shared_ptr<CPSlotMapper>& mapper,
+                          std::optional<int64_t>               reused_tokens = std::nullopt) {
+    if (malloc_info.linear_prefill_prompt_tokens <= 0 || !malloc_info.reuse_cache
+        || config.reuse_cache_tail_blocks == std::numeric_limits<int>::max()
+        || !group.supportsBorrowedLinearPrefill(config.seq_size_per_block)
+        || malloc_info.batch_kv_cache_resource->batchSize() != 1) {
+        return nullptr;
+    }
+    const auto& existing =
+        malloc_info.batch_kv_cache_resource->cacheResource(0).blockIds(group.tag).linearPrefillPlan();
+    const auto reused            = reused_tokens.value_or(existing ? existing->reusedTokens() : 0);
+    const auto checkpoint_tokens = group.seqSizePerBlock() * (mapper && mapper->isSharded() ? mapper->cpSize() : 1);
+    return std::make_shared<LinearPrefillPlan>(malloc_info.linear_prefill_prompt_tokens,
+                                               group.seqSizePerBlock(),
+                                               checkpoint_tokens,
+                                               config.reuse_cache_tail_blocks,
+                                               reused);
+}
+
+RequiredPositions chunkCachePositions(const MallocInfo&                    malloc_info,
+                                      const CacheConfig&                   config,
+                                      const std::shared_ptr<CPSlotMapper>& mapper,
+                                      const GroupBase&                     group,
+                                      int                                  reserve_tokens) {
     RequiredPositions positions;
+    if (const auto plan = borrowedLinearPrefillPlan(malloc_info, config, group, mapper)) {
+        positions.exact = true;
+        for (const auto position : plan->newPositions()) {
+            positions.insert(static_cast<size_t>(position));
+        }
+        return positions;
+    }
     const int         seq_len = malloc_info.incrSeqLen();
     const auto        count   = group.chunkCacheBlockCount(seq_len,
                                                   malloc_info.max_chunk_tokens,
@@ -70,13 +104,17 @@ RequiredPositions chunkCachePositions(const MallocInfo& malloc_info, const Group
     return positions;
 }
 
-RequiredPositions chunkRequiredPositions(const MallocInfo&             malloc_info,
-                                         const SingleTypeCacheManager& group,
-                                         int                           reserve_tokens,
-                                         const RequiredPositions&      base_positions = {}) {
+RequiredPositions chunkRequiredPositions(const MallocInfo&                    malloc_info,
+                                         const CacheConfig&                   config,
+                                         const std::shared_ptr<CPSlotMapper>& mapper,
+                                         const SingleTypeCacheManager&        group,
+                                         int                                  reserve_tokens,
+                                         const RequiredPositions&             base_positions = {}) {
     auto        required_positions = base_positions;
     const auto& blocks = malloc_info.batch_kv_cache_resource->blocks(0, group.tag());
-    for (const size_t pos : chunkCachePositions(malloc_info, group.config(), reserve_tokens)) {
+    const auto  positions          = chunkCachePositions(malloc_info, config, mapper, group.config(), reserve_tokens);
+    required_positions.exact       = required_positions.exact || positions.exact;
+    for (const size_t pos : positions) {
         if (!malloc_info.reuse_cache || pos >= blocks.size() || isNullBlockIdx(blocks[pos])) {
             required_positions.insert(pos);
         }
@@ -278,7 +316,8 @@ int CoordinatorCacheManager::estimateBatchPeakNeedBlocks(const BatchKVCacheResou
                                                          int                            remaining_tokens,
                                                          int                            reserve_step,
                                                          bool                           enable_reuse_cache,
-                                                         int                            target_batch_size) const {
+                                                         int                            target_batch_size,
+                                                         int linear_prefill_prompt_tokens) const {
     if (!batch_kv_cache_resource || batch_kv_cache_resource->batchSize() == 0) {
         return 0;
     }
@@ -286,6 +325,50 @@ int CoordinatorCacheManager::estimateBatchPeakNeedBlocks(const BatchKVCacheResou
     const int current_batch_size = batch_kv_cache_resource->batchSize();
     const int target_width       = std::max(current_batch_size, target_batch_size);
     const int clamped_common_len = std::clamp(common_seq_len, 0, seq_len);
+
+    if (linear_prefill_prompt_tokens > 0 && target_width == 1) {
+        MallocInfo info;
+        info.batch_kv_cache_resource      = batch_kv_cache_resource;
+        info.reuse_cache                  = enable_reuse_cache;
+        info.linear_prefill_prompt_tokens = linear_prefill_prompt_tokens;
+        bool       supported              = false;
+        int        peak                   = 0;
+        const bool fresh                  = batch_kv_cache_resource->curBlocksNum() == 0;
+        for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
+            const auto& group = config_.groups()[static_cast<size_t>(group_id)];
+            const auto& ids   = batch_kv_cache_resource->cacheResource(0).blockIds(group.tag);
+            if (const auto plan = borrowedLinearPrefillPlan(info, config_, group, cp_slot_mapper_)) {
+                supported = true;
+                for (const auto position : plan->newPositions()) {
+                    peak += static_cast<size_t>(position) >= ids.blocksNum()
+                            || isNullBlockIdx(ids.blocks()[static_cast<size_t>(position)]);
+                }
+                continue;
+            }
+            // Other groups keep their own allocation policy, in the same CP
+            // coordinate system used by the real allocator.
+            const auto group_seq = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, group.tag, seq_len);
+            const auto group_common =
+                cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, group.tag, clamped_common_len);
+            const auto group_end =
+                cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, group.tag, seq_len + remaining_tokens);
+            const int group_reserve = config_.isLinearReplayGroup(group_id) ? 0 : reserve_step;
+            peak +=
+                fresh ?
+                    kv_cache_groups_[static_cast<size_t>(group_id)]->estimateInitialBatchPeakNeedBlocks(
+                        group_seq,
+                        group_common,
+                        std::max(0, group_end - group_seq),
+                        group_reserve,
+                        enable_reuse_cache,
+                        1) :
+                    kv_cache_groups_[static_cast<size_t>(group_id)]->estimatePeakNeedBlocks(
+                        group_seq, ids.blocks(), std::max(0, group_end - group_seq), group_reserve, enable_reuse_cache);
+        }
+        if (supported) {
+            return peak;
+        }
+    }
 
     // A fresh resource follows initMalloc's two phases. Each group estimates that exact sequence so Linear groups can
     // distinguish the shared common tail from every sequence's private suffix tail.
@@ -332,6 +415,8 @@ bool CoordinatorCacheManager::detachSharedBlocksForRecompute(const BatchKVCacheR
     using BlockLocations = std::map<BlockIdxType, std::vector<std::pair<BlockIds*, size_t>>>;
     std::vector<BlockLocations>            block_locations(groups.size());
     std::vector<BlockIndicesType>          allocated_blocks(groups.size());
+    std::vector<std::vector<std::pair<BlockIds*, size_t>>>                      missing_prefill_slots(groups.size());
+    std::vector<std::pair<BlockIds*, std::shared_ptr<const LinearPrefillPlan>>> replanned_prefill;
     block_tree_cache_detail::ScopeRollback rollback([&] {
         for (size_t i = 0; i < groups.size(); ++i) {
             groups[i]->blockPool()->decRef(allocated_blocks[i]);
@@ -348,6 +433,21 @@ bool CoordinatorCacheManager::detachSharedBlocksForRecompute(const BatchKVCacheR
         for (int batch = 0; batch < resource->batchSize(); ++batch) {
             auto&       ids    = resource->mutableBlockIds(batch, tag);
             const auto& blocks = ids.blocks();
+            const auto& old_plan = ids.linearPrefillPlan();
+            if (old_plan && old_plan->reusedTokens() != device_ready_reuse_length) {
+                auto plan = std::make_shared<LinearPrefillPlan>(old_plan->promptTokens(),
+                                                                old_plan->pageTokens(),
+                                                                old_plan->checkpointTokens(),
+                                                                config_.reuse_cache_tail_blocks,
+                                                                device_ready_reuse_length);
+                for (const auto position : plan->newPositions()) {
+                    RTP_LLM_CHECK(static_cast<size_t>(position) < blocks.size());
+                    if (isNullBlockIdx(blocks[static_cast<size_t>(position)])) {
+                        missing_prefill_slots[i].emplace_back(&ids, static_cast<size_t>(position));
+                    }
+                }
+                replanned_prefill.emplace_back(&ids, std::move(plan));
+            }
             for (size_t pos = recompute_begin; pos < blocks.size(); ++pos) {
                 if (!isNullBlockIdx(blocks[pos])) {
                     locations[blocks[pos]].emplace_back(&ids, pos);
@@ -363,13 +463,14 @@ bool CoordinatorCacheManager::detachSharedBlocksForRecompute(const BatchKVCacheR
                 ++it;
             }
         }
-        if (locations.empty()) {
+        const auto allocations = locations.size() + missing_prefill_slots[i].size();
+        if (allocations == 0) {
             continue;
         }
-        if (!group->ensureFreeBlocks(locations.size() + reserveBlocksForPoolMetrics(i))) {
+        if (!group->ensureFreeBlocks(allocations + reserveBlocksForPoolMetrics(i))) {
             return false;
         }
-        auto new_blocks = pool->malloc(locations.size());
+        auto new_blocks = pool->malloc(allocations);
         if (!new_blocks) {
             return false;
         }
@@ -392,6 +493,12 @@ bool CoordinatorCacheManager::detachSharedBlocksForRecompute(const BatchKVCacheR
                 pool->decRef(old_block);
             }
         }
+        for (const auto& [ids, position] : missing_prefill_slots[group_index]) {
+            ids->setAt(position, allocated_blocks[group_index][index++]);
+        }
+    }
+    for (auto& [ids, plan] : replanned_prefill) {
+        ids->setLinearPrefillPlan(std::move(plan));
     }
     rollback.dismiss();
     return true;
@@ -713,7 +820,16 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
         const auto  common_slots     = static_cast<size_t>(group.needBlocksNum(group_common_seq, 0));
         const int   group_reserve =
             config_.isLinearReplayGroup(group_id) ? 0 : malloc_info.complete_token_ids->getReserveStep();
-        for (const size_t pos : chunkRequiredPositions(malloc_info, group, group_reserve)) {
+        const auto reuse_tokens =
+            matched_blocks
+            * static_cast<size_t>(cp_mapper ? cp_mapper->reuseBlockTokens(config_) : config_.seq_size_per_block);
+        if (const auto plan =
+                borrowedLinearPrefillPlan(malloc_info, config_, group.config(), cp_mapper, reuse_tokens)) {
+            kv_resource.mutableBlockIds(0, tag).setLinearPrefillPlan(plan);
+        }
+        const auto chunk_positions = chunkRequiredPositions(malloc_info, config_, cp_mapper, group, group_reserve);
+        prepared.required_positions[static_cast<size_t>(group_id)].exact = chunk_positions.exact;
+        for (const size_t pos : chunk_positions) {
             if (pos < common_slots) {
                 prepared.required_positions[static_cast<size_t>(group_id)].insert(pos);
             }
@@ -837,7 +953,8 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
             const int group_reserve = replay_group ? 0 : reserve_step;
             const bool replay_mutable =
                 isMutableLinearReplayGroup(config_, kv_resource->cacheResource(b), group_id);
-            auto required_positions = chunkCachePositions(malloc_info, config_.group(tag), group_reserve);
+            auto required_positions =
+                chunkCachePositions(malloc_info, config_, cp_mapper, config_.group(tag), group_reserve);
             if (malloc_info.preserve_inflight) {
                 const size_t end = static_cast<size_t>(group->needBlocksNum(group_seq_len, 0, group_reserve));
                 const size_t begin =
@@ -1064,6 +1181,7 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
                 for (size_t i = 0; i < insert_keys.size(); ++i) {
                     const size_t position = sparse_logical ? (i + 1) * static_cast<size_t>(cp_mapper->cpSize()) - 1 : i;
                     if (position >= blocks.size() || isNullBlockIdx(blocks[position])
+                        || !kv_cache_resource->cacheResource(batch_id).canPublishLinearPrefillBlock(tag, position)
                         || !kv_cache_resource->cacheResource(batch_id).canPublishLinearReplayBlock(tag, position)) {
                         continue;
                     }
@@ -1573,7 +1691,7 @@ int CoordinatorCacheManager::getNeedBlocks(const MallocInfo& malloc_info) const 
         }
         const int  reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, tag) : 0;
         const int  group_reserve      = config_.isLinearReplayGroup(group_id) ? 0 : reserve_step;
-        const auto required_positions = chunkRequiredPositions(malloc_info, *group, group_reserve);
+        const auto required_positions = chunkRequiredPositions(malloc_info, config_, cp_mapper, *group, group_reserve);
         const auto need = group->getNeedBlocks(group_common_seq,
                                                group_seq_len,
                                                group_reserve,
@@ -2232,8 +2350,8 @@ CoordinatorCacheManager::evaluateInitCapacityImpl(const MallocInfo&             
             required_positions == nullptr ? no_required_positions : (*required_positions)[group_index];
         const int group_reserve =
             config_.isLinearReplayGroup(group_id) ? 0 : malloc_info.complete_token_ids->getReserveStep();
-        const auto group_required_positions =
-            chunkRequiredPositions(malloc_info, *kv_cache_groups_[group_index], group_reserve, base_required_positions);
+        const auto group_required_positions = chunkRequiredPositions(
+            malloc_info, config_, cp_mapper, *kv_cache_groups_[group_index], group_reserve, base_required_positions);
         const auto need = kv_cache_groups_[group_index]->getNeedBlocks(
             group_common_seq,
             group_seq_len,

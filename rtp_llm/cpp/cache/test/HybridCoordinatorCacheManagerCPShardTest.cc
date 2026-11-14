@@ -89,6 +89,169 @@ protected:
     }
 };
 
+TEST_F(HybridCoordinatorCacheManagerCPShardTest, BorrowedPrefillAllocatesEffectiveLastOneThroughFive) {
+    for (int n = 1; n <= 5; ++n) {
+        for (int tail : {0, 1}) {
+            auto config                    = makeCPHybridConfig();
+            config.reuse_cache_tail_blocks = n;
+            auto groups                    = config.topology().groups();
+            for (auto& group : groups) {
+                group.policy.prefill_borrow_tail = group.policy.group_type == CacheGroupType::LINEAR;
+            }
+            config.setTopology(std::move(groups), config.topology().layers());
+            auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+            ASSERT_TRUE(allocator->init());
+            allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
+            const int  length   = 12 * 8 + tail;
+            auto       tokens   = makeTokens(1, length, 4);
+            auto       resource = makeBatchRes(1, config, {});
+            MallocInfo info{resource, tokens};
+            info.reuse_cache                  = true;
+            info.enable_cache_lookup          = false;
+            info.enable_remove_skipped_blocks = false;
+            info.max_chunk_tokens             = 16;
+            info.linear_prefill_prompt_tokens = length;
+            EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource, length, length, 0, 0, true, 1, length),
+                      (length + 7) / 8 + n + tail);
+            const auto pool        = allocator->groupBlockPools()[config.topology().groupIdForTag("linear")];
+            const auto free_before = pool->freeBlocksNum();
+            ASSERT_TRUE(allocator->malloc(info).success) << "N=" << n << " tail=" << tail;
+            const auto& ids = resource->cacheResource(0).blockIds("linear");
+            ASSERT_NE(ids.linearPrefillPlan(), nullptr);
+            EXPECT_EQ(std::count_if(ids.blocks().begin(), ids.blocks().end(), [](auto id) { return id > 0; }),
+                      n + tail);
+            for (int checkpoint = 1; checkpoint <= 12; ++checkpoint) {
+                const auto position = checkpoint * 2 - 1;
+                EXPECT_EQ(ids.blocks()[position] > 0, checkpoint > 12 - n);
+            }
+            EXPECT_EQ(allocator->getNeedBlocks(info), 0);
+            EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource, length, length, 0, 0, true, 1, length), 0);
+            allocator->free({resource, tokens});
+            EXPECT_EQ(pool->freeBlocksNum(), free_before);
+        }
+    }
+}
+
+TEST_F(HybridCoordinatorCacheManagerCPShardTest, BorrowedStateIsNotPublishedBeforeItsCheckpointCompletes) {
+    auto config = makeCPHybridConfig();
+    auto groups = config.topology().groups();
+    for (auto& group : groups) {
+        group.policy.prefill_borrow_tail = group.policy.group_type == CacheGroupType::LINEAR;
+    }
+    config.setTopology(std::move(groups), config.topology().layers());
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
+    CacheKeysType keys;
+    for (int key = 1; key <= 24; ++key) {
+        keys.push_back(key);
+    }
+    auto       tokens   = makeTokens(1, 96, 4);
+    auto       resource = makeBatchRes(1, config, keys);
+    MallocInfo info{resource, tokens};
+    info.enable_cache_lookup          = false;
+    info.enable_remove_skipped_blocks = false;
+    info.linear_prefill_prompt_tokens = 96;
+    ASSERT_TRUE(allocator->malloc(info).success);
+    auto& ids = resource->mutableBlockIds(0, "linear");
+    ids.completeLinearPrefillChunk(16);
+    size_t resident = 0;
+    allocator->insertIntoCache({resource, tokens, false}, resident);
+    const CacheKeysType canonical{2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24};
+    auto                cache      = allocator->blockTreeCacheOwner();
+    auto                incomplete = cache->match(canonical);
+    EXPECT_EQ(incomplete.matched_device_blocks, 0u);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, incomplete.matched_device_resources);
+
+    ids.completeLinearPrefillChunk(96);
+    allocator->insertIntoCache({resource, tokens, false}, resident);
+    auto complete = cache->match(canonical);
+    EXPECT_EQ(complete.matched_device_blocks, canonical.size());
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, complete.matched_device_resources);
+    allocator->free({resource, tokens});
+}
+
+TEST_F(HybridCoordinatorCacheManagerCPShardTest, BorrowedPrefillLoadFallbackReplansAtomically) {
+    auto config                    = makeCPHybridConfig();
+    config.reuse_cache_tail_blocks = 5;
+    auto groups                    = config.topology().groups();
+    for (auto& group : groups) {
+        group.policy.prefill_borrow_tail = group.policy.group_type == CacheGroupType::LINEAR;
+    }
+    config.setTopology(std::move(groups), config.topology().layers());
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
+    const int  length   = 13 * 8 + 1;
+    auto       tokens   = makeTokens(1, length, 4);
+    auto       resource = makeBatchRes(1, config, {});
+    MallocInfo info{resource, tokens};
+    info.enable_cache_lookup          = false;
+    info.enable_remove_skipped_blocks = false;
+    info.linear_prefill_prompt_tokens = length;
+    ASSERT_TRUE(allocator->malloc(info).success);
+    auto&      ids  = resource->mutableBlockIds(0, "linear");
+    const auto pool = allocator->groupBlockPools()[config.topology().groupIdForTag("linear")];
+
+    // Reproduce the ownership shape of a C10 hit with an uncomputed C9 hole.
+    const size_t missing = 9 * 2 - 1;
+    pool->decRef(ids.blocks()[missing]);
+    ids.setAt(missing, NULL_BLOCK_IDX);
+    ids.setLinearPrefillPlan(std::make_shared<LinearPrefillPlan>(length, 4, 8, 5, 10 * 8));
+    const auto before = ids.blocks();
+    const auto held   = pool->malloc(pool->freeBlocksNum());
+    ASSERT_TRUE(held.has_value());
+    pool->incRef(*held);
+    EXPECT_FALSE(allocator->detachSharedBlocksForRecompute(resource, 0));
+    EXPECT_EQ(ids.blocks(), before);
+    EXPECT_EQ(ids.linearPrefillPlan()->reusedTokens(), 80);
+    pool->decRef(*held);
+
+    ASSERT_TRUE(allocator->detachSharedBlocksForRecompute(resource, 0));
+    EXPECT_GT(ids.blocks()[missing], 0);
+    EXPECT_EQ(ids.linearPrefillPlan()->reusedTokens(), 0);
+    EXPECT_EQ(std::count_if(ids.blocks().begin(), ids.blocks().end(), [](auto id) { return id > 0; }), 6);
+    EXPECT_FALSE(ids.canPublishLinearPrefillBlock(missing));
+    allocator->free({resource, tokens});
+}
+
+TEST_F(HybridCoordinatorCacheManagerCPShardTest, LocalDecodeFallbackPreservesPromptCheckpointsAndRollsOtherStates) {
+    for (int n = 1; n <= 5; ++n) {
+        auto config                    = makeCPHybridConfig();
+        config.reuse_cache_tail_blocks = n;
+        auto groups                    = config.topology().groups();
+        for (auto& group : groups) {
+            group.policy.prefill_borrow_tail = group.policy.group_type == CacheGroupType::LINEAR;
+        }
+        config.setTopology(std::move(groups), config.topology().layers());
+        auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator->init());
+        allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
+        const int  length   = 12 * 8;
+        auto       tokens   = makeTokens(1, length, 4);
+        auto       resource = makeBatchRes(1, config, {});
+        MallocInfo info{resource, tokens};
+        info.enable_cache_lookup          = false;
+        info.enable_remove_skipped_blocks = false;
+        info.linear_prefill_prompt_tokens = length;
+        ASSERT_TRUE(allocator->malloc(info).success);
+        const auto group_index = config.topology().groupIdForTag("linear");
+        const auto group       = allocator->cacheGroups()[group_index];
+        auto&      ids         = resource->mutableBlockIds(0, "linear");
+        ids.completeLinearPrefillChunk(length);
+        const auto original = ids.blocks();
+        for (int generated_pages = 1; generated_pages <= 40; ++generated_pages) {
+            ASSERT_TRUE(group->mallocForDecode(ids, length + generated_pages * 4, true));
+            group->removeSkippedBlocks(ids, true);
+            EXPECT_LE(std::count_if(ids.blocks().begin(), ids.blocks().end(), [](auto id) { return id > 0; }), n + 2);
+            for (const auto position : ids.linearPrefillPlan()->checkpointPositions()) {
+                EXPECT_EQ(ids.blocks()[position], original[position]);
+            }
+        }
+        allocator->free({resource, tokens});
+    }
+}
+
 TEST_F(HybridCoordinatorCacheManagerCPShardTest, PrefillNeedBlocksUsesEachGroupsReuseLength) {
     auto config                    = makeCPHybridConfig();
     config.reuse_cache_tail_blocks = 3;

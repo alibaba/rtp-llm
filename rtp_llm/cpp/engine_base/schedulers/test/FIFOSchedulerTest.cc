@@ -6382,6 +6382,54 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCacheCompatibility) {
     }
 }
 
+TEST_F(FIFOSchedulerTest, testChunkedPrefillBorrowedLastNAdmissionIsLimitedToSupportedRequests) {
+    for (int n = 1; n <= 5; ++n) {
+        for (int variant = 0; variant < 5; ++variant) {
+            SCOPED_TRACE(testing::Message() << "N=" << n << " variant=" << variant);
+            auto cache                    = test::makeSimpleHybridMhaCacheConfig(4, 512, 128, DataType::TYPE_FP16);
+            cache.local_kv_cache_sharded  = true;
+            cache.reuse_cache_tail_blocks = n;
+            auto groups                   = cache.groups();
+            for (auto& group : groups) {
+                if (group.policy.group_type != CacheGroupType::LINEAR) {
+                    continue;
+                }
+                group.policy.prefill_borrow_tail = variant != 1;
+                if (variant == 2) {
+                    auto spec                = group.spec->clone();
+                    spec->seq_size_per_block = 256;
+                    group.spec               = std::move(spec);
+                }
+            }
+            cache.setTopology(std::move(groups), cache.topology().layers());
+            ChunkSchedulerTestConfig config;
+            config.role_type             = variant == 3 ? RoleType::PDFUSION : RoleType::PREFILL;
+            config.prefill_chunk_size    = 65536;
+            config.max_batch_tokens_size = config.max_seq_len = 262144;
+            ChunkSchedulerTestEnv<FIFOScheduler> env(config, cache, makeChunkedCpParallelism());
+            ASSERT_TRUE(env.init());
+            auto       stream = env.makeStream(std::vector<int>(131072 + 128, 1), 1, variant == 4 ? 2 : 1);
+            const auto status = env.scheduler().checkChunkedPrefillRequest(stream);
+            EXPECT_EQ(status.ok(), variant == 0) << status;
+            if (variant == 0) {
+                ASSERT_TRUE(env.scheduler().enqueue(stream).ok());
+                ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {stream}, {65536}));
+                const auto& resource = stream->kvCache().cacheResource(0);
+                for (const auto& group : cache.groups()) {
+                    if (group.policy.group_type == CacheGroupType::LINEAR) {
+                        const auto& ids = resource.blockIds(group.tag);
+                        ASSERT_NE(ids.linearPrefillPlan(), nullptr);
+                        EXPECT_EQ(std::count_if(
+                                      ids.blocks().begin(), ids.blocks().end(), [](auto block) { return block > 0; }),
+                                  n + 1);
+                    }
+                }
+                stream->reportError(ErrorCode::CANCELLED, "unit test cleanup");
+            }
+        }
+    }
+}
+
 TEST_F(FIFOSchedulerTest, testChunkedPrefillRejectsInvalidConfigAtConstruction) {
     for (const int budget : {0, 8192, 16384}) {
         ChunkSchedulerTestConfig config;

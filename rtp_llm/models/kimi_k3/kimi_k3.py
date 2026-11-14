@@ -155,6 +155,7 @@ class KimiK3(BaseModel):
         for layer_descs in cache_descs:
             for desc in layer_descs:
                 if desc.cache_type == KVCacheSpecType.LINEAR:
+                    desc.prefill_borrow_tail = True
                     # KDA states use head shards, independently of MLA page ownership.
                     desc.tp_transfer_mode = TpCacheTransferMode.LINEAR_QKV
                     if model_config.attn_config.mla_fp8_compute:

@@ -1934,6 +1934,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("memory", &KVCacheSpecDesc::memory)
         .def_readwrite("tail", &KVCacheSpecDesc::tail)
         .def_readwrite("cp", &KVCacheSpecDesc::cp)
+        .def_readwrite("prefill_borrow_tail", &KVCacheSpecDesc::prefill_borrow_tail)
         .def(py::pickle(
             [](const KVCacheSpecDesc& self) {
                 return py::make_tuple(self.tag,
@@ -1956,11 +1957,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.memory,
                                       self.tail,
                                       self.cp,
-                                      self.tp_transfer_mode);
+                                      self.tp_transfer_mode,
+                                      self.prefill_borrow_tail);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 20 && t.size() != 21)
+                if (t.size() != 20 && t.size() != 21 && t.size() != 22)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
@@ -1982,8 +1984,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.memory                               = t[17].cast<std::optional<CacheMemoryPolicyDesc>>();
                 c.tail                                 = t[18].cast<std::optional<CacheTailPolicyDesc>>();
                 c.cp                                   = t[19].cast<std::optional<CacheCpPolicyDesc>>();
-                if (t.size() == 21) {
+                if (t.size() >= 21) {
                     c.tp_transfer_mode = t[20].cast<TpCacheTransferMode>();
+                }
+                if (t.size() == 22) {
+                    c.prefill_borrow_tail = t[21].cast<bool>();
                 }
                 return c;
             }));

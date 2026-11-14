@@ -28,6 +28,7 @@ std::string cacheGroupPolicySummary(const CacheGroupPolicy& policy) {
        << ", memory_placement=" << static_cast<int>(policy.memory_placement)
        << ", active_tail_blocks=" << policy.active_tail_blocks << ", shared_chunk_state=" << policy.shared_chunk_state
        << ", validate_tail_blocks=" << policy.validate_tail_blocks
+       << ", prefill_borrow_tail=" << policy.prefill_borrow_tail
        << ", cp_mapping=" << static_cast<int>(policy.cp_mapping) << ", cp_slice=" << static_cast<int>(policy.cp_slice)
        << '}';
     return os.str();

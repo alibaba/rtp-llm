@@ -66,6 +66,7 @@ struct CacheGroupPolicy {
     int sliding_window_size = 0;
     // Share one state bank across logical blocks during chunked prefill.
     bool shared_chunk_state = false;
+    bool prefill_borrow_tail = false;
 
     std::string policyFingerprint() const {
         std::ostringstream oss;
@@ -73,7 +74,7 @@ struct CacheGroupPolicy {
             << ':' << explicit_block_num << ':' << (charge_to_paged_budget ? 1 : 0) << ':'
             << static_cast<int>(memory_placement) << ':' << active_tail_blocks << ':' << (validate_tail_blocks ? 1 : 0)
             << ':' << static_cast<int>(cp_mapping) << ':' << static_cast<int>(cp_slice) << ':' << sliding_window_size
-            << ':' << (shared_chunk_state ? 1 : 0);
+            << ':' << (shared_chunk_state ? 1 : 0) << ':' << (prefill_borrow_tail ? 1 : 0);
         return oss.str();
     }
 };

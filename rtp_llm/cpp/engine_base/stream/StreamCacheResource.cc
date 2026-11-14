@@ -83,6 +83,9 @@ bool StreamCacheResource::copyChunkKernelBlocks(int batch, const std::string& ta
     const auto& group   = config.group(tag);
     const auto  tail    = static_cast<size_t>(stream_->seqLength() - 1) / group.seqSizePerBlock();
     const auto& ids     = batch_kv_cache_resource_->cacheResource(batch).blockIds(tag);
+    if (ids.linearPrefillPlan()) {
+        return ids.copyLinearPrefillKernelBlocks(stream_->prefixLength(), stream_->currentChunkLen(), dst);
+    }
     if (group.policy.shared_chunk_state) {
         // HCA has no overlap. Aligned chunks start a new 128-token compression interval.
         RTP_LLM_CHECK_WITH_INFO(stream_->seqSizePerBlock() % 128 == 0 && stream_->prefixLength() % 128 == 0
@@ -114,6 +117,19 @@ bool StreamCacheResource::copyChunkKernelBlocks(int batch, const std::string& ta
         "cyclic chunk cache requires aligned prefixes and bounded grants");
     ids.copyCyclicKernelBlocks(tail, banks, dst);
     return true;
+}
+
+void StreamCacheResource::completeLinearPrefillChunk(int completed_tokens) {
+    if (resource_context_.role_type != RoleType::PREFILL || !reuseCache()
+        || resource_context_.cache_manager->cacheConfig().reuse_cache_tail_blocks == std::numeric_limits<int>::max()) {
+        return;
+    }
+    for (int batch = 0; batch < batch_kv_cache_resource_->batchSize(); ++batch) {
+        for (const auto& tag : batch_kv_cache_resource_->cacheResource(batch).groupTags()) {
+            auto& ids = batch_kv_cache_resource_->mutableBlockIds(batch, tag);
+            ids.completeLinearPrefillChunk(completed_tokens);
+        }
+    }
 }
 
 void StreamCacheResource::releaseResource() {
@@ -219,13 +235,18 @@ int StreamCacheResource::singleBatchNeedBlocks(int seq_len, int reserve_step) co
 
 int StreamCacheResource::estimatePeakNeedBlocks(
     int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, int target_batch_size) const {
-    return resource_context_.cache_manager->estimatePeakNeedBlocks(batch_kv_cache_resource_,
-                                                                   seq_len,
-                                                                   common_seq_len,
-                                                                   remaining_tokens,
-                                                                   reserve_step,
-                                                                   reuseCache(),
-                                                                   target_batch_size);
+    return resource_context_.cache_manager->estimatePeakNeedBlocks(
+        batch_kv_cache_resource_,
+        seq_len,
+        common_seq_len,
+        remaining_tokens,
+        reserve_step,
+        reuseCache(),
+        target_batch_size,
+        resource_context_.role_type == RoleType::PREFILL && stream_->isContextStream()
+                && stream_->chunkedPrefillEnabled() && !stream_->isFakeStream() ?
+            stream_->inputLength() :
+            0);
 }
 
 void StreamCacheResource::publishReuseLengths(int total, int host, int disk, int backend) {
@@ -268,6 +289,10 @@ absl::Status StreamCacheResource::initKVBlock() {
     malloc_info.enable_remove_skipped_blocks = false;
     malloc_info.max_chunk_tokens =
         stream_->chunkedPrefillEnabled() && stream_->isContextStream() ? stream_->maxChunkSize() : 0;
+    if (resource_context_.role_type == RoleType::PREFILL && stream_->isContextStream()
+        && stream_->chunkedPrefillEnabled() && !stream_->isFakeStream()) {
+        malloc_info.linear_prefill_prompt_tokens = stream_->inputLength();
+    }
 
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
     recordCacheReuseMallocResult(result);

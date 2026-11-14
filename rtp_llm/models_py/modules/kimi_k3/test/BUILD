@@ -3,6 +3,12 @@ load("@pip_gpu_cuda13_torch//:requirements.bzl", cuda13_requirement = "requireme
 load("@pip_cuda13_arm_torch//:requirements.bzl", cuda13_arm_requirement = "requirement")
 
 cuda13_sm100_py_test(
+    name = "prefill_state_alias_test",
+    srcs = ["prefill_state_alias_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)
+
+cuda13_sm100_py_test(
     name = "shared_modeling_test",
     srcs = ["shared_modeling_test.py"],
     deps = [
