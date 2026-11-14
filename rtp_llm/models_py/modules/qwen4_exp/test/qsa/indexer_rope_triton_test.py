@@ -1,3 +1,5 @@
+import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,6 +19,15 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
 )
 
 MODULE = "rtp_llm.models_py.kernels.cuda.qsa.rope_triton"
+
+
+def setUpModule():
+    # Torch's JIT lock survives a killed process in a shared build directory.
+    build_dir = tempfile.TemporaryDirectory()
+    unittest.addModuleCleanup(build_dir.cleanup)
+    env = patch.dict(os.environ, {"TORCH_EXTENSIONS_DIR": build_dir.name})
+    env.start()
+    unittest.addModuleCleanup(env.stop)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
