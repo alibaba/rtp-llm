@@ -11,6 +11,9 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/**
+ * Checks static discovery parsing and returned worker addresses.
+ */
 class StaticServiceDiscoveryProviderTest {
 
     private final StaticServiceDiscoveryProvider provider = new StaticServiceDiscoveryProvider();

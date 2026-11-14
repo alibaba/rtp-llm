@@ -23,6 +23,7 @@
 #include <atomic>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
@@ -208,7 +209,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     const size_t kv_scale_stride_bytes           = group.kvScaleStrideBytes();
     const size_t kv_block_transfer_bytes         = group.kvBlockStrideBytes();
     const size_t kv_scale_transfer_bytes         = group.kvScaleStrideBytes();
-    const bool   use_group_cache_transfer_policy = cache_config.topology().groups().size() > 1;
+    const bool   use_group_cache_transfer_policy = cache_config.usesGroupCacheTransferPolicy();
 
     RTP_LLM_CHECK_WITH_INFO(
         seq_size_per_block > 0, "cache-store tag=%s has zero tokens_per_block", layer_kv.tag.c_str());
@@ -358,7 +359,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             const std::string cache_key = makeCacheKey(
                 cache_model_id,
                 std::to_string(cache_keys[static_cast<int64_t>(batch_id)][static_cast<int64_t>(key_index)]),
-                layer_kv.layer_id,
+                cache_config.cacheKeyLayerId(layer_kv.layer_id),
                 layer_kv.tag);
             const int32_t block_id = host_kv_cache_offset[input_index][static_cast<int64_t>(offset_index)];
             // Host block-offset tables use -1 as the null block sentinel.
@@ -645,14 +646,18 @@ namespace {
 std::mutex g_comm_mutex;
 
 // Avoid destroying static Python objects after interpreter finalization.
-py::function* g_broadcast_fn = nullptr;
-py::function* g_allreduce_fn = nullptr;
-py::function* g_allgather_fn = nullptr;
+py::function* g_broadcast_fn            = nullptr;
+py::function* g_allreduce_fn            = nullptr;
+py::function* g_allgather_fn            = nullptr;
+py::function* g_isend_fn                = nullptr;
+py::function* g_irecv_fn                = nullptr;
 
 void clearCommOpsUnlocked() {
     py::function broadcast_fn;
     py::function allreduce_fn;
     py::function allgather_fn;
+    py::function isend_fn;
+    py::function irecv_fn;
     if (g_broadcast_fn != nullptr) {
         broadcast_fn = std::move(*g_broadcast_fn);
         delete g_broadcast_fn;
@@ -668,6 +673,62 @@ void clearCommOpsUnlocked() {
         delete g_allgather_fn;
         g_allgather_fn = nullptr;
     }
+    if (g_isend_fn != nullptr) {
+        isend_fn = std::move(*g_isend_fn);
+        delete g_isend_fn;
+        g_isend_fn = nullptr;
+    }
+    if (g_irecv_fn != nullptr) {
+        irecv_fn = std::move(*g_irecv_fn);
+        delete g_irecv_fn;
+        g_irecv_fn = nullptr;
+    }
+}
+
+class PythonP2PWork final: public P2PWork {
+public:
+    PythonP2PWork(py::object work, torch::Tensor tensor): work_(std::move(work)), tensor_(std::move(tensor)) {}
+
+    ~PythonP2PWork() override {
+        py::gil_scoped_acquire gil;
+        work_ = py::object();
+    }
+
+    void wait() override {
+        py::gil_scoped_acquire gil;
+        /** PyTorch's CUDA caching allocator delays memory reuse until NCCL communication completes. */
+        work_.attr("wait")();
+    }
+
+    bool isCompleted() override {
+        py::gil_scoped_acquire gil;
+        /** NCCL reports GPU completion or an error; wait() is needed to distinguish success.
+         * Gloo P2P updates its completion state only through wait(), so polling cannot replace its cleanup wait. */
+        return work_.attr("is_completed")().cast<bool>();
+    }
+
+private:
+    py::object    work_;
+    torch::Tensor tensor_;
+};
+
+std::unique_ptr<P2PWork> runP2PCallback(const torch::Tensor& tensor,
+                                        int64_t              global_peer,
+                                        const std::string&   group_name,
+                                        py::function**       callback,
+                                        const char*          callback_name) {
+    py::gil_scoped_acquire gil;
+    py::function           fn;
+    {
+        std::lock_guard<std::mutex> lock(g_comm_mutex);
+        if (*callback != nullptr) {
+            fn = **callback;
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(
+        static_cast<bool>(fn), "%s called but its callback is not registered via register_comm_ops", callback_name);
+    py::object work = fn(tensor, global_peer, group_name);
+    return std::make_unique<PythonP2PWork>(std::move(work), tensor);
 }
 }  // anonymous namespace
 
@@ -755,6 +816,14 @@ void execAllGather(const AllGatherParams& params) {
     fn(recv_list, static_cast<int>(params.mode), send_list, params.inplace);
 }
 
+std::unique_ptr<P2PWork> execISend(const torch::Tensor& tensor, int64_t global_peer, const std::string& group_name) {
+    return runP2PCallback(tensor, global_peer, group_name, &g_isend_fn, "execISend");
+}
+
+std::unique_ptr<P2PWork> execIRecv(torch::Tensor& tensor, int64_t global_peer, const std::string& group_name) {
+    return runP2PCallback(tensor, global_peer, group_name, &g_irecv_fn, "execIRecv");
+}
+
 void execSyncCommunication(bool timeout) {
     (void)timeout;  // Python ops are synchronous
 }
@@ -828,16 +897,24 @@ void registerExecCtxOps(pybind11::module& m) {
 
     m.def(
         "register_comm_ops",
-        [](py::function broadcast_fn, py::function allreduce_fn, py::function allgather_fn) {
+        [](py::function broadcast_fn,
+           py::function allreduce_fn,
+           py::function allgather_fn,
+           py::function isend_fn,
+           py::function irecv_fn) {
             std::lock_guard<std::mutex> lock(g_comm_mutex);
             clearCommOpsUnlocked();
             g_broadcast_fn = new py::function(std::move(broadcast_fn));
             g_allreduce_fn = new py::function(std::move(allreduce_fn));
             g_allgather_fn = new py::function(std::move(allgather_fn));
+            g_isend_fn     = new py::function(std::move(isend_fn));
+            g_irecv_fn     = new py::function(std::move(irecv_fn));
         },
         py::arg("broadcast_fn"),
         py::arg("allreduce_fn"),
         py::arg("allgather_fn"),
+        py::arg("isend_fn"),
+        py::arg("irecv_fn"),
         "Register Python callbacks for C++ communication ops.");
 
     m.def(

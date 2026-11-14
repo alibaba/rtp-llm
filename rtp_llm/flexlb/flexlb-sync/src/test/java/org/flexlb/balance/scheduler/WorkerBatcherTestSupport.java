@@ -6,6 +6,9 @@ import org.flexlb.balance.projection.WorkSnapshot;
 
 import java.util.List;
 
+/**
+ * Creates delivery strategies that expose only the capacity boundary required by batcher tests.
+ */
 final class WorkerBatcherTestSupport {
 
     private WorkerBatcherTestSupport() {}

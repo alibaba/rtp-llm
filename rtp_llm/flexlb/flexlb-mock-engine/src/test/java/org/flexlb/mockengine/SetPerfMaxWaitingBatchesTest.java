@@ -25,19 +25,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * Runtime {@code /set_perf} override tests for the prefill waiting-queue cap
- * ({@code prefill.max_waiting_batches}) — the B3 admission gate. The cap was
- * previously constructor-final (performance JSON only), so tests could not
- * trigger the gate mid-run; this is its runtime control-plane entry, mirroring
- * the existing {@code prefill_fixed_ms} / {@code decode_scale} /
- * {@code max_prefill_concurrency} overrides.
- *
- * <p>Override chain (same priority as {@code prefillMs}): runtime /set_perf
- * value &gt; JSON-configured value. The override value carries the same
- * semantics as the JSON field — 0 = unbounded (production default), &gt; 0 =
- * cap on QUEUED batches (running batches never count). Negative values are
- * neither a cap nor the explicit unbounded 0, so the endpoint answers 400
- * and leaves the live cap untouched.
+ * Checks runtime updates to the Prefill waiting-batch limit through the performance control
+ * endpoint.
  */
 class SetPerfMaxWaitingBatchesTest {
 

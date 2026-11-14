@@ -1,3 +1,5 @@
+load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
+
 test_envs = {}
 
 flashinfer_test_envs = {
@@ -167,4 +169,71 @@ py_test (
         "open_skip",
     ],
     exec_properties = {"gpu": "H20_CU13"},
+)
+
+py_test(
+    name = "gated_residual_test",
+    srcs = ["gated_residual_test.py"],
+    deps = ["//rtp_llm:testlib", ":residual_fixtures"],
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
+)
+
+py_test(
+    name = "residual_pending_test",
+    srcs = ["residual_pending_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py/modules/hybrid/test:residual_fixtures"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+models_py_test(
+    name = "residual_up_mix_test",
+    src = "residual_up_mix_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    deps = [":residual_fixtures"],
+)
+
+models_py_test(
+    name = "residual_norm_fp8_test",
+    src = "residual_norm_fp8_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    deps = [":residual_fixtures"],
+)
+
+models_py_test(
+    name = "residual_prefill_up_mix_test",
+    src = "residual_prefill_up_mix_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    deps = [":residual_fixtures"],
+)
+
+models_py_test(
+    name = "residual_prefill_inject_norm_test",
+    src = "residual_prefill_inject_norm_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    deps = [":residual_fixtures"],
+)
+
+models_py_test(
+    name = "residual_inject_projection_test",
+    src = "residual_inject_projection_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    deps = [":residual_fixtures"],
+)
+
+models_py_test(
+    name = "residual_splitk_inject_test",
+    src = "residual_splitk_inject_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    deps = [":residual_fixtures"],
+)
+
+py_library(
+    name = "residual_fixtures",
+    testonly = True,
+    srcs = ["residual_fixtures.py"],
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm:testlib"],
 )

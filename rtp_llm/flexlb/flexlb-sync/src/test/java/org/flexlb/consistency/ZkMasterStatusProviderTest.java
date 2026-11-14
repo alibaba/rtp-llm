@@ -11,22 +11,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Tests for {@link ZkMasterStatusProvider}.
- *
- * <p>Verifies that the provider correctly delegates to
- * {@link LBStatusConsistencyService#isMaster()} and that the
- * {@code @Lazy} constructor injection pattern (which fixed the
- * Spring circular dependency between ZkMasterStatusProvider and
- * LBStatusConsistencyService) works as expected.
- *
- * <p><b>Regression context:</b> Prior to the {@code @Lazy} fix,
- * constructor injection of {@code LBStatusConsistencyService} into
- * {@code ZkMasterStatusProvider} caused a Spring circular dependency,
- * which prevented {@code KMonitorAdapter} from receiving a
- * {@code MasterStatusProvider} bean — all metrics stopped reporting
- * the {@code isMaster} tag.
- *
- * @author saichen.sm
+ * Checks delegation of metric master status and lazy wiring of the election service.
  */
 class ZkMasterStatusProviderTest {
 

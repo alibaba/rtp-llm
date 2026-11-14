@@ -229,6 +229,10 @@ final class CacheHitFeedbackTracker {
 
     private record Key(long generation, RoleType role, String requestId) {}
 
+    /**
+     * Retains a selected-worker prediction until status feedback resolves its comparison and logging
+     * once.
+     */
     private static final class Prediction {
         private final CacheHitFeedback seed;
         private final boolean predictionAvailable;

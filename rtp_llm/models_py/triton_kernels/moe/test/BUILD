@@ -1,3 +1,5 @@
+load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
+
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test")
 load("@arch_config//:arch_select.bzl", "requirement")
@@ -130,4 +132,33 @@ cuda13_sm100_py_test(
     name = "test_mega_moe_input_packer_perf",
     srcs = ["test_mega_moe_input_packer_perf.py"],
     deps = ["//rtp_llm/models_py/triton_kernels:moe"],
+)
+
+models_py_test(
+    name = "qwen4_topk_test",
+    src = "qwen4_topk_test.py",
+    gpu = "L20_CU13",
+)
+
+py_library(
+    testonly = True,
+    name = "small_moe_test_support",
+    srcs = ["small_moe_fixture.py"],
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+models_py_test(
+    name = "decode_alignment_test",
+    src = "decode_alignment_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+)
+
+models_py_test(
+    name = "small_moe_gemv_test",
+    src = "small_moe_gemv_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    deps = [
+        ":small_moe_test_support",
+    ],
 )

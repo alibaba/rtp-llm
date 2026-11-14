@@ -2,6 +2,7 @@
 
 import ast
 import logging
+import os
 import unittest
 from contextlib import nullcontext
 from functools import partial
@@ -202,18 +203,9 @@ class PrefillDefaultsTest(unittest.TestCase):
         moe.gate = lambda *a, **k: (None, None)
         moe._forward_serial = Mock(return_value="result")
         moe._forward_phased = Mock()
-        recorder = SimpleNamespace(should_record_layer=lambda _: False)
-        with patch.dict(
-            "sys.modules",
-            {
-                "rtp_llm.models_py.modules.dsv4": SimpleNamespace(
-                    _record_tensor=recorder
-                )
-            },
-        ):
-            for rows in (1, 1023, 65537):
-                x = SimpleNamespace(is_cuda=True, shape=(rows, 4096))
-                self.assertEqual(moe._forward_local_chunk(x, None), "result")
+        for rows in (1, 1023, 65537):
+            x = SimpleNamespace(is_cuda=True, shape=(rows, 4096))
+            self.assertEqual(moe._forward_local_chunk(x, None), "result")
         self.assertEqual(moe._forward_serial.call_count, 3)
         moe._forward_phased.assert_not_called()
 
@@ -277,6 +269,31 @@ class PrefillDefaultsTest(unittest.TestCase):
                     triton_kernel.__getitem__.assert_not_called()
                     factory.assert_called_once()
                     self.assertEqual("n_thr" in factory.call_args.kwargs, hidden == 4096)
+
+    def test_post_defaults_to_pdl_disabled_without_environment(self):
+        factory = Mock(return_value=Mock())
+        triton_kernel = MagicMock()
+        post = definition(
+            "rtp_llm/models_py/kernels/ppu/hc/post_kernel.py",
+            "mhc_post_fwd",
+            _mhc_post_fwd=factory,
+        )
+        residual = torch.empty((1, 1024, 4, 4096), dtype=torch.bfloat16)
+        x = torch.empty((1, 1024, 4096), dtype=torch.bfloat16)
+        with (
+            patch.dict(os.environ, {"DSV4_MHC_POST_PDL": "1"}),
+            patch.dict("sys.modules", {
+                "rtp_llm.models_py.kernels.ppu.hc.ppu_hc_sum":
+                    SimpleNamespace(_hc_post_sum=triton_kernel),
+            }),
+        ):
+            result = post(
+                x, residual, torch.empty((1, 1024, 4, 1)),
+                torch.empty((1, 1024, 4, 4)), out=residual, prefill_tuned=True,
+            )
+        self.assertIs(result, residual)
+        factory.assert_not_called()
+        triton_kernel.__getitem__.assert_called_once_with((1024, 8))
 
     def test_phase_dependencies_keep_gemms_apart(self):
         events = []

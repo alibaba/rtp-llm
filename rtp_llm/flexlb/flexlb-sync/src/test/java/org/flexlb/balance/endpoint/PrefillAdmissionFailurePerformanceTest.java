@@ -23,7 +23,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
-/** Measures real endpoint aggregation; delivery and event sinks are not invoked in the measured loop. */
+/**
+ * Measures real endpoint aggregation; delivery and event sinks are not invoked in the measured loop.
+ */
 @Tag("performance-regression")
 class PrefillAdmissionFailurePerformanceTest {
     @Test

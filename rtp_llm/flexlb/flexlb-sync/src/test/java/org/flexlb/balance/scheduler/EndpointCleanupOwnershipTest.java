@@ -37,7 +37,9 @@ import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Cleanup uses current directory membership, including terminal records, rather than live Slot state. */
+/**
+ * Cleanup uses current directory membership, including terminal records, rather than live Slot state.
+ */
 class EndpointCleanupOwnershipTest {
     private FlexlbConfig config;
     private RequestRegistry registry;
@@ -302,8 +304,6 @@ class EndpointCleanupOwnershipTest {
         assertEquals(kvBudget, view.routing().inputAndMaxOutputKvReserved());
     }
 
-    private record CleanupRace<T>(int evicted, T owner) {}
-
     private <T> CleanupRace<T> raceRegistrationAfterAbsentCheck(
             String id,
             int earlierQueries,
@@ -390,4 +390,6 @@ class EndpointCleanupOwnershipTest {
         }
         fail("new resource acquisition did not wait for the cleanup thread's endpoint lock");
     }
+
+    private record CleanupRace<T>(int evicted, T owner) {}
 }

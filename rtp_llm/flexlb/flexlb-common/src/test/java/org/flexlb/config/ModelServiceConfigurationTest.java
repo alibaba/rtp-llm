@@ -13,8 +13,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks model service configuration loading and validation.
+ */
 class ModelServiceConfigurationTest {
-
     private final ApplicationContextRunner contextRunner =
             new ApplicationContextRunner()
                     .withUserConfiguration(
@@ -241,28 +243,8 @@ class ModelServiceConfigurationTest {
                 "static-env discovery hosts must be configured for address: optimizer-service");
     }
 
-    private String staticModelConfig() {
-        return """
-                {"service_id":"test-service","role_endpoints":[{"group":"default",
-                "pd_fusion_endpoint":{"address":"service-a","protocol":"http","path":"/",
-                "worker_status_port":18002,
-                "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}}}]}
-                """;
-    }
-
     private void assertOptimizerRejected(String optimizerConfig, String message) {
         withModelConfig(modelConfig(optimizerConfig))
-                .run(
-                        context -> {
-                            assertThat(context).hasFailed();
-                            assertThat(context.getStartupFailure()).hasRootCauseMessage(message);
-                        });
-    }
-
-    private void assertEndpointRejected(String endpointFields, String message) {
-        String config =
-                staticModelConfig().replace("\"worker_status_port\":18002,", endpointFields);
-        withModelConfig(config)
                 .run(
                         context -> {
                             assertThat(context).hasFailed();
@@ -285,6 +267,26 @@ class ModelServiceConfigurationTest {
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}}}]}
                 """
                 .formatted(optimizerConfig);
+    }
+
+    private void assertEndpointRejected(String endpointFields, String message) {
+        String config =
+                staticModelConfig().replace("\"worker_status_port\":18002,", endpointFields);
+        withModelConfig(config)
+                .run(
+                        context -> {
+                            assertThat(context).hasFailed();
+                            assertThat(context.getStartupFailure()).hasRootCauseMessage(message);
+                        });
+    }
+
+    private String staticModelConfig() {
+        return """
+                {"service_id":"test-service","role_endpoints":[{"group":"default",
+                "pd_fusion_endpoint":{"address":"service-a","protocol":"http","path":"/",
+                "worker_status_port":18002,
+                "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}}}]}
+                """;
     }
 
     private String validOptimizerConfig() {

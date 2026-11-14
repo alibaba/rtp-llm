@@ -14,16 +14,13 @@ import static org.flexlb.balance.prediction.ArithmeticFormulaAst.Node;
  * Batch-aware callers may additionally enable {@code sum(expression)}.
  */
 public final class ArithmeticFormula {
-
     // Bounded reuse also avoids one generated class per equal-model endpoint.
     private static final int MAX_COMPILED_FORMULAS = 128;
+
     private static final Map<Node, Compiled> COMPILED =
             new LinkedHashMap<>(MAX_COMPILED_FORMULAS, 0.75f, true);
 
     private final Compiled compiled;
-
-    private record Compiled(Executable full, ArithmeticFormulaCompiler.Incremental incremental) {}
-
     private final Set<String> referencedVariables;
 
     private ArithmeticFormula(Node root, Set<String> referencedVariables) {
@@ -85,6 +82,12 @@ public final class ArithmeticFormula {
         return compiled.incremental() == null ? null : new Aggregation(compiled.incremental());
     }
 
+    private record Compiled(Executable full, ArithmeticFormulaCompiler.Incremental incremental) {}
+
+    /**
+     * Accumulates per-item terms so batch expressions can be evaluated without rescanning prior
+     * items.
+     */
     public static final class Aggregation {
         private final ArithmeticFormulaCompiler.Incremental program;
         private final double[] sums;
@@ -107,6 +110,9 @@ public final class ArithmeticFormula {
         }
     }
 
+    /**
+     * Evaluates a compiled expression against scalar variables and optional item variables.
+     */
     interface Executable {
         double evaluate(double[] vars, List<double[]> items);
     }

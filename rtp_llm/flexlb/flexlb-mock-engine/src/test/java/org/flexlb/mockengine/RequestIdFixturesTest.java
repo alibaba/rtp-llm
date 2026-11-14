@@ -7,6 +7,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks mock-engine request-ID fixtures against canonical wire IDs.
+ */
 class RequestIdFixturesTest {
 
     @Test

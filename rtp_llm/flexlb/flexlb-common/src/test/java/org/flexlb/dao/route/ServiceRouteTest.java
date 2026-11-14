@@ -11,6 +11,9 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+/**
+ * Checks model service route configuration and identity.
+ */
 class ServiceRouteTest {
     private static final String ROUTE_JSON =
             """
@@ -65,24 +68,6 @@ class ServiceRouteTest {
         List<ServiceRoute> serviceRoutes =
                 JsonUtils.toObject("[" + ROUTE_JSON + "]", new TypeReference<>() {});
         assertStandardRoute(serviceRoutes.getFirst());
-    }
-
-    private static void assertStandardRoute(ServiceRoute serviceRoute) {
-        Assertions.assertEquals(1, serviceRoute.getRoleEndpoints().size());
-        GroupRoleEndPoint roleEndpoint = serviceRoute.getRoleEndpoints().getFirst();
-        Assertions.assertEquals("ea119_PPU_ZW810E_16TP_decode64", roleEndpoint.getGroup());
-        Endpoint prefillEndpoint = new Endpoint();
-        prefillEndpoint.setAddress("com.aicheng.whale.pre.deepseek_dp_tp_test");
-        prefillEndpoint.setProtocol("http");
-        prefillEndpoint.setPath("/");
-        prefillEndpoint.setGroup("ea119_PPU_ZW810E_16TP_decode64");
-        Assertions.assertEquals(prefillEndpoint, roleEndpoint.getPrefillEndpoint());
-        Endpoint decodeEndpoint = new Endpoint();
-        decodeEndpoint.setAddress("com.aicheng.whale.pre.test_pd_gang2.decode");
-        decodeEndpoint.setProtocol("http");
-        decodeEndpoint.setPath("/");
-        decodeEndpoint.setGroup("ea119_PPU_ZW810E_16TP_decode64");
-        Assertions.assertEquals(decodeEndpoint, roleEndpoint.getDecodeEndpoint());
     }
 
     @Test
@@ -178,6 +163,24 @@ class ServiceRouteTest {
         Assertions.assertEquals("grpc", serviceRoute.getKvcm().toEndpoint().getProtocol());
         Assertions.assertEquals(
                 KvcmConfig.DEFAULT_BOOTSTRAP_PORT, serviceRoute.getKvcm().getPort());
+    }
+
+    private static void assertStandardRoute(ServiceRoute serviceRoute) {
+        Assertions.assertEquals(1, serviceRoute.getRoleEndpoints().size());
+        GroupRoleEndPoint roleEndpoint = serviceRoute.getRoleEndpoints().getFirst();
+        Assertions.assertEquals("ea119_PPU_ZW810E_16TP_decode64", roleEndpoint.getGroup());
+        Endpoint prefillEndpoint = new Endpoint();
+        prefillEndpoint.setAddress("com.aicheng.whale.pre.deepseek_dp_tp_test");
+        prefillEndpoint.setProtocol("http");
+        prefillEndpoint.setPath("/");
+        prefillEndpoint.setGroup("ea119_PPU_ZW810E_16TP_decode64");
+        Assertions.assertEquals(prefillEndpoint, roleEndpoint.getPrefillEndpoint());
+        Endpoint decodeEndpoint = new Endpoint();
+        decodeEndpoint.setAddress("com.aicheng.whale.pre.test_pd_gang2.decode");
+        decodeEndpoint.setProtocol("http");
+        decodeEndpoint.setPath("/");
+        decodeEndpoint.setGroup("ea119_PPU_ZW810E_16TP_decode64");
+        Assertions.assertEquals(decodeEndpoint, roleEndpoint.getDecodeEndpoint());
     }
 
     private void assertServiceRoute(ServiceRoute serviceRoute) {

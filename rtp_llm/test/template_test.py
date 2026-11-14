@@ -29,7 +29,7 @@ from rtp_llm.openai.api_datatype import (
 from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderer_factory_register import _renderer_factory
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
-from rtp_llm.openai.renderers.qwen35_renderer import Qwen35Renderer
+from rtp_llm.openai.renderers.qwen35_renderer import Qwen4Renderer, Qwen35Renderer
 from rtp_llm.openai.renderers.qwen_agent_renderer import QwenAgentRenderer
 from rtp_llm.openai.renderers.qwen_agent_tool_renderer import QwenAgentToolRenderer
 from rtp_llm.openai.renderers.qwen_renderer import QwenRenderer
@@ -385,6 +385,78 @@ class TemplateTest(TestCase):
             "<|im_start|>user\nhello<|im_end|>\n"
             "<|im_start|>assistant\n<think>\n\n</think>\n\n"
         )
+
+    def test_qwen35_and_qwen4_pass_top_level_thinking_to_template(self):
+        for model_type, renderer_cls in (
+            ("qwen35_dense", Qwen35Renderer),
+            ("qwen35_moe", Qwen35Renderer),
+            ("qwen4_exp", Qwen4Renderer),
+        ):
+            renderer = renderer_cls(
+                _Qwen35DefaultTemplateTokenizer(),
+                RendererParams(
+                    model_type=model_type,
+                    max_seq_len=1024,
+                    eos_token_id=0,
+                    stop_word_ids_list=[],
+                ),
+                GenerateEnvConfig(),
+                RenderConfig(),
+            )
+            messages = [ChatMessage(role=RoleEnum.user, content="hello")]
+            for top_level, kwargs, disabled in (
+                (False, {"enable_thinking": True}, True),
+                (True, {"enable_thinking": False}, True),
+                (None, {"enable_thinking": False}, True),
+                (None, {"thinking_mode": "disabled"}, True),
+                (True, {}, False),
+                (None, {}, renderer_cls is Qwen4Renderer),
+            ):
+                with self.subTest(
+                    model_type=model_type, top_level=top_level, kwargs=kwargs
+                ):
+                    prompt = renderer.render_chat(
+                        ChatCompletionRequest(
+                            messages=messages,
+                            enable_thinking=top_level,
+                            chat_template_kwargs=kwargs,
+                        )
+                    ).rendered_prompt
+                    self.assertTrue(
+                        prompt.endswith(
+                            "<think>\n\n</think>\n\n" if disabled else "<think>\n"
+                        )
+                    )
+
+    def test_qwen4_template_uses_resolved_service_thinking_mode(self):
+        for default_mode in ("disabled", "enabled", "adaptive"):
+            config = GenerateEnvConfig()
+            config.think_mode = default_mode
+            renderer = Qwen4Renderer(
+                _Qwen35DefaultTemplateTokenizer(),
+                RendererParams(
+                    model_type="qwen4_exp",
+                    max_seq_len=1024,
+                    eos_token_id=0,
+                    stop_word_ids_list=[],
+                ),
+                config,
+                RenderConfig(),
+            )
+            for explicit in (None, False, True):
+                with self.subTest(default_mode=default_mode, explicit=explicit):
+                    request = ChatCompletionRequest(
+                        messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+                        enable_thinking=explicit,
+                    )
+                    disabled = (
+                        default_mode == "disabled" if explicit is None else not explicit
+                    )
+                    self.assertTrue(
+                        renderer.render_chat(request).rendered_prompt.endswith(
+                            "<think>\n\n</think>\n\n" if disabled else "<think>\n"
+                        )
+                    )
 
     def test_basic_renderer_preserves_template_thinking_default(self):
         generate_env_config = GenerateEnvConfig()

@@ -12,7 +12,6 @@ import org.flexlb.enums.DecodeTaskPhase;
  *
  */
 public final class PriorityCostFunction {
-
     private static final int MIN_PRIORITY_RANK = 0;
     private static final int MAX_PRIORITY_RANK = 4;
     private static final int PRIORITY_RANK_BASE = 30;
@@ -34,15 +33,6 @@ public final class PriorityCostFunction {
 
     private PriorityCostFunction() {}
 
-    /** Rank 0..4 of a normalized priority (30..70), clamped for safety. */
-    public static int rank(int priority) {
-        return Math.max(
-                MIN_PRIORITY_RANK,
-                Math.min(
-                        MAX_PRIORITY_RANK,
-                        (priority - PRIORITY_RANK_BASE) / PRIORITY_POINTS_PER_RANK));
-    }
-
     /** Single-value victim cost: 1024^rank. */
     public static long f(int priority) {
         long cost = 1;
@@ -51,6 +41,15 @@ public final class PriorityCostFunction {
             cost *= COST_RADIX;
         }
         return cost;
+    }
+
+    /** Rank 0..4 of a normalized priority (30..70), clamped for safety. */
+    public static int rank(int priority) {
+        return Math.max(
+                MIN_PRIORITY_RANK,
+                Math.min(
+                        MAX_PRIORITY_RANK,
+                        (priority - PRIORITY_RANK_BASE) / PRIORITY_POINTS_PER_RANK));
     }
 
     /** Add non-negative diagnostic costs, saturating instead of wrapping. */
@@ -85,12 +84,6 @@ public final class PriorityCostFunction {
         };
     }
 
-    /** KV bucket of a reservation: ceil(kvTokens / 1024) (design doc 12.3). */
-    public static long kvBucket(long kvTokens) {
-        long nonNegativeTokens = Math.max(0, kvTokens);
-        return nonNegativeTokens == 0 ? 0 : 1 + (nonNegativeTokens - 1) / KV_TOKENS_PER_COST_BUCKET;
-    }
-
     /**
      * Length waste factor for KV eviction (design doc 12.5):
      * {@code max(1, sqrt(kvBucket))}, rounded to long — large releases sort
@@ -98,5 +91,11 @@ public final class PriorityCostFunction {
      */
     public static long lengthWasteCost(long kvTokens) {
         return Math.max(1L, Math.round(Math.sqrt((double) kvBucket(kvTokens))));
+    }
+
+    /** KV bucket of a reservation: ceil(kvTokens / 1024) (design doc 12.3). */
+    public static long kvBucket(long kvTokens) {
+        long nonNegativeTokens = Math.max(0, kvTokens);
+        return nonNegativeTokens == 0 ? 0 : 1 + (nonNegativeTokens - 1) / KV_TOKENS_PER_COST_BUCKET;
     }
 }

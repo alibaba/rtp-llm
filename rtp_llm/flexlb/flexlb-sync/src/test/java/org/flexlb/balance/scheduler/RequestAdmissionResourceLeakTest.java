@@ -34,7 +34,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Real endpoint reservations remain exact across competing local terminal paths. */
+/**
+ * Real endpoint reservations remain exact across competing local terminal paths.
+ */
 class RequestAdmissionResourceLeakTest {
     private FlexlbConfig config;
     private RequestRegistry lifecycle;

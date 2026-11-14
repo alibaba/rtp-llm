@@ -24,8 +24,10 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks learned execution predictions and sample updates.
+ */
 class LearningPredictorTest {
-
     @Test
     @DisplayName("default model produces a non-negative estimate")
     void defaultModelEstimateMs() {
@@ -220,13 +222,6 @@ class LearningPredictorTest {
                 initial, p.evaluator(), "serialized updates must publish a replacement evaluator");
     }
 
-    private static double[] snapshotWeights(PrefillTimePredictor.Evaluator evaluator)
-            throws ReflectiveOperationException {
-        Field weights = evaluator.getClass().getDeclaredField("weights");
-        weights.setAccessible(true);
-        return ((double[]) weights.get(evaluator)).clone();
-    }
-
     private static void recordSnapshot(
             Map<PrefillTimePredictor.Evaluator, double[]> weightsByEvaluator,
             PrefillTimePredictor.Evaluator evaluator)
@@ -244,6 +239,13 @@ class LearningPredictorTest {
                     }
                     return observed;
                 });
+    }
+
+    private static double[] snapshotWeights(PrefillTimePredictor.Evaluator evaluator)
+            throws ReflectiveOperationException {
+        Field weights = evaluator.getClass().getDeclaredField("weights");
+        weights.setAccessible(true);
+        return ((double[]) weights.get(evaluator)).clone();
     }
 
     private static PrefillBatchFeatures batchFeatures(PrefillBatchFeatures.Item... items) {

@@ -29,6 +29,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks when scheduling responses include a worker's logical engine index.
+ */
 class FlexlbScheduleEngineIndexTest {
 
     private RouteService routeService;

@@ -65,6 +65,9 @@ class Qwen3DSparkWeight(QWenV3Weight):
 
 
 class Qwen3DSpark(QwenV3):
+    def support_pp(self) -> bool:
+        return False
+
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         dspark = get_config_from_path(ckpt_path)

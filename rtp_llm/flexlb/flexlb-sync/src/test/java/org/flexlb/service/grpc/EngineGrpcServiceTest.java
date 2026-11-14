@@ -14,6 +14,9 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
+/**
+ * Checks engine RPC service request conversion and response handling.
+ */
 class EngineGrpcServiceTest {
 
     @ParameterizedTest

@@ -17,31 +17,6 @@ using DeviceSWACacheManager = SWACacheManager;
 
 namespace {
 
-class ScopedEnvVar {
-public:
-    ScopedEnvVar(const char* name, const char* value): name_(name) {
-        const char* old_value = std::getenv(name_);
-        if (old_value != nullptr) {
-            old_value_ = old_value;
-            had_value_ = true;
-        }
-        setenv(name_, value, 1);
-    }
-
-    ~ScopedEnvVar() {
-        if (had_value_) {
-            setenv(name_, old_value_.c_str(), 1);
-        } else {
-            unsetenv(name_);
-        }
-    }
-
-private:
-    const char* name_;
-    std::string old_value_;
-    bool        had_value_ = false;
-};
-
 std::shared_ptr<FixedStateCacheSpec> makeDsv4StateSpec(int seq_size_per_block) {
     return makeTestFixedStateSpec(static_cast<uint32_t>(seq_size_per_block));
 }
@@ -66,13 +41,12 @@ size_t validBlockCount(const BlockIndicesType& blocks) {
 class DeviceSWACacheManagerTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        block_pool_                                  = createDeviceBlockPool();
+        block_pool_ = createDeviceBlockPool();
         block_pool_->init();
         total_blocks_ = block_pool_->freeBlocksNum();
     }
 
-    void TearDown() override {
-    }
+    void TearDown() override {}
 
     DeviceSWACacheManager makeGroup(int seq_size_per_block) {
         auto spec                = std::make_shared<MHAKVCacheSpec>();
@@ -433,10 +407,9 @@ TEST_F(DeviceSWACacheManagerTest, Malloc_NoOpWhenEnoughBlocks) {
 }
 
 TEST_F(DeviceSWACacheManagerTest, Malloc_DSV4TrapSkipsHCAStateNullTail) {
-    ScopedEnvVar env("DSV4_TRAP_INVALID_KV_ACCESS", "1");
-    auto         spec  = makeDsv4StateSpec(4);
-    auto         group = DeviceSWACacheManager({}, spec, block_pool_, 5, makePolicy(false));
-    BlockIds     block_ids(1);
+    auto     spec  = makeDsv4StateSpec(4);
+    auto     group = DeviceSWACacheManager({}, spec, block_pool_, 5, makePolicy(false));
+    BlockIds block_ids(1);
     block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
 
     EXPECT_NO_THROW((void)group.malloc(block_ids, 12));
@@ -473,20 +446,18 @@ TEST_F(DeviceSWACacheManagerTest, Malloc_CSAStateReuseEnabledKeepsTailOnly) {
 }
 
 TEST_F(DeviceSWACacheManagerTest, Malloc_DSV4TrapChecksSWAKVNullTail) {
-    ScopedEnvVar env("DSV4_TRAP_INVALID_KV_ACCESS", "1");
-    auto         spec  = makeDsv4StateSpec(4);
-    auto         group = DeviceSWACacheManager({}, spec, block_pool_, 6, makePolicy());
-    BlockIds     block_ids(1);
+    auto     spec  = makeDsv4StateSpec(4);
+    auto     group = DeviceSWACacheManager({}, spec, block_pool_, 6, makePolicy());
+    BlockIds block_ids(1);
     block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
 
     EXPECT_THROW((void)group.malloc(block_ids, 12), std::exception);
 }
 
 TEST_F(DeviceSWACacheManagerTest, Malloc_DSV4TrapChecksNonSkipStateNullTail) {
-    ScopedEnvVar env("DSV4_TRAP_INVALID_KV_ACCESS", "1");
-    auto         spec  = makeDsv4StateSpec(4);
-    auto         group = DeviceSWACacheManager({}, spec, block_pool_, 4, makePolicy(), 2);
-    BlockIds     block_ids(1);
+    auto     spec  = makeDsv4StateSpec(4);
+    auto     group = DeviceSWACacheManager({}, spec, block_pool_, 4, makePolicy(), 2);
+    BlockIds block_ids(1);
     block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
 
     EXPECT_THROW((void)group.malloc(block_ids, 12), std::exception);

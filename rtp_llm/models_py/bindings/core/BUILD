@@ -191,7 +191,6 @@ cc_library(
     copts = copts(),
 )
 
-
 filegroup(
     name = "exec_ctx_impl_srcs",
     srcs = [
@@ -309,6 +308,10 @@ cc_library(
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
             "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
+            "//rtp_llm/models_py/bindings/cuda/kernels:speculative_sampling_host",
+            "//rtp_llm/models_py/bindings/cuda/kernels/sampling:softmax_host",
+            "//rtp_llm/models_py/bindings/cuda/kernels/sampling:temperature_host",
+            "//rtp_llm/models_py/bindings/cuda/kernels/sampling:host_utils",
         ],
         "//conditions:default": [],
     }),
@@ -340,6 +343,10 @@ cc_library(
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
             "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
+            "//rtp_llm/models_py/bindings/cuda/kernels:speculative_sampling_host",
+            "//rtp_llm/models_py/bindings/cuda/kernels/sampling:softmax_host",
+            "//rtp_llm/models_py/bindings/cuda/kernels/sampling:temperature_host",
+            "//rtp_llm/models_py/bindings/cuda/kernels/sampling:host_utils",
         ],
         "//conditions:default": [],
     }),

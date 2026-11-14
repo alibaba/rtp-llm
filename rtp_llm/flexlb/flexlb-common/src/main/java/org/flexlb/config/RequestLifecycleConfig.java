@@ -3,7 +3,9 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.Setter;
 
-/** Request inactivity and post-decision Engine visibility are separate deadlines. */
+/**
+ * Request inactivity and post-decision Engine visibility are separate deadlines.
+ */
 @Getter
 @Setter
 public final class RequestLifecycleConfig {
@@ -18,6 +20,10 @@ public final class RequestLifecycleConfig {
         private Long timeoutMs;
     }
 
+    /**
+     * Scales predicted work to set the post-delivery engine-visibility deadline. The multiplier is
+     * finite and at least one; request inactivity uses its separate timeout.
+     */
     @Getter
     @Setter
     public static final class DecisionConfig {

@@ -39,36 +39,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * Comprehensive fault injection test covering all fault injection types
- * supported by the Java mock engine's FaultInjectionConfig.
- *
- * <p>Each test method exercises one fault injection type via the HTTP control
- * API ({@link MockControlServer}) and/or direct gRPC calls
- * ({@link JavaMockEngineCluster.FastRpcService}), verifying the fault
- * takes effect and that clearing it restores normal behaviour.
- *
- * <p>API notes:
- * <ul>
- *   <li>The HTTP /inject endpoint accepts POST with JSON body
- *       {@code {"port":N,"type":"...","enabled":true,...}}, not GET with
- *       query parameters.</li>
- *   <li>Supported inject types: enqueue_error, generate_error, fetch_error,
- *       no_respond, kv_pressure, queue_depth, crash_after, enqueue_delay,
- *       generate_delay.</li>
- *   <li>/start_engine automatically clears fault injection config and resets
- *       enqueueCount, so crash recovery no longer requires /clear_inject
- *       first.</li>
- * </ul>
+ * Checks mock-engine fault settings through HTTP controls and gRPC calls, including restoration of
+ * ordinary behavior after clearing faults.
  */
 class ComprehensiveFaultInjectionTest {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
     private static final AtomicInteger PORT_ALLOCATOR = new AtomicInteger(62900);
+
     private static final long TOTAL_KV_TOKENS = 6_291_456L;
 
     @TempDir Path tempDir;
-
     private ScheduledExecutorService scheduler;
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
@@ -650,36 +631,6 @@ class ComprehensiveFaultInjectionTest {
         }
     }
 
-    // ════════════════════════════════════════════════════════════════
-    //  Cluster setup helpers
-    // ════════════════════════════════════════════════════════════════
-
-    /**
-     * Claim the next 10-port block whose first {@code needed} ports are all
-     * bindable right now. The allocator's ports sit inside the OS ephemeral
-     * range, so a stray outbound connection from an unrelated process (e.g. a
-     * lingering CLOSE_WAIT socket) can squat on a deterministic port and fail
-     * every full-suite run; skipping occupied blocks keeps the tests hermetic.
-     */
-    private static int allocatePortBlock(int needed) {
-        for (int attempt = 0; attempt < 20; attempt++) {
-            int basePort = PORT_ALLOCATOR.getAndAdd(10);
-            boolean allFree = true;
-            for (int i = 0; i < needed; i++) {
-                try (ServerSocket probe = new ServerSocket(basePort + i)) {
-                    probe.setReuseAddress(true);
-                } catch (IOException e) {
-                    allFree = false;
-                    break;
-                }
-            }
-            if (allFree) {
-                return basePort;
-            }
-        }
-        throw new IllegalStateException("no bindable 10-port block after 20 attempts");
-    }
-
     /**
      * Start a cluster with direct service calls (no real gRPC servers).
      * Suitable for tests that use /inject, /clear_inject, /set_kv_pressure,
@@ -739,6 +690,36 @@ class ComprehensiveFaultInjectionTest {
                         services, new ConcurrentHashMap<>(), null, null, "127.0.0.1", 0);
         controlServer.start();
         return basePort;
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  Cluster setup helpers
+    // ════════════════════════════════════════════════════════════════
+
+    /**
+     * Claim the next 10-port block whose first {@code needed} ports are all
+     * bindable right now. The allocator's ports sit inside the OS ephemeral
+     * range, so a stray outbound connection from an unrelated process (e.g. a
+     * lingering CLOSE_WAIT socket) can squat on a deterministic port and fail
+     * every full-suite run; skipping occupied blocks keeps the tests hermetic.
+     */
+    private static int allocatePortBlock(int needed) {
+        for (int attempt = 0; attempt < 20; attempt++) {
+            int basePort = PORT_ALLOCATOR.getAndAdd(10);
+            boolean allFree = true;
+            for (int i = 0; i < needed; i++) {
+                try (ServerSocket probe = new ServerSocket(basePort + i)) {
+                    probe.setReuseAddress(true);
+                } catch (IOException e) {
+                    allFree = false;
+                    break;
+                }
+            }
+            if (allFree) {
+                return basePort;
+            }
+        }
+        throw new IllegalStateException("no bindable 10-port block after 20 attempts");
     }
 
     /**

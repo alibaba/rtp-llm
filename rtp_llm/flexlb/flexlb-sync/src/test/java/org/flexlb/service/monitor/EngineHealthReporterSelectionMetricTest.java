@@ -22,6 +22,9 @@ import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_EXECUTION_TIME
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks selected Prefill estimate metrics and delivery-mode tags.
+ */
 @ExtendWith(MockitoExtension.class)
 class EngineHealthReporterSelectionMetricTest {
 

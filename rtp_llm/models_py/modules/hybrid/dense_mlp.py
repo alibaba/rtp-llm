@@ -34,8 +34,10 @@ class DenseMLP(nn.Module):
         weights: Dict[str, torch.Tensor],
         quant_config: object,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        linear_factory=None,
     ):
         super().__init__()
+        self.linear_factory = linear_factory or LinearFactory
 
         self.activation_type = activation_type
         self.parallelism_config = parallelism_config
@@ -46,7 +48,7 @@ class DenseMLP(nn.Module):
 
         if self.is_gated:
             if W.ffn_w13 not in weights:
-                self.up_proj = LinearFactory.create_merged_linear(
+                self.up_proj = self.linear_factory.create_merged_linear(
                     weights,
                     weight_keys=[W.ffn_w1, W.ffn_w3],
                     scale_keys=[W.ffn_s1, W.ffn_s3],
@@ -58,7 +60,7 @@ class DenseMLP(nn.Module):
                     input_scale_keys=[W.ffn_w1_i_s, W.ffn_w3_i_s],
                 )
             else:
-                self.up_proj = LinearFactory.create_linear_from_weights(
+                self.up_proj = self.linear_factory.create_linear_from_weights(
                     weights,
                     W.ffn_w13,
                     W.ffn_s13,
@@ -70,7 +72,7 @@ class DenseMLP(nn.Module):
                 )
 
         else:
-            self.up_proj = LinearFactory.create_linear_from_weights(
+            self.up_proj = self.linear_factory.create_linear_from_weights(
                 weights,
                 W.ffn_w3,
                 W.ffn_s3,
@@ -81,7 +83,7 @@ class DenseMLP(nn.Module):
                 input_scale_key=W.ffn_w3_i_s,
             )
 
-        self.down_proj = LinearFactory.create_linear_from_weights(
+        self.down_proj = self.linear_factory.create_linear_from_weights(
             weights,
             W.ffn_w2,
             W.ffn_s2,

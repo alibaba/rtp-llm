@@ -53,7 +53,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Real Netty boundaries for forwarding guards and exact-owner cancellation. */
+/**
+ * Real Netty boundaries for forwarding guards and exact-owner cancellation.
+ */
 class FlexlbForwardHopGuardNettyTest {
 
     @Test
@@ -361,6 +363,9 @@ class FlexlbForwardHopGuardNettyTest {
                 phase.name());
     }
 
+    /**
+     * Owns a client connection used to verify the forwarding hop limit over Netty.
+     */
     private static final class Client implements AutoCloseable {
         private final ManagedChannel channel;
         private final FlexlbServiceGrpc.FlexlbServiceBlockingStub stub;
@@ -372,18 +377,21 @@ class FlexlbForwardHopGuardNettyTest {
                             .withDeadlineAfter(5, TimeUnit.SECONDS);
         }
 
-        static Client connect(int port) {
-            return new Client(
-                    NettyChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().build());
-        }
-
         @Override
         public void close() throws InterruptedException {
             channel.shutdownNow();
             channel.awaitTermination(5, TimeUnit.SECONDS);
         }
+
+        static Client connect(int port) {
+            return new Client(
+                    NettyChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().build());
+        }
     }
 
+    /**
+     * Runs one forwarding-test server and exposes its addresses and executor completion.
+     */
     private static final class Node implements AutoCloseable {
         private final AtomicReference<String> masterAddress = new AtomicReference<>();
         private final AtomicBoolean isMaster = new AtomicBoolean(false);
@@ -468,16 +476,26 @@ class FlexlbForwardHopGuardNettyTest {
                             .start();
         }
 
+        @Override
+        public void close() throws InterruptedException {
+            forwarder.shutdown();
+            server.shutdownNow();
+            server.awaitTermination(5, TimeUnit.SECONDS);
+            serverExecutor.shutdownNow();
+            channelExecutor.shutdownNow();
+            channelEventLoop.shutdownGracefully().sync();
+        }
+
         static Node start(String localIdentity) throws Exception {
             return new Node(localIdentity);
         }
 
-        int grpcPort() {
-            return server.getPort();
-        }
-
         String httpAddress() {
             return "127.0.0.1:" + (grpcPort() - FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET);
+        }
+
+        int grpcPort() {
+            return server.getPort();
         }
 
         void awaitExecutorIdle() throws InterruptedException {
@@ -488,16 +506,6 @@ class FlexlbForwardHopGuardNettyTest {
             }
             assertEquals(0, serverExecutor.getActiveCount());
             assertTrue(serverExecutor.getQueue().isEmpty());
-        }
-
-        @Override
-        public void close() throws InterruptedException {
-            forwarder.shutdown();
-            server.shutdownNow();
-            server.awaitTermination(5, TimeUnit.SECONDS);
-            serverExecutor.shutdownNow();
-            channelExecutor.shutdownNow();
-            channelEventLoop.shutdownGracefully().sync();
         }
     }
 }

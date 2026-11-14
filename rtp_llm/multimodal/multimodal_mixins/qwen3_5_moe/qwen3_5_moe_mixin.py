@@ -40,13 +40,18 @@ except Exception as e:
 
 
 class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
+    image_processor_class = Qwen2VLImageProcessor
+
     def __init__(self, mm_related_params: VitParameters):
         self.mm_processor = AutoProcessor.from_pretrained(
             mm_related_params.config["ckpt_path"]
         )
-        self.mm_processor.image_processor = Qwen2VLImageProcessor.from_pretrained(
-            mm_related_params.config["ckpt_path"]
-        )
+        if self.image_processor_class is not None:
+            self.mm_processor.image_processor = (
+                self.image_processor_class.from_pretrained(
+                    mm_related_params.config["ckpt_path"]
+                )
+            )
         config_hf = Qwen3_5MoeVisionConfig.from_pretrained(
             mm_related_params.config["ckpt_path"]
         )
@@ -86,10 +91,14 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
     ):
         if not all(mm_type == MMUrlType.IMAGE for mm_type in mm_types):
             return super().batched_embedding(data_list, mm_types, **kwargs)
+        return self._batched_vision_embedding(data_list, **kwargs)
+
+    def _batched_vision_embedding(self, data_list, **kwargs):
+        """Pack already preprocessed media through the shared vision tower."""
         res_list = []
         pixel_values_list = []
         grid_thw_list = []
-        for data, mm_type in zip(data_list, mm_types):
+        for data in data_list:
             pixel_values_list.append(data[0])
             grid_thw_list.append(data[1])
         pixel_values = (

@@ -19,18 +19,12 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
 /**
- * Process-local owner of discovered worker generations and routable endpoint
- * generations.
- *
- * <p>A status entry describes the generation currently being polled. Routing
- * authority always comes from the matching endpoint generation in
- * {@link EndpointRegistry}; callers must capture a pin before using it. Keeping
- * both views behind this directory makes disagreement visible instead of
- * hiding it behind a derived capacity value.</p>
+ * Tracks discovered worker generations and their matching routable endpoints. Discovery installs
+ * generation identity before validated status publishes an endpoint; routing captures exact pins,
+ * and removal retires the matching endpoint and cache metadata.
  */
 @Component
 public final class WorkerDirectory implements WorkerStatusProvider {
-
     private final Map<RoleType, ConcurrentHashMap<String, WorkerStatus>> statusesByRole =
             new EnumMap<>(RoleType.class);
     private final EndpointRegistry endpointRegistry;
@@ -40,14 +34,6 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         for (RoleType role : RoleType.values()) {
             statusesByRole.put(role, new ConcurrentHashMap<>());
         }
-    }
-
-    /** Immutable point-in-time view of discovered generations for one role. */
-    public Map<String, WorkerStatus> statusSnapshot(RoleType role) {
-        if (role == null) {
-            return Map.of();
-        }
-        return Map.copyOf(statusesByRole.get(role));
     }
 
     @Override
@@ -60,6 +46,14 @@ public final class WorkerDirectory implements WorkerStatusProvider {
             return statuses;
         }
         return statuses.stream().filter(status -> group.equals(status.getGroup())).toList();
+    }
+
+    /** Immutable point-in-time view of discovered generations for one role. */
+    public Map<String, WorkerStatus> statusSnapshot(RoleType role) {
+        if (role == null) {
+            return Map.of();
+        }
+        return Map.copyOf(statusesByRole.get(role));
     }
 
     /** Identity check used by asynchronous callbacks under the status lock. */
@@ -195,6 +189,84 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         }
     }
 
+    /** Immutable, non-owning address snapshot for lazy selection. */
+    public List<String> endpointAddressSnapshot(RoleType role) {
+        return endpointRegistry.endpointAddressSnapshot(role);
+    }
+
+    /**
+     * Immutable, non-owning Prefill generations for one routing traversal.
+     * The winning address must still be captured and identity-checked.
+     */
+    public List<EndpointRegistry.PrefillRoutingEntry> prefillRoutingSnapshot(RoleType role) {
+        return endpointRegistry.prefillRoutingSnapshot(role);
+    }
+
+    /** Capture one exact currently published endpoint generation by address. */
+    public WorkerEndpoint.GenerationPin captureEndpoint(RoleType role, String ipPort) {
+        return endpointRegistry.capture(role, ipPort);
+    }
+
+    /** Immutable Decode routing values for one group. */
+    public List<DecodeEndpoint.DecodeRoutingView> decodeRoutingSnapshot(String group) {
+        List<DecodeEndpoint.DecodeRoutingView> snapshots = endpointRegistry.decodeRoutingSnapshot();
+        if (group == null || snapshots.isEmpty()) {
+            return snapshots;
+        }
+        ArrayList<DecodeEndpoint.DecodeRoutingView> matching = new ArrayList<>(snapshots.size());
+        for (DecodeEndpoint.DecodeRoutingView snapshot : snapshots) {
+            if (group.equals(snapshot.topology().group())) {
+                matching.add(snapshot);
+            }
+        }
+        return List.copyOf(matching);
+    }
+
+    /** Pin the exact generation represented by a Decode routing snapshot. */
+    public WorkerEndpoint.GenerationPin captureDecodeGeneration(
+            DecodeEndpoint.DecodeRoutingView expected) {
+        return endpointRegistry.captureDecodeGeneration(expected);
+    }
+
+    /** Non-owning monitoring projection; no live endpoint map escapes. */
+    public List<String> endpointAddresses(RoleType role, String group) {
+        List<WorkerEndpoint.GenerationPin> captured = captureEndpoints(role, group);
+        try {
+            List<String> addresses = new ArrayList<>(captured.size());
+            for (WorkerEndpoint.GenerationPin pin : captured) {
+                addresses.add(pin.endpoint().ipPort());
+            }
+            return addresses;
+        } finally {
+            closePins(captured);
+        }
+    }
+
+    /** Capture exact endpoint generations for one routing decision. */
+    public List<WorkerEndpoint.GenerationPin> captureEndpoints(RoleType role, String group) {
+        List<WorkerEndpoint.GenerationPin> captured = endpointRegistry.capture(role);
+        List<WorkerEndpoint.GenerationPin> matching = new ArrayList<>(captured.size());
+        try {
+            for (int index = 0; index < captured.size(); index++) {
+                WorkerEndpoint.GenerationPin pin = captured.get(index);
+                WorkerStatus.TopologySnapshot topology =
+                        pin.endpoint().getStatus().topologySnapshot();
+                if (group != null && !group.equals(topology.group())) {
+                    pin.close();
+                    captured.set(index, null);
+                    continue;
+                }
+                matching.add(pin);
+                captured.set(index, null);
+            }
+            return matching;
+        } catch (Throwable failure) {
+            closePins(captured);
+            closePins(matching);
+            throw failure;
+        }
+    }
+
     private void finalizeRetirement(
             RoleType role,
             String address,
@@ -237,84 +309,6 @@ public final class WorkerDirectory implements WorkerStatusProvider {
                     finalizationFailure);
         } finally {
             status.lock.unlock();
-        }
-    }
-
-    /** Immutable, non-owning address snapshot for lazy selection. */
-    public List<String> endpointAddressSnapshot(RoleType role) {
-        return endpointRegistry.endpointAddressSnapshot(role);
-    }
-
-    /**
-     * Immutable, non-owning Prefill generations for one routing traversal.
-     * The winning address must still be captured and identity-checked.
-     */
-    public List<EndpointRegistry.PrefillRoutingEntry> prefillRoutingSnapshot(RoleType role) {
-        return endpointRegistry.prefillRoutingSnapshot(role);
-    }
-
-    /** Capture one exact currently published endpoint generation by address. */
-    public WorkerEndpoint.GenerationPin captureEndpoint(RoleType role, String ipPort) {
-        return endpointRegistry.capture(role, ipPort);
-    }
-
-    /** Immutable Decode routing values for one group. */
-    public List<DecodeEndpoint.DecodeRoutingView> decodeRoutingSnapshot(String group) {
-        List<DecodeEndpoint.DecodeRoutingView> snapshots = endpointRegistry.decodeRoutingSnapshot();
-        if (group == null || snapshots.isEmpty()) {
-            return snapshots;
-        }
-        ArrayList<DecodeEndpoint.DecodeRoutingView> matching = new ArrayList<>(snapshots.size());
-        for (DecodeEndpoint.DecodeRoutingView snapshot : snapshots) {
-            if (group.equals(snapshot.topology().group())) {
-                matching.add(snapshot);
-            }
-        }
-        return List.copyOf(matching);
-    }
-
-    /** Pin the exact generation represented by a Decode routing snapshot. */
-    public WorkerEndpoint.GenerationPin captureDecodeGeneration(
-            DecodeEndpoint.DecodeRoutingView expected) {
-        return endpointRegistry.captureDecodeGeneration(expected);
-    }
-
-    /** Capture exact endpoint generations for one routing decision. */
-    public List<WorkerEndpoint.GenerationPin> captureEndpoints(RoleType role, String group) {
-        List<WorkerEndpoint.GenerationPin> captured = endpointRegistry.capture(role);
-        List<WorkerEndpoint.GenerationPin> matching = new ArrayList<>(captured.size());
-        try {
-            for (int index = 0; index < captured.size(); index++) {
-                WorkerEndpoint.GenerationPin pin = captured.get(index);
-                WorkerStatus.TopologySnapshot topology =
-                        pin.endpoint().getStatus().topologySnapshot();
-                if (group != null && !group.equals(topology.group())) {
-                    pin.close();
-                    captured.set(index, null);
-                    continue;
-                }
-                matching.add(pin);
-                captured.set(index, null);
-            }
-            return matching;
-        } catch (Throwable failure) {
-            closePins(captured);
-            closePins(matching);
-            throw failure;
-        }
-    }
-
-    /** Non-owning monitoring projection; no live endpoint map escapes. */
-    public List<String> endpointAddresses(RoleType role, String group) {
-        List<WorkerEndpoint.GenerationPin> captured = captureEndpoints(role, group);
-        try {
-            List<String> addresses = new ArrayList<>(captured.size());
-            for (WorkerEndpoint.GenerationPin pin : captured) {
-                addresses.add(pin.endpoint().ipPort());
-            }
-            return addresses;
-        } finally {
-            closePins(captured);
         }
     }
 

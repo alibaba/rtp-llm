@@ -1,7 +1,10 @@
 import unittest
+from dataclasses import FrozenInstanceError
 from unittest import TestCase
 
-from rtp_llm.config.engine_config import finalize_scheduler_config
+from rtp_llm.config.collective_config import CollectiveConfig
+from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.ops import RoleType
 
 
@@ -13,6 +16,31 @@ class DummyFIFOSchedulerConfig:
 
 
 class EngineConfigTest(TestCase):
+    def test_collective_policy_is_an_immutable_snapshot(self):
+        configs = PyEnvConfigs()
+        configs.all_reduce_backend = "nccl"
+        configs.all_reduce_large_prefill = False
+        engine = EngineConfig.create(configs)
+        self.assertEqual(engine.collective_config, CollectiveConfig("nccl", False))
+        configs.all_reduce_backend = "auto"
+        configs.all_reduce_large_prefill = None
+        self.assertEqual(engine.collective_config, CollectiveConfig("nccl", False))
+        with self.assertRaises(FrozenInstanceError):
+            setattr(engine.collective_config, "large_prefill", True)
+        self.assertIn("all_reduce_backend: nccl", engine.to_string())
+
+    def test_collective_policy_defaults_to_auto(self):
+        engine = EngineConfig.create(PyEnvConfigs())
+        self.assertEqual(engine.collective_config, CollectiveConfig())
+
+    def test_explicit_collective_topology_is_validated_on_single_rank(self):
+        configs = PyEnvConfigs()
+        for backend in ("sm120_ipc", "sm120_p2p"):
+            with self.subTest(backend=backend):
+                configs.all_reduce_backend = backend
+                with self.assertRaisesRegex(ValueError, "requires single-node"):
+                    EngineConfig.create(configs)
+
     def _finalize(self, chunk_size=0, **overrides):
         cfg = DummyFIFOSchedulerConfig()
         cfg.prefill_chunk_size = chunk_size

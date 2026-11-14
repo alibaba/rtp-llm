@@ -8,6 +8,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+/**
+ * Builds the SGLang-compatible chained SHA-256 block hashes, including the configured lookahead
+ * treatment.
+ */
 public final class SglangBlockHashStrategy implements BlockHashStrategy {
 
     private static final ThreadLocal<MessageDigest> SHA_256 =

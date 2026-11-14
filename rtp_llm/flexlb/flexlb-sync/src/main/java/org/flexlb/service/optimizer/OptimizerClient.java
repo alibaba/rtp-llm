@@ -31,17 +31,23 @@ import java.net.URI;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+/**
+ * Starts optimizer discovery when usable query input arrives, then posts trace queries to its
+ * resolved target. Shutdown closes its discovery lifecycle.
+ */
 @Slf4j
 @Component
 public class OptimizerClient {
-
     private static final String PATH_TRACE_QUERY = "/traceQuery";
+
     private final GeneralHttpNettyService httpService;
     private final OptimizerAddressResolver addressResolver;
     private final KvcmWorkerMetadataResolver workerMetadataResolver;
     private final FlexMonitor monitor;
     private final String basePath;
+
     private final boolean enabled;
+
     private final AtomicBoolean shutdown = new AtomicBoolean(false);
     private final Object discoveryLifecycleLock = new Object();
 
@@ -163,13 +169,15 @@ public class OptimizerClient {
         }
     }
 
-    private boolean startAddressResolver() {
+    @PreDestroy
+    public void shutdown() {
         synchronized (discoveryLifecycleLock) {
-            if (shutdown.get()) {
-                return false;
+            if (!shutdown.compareAndSet(false, true)) {
+                return;
             }
-            addressResolver.start();
-            return true;
+            if (addressResolver != null) {
+                addressResolver.shutdown();
+            }
         }
     }
 
@@ -181,9 +189,27 @@ public class OptimizerClient {
         reportFailed("status_" + (statusCode == null ? "MISSING" : statusCode.name()));
     }
 
+    private boolean startAddressResolver() {
+        synchronized (discoveryLifecycleLock) {
+            if (shutdown.get()) {
+                return false;
+            }
+            addressResolver.start();
+            return true;
+        }
+    }
+
     private void reportSkipped(String reason) {
         reportMetric(MetricConstant.OPTIMIZER_TRACE_QUERY_SKIPPED_QPS, reason);
         log.warn("Optimizer trace query skipped: reason={}", reason);
+    }
+
+    private void reportMetric(String metric, String reason) {
+        try {
+            monitor.report(metric, FlexMetricTags.of("reason", reason), 1.0);
+        } catch (RuntimeException error) {
+            log.warn("Optimizer metric report failed: metric={}, reason={}", metric, reason, error);
+        }
     }
 
     private void reportFailed(String reason) {
@@ -201,14 +227,6 @@ public class OptimizerClient {
                 error);
     }
 
-    private void reportMetric(String metric, String reason) {
-        try {
-            monitor.report(metric, FlexMetricTags.of("reason", reason), 1.0);
-        } catch (RuntimeException error) {
-            log.warn("Optimizer metric report failed: metric={}, reason={}", metric, reason, error);
-        }
-    }
-
     private String resolveInstanceId(Request request, ServerStatus selectedWorker) {
         if (selectedWorker == null
                 || selectedWorker.getRole() == null
@@ -217,18 +235,6 @@ public class OptimizerClient {
         }
         return workerMetadataResolver.resolveNamespace(
                 selectedWorker.getRole(), selectedWorker.getGroup(), request.getBlockSize());
-    }
-
-    @PreDestroy
-    public void shutdown() {
-        synchronized (discoveryLifecycleLock) {
-            if (!shutdown.compareAndSet(false, true)) {
-                return;
-            }
-            if (addressResolver != null) {
-                addressResolver.shutdown();
-            }
-        }
     }
 
     private static OptimizerConfig resolveOptimizerConfig(ModelMetaConfig modelMetaConfig) {

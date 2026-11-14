@@ -43,6 +43,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks combined Prefill and Decode scheduling behavior across configured modes.
+ */
 class PdfusionSchedulingTest {
     @ParameterizedTest
     @CsvSource({

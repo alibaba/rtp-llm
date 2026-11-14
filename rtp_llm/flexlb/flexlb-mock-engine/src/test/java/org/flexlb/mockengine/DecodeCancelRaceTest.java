@@ -29,29 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Concurrency regression tests for the two decode cancel races fixed in
- * {@code JavaMockEngineCluster.FastRpcService}:
- *
- * <ol>
- *   <li><b>P1-1 (permanent leak)</b> — {@code scheduleDecodeCompletion} used to
- *       call {@code runningTasks.putIfAbsent} OUTSIDE {@code decodeQueueLock}
- *       before claiming any counter. A cancel() landing in that window removed
- *       the entry and over-decremented pendingRequests / activeDecodeRequests /
- *       activeKvTokens that were never incremented; the admission then claimed
- *       them back and the completion (wasRunning=false) never released them —
- *       a permanent +1 on all three counters and a KV leak.
- *       {@link #cancelInAdmissionWindowNeverLeaksCounters} hammers that exact
- *       window and asserts all counters and KV settle at zero with no LEAK.</li>
- *   <li><b>P1-2 (transient over-admission)</b> — cancel() used to release the
- *       running slot (activeDecodeRequests--, KV release) outside the lock and
- *       only then take {@code decodeQueueLock} to drain, so a concurrent
- *       admission could grab the freed slot before the drain re-consumed it,
- *       transiently pushing activeDecodeRequests to cap+1.
- *       {@link #activeDecodeRequestsNeverExceedsCapUnderCancelStorm} samples
- *       the counter continuously under a schedule/cancel/completion storm and
- *       asserts it never exceeds decodeMaxConcurrency (the hard gate is
- *       always on).</li>
- * </ol>
+ * Checks concurrent Decode cancellation and completion for exact task removal and resource release.
  */
 class DecodeCancelRaceTest {
 

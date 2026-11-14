@@ -51,7 +51,6 @@ import static org.mockito.Mockito.when;
  * Exercises Encoder placement through the same submission path used by Schedule.
  */
 class EncoderSchedulingIntegrationTest {
-
     private ConfigService configService;
     private WorkerDirectory directory;
     private RequestRegistry requests;
@@ -317,34 +316,6 @@ class EncoderSchedulingIntegrationTest {
         assertNull(requests.requestSlot("6", RequestPhase.ENCODER));
     }
 
-    private void useEncoderQueue(int maxInflight) {
-        scheduler.closePlacement();
-        FlexlbConfig config = SchedulingTestConfig.batchConfig();
-        SchedulingTestConfig.useFifoQueue(config);
-        SchedulingTestConfig.useNonBatchDispatcher(config);
-        config.getDispatcher().setMaxInflightPerEncoderWorker(maxInflight);
-        when(configService.loadBalanceConfig()).thenReturn(config);
-        ModelMetaConfig model = mock(ModelMetaConfig.class);
-        when(model.requiredRoles()).thenReturn(List.of(RoleType.ENCODER));
-        DefaultRouter router =
-                new DefaultRouter(
-                        mock(CostBasedPrefillStrategy.class),
-                        mock(DecodeSelector.class),
-                        mock(RandomStrategy.class),
-                        new EncoderStrategy(directory),
-                        configService,
-                        model);
-        scheduler =
-                new RequestScheduler(
-                        configService,
-                        router,
-                        mock(EndpointRegistry.class),
-                        mock(BatchSchedulerReporter.class),
-                        mock(EvictionManager.class),
-                        requests,
-                        new PlacementAvailability());
-    }
-
     @Test
     void weightedRequestChoosesLessObservedUncachedWorkDespiteMoreConcurrentTasks() {
         worker("long", 8001, true, "group", 0, Map.of("old", task("old", 1000)), 1, 0);
@@ -491,6 +462,34 @@ class EncoderSchedulingIntegrationTest {
         assertEquals(
                 RequestPhase.ENCODER,
                 requests.requestSlot("5", RequestPhase.ENCODER).requestPhase());
+    }
+
+    private void useEncoderQueue(int maxInflight) {
+        scheduler.closePlacement();
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
+        SchedulingTestConfig.useFifoQueue(config);
+        SchedulingTestConfig.useNonBatchDispatcher(config);
+        config.getDispatcher().setMaxInflightPerEncoderWorker(maxInflight);
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        ModelMetaConfig model = mock(ModelMetaConfig.class);
+        when(model.requiredRoles()).thenReturn(List.of(RoleType.ENCODER));
+        DefaultRouter router =
+                new DefaultRouter(
+                        mock(CostBasedPrefillStrategy.class),
+                        mock(DecodeSelector.class),
+                        mock(RandomStrategy.class),
+                        new EncoderStrategy(directory),
+                        configService,
+                        model);
+        scheduler =
+                new RequestScheduler(
+                        configService,
+                        router,
+                        mock(EndpointRegistry.class),
+                        mock(BatchSchedulerReporter.class),
+                        mock(EvictionManager.class),
+                        requests,
+                        new PlacementAvailability());
     }
 
     private EncoderEndpoint worker(

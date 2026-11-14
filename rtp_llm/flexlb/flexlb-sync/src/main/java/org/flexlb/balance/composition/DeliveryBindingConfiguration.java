@@ -25,7 +25,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
-/** Selects exactly one delivery strategy from the canonical startup config. */
+/**
+ * Selects exactly one delivery strategy from the canonical startup config.
+ */
 @Configuration(proxyBeanMethods = false)
 public class DeliveryBindingConfiguration {
 

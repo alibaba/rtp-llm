@@ -1,6 +1,8 @@
 package org.flexlb.balance.scheduler;
 
-/** First cause asking the scheduling master to cancel a request. */
+/**
+ * First cause asking the scheduling master to cancel a request.
+ */
 public enum CancelReason {
     CLIENT_CANCELLED("request cancelled by client"),
     DEADLINE_EXCEEDED("request deadline exceeded");

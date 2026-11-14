@@ -1,9 +1,14 @@
 package org.flexlb.constant;
 
+/**
+ * Resolves and validates the message-size limit shared by FlexLB gRPC endpoints.
+ */
 public final class GrpcConstants {
     // Set the same MiB limit on frontend and FlexLB; read once at process startup.
     public static final int MAX_MESSAGE_SIZE =
             parseMaxMessageSize(System.getenv("FLEXLB_MAX_MESSAGE_SIZE_MB"));
+
+    private GrpcConstants() {}
 
     static int parseMaxMessageSize(String value) {
         String configured = value == null || value.trim().isEmpty() ? "512" : value.trim();
@@ -18,6 +23,4 @@ public final class GrpcConstants {
                     "FLEXLB_MAX_MESSAGE_SIZE_MB must be an integer from 1 to 2047 (MiB)", e);
         }
     }
-
-    private GrpcConstants() {}
 }

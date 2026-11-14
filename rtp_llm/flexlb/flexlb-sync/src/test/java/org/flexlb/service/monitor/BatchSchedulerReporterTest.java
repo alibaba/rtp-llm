@@ -31,6 +31,9 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
+/**
+ * Checks batching metric registration, priority tags and avoidance of duplicate accounting.
+ */
 @ExtendWith(MockitoExtension.class)
 class BatchSchedulerReporterTest {
 

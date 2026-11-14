@@ -9,6 +9,7 @@ import torch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory_register import ModelDict
+from rtp_llm.models_py.distributed.rank_layout import Group, RankLayout
 from rtp_llm.ops import (
     ParallelismConfig,
     PrefillCPConfig,
@@ -18,6 +19,33 @@ from rtp_llm.ops import (
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
 RUN_AFFINITY_TIMEOUT_SEC = 10
+
+
+def finalize_rank_local_deepep_internode(
+    moe_config,
+    deep_ep_config,
+    parallelism_config: ParallelismConfig,
+) -> None:
+    """Correct auto-derived internode mode after the worker rank is known.
+
+    A node launcher may host ranks from different PP stages; explicit user
+    settings are left untouched.
+    """
+    if (
+        parallelism_config.pp_size <= 1
+        or not moe_config.use_deepep_moe
+        or deep_ep_config.use_deepep_moe is not None
+        or deep_ep_config.use_deepep_internode is not None
+        or deep_ep_config.use_deepep_low_latency is not None
+        or deep_ep_config.use_mori_ep is not None
+    ):
+        return
+    layout = RankLayout.from_parallelism_config(parallelism_config)
+    stage_group = layout.group_of(Group.STAGE, parallelism_config.world_rank)
+    moe_config.use_deepep_internode = (
+        min(stage_group) // parallelism_config.local_world_size
+        != max(stage_group) // parallelism_config.local_world_size
+    )
 
 
 def auto_configure_deepep(
@@ -129,8 +157,7 @@ def auto_configure_deepep(
         # All are None, use auto configuration
         _apply_auto_deepep_config(
             moe_config=moe_config,
-            world_size=parallelism_config.world_size,
-            local_world_size=parallelism_config.local_world_size,
+            parallelism_config=parallelism_config,
             role_type=role_type,
         )
     else:
@@ -168,8 +195,7 @@ def auto_configure_deepep(
 
 def _apply_auto_deepep_config(
     moe_config,
-    world_size: int,
-    local_world_size: int,
+    parallelism_config,
     role_type: RoleType,
 ):
     """
@@ -182,10 +208,23 @@ def _apply_auto_deepep_config(
     is_inference = role_type == RoleType.PDFUSION
     is_decode = role_type == RoleType.DECODE
 
-    # Determine GPU configuration
-    is_single_gpu = world_size == 1
-    is_multi_gpu = world_size > 1
-    is_multi_node = world_size > local_world_size
+    # Determine GPU configuration via RankLayout (stage-local view under PP).
+    local_world_size = parallelism_config.local_world_size
+    world_size = parallelism_config.world_size
+    if parallelism_config.pp_size > 1:
+        layout = RankLayout.from_parallelism_config(parallelism_config)
+        stage_size = layout.size_of(Group.STAGE)
+        is_single_gpu = stage_size == 1
+        is_multi_gpu = stage_size > 1
+        stage_group = layout.group_of(Group.STAGE, parallelism_config.world_rank)
+        is_multi_node = (
+            min(stage_group) // local_world_size
+            != max(stage_group) // local_world_size
+        )
+    else:
+        is_single_gpu = world_size == 1
+        is_multi_gpu = world_size > 1
+        is_multi_node = world_size > local_world_size
 
     # Apply configuration rules
     use_deepep_moe = False
@@ -299,14 +338,13 @@ def set_parallelism_config(
     parallelism_config.local_rank = (
         parallelism_config.world_rank % parallelism_config.local_world_size
     )
-    parallelism_config.tp_rank = (
-        parallelism_config.world_rank % parallelism_config.tp_size
-    )
-    parallelism_config.dp_rank = (
-        parallelism_config.world_rank // parallelism_config.tp_size
-    )
-    parallelism_config.ep_rank = (
-        parallelism_config.world_rank % parallelism_config.ep_size
+    layout = RankLayout.from_parallelism_config(parallelism_config)
+    coord = layout.coord_of(parallelism_config.world_rank)
+    parallelism_config.tp_rank = coord.tp
+    parallelism_config.dp_rank = coord.dp
+    parallelism_config.pp_rank = coord.pp
+    parallelism_config.ep_rank = layout.ep_rank_of(
+        parallelism_config.world_rank, parallelism_config.ep_size
     )
     parallelism_config.ffn_tp_rank = (
         parallelism_config.tp_rank % parallelism_config.ffn_tp_size

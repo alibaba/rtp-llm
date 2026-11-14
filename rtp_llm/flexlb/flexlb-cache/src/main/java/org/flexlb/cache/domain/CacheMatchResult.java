@@ -19,7 +19,6 @@ public record CacheMatchResult(
         long queryTimeUs,
         long blockSize,
         boolean querySucceeded) {
-
     public CacheMatchResult(
             Map<String, HostCacheMatch> hostMatches,
             CacheMatchSource source,
@@ -45,16 +44,6 @@ public record CacheMatchResult(
     }
 
     /**
-     * Returns the match stored under the given key, without any KVCM legacy fallback. Routing
-     * paths should use {@link #hostMatch(WorkerStatus)} instead.
-     *
-     * @param workerIpPort worker identity key, typically logical {@code ip:port@engineIndex}
-     */
-    public HostCacheMatch exactHostMatch(String workerIpPort) {
-        return hostMatches.get(workerIpPort);
-    }
-
-    /**
      * Returns the match for a worker, preserving legacy KVCM host identities for one engine.
      *
      * <p>KVCM formerly returned a physical {@code ip:port} host identity. A single-engine
@@ -72,5 +61,15 @@ public record CacheMatchResult(
             return exactMatch;
         }
         return exactHostMatch(workerStatus.getPhysicalIpPort());
+    }
+
+    /**
+     * Returns the match stored under the given key, without any KVCM legacy fallback. Routing
+     * paths should use {@link #hostMatch(WorkerStatus)} instead.
+     *
+     * @param workerIpPort worker identity key, typically logical {@code ip:port@engineIndex}
+     */
+    public HostCacheMatch exactHostMatch(String workerIpPort) {
+        return hostMatches.get(workerIpPort);
     }
 }

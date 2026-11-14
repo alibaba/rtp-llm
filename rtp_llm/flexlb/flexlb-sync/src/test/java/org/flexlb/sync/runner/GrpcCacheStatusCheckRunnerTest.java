@@ -28,6 +28,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks cache polling updates, retry after index failure and stale-generation rejection.
+ */
 class GrpcCacheStatusCheckRunnerTest {
 
     private final EngineGrpcService engineGrpcService = Mockito.mock(EngineGrpcService.class);

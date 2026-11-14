@@ -48,10 +48,15 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks ViT cache residency ranking and invalidation when worker generations change.
+ */
 class VitCacheDirectoryTest {
     private VitCacheDirectory directory;
     private VitCacheSelector selector;
+
     private final Map<String, WorkerStatus> live = new HashMap<>();
+
     private WorkerStatus a;
     private WorkerStatus b;
     private EngineGrpcClient grpc;
@@ -84,41 +89,6 @@ class VitCacheDirectoryTest {
     @AfterEach
     void tearDown() {
         directory.stop();
-    }
-
-    private WorkerStatus worker(String ip, String group) {
-        return WorkerStatus.createDiscovered(RoleType.VIT, group, ip, 8000, 8001, "");
-    }
-
-    private BalanceContext context(String... keys) {
-        Request request = new Request();
-        request.setRequestId("123");
-        request.setCacheAffinityKeys(List.of(keys));
-        request.setGenerateTimeout(30000);
-        BalanceContext context = new BalanceContext(new FlexlbConfig());
-        context.setRequest(request);
-        return context;
-    }
-
-    private void snapshot(WorkerStatus worker, String epoch, String... keys) {
-        directory.replace(
-                worker,
-                MultimodalCacheStatusPB.newBuilder()
-                        .setWorkerInstance(epoch)
-                        .addAllKeys(List.of(keys))
-                        .build());
-    }
-
-    private void tierSnapshot(
-            WorkerStatus worker, List<String> hashes, List<String> gpu, List<String> cpu) {
-        directory.replace(
-                worker,
-                MultimodalCacheStatusPB.newBuilder()
-                        .setWorkerInstance("instance")
-                        .addAllKeys(hashes)
-                        .addAllGpuEmbeddingKeys(gpu)
-                        .addAllCpuEmbeddingKeys(cpu)
-                        .build());
     }
 
     @Test
@@ -440,5 +410,40 @@ class VitCacheDirectoryTest {
         live.put(a.getIpPort(), worker(a.getIp(), "one"));
         assertFalse(selector.validate(ctx, "one").isSuccess());
         org.junit.jupiter.api.Assertions.assertNull(selector.selectPinned(ctx, "one"));
+    }
+
+    private WorkerStatus worker(String ip, String group) {
+        return WorkerStatus.createDiscovered(RoleType.VIT, group, ip, 8000, 8001, "");
+    }
+
+    private BalanceContext context(String... keys) {
+        Request request = new Request();
+        request.setRequestId("123");
+        request.setCacheAffinityKeys(List.of(keys));
+        request.setGenerateTimeout(30000);
+        BalanceContext context = new BalanceContext(new FlexlbConfig());
+        context.setRequest(request);
+        return context;
+    }
+
+    private void snapshot(WorkerStatus worker, String epoch, String... keys) {
+        directory.replace(
+                worker,
+                MultimodalCacheStatusPB.newBuilder()
+                        .setWorkerInstance(epoch)
+                        .addAllKeys(List.of(keys))
+                        .build());
+    }
+
+    private void tierSnapshot(
+            WorkerStatus worker, List<String> hashes, List<String> gpu, List<String> cpu) {
+        directory.replace(
+                worker,
+                MultimodalCacheStatusPB.newBuilder()
+                        .setWorkerInstance("instance")
+                        .addAllKeys(hashes)
+                        .addAllGpuEmbeddingKeys(gpu)
+                        .addAllCpuEmbeddingKeys(cpu)
+                        .build());
     }
 }

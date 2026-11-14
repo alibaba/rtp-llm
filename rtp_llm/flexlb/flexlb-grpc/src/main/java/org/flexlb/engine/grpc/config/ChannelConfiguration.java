@@ -20,6 +20,10 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Creates engine-client, follower-forwarding and server gRPC execution resources. Forwarder callbacks
+ * use a separate executor so engine status traffic cannot occupy their callback threads.
+ */
 @Configuration
 public class ChannelConfiguration {
 

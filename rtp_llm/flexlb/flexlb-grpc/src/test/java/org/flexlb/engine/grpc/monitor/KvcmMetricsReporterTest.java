@@ -9,6 +9,9 @@ import org.junit.jupiter.api.Test;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
+/**
+ * Checks KVCM metric registration and query observations.
+ */
 class KvcmMetricsReporterTest {
 
     private final FlexMonitor monitor = mock(FlexMonitor.class);

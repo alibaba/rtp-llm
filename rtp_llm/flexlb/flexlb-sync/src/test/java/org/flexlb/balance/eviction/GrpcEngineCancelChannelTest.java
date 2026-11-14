@@ -19,6 +19,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks engine cancellation replies and transport failures.
+ */
 class GrpcEngineCancelChannelTest {
     private static final CancelTarget TARGET = new CancelTarget("10.0.0.1", 8081);
 

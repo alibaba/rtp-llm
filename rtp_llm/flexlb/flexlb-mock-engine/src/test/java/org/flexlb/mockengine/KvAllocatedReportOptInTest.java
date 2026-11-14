@@ -23,20 +23,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Two-state tests for the opt-in accepted-layer window (performance JSON
- * {@code decode.report_queued_as_kv_allocated}, C1-①):
- *
- * <ol>
- *   <li>default OFF — queued decode requests keep today's reporting
- *       (TASK_PHASE_RUNNING entries in running_task_info, runningQueryLen
- *       counts only truly running requests as before): zero behavior
- *       change,</li>
- *   <li>ON — queued (admitted, not yet running) requests surface as
- *       TASK_PHASE_KV_ALLOCATED so the scheduler's accepted layer sees them;
- *       once drained into a slot the phase flips back to RUNNING; cancel of a
- *       queued request reports the KV_ALLOCATED phase (the exact contract the
- *       8429 accepted-eviction path consumes).</li>
- * </ol>
+ * Checks both queued Decode status representations selected by the opt-in KV-allocation reporting
+ * setting.
  */
 class KvAllocatedReportOptInTest {
 

@@ -28,6 +28,9 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
+/**
+ * Checks application startup against environment defaults and command-line overrides.
+ */
 @ExtendWith(SystemStubsExtension.class)
 class ApplicationEnvironmentTest {
 

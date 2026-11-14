@@ -14,30 +14,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Writes the domain-to-host mapping used by file-based discovery test fixtures.
- *
- * <p>The file is derived wholesale from the live services map on every
- * mutation (add/remove engine), so its content can never drift from the set
- * of engines actually hosted by this cluster process:
- *
- * <pre>{@code
- * {
- *   "mock.prefill.hosts.address": ["127.0.0.1:60999", "127.0.0.1:61000"],
- *   "mock.decode.hosts.address":  ["127.0.0.1:61001"]
- * }
- * }</pre>
- *
- * <p>Entries carry the HTTP port (grpc port − 1), matching the legacy
- * HTTP address values produced by {@code writeDiscoveryFiles} and the
- * http→grpc (+1) conversion in {@code WorkerAddressService}.
- *
- * <p>Atomicity: write {@code <path>.tmp} in the same directory, then
- * {@code Files.move(ATOMIC_MOVE, REPLACE_EXISTING)}. A single in-process lock
- * serializes writers (add/remove engine hold it across the whole
- * mutate-services + rewrite-file critical section). Readers re-parse the file
- * on every poll; if they ever catch a torn window they fall back to their last
- * good snapshot, and ATOMIC_MOVE makes even that virtually impossible on the
- * same filesystem.
+ * Rewrites the file-discovery mapping from the live engine services after cluster changes. Entries
+ * use HTTP ports, and writers serialize replacement of a temporary file in the same directory.
  */
 final class DiscoveryFileStore {
 

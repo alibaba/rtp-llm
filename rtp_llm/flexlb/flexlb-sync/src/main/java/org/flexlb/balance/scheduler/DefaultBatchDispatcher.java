@@ -57,11 +57,15 @@ import java.util.function.BiConsumer;
  * Handles the full pipeline: build request → send → parse response → callback.
  * Does NOT manage inflight state; results are reported through the delivery
  * observer port.
+ *
+ * <p>A submission reserves execution capacity before asynchronous dispatch. RPC results pass
+ * through the completion executor to the delivery observer; shutdown must keep that executor
+ * available until accepted RPC completions have drained.
  */
 @Component
 public class DefaultBatchDispatcher {
-
     private static final long EXECUTOR_KEEP_ALIVE_SECONDS = 60L;
+
     private static final RouteProjection.AdmissionBlockSemantics CAPACITY_BLOCK_SEMANTICS =
             new RouteProjection.AdmissionBlockSemantics(
                     "DELIVERY_CAPACITY_BATCH_ADMISSION",
@@ -73,11 +77,15 @@ public class DefaultBatchDispatcher {
     private final ConfigService configService;
     private final ThreadPoolExecutor dispatchExecutor;
     private final ThreadPoolExecutor completionExecutor;
+
     private final int admissionCapacity;
+
     private final Semaphore admissionPermits;
+
     // Count permits alone cannot bound retained bytes when payload sizes vary.
     // Keep this charge until the RPC settles, including queued dispatches.
     private final long maxInflightBytes;
+
     private final AtomicLong inflightPayloadBytes;
     // Keep the completion executor alive while accepted RPCs await completion.
     private final AtomicInteger pendingCompletions = new AtomicInteger();
@@ -106,6 +114,7 @@ public class DefaultBatchDispatcher {
                     capacityListeners.remove(listener);
                 }
             };
+
     private volatile boolean acceptingSubmissions = true;
 
     @Autowired
@@ -202,28 +211,6 @@ public class DefaultBatchDispatcher {
         reportExecutorMetrics();
     }
 
-    /**
-     * Register gauges for the current executor state.
-     */
-    private void registerMetrics() {
-        registerGauge(MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS);
-        registerGauge(MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE);
-        registerGauge(MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE);
-    }
-
-    private void registerGauge(String metricName) {
-        monitor.register(metricName, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-    }
-
-    @Scheduled(fixedRate = 2000)
-    void reportExecutorMetrics() {
-        monitor.report(
-                MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS, dispatchExecutor.getActiveCount());
-        monitor.report(
-                MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE, dispatchExecutor.getQueue().size());
-        monitor.report(MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE, dispatchExecutor.getPoolSize());
-    }
-
     public CapacityBoundary.Attempt<PreparedSubmission> tryPrepareSubmission() {
         admissionReadLock.lock();
         try {
@@ -241,10 +228,6 @@ public class DefaultBatchDispatcher {
         }
     }
 
-    private static CapacityBoundary.Attempt<PreparedSubmission> rejectedFailure(Throwable cause) {
-        return CapacityBoundary.Attempt.rejected(CapacityBoundary.failed(cause));
-    }
-
     @PreDestroy
     public void shutdown() {
         admissionWriteLock.lock();
@@ -260,10 +243,55 @@ public class DefaultBatchDispatcher {
         signalCapacityAvailable();
     }
 
+    @Scheduled(fixedRate = 2000)
+    void reportExecutorMetrics() {
+        monitor.report(
+                MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS, dispatchExecutor.getActiveCount());
+        monitor.report(
+                MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE, dispatchExecutor.getQueue().size());
+        monitor.report(MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE, dispatchExecutor.getPoolSize());
+    }
+
+    /**
+     * Register gauges for the current executor state.
+     */
+    private void registerMetrics() {
+        registerGauge(MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS);
+        registerGauge(MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE);
+        registerGauge(MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE);
+    }
+
+    private void registerGauge(String metricName) {
+        monitor.register(metricName, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+    }
+
+    private static CapacityBoundary.Attempt<PreparedSubmission> rejectedFailure(Throwable cause) {
+        return CapacityBoundary.Attempt.rejected(CapacityBoundary.failed(cause));
+    }
+
     private void releasePermit() {
         admissionPermits.release();
         signalCapacityAvailable();
         tryShutdownExecutor();
+    }
+
+    private void signalCapacityAvailable() {
+        for (Runnable listener : capacityListeners) {
+            try {
+                listener.run();
+            } catch (Throwable listenerFailure) {
+                Logger.error("Batch dispatcher capacity listener failed", listenerFailure);
+            }
+        }
+    }
+
+    private void tryShutdownExecutor() {
+        if (!acceptingSubmissions
+                && admissionPermits.availablePermits() == admissionCapacity
+                && pendingCompletions.get() == 0) {
+            dispatchExecutor.shutdown();
+            completionExecutor.shutdown();
+        }
     }
 
     /**
@@ -277,217 +305,6 @@ public class DefaultBatchDispatcher {
             total += item.batchPayloadSizeUpperBound();
         }
         return total;
-    }
-
-    private void finishCompletion() {
-        pendingCompletions.decrementAndGet();
-        tryShutdownExecutor();
-    }
-
-    private void tryShutdownExecutor() {
-        if (!acceptingSubmissions
-                && admissionPermits.availablePermits() == admissionCapacity
-                && pendingCompletions.get() == 0) {
-            dispatchExecutor.shutdown();
-            completionExecutor.shutdown();
-        }
-    }
-
-    private void signalCapacityAvailable() {
-        for (Runnable listener : capacityListeners) {
-            try {
-                listener.run();
-            } catch (Throwable listenerFailure) {
-                Logger.error("Batch dispatcher capacity listener failed", listenerFailure);
-            }
-        }
-    }
-
-    /** One dispatch-task permit, acquired before the canonical commit. */
-    private final class PermitReservation implements PreparedSubmission {
-
-        private enum PermitPhase {
-            PREPARED,
-            SUBMITTED,
-            /** doDispatch registered the RPC completion observer: only that
-             *  observer may release the permit (when the RPC completes). */
-            AWAITING_RPC,
-            RELEASED
-        }
-
-        private final AtomicReference<PermitPhase> phase =
-                new AtomicReference<>(PermitPhase.PREPARED);
-
-        /** Wire-size charged against the in-flight byte budget. 0 until the
-         *  dispatch task freezes its items; never negative. */
-        private final AtomicLong chargedBytes = new AtomicLong(0L);
-
-        @Override
-        public void submit(BatchDeliveryStrategy.Delivery delivery) {
-            Objects.requireNonNull(delivery, "delivery");
-            if (!phase.compareAndSet(PermitPhase.PREPARED, PermitPhase.SUBMITTED)) {
-                throw new IllegalStateException(
-                        "prepared batch submission cannot submit from " + phase.get());
-            }
-            try {
-                dispatchExecutor.execute(
-                        () -> {
-                            try {
-                                // Completion ownership: doDispatch settles the permit
-                                // on EVERY terminal path — either by transferring to
-                                // AWAITING_RPC (the registered completion observer
-                                // releases when the EnqueueBatch RPC completes), or by
-                                // releasing it directly when no RPC completion will
-                                // ever arrive (build failure, oversize, pre-send
-                                // throw, null future, registration failure). A
-                                // Delivery that returns WITHOUT ever calling the
-                                // sender (all requests expired/cancelled before
-                                // handoff) also leaves no completion behind, so the
-                                // permit must be settled after delivery.run returns.
-                                delivery.run(
-                                        (items, batchId, predictedMs, reason, observer) -> {
-                                            // Byte-budget admission: charge the frozen
-                                            // wire-size before any serialization. A rejection
-                                            // here is pre-send by construction: nothing was
-                                            // serialized, so NOT_SENT is the honest outcome.
-                                            long bytes = wireSizeUpperBound(items);
-                                            if (!tryChargeBytes(bytes)) {
-                                                Logger.warn(
-                                                        "EnqueueBatch byte budget exhausted; failing batch {} ({}B > budget {}B, in-flight {}B) as NOT_SENT",
-                                                        batchId,
-                                                        bytes,
-                                                        maxInflightBytes,
-                                                        inflightPayloadBytes.get());
-                                                failItems(
-                                                        items,
-                                                        batchId,
-                                                        "in-flight payload byte budget exhausted",
-                                                        observer);
-                                                // No RPC, no observer: settle count and bytes.
-                                                settleIfNoRpcRegistered();
-                                                return;
-                                            }
-                                            doDispatch(
-                                                    dispatchTask(
-                                                            items,
-                                                            batchId,
-                                                            predictedMs,
-                                                            reason,
-                                                            observer,
-                                                            PermitReservation.this));
-                                        });
-                            } catch (Throwable deliveryFailure) {
-                                // Delivery owns admission cleanup; do not infer a
-                                // second per-request outcome from task failure.
-                                Logger.error("Batch delivery task failed", deliveryFailure);
-                            } finally {
-                                // Exactly-once settle: if doDispatch transferred to
-                                // AWAITING_RPC this is a NO-OP (only the completion
-                                // observer releases). Otherwise this returns the
-                                // permit — without it, a sender-less delivery would
-                                // leak admission permanently and shutdown could
-                                // never complete.
-                                settleIfNoRpcRegistered();
-                            }
-                        });
-            } catch (RuntimeException | Error submissionFailure) {
-                finishSubmitted();
-                throw submissionFailure;
-            }
-        }
-
-        @Override
-        public void close() {
-            if (phase.compareAndSet(PermitPhase.PREPARED, PermitPhase.RELEASED)) {
-                releasePermit();
-            }
-        }
-
-        private void finishSubmitted() {
-            if (phase.compareAndSet(PermitPhase.SUBMITTED, PermitPhase.RELEASED)) {
-                releasePermit();
-            }
-        }
-
-        /**
-         * Charges this batch's wire-size upper bound against the in-flight
-         * byte budget. Called once at dispatch-task construction (items
-         * frozen). Rejecting here means the batch was NOT serialized: the
-         * items are failed NOT_SENT and the permit settles, so admission
-         * count and byte budget return together.
-         */
-        boolean tryChargeBytes(long bytes) {
-            long budget = maxInflightBytes;
-            long current;
-            long next;
-            do {
-                current = inflightPayloadBytes.get();
-                next = current + bytes;
-                if (next > budget) {
-                    return false;
-                }
-            } while (!inflightPayloadBytes.compareAndSet(current, next));
-            chargedBytes.set(bytes);
-            return true;
-        }
-
-        private void releaseChargedBytes() {
-            long bytes = chargedBytes.getAndSet(0L);
-            if (bytes > 0L) {
-                inflightPayloadBytes.addAndGet(-bytes);
-                signalCapacityAvailable();
-            }
-        }
-
-        /**
-         * Transfers completion ownership before registering the observer: an
-         * already-completed future can run its callback before handleAsync returns.
-         * Registration failure explicitly settles this ownership instead.
-         */
-        void transferToRpcCompletion() {
-            phase.compareAndSet(PermitPhase.SUBMITTED, PermitPhase.AWAITING_RPC);
-        }
-
-        /**
-         * Releases the admission permit when the dispatched EnqueueBatch RPC
-         * has completed (success, failure, or uncertain), or when the task
-         * wrapper settled because no RPC completion was registered.
-         * Idempotent via the phase CAS.
-         */
-        void releaseOnRpcCompletion() {
-            PermitPhase current = phase.get();
-            if (current == PermitPhase.RELEASED) {
-                return;
-            }
-            if (phase.compareAndSet(PermitPhase.AWAITING_RPC, PermitPhase.RELEASED)
-                    || phase.compareAndSet(PermitPhase.PREPARED, PermitPhase.RELEASED)) {
-                releaseChargedBytes();
-                releasePermit();
-            }
-        }
-
-        /**
-         * Task-wrapper settle: releases the permit only when no RPC
-         * completion observer took ownership. AWAITING_RPC (observer
-         * registered) and RELEASED are left untouched; SUBMITTED (and
-         * PREPARED, if the delivery threw before submit advanced the phase)
-         * release now because nothing else ever will.
-         */
-        void settleIfNoRpcRegistered() {
-            PermitPhase current = phase.get();
-            if (current == PermitPhase.AWAITING_RPC || current == PermitPhase.RELEASED) {
-                return;
-            }
-            if (phase.compareAndSet(PermitPhase.SUBMITTED, PermitPhase.RELEASED)) {
-                releaseChargedBytes();
-                releasePermit();
-                return;
-            }
-            if (phase.compareAndSet(PermitPhase.PREPARED, PermitPhase.RELEASED)) {
-                releaseChargedBytes();
-                releasePermit();
-            }
-        }
     }
 
     private static DispatchTask dispatchTask(
@@ -519,15 +336,6 @@ public class DefaultBatchDispatcher {
                 Objects.requireNonNull(observer, "observer"),
                 permitReservation);
     }
-
-    private record DispatchTask(
-            List<ScheduledRequest> items,
-            PrefillEndpoint prefillEndpoint,
-            long batchId,
-            long predictedMs,
-            String reason,
-            BiConsumer<ScheduledRequest, DeliveryResult> observer,
-            PermitReservation permitReservation) {}
 
     // ==================== Internal: dispatch pipeline (runs on executor thread)
     // ====================
@@ -692,10 +500,196 @@ public class DefaultBatchDispatcher {
         }
     }
 
-    private static Throwable unwrapCompletionFailure(Throwable failure) {
-        return failure instanceof CompletionException && failure.getCause() != null
-                ? failure.getCause()
-                : failure;
+    // ==================== gRPC request building ====================
+
+    private EngineRpcService.EnqueueBatchRequestPB buildBatchRequest(
+            long batchId, List<ScheduledRequest> items) throws InvalidProtocolBufferException {
+        EngineRpcService.EnqueueBatchRequestPB.Builder builder =
+                EngineRpcService.EnqueueBatchRequestPB.newBuilder()
+                        .setBatchId(batchId)
+                        .setFetchAttachTimeoutMs(
+                                configService
+                                        .loadBalanceConfig()
+                                        .getDispatcher()
+                                        .getFetchAttachTimeoutMs());
+        BatchRoleAddressCache roleAddresses = new BatchRoleAddressCache();
+        if (!items.isEmpty()) {
+            long dpRank = items.get(0).prefill().getDpRank();
+            boolean singleDpRank = true;
+            for (int i = 1; i < items.size(); i++) {
+                if (items.get(i).prefill().getDpRank() != dpRank) {
+                    singleDpRank = false;
+                    break;
+                }
+            }
+            if (singleDpRank) {
+                builder.addDpSlots(buildDpSlot(dpRank, items, roleAddresses));
+                return builder.build();
+            }
+        }
+
+        Map<Long, List<ScheduledRequest>> byDpRank = new HashMap<>();
+        for (ScheduledRequest item : items) {
+            byDpRank.computeIfAbsent(item.prefill().getDpRank(), ignored -> new ArrayList<>())
+                    .add(item);
+        }
+        List<Map.Entry<Long, List<ScheduledRequest>>> ranks = new ArrayList<>(byDpRank.entrySet());
+        ranks.sort(Map.Entry.comparingByKey());
+        for (Map.Entry<Long, List<ScheduledRequest>> entry : ranks) {
+            builder.addDpSlots(buildDpSlot(entry.getKey(), entry.getValue(), roleAddresses));
+        }
+        return builder.build();
+    }
+
+    private EngineRpcService.EnqueueBatchDpSlotPB buildDpSlot(
+            long dpRank, List<ScheduledRequest> items, BatchRoleAddressCache roleAddresses)
+            throws InvalidProtocolBufferException {
+        EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
+                EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank((int) dpRank);
+        for (ScheduledRequest item : items) {
+            slot.addRequests(
+                    EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
+                            .setInput(buildInput(item, roleAddresses))
+                            .build());
+        }
+        return slot.build();
+    }
+
+    private EngineRpcService.GenerateInputPB buildInput(
+            ScheduledRequest item, BatchRoleAddressCache roleAddresses)
+            throws InvalidProtocolBufferException {
+        ByteString generateInput = item.ctx().getGenerateInputPb();
+        if (generateInput == null || generateInput.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "generateInputPb is missing for request " + item.requestId());
+        }
+        EngineRpcService.GenerateInputPB.Builder input =
+                EngineRpcService.GenerateInputPB.newBuilder();
+        input.mergeFrom(generateInput);
+        if (!Objects.equals(RequestId.parse(input), item.requestId())) {
+            throw new IllegalArgumentException(
+                    "request_id mismatch between schedule request and GenerateInputPB");
+        }
+        // This batch RPC carries independent requests. Propagate each Schedule
+        // parent in its own payload, never in the shared RPC metadata.
+        if (FlexlbTrace.isEnabled() && item.ctx().getTraceContext() != null) {
+            try {
+                var carrier = FlexlbTrace.inject(item.ctx().getTraceContext());
+                String traceparent = carrier.get("traceparent");
+                if (traceparent != null && !traceparent.isEmpty()) {
+                    var traceContext =
+                            input.getRequestInfo().getTraceContext().toBuilder()
+                                    .setTraceparent(traceparent)
+                                    .setTracestate(carrier.getOrDefault("tracestate", ""))
+                                    .build();
+                    input.getRequestInfoBuilder().setTraceContext(traceContext);
+                }
+            } catch (Throwable ignored) {
+                // Tracing must not prevent dispatch or erase the incoming carrier.
+            }
+        }
+        EngineRpcService.GenerateConfigPB.Builder config = input.getGenerateConfigBuilder();
+        config.clearRoleAddrs();
+        addRoleAddr(config, roleAddresses.prefill(item.prefill()));
+        addRoleAddr(config, roleAddresses.decode(item.decode()));
+        // Pass the normalized Auto-TPM priority through to the engine
+        // (metrics tagging only). normalize() always sets 1-100, so every
+        // dispatched request carries its priority into the proto field.
+        Request request = item.ctx().getRequest();
+        if (request != null) {
+            input.setPriority(request.getPriority());
+        }
+        return input.build();
+    }
+
+    private static void addRoleAddr(
+            EngineRpcService.GenerateConfigPB.Builder config,
+            EngineRpcService.RoleAddrPB roleAddress) {
+        if (roleAddress == null) {
+            return;
+        }
+        config.addRoleAddrs(roleAddress);
+    }
+
+    private void failItems(
+            List<ScheduledRequest> items,
+            long batchId,
+            String message,
+            BiConsumer<ScheduledRequest, DeliveryResult> observer) {
+        failItems(items, batchId, new RuntimeException(message), observer);
+    }
+
+    private void failItems(
+            List<ScheduledRequest> items,
+            long batchId,
+            Throwable error,
+            BiConsumer<ScheduledRequest, DeliveryResult> observer) {
+        for (ScheduledRequest item : items) {
+            try {
+                observer.accept(item, DeliveryResult.notSent(error));
+            } catch (Throwable callbackFailure) {
+                Logger.error(
+                        "Dispatch-failure callback failed request_id={} batch_id={}",
+                        item.requestId(),
+                        batchId,
+                        callbackFailure);
+            }
+        }
+    }
+
+    // ==================== Logging ====================
+
+    private void logDispatch(
+            long batchId,
+            List<ScheduledRequest> items,
+            PrefillEndpoint prefillEp,
+            long predMs,
+            String reason) {
+        if (!Logger.isDebugEnabled()) {
+            return;
+        }
+        long totalTokens = 0;
+        long totalHit = 0;
+        StringBuilder itemDetail = new StringBuilder();
+        for (int i = 0; i < items.size(); i++) {
+            ScheduledRequest item = items.get(i);
+            long seqLen = item.seqLen();
+            long hitCache = item.hitCache();
+            totalTokens += seqLen;
+            totalHit += hitCache;
+            if (i > 0) {
+                itemDetail.append(", ");
+            }
+            itemDetail
+                    .append("{req_id=")
+                    .append(item.requestId())
+                    .append(" seq_len=")
+                    .append(seqLen)
+                    .append(" hit_cache=")
+                    .append(hitCache)
+                    .append('}');
+        }
+
+        ScheduledRequest head = items.get(0);
+        long now = System.currentTimeMillis();
+        long waitMs = now - head.enqueuedAtMs();
+        long remainingMs = head.expiresAtMs() - now;
+
+        Logger.debug(
+                "flexlb_batch_dispatch batch_id={} batch_size={} total_tokens={} total_hit={} "
+                        + "pred_ms={} reason={} wait_ms={} request_remaining_ms={} "
+                        + "prefill={}:{} items=[{}]",
+                batchId,
+                items.size(),
+                totalTokens,
+                totalHit,
+                predMs,
+                reason,
+                waitMs,
+                remainingMs,
+                prefillEp.getIp(),
+                prefillEp.getHttpPort(),
+                itemDetail);
     }
 
     private void requireBatchDispatcher() {
@@ -724,30 +718,15 @@ public class DefaultBatchDispatcher {
         }
     }
 
-    private void failItems(
-            List<ScheduledRequest> items,
-            long batchId,
-            String message,
-            BiConsumer<ScheduledRequest, DeliveryResult> observer) {
-        failItems(items, batchId, new RuntimeException(message), observer);
+    private void finishCompletion() {
+        pendingCompletions.decrementAndGet();
+        tryShutdownExecutor();
     }
 
-    private void failItems(
-            List<ScheduledRequest> items,
-            long batchId,
-            Throwable error,
-            BiConsumer<ScheduledRequest, DeliveryResult> observer) {
-        for (ScheduledRequest item : items) {
-            try {
-                observer.accept(item, DeliveryResult.notSent(error));
-            } catch (Throwable callbackFailure) {
-                Logger.error(
-                        "Dispatch-failure callback failed request_id={} batch_id={}",
-                        item.requestId(),
-                        batchId,
-                        callbackFailure);
-            }
-        }
+    private static Throwable unwrapCompletionFailure(Throwable failure) {
+        return failure instanceof CompletionException && failure.getCause() != null
+                ? failure.getCause()
+                : failure;
     }
 
     // ==================== Response parsing ====================
@@ -867,117 +846,6 @@ public class DefaultBatchDispatcher {
         }
     }
 
-    // ==================== gRPC request building ====================
-
-    private EngineRpcService.EnqueueBatchRequestPB buildBatchRequest(
-            long batchId, List<ScheduledRequest> items) throws InvalidProtocolBufferException {
-        EngineRpcService.EnqueueBatchRequestPB.Builder builder =
-                EngineRpcService.EnqueueBatchRequestPB.newBuilder()
-                        .setBatchId(batchId)
-                        .setFetchAttachTimeoutMs(
-                                configService
-                                        .loadBalanceConfig()
-                                        .getDispatcher()
-                                        .getFetchAttachTimeoutMs());
-        BatchRoleAddressCache roleAddresses = new BatchRoleAddressCache();
-        if (!items.isEmpty()) {
-            long dpRank = items.get(0).prefill().getDpRank();
-            boolean singleDpRank = true;
-            for (int i = 1; i < items.size(); i++) {
-                if (items.get(i).prefill().getDpRank() != dpRank) {
-                    singleDpRank = false;
-                    break;
-                }
-            }
-            if (singleDpRank) {
-                builder.addDpSlots(buildDpSlot(dpRank, items, roleAddresses));
-                return builder.build();
-            }
-        }
-
-        Map<Long, List<ScheduledRequest>> byDpRank = new HashMap<>();
-        for (ScheduledRequest item : items) {
-            byDpRank.computeIfAbsent(item.prefill().getDpRank(), ignored -> new ArrayList<>())
-                    .add(item);
-        }
-        List<Map.Entry<Long, List<ScheduledRequest>>> ranks = new ArrayList<>(byDpRank.entrySet());
-        ranks.sort(Map.Entry.comparingByKey());
-        for (Map.Entry<Long, List<ScheduledRequest>> entry : ranks) {
-            builder.addDpSlots(buildDpSlot(entry.getKey(), entry.getValue(), roleAddresses));
-        }
-        return builder.build();
-    }
-
-    private EngineRpcService.EnqueueBatchDpSlotPB buildDpSlot(
-            long dpRank, List<ScheduledRequest> items, BatchRoleAddressCache roleAddresses)
-            throws InvalidProtocolBufferException {
-        EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
-                EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank((int) dpRank);
-        for (ScheduledRequest item : items) {
-            slot.addRequests(
-                    EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
-                            .setInput(buildInput(item, roleAddresses))
-                            .build());
-        }
-        return slot.build();
-    }
-
-    private EngineRpcService.GenerateInputPB buildInput(
-            ScheduledRequest item, BatchRoleAddressCache roleAddresses)
-            throws InvalidProtocolBufferException {
-        ByteString generateInput = item.ctx().getGenerateInputPb();
-        if (generateInput == null || generateInput.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "generateInputPb is missing for request " + item.requestId());
-        }
-        EngineRpcService.GenerateInputPB.Builder input =
-                EngineRpcService.GenerateInputPB.newBuilder();
-        input.mergeFrom(generateInput);
-        if (!Objects.equals(RequestId.parse(input), item.requestId())) {
-            throw new IllegalArgumentException(
-                    "request_id mismatch between schedule request and GenerateInputPB");
-        }
-        // This batch RPC carries independent requests. Propagate each Schedule
-        // parent in its own payload, never in the shared RPC metadata.
-        if (FlexlbTrace.isEnabled() && item.ctx().getTraceContext() != null) {
-            try {
-                var carrier = FlexlbTrace.inject(item.ctx().getTraceContext());
-                String traceparent = carrier.get("traceparent");
-                if (traceparent != null && !traceparent.isEmpty()) {
-                    var traceContext =
-                            input.getRequestInfo().getTraceContext().toBuilder()
-                                    .setTraceparent(traceparent)
-                                    .setTracestate(carrier.getOrDefault("tracestate", ""))
-                                    .build();
-                    input.getRequestInfoBuilder().setTraceContext(traceContext);
-                }
-            } catch (Throwable ignored) {
-                // Tracing must not prevent dispatch or erase the incoming carrier.
-            }
-        }
-        EngineRpcService.GenerateConfigPB.Builder config = input.getGenerateConfigBuilder();
-        config.clearRoleAddrs();
-        addRoleAddr(config, roleAddresses.prefill(item.prefill()));
-        addRoleAddr(config, roleAddresses.decode(item.decode()));
-        // Pass the normalized Auto-TPM priority through to the engine
-        // (metrics tagging only). normalize() always sets 1-100, so every
-        // dispatched request carries its priority into the proto field.
-        Request request = item.ctx().getRequest();
-        if (request != null) {
-            input.setPriority(request.getPriority());
-        }
-        return input.build();
-    }
-
-    private static void addRoleAddr(
-            EngineRpcService.GenerateConfigPB.Builder config,
-            EngineRpcService.RoleAddrPB roleAddress) {
-        if (roleAddress == null) {
-            return;
-        }
-        config.addRoleAddrs(roleAddress);
-    }
-
     private static EngineRpcService.RoleAddrPB buildRoleAddr(ServerStatus serverStatus) {
         RoleType role = serverStatus.getRole();
         return EngineRpcService.RoleAddrPB.newBuilder()
@@ -999,7 +867,206 @@ public class DefaultBatchDispatcher {
                 && cached.getGrpcPort() == serverStatus.getGrpcPort();
     }
 
-    /** Reuses immutable role addresses while building one batch payload. */
+    /**
+     * One dispatch-task permit, acquired before the canonical commit.
+     */
+    private final class PermitReservation implements PreparedSubmission {
+        private final AtomicReference<PermitPhase> phase =
+                new AtomicReference<>(PermitPhase.PREPARED);
+
+        /** Wire-size charged against the in-flight byte budget. 0 until the
+         *  dispatch task freezes its items; never negative. */
+        private final AtomicLong chargedBytes = new AtomicLong(0L);
+
+        @Override
+        public void submit(BatchDeliveryStrategy.Delivery delivery) {
+            Objects.requireNonNull(delivery, "delivery");
+            if (!phase.compareAndSet(PermitPhase.PREPARED, PermitPhase.SUBMITTED)) {
+                throw new IllegalStateException(
+                        "prepared batch submission cannot submit from " + phase.get());
+            }
+            try {
+                dispatchExecutor.execute(
+                        () -> {
+                            try {
+                                // Completion ownership: doDispatch settles the permit
+                                // on EVERY terminal path — either by transferring to
+                                // AWAITING_RPC (the registered completion observer
+                                // releases when the EnqueueBatch RPC completes), or by
+                                // releasing it directly when no RPC completion will
+                                // ever arrive (build failure, oversize, pre-send
+                                // throw, null future, registration failure). A
+                                // Delivery that returns WITHOUT ever calling the
+                                // sender (all requests expired/cancelled before
+                                // handoff) also leaves no completion behind, so the
+                                // permit must be settled after delivery.run returns.
+                                delivery.run(
+                                        (items, batchId, predictedMs, reason, observer) -> {
+                                            // Byte-budget admission: charge the frozen
+                                            // wire-size before any serialization. A rejection
+                                            // here is pre-send by construction: nothing was
+                                            // serialized, so NOT_SENT is the honest outcome.
+                                            long bytes = wireSizeUpperBound(items);
+                                            if (!tryChargeBytes(bytes)) {
+                                                Logger.warn(
+                                                        "EnqueueBatch byte budget exhausted; failing batch {} ({}B > budget {}B, in-flight {}B) as NOT_SENT",
+                                                        batchId,
+                                                        bytes,
+                                                        maxInflightBytes,
+                                                        inflightPayloadBytes.get());
+                                                failItems(
+                                                        items,
+                                                        batchId,
+                                                        "in-flight payload byte budget exhausted",
+                                                        observer);
+                                                // No RPC, no observer: settle count and bytes.
+                                                settleIfNoRpcRegistered();
+                                                return;
+                                            }
+                                            doDispatch(
+                                                    dispatchTask(
+                                                            items,
+                                                            batchId,
+                                                            predictedMs,
+                                                            reason,
+                                                            observer,
+                                                            PermitReservation.this));
+                                        });
+                            } catch (Throwable deliveryFailure) {
+                                // Delivery owns admission cleanup; do not infer a
+                                // second per-request outcome from task failure.
+                                Logger.error("Batch delivery task failed", deliveryFailure);
+                            } finally {
+                                // Exactly-once settle: if doDispatch transferred to
+                                // AWAITING_RPC this is a NO-OP (only the completion
+                                // observer releases). Otherwise this returns the
+                                // permit — without it, a sender-less delivery would
+                                // leak admission permanently and shutdown could
+                                // never complete.
+                                settleIfNoRpcRegistered();
+                            }
+                        });
+            } catch (RuntimeException | Error submissionFailure) {
+                finishSubmitted();
+                throw submissionFailure;
+            }
+        }
+
+        @Override
+        public void close() {
+            if (phase.compareAndSet(PermitPhase.PREPARED, PermitPhase.RELEASED)) {
+                releasePermit();
+            }
+        }
+
+        /**
+         * Charges this batch's wire-size upper bound against the in-flight
+         * byte budget. Called once at dispatch-task construction (items
+         * frozen). Rejecting here means the batch was NOT serialized: the
+         * items are failed NOT_SENT and the permit settles, so admission
+         * count and byte budget return together.
+         */
+        boolean tryChargeBytes(long bytes) {
+            long budget = maxInflightBytes;
+            long current;
+            long next;
+            do {
+                current = inflightPayloadBytes.get();
+                next = current + bytes;
+                if (next > budget) {
+                    return false;
+                }
+            } while (!inflightPayloadBytes.compareAndSet(current, next));
+            chargedBytes.set(bytes);
+            return true;
+        }
+
+        /**
+         * Transfers completion ownership before registering the observer: an
+         * already-completed future can run its callback before handleAsync returns.
+         * Registration failure explicitly settles this ownership instead.
+         */
+        void transferToRpcCompletion() {
+            phase.compareAndSet(PermitPhase.SUBMITTED, PermitPhase.AWAITING_RPC);
+        }
+
+        /**
+         * Releases the admission permit when the dispatched EnqueueBatch RPC
+         * has completed (success, failure, or uncertain), or when the task
+         * wrapper settled because no RPC completion was registered.
+         * Idempotent via the phase CAS.
+         */
+        void releaseOnRpcCompletion() {
+            PermitPhase current = phase.get();
+            if (current == PermitPhase.RELEASED) {
+                return;
+            }
+            if (phase.compareAndSet(PermitPhase.AWAITING_RPC, PermitPhase.RELEASED)
+                    || phase.compareAndSet(PermitPhase.PREPARED, PermitPhase.RELEASED)) {
+                releaseChargedBytes();
+                releasePermit();
+            }
+        }
+
+        /**
+         * Task-wrapper settle: releases the permit only when no RPC
+         * completion observer took ownership. AWAITING_RPC (observer
+         * registered) and RELEASED are left untouched; SUBMITTED (and
+         * PREPARED, if the delivery threw before submit advanced the phase)
+         * release now because nothing else ever will.
+         */
+        void settleIfNoRpcRegistered() {
+            PermitPhase current = phase.get();
+            if (current == PermitPhase.AWAITING_RPC || current == PermitPhase.RELEASED) {
+                return;
+            }
+            if (phase.compareAndSet(PermitPhase.SUBMITTED, PermitPhase.RELEASED)) {
+                releaseChargedBytes();
+                releasePermit();
+                return;
+            }
+            if (phase.compareAndSet(PermitPhase.PREPARED, PermitPhase.RELEASED)) {
+                releaseChargedBytes();
+                releasePermit();
+            }
+        }
+
+        private void finishSubmitted() {
+            if (phase.compareAndSet(PermitPhase.SUBMITTED, PermitPhase.RELEASED)) {
+                releasePermit();
+            }
+        }
+
+        private void releaseChargedBytes() {
+            long bytes = chargedBytes.getAndSet(0L);
+            if (bytes > 0L) {
+                inflightPayloadBytes.addAndGet(-bytes);
+                signalCapacityAvailable();
+            }
+        }
+
+        private enum PermitPhase {
+            PREPARED,
+            SUBMITTED,
+            /** doDispatch registered the RPC completion observer: only that
+             *  observer may release the permit (when the RPC completes). */
+            AWAITING_RPC,
+            RELEASED
+        }
+    }
+
+    private record DispatchTask(
+            List<ScheduledRequest> items,
+            PrefillEndpoint prefillEndpoint,
+            long batchId,
+            long predictedMs,
+            String reason,
+            BiConsumer<ScheduledRequest, DeliveryResult> observer,
+            PermitReservation permitReservation) {}
+
+    /**
+     * Reuses immutable role addresses while building one batch payload.
+     */
     private static final class BatchRoleAddressCache {
         private EngineRpcService.RoleAddrPB prefill;
         private EngineRpcService.RoleAddrPB decode;
@@ -1025,62 +1092,9 @@ public class DefaultBatchDispatcher {
         }
     }
 
-    // ==================== Logging ====================
-
-    private void logDispatch(
-            long batchId,
-            List<ScheduledRequest> items,
-            PrefillEndpoint prefillEp,
-            long predMs,
-            String reason) {
-        if (!Logger.isDebugEnabled()) {
-            return;
-        }
-        long totalTokens = 0;
-        long totalHit = 0;
-        StringBuilder itemDetail = new StringBuilder();
-        for (int i = 0; i < items.size(); i++) {
-            ScheduledRequest item = items.get(i);
-            long seqLen = item.seqLen();
-            long hitCache = item.hitCache();
-            totalTokens += seqLen;
-            totalHit += hitCache;
-            if (i > 0) {
-                itemDetail.append(", ");
-            }
-            itemDetail
-                    .append("{req_id=")
-                    .append(item.requestId())
-                    .append(" seq_len=")
-                    .append(seqLen)
-                    .append(" hit_cache=")
-                    .append(hitCache)
-                    .append('}');
-        }
-
-        ScheduledRequest head = items.get(0);
-        long now = System.currentTimeMillis();
-        long waitMs = now - head.enqueuedAtMs();
-        long remainingMs = head.expiresAtMs() - now;
-
-        Logger.debug(
-                "flexlb_batch_dispatch batch_id={} batch_size={} total_tokens={} total_hit={} "
-                        + "pred_ms={} reason={} wait_ms={} request_remaining_ms={} "
-                        + "prefill={}:{} items=[{}]",
-                batchId,
-                items.size(),
-                totalTokens,
-                totalHit,
-                predMs,
-                reason,
-                waitMs,
-                remainingMs,
-                prefillEp.getIp(),
-                prefillEp.getHttpPort(),
-                itemDetail);
-    }
-
-    /** Per-dispatch phase marker used only by the executor thread. */
+    /**
+     * Per-dispatch phase marker used only by the executor thread.
+     */
     private static final class DispatchAttempt {
         private boolean rpcInvocationStarted;
     }

@@ -11,6 +11,10 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks scheduling latency stages, priority buckets and measurement-window resets without inventing
+ * missing samples.
+ */
 class ServerScheduleLatencyRecorderTest {
 
     @Test

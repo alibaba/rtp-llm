@@ -23,86 +23,13 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.function.Predicate;
 
+/**
+ * <p>Discovery prepares an endpoint privately before publishing its generation for routing.
+ * Captures return exact generation pins; replacement and retirement withdraw the old generation
+ * and coordinate its cleanup rather than redirecting existing handles.
+ */
 @Component
 public class EndpointRegistry {
-
-    private enum RegistryPhase {
-        OPEN,
-        CLOSING,
-        CLOSED
-    }
-
-    /** Result of publishing a fully initialized endpoint generation. */
-    public record EndpointPublication(WorkerEndpoint endpoint, Runnable statusProjection) {}
-
-    /**
-     * One non-owning Prefill generation exposed to routing.
-     *
-     * <p>The endpoint identity is advisory: a caller must capture the address
-     * and verify that the pinned endpoint is still this exact instance before
-     * transferring generation ownership to a request.</p>
-     */
-    public record PrefillRoutingEntry(String address, PrefillEndpoint endpoint) {
-        public PrefillRoutingEntry {
-            java.util.Objects.requireNonNull(address, "address");
-            java.util.Objects.requireNonNull(endpoint, "endpoint");
-        }
-    }
-
-    /**
-     * One exact endpoint generation moved out of the routing registry.
-     *
-     * <p>The capability is the sole completion token for the registry's
-     * detached-retirement barrier. It initiates and awaits endpoint cleanup
-     * outside the registry gate, then resolves that token exactly once.</p>
-     */
-    public static final class DetachedGeneration {
-        private final EndpointRegistry registry;
-        private final WorkerEndpoint endpoint;
-        private final AtomicBoolean retirementClaimed = new AtomicBoolean();
-
-        private DetachedGeneration(EndpointRegistry registry, WorkerEndpoint endpoint) {
-            this.registry = registry;
-            this.endpoint = endpoint;
-        }
-
-        /** Exact identity check without exposing the owned endpoint resource. */
-        public boolean ownsEndpoint(WorkerEndpoint exactEndpoint) {
-            return endpoint == exactEndpoint;
-        }
-
-        /** Drain this exact generation and resolve its registry barrier token. */
-        public void retireAndAwait() {
-            if (!retirementClaimed.compareAndSet(false, true)) {
-                throw new IllegalStateException(
-                        "Detached endpoint retirement was already claimed: "
-                                + endpoint.getStatus().getIpPort()
-                                + "#"
-                                + endpoint.getStatus().getGenerationId());
-            }
-            Throwable failure = null;
-            try {
-                try {
-                    endpoint.close();
-                } catch (Throwable closeFailure) {
-                    failure = closeFailure;
-                }
-                try {
-                    endpoint.awaitRetirement();
-                } catch (Throwable awaitFailure) {
-                    failure = appendFailure(failure, awaitFailure);
-                }
-            } finally {
-                try {
-                    registry.resolveDetachedGeneration(this);
-                } catch (Throwable resolutionFailure) {
-                    failure = appendFailure(failure, resolutionFailure);
-                }
-            }
-            rethrowDetachedRetirementFailure(failure);
-        }
-    }
-
     private final EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>> endpointsByRole =
             endpointMaps();
 
@@ -127,29 +54,13 @@ public class EndpointRegistry {
     private final DeliveryStrategy deliveryStrategy;
     private final PlacementAvailability placementAvailability;
     private final Object lifecycleGate = new Object();
+
     private RegistryPhase registryPhase = RegistryPhase.OPEN;
+
     private int inflightPublications;
     private int inflightDetachedRetirements;
+
     private Throwable closeFailure;
-
-    private static EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>> endpointMaps() {
-        EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>> maps =
-                new EnumMap<>(RoleType.class);
-        for (RoleType role :
-                List.of(
-                        RoleType.PREFILL,
-                        RoleType.DECODE,
-                        RoleType.PDFUSION,
-                        RoleType.ENCODER,
-                        RoleType.VIT)) {
-            maps.put(role, new ConcurrentHashMap<>());
-        }
-        return maps;
-    }
-
-    private ConcurrentHashMap<String, WorkerEndpoint> endpoints(RoleType role) {
-        return endpointsByRole.get(role);
-    }
 
     @Autowired
     public EndpointRegistry(
@@ -170,6 +81,54 @@ public class EndpointRegistry {
     public WorkerEndpoint get(RoleType roleType, String ipPort) {
         Map<String, WorkerEndpoint> endpoints = endpoints(roleType);
         return endpoints == null ? null : endpoints.get(ipPort);
+    }
+
+    /**
+     * Return immutable routing values for the Decode generations observed
+     * during this traversal.
+     *
+     * <p>The registry is intentionally not locked while an endpoint takes its
+     * admission lock.  This avoids introducing a map-bin/admission-lock order;
+     * publication races are resolved when the selected generation is pinned
+     * by {@link #captureDecodeGeneration(DecodeEndpoint.DecodeRoutingView)}.</p>
+     */
+    public List<DecodeEndpoint.DecodeRoutingView> decodeRoutingSnapshot() {
+        List<Map.Entry<String, DecodeEndpoint>> directory = decodeDirectory;
+        List<DecodeEndpoint.DecodeRoutingView> snapshot = new ArrayList<>(directory.size());
+        for (Map.Entry<String, DecodeEndpoint> entry : directory) {
+            snapshot.add(entry.getValue().routingViewSnapshot(entry.getKey()));
+        }
+        return List.copyOf(snapshot);
+    }
+
+    /**
+     * Capture the exact Decode generation represented by a routing snapshot.
+     *
+     * <p>The routing values are advisory and may change after selection. The
+     * subsequent reservation/dispatch transaction revalidates capacity under
+     * the endpoint admission lock. This method authorizes only an identical
+     * endpoint generation; every rejected or exceptional capture is closed
+     * here, while a successful caller owns the returned generation pin.</p>
+     */
+    public WorkerEndpoint.GenerationPin captureDecodeGeneration(
+            DecodeEndpoint.DecodeRoutingView expected) {
+        WorkerEndpoint.GenerationPin pin = capture(RoleType.DECODE, expected.address());
+        if (pin == null) {
+            return null;
+        }
+        boolean transferred = false;
+        try {
+            if (pin.generationId() != expected.generationId()
+                    || !(pin.endpoint() instanceof DecodeEndpoint)) {
+                return null;
+            }
+            transferred = true;
+            return pin;
+        } finally {
+            if (!transferred) {
+                pin.close();
+            }
+        }
     }
 
     /**
@@ -255,66 +214,6 @@ public class EndpointRegistry {
         };
     }
 
-    /**
-     * Return immutable routing values for the Decode generations observed
-     * during this traversal.
-     *
-     * <p>The registry is intentionally not locked while an endpoint takes its
-     * admission lock.  This avoids introducing a map-bin/admission-lock order;
-     * publication races are resolved when the selected generation is pinned
-     * by {@link #captureDecodeGeneration(DecodeEndpoint.DecodeRoutingView)}.</p>
-     */
-    public List<DecodeEndpoint.DecodeRoutingView> decodeRoutingSnapshot() {
-        List<Map.Entry<String, DecodeEndpoint>> directory = decodeDirectory;
-        List<DecodeEndpoint.DecodeRoutingView> snapshot = new ArrayList<>(directory.size());
-        for (Map.Entry<String, DecodeEndpoint> entry : directory) {
-            snapshot.add(entry.getValue().routingViewSnapshot(entry.getKey()));
-        }
-        return List.copyOf(snapshot);
-    }
-
-    /**
-     * Capture the exact Decode generation represented by a routing snapshot.
-     *
-     * <p>The routing values are advisory and may change after selection. The
-     * subsequent reservation/dispatch transaction revalidates capacity under
-     * the endpoint admission lock. This method authorizes only an identical
-     * endpoint generation; every rejected or exceptional capture is closed
-     * here, while a successful caller owns the returned generation pin.</p>
-     */
-    public WorkerEndpoint.GenerationPin captureDecodeGeneration(
-            DecodeEndpoint.DecodeRoutingView expected) {
-        WorkerEndpoint.GenerationPin pin = capture(RoleType.DECODE, expected.address());
-        if (pin == null) {
-            return null;
-        }
-        boolean transferred = false;
-        try {
-            if (pin.generationId() != expected.generationId()
-                    || !(pin.endpoint() instanceof DecodeEndpoint)) {
-                return null;
-            }
-            transferred = true;
-            return pin;
-        } finally {
-            if (!transferred) {
-                pin.close();
-            }
-        }
-    }
-
-    private static WorkerEndpoint.GenerationPin capture(
-            ConcurrentHashMap<String, WorkerEndpoint> endpoints, String ipPort) {
-        AtomicReference<WorkerEndpoint.GenerationPin> captured = new AtomicReference<>();
-        endpoints.computeIfPresent(
-                ipPort,
-                (ignored, current) -> {
-                    captured.set(current.tryPinGeneration());
-                    return current;
-                });
-        return captured.get();
-    }
-
     /** Return the endpoint only when it belongs to the expected status generation. */
     public WorkerEndpoint get(RoleType roleType, String ipPort, WorkerStatus expectedStatus) {
         WorkerEndpoint endpoint = get(roleType, ipPort);
@@ -374,6 +273,185 @@ public class EndpointRegistry {
         }
     }
 
+    /**
+     * Close and remove one exact endpoint generation from routing without
+     * waiting for its potentially blocking drain. The caller holds the ACTIVE
+     * WorkerStatus generation lock. This method publishes RETIRING only after
+     * the exact endpoint gate has closed and routing withdrawal is visible;
+     * the caller closes the returned endpoint outside that lock.
+     */
+    public DetachedGeneration detachAndBeginRetirement(
+            RoleType roleType, String ipPort, WorkerStatus expectedStatus) {
+        if (expectedStatus == null) {
+            return null;
+        }
+        expectedStatus.requireActiveGeneration();
+        DetachedGeneration detached;
+        synchronized (lifecycleGate) {
+            if (registryPhase != RegistryPhase.OPEN) {
+                throw new IllegalStateException("EndpointRegistry is closing");
+            }
+            ConcurrentHashMap<String, WorkerEndpoint> endpoints = endpoints(roleType);
+            detached =
+                    endpoints == null ? null : detach(roleType, endpoints, ipPort, expectedStatus);
+            if (detached != null) {
+                inflightDetachedRetirements++;
+                if (!expectedStatus.beginRetirementAfterEndpointGateClosed()) {
+                    throw new IllegalStateException(
+                            "WorkerStatus generation changed while its lock was held: "
+                                    + ipPort
+                                    + "#"
+                                    + expectedStatus.getGenerationId());
+                }
+            }
+        }
+        if (detached != null) {
+            WorkerStatus.TopologySnapshot topology =
+                    detached.endpoint.getStatus().topologySnapshot();
+            placementAvailability.topologyChanged(roleType, topology.group(), ipPort);
+        }
+        return detached;
+    }
+
+    public void close() {
+        boolean interrupted = false;
+        boolean closeOwner = false;
+        synchronized (lifecycleGate) {
+            if (registryPhase == RegistryPhase.OPEN) {
+                registryPhase = RegistryPhase.CLOSING;
+                prefillDirectory = List.of();
+                pdFusionDirectory = List.of();
+                decodeDirectory = List.of();
+                closeOwner = true;
+            }
+            while (registryPhase == RegistryPhase.CLOSING
+                    && (!closeOwner || inflightPublications != 0)) {
+                try {
+                    lifecycleGate.wait();
+                } catch (InterruptedException interruption) {
+                    interrupted = true;
+                }
+            }
+            if (!closeOwner) {
+                Throwable completedFailure = closeFailure;
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+                rethrowCloseFailure(completedFailure);
+                return;
+            }
+        }
+
+        Throwable failure;
+        try {
+            failure = closeEndpointGenerations();
+        } catch (RuntimeException | Error unexpectedFailure) {
+            failure = unexpectedFailure;
+        }
+        try {
+            awaitDetachedRetirements();
+        } catch (RuntimeException | Error detachedBarrierFailure) {
+            failure = appendFailure(failure, detachedBarrierFailure);
+        }
+        synchronized (lifecycleGate) {
+            closeFailure = failure;
+            registryPhase = RegistryPhase.CLOSED;
+            lifecycleGate.notifyAll();
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        rethrowCloseFailure(failure);
+    }
+
+    /** Immutable point-in-time view; publication remains owned by this registry. */
+    @SuppressWarnings("unchecked")
+    public Map<String, PrefillEndpoint> snapshotPrefillEndpoints() {
+        return (Map<String, PrefillEndpoint>) (Map<?, ?>) Map.copyOf(endpoints(RoleType.PREFILL));
+    }
+
+    /** Immutable point-in-time view; publication remains owned by this registry. */
+    @SuppressWarnings("unchecked")
+    public Map<String, DecodeEndpoint> snapshotDecodeEndpoints() {
+        return (Map<String, DecodeEndpoint>) (Map<?, ?>) Map.copyOf(endpoints(RoleType.DECODE));
+    }
+
+    public int getEndpointCount(RoleType roleType) {
+        Map<String, WorkerEndpoint> endpoints = endpoints(roleType);
+        return endpoints == null ? 0 : endpoints.size();
+    }
+
+    /**
+     * Trigger TTL eviction on all prefill and decode endpoints.
+     *
+     * @param ttlMs max age before eviction
+     * @param retainForSchedulerCleanup current directory lookup, called under endpoint locks;
+     *                                  must not acquire request locks or use a historical snapshot
+     */
+    public void evictExpiredOrphans(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
+        endpoints(RoleType.PREFILL)
+                .forEach(
+                        (endpoint, worker) -> {
+                            PrefillEndpoint ep = (PrefillEndpoint) worker;
+                            logEndpointEviction(
+                                    RoleType.PREFILL,
+                                    endpoint,
+                                    ep.evictExpiredInflight(ttlMs, retainForSchedulerCleanup),
+                                    ttlMs);
+                        });
+        endpoints(RoleType.DECODE)
+                .forEach(
+                        (endpoint, worker) -> {
+                            DecodeEndpoint ep = (DecodeEndpoint) worker;
+                            logEndpointEviction(
+                                    RoleType.DECODE,
+                                    endpoint,
+                                    ep.evictExpiredRequests(ttlMs, retainForSchedulerCleanup),
+                                    ttlMs);
+                        });
+        endpoints(RoleType.PDFUSION)
+                .forEach(
+                        (endpoint, worker) -> {
+                            PrefillEndpoint ep = (PrefillEndpoint) worker;
+                            logEndpointEviction(
+                                    RoleType.PDFUSION,
+                                    endpoint,
+                                    ep.evictExpiredBatches(ttlMs),
+                                    ttlMs);
+                        });
+    }
+
+    private static EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>> endpointMaps() {
+        EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>> maps =
+                new EnumMap<>(RoleType.class);
+        for (RoleType role :
+                List.of(
+                        RoleType.PREFILL,
+                        RoleType.DECODE,
+                        RoleType.PDFUSION,
+                        RoleType.ENCODER,
+                        RoleType.VIT)) {
+            maps.put(role, new ConcurrentHashMap<>());
+        }
+        return maps;
+    }
+
+    private ConcurrentHashMap<String, WorkerEndpoint> endpoints(RoleType role) {
+        return endpointsByRole.get(role);
+    }
+
+    private static WorkerEndpoint.GenerationPin capture(
+            ConcurrentHashMap<String, WorkerEndpoint> endpoints, String ipPort) {
+        AtomicReference<WorkerEndpoint.GenerationPin> captured = new AtomicReference<>();
+        endpoints.computeIfPresent(
+                ipPort,
+                (ignored, current) -> {
+                    captured.set(current.tryPinGeneration());
+                    return current;
+                });
+        return captured.get();
+    }
+
     private void beginCandidatePublication() {
         synchronized (lifecycleGate) {
             if (registryPhase != RegistryPhase.OPEN) {
@@ -424,24 +502,6 @@ public class EndpointRegistry {
             withdrawAndCloseCandidate(role, endpoints, ipPort, candidate, publicationFailure);
             throw propagate(publicationFailure, ipPort);
         }
-    }
-
-    private void withdrawAndCloseCandidate(
-            RoleType role,
-            ConcurrentHashMap<String, WorkerEndpoint> endpoints,
-            String ipPort,
-            WorkerEndpoint candidate,
-            Throwable primaryFailure) {
-        try {
-            mutateEndpointMap(
-                    role,
-                    endpoints,
-                    ipPort,
-                    (ignored, current) -> current == candidate ? null : current);
-        } catch (Throwable withdrawalFailure) {
-            addSuppressedNoFail(primaryFailure, withdrawalFailure);
-        }
-        closeCandidate(candidate, primaryFailure);
     }
 
     /**
@@ -523,16 +583,6 @@ public class EndpointRegistry {
         return role == RoleType.PREFILL ? prefillDirectory : pdFusionDirectory;
     }
 
-    private void publishPrefillDirectory(RoleType role, List<PrefillRoutingEntry> directory) {
-        if (role == RoleType.PREFILL) {
-            prefillDirectory = directory;
-        } else if (role == RoleType.PDFUSION) {
-            pdFusionDirectory = directory;
-        } else {
-            throw new IllegalArgumentException("Not a Prefill routing role: " + role);
-        }
-    }
-
     /** Build the exact post-mutation directory before the CHM write. */
     private List<Map.Entry<String, DecodeEndpoint>> decodeDirectoryAfterMutationLocked(
             List<Map.Entry<String, DecodeEndpoint>> previous, String address, DecodeEndpoint next) {
@@ -552,21 +602,41 @@ public class EndpointRegistry {
         return List.copyOf(entries);
     }
 
-    private static void closeCandidate(WorkerEndpoint candidate, Throwable primaryFailure) {
-        if (candidate == null) {
-            return;
-        }
-        try {
-            candidate.closeAsynchronously();
-        } catch (Throwable closeFailure) {
-            addSuppressedNoFail(primaryFailure, closeFailure);
+    private void publishPrefillDirectory(RoleType role, List<PrefillRoutingEntry> directory) {
+        if (role == RoleType.PREFILL) {
+            prefillDirectory = directory;
+        } else if (role == RoleType.PDFUSION) {
+            pdFusionDirectory = directory;
+        } else {
+            throw new IllegalArgumentException("Not a Prefill routing role: " + role);
         }
     }
 
-    private static void startCandidate(WorkerEndpoint candidate) {
-        if (candidate instanceof PrefillEndpoint prefill) {
-            prefill.startGeneration();
+    private void signalPublishedEndpoint(WorkerEndpoint endpoint) {
+        if (endpoint == null) {
+            return;
         }
+        WorkerStatus.TopologySnapshot topology = endpoint.getStatus().topologySnapshot();
+        placementAvailability.topologyChanged(
+                endpoint.getStatus().getRole(), topology.group(), endpoint.ipPort());
+    }
+
+    private void withdrawAndCloseCandidate(
+            RoleType role,
+            ConcurrentHashMap<String, WorkerEndpoint> endpoints,
+            String ipPort,
+            WorkerEndpoint candidate,
+            Throwable primaryFailure) {
+        try {
+            mutateEndpointMap(
+                    role,
+                    endpoints,
+                    ipPort,
+                    (ignored, current) -> current == candidate ? null : current);
+        } catch (Throwable withdrawalFailure) {
+            addSuppressedNoFail(primaryFailure, withdrawalFailure);
+        }
+        closeCandidate(candidate, primaryFailure);
     }
 
     private static void addSuppressedNoFail(Throwable primary, Throwable leaf) {
@@ -580,6 +650,17 @@ public class EndpointRegistry {
         }
     }
 
+    private static void closeCandidate(WorkerEndpoint candidate, Throwable primaryFailure) {
+        if (candidate == null) {
+            return;
+        }
+        try {
+            candidate.closeAsynchronously();
+        } catch (Throwable closeFailure) {
+            addSuppressedNoFail(primaryFailure, closeFailure);
+        }
+    }
+
     private static RuntimeException propagate(Throwable failure, String ipPort) {
         if (failure instanceof RuntimeException runtimeFailure) {
             return runtimeFailure;
@@ -590,51 +671,17 @@ public class EndpointRegistry {
         return new IllegalStateException("Endpoint publication failed for " + ipPort, failure);
     }
 
+    private static void startCandidate(WorkerEndpoint candidate) {
+        if (candidate instanceof PrefillEndpoint prefill) {
+            prefill.startGeneration();
+        }
+    }
+
     private static void requireGenerationLock(WorkerStatus status) {
         if (!status.lock.isHeldByCurrentThread()) {
             throw new IllegalStateException(
                     "Endpoint publication requires the WorkerStatus generation lock");
         }
-    }
-
-    /**
-     * Close and remove one exact endpoint generation from routing without
-     * waiting for its potentially blocking drain. The caller holds the ACTIVE
-     * WorkerStatus generation lock. This method publishes RETIRING only after
-     * the exact endpoint gate has closed and routing withdrawal is visible;
-     * the caller closes the returned endpoint outside that lock.
-     */
-    public DetachedGeneration detachAndBeginRetirement(
-            RoleType roleType, String ipPort, WorkerStatus expectedStatus) {
-        if (expectedStatus == null) {
-            return null;
-        }
-        expectedStatus.requireActiveGeneration();
-        DetachedGeneration detached;
-        synchronized (lifecycleGate) {
-            if (registryPhase != RegistryPhase.OPEN) {
-                throw new IllegalStateException("EndpointRegistry is closing");
-            }
-            ConcurrentHashMap<String, WorkerEndpoint> endpoints = endpoints(roleType);
-            detached =
-                    endpoints == null ? null : detach(roleType, endpoints, ipPort, expectedStatus);
-            if (detached != null) {
-                inflightDetachedRetirements++;
-                if (!expectedStatus.beginRetirementAfterEndpointGateClosed()) {
-                    throw new IllegalStateException(
-                            "WorkerStatus generation changed while its lock was held: "
-                                    + ipPort
-                                    + "#"
-                                    + expectedStatus.getGenerationId());
-                }
-            }
-        }
-        if (detached != null) {
-            WorkerStatus.TopologySnapshot topology =
-                    detached.endpoint.getStatus().topologySnapshot();
-            placementAvailability.topologyChanged(roleType, topology.group(), ipPort);
-        }
-        return detached;
     }
 
     private DetachedGeneration detach(
@@ -725,66 +772,6 @@ public class EndpointRegistry {
                     status.getMetricIpPort(),
                     telemetryFailure);
         }
-    }
-
-    private void signalPublishedEndpoint(WorkerEndpoint endpoint) {
-        if (endpoint == null) {
-            return;
-        }
-        WorkerStatus.TopologySnapshot topology = endpoint.getStatus().topologySnapshot();
-        placementAvailability.topologyChanged(
-                endpoint.getStatus().getRole(), topology.group(), endpoint.ipPort());
-    }
-
-    public void close() {
-        boolean interrupted = false;
-        boolean closeOwner = false;
-        synchronized (lifecycleGate) {
-            if (registryPhase == RegistryPhase.OPEN) {
-                registryPhase = RegistryPhase.CLOSING;
-                prefillDirectory = List.of();
-                pdFusionDirectory = List.of();
-                decodeDirectory = List.of();
-                closeOwner = true;
-            }
-            while (registryPhase == RegistryPhase.CLOSING
-                    && (!closeOwner || inflightPublications != 0)) {
-                try {
-                    lifecycleGate.wait();
-                } catch (InterruptedException interruption) {
-                    interrupted = true;
-                }
-            }
-            if (!closeOwner) {
-                Throwable completedFailure = closeFailure;
-                if (interrupted) {
-                    Thread.currentThread().interrupt();
-                }
-                rethrowCloseFailure(completedFailure);
-                return;
-            }
-        }
-
-        Throwable failure;
-        try {
-            failure = closeEndpointGenerations();
-        } catch (RuntimeException | Error unexpectedFailure) {
-            failure = unexpectedFailure;
-        }
-        try {
-            awaitDetachedRetirements();
-        } catch (RuntimeException | Error detachedBarrierFailure) {
-            failure = appendFailure(failure, detachedBarrierFailure);
-        }
-        synchronized (lifecycleGate) {
-            closeFailure = failure;
-            registryPhase = RegistryPhase.CLOSED;
-            lifecycleGate.notifyAll();
-        }
-        if (interrupted) {
-            Thread.currentThread().interrupt();
-        }
-        rethrowCloseFailure(failure);
     }
 
     /** Wait for every generation detached before the close gate linearized. */
@@ -895,63 +882,6 @@ public class EndpointRegistry {
         }
     }
 
-    /** Immutable point-in-time view; publication remains owned by this registry. */
-    @SuppressWarnings("unchecked")
-    public Map<String, PrefillEndpoint> snapshotPrefillEndpoints() {
-        return (Map<String, PrefillEndpoint>) (Map<?, ?>) Map.copyOf(endpoints(RoleType.PREFILL));
-    }
-
-    /** Immutable point-in-time view; publication remains owned by this registry. */
-    @SuppressWarnings("unchecked")
-    public Map<String, DecodeEndpoint> snapshotDecodeEndpoints() {
-        return (Map<String, DecodeEndpoint>) (Map<?, ?>) Map.copyOf(endpoints(RoleType.DECODE));
-    }
-
-    public int getEndpointCount(RoleType roleType) {
-        Map<String, WorkerEndpoint> endpoints = endpoints(roleType);
-        return endpoints == null ? 0 : endpoints.size();
-    }
-
-    /**
-     * Trigger TTL eviction on all prefill and decode endpoints.
-     *
-     * @param ttlMs max age before eviction
-     * @param retainForSchedulerCleanup current directory lookup, called under endpoint locks;
-     *                                  must not acquire request locks or use a historical snapshot
-     */
-    public void evictExpiredOrphans(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
-        endpoints(RoleType.PREFILL)
-                .forEach(
-                        (endpoint, worker) -> {
-                            PrefillEndpoint ep = (PrefillEndpoint) worker;
-                            logEndpointEviction(
-                                    RoleType.PREFILL,
-                                    endpoint,
-                                    ep.evictExpiredInflight(ttlMs, retainForSchedulerCleanup),
-                                    ttlMs);
-                        });
-        endpoints(RoleType.DECODE)
-                .forEach(
-                        (endpoint, worker) -> {
-                            DecodeEndpoint ep = (DecodeEndpoint) worker;
-                            logEndpointEviction(
-                                    RoleType.DECODE,
-                                    endpoint,
-                                    ep.evictExpiredRequests(ttlMs, retainForSchedulerCleanup),
-                                    ttlMs);
-                        });
-        endpoints(RoleType.PDFUSION)
-                .forEach(
-                        (endpoint, worker) -> {
-                            PrefillEndpoint ep = (PrefillEndpoint) worker;
-                            logEndpointEviction(
-                                    RoleType.PDFUSION,
-                                    endpoint,
-                                    ep.evictExpiredBatches(ttlMs),
-                                    ttlMs);
-                        });
-    }
-
     /**
      * Log and report one endpoint-ledger TTL eviction pass: endpoint-side
      * evictions were previously log-only, invisible to the
@@ -970,6 +900,85 @@ public class EndpointRegistry {
                     endpoint,
                     evicted,
                     ttlMs);
+        }
+    }
+
+    private enum RegistryPhase {
+        OPEN,
+        CLOSING,
+        CLOSED
+    }
+
+    /**
+     * Result of publishing a fully initialized endpoint generation.
+     */
+    public record EndpointPublication(WorkerEndpoint endpoint, Runnable statusProjection) {}
+
+    /**
+     * One non-owning Prefill generation exposed to routing.
+     *
+     * <p>The endpoint identity is advisory: a caller must capture the address
+     * and verify that the pinned endpoint is still this exact instance before
+     * transferring generation ownership to a request.</p>
+     */
+    public record PrefillRoutingEntry(String address, PrefillEndpoint endpoint) {
+        public PrefillRoutingEntry {
+            java.util.Objects.requireNonNull(address, "address");
+            java.util.Objects.requireNonNull(endpoint, "endpoint");
+        }
+    }
+
+    /**
+     * One exact endpoint generation moved out of the routing registry.
+     *
+     * <p>The capability is the sole completion token for the registry's
+     * detached-retirement barrier. It initiates and awaits endpoint cleanup
+     * outside the registry gate, then resolves that token exactly once.</p>
+     */
+    public static final class DetachedGeneration {
+        private final EndpointRegistry registry;
+        private final WorkerEndpoint endpoint;
+        private final AtomicBoolean retirementClaimed = new AtomicBoolean();
+
+        private DetachedGeneration(EndpointRegistry registry, WorkerEndpoint endpoint) {
+            this.registry = registry;
+            this.endpoint = endpoint;
+        }
+
+        /** Exact identity check without exposing the owned endpoint resource. */
+        public boolean ownsEndpoint(WorkerEndpoint exactEndpoint) {
+            return endpoint == exactEndpoint;
+        }
+
+        /** Drain this exact generation and resolve its registry barrier token. */
+        public void retireAndAwait() {
+            if (!retirementClaimed.compareAndSet(false, true)) {
+                throw new IllegalStateException(
+                        "Detached endpoint retirement was already claimed: "
+                                + endpoint.getStatus().getIpPort()
+                                + "#"
+                                + endpoint.getStatus().getGenerationId());
+            }
+            Throwable failure = null;
+            try {
+                try {
+                    endpoint.close();
+                } catch (Throwable closeFailure) {
+                    failure = closeFailure;
+                }
+                try {
+                    endpoint.awaitRetirement();
+                } catch (Throwable awaitFailure) {
+                    failure = appendFailure(failure, awaitFailure);
+                }
+            } finally {
+                try {
+                    registry.resolveDetachedGeneration(this);
+                } catch (Throwable resolutionFailure) {
+                    failure = appendFailure(failure, resolutionFailure);
+                }
+            }
+            rethrowDetachedRetirementFailure(failure);
         }
     }
 }

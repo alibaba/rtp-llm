@@ -8,6 +8,9 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Objects;
 
+/**
+ * Attaches or detaches the configured console appender without recreating the logging backend.
+ */
 final class LogbackStdoutController {
 
     private static final String CONSOLE_APPENDER = "CONSOLE-async";

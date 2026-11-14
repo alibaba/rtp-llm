@@ -21,8 +21,10 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks live endpoint captures by role and group and exact release of filtered pins.
+ */
 class WorkerDirectoryTest {
-
     private WorkerDirectory workerDirectory;
     private EndpointRegistry registry;
 
@@ -192,31 +194,6 @@ class WorkerDirectoryTest {
                         .toList());
     }
 
-    private void assertRoleEndpoint(RoleType role, int port) {
-        WorkerStatus status = status(role, null, port);
-        WorkerEndpoint registered =
-                RunnerTestSupport.publishEndpoint(
-                        registry, role, status.getLogicalIpPort(), status);
-
-        List<WorkerEndpoint.GenerationPin> selected = workerDirectory.captureEndpoints(role, null);
-        try {
-            assertEquals(1, selected.size());
-            assertSame(registered, selected.getFirst().endpoint());
-        } finally {
-            closePins(selected);
-        }
-    }
-
-    private static WorkerStatus status(RoleType role, String group, int port) {
-        return RunnerTestSupport.discovered(role, group, "127.0.0.1", port, port + 1, "test-site");
-    }
-
-    private static void closePins(List<WorkerEndpoint.GenerationPin> pins) {
-        for (WorkerEndpoint.GenerationPin pin : pins) {
-            pin.close();
-        }
-    }
-
     @Test
     void role_status_maps_are_independent_and_counted_once() {
         WorkerStatus prefill = status(RoleType.PREFILL, "group1", 8201);
@@ -261,6 +238,31 @@ class WorkerDirectoryTest {
         assertEquals(List.of(matching), provider.getWorkerStatuses(RoleType.PREFILL, "group1"));
         assertEquals(2, provider.getWorkerStatuses(RoleType.PREFILL, null).size());
         assertTrue(provider.getWorkerStatuses(null, "group1").isEmpty());
+    }
+
+    private void assertRoleEndpoint(RoleType role, int port) {
+        WorkerStatus status = status(role, null, port);
+        WorkerEndpoint registered =
+                RunnerTestSupport.publishEndpoint(
+                        registry, role, status.getLogicalIpPort(), status);
+
+        List<WorkerEndpoint.GenerationPin> selected = workerDirectory.captureEndpoints(role, null);
+        try {
+            assertEquals(1, selected.size());
+            assertSame(registered, selected.getFirst().endpoint());
+        } finally {
+            closePins(selected);
+        }
+    }
+
+    private static WorkerStatus status(RoleType role, String group, int port) {
+        return RunnerTestSupport.discovered(role, group, "127.0.0.1", port, port + 1, "test-site");
+    }
+
+    private static void closePins(List<WorkerEndpoint.GenerationPin> pins) {
+        for (WorkerEndpoint.GenerationPin pin : pins) {
+            pin.close();
+        }
     }
 
     private void discover(WorkerStatus status) {

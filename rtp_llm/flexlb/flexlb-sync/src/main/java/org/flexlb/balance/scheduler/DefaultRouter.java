@@ -30,15 +30,20 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+/**
+ * <p>Validates requested roles, selects their exact worker generations, then prepares a route
+ * admission. Selection failure closes the remaining pins; committing or delivering the prepared
+ * route belongs to the caller.
+ */
 @Component
 public class DefaultRouter {
-
     private final CostBasedPrefillStrategy prefillSelector;
     private final DecodeSelector decodeSelector;
     private final RandomStrategy vitSelector;
     private final EncoderStrategy encoderSelector;
     private final ConfigService configService;
     private final Set<RoleType> requiredRoles;
+
     @Autowired private VitCacheSelector vitCacheSelector;
 
     @Autowired
@@ -59,31 +64,6 @@ public class DefaultRouter {
                         new LinkedHashSet<>(
                                 Objects.requireNonNull(modelMetaConfig, "modelMetaConfig")
                                         .requiredRoles()));
-    }
-
-    boolean isEncoderOnly(BalanceContext context) {
-        return requestedRoles(context).equals(Set.of(RoleType.ENCODER));
-    }
-
-    boolean hasEncoderRole() {
-        return requiredRoles.contains(RoleType.ENCODER);
-    }
-
-    PlacementResult<SelectedRole, PlacementKey> selectEncoder(BalanceContext context) {
-        Response failure = validateRequest(context);
-        if (failure != null) {
-            return PlacementResult.rejected(failure);
-        }
-        if (!isEncoderOnly(context)) {
-            return PlacementResult.rejected(Response.error(StrategyErrorType.INVALID_REQUEST));
-        }
-        String policyGroup = resolvePolicyGroup(context);
-        SelectedRole selected = encoderSelector.select(context, policyGroup);
-        return selected == null
-                ? PlacementResult.blocked(
-                        new PlacementKey(RoleType.ENCODER, policyGroup),
-                        Response.error(StrategyErrorType.NO_ENCODER_WORKER))
-                : PlacementResult.success(selected);
     }
 
     public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context) {
@@ -141,6 +121,48 @@ public class DefaultRouter {
         return vitCacheSelector != null
                 && requiredRoles.contains(RoleType.VIT)
                 && vitCacheSelector.validate(context, resolvePolicyGroup(context)).isSuccess();
+    }
+
+    boolean hasEncoderRole() {
+        return requiredRoles.contains(RoleType.ENCODER);
+    }
+
+    PlacementResult<SelectedRole, PlacementKey> selectEncoder(BalanceContext context) {
+        Response failure = validateRequest(context);
+        if (failure != null) {
+            return PlacementResult.rejected(failure);
+        }
+        if (!isEncoderOnly(context)) {
+            return PlacementResult.rejected(Response.error(StrategyErrorType.INVALID_REQUEST));
+        }
+        String policyGroup = resolvePolicyGroup(context);
+        SelectedRole selected = encoderSelector.select(context, policyGroup);
+        return selected == null
+                ? PlacementResult.blocked(
+                        new PlacementKey(RoleType.ENCODER, policyGroup),
+                        Response.error(StrategyErrorType.NO_ENCODER_WORKER))
+                : PlacementResult.success(selected);
+    }
+
+    boolean isEncoderOnly(BalanceContext context) {
+        return requestedRoles(context).equals(Set.of(RoleType.ENCODER));
+    }
+
+    String resolvePolicyGroup(BalanceContext context) {
+        if (context == null || context.getRequest() == null) {
+            return null;
+        }
+        FlexlbConfig config =
+                context.getConfig() != null
+                        ? context.getConfig()
+                        : configService.loadBalanceConfig();
+        if (config == null || config.getRouter().getGroupSelector() == null) {
+            return null;
+        }
+        return config.getRouter()
+                .getGroupSelector()
+                .resolveTargetGroup(context.getRequest())
+                .orElse(null);
     }
 
     private Response validateRequest(BalanceContext context) {
@@ -242,23 +264,6 @@ public class DefaultRouter {
         }
     }
 
-    String resolvePolicyGroup(BalanceContext context) {
-        if (context == null || context.getRequest() == null) {
-            return null;
-        }
-        FlexlbConfig config =
-                context.getConfig() != null
-                        ? context.getConfig()
-                        : configService.loadBalanceConfig();
-        if (config == null || config.getRouter().getGroupSelector() == null) {
-            return null;
-        }
-        return config.getRouter()
-                .getGroupSelector()
-                .resolveTargetGroup(context.getRequest())
-                .orElse(null);
-    }
-
     private PlacementResult<SelectedRole, RoleType> selectRole(
             BalanceContext context, RoleType role, String group, DecodeBinding decodeAdmission) {
         return switch (role) {
@@ -277,12 +282,13 @@ public class DefaultRouter {
         return selected == null ? PlacementResult.blocked(role) : PlacementResult.success(selected);
     }
 
-    private static List<ServerStatus> serverStatuses(List<SelectedRole> selections) {
-        List<ServerStatus> statuses = new ArrayList<>(selections.size());
-        for (SelectedRole selection : selections) {
-            statuses.add(selection.serverStatus());
+    private static Throwable closeSelection(SelectedRole selection, Throwable primaryFailure) {
+        try {
+            selection.close();
+        } catch (Throwable closeFailure) {
+            return RequestTerminalCleanup.appendFailure(primaryFailure, closeFailure);
         }
-        return statuses;
+        return primaryFailure;
     }
 
     private static Throwable closeSelections(
@@ -294,13 +300,12 @@ public class DefaultRouter {
         return failure;
     }
 
-    private static Throwable closeSelection(SelectedRole selection, Throwable primaryFailure) {
-        try {
-            selection.close();
-        } catch (Throwable closeFailure) {
-            return RequestTerminalCleanup.appendFailure(primaryFailure, closeFailure);
+    private static List<ServerStatus> serverStatuses(List<SelectedRole> selections) {
+        List<ServerStatus> statuses = new ArrayList<>(selections.size());
+        for (SelectedRole selection : selections) {
+            statuses.add(selection.serverStatus());
         }
-        return primaryFailure;
+        return statuses;
     }
 
     private static RuntimeException propagate(Throwable failure) {
@@ -320,23 +325,26 @@ public class DefaultRouter {
         return response;
     }
 
+    /**
+     * Retains selected generation pins until they are transferred to a route or closed after
+     * selection failure.
+     */
     private record PinnedRouting(
             List<SelectedRole> selections,
             PlacementKey blocker,
             Response failure,
             Map<String, Object> diagnostics)
             implements AutoCloseable {
-
-        private List<ServerStatus> serverStatuses() {
-            return DefaultRouter.serverStatuses(selections);
-        }
-
         @Override
         public void close() {
             Throwable failure = closeSelections(selections, null);
             if (failure != null) {
                 throw propagate(failure);
             }
+        }
+
+        private List<ServerStatus> serverStatuses() {
+            return DefaultRouter.serverStatuses(selections);
         }
     }
 }

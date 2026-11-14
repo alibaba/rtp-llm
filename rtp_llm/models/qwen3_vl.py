@@ -23,6 +23,9 @@ if not hasattr(tl, "wrap_triton"):
 
 
 class QWen3_VL(QwenV3):
+    def support_pp(self) -> bool:
+        return False
+
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.qwen3vl import Qwen3VLModel
 

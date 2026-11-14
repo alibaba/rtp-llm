@@ -24,6 +24,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks cache-aware selection inputs and results across configured cache sources.
+ */
 class CacheAwareServiceTest {
 
     private final CacheMetricsReporter metricsReporter = mock(CacheMetricsReporter.class);

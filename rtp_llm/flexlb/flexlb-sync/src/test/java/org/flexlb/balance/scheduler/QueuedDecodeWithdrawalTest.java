@@ -43,11 +43,16 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks queued Decode withdrawal and replacement without losing the original request or releasing
+ * prepared work.
+ */
 class QueuedDecodeWithdrawalTest {
     private FlexlbConfig config;
     private RequestRegistry registry;
     private GlobalQueueCoordinator queue;
     private DecodeEndpoint decode;
+
     private final DecodeEndpoint.AdmissionCapacity capacity =
             new DecodeEndpoint.AdmissionCapacity(1, 95);
 
@@ -80,37 +85,6 @@ class QueuedDecodeWithdrawalTest {
         registry.closePublisher();
     }
 
-    private ScheduledRequest queued(long id) {
-        var context = RequestLifecycleTestSupport.context(config, id);
-        context.setSchedulingMetadata(
-                SchedulingMetadata.explicit(30, System.currentTimeMillis() + 60_000L));
-        var future = registry.register(context);
-        context.setFuture(future);
-        DecodeEndpoint.ReservationHandle reservation;
-        try (var pin = decode.tryPinGeneration()) {
-            reservation = decode.reserve(pin, Long.toString(id), 16, 16, 30, capacity);
-        }
-        assertNotNull(reservation);
-        var prefill = mock(PrefillEndpoint.class);
-        when(prefill.removeQueued(any(), anyString())).thenReturn(true);
-        var item =
-                new ScheduledRequest(
-                        context,
-                        future,
-                        new Response(),
-                        new ServerStatus(),
-                        new ServerStatus(),
-                        prefill,
-                        decode,
-                        reservation,
-                        System.currentTimeMillis());
-        try (var admission = registry.claimAdmissionHandle(Long.toString(id), future)) {
-            assertNotNull(admission);
-            assertTrue(registry.commitItemForPublication(item, () -> true));
-        }
-        return item;
-    }
-
     @Test
     void lateDecodeFinishedAfterEmptyWorkerReportDrainsAcknowledgedRequest() {
         decode.close();
@@ -141,36 +115,6 @@ class QueuedDecodeWithdrawalTest {
         applyStatus(Map.of(), Map.of("42", task));
         assertTrue(registry.snapshotActiveRequests().isEmpty());
         decode.close();
-    }
-
-    private void applyStatus(Map<String, TaskInfo> running, Map<String, TaskInfo> finished) {
-        WorkerStatus status = decode.getStatus();
-        WorkerStatusResponse response = new WorkerStatusResponse();
-        response.setRole(RoleType.DECODE);
-        response.setAlive(true);
-        response.setTotalKvCacheTokens(10_000L);
-        response.setAvailableKvCacheTokens(10_000L);
-        response.setRunningTaskInfo(running);
-        response.setFinishedTaskInfo(finished);
-        response.setStatusVersion(Math.max(1, status.appliedStatusCursor().statusVersion() + 1));
-        response.setLatestFinishedVersion(
-                Math.max(0, status.appliedStatusCursor().latestFinishedTaskVersion())
-                        + finished.size());
-        Runnable projection;
-        status.lock.lock();
-        try {
-            projection =
-                    decode.applyPreparedStatus(
-                            status, status.prepareNewStatus(status.freezeStatusResponse(response)));
-        } finally {
-            status.lock.unlock();
-        }
-        projection.run();
-    }
-
-    private boolean replace(ScheduledRequest item) {
-        return registry.replaceQueuedDecodeReservations(
-                decode, List.of(item.decodeReservation()), "100", 16, 16, 80, capacity);
     }
 
     @Test
@@ -367,5 +311,66 @@ class QueuedDecodeWithdrawalTest {
         verify(queue, never()).requeue(item);
         assertNull(decode.reservationHandle("9"));
         assertNotNull(decode.reservationHandle("100"));
+    }
+
+    private ScheduledRequest queued(long id) {
+        var context = RequestLifecycleTestSupport.context(config, id);
+        context.setSchedulingMetadata(
+                SchedulingMetadata.explicit(30, System.currentTimeMillis() + 60_000L));
+        var future = registry.register(context);
+        context.setFuture(future);
+        DecodeEndpoint.ReservationHandle reservation;
+        try (var pin = decode.tryPinGeneration()) {
+            reservation = decode.reserve(pin, Long.toString(id), 16, 16, 30, capacity);
+        }
+        assertNotNull(reservation);
+        var prefill = mock(PrefillEndpoint.class);
+        when(prefill.removeQueued(any(), anyString())).thenReturn(true);
+        var item =
+                new ScheduledRequest(
+                        context,
+                        future,
+                        new Response(),
+                        new ServerStatus(),
+                        new ServerStatus(),
+                        prefill,
+                        decode,
+                        reservation,
+                        System.currentTimeMillis());
+        try (var admission = registry.claimAdmissionHandle(Long.toString(id), future)) {
+            assertNotNull(admission);
+            assertTrue(registry.commitItemForPublication(item, () -> true));
+        }
+        return item;
+    }
+
+    private void applyStatus(Map<String, TaskInfo> running, Map<String, TaskInfo> finished) {
+        WorkerStatus status = decode.getStatus();
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRole(RoleType.DECODE);
+        response.setAlive(true);
+        response.setTotalKvCacheTokens(10_000L);
+        response.setAvailableKvCacheTokens(10_000L);
+        response.setRunningTaskInfo(running);
+        response.setFinishedTaskInfo(finished);
+        response.setStatusVersion(Math.max(1, status.appliedStatusCursor().statusVersion() + 1));
+        response.setLatestFinishedVersion(
+                Math.max(0, status.appliedStatusCursor().latestFinishedTaskVersion())
+                        + finished.size());
+        Runnable projection;
+        status.lock.lock();
+        try {
+            projection =
+                    decode.applyPreparedStatus(
+                            status, status.prepareNewStatus(status.freezeStatusResponse(response)));
+        } finally {
+            status.lock.unlock();
+        }
+        projection.run();
+    }
+
+    private boolean replace(ScheduledRequest item) {
+        return registry.replaceQueuedDecodeReservations(
+                decode, List.of(item.decodeReservation()), "100", 16, 16, 80, capacity);
     }
 }

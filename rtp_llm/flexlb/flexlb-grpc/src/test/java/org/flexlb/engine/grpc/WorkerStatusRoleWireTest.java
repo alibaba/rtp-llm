@@ -9,6 +9,9 @@ import java.util.HexFormat;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+/**
+ * Checks worker role values encoded in status messages.
+ */
 class WorkerStatusRoleWireTest {
 
     // 使用 DashLLM model_rpc_service_pb2.WorkerStatusPB.SerializeToString() 生成，

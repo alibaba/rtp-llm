@@ -57,6 +57,7 @@ class BackendManager(object):
                 nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
                 nccl_init_port=self._distributed_server.get_nccl_init_port(),
                 backend="nccl",
+                collective_config=engine_config.collective_config,
                 timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
             )
         world_info = get_world_info(
@@ -87,6 +88,9 @@ class BackendManager(object):
         ModelFactory.update_engine_config_from_model_config(
             engine_config=engine_config,
             model_config=model_config,
+        )
+        self._distributed_server.validate_pp_partition_consistency(
+            engine_config.parallelism_config
         )
         # Generation-prefill is a secondary runner owned only by the normalized
         # PDFUSION language-model process. Validate its cross-option capacity

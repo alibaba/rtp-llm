@@ -31,10 +31,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Selection and authoritative admission must interpret the same ownership scope. */
+/**
+ * Selection and authoritative admission must interpret the same ownership scope.
+ */
 class DecodeSelectionAdmissionContractTest {
     private static final String QUEUED_IP = "127.0.0.1";
     private static final String FREE_IP = "127.0.0.2";
+
     private static final long PROMPT_TOKENS = 100L;
     private static final long EXPECTED_TOKENS = 300L;
 
@@ -127,17 +130,17 @@ class DecodeSelectionAdmissionContractTest {
                                         .map(dimension -> Arguments.of(policy, dimension)));
     }
 
-    private enum CapacityDimension {
-        EXPECTED_KV,
-        REQUESTS
-    }
-
     private static Stream<Arguments> preemptionCases() {
         return Stream.of(Policy.PRIORITY_DEFAULT, Policy.PREEMPTIVE)
                 .flatMap(
                         policy ->
                                 Stream.of(CapacityDimension.values())
                                         .map(dimension -> Arguments.of(policy, dimension)));
+    }
+
+    private enum CapacityDimension {
+        EXPECTED_KV,
+        REQUESTS
     }
 
     private enum Policy {
@@ -148,6 +151,9 @@ class DecodeSelectionAdmissionContractTest {
         PREEMPTIVE
     }
 
+    /**
+     * Builds Decode selection scenarios and checks that selection itself creates no reservation.
+     */
     private static final class Fixture implements AutoCloseable {
         private final FlexlbConfig config = StrategyTestSupport.config();
         private final EndpointRegistry endpoints;
@@ -190,6 +196,11 @@ class DecodeSelectionAdmissionContractTest {
                 assertNotNull(queued.reserve(pin, "1", 0L, kvBudget, 50));
                 assertNotNull(queued.reserve(pin, "2", 0L, kvBudget, 50));
             }
+        }
+
+        @Override
+        public void close() {
+            endpoints.close();
         }
 
         private DecodeEndpoint publish(String ip) {
@@ -248,11 +259,6 @@ class DecodeSelectionAdmissionContractTest {
             assertEquals(freeUsage, free.routingView().placementUsage());
             assertFalse(queued.resourceSnapshot().isQueued(Long.toString(requestId)));
             assertFalse(free.resourceSnapshot().isQueued(Long.toString(requestId)));
-        }
-
-        @Override
-        public void close() {
-            endpoints.close();
         }
     }
 }

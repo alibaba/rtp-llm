@@ -1,4 +1,5 @@
 import importlib.metadata
+import importlib.util
 import logging
 import os
 import platform
@@ -187,6 +188,13 @@ def resolve_scope(
             ):
                 # Old PPU snapshots contain metadata without the required .hgbin.
                 parts += ("ppu-hgbin-v1",)
+            if item.name == "flashinfer":
+                # Bundled headers enter generated ninja files by absolute path.
+                # Fork snapshots when staging moves them out of Bazel runfiles;
+                # old rules must not survive under the new stable package path.
+                spec = importlib.util.find_spec("flashinfer_cubin")
+                origin = spec.origin if spec is not None else "online-cubins"
+                parts += (sha256(str(origin).encode()).hexdigest()[:16],)
             if item.name == "deep_gemm":
                 try:
                     identity = deep_gemm_build_scope(torch_scope)
@@ -356,13 +364,11 @@ class JitCacheManager(FileSystemEventHandler):
 
     def _start_watch(self) -> bool:
         try:
-            # RTP_JIT_WATCHDOG_DEBUG=1 keeps the raw inotify event DEBUG
-            # stream available for incident diagnosis (event loss /
-            # IN_Q_OVERFLOW blind spots); every enabled component's rules
-            # would still gate the handler, only the log volume returns.
-            if os.environ.get("RTP_JIT_WATCHDOG_DEBUG", "0") != "1":
-                for name in NOISY_WATCHDOG_LOGGERS:
-                    logging.getLogger(name).setLevel(logging.WARNING)
+            # The inotify_buffer DEBUG stream is pure per-event noise in
+            # production; silence it unconditionally (re-enable temporarily on
+            # a debug branch when diagnosing event loss / IN_Q_OVERFLOW).
+            for name in NOISY_WATCHDOG_LOGGERS:
+                logging.getLogger(name).setLevel(logging.WARNING)
             self._observer = Observer()
             for item in self.scope.components:
                 item.local_dir.mkdir(parents=True, exist_ok=True)

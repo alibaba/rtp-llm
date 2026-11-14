@@ -42,6 +42,9 @@ import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks request deadlines, delivery timing and handoff detection across late completion.
+ */
 class RequestLifetimeTest {
     @Test
     void deadlineUsesTheActualDeliveryClockAndPreservesZeroAndSaturation() {
@@ -709,10 +712,6 @@ class RequestLifetimeTest {
         assertNotNull(slot.commitTerminalRecord(terminal).terminal());
     }
 
-    private static WorkSnapshot emptyWork(long capturedAtMs) {
-        return new WorkSnapshot(capturedAtMs, List.of(), List.of(), 0L);
-    }
-
     private static WorkSnapshot unknownWork(long capturedAtMs) {
         return new WorkSnapshot(capturedAtMs, List.of(), List.of(), 1L);
     }
@@ -730,22 +729,6 @@ class RequestLifetimeTest {
                     deliveredAtMs);
             return fixture.slot.decisionDeadlineAtMs();
         }
-    }
-
-    private static void observePrefillAt(Fixture fixture, boolean completed, long nowMs) {
-        org.springframework.test.util.ReflectionTestUtils
-                .<RequestSlot.EngineObservation>invokeMethod(
-                        fixture.slot,
-                        "applyPrefillStatusLocked",
-                        fixture.item.prefillEp(),
-                        RoleType.PREFILL,
-                        completed
-                                ? PrefillState.WorkerStatusFact.terminal(
-                                        fixture.item,
-                                        PrefillState.WorkerStatusFact.Kind.COMPLETED,
-                                        0L)
-                                : PrefillState.WorkerStatusFact.active(fixture.item),
-                        nowMs);
     }
 
     private static Fixture fixture(boolean separateDecode) {
@@ -793,6 +776,30 @@ class RequestLifetimeTest {
         return new Fixture(config, slot, item);
     }
 
+    private static ServerStatus prefillServer() {
+        ServerStatus server = new ServerStatus();
+        server.setRole(RoleType.PREFILL);
+        server.setServerIp("127.0.0.1");
+        server.setGrpcPort(8081);
+        return server;
+    }
+
+    private static void observePrefillAt(Fixture fixture, boolean completed, long nowMs) {
+        org.springframework.test.util.ReflectionTestUtils
+                .<RequestSlot.EngineObservation>invokeMethod(
+                        fixture.slot,
+                        "applyPrefillStatusLocked",
+                        fixture.item.prefillEp(),
+                        RoleType.PREFILL,
+                        completed
+                                ? PrefillState.WorkerStatusFact.terminal(
+                                        fixture.item,
+                                        PrefillState.WorkerStatusFact.Kind.COMPLETED,
+                                        0L)
+                                : PrefillState.WorkerStatusFact.active(fixture.item),
+                        nowMs);
+    }
+
     private static RequestSlot.EngineObservation observePrefill(
             RequestSlot slot, ScheduledRequest item, boolean completed) {
         return org.springframework.test.util.ReflectionTestUtils
@@ -808,15 +815,6 @@ class RequestLifetimeTest {
                         System.currentTimeMillis());
     }
 
-    private static void startPrediction(RequestSlot slot) {
-        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                slot,
-                "updateDeliveryPredictionLocked",
-                emptyWork(System.currentTimeMillis()),
-                100L,
-                System.currentTimeMillis());
-    }
-
     private static RequestSlot.DecisionExpiry expireDecision(Fixture fixture) {
         RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);
         startPrediction(fixture.slot);
@@ -826,12 +824,17 @@ class RequestLifetimeTest {
         return fixture.slot.onDecisionVisibilityDeadline(deadline);
     }
 
-    private static ServerStatus prefillServer() {
-        ServerStatus server = new ServerStatus();
-        server.setRole(RoleType.PREFILL);
-        server.setServerIp("127.0.0.1");
-        server.setGrpcPort(8081);
-        return server;
+    private static void startPrediction(RequestSlot slot) {
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                slot,
+                "updateDeliveryPredictionLocked",
+                emptyWork(System.currentTimeMillis()),
+                100L,
+                System.currentTimeMillis());
+    }
+
+    private static WorkSnapshot emptyWork(long capturedAtMs) {
+        return new WorkSnapshot(capturedAtMs, List.of(), List.of(), 0L);
     }
 
     private record Fixture(FlexlbConfig config, RequestSlot slot, ScheduledRequest item) {}

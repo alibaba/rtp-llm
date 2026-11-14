@@ -16,7 +16,6 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.grammar_constraint import parse_json_grammar_value

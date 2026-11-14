@@ -20,6 +20,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
+/**
+ * Checks logging configuration during application startup.
+ */
 class FlexlbLoggingStartupTest {
 
     @Test
@@ -53,6 +56,9 @@ class FlexlbLoggingStartupTest {
         }
     }
 
+    /**
+     * Supplies logging components for the isolated startup test context.
+     */
     @Configuration(proxyBeanMethods = false)
     @Import(FlexlbLogManager.class)
     static class LoggingConfiguration {

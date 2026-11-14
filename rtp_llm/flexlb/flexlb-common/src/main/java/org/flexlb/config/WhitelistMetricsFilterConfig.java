@@ -21,47 +21,14 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.stream.Collectors;
 
 /**
- * Metric whitelist — the single configurable {@code flexlb.} exposure
- * filter: only {@code flexlb.} prefixed metrics matching the comma-separated
- * {@code flexlb.monitor.metric-whitelist} command-line property are
- * registered/reported, so deployments (e.g. the online_eval harness) can
- * trim the exposition surface down to exactly the series their collector
- * consumes.
- *
- * <p>The property defaults to {@link #DEFAULT_METRIC_WHITELIST} — the six
- * core link latency metrics, kept as a preset so the default exposition
- * stays minimal. Set the whitelist to the bare {@code flexlb_} prefix to
- * expose every {@code flexlb_*} series.
- *
- * <p>Matching semantics — entries are <b>prometheus-form prefixes or full
- * names</b> (dots as underscores, leading {@code flexlb_} kept), so the list
- * can be copied verbatim from the collector-side whitelist
- * ({@code MASTER_PROMETHEUS_PREFIXES} in {@code eval_collectors.py}). A meter
- * name matches an entry when its prometheus form starts with the entry; the
- * counter exposition form (micrometer appends {@code _total} on the
- * prometheus endpoint) is also tried, so a {@code ..._total} entry matches
- * the counter's micrometer name (which does not carry the suffix).
- *
- * <p>This config filters at two layers:
- * <ol>
- *   <li><b>Early-return allowlist</b> — via {@link MicrometerFlexMonitor#setAllowedMetrics(Set)}
- *       with a prefix-aware {@link Set} view, non-matching metrics are skipped
- *       at register()/report() time before any Micrometer interaction.</li>
- *   <li><b>MeterFilter</b> — a defensive {@code MeterRegistry} filter denying
- *       any non-matching {@code flexlb.} meter (e.g. one registered before the
- *       allowlist took effect).</li>
- * </ol>
- *
- * <p>Fail-safe: an explicitly empty/blank whitelist <b>denies every
- * {@code flexlb.} metric</b> (with a WARN log) rather than exposing
- * everything — a misconfigured whitelist should fail closed. Non-
- * {@code flexlb.} metrics (jvm.*, process.*, ...) are always allowed.
+ * Filters {@code flexlb.} metrics using configured Prometheus-name prefixes at registration and
+ * reporting. Counter names also match their {@code _total} exposition form; a blank whitelist denies
+ * FlexLB metrics while unrelated JVM and process metrics remain allowed.
  */
 @Slf4j
 @Configuration
 @ConditionalOnClass(name = "io.micrometer.core.instrument.MeterRegistry")
 public class WhitelistMetricsFilterConfig {
-
     private static final String METRIC_PREFIX = "flexlb.";
     private static final String PROM_PREFIX = "flexlb_";
     private static final String COUNTER_SUFFIX = "_total";
@@ -104,37 +71,6 @@ public class WhitelistMetricsFilterConfig {
     }
 
     /**
-     * Splits the comma-separated property into trimmed non-empty entries.
-     */
-    static List<String> parseWhitelist(String property) {
-        if (property == null) {
-            return List.of();
-        }
-        return Arrays.stream(property.split(","))
-                .map(String::trim)
-                .filter(entry -> !entry.isEmpty())
-                .collect(Collectors.toUnmodifiableList());
-    }
-
-    /**
-     * Prefix-or-full-name match on the prometheus form of an <b>unprefixed</b>
-     * micrometer meter name (e.g. {@code app.cache.hit.ratio} →
-     * {@code flexlb_app_cache_hit_ratio}). The counter exposition form
-     * ({@code ..._total}) is tried as well so whitelist entries written for
-     * the prometheus endpoint match the underlying counter meter.
-     */
-    static boolean matches(List<String> whitelist, String unprefixedMeterName) {
-        String promName = PROM_PREFIX + unprefixedMeterName.replace('.', '_');
-        String counterName = promName + COUNTER_SUFFIX;
-        for (String entry : whitelist) {
-            if (promName.startsWith(entry) || counterName.startsWith(entry)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
      * Defensive MeterRegistry filter: allows all non-flexlb metrics, and only
      * allows flexlb metrics whose prometheus-form name matches the whitelist.
      */
@@ -166,6 +102,37 @@ public class WhitelistMetricsFilterConfig {
     }
 
     /**
+     * Splits the comma-separated property into trimmed non-empty entries.
+     */
+    static List<String> parseWhitelist(String property) {
+        if (property == null) {
+            return List.of();
+        }
+        return Arrays.stream(property.split(","))
+                .map(String::trim)
+                .filter(entry -> !entry.isEmpty())
+                .collect(Collectors.toUnmodifiableList());
+    }
+
+    /**
+     * Prefix-or-full-name match on the prometheus form of an <b>unprefixed</b>
+     * micrometer meter name (e.g. {@code app.cache.hit.ratio} →
+     * {@code flexlb_app_cache_hit_ratio}). The counter exposition form
+     * ({@code ..._total}) is tried as well so whitelist entries written for
+     * the prometheus endpoint match the underlying counter meter.
+     */
+    static boolean matches(List<String> whitelist, String unprefixedMeterName) {
+        String promName = PROM_PREFIX + unprefixedMeterName.replace('.', '_');
+        String counterName = promName + COUNTER_SUFFIX;
+        for (String entry : whitelist) {
+            if (promName.startsWith(entry) || counterName.startsWith(entry)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * {@link Set} view over the whitelist entries whose {@code contains} is
      * the prefix-or-full-name match on the (unprefixed) micrometer name —
      * {@code MicrometerFlexMonitor}'s exact-match allowlist check becomes
@@ -174,7 +141,6 @@ public class WhitelistMetricsFilterConfig {
      * cached by metric name for the lifetime of this immutable whitelist.
      */
     static final class PrefixAllowSet extends AbstractSet<String> {
-
         private final List<String> entries;
         private final ConcurrentMap<String, Boolean> matchesByName = new ConcurrentHashMap<>();
 
@@ -191,10 +157,6 @@ public class WhitelistMetricsFilterConfig {
             return cached != null ? cached : matchesByName.computeIfAbsent(name, this::matchesName);
         }
 
-        private boolean matchesName(String name) {
-            return matches(entries, name);
-        }
-
         @Override
         public Iterator<String> iterator() {
             return entries.iterator();
@@ -203,6 +165,10 @@ public class WhitelistMetricsFilterConfig {
         @Override
         public int size() {
             return entries.size();
+        }
+
+        private boolean matchesName(String name) {
+            return matches(entries, name);
         }
     }
 }

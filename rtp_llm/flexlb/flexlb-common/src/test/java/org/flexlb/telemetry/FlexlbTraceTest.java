@@ -37,6 +37,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks trace-context extraction, propagation and span recording.
+ */
 class FlexlbTraceTest {
 
     private RecordingExporter exporter;
@@ -287,6 +290,9 @@ class FlexlbTraceTest {
         }
     }
 
+    /**
+     * Reads trace propagation values from a string map.
+     */
     private static final class MapGetter implements TextMapGetter<Map<String, String>> {
         @Override
         public Iterable<String> keys(Map<String, String> carrier) {
@@ -299,6 +305,9 @@ class FlexlbTraceTest {
         }
     }
 
+    /**
+     * Captures exported spans for trace assertions.
+     */
     private static final class RecordingExporter implements SpanExporter {
         private final List<SpanData> spans = new ArrayList<>();
 

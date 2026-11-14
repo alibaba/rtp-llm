@@ -56,6 +56,16 @@ py_library(
 )
 
 py_library(
+    name = "gated_residual",
+    srcs = glob(["gated_residual/*.py"]),
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm/models_py:kernels",
+    ] + triton_deps(["triton"]),
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "common",
     srcs = glob(["common/*.py"]),
     visibility = ["//visibility:public"]
@@ -88,7 +98,15 @@ py_library(
         ":causal_conv1d",
         ":moe",
         ":common",
+        ":gated_residual",
         ":sparse_mla",
     ] + triton_deps(["triton"]),
     visibility = ["//visibility:public"]
+)
+
+py_library(
+    name = "peer_all_reduce",
+    srcs = ["peer_all_reduce.py"],
+    deps = ["//rtp_llm:torch"],
+    visibility = ["//visibility:public"],
 )

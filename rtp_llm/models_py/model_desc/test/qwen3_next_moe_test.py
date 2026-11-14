@@ -1,7 +1,7 @@
 """Decoder construction and forwarding into the real generic routed-only layer."""
 
 from types import SimpleNamespace
-from unittest import TestCase, main
+from unittest import TestCase, main, skipUnless
 from unittest.mock import patch
 
 import torch
@@ -111,6 +111,231 @@ class Qwen3NextRoutedOnlyTest(TestCase):
                     self.assertEqual(backend.calls, 1)
                     torch.testing.assert_close(output, hidden + 1)
                     self.assertIs(result_residual, residual)
+
+
+class Qwen3NextFullAttentionMetadataTest(TestCase):
+    def test_full_attention_preserves_flags_without_linear_metadata(self):
+        # Device-only eager draft inputs have no CPU query partition. Neither
+        # ordinary nor CP full-attention models need a convolution partition.
+        for cp in (False, True):
+            for graph in (False, True):
+                for verify in (False, True):
+                    with self.subTest(cp=cp, graph=graph, verify=verify):
+                        attention = qwen3_next.PyAttentionInputs()
+                        attention.is_prefill = True
+                        attention.is_target_verify = verify
+                        attention.prefix_lengths = torch.zeros(1, dtype=torch.int32)
+                        model = SimpleNamespace(
+                            kv_cache=None,
+                            layers=[
+                                SimpleNamespace(layer_type=HybridAttentionType.NONE)
+                            ],
+                            parallelism_config=SimpleNamespace(
+                                prefill_cp_config=SimpleNamespace(is_enabled=lambda: cp)
+                            ),
+                        )
+                        with (
+                            patch.object(
+                                qwen3_next,
+                                "prepare_causal_conv1d_metadata",
+                                side_effect=AssertionError(
+                                    "full attention has no convolution consumer"
+                                ),
+                            ),
+                            patch.object(
+                                qwen3_next,
+                                "_is_aiter_flydsl_gdn_prefill_enabled",
+                                return_value=False,
+                            ),
+                        ):
+                            metadata = qwen3_next.Qwen3NextModel._build_attn_meta(
+                                model,
+                                SimpleNamespace(attention_inputs=attention),
+                                torch.device("cpu"),
+                                is_cuda_graph=graph,
+                            )
+                        self.assertEqual(metadata.is_cuda_graph, graph)
+                        self.assertEqual(metadata.is_target_verify, verify)
+                        self.assertIsNone(metadata.prefill_conv1d_meta)
+                        self.assertIsNone(metadata.full_prefill_conv1d_meta)
+                        self.assertIsNone(metadata.cp_restore_indices)
+
+    def test_mixed_cp_keeps_linear_partition_and_restore_metadata(self):
+        mha = SimpleNamespace(is_prefill=True, is_target_verify=False)
+        gdn = SimpleNamespace(is_prefill=True, is_target_verify=False)
+        artifacts = tuple(object() for _ in range(5))
+        seen = []
+
+        def cp_metadata(attention, device):
+            seen.append((attention, device))
+            return artifacts
+
+        cache = SimpleNamespace(
+            get_layer_cache_groups=lambda index: [
+                SimpleNamespace(tag="mha" if index == 0 else "gdn")
+            ]
+        )
+        model = SimpleNamespace(
+            kv_cache=cache,
+            layers=[
+                SimpleNamespace(layer_type=HybridAttentionType.NONE),
+                SimpleNamespace(layer_type=HybridAttentionType.LINEAR),
+            ],
+            parallelism_config=SimpleNamespace(
+                prefill_cp_config=SimpleNamespace(is_enabled=lambda: True)
+            ),
+            _build_cp_linear_attn_metadata=cp_metadata,
+        )
+        metadata = qwen3_next.Qwen3NextModel._build_attn_meta(
+            model,
+            SimpleNamespace(attention_inputs={"mha": mha, "gdn": gdn}),
+            torch.device("cpu"),
+        )
+        self.assertEqual(seen, [(gdn, torch.device("cpu"))])
+        self.assertIs(metadata.full_prefill_conv1d_meta, artifacts[0])
+        self.assertIs(metadata.full_prefill_cu_seqlens, artifacts[1])
+        self.assertIs(metadata.cp_restore_indices, artifacts[2])
+        self.assertIs(metadata.cp_local_extract_indices, artifacts[3])
+        self.assertIs(metadata.cp_local_valid_mask, artifacts[4])
+
+
+@skipUnless(torch.cuda.is_available(), "CUDA metadata consumer required")
+class Qwen3NextHostConvMetadataTest(TestCase):
+    def inputs(self, lengths):
+        from rtp_llm.ops.compute_ops import PyAttentionInputs
+
+        attention = PyAttentionInputs()
+        attention.is_prefill = True
+        attention.is_target_verify = False
+        attention.is_cuda_graph = False
+        host = torch.zeros(len(lengths) + 1, dtype=torch.int32, device="cpu")
+        host[1:] = torch.tensor(lengths, dtype=torch.int32, device="cpu").cumsum(0)
+        attention.input_lengths = torch.tensor(lengths, dtype=torch.int32, device="cpu")
+        attention.cu_seqlens = host
+        attention.cu_seqlens_device = host.to("cuda")
+        attention.prefix_lengths = torch.zeros(
+            len(lengths), dtype=torch.int32, device="cpu"
+        )
+        return attention
+
+    def model(self, cache=None):
+        return SimpleNamespace(
+            kv_cache=cache,
+            layers=[SimpleNamespace(layer_type=HybridAttentionType.LINEAR)],
+            parallelism_config=SimpleNamespace(
+                prefill_cp_config=SimpleNamespace(is_enabled=lambda: False)
+            ),
+        )
+
+    def build(self, attention, graph=False, cache=None):
+        return qwen3_next.Qwen3NextModel._build_attn_meta(
+            self.model(cache),
+            SimpleNamespace(attention_inputs=attention),
+            torch.device("cuda"),
+            is_cuda_graph=graph,
+        ).prefill_conv1d_meta
+
+    def test_host_metadata_full_conv_consumer_on_nondefault_stream(self):
+        from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_fn
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream), torch.device("cuda"):
+            for lengths in ([7, 17], [31, 65], [0, 17], [127, 131]):
+                attention = self.inputs(lengths)
+                with patch.object(
+                    qwen3_next,
+                    "prepare_causal_conv1d_metadata",
+                    wraps=qwen3_next.prepare_causal_conv1d_metadata,
+                ) as prepare:
+                    metadata = self.build(attention)
+                self.assertIs(
+                    prepare.call_args.kwargs["query_start_loc"], attention.cu_seqlens
+                )
+                prefixes = [0, 16]
+                blocks = [
+                    (prefix + length + 15) // 16
+                    for prefix, length in zip(prefixes, lengths)
+                ]
+                table = torch.full(
+                    (2, max(blocks)), -1, device="cuda", dtype=torch.int32
+                )
+                offset = 0
+                for row, count in enumerate(blocks):
+                    table[row, :count] = torch.arange(
+                        offset, offset + count, device="cuda", dtype=torch.int32
+                    )
+                    offset += count
+                initial = torch.randn(
+                    offset, 3, 256, device="cuda", dtype=torch.float32
+                )
+                x = torch.randn(sum(lengths), 256, device="cuda", dtype=torch.bfloat16)
+                weight = torch.randn(256, 4, device="cuda", dtype=torch.float32)
+                prefix = torch.tensor(prefixes, device="cuda", dtype=torch.int32)
+                results = []
+                for meta in (None, metadata):
+                    states = initial.clone()
+                    output = causal_conv1d_fn(
+                        x.clone().T,
+                        weight,
+                        None,
+                        states.transpose(1, 2),
+                        attention.cu_seqlens_device,
+                        table,
+                        prefix,
+                        16,
+                        metadata=meta,
+                    )
+                    results.append((output, states))
+                torch.testing.assert_close(results[0][0], results[1][0], rtol=0, atol=0)
+                torch.testing.assert_close(results[0][1], results[1][1], rtol=0, atol=0)
+        stream.synchronize()
+
+    def test_empty_mirror_shape_mismatch_and_graph_use_live_device_metadata(self):
+        for mode in ("empty", "shape", "device_lengths", "graph_arg", "graph_field"):
+            attention = self.inputs([7, 17])
+            if mode == "empty":
+                attention.cu_seqlens = torch.empty(0, dtype=torch.int32, device="cpu")
+            elif mode == "shape":
+                attention.cu_seqlens = torch.tensor(
+                    [0, 24], dtype=torch.int32, device="cpu"
+                )
+            elif mode == "device_lengths":
+                attention.input_lengths = attention.input_lengths.cuda()
+                attention.cu_seqlens = torch.tensor(
+                    [0, 1, 24], dtype=torch.int32, device="cpu"
+                )
+            else:
+                attention.cu_seqlens = torch.tensor(
+                    [0, 1, 24], dtype=torch.int32, device="cpu"
+                )
+                attention.is_cuda_graph = mode == "graph_field"
+            with patch.object(
+                qwen3_next,
+                "prepare_causal_conv1d_metadata",
+                wraps=qwen3_next.prepare_causal_conv1d_metadata,
+            ) as prepare:
+                metadata = self.build(attention, graph=mode == "graph_arg")
+            self.assertIs(
+                prepare.call_args.kwargs["query_start_loc"], attention.cu_seqlens_device
+            )
+            self.assertEqual(metadata.batch_ptr.tolist(), [0, 1, 1, 1, -1])
+            self.assertEqual(metadata.token_chunk_offset_ptr.tolist(), [0, 0, 1, 2, -1])
+
+    def test_tagged_linear_group_owns_the_host_partition(self):
+        mha = self.inputs([1, 23])
+        gdn = self.inputs([7, 17])
+        cache = SimpleNamespace(
+            get_layer_cache_groups=lambda _: [SimpleNamespace(tag="gdn")]
+        )
+        with patch.object(
+            qwen3_next,
+            "prepare_causal_conv1d_metadata",
+            wraps=qwen3_next.prepare_causal_conv1d_metadata,
+        ) as prepare:
+            metadata = self.build({"mha": mha, "gdn": gdn}, cache=cache)
+        self.assertIs(prepare.call_args.kwargs["query_start_loc"], gdn.cu_seqlens)
+        self.assertEqual(metadata.batch_ptr.tolist(), [0, 1, 1, 1, -1])
 
 
 if __name__ == "__main__":

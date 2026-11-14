@@ -24,33 +24,61 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.withSettings;
 
 /**
- * Locks the legacy single-target (router == null) schedule-stage fallback
- * trigger of JavaLoadClient.handleRequest: ANY schedule failure (here a gRPC
- * UNAVAILABLE from the schedule stub) with ENABLE_FALLBACK + a non-empty
- * fallback prefill list must attempt the direct-to-engine fallback
- * (route_path="fallback"), while the escape hatch stays off unless explicitly
- * opted in.
- *
- * <p>Regression lock for the code-review finding where the mode-dependent
- * trigger {@code router != null && "transport".equals(...)} silently
- * disabled the legacy fallback: in the legacy mode router is null, so the
- * trigger was constantly false and attemptFallback was unreachable — the
- * opposite of the documented "legacy ANY-failure, byte-identical" contract.
- *
- * <p>The schedule leg is a Mockito RETURNS_SELF stub injected through the
- * package field (deterministic immediate UNAVAILABLE, no network); the
- * fallback engine leg points at a loopback port with no listener, so
- * runFallbackStream also fails fast and attemptFallback stamps its
- * route_path="fallback" catch contract.
+ * Checks direct-engine fallback after a failed scheduling RPC in the legacy single-target
+ * load-client path.
  */
 class JavaLoadClientLegacyFallbackTest {
-
-    @TempDir Path tempDir;
-
     /** Loopback ports with no listener: connects fail fast (RST). */
     private static final String UNREACHABLE_MASTER = "127.0.0.1:1";
 
     private static final String UNREACHABLE_ENGINE = "127.0.0.1:2";
+
+    @TempDir Path tempDir;
+
+    @Test
+    @Timeout(30)
+    void legacyScheduleFailureTriggersFallbackWhenEnabled() throws Exception {
+        JavaLoadClient client = legacyClient(true);
+        try {
+            injectFailingScheduleStub(client);
+            client.fallbackPrefillAddrs.add(UNREACHABLE_ENGINE);
+
+            JavaLoadClient.RequestResult result = handle(client, rec(0));
+
+            // attemptFallback ran: the direct-to-engine row is stamped
+            // route_path="fallback" even when the engine leg also fails
+            // (both errors are preserved on the row).
+            assertEquals("fallback", result.routePath);
+            assertEquals("exception", result.status);
+            assertTrue(result.error.startsWith("master="), result.error);
+            assertTrue(result.error.contains("; fallback="), result.error);
+            assertEquals("transport", result.errorKind);
+        } finally {
+            closeClient(client);
+        }
+    }
+
+    @Test
+    @Timeout(30)
+    void legacyScheduleFailureStaysOnErrorRowWhenFallbackDisabled() throws Exception {
+        JavaLoadClient client = legacyClient(false);
+        try {
+            injectFailingScheduleStub(client);
+            client.fallbackPrefillAddrs.add(UNREACHABLE_ENGINE);
+
+            JavaLoadClient.RequestResult result = handle(client, rec(1));
+
+            // Opt-in semantics: without ENABLE_FALLBACK the schedule failure
+            // surfaces as a plain master-path error row — the fallback list
+            // being non-empty must not be enough to bypass the master.
+            assertEquals("master", result.routePath);
+            assertEquals("exception", result.status);
+            assertFalse(result.error.contains("fallback="), result.error);
+            assertEquals("transport", result.errorKind);
+        } finally {
+            closeClient(client);
+        }
+    }
 
     private JavaLoadClient legacyClient(boolean enableFallback) {
         JavaLoadClient.Config config =
@@ -134,50 +162,5 @@ class JavaLoadClientLegacyFallbackTest {
         }
         return new JavaLoadClient.TraceRecord(
                 idx, "rid-" + idx, "trace-" + idx, 0L, 64, 8, List.of(), tokens);
-    }
-
-    @Test
-    @Timeout(30)
-    void legacyScheduleFailureTriggersFallbackWhenEnabled() throws Exception {
-        JavaLoadClient client = legacyClient(true);
-        try {
-            injectFailingScheduleStub(client);
-            client.fallbackPrefillAddrs.add(UNREACHABLE_ENGINE);
-
-            JavaLoadClient.RequestResult result = handle(client, rec(0));
-
-            // attemptFallback ran: the direct-to-engine row is stamped
-            // route_path="fallback" even when the engine leg also fails
-            // (both errors are preserved on the row).
-            assertEquals("fallback", result.routePath);
-            assertEquals("exception", result.status);
-            assertTrue(result.error.startsWith("master="), result.error);
-            assertTrue(result.error.contains("; fallback="), result.error);
-            assertEquals("transport", result.errorKind);
-        } finally {
-            closeClient(client);
-        }
-    }
-
-    @Test
-    @Timeout(30)
-    void legacyScheduleFailureStaysOnErrorRowWhenFallbackDisabled() throws Exception {
-        JavaLoadClient client = legacyClient(false);
-        try {
-            injectFailingScheduleStub(client);
-            client.fallbackPrefillAddrs.add(UNREACHABLE_ENGINE);
-
-            JavaLoadClient.RequestResult result = handle(client, rec(1));
-
-            // Opt-in semantics: without ENABLE_FALLBACK the schedule failure
-            // surfaces as a plain master-path error row — the fallback list
-            // being non-empty must not be enough to bypass the master.
-            assertEquals("master", result.routePath);
-            assertEquals("exception", result.status);
-            assertFalse(result.error.contains("fallback="), result.error);
-            assertEquals("transport", result.errorKind);
-        } finally {
-            closeClient(client);
-        }
     }
 }

@@ -34,13 +34,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * to decode engines within the same shard via {@code RoleAddrPB} port hints.
  */
 class MultiShardRoutingTest {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
+
     private static final int BASE_PORT = 63000;
 
     @TempDir Path tempDir;
-
     private MockEngineTestCluster cluster;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
     private List<List<JavaMockEngineCluster.FastRpcService>> prefillByShard;
@@ -280,10 +279,6 @@ class MultiShardRoutingTest {
         }
     }
 
-    // ──────────── Cluster setup ────────────
-
-    private record ShardConfig(int nPrefill, int nDecode) {}
-
     /**
      * Start a multi-shard cluster. All prefill engines are created first
      * (contiguous ports), then all decode engines, so that shard prefill
@@ -338,4 +333,8 @@ class MultiShardRoutingTest {
     private MockPerformanceModel model(String formula) throws Exception {
         return MockEngineTestSupport.performanceModel(tempDir, formula);
     }
+
+    // ──────────── Cluster setup ────────────
+
+    private record ShardConfig(int nPrefill, int nDecode) {}
 }

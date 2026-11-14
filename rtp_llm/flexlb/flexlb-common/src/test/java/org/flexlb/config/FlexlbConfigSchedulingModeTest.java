@@ -8,6 +8,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks scheduling-mode configuration and compatibility of its settings.
+ */
 class FlexlbConfigSchedulingModeTest {
 
     @Test

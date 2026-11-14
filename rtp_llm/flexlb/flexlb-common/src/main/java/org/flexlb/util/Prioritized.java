@@ -1,23 +1,8 @@
 package org.flexlb.util;
 
 /**
- * Unified priority contract for all queueable items in the FlexLB routing
- * and scheduling layers.
- *
- * <p>Implemented by {@code BalanceContext} (the top-level request queue) and
- * {@code BatchItem} (the per-worker batcher queue), allowing
- * {@link PriorityOrdering#STRICT} to serve as the single ordering primitive
- * across both queue layers (PR-B of the Luoli refactor).
- *
- * <ul>
- *   <li>{@link #priority()} — normalized Auto-TPM priority (1-100, higher =
- *       more important), sourced from {@code ScheduleBudget} when Auto-TPM is
- *       active, or from {@code Request.getPriority()} on the legacy path.</li>
- *   <li>{@link #enqueueSeq()} — monotonic enqueue sequence number used as the
- *       FIFO tie-break within the same priority level (earlier = first).</li>
- * </ul>
- *
- * @see PriorityOrdering
+ * Exposes normalized request priority and enqueue sequence for shared scheduling order. Higher
+ * priorities run first; equal priorities retain FIFO order.
  */
 public interface Prioritized {
 

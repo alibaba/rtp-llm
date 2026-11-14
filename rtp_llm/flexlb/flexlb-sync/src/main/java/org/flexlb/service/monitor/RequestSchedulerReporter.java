@@ -42,7 +42,6 @@ import static org.flexlb.constant.MetricConstant.REQUEST_LIFECYCLE_FAILURES_TOTA
 @Slf4j
 @Component
 public class RequestSchedulerReporter {
-
     /**
      * Priority is a normalized level, so its single-tag set is shared per
      * level instead of being rebuilt on every report.
@@ -54,20 +53,6 @@ public class RequestSchedulerReporter {
     @Autowired
     public RequestSchedulerReporter(FlexMonitor monitor) {
         this.monitor = monitor;
-    }
-
-    private static FlexMetricTags[] buildPriorityTags() {
-        FlexMetricTags[] tags = new FlexMetricTags[PriorityNormalizer.MAX_PRIORITY + 1];
-        for (int priority = 0; priority < tags.length; priority++) {
-            tags[priority] = FlexMetricTags.of("priority", String.valueOf(priority));
-        }
-        return tags;
-    }
-
-    private static FlexMetricTags priorityTags(int priority) {
-        return priority >= 0 && priority <= PriorityNormalizer.MAX_PRIORITY
-                ? PRIORITY_TAGS[priority]
-                : FlexMetricTags.of("priority", String.valueOf(priority));
     }
 
     @PostConstruct
@@ -152,21 +137,6 @@ public class RequestSchedulerReporter {
      */
     public void reportLifecycleFailure(String stage) {
         reportLifecycleFailureCount(stage, 1.0);
-    }
-
-    @Scheduled(fixedRate = 2000)
-    private void reportLifecycleFailureCounts() {
-        reportLifecycleFailureCount("registration", 0.0);
-        reportLifecycleFailureCount("terminal_cleanup", 0.0);
-    }
-
-    private void reportLifecycleFailureCount(String stage, double count) {
-        try {
-            monitor.report(
-                    REQUEST_LIFECYCLE_FAILURES_TOTAL, FlexMetricTags.of("stage", stage), count);
-        } catch (Throwable failure) {
-            log.warn("Failed to report request lifecycle failure, stage={}", stage, failure);
-        }
     }
 
     /**
@@ -379,5 +349,34 @@ public class RequestSchedulerReporter {
      */
     public void reportDecodeEngineLoad(String endpoint, int load) {
         monitor.report(AUTO_TPM_DECODE_ENGINE_LOAD, FlexMetricTags.of("endpoint", endpoint), load);
+    }
+
+    private static FlexMetricTags[] buildPriorityTags() {
+        FlexMetricTags[] tags = new FlexMetricTags[PriorityNormalizer.MAX_PRIORITY + 1];
+        for (int priority = 0; priority < tags.length; priority++) {
+            tags[priority] = FlexMetricTags.of("priority", String.valueOf(priority));
+        }
+        return tags;
+    }
+
+    private static FlexMetricTags priorityTags(int priority) {
+        return priority >= 0 && priority <= PriorityNormalizer.MAX_PRIORITY
+                ? PRIORITY_TAGS[priority]
+                : FlexMetricTags.of("priority", String.valueOf(priority));
+    }
+
+    @Scheduled(fixedRate = 2000)
+    private void reportLifecycleFailureCounts() {
+        reportLifecycleFailureCount("registration", 0.0);
+        reportLifecycleFailureCount("terminal_cleanup", 0.0);
+    }
+
+    private void reportLifecycleFailureCount(String stage, double count) {
+        try {
+            monitor.report(
+                    REQUEST_LIFECYCLE_FAILURES_TOTAL, FlexMetricTags.of("stage", stage), count);
+        } catch (Throwable failure) {
+            log.warn("Failed to report request lifecycle failure, stage={}", stage, failure);
+        }
     }
 }

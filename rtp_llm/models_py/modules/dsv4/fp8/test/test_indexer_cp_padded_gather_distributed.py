@@ -123,10 +123,11 @@ def _rank_cache_payload(
 
 def _install_world_as_tp_group() -> None:
     collective_torch._group_map.clear()
-    collective_torch._group_map[Group.DP_AND_TP] = dist.group.WORLD
+    collective_torch._group_map[Group.WORLD] = dist.group.WORLD
     collective_torch._parallelism_config = SimpleNamespace(
         tp_size=_WORLD_SIZE,
         dp_size=1,
+        pp_size=1,
         world_size=_WORLD_SIZE,
     )
     collective_torch._initialized = True
@@ -146,8 +147,9 @@ def _fused_gather_allgather_restore_worker(
 
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
-    os.environ["DSV4_TRAP_INVALID_KV_ACCESS"] = "0"
-
+    # The hand-rolled block tables only ever point at physical blocks >= 1 and
+    # padding tokens never reach the gather guard, so the always-on
+    # invalid-KV-access trap stays silent here.
     try:
         dist.init_process_group(
             backend="nccl",

@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from multiprocessing import Process
+from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -159,6 +160,52 @@ class TestGetWorldInfo(TestCase):
         self.assertEqual(len(world_info.members), 2)
         self.assertEqual(world_info.members[0].server_port, 20000)
         self.assertEqual(world_info.members[1].server_port, 20008)
+
+
+class PPPartitionConsistencyTest(unittest.TestCase):
+    @staticmethod
+    def _config(world_rank=0, world_size=4, pp_size=2):
+        return SimpleNamespace(
+            pp_size=pp_size,
+            world_rank=world_rank,
+            world_size=world_size,
+            pp_stage_layer_counts=[2, 3] if pp_size > 1 else [],
+        )
+
+    @staticmethod
+    def _server():
+        server = ds.DistributedServer.__new__(ds.DistributedServer)
+        server.store = FakeStore()
+        return server
+
+    def test_rank_publishes_and_validates_all_snapshots(self):
+        server = self._server()
+        for rank in (0, 1, 3):
+            server.store.set(
+                server.PP_PARTITION_SNAPSHOT_KEY + str(rank),
+                json.dumps([2, 3]),
+            )
+
+        server.validate_pp_partition_consistency(self._config(world_rank=2))
+
+        snapshot = json.loads(
+            server.store.get(server.PP_PARTITION_SNAPSHOT_KEY + "2").decode("utf-8")
+        )
+        self.assertEqual(snapshot, [2, 3])
+
+    def test_missing_rank_snapshot_becomes_bounded_store_failure(self):
+        server = self._server()
+        with self.assertRaisesRegex(RuntimeError, "world_rank=1"):
+            server.validate_pp_partition_consistency(
+                self._config(world_size=2)
+            )
+
+    def test_single_stage_does_not_touch_store(self):
+        server = self._server()
+        server.validate_pp_partition_consistency(
+            self._config(world_size=1, pp_size=1)
+        )
+        self.assertEqual(server.store._data, {})
 
 
 class DistributedServerTest(unittest.TestCase):

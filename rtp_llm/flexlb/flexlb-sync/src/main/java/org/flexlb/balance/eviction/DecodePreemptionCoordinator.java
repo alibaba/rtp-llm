@@ -33,62 +33,6 @@ import java.util.function.BooleanSupplier;
  */
 @Component
 public final class DecodePreemptionCoordinator {
-
-    record PreemptionResult(boolean committed, boolean controlFailure, String detail) {
-        public PreemptionResult {
-            if (committed && controlFailure) {
-                throw new IllegalArgumentException(
-                        "committed preemption cannot be a control failure");
-            }
-            Objects.requireNonNull(detail, "detail");
-        }
-    }
-
-    record PreemptionCommand(
-            DecodeEndpoint endpoint,
-            String incomingRequestId,
-            long incomingKvTokens,
-            long incomingKvBudgetTokens,
-            int incomingPriority,
-            DecodeEndpoint.AdmissionCapacity capacity,
-            List<DecodeRequestView> victims,
-            long cancelAckTimeoutMs,
-            long preemptionTimeoutMs,
-            BooleanSupplier admissionOpen,
-            String detail) {
-        public PreemptionCommand {
-            if (endpoint == null || victims == null || victims.isEmpty()) {
-                throw new IllegalArgumentException("endpoint and victims are required");
-            }
-            victims = List.copyOf(victims);
-            if (incomingRequestId == null || incomingRequestId.isBlank()) {
-                throw new IllegalArgumentException("incoming request id must not be blank");
-            }
-            if (capacity == null) {
-                throw new IllegalArgumentException("capacity policy is required");
-            }
-            Set<String> victimIds = new LinkedHashSet<>();
-            for (DecodeRequestView victim : victims) {
-                if (victim.requestId() == null
-                        || victim.requestId().isBlank()
-                        || victim.reservationToken() <= 0L) {
-                    throw new IllegalArgumentException(
-                            "victim requestId must not be blank and reservation token must be positive");
-                }
-                if (victim.phase() == null || !victim.phase().requiresEngineCancel()) {
-                    throw new IllegalArgumentException(
-                            "coordinator accepts only Engine-Cancel victims");
-                }
-                if (!victimIds.add(victim.requestId())) {
-                    throw new IllegalArgumentException("duplicate victim " + victim.requestId());
-                }
-            }
-            if (admissionOpen == null) {
-                throw new IllegalArgumentException("admission gate is required");
-            }
-        }
-    }
-
     private final EngineCancelChannel cancelChannel;
     private final RequestRegistry requests;
     private final RequestSchedulerReporter reporter;
@@ -460,6 +404,76 @@ public final class DecodePreemptionCoordinator {
                 + (message == null || message.isBlank() ? "" : ":" + message);
     }
 
+    private long nextToken() {
+        long token = tokenSequence.getAndIncrement();
+        if (token <= 0) {
+            throw new IllegalStateException("preemption attempt token exhausted");
+        }
+        return token;
+    }
+
+    /**
+     * Reports whether an exact victim set yielded capacity and the reason an attempt stopped.
+     */
+    record PreemptionResult(boolean committed, boolean controlFailure, String detail) {
+        public PreemptionResult {
+            if (committed && controlFailure) {
+                throw new IllegalArgumentException(
+                        "committed preemption cannot be a control failure");
+            }
+            Objects.requireNonNull(detail, "detail");
+        }
+    }
+
+    /**
+     * Captures the incoming request and exact victim-generation capabilities for one preemption
+     * attempt.
+     */
+    record PreemptionCommand(
+            DecodeEndpoint endpoint,
+            String incomingRequestId,
+            long incomingKvTokens,
+            long incomingKvBudgetTokens,
+            int incomingPriority,
+            DecodeEndpoint.AdmissionCapacity capacity,
+            List<DecodeRequestView> victims,
+            long cancelAckTimeoutMs,
+            long preemptionTimeoutMs,
+            BooleanSupplier admissionOpen,
+            String detail) {
+        public PreemptionCommand {
+            if (endpoint == null || victims == null || victims.isEmpty()) {
+                throw new IllegalArgumentException("endpoint and victims are required");
+            }
+            victims = List.copyOf(victims);
+            if (incomingRequestId == null || incomingRequestId.isBlank()) {
+                throw new IllegalArgumentException("incoming request id must not be blank");
+            }
+            if (capacity == null) {
+                throw new IllegalArgumentException("capacity policy is required");
+            }
+            Set<String> victimIds = new LinkedHashSet<>();
+            for (DecodeRequestView victim : victims) {
+                if (victim.requestId() == null
+                        || victim.requestId().isBlank()
+                        || victim.reservationToken() <= 0L) {
+                    throw new IllegalArgumentException(
+                            "victim requestId must not be blank and reservation token must be positive");
+                }
+                if (victim.phase() == null || !victim.phase().requiresEngineCancel()) {
+                    throw new IllegalArgumentException(
+                            "coordinator accepts only Engine-Cancel victims");
+                }
+                if (!victimIds.add(victim.requestId())) {
+                    throw new IllegalArgumentException("duplicate victim " + victim.requestId());
+                }
+            }
+            if (admissionOpen == null) {
+                throw new IllegalArgumentException("admission gate is required");
+            }
+        }
+    }
+
     private enum ClaimDisposition {
         RELEASABLE,
         OUTBOUND,
@@ -467,7 +481,9 @@ public final class DecodePreemptionCoordinator {
         TERMINAL
     }
 
-    /** Exact opaque slot claim paired with its immutable endpoint victim. */
+    /**
+     * Exact opaque slot claim paired with its immutable endpoint victim.
+     */
     private static final class ClaimedVictim {
         private final DecodeRequestView victim;
         private final CancelTarget target;
@@ -509,7 +525,9 @@ public final class DecodePreemptionCoordinator {
     private static final class AttemptCapability implements AutoCloseable {
         private final PreemptionCommand command;
         private final RequestRegistry requests;
+
         private final long token;
+
         private final List<ClaimedVictim> claims = new ArrayList<>();
 
         /** Historical outbound boundary retained after an abort. */
@@ -518,6 +536,7 @@ public final class DecodePreemptionCoordinator {
         private boolean endpointBegun;
         private boolean committed;
         private boolean closed;
+
         private String cleanupFailure;
 
         private AttemptCapability(PreemptionCommand command, RequestRegistry requests, long token) {
@@ -527,6 +546,43 @@ public final class DecodePreemptionCoordinator {
             this.command = command;
             this.requests = requests;
             this.token = token;
+        }
+
+        @Override
+        public void close() {
+            if (!beginClose()) {
+                return;
+            }
+
+            // OUTBOUND means the call may have reached Prefill even if its
+            // Java invocation or continuation failed. Transfer before endpoint
+            // abort so neither owner can be mistaken for locally releasable.
+            for (ClaimedVictim owned : claims) {
+                if (owned.disposition == ClaimDisposition.OUTBOUND) {
+                    try {
+                        transferUnknown(owned);
+                    } catch (RuntimeException | Error failure) {
+                        recordCleanupFailure("transfer_unknown:" + owned.requestId(), failure);
+                    }
+                }
+            }
+            if (endpointBegun) {
+                try {
+                    command.endpoint()
+                            .finishPreemption(token, DecodeEndpoint.PreemptionDecision.ABORT);
+                } catch (RuntimeException | Error failure) {
+                    recordCleanupFailure("endpoint_abort", failure);
+                }
+            }
+            for (ClaimedVictim owned : claims) {
+                if (owned.disposition == ClaimDisposition.RELEASABLE) {
+                    try {
+                        owned.claim().release();
+                    } catch (RuntimeException | Error failure) {
+                        recordCleanupFailure("release_claim:" + owned.requestId(), failure);
+                    }
+                }
+            }
         }
 
         private ClaimedVictim add(
@@ -580,26 +636,6 @@ public final class DecodePreemptionCoordinator {
             return true;
         }
 
-        private synchronized boolean isTerminal(ClaimedVictim owned) {
-            return owned.disposition == ClaimDisposition.TERMINAL;
-        }
-
-        private synchronized boolean allVictimsTerminal() {
-            if (claims.isEmpty()) {
-                return false;
-            }
-            return claims.stream()
-                    .allMatch(owned -> owned.disposition == ClaimDisposition.TERMINAL);
-        }
-
-        private synchronized void transferred(ClaimedVictim owned) {
-            if (isTerminal(owned)) {
-                owned.disposition = ClaimDisposition.TERMINAL;
-            } else {
-                owned.disposition = ClaimDisposition.TRANSFERRED;
-            }
-        }
-
         private void transferUnknown(ClaimedVictim owned) {
             if (!shouldTransferUnknown(owned)) {
                 return;
@@ -617,6 +653,18 @@ public final class DecodePreemptionCoordinator {
             return owned.disposition == ClaimDisposition.OUTBOUND;
         }
 
+        private synchronized void transferred(ClaimedVictim owned) {
+            if (isTerminal(owned)) {
+                owned.disposition = ClaimDisposition.TERMINAL;
+            } else {
+                owned.disposition = ClaimDisposition.TRANSFERRED;
+            }
+        }
+
+        private synchronized boolean isTerminal(ClaimedVictim owned) {
+            return owned.disposition == ClaimDisposition.TERMINAL;
+        }
+
         private PreemptionResult finish(boolean hasNotFound) {
             if (allVictimsTerminal()
                     && command.admissionOpen().getAsBoolean()
@@ -632,53 +680,24 @@ public final class DecodePreemptionCoordinator {
                     cleanSingleNotFound ? "cancel_not_found" : "cancel_terminal_unknown");
         }
 
-        private PreemptionResult abort(boolean controlFailure, String detail) {
-            close();
-            String resultDetail =
-                    cleanupFailure == null ? detail : detail + ";cleanup_failed=" + cleanupFailure;
-            return new PreemptionResult(false, controlFailure, resultDetail);
-        }
-
-        @Override
-        public void close() {
-            if (!beginClose()) {
-                return;
+        private synchronized boolean allVictimsTerminal() {
+            if (claims.isEmpty()) {
+                return false;
             }
-
-            // OUTBOUND means the call may have reached Prefill even if its
-            // Java invocation or continuation failed. Transfer before endpoint
-            // abort so neither owner can be mistaken for locally releasable.
-            for (ClaimedVictim owned : claims) {
-                if (owned.disposition == ClaimDisposition.OUTBOUND) {
-                    try {
-                        transferUnknown(owned);
-                    } catch (RuntimeException | Error failure) {
-                        recordCleanupFailure("transfer_unknown:" + owned.requestId(), failure);
-                    }
-                }
-            }
-            if (endpointBegun) {
-                try {
-                    command.endpoint()
-                            .finishPreemption(token, DecodeEndpoint.PreemptionDecision.ABORT);
-                } catch (RuntimeException | Error failure) {
-                    recordCleanupFailure("endpoint_abort", failure);
-                }
-            }
-            for (ClaimedVictim owned : claims) {
-                if (owned.disposition == ClaimDisposition.RELEASABLE) {
-                    try {
-                        owned.claim().release();
-                    } catch (RuntimeException | Error failure) {
-                        recordCleanupFailure("release_claim:" + owned.requestId(), failure);
-                    }
-                }
-            }
+            return claims.stream()
+                    .allMatch(owned -> owned.disposition == ClaimDisposition.TERMINAL);
         }
 
         private synchronized void markCommitted() {
             committed = true;
             closed = true;
+        }
+
+        private PreemptionResult abort(boolean controlFailure, String detail) {
+            close();
+            String resultDetail =
+                    cleanupFailure == null ? detail : detail + ";cleanup_failed=" + cleanupFailure;
+            return new PreemptionResult(false, controlFailure, resultDetail);
         }
 
         private synchronized boolean beginClose() {
@@ -694,13 +713,5 @@ public final class DecodePreemptionCoordinator {
                 cleanupFailure = operation + ":" + failureDetail(failure);
             }
         }
-    }
-
-    private long nextToken() {
-        long token = tokenSequence.getAndIncrement();
-        if (token <= 0) {
-            throw new IllegalStateException("preemption attempt token exhausted");
-        }
-        return token;
     }
 }

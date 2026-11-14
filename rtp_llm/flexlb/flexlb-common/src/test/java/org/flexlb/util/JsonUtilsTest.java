@@ -14,6 +14,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks JSON conversion and handling of mapping failures.
+ */
 class JsonUtilsTest {
 
     @Test
@@ -54,6 +57,9 @@ class JsonUtilsTest {
     @JsonDeserialize(using = FatalErrorDeserializer.class)
     private static class ErrorPayload {}
 
+    /**
+     * Throws a fatal error during deserialization to test error propagation.
+     */
     public static class FatalErrorDeserializer extends JsonDeserializer<ErrorPayload> {
         @Override
         public ErrorPayload deserialize(JsonParser parser, DeserializationContext context)

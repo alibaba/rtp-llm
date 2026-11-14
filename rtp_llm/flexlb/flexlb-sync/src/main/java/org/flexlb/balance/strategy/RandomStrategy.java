@@ -14,7 +14,9 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
-/** Random selection for the stateless VIT role. */
+/**
+ * Random selection for the stateless VIT role.
+ */
 @Component
 public final class RandomStrategy {
     private static final Logger LOGGER = LoggerFactory.getLogger(RandomStrategy.class);

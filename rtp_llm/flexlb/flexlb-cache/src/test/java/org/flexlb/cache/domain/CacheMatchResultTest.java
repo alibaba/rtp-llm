@@ -11,6 +11,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
+/**
+ * Checks cache-match result aggregation and boundary values.
+ */
 class CacheMatchResultTest {
 
     @Test

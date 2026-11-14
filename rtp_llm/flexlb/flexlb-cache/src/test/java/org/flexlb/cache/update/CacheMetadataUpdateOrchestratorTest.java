@@ -22,6 +22,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks cache metadata update routing and failure handling.
+ */
 class CacheMetadataUpdateOrchestratorTest {
 
     private final CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);

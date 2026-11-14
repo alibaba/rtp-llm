@@ -32,22 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * Targeted regression tests for CodeReview fixes in the Java mock engine.
- *
- * <p>Each test directly covers one of the issues identified during code review,
- * ensuring the fixes are not regressed:
- *
- * <ol>
- *   <li>{@link #cancelOnDecodeEngineDecrementsAllCounters} — cancel() on a decode
- *       engine must decrement activeDecodeRequests and activeKvTokens in addition
- *       to pendingRequests.</li>
- *   <li>{@link #cancelledRequestNotForwardedToDecode} — a request cancelled on the
- *       prefill engine before prefill completes must not be forwarded to the decode
- *       engine (prefill completion callback checks cancelledRequests).</li>
- *   <li>{@link #putIfAbsentAtomicUnderConcurrency} — scheduleDecodeCompletion uses
- *       putIfAbsent so that concurrent calls for the same requestId do not
- *       double-count any counter.</li>
- * </ol>
+ * Checks mock-engine edge cases for resource release, request completion and fault handling.
  */
 class CodeReviewFixTest {
 

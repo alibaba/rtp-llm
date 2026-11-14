@@ -9,9 +9,6 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
-    trap_invalid_kv_access_enabled,
-)
 from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_triton import (
     is_supported as swa_is_supported,
 )
@@ -24,10 +21,11 @@ class FusedQKVRopeCache(NamedTuple):
 
 
 @triton.jit
-def _trap():
-    tl.inline_asm_elementwise(
-        "trap; // dummy $0", "=r", [], dtype=tl.int32, is_pure=False, pack=1
-    )
+def _trap(TRAP_INVALID_KV_ACCESS: tl.constexpr):
+    if TRAP_INVALID_KV_ACCESS:
+        tl.inline_asm_elementwise(
+            "trap; // dummy $0", "=r", [], dtype=tl.int32, is_pure=False, pack=1
+        )
 
 
 @triton.jit(do_not_specialize=["kv_stride", "block_stride", "num_pages", "num_freqs"])
@@ -59,7 +57,7 @@ def _fused_qkv_rope_cache_kernel(
     else:
         frequency_row = tl.load(positions + row).to(tl.int64)
         if (frequency_row < 0) | (frequency_row >= num_freqs):
-            _trap()
+            _trap(TRAP_INVALID_KV_ACCESS)
             return
     cos = tl.load(freqs + frequency_row * 64 + 2 * pair)
     sin = tl.load(freqs + frequency_row * 64 + 2 * pair + 1)
@@ -109,8 +107,7 @@ def _fused_qkv_rope_cache_kernel(
             return
         page = slot // ENTRIES
         if page >= num_pages:
-            if TRAP_INVALID_KV_ACCESS:
-                _trap()
+            _trap(TRAP_INVALID_KV_ACCESS)
             return
         position = slot % ENTRIES
         page_base = pool + page * block_stride.to(tl.int64)
@@ -227,7 +224,7 @@ def try_fused_qkv_rope_cache(
             ENTRIES=pool_3d.shape[1],
             EPS=eps,
             GATHERED_FREQS=gathered_freqs,
-            TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+            TRAP_INVALID_KV_ACCESS=True,
             num_warps=4,
         )
     return FusedQKVRopeCache(q, kv_out, freqs_cis)

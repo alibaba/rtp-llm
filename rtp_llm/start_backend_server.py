@@ -19,10 +19,12 @@ from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
     configure_kv_cache_event_host_ip_port,
+    finalize_rank_local_deepep_internode,
     load_gpu_nic_affinity,
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
 )
+from rtp_llm.models_py.distributed.rank_layout import RankLayout
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
@@ -35,12 +37,21 @@ from rtp_llm.utils.util import copy_gemm_config
 setup_logging()
 
 
-def _install_hot_hook_runtime(role: str) -> None:
-    try:
-        from rtp_llm.utils.hot_hook_runtime import install_if_enabled
+def _install_hot_hook_runtime(role: str, py_env_configs) -> None:
+    """Install the hot hook runtime from the parsed config.
 
-        if install_if_enabled():
-            logging.info("RTP hot hook runtime installed for %s", role)
+    The single switch is the hot-hook config path (--hot_hook_config /
+    RTP_HOT_HOOK_CONFIG): a non-empty path pointing at a loadable JSON enables
+    the runtime; no path means no install.
+    """
+    try:
+        from rtp_llm.utils.hot_hook_runtime import install_from_config
+
+        config_path = py_env_configs.hot_hook_config.config_path
+        if config_path and install_from_config(config_path):
+            logging.info(
+                "RTP hot hook runtime installed for %s (config=%s)", role, config_path
+            )
     except Exception as e:
         logging.error("failed to install RTP hot hook runtime for %s: %s", role, e)
 
@@ -67,7 +78,7 @@ def local_rank_start(
     """Start local rank with proper signal handling for graceful shutdown"""
     if expected_parent_pid is not None:
         arm_parent_death_sigkill(expected_parent_pid)
-    _install_hot_hook_runtime(f"backend_rank_{world_rank}")
+    _install_hot_hook_runtime(f"backend_rank_{world_rank}", py_env_configs)
     backend_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
 
@@ -87,6 +98,11 @@ def local_rank_start(
             py_env_configs.parallelism_config,
             world_rank,
             py_env_configs.prefill_cp_config,
+        )
+        finalize_rank_local_deepep_internode(
+            py_env_configs.moe_config,
+            py_env_configs.deep_ep_config,
+            py_env_configs.parallelism_config,
         )
         local_rank = py_env_configs.parallelism_config.local_rank
         py_env_configs.server_config.set_local_rank(local_rank)
@@ -157,8 +173,14 @@ def _validate_dp_configuration(py_env_configs: PyEnvConfigs):
     """Validate data parallelism configuration"""
     pc = py_env_configs.parallelism_config
     if pc.dp_size > 1:
-        # tp must on one device when dp
-        assert pc.world_rank % pc.tp_size == 0
+        layout = RankLayout.from_parallelism_config(pc)
+        coord = layout.coord_of(pc.world_rank)
+        if coord.tp != 0:
+            raise ValueError(
+                "data-parallel launcher must start at tp_rank 0, got "
+                f"world_rank={pc.world_rank}, tp_rank={coord.tp}, "
+                f"tp_size={pc.tp_size}, dp_size={pc.dp_size}, pp_size={pc.pp_size}"
+            )
 
 
 def _create_rank_processes(

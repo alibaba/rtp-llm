@@ -30,6 +30,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks standby cache metadata storage and worker-scoped updates.
+ */
 class LocalStandbyCacheManagerTest {
 
     @Test

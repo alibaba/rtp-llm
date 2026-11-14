@@ -18,8 +18,30 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-/** Shared fixtures which exercise only the frozen endpoint-facing ports. */
+/**
+ * Shared fixtures which exercise only the frozen endpoint-facing ports.
+ */
 public final class EndpointTestSupport {
+    private static final CapacityBoundary PARKED_BOUNDARY =
+            CapacityBoundary.unavailable(
+                    new CapacityBoundary.Availability() {
+                        @Override
+                        public boolean isAvailable() {
+                            return false;
+                        }
+
+                        @Override
+                        public void addListener(Runnable listener) {}
+
+                        @Override
+                        public void removeListener(Runnable listener) {}
+                    },
+                    new RouteProjection.AdmissionBlockSemantics(
+                            "test delivery parked",
+                            RouteProjection.AfterProbeAdmission.BLOCKED,
+                            "test delivery parked",
+                            RoleType.PREFILL));
+    static final DeliveryMetrics NOOP_TELEMETRY = org.mockito.Mockito.mock(DeliveryMetrics.class);
 
     private EndpointTestSupport() {}
 
@@ -91,26 +113,6 @@ public final class EndpointTestSupport {
         }
     }
 
-    private static void prepareResponse(WorkerStatus status, WorkerStatusResponse response) {
-        // This helper models a successful status poll for an active generation.
-        // Retirement tests must exercise the explicit dead-status path instead.
-        response.setAlive(true);
-        if (response.getRole() == null) {
-            response.setRole(status.getRole());
-        }
-        long committedVersion = status.appliedStatusCursor().statusVersion();
-        Long responseVersion = response.getStatusVersion();
-        if (responseVersion == null
-                || responseVersion <= 0L
-                || responseVersion <= committedVersion) {
-            response.setStatusVersion(Math.max(1L, committedVersion + 1L));
-        }
-        if (response.getLatestFinishedVersion() == null) {
-            response.setLatestFinishedVersion(
-                    status.appliedStatusCursor().latestFinishedTaskVersion());
-        }
-    }
-
     static TestRequestRuntime requestRuntime() {
         return new TestRequestRuntime();
     }
@@ -150,42 +152,12 @@ public final class EndpointTestSupport {
         return new RouteDeliveryStrategy(runtime.requests(), NOOP_TELEMETRY);
     }
 
-    private static final CapacityBoundary PARKED_BOUNDARY =
-            CapacityBoundary.unavailable(
-                    new CapacityBoundary.Availability() {
-                        @Override
-                        public boolean isAvailable() {
-                            return false;
-                        }
-
-                        @Override
-                        public void addListener(Runnable listener) {}
-
-                        @Override
-                        public void removeListener(Runnable listener) {}
-                    },
-                    new RouteProjection.AdmissionBlockSemantics(
-                            "test delivery parked",
-                            RouteProjection.AfterProbeAdmission.BLOCKED,
-                            "test delivery parked",
-                            RoleType.PREFILL));
-
     static boolean offer(PrefillEndpoint endpoint, ScheduledRequest item) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             if (pin == null) {
                 return false;
             }
             return endpoint.offerPinned(pin, item);
-        }
-    }
-
-    static PrefillState.RouteReservation reserveUnqueued(
-            PrefillEndpoint endpoint, ScheduledRequest item, long predictedMs) {
-        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-            if (pin == null) {
-                throw new IllegalStateException("endpoint is retired");
-            }
-            return endpoint.reserveUnqueuedRoute(pin, item, predictedMs).reservation();
         }
     }
 
@@ -196,6 +168,16 @@ public final class EndpointTestSupport {
                 var commit = endpoint.tryBeginRouteCommitAdmission();
                 var handoff = commit.commit(List.of(item), List.of(reservation))) {
             // The endpoint ledger owns this request until authoritative termination.
+        }
+    }
+
+    static PrefillState.RouteReservation reserveUnqueued(
+            PrefillEndpoint endpoint, ScheduledRequest item, long predictedMs) {
+        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
+            if (pin == null) {
+                throw new IllegalStateException("endpoint is retired");
+            }
+            return endpoint.reserveUnqueuedRoute(pin, item, predictedMs).reservation();
         }
     }
 
@@ -258,8 +240,29 @@ public final class EndpointTestSupport {
         }
     }
 
-    static final DeliveryMetrics NOOP_TELEMETRY = org.mockito.Mockito.mock(DeliveryMetrics.class);
+    private static void prepareResponse(WorkerStatus status, WorkerStatusResponse response) {
+        // This helper models a successful status poll for an active generation.
+        // Retirement tests must exercise the explicit dead-status path instead.
+        response.setAlive(true);
+        if (response.getRole() == null) {
+            response.setRole(status.getRole());
+        }
+        long committedVersion = status.appliedStatusCursor().statusVersion();
+        Long responseVersion = response.getStatusVersion();
+        if (responseVersion == null
+                || responseVersion <= 0L
+                || responseVersion <= committedVersion) {
+            response.setStatusVersion(Math.max(1L, committedVersion + 1L));
+        }
+        if (response.getLatestFinishedVersion() == null) {
+            response.setLatestFinishedVersion(
+                    status.appliedStatusCursor().latestFinishedTaskVersion());
+        }
+    }
 
+    /**
+     * Supplies request registration and events for endpoint lifecycle tests.
+     */
     static class TestRequestRuntime {
         private final RequestRegistry requests = org.mockito.Mockito.mock(RequestRegistry.class);
         private final EndpointEventProjector events =
@@ -314,6 +317,9 @@ public final class EndpointTestSupport {
         }
     }
 
+    /**
+     * Describes the exact Prefill retirement observed by an endpoint test.
+     */
     record PrefillRetirement(PrefillEndpoint endpoint, List<ScheduledRequest> ownedItems) {
         PrefillRetirement {
             ownedItems = List.copyOf(ownedItems);

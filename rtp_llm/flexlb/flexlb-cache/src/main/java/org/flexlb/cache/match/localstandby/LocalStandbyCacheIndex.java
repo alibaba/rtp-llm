@@ -22,7 +22,6 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 @Slf4j
 class LocalStandbyCacheIndex {
-
     private static final long CLEANUP_CHECK_INTERVAL_MS = 10_000;
     private static final int NORMAL_CLEANUP_BATCH_DIVISOR = 10;
     private static final int PRESSURE_CLEANUP_BATCH_DIVISOR = 5;
@@ -34,6 +33,7 @@ class LocalStandbyCacheIndex {
     private final long minimumTtlNanos;
     private final double ttlReductionStartRatio;
     private final boolean automaticCleanupEnabled;
+
     private final ConcurrentHashMap<Long, ConcurrentHashMap<String, Long>> blockToEnginesMap =
             new ConcurrentHashMap<>();
     // Prevent duplicate request-triggered full scans from being queued or run concurrently.
@@ -41,9 +41,12 @@ class LocalStandbyCacheIndex {
     private final AtomicBoolean cleanupStopped = new AtomicBoolean();
     private final AtomicLong mappingCount = new AtomicLong();
     private final ScheduledExecutorService cleanupExecutor;
+
     private volatile long maximumEntries;
     private volatile long nextHighWatermarkScanTimeNanos = System.nanoTime();
+
     private Iterator<Long> cleanupIterator;
+
     private int checksSinceLastCleanup;
 
     LocalStandbyCacheIndex(
@@ -158,6 +161,25 @@ class LocalStandbyCacheIndex {
         return workers;
     }
 
+    long effectiveTtlNanos() {
+        if (maximumEntries <= 0 || mappingCount.get() <= 0) {
+            return ttlNanos;
+        }
+
+        double usageRatio = capacityUsageRatio();
+        if (usageRatio >= 1.0) {
+            return minimumTtlNanos;
+        }
+        if (usageRatio <= ttlReductionStartRatio) {
+            return ttlNanos;
+        }
+
+        double reductionProgress =
+                (usageRatio - ttlReductionStartRatio) / (1.0 - ttlReductionStartRatio);
+        long ttlRange = ttlNanos - minimumTtlNanos;
+        return ttlNanos - (long) (ttlRange * reductionProgress);
+    }
+
     void updateMaximumEntries(long newMaximumEntries) {
         maximumEntries = newMaximumEntries;
         requestHighWatermarkCleanupIfNeeded();
@@ -233,25 +255,6 @@ class LocalStandbyCacheIndex {
         return NORMAL_CHECKS_BEFORE_CLEANUP;
     }
 
-    long effectiveTtlNanos() {
-        if (maximumEntries <= 0 || mappingCount.get() <= 0) {
-            return ttlNanos;
-        }
-
-        double usageRatio = capacityUsageRatio();
-        if (usageRatio >= 1.0) {
-            return minimumTtlNanos;
-        }
-        if (usageRatio <= ttlReductionStartRatio) {
-            return ttlNanos;
-        }
-
-        double reductionProgress =
-                (usageRatio - ttlReductionStartRatio) / (1.0 - ttlReductionStartRatio);
-        long ttlRange = ttlNanos - minimumTtlNanos;
-        return ttlNanos - (long) (ttlRange * reductionProgress);
-    }
-
     void removeExpiredMappingsBatch() {
         if (cleanupShouldStop()) {
             return;
@@ -290,6 +293,21 @@ class LocalStandbyCacheIndex {
         }
     }
 
+    private void removeExpiredMappingsFullScan() {
+        long cleanupTimeNanos = System.nanoTime();
+        long effectiveTtlNanos = effectiveTtlNanos();
+        for (Long blockCacheKey : blockToEnginesMap.keySet()) {
+            if (cleanupShouldStop()) {
+                return;
+            }
+            removeExpiredWorkerMappings(blockCacheKey, cleanupTimeNanos, effectiveTtlNanos);
+        }
+    }
+
+    private boolean cleanupShouldStop() {
+        return cleanupStopped.get() || Thread.currentThread().isInterrupted();
+    }
+
     private Map<String, Long> removeExpiredWorkerMappings(
             Long blockCacheKey, long cleanupTimeNanos, long effectiveTtlNanos) {
         return blockToEnginesMap.computeIfPresent(
@@ -306,15 +324,9 @@ class LocalStandbyCacheIndex {
                 });
     }
 
-    private void removeExpiredMappingsFullScan() {
-        long cleanupTimeNanos = System.nanoTime();
-        long effectiveTtlNanos = effectiveTtlNanos();
-        for (Long blockCacheKey : blockToEnginesMap.keySet()) {
-            if (cleanupShouldStop()) {
-                return;
-            }
-            removeExpiredWorkerMappings(blockCacheKey, cleanupTimeNanos, effectiveTtlNanos);
-        }
+    private boolean isExpired(
+            long lastUpdatedNanos, long currentTimeNanos, long effectiveTtlNanos) {
+        return currentTimeNanos - lastUpdatedNanos >= effectiveTtlNanos;
     }
 
     private boolean incrementMappingCountIfBelowLimit() {
@@ -354,15 +366,6 @@ class LocalStandbyCacheIndex {
                 log.warn("Failed to schedule immediate Local Standby cache cleanup", e);
             }
         }
-    }
-
-    private boolean cleanupShouldStop() {
-        return cleanupStopped.get() || Thread.currentThread().isInterrupted();
-    }
-
-    private boolean isExpired(
-            long lastUpdatedNanos, long currentTimeNanos, long effectiveTtlNanos) {
-        return currentTimeNanos - lastUpdatedNanos >= effectiveTtlNanos;
     }
 
     private double capacityUsageRatio() {

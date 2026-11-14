@@ -29,8 +29,10 @@ class CausalAttention(nn.Module):
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
         layer_idx: int = 0,
+        linear_factory=None,
     ):
         super().__init__()
+        self.linear_factory = linear_factory or LinearFactory
         self.layer_idx = layer_idx
         self.parallelism_config = parallelism_config
         self.tp_size = parallelism_config.get_attn_tp_size()
@@ -39,7 +41,7 @@ class CausalAttention(nn.Module):
         self.head_dim = attn_config.size_per_head
         self.q_size = attn_config.head_num * self.head_dim
 
-        self.qkv_proj = LinearFactory.create_linear_from_weights(
+        self.qkv_proj = self.linear_factory.create_linear_from_weights(
             weights,
             W.attn_qkv_w,
             W.attn_qkv_s,
@@ -49,7 +51,7 @@ class CausalAttention(nn.Module):
             weight_scale_2_key=W.attn_qkv_s2,
             input_scale_key=W.attn_qkv_i_s,
         )
-        self.o_proj = LinearFactory.create_linear_from_weights(
+        self.o_proj = self.linear_factory.create_linear_from_weights(
             weights,
             W.attn_o_w,
             W.attn_o_s,

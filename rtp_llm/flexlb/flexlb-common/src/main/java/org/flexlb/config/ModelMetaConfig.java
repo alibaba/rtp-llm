@@ -16,8 +16,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Parses model service routes and exposes the required role topology and grouped endpoints.
+ */
 public class ModelMetaConfig {
-
     private static final List<RoleType> ROUTING_ORDER =
             List.of(
                     RoleType.PDFUSION,
@@ -65,35 +67,6 @@ public class ModelMetaConfig {
         return List.copyOf(modelServiceRoute.values());
     }
 
-    private void setPrimaryRoute(ServiceRoute serviceRoute) {
-        this.primaryRoute = serviceRoute;
-        this.modelName = modelNameFromServiceId(serviceRoute.getServiceId());
-        this.requiredRoles = resolveRequiredRoles(serviceRoute);
-    }
-
-    private static List<RoleType> resolveRequiredRoles(ServiceRoute serviceRoute) {
-        if (serviceRoute == null) {
-            return List.of();
-        }
-        List<RoleType> parsedRoles = serviceRoute.getAllRoleTypes();
-        Set<RoleType> configured =
-                parsedRoles.isEmpty()
-                        ? EnumSet.noneOf(RoleType.class)
-                        : EnumSet.copyOf(parsedRoles);
-        return ROUTING_ORDER.stream().filter(configured::contains).toList();
-    }
-
-    private static String modelNameFromServiceId(String serviceId) {
-        if (serviceId == null) {
-            return "";
-        }
-        String servicePrefix = CommonConstants.FUNCTION + ".";
-        if (serviceId.startsWith(servicePrefix) && serviceId.length() > servicePrefix.length()) {
-            return IdUtils.getModelNameByServiceId(serviceId);
-        }
-        return serviceId;
-    }
-
     /** Immutable request topology; live endpoint occupancy never changes it. */
     public List<RoleType> requiredRoles() {
         return requiredRoles;
@@ -124,5 +97,34 @@ public class ModelMetaConfig {
             }
         }
         return Collections.emptyList();
+    }
+
+    private void setPrimaryRoute(ServiceRoute serviceRoute) {
+        this.primaryRoute = serviceRoute;
+        this.modelName = modelNameFromServiceId(serviceRoute.getServiceId());
+        this.requiredRoles = resolveRequiredRoles(serviceRoute);
+    }
+
+    private static String modelNameFromServiceId(String serviceId) {
+        if (serviceId == null) {
+            return "";
+        }
+        String servicePrefix = CommonConstants.FUNCTION + ".";
+        if (serviceId.startsWith(servicePrefix) && serviceId.length() > servicePrefix.length()) {
+            return IdUtils.getModelNameByServiceId(serviceId);
+        }
+        return serviceId;
+    }
+
+    private static List<RoleType> resolveRequiredRoles(ServiceRoute serviceRoute) {
+        if (serviceRoute == null) {
+            return List.of();
+        }
+        List<RoleType> parsedRoles = serviceRoute.getAllRoleTypes();
+        Set<RoleType> configured =
+                parsedRoles.isEmpty()
+                        ? EnumSet.noneOf(RoleType.class)
+                        : EnumSet.copyOf(parsedRoles);
+        return ROUTING_ORDER.stream().filter(configured::contains).toList();
     }
 }

@@ -21,14 +21,17 @@ import static org.flexlb.constant.NacosConfigConstants.NACOS_GROUP;
 import static org.flexlb.constant.NacosConfigConstants.NACOS_NAMESPACE;
 import static org.flexlb.constant.NacosConfigConstants.NACOS_SERVER_ADDR;
 
+/**
+ * Loads configuration from Nacos and forwards subscribed updates to its listener.
+ */
 @Slf4j
 @Component
 final class NacosConfigSource implements ConfigSource {
-
     private static final long CONFIG_READ_TIMEOUT_MS = 3000;
     private static final int PRIORITY = 2;
 
     private final NacosConfig config;
+
     private com.alibaba.nacos.api.config.ConfigService client;
     private Listener listener;
     private volatile Consumer<String> updateListener;
@@ -58,6 +61,30 @@ final class NacosConfigSource implements ConfigSource {
     @Override
     public int priority() {
         return PRIORITY;
+    }
+
+    @Override
+    public void setUpdateListener(Consumer<String> listener) {
+        this.updateListener = listener;
+    }
+
+    @Override
+    public String load() {
+        return configContent;
+    }
+
+    @Override
+    public void close() throws Exception {
+        if (client == null) {
+            return;
+        }
+        try {
+            if (listener != null) {
+                client.removeListener(config.getDataId(), config.getGroup(), listener);
+            }
+        } finally {
+            client.shutDown();
+        }
     }
 
     @PostConstruct
@@ -91,30 +118,6 @@ final class NacosConfigSource implements ConfigSource {
                 e.addSuppressed(closeException);
             }
             throw new IllegalStateException("Failed to initialize Nacos configuration source", e);
-        }
-    }
-
-    @Override
-    public void setUpdateListener(Consumer<String> listener) {
-        this.updateListener = listener;
-    }
-
-    @Override
-    public String load() {
-        return configContent;
-    }
-
-    @Override
-    public void close() throws Exception {
-        if (client == null) {
-            return;
-        }
-        try {
-            if (listener != null) {
-                client.removeListener(config.getDataId(), config.getGroup(), listener);
-            }
-        } finally {
-            client.shutDown();
         }
     }
 

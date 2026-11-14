@@ -12,6 +12,10 @@ import static org.flexlb.constant.DeploymentIdentityConstants.WHALE_BIZ_NAME;
 import static org.flexlb.constant.DeploymentIdentityConstants.WHALE_DEPLOYMENT_NAME;
 import static org.flexlb.constant.DeploymentIdentityConstants.WHALE_ZONE_NAME;
 
+/**
+ * Resolves one stable deployment identity from the configured environment and reports missing
+ * identity inputs.
+ */
 @Getter
 @Component
 public class DeploymentIdentity {

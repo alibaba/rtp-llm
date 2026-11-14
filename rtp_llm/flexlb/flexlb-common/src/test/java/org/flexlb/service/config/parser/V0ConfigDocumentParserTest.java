@@ -16,6 +16,9 @@ import java.util.function.Consumer;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * Checks legacy configuration parsing and compatibility errors.
+ */
 class V0ConfigDocumentParserTest {
 
     @Test
@@ -156,6 +159,9 @@ class V0ConfigDocumentParserTest {
         service.close();
     }
 
+    /**
+     * Supplies legacy documents to exercise parser compatibility behavior.
+     */
     private static final class CompatibilitySource implements ConfigSource {
         private final NormalizedConfig converted;
 

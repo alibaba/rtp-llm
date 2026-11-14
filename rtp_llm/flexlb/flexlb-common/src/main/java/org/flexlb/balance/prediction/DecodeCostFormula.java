@@ -2,7 +2,9 @@ package org.flexlb.balance.prediction;
 
 import java.util.Map;
 
-/** Immutable Decode cost expression evaluated against one routing snapshot. */
+/**
+ * Immutable Decode cost expression evaluated against one routing snapshot.
+ */
 public final class DecodeCostFormula {
 
     private static final Map<String, Integer> VARIABLES =

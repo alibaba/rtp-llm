@@ -12,7 +12,13 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 
-/** Routes cache metadata updates to the source that owns the update contract. */
+/**
+ * Routes cache metadata updates to the source that owns the update contract.
+ *
+ * <p>Worker-status metadata updates and removals target Local Sync only when enabled.
+ * Routed-request updates target Local Standby when enabled. These two inputs intentionally
+ * maintain different cache views.
+ */
 @Slf4j
 @Component
 public class CacheMetadataUpdateOrchestrator {

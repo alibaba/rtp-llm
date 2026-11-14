@@ -69,13 +69,30 @@ class DeepSeekV41Model(DeepSeekV4Model):
         modules = []
         device = self.v4.embed.weight.device
         self._engram_hash_state = NgramHashState(layout, checkpoint_path, device=device)
-        for layer_id in layout.layer_ids:
-            if layer_id >= len(self.v4.layers):
-                continue
-            layer = self.v4.layers[layer_id]
-            layer.engram = Engram.from_checkpoint(
+        loadable = [
+            layer_id for layer_id in layout.layer_ids if layer_id < len(self.v4.layers)
+        ]
+        # Each table is a dedicated ~94 GiB shard fetched at per-process NAS
+        # speed (~102 MB/s measured — the cap is per process, NOT per stream:
+        # two in-process reader threads split one budget and starve). Rotate
+        # each rank's first table so the flock winners for different tables
+        # land in different ranks: the tables stage in parallel across
+        # processes (the same concurrency model the main weight load uses),
+        # keeping the cold start inside the CI watchdog budget.
+        rotation = 0
+        if len(loadable) > 1:
+            import torch.distributed as dist
+
+            if dist.is_available() and dist.is_initialized():
+                rotation = dist.get_rank() % len(loadable)
+        ordered = loadable[rotation:] + loadable[:rotation]
+        results = {}
+        for layer_id in ordered:
+            results[layer_id] = Engram.from_checkpoint(
                 config, layer_id, checkpoint_path, device
             )
+        for layer_id in loadable:
+            self.v4.layers[layer_id].engram = results[layer_id]
             modules.append((layer_id, layout.layer_ids.index(layer_id)))
         self._engram_layers = tuple(modules)
         logging.info(

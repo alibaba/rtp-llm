@@ -9,25 +9,8 @@ import java.io.IOException;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Abstract base class managing a mock gRPC worker server lifecycle.
- *
- * <p>Starts a real Netty gRPC server ({@link NettyServerBuilder}) on a configurable
- * port.  The server hosts a {@link MockRpcService} that records all incoming
- * RPC calls for later assertion.
- *
- * <p>Usage:
- * <pre>{@code
- * MockPrefillWorker worker = new MockPrefillWorker(behavior);
- * worker.start(0);             // auto-assign port
- * int grpcPort = worker.getPort();
- * int httpPort = grpcPort - 1; // CommonConstants.GRPC_PORT_OFFSET = 1
- * // ... run test ...
- * worker.stop();
- * }</pre>
- *
- * <p>Port convention: gRPC port = HTTP port + 1 (see
- * {@code CommonConstants.GRPC_PORT_OFFSET}).  Mock workers always serve gRPC
- * on the requested port; the FlexLB scheduler derives the HTTP port internally.
+ * Owns a Netty gRPC mock-worker server and its recorded RPCs. Start binds the configured port; close
+ * releases the server resources.
  */
 public abstract class MockWorker {
 

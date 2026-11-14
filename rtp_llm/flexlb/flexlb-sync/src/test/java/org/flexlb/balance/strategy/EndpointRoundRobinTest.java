@@ -10,6 +10,9 @@ import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+/**
+ * Checks round-robin position across changing eligible sets, groups and concurrent picks.
+ */
 class EndpointRoundRobinTest {
     @Test
     void changingEligibleSetDoesNotSkipAContinuouslyEligibleWorker() {

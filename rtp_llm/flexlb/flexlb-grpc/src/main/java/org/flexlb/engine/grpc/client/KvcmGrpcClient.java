@@ -37,15 +37,18 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
-/** High-level KVCM cache matching client. */
+/**
+ * High-level KVCM cache matching client.
+ */
 @Slf4j
 @Component
 public class KvcmGrpcClient {
-
     private static final String INITIAL_HEALTH_REASON = "initial";
+
     private static final long MIN_IMMEDIATE_REFRESH_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(1);
 
     private final boolean enabled;
+
     private final CacheMatchConfiguration configuration;
     private final KvcmConfig topologyConfig;
     private final KvcmMetaServiceClient metaServiceClient;
@@ -67,6 +70,7 @@ public class KvcmGrpcClient {
     private final AtomicLong lastHeartbeatFailureTimeMs = new AtomicLong();
     private final AtomicReference<String> lastStateChangeReason =
             new AtomicReference<>(INITIAL_HEALTH_REASON);
+
     private volatile Consumer<KvcmHealthSnapshot> healthSnapshotListener = ignored -> {};
 
     public KvcmGrpcClient(
@@ -140,6 +144,52 @@ public class KvcmGrpcClient {
                     "KVCM worker metadata unavailable for role=" + roleType + ", group=" + group);
         }
         return queryWithRetry(requestId, blockCacheKeys, namespace, queryType, roleType, group);
+    }
+
+    public void setHealthSnapshotListener(Consumer<KvcmHealthSnapshot> listener) {
+        this.healthSnapshotListener = listener == null ? ignored -> {} : listener;
+    }
+
+    public KvcmHealthSnapshot healthSnapshot() {
+        return new KvcmHealthSnapshot(
+                healthState.get(),
+                consecutiveHeartbeatFailures.get(),
+                consecutiveHeartbeatSuccesses.get(),
+                consecutiveQueryFailures.get(),
+                lastHeartbeatSuccessTimeMs.get(),
+                lastHeartbeatFailureTimeMs.get(),
+                lastStateChangeReason.get());
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        if (refreshExecutor != null) {
+            refreshExecutor.shutdownNow();
+            try {
+                if (!refreshExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
+                    log.warn("KVCM service-state refresher did not stop within 1 second");
+                }
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    void refreshKvcmServiceStateSafely() {
+        try {
+            recordHeartbeat(leaderResolver.refresh());
+        } catch (RuntimeException error) {
+            log.warn("Failed to refresh KVCM leader state; keeping the last known value", error);
+            recordHeartbeat(false);
+        }
+        if (refreshExecutor != null && refreshExecutor.isShutdown()) {
+            return;
+        }
+        try {
+            workerMetadataResolver.refreshNamespacesAndQueryTypes();
+        } catch (RuntimeException error) {
+            log.warn("Failed to refresh KVCM metadata; keeping the last known values", error);
+        }
     }
 
     private Map<String, org.flexlb.dao.cache.HostCacheMatch> queryWithRetry(
@@ -249,36 +299,112 @@ public class KvcmGrpcClient {
         return toMatchesByHost(response.getHostsList());
     }
 
-    void refreshKvcmServiceStateSafely() {
-        try {
-            recordHeartbeat(leaderResolver.refresh());
-        } catch (RuntimeException error) {
-            log.warn("Failed to refresh KVCM leader state; keeping the last known value", error);
-            recordHeartbeat(false);
-        }
-        if (refreshExecutor != null && refreshExecutor.isShutdown()) {
+    private void requestImmediateRefresh() {
+        if (refreshExecutor == null
+                || refreshExecutor.isShutdown()
+                || !immediateRefreshQueued.compareAndSet(false, true)) {
             return;
         }
+        long nowNs = System.nanoTime();
+        long lastRefreshNs = lastImmediateRefreshScheduledNs.get();
+        if (lastRefreshNs != Long.MIN_VALUE
+                && nowNs - lastRefreshNs < MIN_IMMEDIATE_REFRESH_INTERVAL_NANOS) {
+            immediateRefreshQueued.set(false);
+            return;
+        }
+        lastImmediateRefreshScheduledNs.set(nowNs);
         try {
-            workerMetadataResolver.refreshNamespacesAndQueryTypes();
-        } catch (RuntimeException error) {
-            log.warn("Failed to refresh KVCM metadata; keeping the last known values", error);
+            refreshExecutor.execute(
+                    () -> {
+                        try {
+                            refreshKvcmServiceStateSafely();
+                        } finally {
+                            immediateRefreshQueued.set(false);
+                        }
+                    });
+        } catch (RejectedExecutionException error) {
+            immediateRefreshQueued.set(false);
         }
     }
 
-    public void setHealthSnapshotListener(Consumer<KvcmHealthSnapshot> listener) {
-        this.healthSnapshotListener = listener == null ? ignored -> {} : listener;
+    private Map<String, org.flexlb.dao.cache.HostCacheMatch> toMatchesByHost(
+            List<HostCacheMatch> matches) {
+        Map<String, org.flexlb.dao.cache.HostCacheMatch> result = new HashMap<>();
+        for (HostCacheMatch match : matches) {
+            if (StringUtils.isBlank(match.getHostIpPort())) {
+                continue;
+            }
+            org.flexlb.dao.cache.HostCacheMatch previous =
+                    result.put(
+                            match.getHostIpPort(),
+                            new org.flexlb.dao.cache.HostCacheMatch(
+                                    match.getLocal(), match.getGlobal()));
+            if (previous != null) {
+                log.warn(
+                        "KVCM returned duplicate cache matches for host {}; keeping the last record",
+                        match.getHostIpPort());
+            }
+        }
+        return result;
     }
 
-    public KvcmHealthSnapshot healthSnapshot() {
-        return new KvcmHealthSnapshot(
-                healthState.get(),
-                consecutiveHeartbeatFailures.get(),
-                consecutiveHeartbeatSuccesses.get(),
-                consecutiveQueryFailures.get(),
-                lastHeartbeatSuccessTimeMs.get(),
-                lastHeartbeatFailureTimeMs.get(),
-                lastStateChangeReason.get());
+    private void recordQuerySuccess() {
+        consecutiveQueryFailures.set(0);
+        if (!applicationWarmupState.isWarmupFinished()
+                || healthState.get() == KvcmHealthState.HEALTHY) {
+            consecutiveQuerySuccesses.set(0);
+            return;
+        }
+        int successes = consecutiveQuerySuccesses.incrementAndGet();
+        if (successes >= configuration.getKvcmRuntimeConfig().getRecoverySuccessThreshold()
+                && healthState.compareAndSet(KvcmHealthState.UNHEALTHY, KvcmHealthState.HEALTHY)) {
+            consecutiveHeartbeatFailures.set(0);
+            consecutiveHeartbeatSuccesses.set(0);
+            recordHealthTransition("cache query recovery threshold reached");
+            notifyHealthSnapshotListener();
+        }
+    }
+
+    private void recordHealthTransition(String reason) {
+        lastStateChangeReason.set(reason);
+        KvcmHealthSnapshot snapshot = healthSnapshot();
+        if (snapshot.isHealthy()) {
+            log.info(
+                    "KVCM health recovered, reason={}, consecutiveHeartbeatSuccesses={}, consecutiveQuerySuccesses={}",
+                    reason,
+                    snapshot.consecutiveHeartbeatSuccesses(),
+                    consecutiveQuerySuccesses.get());
+        } else {
+            log.warn(
+                    "KVCM marked unhealthy, reason={}, consecutiveHeartbeatFailures={}, "
+                            + "consecutiveQueryFailures={}",
+                    reason,
+                    snapshot.consecutiveHeartbeatFailures(),
+                    snapshot.consecutiveQueryFailures());
+        }
+    }
+
+    private void notifyHealthSnapshotListener() {
+        KvcmHealthSnapshot snapshot = healthSnapshot();
+        try {
+            healthSnapshotListener.accept(snapshot);
+        } catch (RuntimeException error) {
+            log.error("KVCM health snapshot listener failed, state={}", snapshot.state(), error);
+        }
+    }
+
+    private void recordQueryFailure() {
+        consecutiveQuerySuccesses.set(0);
+        if (!applicationWarmupState.isWarmupFinished()) {
+            return;
+        }
+        consecutiveHeartbeatSuccesses.set(0);
+        int failures = consecutiveQueryFailures.incrementAndGet();
+        if (failures >= configuration.getKvcmRuntimeConfig().getQueryFailureThreshold()
+                && healthState.compareAndSet(KvcmHealthState.HEALTHY, KvcmHealthState.UNHEALTHY)) {
+            recordHealthTransition("cache query failure threshold reached");
+            notifyHealthSnapshotListener();
+        }
     }
 
     private void recordHeartbeat(boolean success) {
@@ -319,128 +445,6 @@ public class KvcmGrpcClient {
         if (failures >= configuration.getKvcmRuntimeConfig().getHeartbeatFailureThreshold()
                 && healthState.compareAndSet(KvcmHealthState.HEALTHY, KvcmHealthState.UNHEALTHY)) {
             recordHealthTransition("heartbeat failure threshold reached");
-        }
-    }
-
-    private void recordQuerySuccess() {
-        consecutiveQueryFailures.set(0);
-        if (!applicationWarmupState.isWarmupFinished()
-                || healthState.get() == KvcmHealthState.HEALTHY) {
-            consecutiveQuerySuccesses.set(0);
-            return;
-        }
-        int successes = consecutiveQuerySuccesses.incrementAndGet();
-        if (successes >= configuration.getKvcmRuntimeConfig().getRecoverySuccessThreshold()
-                && healthState.compareAndSet(KvcmHealthState.UNHEALTHY, KvcmHealthState.HEALTHY)) {
-            consecutiveHeartbeatFailures.set(0);
-            consecutiveHeartbeatSuccesses.set(0);
-            recordHealthTransition("cache query recovery threshold reached");
-            notifyHealthSnapshotListener();
-        }
-    }
-
-    private void recordQueryFailure() {
-        consecutiveQuerySuccesses.set(0);
-        if (!applicationWarmupState.isWarmupFinished()) {
-            return;
-        }
-        consecutiveHeartbeatSuccesses.set(0);
-        int failures = consecutiveQueryFailures.incrementAndGet();
-        if (failures >= configuration.getKvcmRuntimeConfig().getQueryFailureThreshold()
-                && healthState.compareAndSet(KvcmHealthState.HEALTHY, KvcmHealthState.UNHEALTHY)) {
-            recordHealthTransition("cache query failure threshold reached");
-            notifyHealthSnapshotListener();
-        }
-    }
-
-    private void recordHealthTransition(String reason) {
-        lastStateChangeReason.set(reason);
-        KvcmHealthSnapshot snapshot = healthSnapshot();
-        if (snapshot.isHealthy()) {
-            log.info(
-                    "KVCM health recovered, reason={}, consecutiveHeartbeatSuccesses={}, consecutiveQuerySuccesses={}",
-                    reason,
-                    snapshot.consecutiveHeartbeatSuccesses(),
-                    consecutiveQuerySuccesses.get());
-        } else {
-            log.warn(
-                    "KVCM marked unhealthy, reason={}, consecutiveHeartbeatFailures={}, "
-                            + "consecutiveQueryFailures={}",
-                    reason,
-                    snapshot.consecutiveHeartbeatFailures(),
-                    snapshot.consecutiveQueryFailures());
-        }
-    }
-
-    private void notifyHealthSnapshotListener() {
-        KvcmHealthSnapshot snapshot = healthSnapshot();
-        try {
-            healthSnapshotListener.accept(snapshot);
-        } catch (RuntimeException error) {
-            log.error("KVCM health snapshot listener failed, state={}", snapshot.state(), error);
-        }
-    }
-
-    private Map<String, org.flexlb.dao.cache.HostCacheMatch> toMatchesByHost(
-            List<HostCacheMatch> matches) {
-        Map<String, org.flexlb.dao.cache.HostCacheMatch> result = new HashMap<>();
-        for (HostCacheMatch match : matches) {
-            if (StringUtils.isBlank(match.getHostIpPort())) {
-                continue;
-            }
-            org.flexlb.dao.cache.HostCacheMatch previous =
-                    result.put(
-                            match.getHostIpPort(),
-                            new org.flexlb.dao.cache.HostCacheMatch(
-                                    match.getLocal(), match.getGlobal()));
-            if (previous != null) {
-                log.warn(
-                        "KVCM returned duplicate cache matches for host {}; keeping the last record",
-                        match.getHostIpPort());
-            }
-        }
-        return result;
-    }
-
-    private void requestImmediateRefresh() {
-        if (refreshExecutor == null
-                || refreshExecutor.isShutdown()
-                || !immediateRefreshQueued.compareAndSet(false, true)) {
-            return;
-        }
-        long nowNs = System.nanoTime();
-        long lastRefreshNs = lastImmediateRefreshScheduledNs.get();
-        if (lastRefreshNs != Long.MIN_VALUE
-                && nowNs - lastRefreshNs < MIN_IMMEDIATE_REFRESH_INTERVAL_NANOS) {
-            immediateRefreshQueued.set(false);
-            return;
-        }
-        lastImmediateRefreshScheduledNs.set(nowNs);
-        try {
-            refreshExecutor.execute(
-                    () -> {
-                        try {
-                            refreshKvcmServiceStateSafely();
-                        } finally {
-                            immediateRefreshQueued.set(false);
-                        }
-                    });
-        } catch (RejectedExecutionException error) {
-            immediateRefreshQueued.set(false);
-        }
-    }
-
-    @PreDestroy
-    public void shutdown() {
-        if (refreshExecutor != null) {
-            refreshExecutor.shutdownNow();
-            try {
-                if (!refreshExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
-                    log.warn("KVCM service-state refresher did not stop within 1 second");
-                }
-            } catch (InterruptedException error) {
-                Thread.currentThread().interrupt();
-            }
         }
     }
 }

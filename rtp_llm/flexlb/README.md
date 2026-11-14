@@ -79,6 +79,32 @@ The following Maven Wrapper files are included in the project (do not delete):
 
 ### Code Formatting
 
+FlexLB development follows the repository-scoped
+[development skill](skills/flexlb-development/SKILL.md) and the
+[member organization rules](AGENTS.md#java-成员组织顺序).
+The skill is discoverable from the repository root and its subdirectories through
+the root `.agents/skills/flexlb-development` link.
+
+From `rtp_llm/flexlb`, check or apply member ordering across **all FlexLB Java
+modules, tests, and tools**, excluding generated `target` directories:
+
+```bash
+python3 -m pip install -r tools/java-member-order-requirements.txt
+python3 tools/order_java_members.py --check
+python3 tools/order_java_members.py --apply
+./mvnw spotless:apply -Pspotless-check
+./mvnw spotless:check -Pspotless-check
+```
+
+Pass specific files or directories to narrow the scope. `--diff` previews changes;
+`--patch` emits a patch without writing files. The tool orders declarations by
+kind, visibility, and source call relationships, preserving method contents and
+initializer order. Class workflow comments require human review: the tool does
+not infer business importance or interpret lifecycle prose.
+
+Run the ordering tool's tests with
+`python3 -m unittest discover -s tools -p 'test_order_java_members.py'`.
+
 FlexLB uses the repository-root [pre-commit](https://pre-commit.com/) configuration.
 Java is formatted with Spotless and google-java-format 1.28.0 (AOSP four-space style,
 preserving Javadoc layout); Python uses the repository's Black and isort versions.
@@ -89,13 +115,23 @@ XML and Markdown use Prettier (with its official XML plugin).
 Enable the repository's Git hooks once per checkout (run from the repository root):
 
 ```bash
-uv tool install pre-commit  # alternatively: pip install pre-commit
+python3 -m pip install --user pre-commit  # or install in your Python environment
 git config --local core.hooksPath .githooks
+python3 -m pre_commit run --hook-stage pre-commit
 ```
 
-Each `git commit` runs the formatters when matching files are staged. Java changes
-run `spotless:apply` across the FlexLB reactor; Spotless caches files that are already
-clean. The other formatters process staged files. If a formatter changes a file,
+Each `git commit` checks the staged changes. FlexLB Java changes first check member
+ordering and the presence and multiline format of purpose/flow Javadocs on changed
+named classes, including nested classes. Unchanged historical class documentation is
+not backfilled by this gate. Simple records with no custom behavior, field-only DTOs
+and simple enums do not require redundant class comments. Units, special values and
+other implicit contracts still require review and appropriate documentation.
+The Python hook installs its pinned parser dependencies
+in an isolated environment. Java then runs read-only `spotless:check` across the full
+FlexLB reactor. Reviewers still assess the accuracy and brevity of the descriptions.
+Do not bypass failed checks with `--no-verify`, `SKIP`, or disabled hooks.
+
+The other formatters process staged files. If a formatter changes a file,
 review and stage the result, then commit again. Unstaged changes are preserved by pre-commit.
 Java formatting requires JDK 21; Maven is supplied by `mvnw`. The first run downloads
 the formatter dependencies. Compilation and tests remain separate build commands.
@@ -103,7 +139,7 @@ the formatter dependencies. Compilation and tests remain separate build commands
 To format all FlexLB code, run from the repository root:
 
 ```bash
-git ls-files -z rtp_llm/flexlb | xargs -0 pre-commit run --files
+git ls-files -z rtp_llm/flexlb | xargs -0 python3 -m pre_commit run --files
 ```
 
 To apply or check Java formatting across all Maven modules:

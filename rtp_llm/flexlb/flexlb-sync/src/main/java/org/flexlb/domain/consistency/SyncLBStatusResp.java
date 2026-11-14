@@ -4,9 +4,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 /**
- * @author zjw
- * description:
- * date: 2025/3/31
+ * Carries the response to a FlexLB status synchronization request.
  */
 @Getter
 @Setter

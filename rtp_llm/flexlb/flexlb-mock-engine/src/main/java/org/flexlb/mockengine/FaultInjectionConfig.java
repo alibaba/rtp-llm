@@ -3,19 +3,7 @@ package org.flexlb.mockengine;
 import java.util.List;
 
 /**
- * Immutable fault-injection configuration for the Java mock engine.
- *
- * <p>Controls how the mock gRPC service responds to requests in various failure
- * scenarios. Modeled after {@code MockWorkerBehavior} with a fluent builder.
- *
- * <pre>{@code
- * FaultInjectionConfig config = FaultInjectionConfig.builder()
- *     .failOnEnqueue(true)
- *     .enqueueDelayMs(500)
- *     .kvPressureTokens(500_000)
- *     .crashAfterNRequests(10)
- *     .build()
- * }</pre>
+ * Defines immutable mock-engine failure and delay settings built through the fluent builder.
  */
 public final class FaultInjectionConfig {
 
@@ -355,6 +343,9 @@ public final class FaultInjectionConfig {
         }
     }
 
+    /**
+     * Assembles an immutable fault plan without mutating the configuration already used by requests.
+     */
     public static final class Builder {
         private boolean failOnEnqueue = false;
         private long enqueueErrorCode = 13;

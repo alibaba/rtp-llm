@@ -203,7 +203,7 @@ class QWenV2Tokenizer(BaseTokenizer):
         model_type = str(
             config_json.get("model_type") or text_config.get("model_type") or ""
         )
-        if model_type.startswith("qwen3_5"):
+        if model_type.startswith(("qwen3_5", "qwen4_exp")):
             return True
         lower_path = tokenizer_path.lower()
         return any(name in lower_path for name in ["qwen35", "qwen3.5", "qwen3.6"])
@@ -235,6 +235,8 @@ register_tokenizer(
         "qwen35_dense_mtp",
         "qwen35_moe",
         "qwen35_moe_mtp",
+        "qwen4_exp",
+        "qwen4_exp_mtp",
     ],
     QWenV2Tokenizer,
 )

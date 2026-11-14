@@ -21,8 +21,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks formula parsing and evaluation against supported arithmetic and aggregation semantics.
+ */
 class ArithmeticFormulaTest {
-
     @Test
     void evaluatesScalarVariablesWithCallerDefinedIndices() {
         ArithmeticFormula formula =
@@ -341,16 +343,6 @@ class ArithmeticFormulaTest {
         assertBitsEqual(4 * largeItemValue(7), formula.evaluateAsDouble(new double[] {7}, null));
     }
 
-    private static double largeItemValue(double x) {
-        return x
-                + x * x
-                + x * x * x
-                + Math.max(x, 2)
-                + Math.min(x, 3)
-                + Math.abs(x)
-                + Math.sqrt(Math.abs(x));
-    }
-
     @Test
     void compiledAggregatesPreserveScalarFallbackAndExactOperationOrder() {
         double[] values = {
@@ -373,30 +365,6 @@ class ArithmeticFormulaTest {
                     "max(x / " + divisor + " - 2, -0.0)",
                     (x, y) -> Math.max(x / d - 2, -0.0),
                     values);
-        }
-    }
-
-    private static void assertAggregateMatchesReference(
-            String term, DoubleBinaryOperator reference, double[] values) {
-        ArithmeticFormula formula =
-                ArithmeticFormula.parse(
-                        "sum(" + term + ")", Map.of("x", 0, "y", 1), Set.of(), true);
-        List<double[]> batch = new ArrayList<>();
-        double expectedSum = 0.0;
-        for (double x : values) {
-            for (double y : values) {
-                double[] item = {x, y};
-                double expected = reference.applyAsDouble(x, y);
-                assertBitsEqual(expected, formula.evaluateAsDouble(item, null));
-                assertBitsEqual(expected, formula.evaluateAsDouble(item, List.of()));
-                assertBitsEqual(
-                        0.0 + expected,
-                        formula.evaluateAsDouble(new double[] {999, 999}, List.of(item)));
-                batch.add(item);
-                expectedSum += expected;
-                assertBitsEqual(
-                        expectedSum, formula.evaluateAsDouble(new double[] {999, 999}, batch));
-            }
         }
     }
 
@@ -511,14 +479,6 @@ class ArithmeticFormulaTest {
         }
     }
 
-    private static ArithmeticFormula aggregateFormula(String expression) {
-        return ArithmeticFormula.parse(expression, Map.of("x", 0), Set.of(), true);
-    }
-
-    private static void assertBitsEqual(double expected, double actual) {
-        assertEquals(Double.doubleToLongBits(expected), Double.doubleToLongBits(actual));
-    }
-
     @Test
     void returnsNonFiniteResultsForTheCallerToValidate() {
         assertTrue(
@@ -549,5 +509,47 @@ class ArithmeticFormulaTest {
                 () -> PrefillTimeFormula.parse("sum(totalComputeTokens)"));
         assertThrows(
                 IllegalArgumentException.class, () -> PrefillTimeFormula.parse("running_size"));
+    }
+
+    private static double largeItemValue(double x) {
+        return x
+                + x * x
+                + x * x * x
+                + Math.max(x, 2)
+                + Math.min(x, 3)
+                + Math.abs(x)
+                + Math.sqrt(Math.abs(x));
+    }
+
+    private static void assertAggregateMatchesReference(
+            String term, DoubleBinaryOperator reference, double[] values) {
+        ArithmeticFormula formula =
+                ArithmeticFormula.parse(
+                        "sum(" + term + ")", Map.of("x", 0, "y", 1), Set.of(), true);
+        List<double[]> batch = new ArrayList<>();
+        double expectedSum = 0.0;
+        for (double x : values) {
+            for (double y : values) {
+                double[] item = {x, y};
+                double expected = reference.applyAsDouble(x, y);
+                assertBitsEqual(expected, formula.evaluateAsDouble(item, null));
+                assertBitsEqual(expected, formula.evaluateAsDouble(item, List.of()));
+                assertBitsEqual(
+                        0.0 + expected,
+                        formula.evaluateAsDouble(new double[] {999, 999}, List.of(item)));
+                batch.add(item);
+                expectedSum += expected;
+                assertBitsEqual(
+                        expectedSum, formula.evaluateAsDouble(new double[] {999, 999}, batch));
+            }
+        }
+    }
+
+    private static void assertBitsEqual(double expected, double actual) {
+        assertEquals(Double.doubleToLongBits(expected), Double.doubleToLongBits(actual));
+    }
+
+    private static ArithmeticFormula aggregateFormula(String expression) {
+        return ArithmeticFormula.parse(expression, Map.of("x", 0), Set.of(), true);
     }
 }

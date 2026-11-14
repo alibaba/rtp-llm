@@ -38,12 +38,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @DisplayName("WorkerStatus status-commit contract")
 class WorkerStatusTest {
-
-    private static WorkerStatus discovered() {
-        return WorkerStatus.createDiscovered(
-                RoleType.PREFILL, "group-a", "10.0.0.1", 8080, 9090, "site-a");
-    }
-
     @Test
     @DisplayName("Discovery identity keeps a physical transport address and logical engine key")
     void discoveredWorkerSeparatesPhysicalAndLogicalIdentity() {
@@ -83,6 +77,11 @@ class WorkerStatusTest {
                         1);
 
         assertEquals("10.0.0.1:8080", status.getMetricIpPort());
+    }
+
+    private static WorkerStatus discovered() {
+        return WorkerStatus.createDiscovered(
+                RoleType.PREFILL, "group-a", "10.0.0.1", 8080, 9090, "site-a");
     }
 
     /**
@@ -150,6 +149,9 @@ class WorkerStatusTest {
                 fields.runningTaskList().get(Long.toString(marker)).requestId());
     }
 
+    /**
+     * Checks that readers observe complete worker-state publications.
+     */
     @Nested
     @DisplayName("Atomic publication")
     class AtomicPublication {
@@ -227,6 +229,9 @@ class WorkerStatusTest {
         }
     }
 
+    /**
+     * Checks worker-state transaction validation and atomic commit behavior.
+     */
     @Nested
     @DisplayName("Prepare/publish transaction invariants")
     class TransactionInvariants {
@@ -326,6 +331,9 @@ class WorkerStatusTest {
         }
     }
 
+    /**
+     * Checks merging of worker observation cursors.
+     */
     @Nested
     @DisplayName("Cursor merge")
     class CursorMerge {
@@ -392,6 +400,9 @@ class WorkerStatusTest {
         }
     }
 
+    /**
+     * Checks that replaced worker generations cannot update the current generation.
+     */
     @Nested
     @DisplayName("Generation identity and topology")
     class GenerationIdentity {
@@ -432,6 +443,9 @@ class WorkerStatusTest {
         }
     }
 
+    /**
+     * Checks poll success and failure effects on worker health.
+     */
     @Nested
     @DisplayName("Poll health")
     class PollHealthContract {

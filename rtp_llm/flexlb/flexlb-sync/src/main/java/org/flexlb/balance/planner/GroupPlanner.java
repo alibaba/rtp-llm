@@ -16,14 +16,12 @@ import java.util.function.ToDoubleFunction;
  * virtual incoming probe that has never entered the live queue.
  */
 public final class GroupPlanner {
-
     /** Allocation hint only; {@link Constraints#maxRequests()} is authoritative. */
     private static final int INITIAL_SELECTION_CAPACITY = 32;
 
     public static final String PREDICTED_EXECUTION_CAP = "predicted_execution_cap";
     public static final String BATCH_FULL = "batch_full";
     public static final String FIXED_WINDOW_TIMEOUT = "fixed_window_timeout";
-
     private static final ItemAccess<Item> ITEM_ACCESS =
             new ItemAccess<>() {
                 @Override
@@ -39,123 +37,58 @@ public final class GroupPlanner {
 
     private GroupPlanner() {}
 
-    /**
-     * Immutable input suitable for route-time projection. Ordering fields are
-     * carried even though this planner deliberately requires its input to have
-     * already been sorted by the queue's production comparator.
-     */
-    public record Item(
-            String requestId,
-            int priority,
-            long enqueueSeq,
-            long enqueuedAtMs,
-            long expiresAtMs,
-            long seqLen,
-            long hitCache) {
-
-        public Item {
-            if (seqLen < 0L) {
-                throw new IllegalArgumentException("seqLen must be non-negative");
-            }
-            if (hitCache < 0L || hitCache > seqLen) {
-                throw new IllegalArgumentException("hitCache must be in [0, seqLen]");
-            }
-        }
-    }
-
-    /** Compute and KV resource shape of one planned group. */
-    public record Shape(int size, long maxSeqLen, long paddedTokens, long kvTokens) {
-
-        public static Shape empty() {
-            return new Shape(0, 0L, 0L, 0L);
-        }
-
-        public Shape add(long seqLen) {
-            int nextSize = size + 1;
-            long boundedSeqLen = Math.max(0L, seqLen);
-            long nextMaxSeqLen = Math.max(maxSeqLen, boundedSeqLen);
-            return new Shape(
-                    nextSize,
-                    nextMaxSeqLen,
-                    saturatedMultiply(nextMaxSeqLen, nextSize),
-                    saturatedAdd(kvTokens, boundedSeqLen));
-        }
-
-        public boolean fitsCompute(long capacity) {
-            return capacity > 0L && paddedTokens < capacity;
-        }
-
-        public boolean fitsKv(long capacity) {
-            return capacity == Long.MAX_VALUE || (capacity >= 0L && kvTokens <= capacity);
-        }
-
-        private static long saturatedMultiply(long value, int multiplier) {
-            if (value == 0L || multiplier == 0) {
-                return 0L;
-            }
-            return value > Long.MAX_VALUE / multiplier ? Long.MAX_VALUE : value * multiplier;
-        }
-    }
-
-    /** Adapter that lets the pure planner operate on either live or projected items. */
-    public interface ItemAccess<T> {
-        long enqueuedAtMs(T item);
-
-        long seqLen(T item);
-    }
-
-    /** Frozen policy and resource bounds for one planning operation. */
-    public record Constraints(
-            int maxRequests,
-            long batchTokenCapacity,
-            long batchKvCapacity,
-            long predictedExecutionBudgetMs,
-            long collectionWindowMs) {
-
-        public Constraints {
-            if (maxRequests < 1) {
-                throw new IllegalArgumentException("maxRequests must be positive");
-            }
-        }
-    }
-
-    /** Group selection before readiness is evaluated against a clock value. */
-    public record Selection<T>(
-            List<T> items,
-            Shape shape,
-            long windowOpenedAtMs,
-            boolean predictionBoundaryTriggered,
-            OptionalDouble selectedPredictionMs) {
-
-        public Selection {
-            items = items == null ? List.of() : List.copyOf(items);
-            validateSelectedPrediction(items, selectedPredictionMs);
-        }
-    }
-
-    /** Complete pure plan: selected group, shape, dispatch reason, and window state. */
-    public record Plan<T>(
-            List<T> items,
-            Shape shape,
-            long windowOpenedAtMs,
-            long collectionDeadlineMs,
-            boolean predictionBoundaryTriggered,
-            OptionalDouble selectedPredictionMs,
-            String reason) {
-
-        public Plan {
-            items = items == null ? List.of() : List.copyOf(items);
-            validateSelectedPrediction(items, selectedPredictionMs);
-        }
-
-        public boolean ready() {
-            return reason != null;
-        }
-    }
-
     /** Item adapter for immutable route-time {@link Item}s. */
     public static ItemAccess<Item> itemAccess() {
         return ITEM_ACCESS;
+    }
+
+    /** Convenience entry point for projections whose clock is already frozen. */
+    public static <T> Plan<T> plan(
+            Iterable<T> orderedItems,
+            ItemAccess<T> access,
+            Constraints constraints,
+            long nowMs,
+            ToDoubleFunction<List<T>> predictor) {
+        return evaluateReadiness(
+                select(orderedItems, access, constraints, predictor), constraints, nowMs);
+    }
+
+    /** Evaluate one selection against an explicit clock value. */
+    public static <T> Plan<T> evaluateReadiness(
+            Selection<T> selection, Constraints constraints, long nowMs) {
+        long deadlineMs =
+                collectionDeadlineMs(
+                        selection.windowOpenedAtMs(), constraints.collectionWindowMs());
+        String reason = null;
+        if (selection.predictionBoundaryTriggered()) {
+            reason = PREDICTED_EXECUTION_CAP;
+        } else if (!selection.items().isEmpty()
+                && selection.items().size() >= constraints.maxRequests()) {
+            reason = BATCH_FULL;
+        } else if (windowElapsed(
+                selection.windowOpenedAtMs(), nowMs, constraints.collectionWindowMs())) {
+            reason = FIXED_WINDOW_TIMEOUT;
+        }
+        return new Plan<>(
+                selection.items(),
+                selection.shape(),
+                selection.windowOpenedAtMs(),
+                deadlineMs,
+                selection.predictionBoundaryTriggered(),
+                selection.selectedPredictionMs(),
+                reason);
+    }
+
+    public static long collectionDeadlineMs(long windowOpenedAtMs, long collectionWindowMs) {
+        return saturatedAdd(windowOpenedAtMs, Math.max(0L, collectionWindowMs));
+    }
+
+    public static boolean windowElapsed(
+            long windowOpenedAtMs, long nowMs, long collectionWindowMs) {
+        long boundedWindowMs = Math.max(0L, collectionWindowMs);
+        return windowOpenedAtMs != Long.MAX_VALUE
+                && nowMs >= windowOpenedAtMs
+                && nowMs - windowOpenedAtMs >= boundedWindowMs;
     }
 
     /**
@@ -172,16 +105,6 @@ public final class GroupPlanner {
                 access,
                 constraints,
                 predictor == null ? null : (added, prefix) -> predictor.applyAsDouble(prefix));
-    }
-
-    /**
-     * Owned by one selection: invoked once per visited prefix in append order.
-     * The last tentative member may exceed the prediction budget and be excluded from the result.
-     * Callbacks must not retain the mutable prefix list.
-     */
-    @FunctionalInterface
-    public interface PrefixPrediction<T> {
-        double append(T added, List<T> prefix);
     }
 
     public static <T> Selection<T> selectWithPrediction(
@@ -272,55 +195,6 @@ public final class GroupPlanner {
                         : OptionalDouble.empty());
     }
 
-    /** Evaluate one selection against an explicit clock value. */
-    public static <T> Plan<T> evaluateReadiness(
-            Selection<T> selection, Constraints constraints, long nowMs) {
-        long deadlineMs =
-                collectionDeadlineMs(
-                        selection.windowOpenedAtMs(), constraints.collectionWindowMs());
-        String reason = null;
-        if (selection.predictionBoundaryTriggered()) {
-            reason = PREDICTED_EXECUTION_CAP;
-        } else if (!selection.items().isEmpty()
-                && selection.items().size() >= constraints.maxRequests()) {
-            reason = BATCH_FULL;
-        } else if (windowElapsed(
-                selection.windowOpenedAtMs(), nowMs, constraints.collectionWindowMs())) {
-            reason = FIXED_WINDOW_TIMEOUT;
-        }
-        return new Plan<>(
-                selection.items(),
-                selection.shape(),
-                selection.windowOpenedAtMs(),
-                deadlineMs,
-                selection.predictionBoundaryTriggered(),
-                selection.selectedPredictionMs(),
-                reason);
-    }
-
-    /** Convenience entry point for projections whose clock is already frozen. */
-    public static <T> Plan<T> plan(
-            Iterable<T> orderedItems,
-            ItemAccess<T> access,
-            Constraints constraints,
-            long nowMs,
-            ToDoubleFunction<List<T>> predictor) {
-        return evaluateReadiness(
-                select(orderedItems, access, constraints, predictor), constraints, nowMs);
-    }
-
-    public static boolean windowElapsed(
-            long windowOpenedAtMs, long nowMs, long collectionWindowMs) {
-        long boundedWindowMs = Math.max(0L, collectionWindowMs);
-        return windowOpenedAtMs != Long.MAX_VALUE
-                && nowMs >= windowOpenedAtMs
-                && nowMs - windowOpenedAtMs >= boundedWindowMs;
-    }
-
-    public static long collectionDeadlineMs(long windowOpenedAtMs, long collectionWindowMs) {
-        return saturatedAdd(windowOpenedAtMs, Math.max(0L, collectionWindowMs));
-    }
-
     private static boolean predictionGrowthLimitExceeded(double predictedMs, long thresholdMs) {
         return predictedMs > thresholdMs;
     }
@@ -348,5 +222,139 @@ public final class GroupPlanner {
 
     private static long saturatedAdd(long left, long right) {
         return right > 0L && left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
+    }
+
+    /**
+     * Immutable input suitable for route-time projection. Ordering fields are
+     * carried even though this planner deliberately requires its input to have
+     * already been sorted by the queue's production comparator.
+     */
+    public record Item(
+            String requestId,
+            int priority,
+            long enqueueSeq,
+            long enqueuedAtMs,
+            long expiresAtMs,
+            long seqLen,
+            long hitCache) {
+
+        public Item {
+            if (seqLen < 0L) {
+                throw new IllegalArgumentException("seqLen must be non-negative");
+            }
+            if (hitCache < 0L || hitCache > seqLen) {
+                throw new IllegalArgumentException("hitCache must be in [0, seqLen]");
+            }
+        }
+    }
+
+    /**
+     * Compute and KV resource shape of one planned group.
+     */
+    public record Shape(int size, long maxSeqLen, long paddedTokens, long kvTokens) {
+
+        public static Shape empty() {
+            return new Shape(0, 0L, 0L, 0L);
+        }
+
+        public Shape add(long seqLen) {
+            int nextSize = size + 1;
+            long boundedSeqLen = Math.max(0L, seqLen);
+            long nextMaxSeqLen = Math.max(maxSeqLen, boundedSeqLen);
+            return new Shape(
+                    nextSize,
+                    nextMaxSeqLen,
+                    saturatedMultiply(nextMaxSeqLen, nextSize),
+                    saturatedAdd(kvTokens, boundedSeqLen));
+        }
+
+        public boolean fitsCompute(long capacity) {
+            return capacity > 0L && paddedTokens < capacity;
+        }
+
+        public boolean fitsKv(long capacity) {
+            return capacity == Long.MAX_VALUE || (capacity >= 0L && kvTokens <= capacity);
+        }
+
+        private static long saturatedMultiply(long value, int multiplier) {
+            if (value == 0L || multiplier == 0) {
+                return 0L;
+            }
+            return value > Long.MAX_VALUE / multiplier ? Long.MAX_VALUE : value * multiplier;
+        }
+    }
+
+    /**
+     * Adapter that lets the pure planner operate on either live or projected items.
+     */
+    public interface ItemAccess<T> {
+        long enqueuedAtMs(T item);
+
+        long seqLen(T item);
+    }
+
+    /**
+     * Frozen policy and resource bounds for one planning operation.
+     */
+    public record Constraints(
+            int maxRequests,
+            long batchTokenCapacity,
+            long batchKvCapacity,
+            long predictedExecutionBudgetMs,
+            long collectionWindowMs) {
+
+        public Constraints {
+            if (maxRequests < 1) {
+                throw new IllegalArgumentException("maxRequests must be positive");
+            }
+        }
+    }
+
+    /**
+     * Group selection before readiness is evaluated against a clock value.
+     */
+    public record Selection<T>(
+            List<T> items,
+            Shape shape,
+            long windowOpenedAtMs,
+            boolean predictionBoundaryTriggered,
+            OptionalDouble selectedPredictionMs) {
+
+        public Selection {
+            items = items == null ? List.of() : List.copyOf(items);
+            validateSelectedPrediction(items, selectedPredictionMs);
+        }
+    }
+
+    /**
+     * Complete pure plan: selected group, shape, dispatch reason, and window state.
+     */
+    public record Plan<T>(
+            List<T> items,
+            Shape shape,
+            long windowOpenedAtMs,
+            long collectionDeadlineMs,
+            boolean predictionBoundaryTriggered,
+            OptionalDouble selectedPredictionMs,
+            String reason) {
+
+        public Plan {
+            items = items == null ? List.of() : List.copyOf(items);
+            validateSelectedPrediction(items, selectedPredictionMs);
+        }
+
+        public boolean ready() {
+            return reason != null;
+        }
+    }
+
+    /**
+     * Owned by one selection: invoked once per visited prefix in append order.
+     * The last tentative member may exceed the prediction budget and be excluded from the result.
+     * Callbacks must not retain the mutable prefix list.
+     */
+    @FunctionalInterface
+    public interface PrefixPrediction<T> {
+        double append(T added, List<T> prefix);
     }
 }

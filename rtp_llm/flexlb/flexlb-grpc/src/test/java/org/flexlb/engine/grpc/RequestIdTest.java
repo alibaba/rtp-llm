@@ -14,6 +14,9 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/**
+ * Checks request-ID wire encoding and parsing.
+ */
 class RequestIdTest {
     @Test
     void originalIdTagsRemainInt64AndNewTagsCarryStrings() {

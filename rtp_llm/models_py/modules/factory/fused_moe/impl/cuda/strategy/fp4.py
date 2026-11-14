@@ -110,3 +110,59 @@ class CudaFp4EpNormalStrategy(MoeStrategy):
             executor_class=TrtllmFp4Executor,
             quant_config=quant_config,
         )
+
+
+class CudaNvfp4CutlassStrategy(MoeStrategy):
+    strategy_name = "nvfp4_cutlass"
+
+    @classmethod
+    def check_conditions(cls, checker, config):
+        resolver = MoeConfigResolver()
+        checker.check(resolver.get_quant_method(config) == "modelopt_fp4")
+        checker.check(config.moe_strategy == "nvfp4_cutlass")
+
+    def get_attributes(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_nvfp4_executor import (
+            CutlassNvfp4Executor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
+            PureTpRouterNvfp4Cutlass,
+        )
+
+        return StrategyAttributes(
+            router_class=PureTpRouterNvfp4Cutlass,
+            executor_class=CutlassNvfp4Executor,
+            quant_config=FusedMoEQuantConfig(
+                quant_dtype=torch.uint8, block_shape=[16, 16]
+            ),
+        )
+
+
+class CudaNvfp4MarlinStrategy(CudaNvfp4CutlassStrategy):
+    strategy_name = "nvfp4_marlin"
+
+    def can_handle(self, config):
+        if config.moe_strategy != self.strategy_name:
+            return False
+        return super().can_handle(config)
+
+    @classmethod
+    def check_conditions(cls, checker, config):
+        checker.check(MoeConfigResolver().get_quant_method(config) == "modelopt_fp4")
+        checker.check(config.moe_strategy == "nvfp4_marlin")
+
+    def get_attributes(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.marlin_nvfp4_executor import (
+            Qwen4MarlinExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
+            PureTpRouterNvfp4Cutlass,
+        )
+
+        return StrategyAttributes(
+            router_class=PureTpRouterNvfp4Cutlass,
+            executor_class=Qwen4MarlinExecutor,
+            quant_config=FusedMoEQuantConfig(
+                quant_dtype=torch.uint8, block_shape=[16, 16]
+            ),
+        )

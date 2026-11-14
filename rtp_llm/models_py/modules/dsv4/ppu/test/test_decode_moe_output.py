@@ -2,7 +2,7 @@
 
 import unittest
 from types import MethodType, SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import torch
 from rtp_llm.device.device_type import is_ppu
@@ -32,19 +32,15 @@ class MoeOutputContractTest(unittest.TestCase):
             _mega_csa_adapter=None, _mega_hca_adapter=None,
         )
         block._hc_pre_norm = MethodType(Block._hc_pre_norm, block)
-        with patch(
-            "rtp_llm.models_py.modules.dsv4._record_tensor.should_record_layer",
-            return_value=False,
-        ):
-            for value in (None, mask):
-                metadata = SimpleNamespace(active_token_mask=value)
-                Block.forward_decode(block, x, metadata, ids, attn_fn=lambda x: x)
-                expected = {"is_decode_forward": True}
-                if value is not None:
-                    expected["active_token_mask"] = mask
-                self.assertEqual(ffn.call_args.kwargs.keys(), expected.keys())
-                if value is not None:
-                    self.assertIs(ffn.call_args.kwargs["active_token_mask"], mask)
+        for value in (None, mask):
+            metadata = SimpleNamespace(active_token_mask=value)
+            Block.forward_decode(block, x, metadata, ids, attn_fn=lambda x: x)
+            expected = {"is_decode_forward": True}
+            if value is not None:
+                expected["active_token_mask"] = mask
+            self.assertEqual(ffn.call_args.kwargs.keys(), expected.keys())
+            if value is not None:
+                self.assertIs(ffn.call_args.kwargs["active_token_mask"], mask)
 
     def test_invalid_output_dtype_fails_before_dispatch(self):
         with self.assertRaisesRegex(ValueError, "routed output"):

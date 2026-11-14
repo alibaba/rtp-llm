@@ -6,8 +6,6 @@ from typing import NamedTuple, Optional, Tuple
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import validate_slot_mapping
-
 
 class CPByteSlicedSlotCompaction(NamedTuple):
     unique_blocks: torch.Tensor
@@ -31,13 +29,6 @@ def build_cp_byte_sliced_slot_compaction(
         slot_mapping.reshape(-1)
         .to(dtype=torch.int64, device=slot_mapping.device)
         .contiguous()
-    )
-    validate_slot_mapping(
-        validation_site,
-        slots,
-        block_size=full_entries_per_block,
-        num_blocks=int(num_blocks),
-        negative_mode=negative_mode,
     )
 
     gather_lens_saved: Optional[torch.Tensor] = None

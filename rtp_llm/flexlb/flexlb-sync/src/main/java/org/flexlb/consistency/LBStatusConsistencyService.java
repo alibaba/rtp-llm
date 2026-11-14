@@ -19,16 +19,21 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 
+/**
+ * <p>Initialization prepares the configured election service. Online starts participation; offline
+ * withdraws it, while master queries and notifications expose the current election result.
+ * Destruction releases the service resources.
+ */
 @Slf4j
 @Component
 public class LBStatusConsistencyService implements MasterElectService {
-
     public static final String MASTER_CHANGE_NOTIFY_PATH = "/rtp_llm/notify_master";
 
     private final ZookeeperMasterElectService zookeeperMasterElectService;
     private final Environment environment;
     private final ConsistencyConfig consistencyConfig;
     private final DeploymentIdentity deploymentIdentity;
+
     private String serverPort;
     private String roleId;
     private String localHostIp;
@@ -68,6 +73,11 @@ public class LBStatusConsistencyService implements MasterElectService {
     }
 
     @Override
+    public boolean isNeedConsistency() {
+        return consistencyConfig instanceof ZookeeperConsistencyConfig;
+    }
+
+    @Override
     public void start() {
         if (!isNeedConsistency()) {
             log.warn("start: lbConsistencyConfig is closed.");
@@ -95,37 +105,6 @@ public class LBStatusConsistencyService implements MasterElectService {
         this.zookeeperMasterElectService.destroy();
     }
 
-    @Override
-    public boolean isNeedConsistency() {
-        return consistencyConfig instanceof ZookeeperConsistencyConfig;
-    }
-
-    @Override
-    public boolean isMaster() {
-        if (!isNeedConsistency()) {
-            return false;
-        }
-        return zookeeperMasterElectService.isMaster();
-    }
-
-    @Override
-    public void refreshMasterHost(boolean forceSync) {
-        if (isNeedConsistency() && forceSync) {
-            zookeeperMasterElectService.updateLatestMaster();
-        }
-    }
-
-    public String getMasterHostIpPort() {
-        if (!isNeedConsistency()) {
-            return null;
-        }
-        String masterHostIp = zookeeperMasterElectService.getMasterHostIp(false);
-        if (masterHostIp == null) {
-            return null;
-        }
-        return masterHostIp + ":" + serverPort;
-    }
-
     public String getLocalHostIp() {
         return localHostIp;
     }
@@ -150,6 +129,13 @@ public class LBStatusConsistencyService implements MasterElectService {
         return resp;
     }
 
+    @Override
+    public void refreshMasterHost(boolean forceSync) {
+        if (isNeedConsistency() && forceSync) {
+            zookeeperMasterElectService.updateLatestMaster();
+        }
+    }
+
     public SyncLBStatusResp dumpLBStatus() {
         SyncLBStatusResp resp = new SyncLBStatusResp();
         Map<String, Object> snapshot = new LinkedHashMap<>();
@@ -162,5 +148,24 @@ public class LBStatusConsistencyService implements MasterElectService {
         resp.setMsg("leadership snapshot");
         resp.setLbStatus(JsonUtils.toStringOrEmpty(snapshot));
         return resp;
+    }
+
+    @Override
+    public boolean isMaster() {
+        if (!isNeedConsistency()) {
+            return false;
+        }
+        return zookeeperMasterElectService.isMaster();
+    }
+
+    public String getMasterHostIpPort() {
+        if (!isNeedConsistency()) {
+            return null;
+        }
+        String masterHostIp = zookeeperMasterElectService.getMasterHostIp(false);
+        if (masterHostIp == null) {
+            return null;
+        }
+        return masterHostIp + ":" + serverPort;
     }
 }

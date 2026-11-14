@@ -11,12 +11,17 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks capacity-triggered retries, wakeup matching and cancellation without losing opportunities.
+ */
 class PlacementWaitQueueTest {
-    private final PlacementAvailability availability = new PlacementAvailability();
-    private final PlacementWaitQueue queue = new PlacementWaitQueue(true, availability);
-    private long sequence;
     private static final PlacementKey A = PlacementKey.exact(RoleType.PREFILL, "g", "a:8000");
     private static final PlacementKey B = PlacementKey.exact(RoleType.PREFILL, "g", "b:8000");
+
+    private final PlacementAvailability availability = new PlacementAvailability();
+    private final PlacementWaitQueue queue = new PlacementWaitQueue(true, availability);
+
+    private long sequence;
 
     @Test
     void oneCapacityEdgeDoesNotReplayAnEntireBacklog() {

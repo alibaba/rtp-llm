@@ -3,6 +3,9 @@ package org.flexlb.config;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 
+/**
+ * Defines configuration shared by the supported master-consistency modes.
+ */
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type")
 @JsonSubTypes({
     @JsonSubTypes.Type(value = NoConsistencyConfig.class, name = "NONE"),

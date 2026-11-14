@@ -38,6 +38,9 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
+/**
+ * Checks cache metric registration and emitted samples.
+ */
 @ExtendWith(MockitoExtension.class)
 class CacheMetricsReporterTest {
 

@@ -12,7 +12,9 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.zip.CRC32;
 
-/** First-match request-to-worker-group selector. */
+/**
+ * First-match request-to-worker-group selector.
+ */
 @Getter
 @Setter
 public final class TrafficPolicyConfig {
@@ -120,6 +122,9 @@ public final class TrafficPolicyConfig {
         return crc32.getValue();
     }
 
+    /**
+     * Applies one request match and its weighted target groups in configured rule order.
+     */
     @Getter
     @Setter
     public static final class Rule {
@@ -132,6 +137,9 @@ public final class TrafficPolicyConfig {
         }
     }
 
+    /**
+     * Combines API-key and input-length constraints for one traffic rule.
+     */
     @Getter
     @Setter
     public static final class Match {
@@ -171,6 +179,9 @@ public final class TrafficPolicyConfig {
         }
     }
 
+    /**
+     * Validates and tests the inclusive input-token range used by a traffic match.
+     */
     @Getter
     @Setter
     public static final class InputTokens {
@@ -197,6 +208,9 @@ public final class TrafficPolicyConfig {
         }
     }
 
+    /**
+     * Assigns a positive selection weight to one target routing group.
+     */
     @Getter
     @Setter
     public static final class Target {

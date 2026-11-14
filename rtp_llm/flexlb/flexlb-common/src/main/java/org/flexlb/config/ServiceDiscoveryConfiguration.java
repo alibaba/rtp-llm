@@ -9,6 +9,9 @@ import org.springframework.context.annotation.Configuration;
 
 import java.util.List;
 
+/**
+ * Builds the discovery router and providers, leaving provider shutdown with their owning beans.
+ */
 @Configuration
 public class ServiceDiscoveryConfiguration {
 

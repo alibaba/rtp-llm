@@ -31,9 +31,13 @@ import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * <p>Start builds the serving endpoint and its configured execution resources. Drain first waits
+ * for the configured request quiet period, then shuts down serving and waits for accepted calls
+ * while their dependencies remain alive; destruction releases the server-owned resources.
+ */
 @Component
 public class FlexlbGrpcServer {
-
     /**
      * Offset from HTTP port to gRPC port for FlexLB's own servers.
      * This is separate from CommonConstants.GRPC_PORT_OFFSET which applies
@@ -42,6 +46,7 @@ public class FlexlbGrpcServer {
     static final int FLEXLB_GRPC_PORT_OFFSET = 2;
 
     private static final int DEFAULT_HTTP_PORT = 7001;
+
     private final long quietPeriodNanos;
 
     private final FlexlbServiceImpl flexlbServiceImpl;
@@ -55,6 +60,7 @@ public class FlexlbGrpcServer {
     private Server server;
     private NioEventLoopGroup bossGroup;
     private volatile ThreadPoolExecutor grpcExecutor;
+
     private final RejectedExecutionHandler rejectionHandler;
 
     public FlexlbGrpcServer(
@@ -139,42 +145,24 @@ public class FlexlbGrpcServer {
         Logger.info("FlexLB gRPC server started on port {}", port);
     }
 
-    private void registerMetrics() {
-        monitor.register(
-                MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS,
-                FlexMetricType.GAUGE,
-                FlexPriorityType.PRECISE);
-        monitor.register(
-                MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE,
-                FlexMetricType.GAUGE,
-                FlexPriorityType.PRECISE);
-        monitor.register(
-                MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE,
-                FlexMetricType.GAUGE,
-                FlexPriorityType.PRECISE);
-        monitor.register(
-                MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE,
-                FlexMetricType.GAUGE,
-                FlexPriorityType.PRECISE);
-        monitor.register(
-                MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS,
-                FlexMetricType.COUNTER,
-                FlexPriorityType.PRECISE);
-    }
-
-    @Scheduled(fixedRate = 2000)
-    private void reportExecutorMetrics() {
-        ThreadPoolExecutor executor = grpcExecutor;
-        if (executor == null) {
-            return;
+    @PreDestroy
+    public void shutdown() {
+        drain();
+        if (bossGroup != null) {
+            bossGroup.shutdownGracefully();
         }
-        monitor.report(
-                MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS, executor.getActiveCount());
-        monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE, executor.getQueue().size());
-        monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE, executor.getPoolSize());
-        monitor.report(
-                MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE, executor.getMaximumPoolSize());
-        monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 0.0);
+        if (grpcServerEventLoopGroup != null) {
+            grpcServerEventLoopGroup.shutdownGracefully();
+        }
+        if (grpcExecutor != null) {
+            grpcExecutor.shutdown();
+            try {
+                grpcExecutor.awaitTermination(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                grpcExecutor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     /**
@@ -224,24 +212,42 @@ public class FlexlbGrpcServer {
         }
     }
 
-    @PreDestroy
-    public void shutdown() {
-        drain();
-        if (bossGroup != null) {
-            bossGroup.shutdownGracefully();
+    private void registerMetrics() {
+        monitor.register(
+                MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS,
+                FlexMetricType.GAUGE,
+                FlexPriorityType.PRECISE);
+        monitor.register(
+                MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE,
+                FlexMetricType.GAUGE,
+                FlexPriorityType.PRECISE);
+        monitor.register(
+                MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE,
+                FlexMetricType.GAUGE,
+                FlexPriorityType.PRECISE);
+        monitor.register(
+                MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE,
+                FlexMetricType.GAUGE,
+                FlexPriorityType.PRECISE);
+        monitor.register(
+                MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS,
+                FlexMetricType.COUNTER,
+                FlexPriorityType.PRECISE);
+    }
+
+    @Scheduled(fixedRate = 2000)
+    private void reportExecutorMetrics() {
+        ThreadPoolExecutor executor = grpcExecutor;
+        if (executor == null) {
+            return;
         }
-        if (grpcServerEventLoopGroup != null) {
-            grpcServerEventLoopGroup.shutdownGracefully();
-        }
-        if (grpcExecutor != null) {
-            grpcExecutor.shutdown();
-            try {
-                grpcExecutor.awaitTermination(5, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                grpcExecutor.shutdownNow();
-                Thread.currentThread().interrupt();
-            }
-        }
+        monitor.report(
+                MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS, executor.getActiveCount());
+        monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE, executor.getQueue().size());
+        monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE, executor.getPoolSize());
+        monitor.report(
+                MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE, executor.getMaximumPoolSize());
+        monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 0.0);
     }
 
     /**

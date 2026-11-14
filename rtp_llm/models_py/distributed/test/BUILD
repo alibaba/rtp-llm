@@ -1,3 +1,15 @@
+py_test(
+    name = "deepep_group_test",
+    srcs = ["deepep_group_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/models_py/distributed:deepep_wrapper",
+    ],
+    timeout = "short",
+)
+
 py_test (
     name = "deepep_test",
     srcs = ["deepep_test.py"],
@@ -63,6 +75,27 @@ py_test(
     },
 )
 
+# Pure stdlib unit test; no testlib dep so it builds without torch/triton repos.
+py_test(
+    name = "rank_layout_test",
+    srcs = ["rank_layout_test.py"],
+    deps = [
+        "//rtp_llm/models_py/distributed:rank_layout",
+    ],
+    timeout = "short",
+)
+
+# PP-aware process group topology: CPU-only gloo, no GPU.
+py_test(
+    name = "pp_group_topology_test",
+    srcs = ["pp_group_topology_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = 'moderate',
+)
+
 py_test(
     name = "collective_torch_hipgraph_unit_test",
     srcs = ["collective_torch_hipgraph_unit_test.py"],
@@ -99,6 +132,16 @@ py_test(
 py_test(
     name = "symm_mem_unit_test",
     srcs = ["symm_mem_unit_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
+)
+
+py_test(
+    name = "all_reduce_unit_test",
+    srcs = ["all_reduce_unit_test.py"],
     deps = [
         "//rtp_llm:testlib",
         "//rtp_llm/models_py/distributed:collective_torch",
@@ -180,4 +223,35 @@ py_test(
         "gpu": "L20_CU13",
         "gpu_count": "4",
     },
+)
+
+py_test(
+    name = "canonical_p2p_integration_test",
+    srcs = ["canonical_p2p_integration_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    env = {"GPU_COUNT": "8"},
+    tags = ["manual", "open_skip", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "8"},
+)
+
+py_test(
+    name = "flashinfer_ipc_all_reduce_integration_test",
+    srcs = ["flashinfer_ipc_all_reduce_integration_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "2"},
+    env = {"GPU_COUNT": "2", "TEST_USING_DEVICE": "CUDA"},
+)
+
+py_test(
+    name = "collective_initialization_test",
+    srcs = ["collective_initialization_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
 )

@@ -32,37 +32,8 @@ import static org.mockito.Mockito.withSettings;
  * back to the mock; no real channel is ever built.
  */
 class MasterTargetRouterTest {
-
     private static final String TARGET_A = "127.0.0.1:18082";
     private static final String TARGET_B = "127.0.0.1:18085";
-
-    private static FlexlbServiceGrpc.FlexlbServiceBlockingStub stub() {
-        return mock(
-                FlexlbServiceGrpc.FlexlbServiceBlockingStub.class,
-                withSettings().defaultAnswer(org.mockito.Answers.RETURNS_SELF));
-    }
-
-    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request() {
-        return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(42).build();
-    }
-
-    private static FlexlbScheduleProtocol.FlexlbScheduleResponsePB response(int code) {
-        return FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
-                .setCode(code)
-                .setSuccess(code == 200)
-                .setEnqueuedByMaster(true)
-                .build();
-    }
-
-    private static MasterTargetRouter router(
-            FlexlbServiceGrpc.FlexlbServiceBlockingStub stubA,
-            FlexlbServiceGrpc.FlexlbServiceBlockingStub stubB) {
-        return new MasterTargetRouter(
-                List.of(TARGET_A, TARGET_B),
-                List.of(
-                        new FlexlbServiceGrpc.FlexlbServiceBlockingStub[] {stubA},
-                        new FlexlbServiceGrpc.FlexlbServiceBlockingStub[] {stubB}));
-    }
 
     @Test
     void stickyTargetServesRequestWithoutFailover() throws Exception {
@@ -345,5 +316,33 @@ class MasterTargetRouterTest {
         assertFalse(node.get("failover").asBoolean());
         assertEquals("none", node.get("error_kind").asText());
         assertEquals("master", node.get("route_path").asText());
+    }
+
+    private static FlexlbServiceGrpc.FlexlbServiceBlockingStub stub() {
+        return mock(
+                FlexlbServiceGrpc.FlexlbServiceBlockingStub.class,
+                withSettings().defaultAnswer(org.mockito.Answers.RETURNS_SELF));
+    }
+
+    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request() {
+        return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(42).build();
+    }
+
+    private static FlexlbScheduleProtocol.FlexlbScheduleResponsePB response(int code) {
+        return FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                .setCode(code)
+                .setSuccess(code == 200)
+                .setEnqueuedByMaster(true)
+                .build();
+    }
+
+    private static MasterTargetRouter router(
+            FlexlbServiceGrpc.FlexlbServiceBlockingStub stubA,
+            FlexlbServiceGrpc.FlexlbServiceBlockingStub stubB) {
+        return new MasterTargetRouter(
+                List.of(TARGET_A, TARGET_B),
+                List.of(
+                        new FlexlbServiceGrpc.FlexlbServiceBlockingStub[] {stubA},
+                        new FlexlbServiceGrpc.FlexlbServiceBlockingStub[] {stubB}));
     }
 }

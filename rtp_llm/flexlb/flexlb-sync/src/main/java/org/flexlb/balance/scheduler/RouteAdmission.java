@@ -22,17 +22,18 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BooleanSupplier;
 
-/** Exact selected route and its provisional resources, shared by both scheduling modes. */
+/**
+ * Exact selected route and its provisional resources, shared by both scheduling modes.
+ *
+ * <p>Preparation retains exact selected generations and provisional route resources. A successful
+ * commit transfers the route to request processing; closing an uncommitted admission releases its
+ * provisional resources instead of closing shared endpoints.
+ */
 public final class RouteAdmission implements AutoCloseable {
-    private enum Ownership {
-        PROVISIONAL,
-        COMMITTED,
-        CLOSED
-    }
-
     private final String requestId;
     private final Response response;
     private final Selection selection;
+
     private DecodeBinding decodeBinding;
     private WorkerEndpoint blockedEndpoint;
     private Ownership ownership = Ownership.PROVISIONAL;
@@ -45,6 +46,130 @@ public final class RouteAdmission implements AutoCloseable {
         this.decodeBinding = Objects.requireNonNull(decodeRequest, "decodeRequest");
         if (!Objects.equals(decodeRequest.requestId(), requestId)) {
             throw new IllegalArgumentException("Decode admission belongs to another request");
+        }
+    }
+
+    public PlacementResult<ScheduledRequest, PlacementKey> tryEnqueue(
+            BalanceContext context, CompletableFuture<Response> future, RequestRegistry lifecycle) {
+        requireProvisional();
+        blockedEndpoint = null;
+        if (!reserveDecode()) {
+            blockedEndpoint = decodeEndpoint();
+            return PlacementResult.blocked(decodePlacementKey());
+        }
+        ScheduledRequest item = createScheduledRequest(context, future, System.currentTimeMillis());
+        context.setRouteSubmittedNanos(System.nanoTime());
+        PlacementResult.Status result =
+                lifecycle.commitRoute(
+                        item, () -> prefillEndpoint().offerPinned(prefillPin(), item));
+        return switch (result) {
+            case SUCCESS -> {
+                markCommitted();
+                yield PlacementResult.success(item);
+            }
+            case BLOCKED -> {
+                blockedEndpoint = prefillEndpoint();
+                yield PlacementResult.blocked(
+                        PlacementKey.exact(
+                                prefillStatus().getRole(),
+                                prefillStatus().getGroup(),
+                                prefillEndpoint().ipPort()));
+            }
+            case CLOSED -> PlacementResult.closed();
+            case REJECTED ->
+                    throw new IllegalStateException("route commit cannot reject with a response");
+        };
+    }
+
+    public DecodeEndpoint decodeEndpoint() {
+        return decodeBinding.endpoint();
+    }
+
+    public ScheduledRequest createScheduledRequest(
+            BalanceContext context, CompletableFuture<Response> future, long enqueuedAtMs) {
+        requireProvisional();
+        if (!Objects.equals(context.getRequestId(), requestId)) {
+            throw new IllegalArgumentException("admission cannot build another request");
+        }
+        return new ScheduledRequest(
+                context,
+                future,
+                response,
+                ServerStatus.copyOf(prefillStatus()),
+                ServerStatus.copyOf(decodeStatus()),
+                prefillEndpoint(),
+                decodeEndpoint(),
+                decodeBinding.reservation(),
+                enqueuedAtMs,
+                decodeBinding);
+    }
+
+    public PrefillEndpoint prefillEndpoint() {
+        return selection.prefillEndpoint();
+    }
+
+    public boolean commitQueuedRequest(RequestRegistry lifecycle, ScheduledRequest item) {
+        requireProvisional();
+        if (lifecycle.commitRoute(item, () -> prefillEndpoint().offerPinned(prefillPin(), item))
+                != PlacementResult.Status.SUCCESS) {
+            return false;
+        }
+        markCommitted();
+        return true;
+    }
+
+    public DecodeBinding decodeBinding() {
+        return decodeBinding;
+    }
+
+    /** Attach client-executed Decode cancellation instructions before publication. */
+    public void setDecodePreemptRequestIds(List<String> requestIds) {
+        requireProvisional();
+        decodeStatus().setPreemptRequestIds(List.copyOf(requestIds));
+    }
+
+    public boolean adoptDecodeReservation(
+            DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
+        requireProvisional();
+        if (endpoint == null
+                || endpoint != decodeEndpoint()
+                || reservation == null
+                || !Objects.equals(reservation.requestId(), requestId)
+                || decodeBinding.reservation() != null) {
+            if (endpoint != null && reservation != null) {
+                endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+            }
+            return false;
+        }
+        try {
+            endpoint.requirePinnedGeneration(decodePin());
+            if (!endpoint.markQueued(decodePin(), reservation)) {
+                endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+                return false;
+            }
+            decodeBinding = decodeBinding.bind(decodeStatus(), decodeEndpoint(), reservation);
+            return true;
+        } catch (RuntimeException | Error failure) {
+            endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+            throw failure;
+        }
+    }
+
+    @Override
+    public void close() {
+        if (ownership != Ownership.PROVISIONAL) {
+            return;
+        }
+        ownership = Ownership.CLOSED;
+        try {
+            if (decodeBinding.reservation() != null) {
+                decodeEndpoint()
+                        .release(
+                                decodeBinding.reservation(),
+                                DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+            }
+        } finally {
+            closePins();
         }
     }
 
@@ -148,183 +273,8 @@ public final class RouteAdmission implements AutoCloseable {
                 && decodePlacementVersion() != decodeEndpoint().placementVersion();
     }
 
-    public PlacementResult<ScheduledRequest, PlacementKey> tryEnqueue(
-            BalanceContext context, CompletableFuture<Response> future, RequestRegistry lifecycle) {
-        requireProvisional();
-        blockedEndpoint = null;
-        if (!reserveDecode()) {
-            blockedEndpoint = decodeEndpoint();
-            return PlacementResult.blocked(decodePlacementKey());
-        }
-        ScheduledRequest item = createScheduledRequest(context, future, System.currentTimeMillis());
-        context.setRouteSubmittedNanos(System.nanoTime());
-        PlacementResult.Status result =
-                lifecycle.commitRoute(
-                        item, () -> prefillEndpoint().offerPinned(prefillPin(), item));
-        return switch (result) {
-            case SUCCESS -> {
-                markCommitted();
-                yield PlacementResult.success(item);
-            }
-            case BLOCKED -> {
-                blockedEndpoint = prefillEndpoint();
-                yield PlacementResult.blocked(
-                        PlacementKey.exact(
-                                prefillStatus().getRole(),
-                                prefillStatus().getGroup(),
-                                prefillEndpoint().ipPort()));
-            }
-            case CLOSED -> PlacementResult.closed();
-            case REJECTED ->
-                    throw new IllegalStateException("route commit cannot reject with a response");
-        };
-    }
-
-    public boolean commitQueuedRequest(RequestRegistry lifecycle, ScheduledRequest item) {
-        requireProvisional();
-        if (lifecycle.commitRoute(item, () -> prefillEndpoint().offerPinned(prefillPin(), item))
-                != PlacementResult.Status.SUCCESS) {
-            return false;
-        }
-        markCommitted();
-        return true;
-    }
-
     Response response() {
         return response;
-    }
-
-    public PrefillEndpoint prefillEndpoint() {
-        return selection.prefillEndpoint();
-    }
-
-    public DecodeEndpoint decodeEndpoint() {
-        return decodeBinding.endpoint();
-    }
-
-    private WorkerEndpoint.GenerationPin prefillPin() {
-        return selection.prefillPin();
-    }
-
-    private WorkerEndpoint.GenerationPin decodePin() {
-        return selection.decodePin();
-    }
-
-    private ServerStatus prefillStatus() {
-        return selection.prefillStatus();
-    }
-
-    private ServerStatus decodeStatus() {
-        return decodeBinding.status();
-    }
-
-    private long prefillPlacementVersion() {
-        return selection.prefillPlacementVersion();
-    }
-
-    private long decodePlacementVersion() {
-        return selection.decodePlacementVersion();
-    }
-
-    public DecodeBinding decodeBinding() {
-        return decodeBinding;
-    }
-
-    /** Attach client-executed Decode cancellation instructions before publication. */
-    public void setDecodePreemptRequestIds(List<String> requestIds) {
-        requireProvisional();
-        decodeStatus().setPreemptRequestIds(List.copyOf(requestIds));
-    }
-
-    boolean reserveDecode() {
-        requireProvisional();
-        if (decodeEndpoint() == null || decodeBinding.reservation() != null) {
-            return true;
-        }
-        DecodeEndpoint.ReservationHandle reservation =
-                switch (decodeBinding.mode()) {
-                    case IMMEDIATE ->
-                            decodeEndpoint()
-                                    .reserve(
-                                            decodePin(),
-                                            requestId,
-                                            decodeBinding.inputKvTokens(),
-                                            decodeBinding.inputAndMaxOutputKvTokens(),
-                                            decodeBinding.priority());
-                    case WAIT_AT_PLACEMENT, PREEMPT_AT_PLACEMENT ->
-                            decodeEndpoint()
-                                    .reserve(
-                                            decodePin(),
-                                            requestId,
-                                            decodeBinding.inputKvTokens(),
-                                            decodeBinding.inputAndMaxOutputKvTokens(),
-                                            decodeBinding.priority(),
-                                            decodeBinding.capacity());
-                };
-        if (reservation == null) {
-            return false;
-        }
-        try {
-            decodeBinding = decodeBinding.bind(decodeStatus(), decodeEndpoint(), reservation);
-            return true;
-        } catch (RuntimeException | Error failure) {
-            decodeEndpoint().release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
-            throw failure;
-        }
-    }
-
-    public boolean adoptDecodeReservation(
-            DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
-        requireProvisional();
-        if (endpoint == null
-                || endpoint != decodeEndpoint()
-                || reservation == null
-                || !Objects.equals(reservation.requestId(), requestId)
-                || decodeBinding.reservation() != null) {
-            if (endpoint != null && reservation != null) {
-                endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
-            }
-            return false;
-        }
-        try {
-            endpoint.requirePinnedGeneration(decodePin());
-            if (!endpoint.markQueued(decodePin(), reservation)) {
-                endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
-                return false;
-            }
-            decodeBinding = decodeBinding.bind(decodeStatus(), decodeEndpoint(), reservation);
-            return true;
-        } catch (RuntimeException | Error failure) {
-            endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
-            throw failure;
-        }
-    }
-
-    public ScheduledRequest createScheduledRequest(
-            BalanceContext context, CompletableFuture<Response> future, long enqueuedAtMs) {
-        requireProvisional();
-        if (!Objects.equals(context.getRequestId(), requestId)) {
-            throw new IllegalArgumentException("admission cannot build another request");
-        }
-        return new ScheduledRequest(
-                context,
-                future,
-                response,
-                ServerStatus.copyOf(prefillStatus()),
-                ServerStatus.copyOf(decodeStatus()),
-                prefillEndpoint(),
-                decodeEndpoint(),
-                decodeBinding.reservation(),
-                enqueuedAtMs,
-                decodeBinding);
-    }
-
-    /** The caller has registered the same canonical request before selecting this route. */
-    record RouteDelivery(DeliveryClaim claim, WorkSnapshot precedingWork, long unstartedWorkMs) {
-        RouteDelivery {
-            Objects.requireNonNull(claim, "claim");
-            Objects.requireNonNull(precedingWork, "precedingWork");
-        }
     }
 
     PlacementResult<RouteDelivery, PlacementKey> tryCommitDirectRoute(
@@ -365,6 +315,55 @@ public final class RouteAdmission implements AutoCloseable {
         }
     }
 
+    boolean reserveDecode() {
+        requireProvisional();
+        if (decodeEndpoint() == null || decodeBinding.reservation() != null) {
+            return true;
+        }
+        DecodeEndpoint.ReservationHandle reservation =
+                switch (decodeBinding.mode()) {
+                    case IMMEDIATE ->
+                            decodeEndpoint()
+                                    .reserve(
+                                            decodePin(),
+                                            requestId,
+                                            decodeBinding.inputKvTokens(),
+                                            decodeBinding.inputAndMaxOutputKvTokens(),
+                                            decodeBinding.priority());
+                    case WAIT_AT_PLACEMENT, PREEMPT_AT_PLACEMENT ->
+                            decodeEndpoint()
+                                    .reserve(
+                                            decodePin(),
+                                            requestId,
+                                            decodeBinding.inputKvTokens(),
+                                            decodeBinding.inputAndMaxOutputKvTokens(),
+                                            decodeBinding.priority(),
+                                            decodeBinding.capacity());
+                };
+        if (reservation == null) {
+            return false;
+        }
+        try {
+            decodeBinding = decodeBinding.bind(decodeStatus(), decodeEndpoint(), reservation);
+            return true;
+        } catch (RuntimeException | Error failure) {
+            decodeEndpoint().release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+            throw failure;
+        }
+    }
+
+    private ServerStatus prefillStatus() {
+        return selection.prefillStatus();
+    }
+
+    private long prefillPlacementVersion() {
+        return selection.prefillPlacementVersion();
+    }
+
+    private long decodePlacementVersion() {
+        return selection.decodePlacementVersion();
+    }
+
     private PlacementResult<RouteDelivery, PlacementKey> commitImmediateRoute(
             RequestRegistry lifecycle,
             ScheduledRequest item,
@@ -403,12 +402,59 @@ public final class RouteAdmission implements AutoCloseable {
         }
     }
 
+    private void markCommitted() {
+        requireProvisional();
+        ownership = Ownership.COMMITTED;
+        closePins();
+    }
+
+    private void requireProvisional() {
+        if (ownership != Ownership.PROVISIONAL) {
+            throw new IllegalStateException("route admission already resolved");
+        }
+    }
+
+    private void closePins() {
+        try (var prefill = prefillPin();
+                var decode = decodePin()) {}
+    }
+
+    private WorkerEndpoint.GenerationPin prefillPin() {
+        return selection.prefillPin();
+    }
+
+    private WorkerEndpoint.GenerationPin decodePin() {
+        return selection.decodePin();
+    }
+
     private PlacementKey decodePlacementKey() {
         return PlacementKey.exact(
                 decodeStatus().getRole(), decodeStatus().getGroup(), decodeEndpoint().ipPort());
     }
 
-    /** Holds acquisition output without mixing a failed publication with capacity pressure. */
+    private ServerStatus decodeStatus() {
+        return decodeBinding.status();
+    }
+
+    private enum Ownership {
+        PROVISIONAL,
+        COMMITTED,
+        CLOSED
+    }
+
+    /**
+     * The caller has registered the same canonical request before selecting this route.
+     */
+    record RouteDelivery(DeliveryClaim claim, WorkSnapshot precedingWork, long unstartedWorkMs) {
+        RouteDelivery {
+            Objects.requireNonNull(claim, "claim");
+            Objects.requireNonNull(precedingWork, "precedingWork");
+        }
+    }
+
+    /**
+     * Holds acquisition output without mixing a failed publication with capacity pressure.
+     */
     private final class PrefillReservationAttempt implements BooleanSupplier {
         private final ScheduledRequest item;
         private PrefillState.ReservationResult<PrefillState.RouteReservation> result;
@@ -442,41 +488,6 @@ public final class RouteAdmission implements AutoCloseable {
                         throw new IllegalStateException("successful admission cannot be rejected");
             };
         }
-    }
-
-    private void markCommitted() {
-        requireProvisional();
-        ownership = Ownership.COMMITTED;
-        closePins();
-    }
-
-    private void requireProvisional() {
-        if (ownership != Ownership.PROVISIONAL) {
-            throw new IllegalStateException("route admission already resolved");
-        }
-    }
-
-    @Override
-    public void close() {
-        if (ownership != Ownership.PROVISIONAL) {
-            return;
-        }
-        ownership = Ownership.CLOSED;
-        try {
-            if (decodeBinding.reservation() != null) {
-                decodeEndpoint()
-                        .release(
-                                decodeBinding.reservation(),
-                                DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
-            }
-        } finally {
-            closePins();
-        }
-    }
-
-    private void closePins() {
-        try (var prefill = prefillPin();
-                var decode = decodePin()) {}
     }
 
     private record Selection(

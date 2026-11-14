@@ -77,7 +77,9 @@ public record CapacityBoundary(
         void removeListener(Runnable listener);
     }
 
-    /** Either an accepted capability/value or one fully materialized boundary. */
+    /**
+     * Either an accepted capability/value or one fully materialized boundary.
+     */
     public record Attempt<T>(T value, CapacityBoundary boundary) {
 
         public Attempt {

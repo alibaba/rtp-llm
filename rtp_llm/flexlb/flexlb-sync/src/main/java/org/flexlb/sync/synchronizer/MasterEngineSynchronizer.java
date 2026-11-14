@@ -28,10 +28,13 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_IN
 
 /**
  * Master engine status synchronizer
+ *
+ * <p>Periodic discovery and polling use the configured scheduler and separate status/application
+ * executors. Per-generation poll leases prevent duplicate work; destruction shuts down the
+ * scheduler and both executors rather than creating a second polling lifecycle.
  */
 @Component
 public final class MasterEngineSynchronizer {
-
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final String modelName;
@@ -43,10 +46,14 @@ public final class MasterEngineSynchronizer {
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService cacheAwareService;
     private final DynamicCacheIntervalService cacheIntervalService;
+
     private final long syncRequestTimeoutMs;
+
     private final LongAdder syncCount = new LongAdder();
     private final Long syncEngineStatusInterval;
+
     private final long statusStaleAfterUs;
+
     private final ScheduledThreadPoolExecutor scheduler;
     private final ThreadPoolExecutor statusCheckExecutor;
     private final ThreadPoolExecutor engineSyncExecutor;
@@ -89,28 +96,6 @@ public final class MasterEngineSynchronizer {
         this.scheduler.scheduleAtFixedRate(
                 this::syncEngineStatus, 0, syncEngineStatusInterval, TimeUnit.MILLISECONDS);
         this.scheduler.scheduleAtFixedRate(this::reportExecutorMetrics, 2, 2, TimeUnit.SECONDS);
-    }
-
-    private static ThreadPoolExecutor executor(int threads, String name) {
-        return new ThreadPoolExecutor(
-                threads,
-                threads,
-                60L,
-                TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(15_000),
-                new NamedThreadFactory(name),
-                new ThreadPoolExecutor.CallerRunsPolicy());
-    }
-
-    private void reportExecutorMetrics() {
-        try {
-            engineHealthReporter.reportThreadPoolInfo(
-                    ENGINE_BALANCING_THREAD_POOL_INFO, "engineSyncExecutor", engineSyncExecutor);
-            engineHealthReporter.reportThreadPoolInfo(
-                    ENGINE_BALANCING_THREAD_POOL_INFO, "statusCheckExecutor", statusCheckExecutor);
-        } catch (Throwable failure) {
-            logger.warn("Failed to report worker sync executor metrics", failure);
-        }
     }
 
     public void syncEngineStatus() {
@@ -156,5 +141,27 @@ public final class MasterEngineSynchronizer {
         scheduler.shutdown();
         engineSyncExecutor.shutdown();
         statusCheckExecutor.shutdown();
+    }
+
+    private static ThreadPoolExecutor executor(int threads, String name) {
+        return new ThreadPoolExecutor(
+                threads,
+                threads,
+                60L,
+                TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(15_000),
+                new NamedThreadFactory(name),
+                new ThreadPoolExecutor.CallerRunsPolicy());
+    }
+
+    private void reportExecutorMetrics() {
+        try {
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO, "engineSyncExecutor", engineSyncExecutor);
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO, "statusCheckExecutor", statusCheckExecutor);
+        } catch (Throwable failure) {
+            logger.warn("Failed to report worker sync executor metrics", failure);
+        }
     }
 }

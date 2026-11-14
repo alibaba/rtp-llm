@@ -71,12 +71,17 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks cache-hit prediction feedback through actual selection and worker polling, including
+ * delayed comparisons.
+ */
 class CacheHitFeedbackFlowTest {
     private final ListAppender<ILoggingEvent> pv = new ListAppender<>();
     private final FlexMonitor monitor = mock(FlexMonitor.class);
     private final LocalStandbyCacheMatchProvider standby =
             mock(LocalStandbyCacheMatchProvider.class);
     private final CacheMatchFailoverManager failover = mock(CacheMatchFailoverManager.class);
+
     private EndpointRegistry registry;
     private WorkerDirectory directory;
     private WorkerStatus worker;
@@ -419,24 +424,6 @@ class CacheHitFeedbackFlowTest {
         return task.build();
     }
 
-    private EngineRpcService.WorkerStatusPB response(
-            EngineRpcService.TaskInfoPB task, boolean finished, long version) {
-        var result =
-                EngineRpcService.WorkerStatusPB.newBuilder()
-                        .setRole(RoleType.PREFILL.getCode())
-                        .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
-                        .setAlive(true)
-                        .setStatusVersion(version)
-                        .setAvailableKvCache(1_000_000)
-                        .setTotalKvCache(1_000_000);
-        if (finished) {
-            result.addFinishedTaskList(task);
-        } else {
-            result.addRunningTaskInfo(task);
-        }
-        return result.build();
-    }
-
     private void poll(
             WorkerStatus status, EngineRpcService.TaskInfoPB task, boolean finished, long version) {
         EngineGrpcService grpc = mock(EngineGrpcService.class);
@@ -459,6 +446,24 @@ class CacheHitFeedbackFlowTest {
                         cache,
                         Runnable::run)
                 .run();
+    }
+
+    private EngineRpcService.WorkerStatusPB response(
+            EngineRpcService.TaskInfoPB task, boolean finished, long version) {
+        var result =
+                EngineRpcService.WorkerStatusPB.newBuilder()
+                        .setRole(RoleType.PREFILL.getCode())
+                        .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                        .setAlive(true)
+                        .setStatusVersion(version)
+                        .setAvailableKvCache(1_000_000)
+                        .setTotalKvCache(1_000_000);
+        if (finished) {
+            result.addFinishedTaskList(task);
+        } else {
+            result.addRunningTaskInfo(task);
+        }
+        return result.build();
     }
 
     private List<JsonNode> events(String event) throws Exception {

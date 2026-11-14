@@ -34,9 +34,7 @@ import java.util.function.Consumer;
 @Component
 @DependsOn({"environmentConfigSource", "nacosConfigSource", "uniConfigConfigSource"})
 public class ConfigService {
-
     public static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";
-
     private static final List<ConfigSource> CONFIG_SOURCES = new ArrayList<>();
 
     private final AtomicReference<FlexlbConfig> currentFlexlbConfig;
@@ -44,6 +42,7 @@ public class ConfigService {
     private final List<Consumer<FlexlbConfig>> updateListeners = new ArrayList<>();
     private final StartupDecisionTopology startupDecisionTopology;
     private final Object updateLock = new Object();
+
     private int configSchemaVersion = ConfigSchemaVersion.V0_COMPATIBILITY;
 
     /**
@@ -65,32 +64,6 @@ public class ConfigService {
         this.configSchemaVersion = config.getSchemaVersion();
     }
 
-    ConfigService(Map<String, String> environment) {
-        this(requireEnvironmentDocument(environment));
-    }
-
-    private static String requireEnvironmentDocument(Map<String, String> environment) {
-        List<String> removed =
-                environment.keySet().stream()
-                        .filter(
-                                name ->
-                                        name.equals("CACHE_STATUS_MAX_INTERVAL_MS")
-                                                || name.equals("DEFAULT_SCHEDULE_MODE")
-                                                || name.equals("FLEXLB_MONITOR_MODE")
-                                                || name.equals("FLEXLB_MONITOR_METRIC_WHITELIST"))
-                        .sorted()
-                        .toList();
-        if (!removed.isEmpty()) {
-            throw new ConfigValidationException(
-                    "environment",
-                    "Removed legacy FlexLB environment variables are no longer read: "
-                            + String.join(", ", removed)
-                            + ". Migrate scheduling behavior into FLEXLB_CONFIG with schemaVersion 3."
-                            + " Configure metric exposure with --flexlb.monitor.metric-whitelist.");
-        }
-        return environment.get(FLEXLB_CONFIG_ENV);
-    }
-
     @Autowired
     public ConfigService(List<ConfigDocumentParser> parsers) {
         if (parsers.isEmpty()) {
@@ -106,6 +79,10 @@ public class ConfigService {
         logEffectiveConfig(currentFlexlbConfig.get(), configSchemaVersion);
     }
 
+    ConfigService(Map<String, String> environment) {
+        this(requireEnvironmentDocument(environment));
+    }
+
     public static synchronized void register(ConfigSource source) {
         if (!CONFIG_SOURCES.contains(source)) {
             CONFIG_SOURCES.add(source);
@@ -113,28 +90,8 @@ public class ConfigService {
         }
     }
 
-    public static FlexlbConfig parse(String document) {
-        try {
-            JsonNode tree = JsonUtils.readStrictTree(document);
-            JsonUtils.rejectJsonNull(tree, "$", FLEXLB_CONFIG_ENV);
-            FlexlbConfigValidator.validateDocumentShape(tree);
-            FlexlbConfig config = JsonUtils.strictTreeToValue(tree, FlexlbConfig.class);
-            FlexlbConfigValidator.validate(config);
-            return config;
-        } catch (ConfigValidationException error) {
-            throw error;
-        } catch (Exception error) {
-            throw new ConfigValidationException(
-                    FLEXLB_CONFIG_ENV, "Invalid FLEXLB_CONFIG JSON: " + error.getMessage(), error);
-        }
-    }
-
     public FlexlbConfig loadBalanceConfig() {
         return currentFlexlbConfig.get();
-    }
-
-    public ServiceRoute modelServiceConfig() {
-        return currentModelServiceConfig.get();
     }
 
     /**
@@ -142,6 +99,10 @@ public class ConfigService {
      */
     public ServiceRoute loadModelServiceConfig() {
         return modelServiceConfig();
+    }
+
+    public ServiceRoute modelServiceConfig() {
+        return currentModelServiceConfig.get();
     }
 
     public void addUpdateListener(Consumer<FlexlbConfig> listener) {
@@ -173,6 +134,49 @@ public class ConfigService {
         }
     }
 
+    public static FlexlbConfig parse(String document) {
+        try {
+            JsonNode tree = JsonUtils.readStrictTree(document);
+            JsonUtils.rejectJsonNull(tree, "$", FLEXLB_CONFIG_ENV);
+            FlexlbConfigValidator.validateDocumentShape(tree);
+            FlexlbConfig config = JsonUtils.strictTreeToValue(tree, FlexlbConfig.class);
+            FlexlbConfigValidator.validate(config);
+            return config;
+        } catch (ConfigValidationException error) {
+            throw error;
+        } catch (Exception error) {
+            throw new ConfigValidationException(
+                    FLEXLB_CONFIG_ENV, "Invalid FLEXLB_CONFIG JSON: " + error.getMessage(), error);
+        }
+    }
+
+    @PreDestroy
+    public void close() {
+        closeConfigSources();
+    }
+
+    private static String requireEnvironmentDocument(Map<String, String> environment) {
+        List<String> removed =
+                environment.keySet().stream()
+                        .filter(
+                                name ->
+                                        name.equals("CACHE_STATUS_MAX_INTERVAL_MS")
+                                                || name.equals("DEFAULT_SCHEDULE_MODE")
+                                                || name.equals("FLEXLB_MONITOR_MODE")
+                                                || name.equals("FLEXLB_MONITOR_METRIC_WHITELIST"))
+                        .sorted()
+                        .toList();
+        if (!removed.isEmpty()) {
+            throw new ConfigValidationException(
+                    "environment",
+                    "Removed legacy FlexLB environment variables are no longer read: "
+                            + String.join(", ", removed)
+                            + ". Migrate scheduling behavior into FLEXLB_CONFIG with schemaVersion 3."
+                            + " Configure metric exposure with --flexlb.monitor.metric-whitelist.");
+        }
+        return environment.get(FLEXLB_CONFIG_ENV);
+    }
+
     private void initializeConfigSources() {
         try {
             synchronized (updateLock) {
@@ -193,29 +197,6 @@ public class ConfigService {
             closeConfigSources();
             throw error;
         }
-    }
-
-    private void initializeConfigSource(ConfigSource source, NormalizedConfig normalized) {
-        try {
-            FlexlbConfig previous = currentFlexlbConfig.get();
-            FlexlbConfig updated =
-                    FlexlbConfigMerger.merge(previous, normalized.flexlbConfig(), source.name());
-            currentFlexlbConfig.set(updated);
-            if (updated != previous) {
-                configSchemaVersion = normalized.sourceSchemaVersion();
-            }
-        } catch (Exception error) {
-            throw new IllegalStateException(
-                    "Failed to initialize FlexLB configuration from " + source.name(), error);
-        }
-        String modelServiceDocument = normalized.modelServiceConfig();
-        if (currentModelServiceConfig.get() == null
-                && modelServiceDocument != null
-                && !modelServiceDocument.isBlank()) {
-            currentModelServiceConfig.set(ModelServiceConfigParser.parse(modelServiceDocument));
-            log.info("Loaded MODEL_SERVICE_CONFIG from {} source", source.name());
-        }
-        log.info("Loaded FlexLB configuration from {} source", source.name());
     }
 
     private void receiveConfigUpdate(ConfigSource source, String content) {
@@ -339,23 +320,6 @@ public class ConfigService {
         return true;
     }
 
-    private record StartupDecisionTopology(
-            SchedulerConfig.Type schedulerType,
-            DispatcherConfig.Type dispatcherType,
-            DecisionPolicyConfig.Type decisionType) {
-
-        /**
-         * Captures the scheduling modes selected when the application starts.
-         */
-        private static StartupDecisionTopology from(FlexlbConfig config) {
-            SchedulerConfig scheduler = config.getScheduler();
-            return new StartupDecisionTopology(
-                    scheduler.getType(),
-                    config.getDispatcher().getType(),
-                    scheduler.getDecision().getType());
-        }
-    }
-
     private void notifyUpdateListeners(FlexlbConfig config) {
         for (Consumer<FlexlbConfig> listener : updateListeners) {
             try {
@@ -389,9 +353,27 @@ public class ConfigService {
                         : config.getRouter().getGroupSelector().getRules().size());
     }
 
-    @PreDestroy
-    public void close() {
-        closeConfigSources();
+    private void initializeConfigSource(ConfigSource source, NormalizedConfig normalized) {
+        try {
+            FlexlbConfig previous = currentFlexlbConfig.get();
+            FlexlbConfig updated =
+                    FlexlbConfigMerger.merge(previous, normalized.flexlbConfig(), source.name());
+            currentFlexlbConfig.set(updated);
+            if (updated != previous) {
+                configSchemaVersion = normalized.sourceSchemaVersion();
+            }
+        } catch (Exception error) {
+            throw new IllegalStateException(
+                    "Failed to initialize FlexLB configuration from " + source.name(), error);
+        }
+        String modelServiceDocument = normalized.modelServiceConfig();
+        if (currentModelServiceConfig.get() == null
+                && modelServiceDocument != null
+                && !modelServiceDocument.isBlank()) {
+            currentModelServiceConfig.set(ModelServiceConfigParser.parse(modelServiceDocument));
+            log.info("Loaded MODEL_SERVICE_CONFIG from {} source", source.name());
+        }
+        log.info("Loaded FlexLB configuration from {} source", source.name());
     }
 
     private static synchronized void closeConfigSources() {
@@ -403,5 +385,26 @@ public class ConfigService {
             }
         }
         CONFIG_SOURCES.clear();
+    }
+
+    /**
+     * Freezes the scheduling topology that must remain consistent with the startup-created
+     * components.
+     */
+    private record StartupDecisionTopology(
+            SchedulerConfig.Type schedulerType,
+            DispatcherConfig.Type dispatcherType,
+            DecisionPolicyConfig.Type decisionType) {
+
+        /**
+         * Captures the scheduling modes selected when the application starts.
+         */
+        private static StartupDecisionTopology from(FlexlbConfig config) {
+            SchedulerConfig scheduler = config.getScheduler();
+            return new StartupDecisionTopology(
+                    scheduler.getType(),
+                    config.getDispatcher().getType(),
+                    scheduler.getDecision().getType());
+        }
     }
 }

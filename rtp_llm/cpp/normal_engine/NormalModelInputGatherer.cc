@@ -50,7 +50,7 @@ size_t blockTableWidth(const StreamGroups& stream_groups, const std::vector<std:
         for (int batch = 0; batch < stream->currentBatchSize(); ++batch) {
             for (const auto& tag : tags) {
                 const auto& ids = resource.cacheResource(batch).blockIds(tag);
-                width = std::max(width, ids.blocksNum() * (kernel ? ids.kernelBlocksPerKvBlock() : 1));
+                width           = std::max(width, ids.blocksNum() * (kernel ? ids.kernelBlocksPerKvBlock() : 1));
             }
         }
     };
@@ -421,11 +421,10 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     if (config_.has_engram) {
         model_input.engram_token_windows = torch::full({(int64_t)current_tokens_size, 4}, -1, pinned_i32);
     }
-    model_input.input_lengths    = torch::empty({(int64_t)total_batch_size}, pinned_i32);
-    model_input.sequence_lengths = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
-    model_input.prefix_lengths   = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
-    model_input.cache_store_publish_start_tokens =
-        torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+    model_input.input_lengths                    = torch::empty({(int64_t)total_batch_size}, pinned_i32);
+    model_input.sequence_lengths                 = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
+    model_input.prefix_lengths                   = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+    model_input.cache_store_publish_start_tokens = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
     if (needs_custom_output_indexes) {
         model_input.custom_output_indexes = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
     }
@@ -588,6 +587,13 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                 }
                 normal_sequence_lengths_gpu.push_back((state.next_seq_len_gpu - 1).to(torch::kInt32).reshape({1}));
                 ctx.input_lengths[ctx.batch_idx] = stream->inputLength();
+                if (model_input.record_lengths) {
+                    // A missing CPU mirror invalidates recording only. Live seqLength()
+                    // can lag async bookkeeping, so do not use it as a fallback.
+                    model_input.record_lengths->q_tokens[ctx.batch_idx] = 1;
+                    model_input.record_lengths->kv_tokens_before[ctx.batch_idx] =
+                        state.next_real_seq_len > 0 ? state.next_real_seq_len - 1 : -1;
+                }
             } else {
                 auto currentTokens = stream->currentExecuteTokens(i);
                 if (currentTokens[0] >= ctx.input_vocab_size) {
@@ -604,6 +610,10 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                                            stream->seqLength() - 1,
                                            1,
                                            model_input.engram_token_windows.data_ptr<int32_t>() + ctx.batch_idx * 4);
+                }
+                if (model_input.record_lengths) {
+                    model_input.record_lengths->q_tokens[ctx.batch_idx]         = 1;
+                    model_input.record_lengths->kv_tokens_before[ctx.batch_idx] = ctx.sequence_lengths[ctx.batch_idx];
                 }
                 if (ctx.need_cal_position_id) {
                     stream->generateNextPositionId(ctx.combo_position_ids
@@ -717,11 +727,16 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                 stream->cacheStorePublishStartToken();
             gatherMultimodalInputsForContextBatch(
                 stream, ctx, gathered_mm_features, gathered_mm_extra_input, host_holder);
+            if (model_input.record_lengths) {
+                model_input.record_lengths->q_tokens[ctx.batch_idx] = ctx.input_lengths[ctx.batch_idx];
+                model_input.record_lengths->kv_tokens_before[ctx.batch_idx] =
+                    ctx.prefix_lengths_host[prefill_batch_idx];
+            }
 
             if (ctx.need_cal_position_id) {
                 auto context_pos_ids = stream->generateContextPositionIds();
-                int begin_off = stream->prefixLength() * config_.position_id_len_factor;
-                int copy_len  = stream->contextLength() * config_.position_id_len_factor;
+                int  begin_off       = stream->prefixLength() * config_.position_id_len_factor;
+                int  copy_len        = stream->contextLength() * config_.position_id_len_factor;
                 memcpy(ctx.combo_position_ids + ctx.token_idx * config_.position_id_len_factor,
                        context_pos_ids.data_ptr<int>() + begin_off,
                        copy_len * sizeof(int));
@@ -873,7 +888,8 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
 }
 
 absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGroups& stream_groups,
-                                                                TensorHolder&       host_holder) const {
+                                                                TensorHolder&       host_holder,
+                                                                bool                record_lengths) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d",
                       stream_groups.contextStreams().size(),
@@ -922,6 +938,11 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     auto model_input                  = allocateModelInputBuffers(stream_groups);
     model_input.skip_lm_head          = prefill_only;
     model_input.capture_hidden_states = prefill_only;
+    if (record_lengths) {
+        model_input.record_lengths.emplace();
+        model_input.record_lengths->q_tokens.resize(stream_groups.totalModelBatchSize(), -1);
+        model_input.record_lengths->kv_tokens_before.resize(stream_groups.totalModelBatchSize(), -1);
+    }
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));

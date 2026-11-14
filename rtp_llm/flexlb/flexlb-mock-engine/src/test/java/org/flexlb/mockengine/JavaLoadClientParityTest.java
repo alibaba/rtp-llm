@@ -19,58 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * pushgateway metric payload format.
  */
 class JavaLoadClientParityTest {
-
     @TempDir Path tempDir;
-
-    private static JavaLoadClient.TraceRecord rec(int idx, long tsMs, int il, int ol) {
-        List<Integer> tokens = new ArrayList<>();
-        for (int i = 0; i < il; i++) {
-            tokens.add(i);
-        }
-        List<Long> keys = new ArrayList<>();
-        for (long k = 0; k < il / 1024; k++) {
-            keys.add(k + idx);
-        }
-        return new JavaLoadClient.TraceRecord(
-                idx, "rid-" + idx, "trace-" + idx, tsMs, il, ol, keys, tokens);
-    }
-
-    private JavaLoadClient dryRunClient() {
-        JavaLoadClient.Config config =
-                new JavaLoadClient.Config(
-                        "trace.jsonl",
-                        "127.0.0.1:7001",
-                        "127.0.0.1:7003",
-                        0,
-                        16,
-                        10.0,
-                        1,
-                        tempDir.resolve("out").toString(),
-                        1,
-                        0,
-                        0,
-                        120_000L,
-                        500.0,
-                        false,
-                        false,
-                        1,
-                        1,
-                        0L,
-                        120,
-                        true,
-                        "engine_service",
-                        "",
-                        false,
-                        10,
-                        1000,
-                        0,
-                        0,
-                        "",
-                        false,
-                        "",
-                        true);
-        return new JavaLoadClient(config);
-    }
 
     // ------------------------------------------------------------------
     // Item 1: shard ordering — duration/limit filters BEFORE i % numShards.
@@ -337,5 +286,55 @@ class JavaLoadClientParityTest {
         assertTrue(body.contains("flexlb_client_send_total{route_path=\"master\"} 0"));
         assertTrue(body.contains("flexlb_client_max_concurrency{route_path=\"master\"} 16"));
         assertFalse(body.contains("flexlb_client_total_ms_avg"));
+    }
+
+    private static JavaLoadClient.TraceRecord rec(int idx, long tsMs, int il, int ol) {
+        List<Integer> tokens = new ArrayList<>();
+        for (int i = 0; i < il; i++) {
+            tokens.add(i);
+        }
+        List<Long> keys = new ArrayList<>();
+        for (long k = 0; k < il / 1024; k++) {
+            keys.add(k + idx);
+        }
+        return new JavaLoadClient.TraceRecord(
+                idx, "rid-" + idx, "trace-" + idx, tsMs, il, ol, keys, tokens);
+    }
+
+    private JavaLoadClient dryRunClient() {
+        JavaLoadClient.Config config =
+                new JavaLoadClient.Config(
+                        "trace.jsonl",
+                        "127.0.0.1:7001",
+                        "127.0.0.1:7003",
+                        0,
+                        16,
+                        10.0,
+                        1,
+                        tempDir.resolve("out").toString(),
+                        1,
+                        0,
+                        0,
+                        120_000L,
+                        500.0,
+                        false,
+                        false,
+                        1,
+                        1,
+                        0L,
+                        120,
+                        true,
+                        "engine_service",
+                        "",
+                        false,
+                        10,
+                        1000,
+                        0,
+                        0,
+                        "",
+                        false,
+                        "",
+                        true);
+        return new JavaLoadClient(config);
     }
 }

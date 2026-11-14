@@ -6,6 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
+/**
+ * Checks worker identity equality and generation distinctions.
+ */
 class WorkerIdentityTest {
 
     @Test

@@ -1,14 +1,137 @@
+import os
 import unittest
+from unittest.mock import Mock, patch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.cpp.cache.test.libcache_config_creator_py_test import validate_basic_config
 from rtp_llm.models.kimi_linear.kimi_linear import KimiLinear
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next
 from rtp_llm.ops import DataType, HybridAttentionType, KVCacheSpecDesc, KVCacheSpecType
+from rtp_llm.tools.convert import weights_convert
+from rtp_llm.tools.convert.weights_convert import WeightConverter
 from rtp_llm.tools.convert.weights_convert_utils import (
     ModelConfigPostBuilder,
     apply_layer_override_and_post_build,
 )
+
+
+class WeightsConvertParallelismTest(unittest.TestCase):
+    def test_explicit_world_size_covers_all_conversion_ranks(self):
+        converter = WeightConverter.__new__(WeightConverter)
+        for rank in range(4):
+            with self.subTest(rank=rank), patch.dict(
+                os.environ,
+                {
+                    "TP_SIZE": "2",
+                    "DP_SIZE": "2",
+                    "WORLD_SIZE": "4",
+                    "WORLD_RANK": str(rank),
+                    "LOCAL_WORLD_SIZE": "4",
+                },
+                clear=True,
+            ):
+                config = converter._build_parallelism_config()
+                self.assertEqual(config.world_size, 4)
+                self.assertEqual(
+                    (
+                        config.tp_rank,
+                        config.dp_rank,
+                        config.ep_rank,
+                        config.local_rank,
+                    ),
+                    (rank % 2, rank // 2, rank, rank),
+                )
+
+    def test_missing_world_size_defaults_to_tp_times_dp(self):
+        converter = WeightConverter.__new__(WeightConverter)
+        for tp_size, dp_size in ((1, 1), (4, 1), (2, 2)):
+            world_size = tp_size * dp_size
+            for rank in range(world_size):
+                with self.subTest(tp=tp_size, dp=dp_size, rank=rank), patch.dict(
+                    os.environ,
+                    {
+                        "TP_SIZE": str(tp_size),
+                        "DP_SIZE": str(dp_size),
+                        "WORLD_RANK": str(rank),
+                        "LOCAL_WORLD_SIZE": str(world_size),
+                    },
+                    clear=True,
+                ):
+                    config = converter._build_parallelism_config()
+                    self.assertEqual(config.world_size, world_size)
+                    self.assertEqual(
+                        (
+                            config.tp_rank,
+                            config.dp_rank,
+                            config.ep_rank,
+                            config.local_rank,
+                        ),
+                        (rank % tp_size, rank // tp_size, rank, rank),
+                    )
+
+    def test_explicit_world_size_rejects_out_of_range_rank(self):
+        converter = WeightConverter.__new__(WeightConverter)
+        with patch.dict(
+            os.environ,
+            {
+                "TP_SIZE": "2",
+                "DP_SIZE": "2",
+                "WORLD_SIZE": "4",
+                "WORLD_RANK": "4",
+                "LOCAL_WORLD_SIZE": "4",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                ValueError, r"world_rank 4 out of range \[0, 4\)"
+            ):
+                converter._build_parallelism_config()
+
+    def test_convert_without_world_size_covers_all_ranks(self):
+        for tp_size, dp_size in ((4, 1), (2, 2)):
+            converter = WeightConverter.__new__(WeightConverter)
+            converter.env_params = {"TP_SIZE": str(tp_size), "DP_SIZE": str(dp_size)}
+            converter.model_path = "/model"
+            converter.model_type = "test_model"
+            converter.model_cls = Mock()
+            with (
+                self.subTest(tp=tp_size, dp=dp_size),
+                patch.dict(os.environ, {}, clear=True),
+                patch.object(
+                    converter, "_estimate_convert_parallel_num", return_value=1
+                ),
+                patch.object(converter, "_save_converted") as save_converted,
+                patch.object(weights_convert.torch.cuda, "device_count", return_value=0),
+                patch.object(
+                    weights_convert.torch.cuda, "is_available", return_value=False
+                ),
+                patch.object(
+                    weights_convert,
+                    "fetch_remote_file_to_local",
+                    side_effect=lambda path, *args: path,
+                ),
+                patch.object(weights_convert, "build_model_config"),
+                patch.object(weights_convert, "apply_layer_override_and_post_build"),
+            ):
+                self.assertEqual(converter.convert("/converted"), 0)
+                self.assertNotIn("WORLD_SIZE", os.environ)
+
+                world_size = tp_size * dp_size
+                configs = [
+                    call.kwargs["parallelism_config"]
+                    for call in converter.model_cls.from_config.call_args_list
+                ]
+                self.assertEqual(
+                    [(c.world_size, c.tp_rank, c.dp_rank, c.ep_rank) for c in configs],
+                    [
+                        (world_size, rank % tp_size, rank // tp_size, rank)
+                        for rank in range(world_size)
+                    ],
+                )
+                model = converter.model_cls.from_config.return_value
+                loader = model.create_model_loader.return_value
+                self.assertEqual(loader.dump_weight_as_ft_style.call_count, world_size)
+                save_converted.assert_called_once_with("/model", "/converted")
 
 
 class WeightsConvertLayerOverrideTest(unittest.TestCase):

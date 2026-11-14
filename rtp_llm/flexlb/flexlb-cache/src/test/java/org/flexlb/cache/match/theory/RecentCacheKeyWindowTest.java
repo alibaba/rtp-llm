@@ -8,6 +8,9 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/**
+ * Checks bounded recent-cache-key snapshots and hit estimates.
+ */
 class RecentCacheKeyWindowTest {
 
     @Test

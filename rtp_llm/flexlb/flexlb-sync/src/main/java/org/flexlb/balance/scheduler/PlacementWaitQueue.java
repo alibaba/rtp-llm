@@ -118,12 +118,28 @@ final class PlacementWaitQueue {
         index(domain);
     }
 
+    private void index(Domain domain) {
+        if (!domain.active) {
+            if (domain.entries.isEmpty()) {
+                domains.remove(domain.key, domain);
+            } else if (domain.available) {
+                ready.add(domain);
+            }
+        }
+    }
+
     private void removeWaiting(GlobalQueueEntry entry) {
         Domain domain = waiting.remove(entry);
         if (domain != null) {
             unindex(domain);
             domain.entries.remove(entry);
             index(domain);
+        }
+    }
+
+    private void unindex(Domain domain) {
+        if (!domain.entries.isEmpty()) {
+            ready.remove(domain);
         }
     }
 
@@ -135,27 +151,15 @@ final class PlacementWaitQueue {
         }
     }
 
-    private void unindex(Domain domain) {
-        if (!domain.entries.isEmpty()) {
-            ready.remove(domain);
-        }
-    }
-
-    private void index(Domain domain) {
-        if (!domain.active) {
-            if (domain.entries.isEmpty()) {
-                domains.remove(domain.key, domain);
-            } else if (domain.available) {
-                ready.add(domain);
-            }
-        }
-    }
-
     private static PlacementKey waitKey(PlacementKey key) {
         // Exact waiters follow role/address even when a replacement changes groups.
         return key.endpoint() == null ? key : PlacementKey.exact(key.role(), null, key.endpoint());
     }
 
+    /**
+     * Groups blocked requests waiting on the same placement condition and preserves their retry
+     * order.
+     */
     private final class Domain {
         private final PlacementKey key;
         private final NavigableSet<GlobalQueueEntry> entries = new TreeSet<>(order);

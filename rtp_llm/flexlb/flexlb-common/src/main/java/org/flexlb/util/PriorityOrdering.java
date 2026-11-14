@@ -3,23 +3,10 @@ package org.flexlb.util;
 import java.util.Comparator;
 
 /**
- * Single source of truth for priority-based queue ordering across all
- * FlexLB queue layers.
- *
- * <p><b>Ordering rule (STRICT):</b>
- * <ol>
- *   <li>{@link Prioritized#priority()} <em>descending</em> (higher priority
- *       dispatched first).</li>
- *   <li>{@link Prioritized#enqueueSeq()} <em>ascending</em> (same-priority
- *       items are strictly first-in-first-out by enqueue order).</li>
- * </ol>
- *
- * <p>Callers that need a deterministic total order (e.g. the batcher queue
- * comparator) append a final {@code .thenComparing(...::requestId)} to
- * {@link #strict()}.
+ * Orders requests by descending priority and ascending enqueue sequence. Callers that require a
+ * total order can append their exact request identity as a final tie-breaker.
  */
 public final class PriorityOrdering {
-
     private static final Comparator<String> REQUEST_ID_ORDER =
             Comparator.nullsFirst(Comparator.naturalOrder());
 
@@ -36,14 +23,7 @@ public final class PriorityOrdering {
                             left.priority(), left.enqueueSeq(),
                             right.priority(), right.enqueueSeq());
 
-    /**
-     * Allocation-free STRICT comparison over primitive ordering keys.
-     */
-    private static int compare(
-            int leftPriority, long leftEnqueueSeq, int rightPriority, long rightEnqueueSeq) {
-        int priorityOrder = Integer.compare(rightPriority, leftPriority);
-        return priorityOrder != 0 ? priorityOrder : Long.compare(leftEnqueueSeq, rightEnqueueSeq);
-    }
+    private PriorityOrdering() {}
 
     /**
      * Allocation-free deterministic total order used by worker queues and
@@ -75,5 +55,12 @@ public final class PriorityOrdering {
         return (Comparator<T>) STRICT;
     }
 
-    private PriorityOrdering() {}
+    /**
+     * Allocation-free STRICT comparison over primitive ordering keys.
+     */
+    private static int compare(
+            int leftPriority, long leftEnqueueSeq, int rightPriority, long rightEnqueueSeq) {
+        int priorityOrder = Integer.compare(rightPriority, leftPriority);
+        return priorityOrder != 0 ? priorityOrder : Long.compare(leftEnqueueSeq, rightEnqueueSeq);
+    }
 }

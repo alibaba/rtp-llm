@@ -243,7 +243,23 @@ std::unique_ptr<rtp_llm::Weights> WeightsConverter::createGptWeights(std::unique
     gpt_weights.position_encoding        = mayCreateDenseWeights(*global_weight, W::wpe);
     gpt_weights.token_type_embedding     = mayCreateDenseWeights(*global_weight, W::token_type_embedding);
     gpt_weights.final_layernorm = mayCreateLayerNormWeights(*global_weight, W::final_ln_gamma, W::final_ln_beta);
-    gpt_weights.lm_head         = mayCreateDenseWeights(*global_weight, W::lm_head);
+    auto lm_head                         = mayCreateDenseWeights(*global_weight, W::lm_head);
+    if (lm_head) {
+        auto scales = mayFindTensor(*global_weight, W::lm_head_s);
+        if (lm_head->kernel.scalar_type() == torch::kFloat8_e4m3fn || scales.defined()) {
+            // The output head has its own format, independent of the model's MoE quantization.
+            TORCH_CHECK(lm_head->kernel.scalar_type() == torch::kFloat8_e4m3fn && lm_head->kernel.dim() == 2
+                            && lm_head->kernel.is_contiguous() && lm_head->kernel.size(0) > 0
+                            && lm_head->kernel.size(1) > 0,
+                        "FP8 LM head requires a contiguous E4M3 weight matrix");
+            TORCH_CHECK(scales.defined() && scales.numel() == 1 && scales.scalar_type() == torch::kFloat32
+                            && scales.device() == lm_head->kernel.device()
+                            && torch::logical_and(torch::isfinite(scales), scales.gt(0)).all().item<bool>(),
+                        "FP8 LM head requires one positive finite FP32 weight scale on the weight device");
+            lm_head->scales = scales.reshape({1}).contiguous();
+        }
+    }
+    gpt_weights.lm_head = std::move(lm_head);
 
     gpt_weights.linear_bias_slopes = mayCreateDenseWeights(*global_weight, W::linear_bias_slopes);
     gpt_weights.d2t_map            = mayFindTensor(*global_weight, W::multi_tokens_predict_d2t_map);

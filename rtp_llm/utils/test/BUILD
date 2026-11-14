@@ -29,7 +29,7 @@ py_test(
 py_test(
     name = "jit_cache_env_test",
     srcs = ["jit_cache_env_test.py"],
-    deps = ["//rtp_llm:jit_cache_env"],
+    deps = ["//rtp_llm:jit_cache_env", "//rtp_llm/test/utils:jit_sys_path_setup"],
 )
 
 py_test(

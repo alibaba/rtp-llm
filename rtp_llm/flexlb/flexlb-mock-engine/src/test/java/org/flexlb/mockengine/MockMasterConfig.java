@@ -7,7 +7,9 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
-/** Writes the process-config envelope consumed by the Java mock engine tests. */
+/**
+ * Writes the process-config envelope consumed by the Java mock engine tests.
+ */
 final class MockMasterConfig {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 

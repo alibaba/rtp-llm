@@ -27,7 +27,9 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Real scheduler, dispatcher and Netty engine RPCs; only engine compute and discovery are simulated. */
+/**
+ * Real scheduler, dispatcher and Netty engine RPCs; only engine compute and discovery are simulated.
+ */
 class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
     @ParameterizedTest
     @ValueSource(strings = {"NOT_MASTER", "SHUTDOWN", "DEAD_BEFORE_CONNECT", "UNRESOLVABLE_HOST"})
@@ -84,6 +86,9 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
         }
     }
 
+    /**
+     * Owns a mock-engine test node and its HTTP endpoint.
+     */
     private final class Node implements AutoCloseable {
         final LBStatusConsistencyService leadership = mock(LBStatusConsistencyService.class);
         final NioEventLoopGroup channelLoop = new NioEventLoopGroup(1);
@@ -112,15 +117,15 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
             server = NettyServerBuilder.forPort(0).addService(service).build().start();
         }
 
-        String httpAddress() {
-            return "127.0.0.1:" + (server.getPort() - FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET);
-        }
-
         @Override
         public void close() throws Exception {
             server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
             forwarder.shutdown();
             channelLoop.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
+        }
+
+        String httpAddress() {
+            return "127.0.0.1:" + (server.getPort() - FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET);
         }
     }
 }

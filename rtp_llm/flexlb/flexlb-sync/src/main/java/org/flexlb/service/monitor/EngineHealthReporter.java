@@ -110,17 +110,12 @@ import static org.flexlb.constant.MetricConstant.ZK_MASTER_NODE;
  */
 @Component
 public class EngineHealthReporter {
-
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final FlexMonitor monitor;
-
     private final CacheMetricsReporter cacheMetricsReporter;
-
     private final EngineGrpcClient engineGrpcClient;
-
     private final WorkerDirectory workerDirectory;
-
     private final Map<String, EventLoopGroup> eventLoopGroupMap;
 
     @Autowired
@@ -343,47 +338,6 @@ public class EngineHealthReporter {
         logger.debug("Running-load variance - role: {}, value: {}", role, variance);
     }
 
-    @Scheduled(fixedRate = 2000)
-    private void reportEngineMetric() {
-        FlexMetricTags tags = FlexMetricTags.of();
-        monitor.report(
-                ENGINE_PREFILL_WORKER_NUMBER,
-                tags,
-                workerDirectory.discoveredCount(RoleType.PREFILL));
-        monitor.report(
-                ENGINE_DECODE_WORKER_NUMBER,
-                tags,
-                workerDirectory.discoveredCount(RoleType.DECODE));
-        monitor.report(
-                ENGINE_ENCODER_WORKER_NUMBER,
-                tags,
-                workerDirectory.discoveredCount(RoleType.ENCODER));
-
-        reportThreadPoolInfo(
-                ENGINE_BALANCING_THREAD_POOL_INFO,
-                "gRpcExecutor",
-                (ThreadPoolExecutor) engineGrpcClient.getExecutor());
-
-        eventLoopGroupMap.forEach(this::reportEventLoopGroup);
-    }
-
-    @Scheduled(fixedRate = 2000)
-    private void reportWorkerBlockSizes() {
-        for (RoleType role : RoleType.values()) {
-            reportWorkerBlockSize(role);
-        }
-    }
-
-    private void reportWorkerBlockSize(RoleType role) {
-        for (WorkerStatus worker : workerDirectory.getWorkerStatuses(role, null)) {
-            long blockSize = worker.committedEngineObservation().blockSize();
-            if (blockSize > 0) {
-                monitor.report(CACHE_BLOCK_SIZE, FlexMetricTags.of("role", role.name()), blockSize);
-                return;
-            }
-        }
-    }
-
     public void reportRawServiceDiscoveryHostCount(String model, RoleType role, int count) {
         monitor.report(
                 ENGINE_SERVICE_DISCOVERY_RAW_HOST_COUNT,
@@ -419,14 +373,6 @@ public class EngineHealthReporter {
                 ENGINE_STATUS_CHECK_FAIL_RT,
                 statusCheckFailureTags(errorEnum, engineIp, role),
                 latencyUs);
-    }
-
-    private static FlexMetricTags statusCheckFailureTags(
-            BalanceStatusEnum errorEnum, String engineIp, RoleType role) {
-        return FlexMetricTags.of(
-                "code", String.valueOf(errorEnum.getCode()),
-                "engineIp", engineIp == null ? "" : engineIp,
-                "role", role == null ? "" : role.getCode());
     }
 
     public void reportCacheStatusCheckerFail(BalanceStatusEnum errorEnum, RoleType role) {
@@ -520,23 +466,6 @@ public class EngineHealthReporter {
                 task.waitingEnteredTimeMs());
     }
 
-    private static FlexMetricTags lifecycleTags(String engineIp, String role, String group) {
-        return FlexMetricTags.of(
-                "engineIp", engineIp == null ? "" : engineIp,
-                "role", role == null ? "" : role,
-                "group", group == null ? "" : group);
-    }
-
-    private long reportDuration(
-            String metric, FlexMetricTags tags, long endTimeMs, long startTimeMs) {
-        if (endTimeMs <= 0L || startTimeMs <= 0L) {
-            return -1L;
-        }
-        long durationMs = Math.max(0L, endTimeMs - startTimeMs);
-        monitor.report(metric, tags, durationMs);
-        return durationMs;
-    }
-
     public void reportWorkerStepMetrics(WorkerStatus worker, WorkerStatus.StepMetrics step) {
         FlexMetricTags tags =
                 FlexMetricTags.of(
@@ -613,40 +542,6 @@ public class EngineHealthReporter {
         }
     }
 
-    /**
-     * WorkerStatus is the common capacity source for both regular engines and
-     * KVCM deployments.  KVCM does not poll GetCacheStatus, so cache capacity
-     * telemetry must be emitted from the WorkerStatus path rather than the
-     * optional cache-status checker.
-     */
-    private void reportKvCacheCapacity(WorkerStatus worker, WorkerStatus.EngineObservation status) {
-        long totalKvCacheTokens = status.totalKvCacheTokens();
-        if (totalKvCacheTokens <= 0) {
-            return;
-        }
-        long availableKvCacheTokens = Math.max(0, status.availableKvCacheTokens());
-        long usedKvCacheTokens = Math.max(0, totalKvCacheTokens - availableKvCacheTokens);
-        reportWorkerMetric(CACHE_USED_KV_CACHE_TOKENS, worker, usedKvCacheTokens);
-        reportWorkerMetric(CACHE_AVAILABLE_KV_CACHE_TOKENS, worker, availableKvCacheTokens);
-        reportWorkerMetric(CACHE_TOTAL_KV_CACHE_TOKENS, worker, totalKvCacheTokens);
-        reportWorkerMetric(
-                CACHE_USED_KV_CACHE_RATIO,
-                worker,
-                (usedKvCacheTokens * 100.0) / totalKvCacheTokens);
-    }
-
-    private void reportWorkerMetric(String metric, WorkerStatus worker, double value) {
-        monitor.report(
-                metric,
-                FlexMetricTags.of(
-                        "engineIp", valueOrEmpty(worker.getIp()), "role", worker.getRole().name()),
-                value);
-    }
-
-    private static String valueOrEmpty(String value) {
-        return value == null ? "" : value;
-    }
-
     public void reportBalancingService(BalanceContext ctx) {
         if (ctx == null || ctx.getResponse() == null) {
             return;
@@ -693,11 +588,6 @@ public class EngineHealthReporter {
         }
     }
 
-    private static String selectionReason(BalanceContext context, RoleType roleType) {
-        String selectionReason = context.selectionReason(roleType);
-        return selectionReason == null ? "UNKNOWN" : selectionReason;
-    }
-
     public void reportMasterNode(String master) {
         monitor.report(ZK_MASTER_NODE, FlexMetricTags.of("masterNode", master), 1.0);
     }
@@ -728,36 +618,6 @@ public class EngineHealthReporter {
                 metricName, FlexMetricTags.of(metricMap), engineSyncExecutor.getCorePoolSize());
         metricMap.put("type", "currentThreadSizeInPool");
         monitor.report(metricName, FlexMetricTags.of(metricMap), engineSyncExecutor.getPoolSize());
-    }
-
-    private void reportEventLoopGroup(String eventLoopGroupName, EventLoopGroup eventLoopGroup) {
-        int totalActiveExecutorCount = 0;
-        int totalPendingTask = 0;
-        for (EventExecutor executor : eventLoopGroup) {
-            boolean isShutdown = executor.isShutdown();
-            boolean isTerminated = executor.isTerminated();
-            boolean isShuttingDown = executor.isShuttingDown();
-            // Record active worker count
-            if (!isShutdown && !isTerminated && !isShuttingDown) {
-                totalActiveExecutorCount++;
-            }
-            if (executor instanceof SingleThreadEventExecutor singleThreadEventExecutor) {
-                int pendingTasks = singleThreadEventExecutor.pendingTasks();
-                totalPendingTask += pendingTasks;
-            }
-        }
-        Map<String, String> metricMap = new HashMap<>();
-        metricMap.put("name", eventLoopGroupName);
-        metricMap.put("type", "active-executor-count");
-        monitor.report(
-                org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO,
-                FlexMetricTags.of(metricMap),
-                totalActiveExecutorCount);
-        metricMap.put("type", "pending-task-total-count");
-        monitor.report(
-                org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO,
-                FlexMetricTags.of(metricMap),
-                totalPendingTask);
     }
 
     /**
@@ -923,5 +783,140 @@ public class EngineHealthReporter {
     public void reportForwardToMasterResult(String type, String code) {
         monitor.report(
                 FORWARD_TO_MASTER_RESULT, FlexMetricTags.of("type", type, "code", code), 1.0);
+    }
+
+    @Scheduled(fixedRate = 2000)
+    private void reportEngineMetric() {
+        FlexMetricTags tags = FlexMetricTags.of();
+        monitor.report(
+                ENGINE_PREFILL_WORKER_NUMBER,
+                tags,
+                workerDirectory.discoveredCount(RoleType.PREFILL));
+        monitor.report(
+                ENGINE_DECODE_WORKER_NUMBER,
+                tags,
+                workerDirectory.discoveredCount(RoleType.DECODE));
+        monitor.report(
+                ENGINE_ENCODER_WORKER_NUMBER,
+                tags,
+                workerDirectory.discoveredCount(RoleType.ENCODER));
+
+        reportThreadPoolInfo(
+                ENGINE_BALANCING_THREAD_POOL_INFO,
+                "gRpcExecutor",
+                (ThreadPoolExecutor) engineGrpcClient.getExecutor());
+
+        eventLoopGroupMap.forEach(this::reportEventLoopGroup);
+    }
+
+    @Scheduled(fixedRate = 2000)
+    private void reportWorkerBlockSizes() {
+        for (RoleType role : RoleType.values()) {
+            reportWorkerBlockSize(role);
+        }
+    }
+
+    private void reportWorkerBlockSize(RoleType role) {
+        for (WorkerStatus worker : workerDirectory.getWorkerStatuses(role, null)) {
+            long blockSize = worker.committedEngineObservation().blockSize();
+            if (blockSize > 0) {
+                monitor.report(CACHE_BLOCK_SIZE, FlexMetricTags.of("role", role.name()), blockSize);
+                return;
+            }
+        }
+    }
+
+    private static FlexMetricTags statusCheckFailureTags(
+            BalanceStatusEnum errorEnum, String engineIp, RoleType role) {
+        return FlexMetricTags.of(
+                "code", String.valueOf(errorEnum.getCode()),
+                "engineIp", engineIp == null ? "" : engineIp,
+                "role", role == null ? "" : role.getCode());
+    }
+
+    private static FlexMetricTags lifecycleTags(String engineIp, String role, String group) {
+        return FlexMetricTags.of(
+                "engineIp", engineIp == null ? "" : engineIp,
+                "role", role == null ? "" : role,
+                "group", group == null ? "" : group);
+    }
+
+    private long reportDuration(
+            String metric, FlexMetricTags tags, long endTimeMs, long startTimeMs) {
+        if (endTimeMs <= 0L || startTimeMs <= 0L) {
+            return -1L;
+        }
+        long durationMs = Math.max(0L, endTimeMs - startTimeMs);
+        monitor.report(metric, tags, durationMs);
+        return durationMs;
+    }
+
+    /**
+     * WorkerStatus is the common capacity source for both regular engines and
+     * KVCM deployments.  KVCM does not poll GetCacheStatus, so cache capacity
+     * telemetry must be emitted from the WorkerStatus path rather than the
+     * optional cache-status checker.
+     */
+    private void reportKvCacheCapacity(WorkerStatus worker, WorkerStatus.EngineObservation status) {
+        long totalKvCacheTokens = status.totalKvCacheTokens();
+        if (totalKvCacheTokens <= 0) {
+            return;
+        }
+        long availableKvCacheTokens = Math.max(0, status.availableKvCacheTokens());
+        long usedKvCacheTokens = Math.max(0, totalKvCacheTokens - availableKvCacheTokens);
+        reportWorkerMetric(CACHE_USED_KV_CACHE_TOKENS, worker, usedKvCacheTokens);
+        reportWorkerMetric(CACHE_AVAILABLE_KV_CACHE_TOKENS, worker, availableKvCacheTokens);
+        reportWorkerMetric(CACHE_TOTAL_KV_CACHE_TOKENS, worker, totalKvCacheTokens);
+        reportWorkerMetric(
+                CACHE_USED_KV_CACHE_RATIO,
+                worker,
+                (usedKvCacheTokens * 100.0) / totalKvCacheTokens);
+    }
+
+    private void reportWorkerMetric(String metric, WorkerStatus worker, double value) {
+        monitor.report(
+                metric,
+                FlexMetricTags.of(
+                        "engineIp", valueOrEmpty(worker.getIp()), "role", worker.getRole().name()),
+                value);
+    }
+
+    private static String valueOrEmpty(String value) {
+        return value == null ? "" : value;
+    }
+
+    private static String selectionReason(BalanceContext context, RoleType roleType) {
+        String selectionReason = context.selectionReason(roleType);
+        return selectionReason == null ? "UNKNOWN" : selectionReason;
+    }
+
+    private void reportEventLoopGroup(String eventLoopGroupName, EventLoopGroup eventLoopGroup) {
+        int totalActiveExecutorCount = 0;
+        int totalPendingTask = 0;
+        for (EventExecutor executor : eventLoopGroup) {
+            boolean isShutdown = executor.isShutdown();
+            boolean isTerminated = executor.isTerminated();
+            boolean isShuttingDown = executor.isShuttingDown();
+            // Record active worker count
+            if (!isShutdown && !isTerminated && !isShuttingDown) {
+                totalActiveExecutorCount++;
+            }
+            if (executor instanceof SingleThreadEventExecutor singleThreadEventExecutor) {
+                int pendingTasks = singleThreadEventExecutor.pendingTasks();
+                totalPendingTask += pendingTasks;
+            }
+        }
+        Map<String, String> metricMap = new HashMap<>();
+        metricMap.put("name", eventLoopGroupName);
+        metricMap.put("type", "active-executor-count");
+        monitor.report(
+                org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO,
+                FlexMetricTags.of(metricMap),
+                totalActiveExecutorCount);
+        metricMap.put("type", "pending-task-total-count");
+        monitor.report(
+                org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO,
+                FlexMetricTags.of(metricMap),
+                totalPendingTask);
     }
 }

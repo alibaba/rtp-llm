@@ -16,13 +16,10 @@ import java.util.List;
 import java.util.Random;
 import java.util.TreeMap;
 
-/** Run identically against both revisions; compare complete selections and candidates. */
+/**
+ * Run identically against both revisions; compare complete selections and candidates.
+ */
 public class ProjectionDifferential {
-    static void add(MessageDigest digest, Object value) {
-        digest.update(value.toString().getBytes(StandardCharsets.UTF_8));
-        digest.update((byte) '\n');
-    }
-
     public static void main(String[] args) throws Exception {
         SnapshotBench.initialize(Path.of(args[0]));
         var model = SnapshotBench.model;
@@ -109,5 +106,10 @@ public class ProjectionDifferential {
                         + states
                         + " sha256="
                         + HexFormat.of().formatHex(digest.digest()));
+    }
+
+    static void add(MessageDigest digest, Object value) {
+        digest.update(value.toString().getBytes(StandardCharsets.UTF_8));
+        digest.update((byte) '\n');
     }
 }

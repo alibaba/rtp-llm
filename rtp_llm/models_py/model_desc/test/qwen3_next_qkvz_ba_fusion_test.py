@@ -74,11 +74,24 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
         qkvz_w = torch.randn(K, qkvz_dim, dtype=dtype, device=self.device)
         ba_w = torch.randn(K, ba_dim, dtype=dtype, device=self.device)
 
-        out_qkvz = x @ qkvz_w
-        out_ba = x @ ba_w
+        # Different output widths may select different reduced-precision BF16
+        # reductions. Test the concatenation identity with FP32 accumulation;
+        # the module execution tests below retain the runtime's default policy.
+        allow_reduced = (
+            torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
+        )
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+        try:
+            out_qkvz = x @ qkvz_w
+            out_ba = x @ ba_w
 
-        fused_w = torch.cat([qkvz_w, ba_w], dim=1).contiguous()
-        out_fused = x @ fused_w
+            fused_w = torch.cat([qkvz_w, ba_w], dim=1).contiguous()
+            out_fused = x @ fused_w
+
+        finally:
+            torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (
+                allow_reduced
+            )
 
         # bf16 GEMM accumulation order can differ between GEMM impls; tolerance
         # follows the project's RmsNormGated test (atol=rtol=1e-2).
@@ -180,15 +193,19 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
             }
 
         hip_version = "test-rocm" if is_rocm else None
-        with patch.object(torch.version, "hip", hip_version, create=True), patch.object(
-            LinearFactory,
-            "create_linear",
-            side_effect=lambda *a, **kw: MagicMock(name="MockFusedLinear"),
-        ) as fused_factory, patch.object(
-            LinearFactory,
-            "create_linear_from_weights",
-            side_effect=lambda *a, **kw: MagicMock(name="MockLinear"),
-        ) as weights_factory:
+        with (
+            patch.object(torch.version, "hip", hip_version, create=True),
+            patch.object(
+                LinearFactory,
+                "create_linear",
+                side_effect=lambda *a, **kw: MagicMock(name="MockFusedLinear"),
+            ) as fused_factory,
+            patch.object(
+                LinearFactory,
+                "create_linear_from_weights",
+                side_effect=lambda *a, **kw: MagicMock(name="MockLinear"),
+            ) as weights_factory,
+        ):
             module = self._build_module(
                 weights_extra=weights_extra,
                 hw_kernel_config=hw,

@@ -12,46 +12,11 @@ from rtp_llm.multimodal.kvcm.tensor_object import pack_object, plan_object
 from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCache
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.mm_remote_embedding_cache import MMRemoteEmbeddingCache
+from rtp_llm.multimodal.test.mm_cache_test_store import Store
 from rtp_llm.multimodal.test.multimodal_process_engine_test import (
     FakeEmbeddingLengthInterface,
 )
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
-
-
-class Store:
-    def __init__(self, objects=None):
-        self.objects = {} if objects is None else objects
-        self.saved = threading.Event()
-        self.read_started = threading.Event()
-        self.read_gate = threading.Event()
-        self.read_gate.set()
-        self.write_gate = threading.Event()
-        self.write_gate.set()
-        self.closed = False
-        self.fail_read = self.fail_write = False
-        self.instance_id = "kve_test"
-        self.instance_group = "kve_test_group"
-
-    def save_one(self, key, value):
-        self.write_gate.wait(3)
-        if self.fail_write:
-            raise RuntimeError("unknown save outcome")
-        self.objects.setdefault(key, value.clone())
-        self.saved.set()
-
-    def object_size(self, key, **kwargs):
-        value = self.objects.get(key)
-        return None if value is None else value.numel()
-
-    def load_one(self, key, value):
-        self.read_started.set()
-        self.read_gate.wait(3)
-        if self.fail_read:
-            raise RuntimeError("read unavailable")
-        value.copy_(self.objects[key])
-
-    def close(self):
-        self.closed = True
 
 
 class RemoteCacheTest(unittest.TestCase):

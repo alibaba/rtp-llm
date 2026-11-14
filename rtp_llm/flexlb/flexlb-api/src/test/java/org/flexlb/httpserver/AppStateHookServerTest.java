@@ -21,6 +21,9 @@ import java.util.Optional;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks localhost readiness access and shutdown responses using the application lifecycle.
+ */
 @ExtendWith(MockitoExtension.class)
 @DisplayName("AppStateHookServer Tests")
 class AppStateHookServerTest {

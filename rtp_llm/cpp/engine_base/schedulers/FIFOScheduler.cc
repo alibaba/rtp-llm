@@ -640,7 +640,7 @@ bool FIFOScheduler::partitionChunkContinuations() {
     return false;
 }
 
-absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
+absl::StatusOr<ScheduleOutput> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
     if (need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
         || !waiting_group_queue_.empty()) {
@@ -809,7 +809,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
         if (!prefill_batch.empty()) {
             reportMetrics();
             last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
-            return prefill_batch;
+            return ScheduleOutput{std::move(prefill_batch)};
         }
         // All context candidates were terminal/invalid. Restore any deferred decode work now.
         if (partitionChunkContinuations()) {
@@ -819,7 +819,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
 
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
-    return running_streams_;
+    return ScheduleOutput{running_streams_};
 }
 
 int64_t FIFOScheduler::waitingStreamsSize() {

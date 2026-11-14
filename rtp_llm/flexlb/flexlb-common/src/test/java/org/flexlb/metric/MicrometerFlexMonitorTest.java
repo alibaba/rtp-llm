@@ -11,6 +11,9 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
+/**
+ * Checks Micrometer metric registration, tags and reported values.
+ */
 class MicrometerFlexMonitorTest {
 
     @AfterEach

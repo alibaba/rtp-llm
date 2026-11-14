@@ -37,6 +37,9 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks direct request expiry against concurrent preparation and completion.
+ */
 class DirectRequestLifetimeRaceTest {
     @ParameterizedTest
     @EnumSource(CancelReason.class)

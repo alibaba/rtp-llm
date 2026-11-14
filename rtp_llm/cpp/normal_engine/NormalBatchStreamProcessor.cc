@@ -81,8 +81,9 @@ absl::Status NormalBatchStreamProcessor::dispatchPrefillOnly(
 }
 
 absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups,
-                                                                            TensorHolder&       host_holder) const {
-    return model_input_gatherer_->gather(stream_groups, host_holder);
+                                                                            TensorHolder&       host_holder,
+                                                                            bool                record_lengths) const {
+    return model_input_gatherer_->gather(stream_groups, host_holder, record_lengths);
 }
 
 absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(

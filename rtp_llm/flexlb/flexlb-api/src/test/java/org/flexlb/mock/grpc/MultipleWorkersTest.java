@@ -23,30 +23,7 @@ import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.when;
 
 /**
- * Multiple workers: start two mock prefill workers and verify that requests
- * are distributed across both, not all sent to a single worker.
- *
- * <p>Flow:
- * 1. Worker A is started by the base class (default behavior)
- * 2. Worker B is started via {@link #addPrefillWorker} (registered in EndpointRegistry)
- * 3. Reconfigure the mock DefaultRouter to alternate between A and B
- * 4. Submit 4 requests
- * 5. Verify: both workers received at least 1 EnqueueBatch call
- * 6. Verify: total EnqueueBatch count matches the number of submitted requests
- *
- * <p>Key mechanism:
- * <ul>
- *   <li>The base class starts one prefill worker (worker A) and registers it in
- *       {@code EndpointRegistry} and {@code WorkerDirectory}</li>
- *   <li>{@link #addPrefillWorker} starts an additional worker B, creates its
- *       {@code WorkerStatus} and {@code PrefillEndpoint}, and registers both</li>
- *   <li>The mock {@code DefaultRouter} is reset and reconfigured to return routing
- *       responses that alternate between A and B</li>
- *   <li>Each routing response contains {@code ServerStatus} entries for the
- *       selected prefill worker and the shared decode worker</li>
- *   <li>The scheduler looks up the prefill endpoint by {@code ip:httpPort}
- *       and offers the request to that worker's {@code WorkerBatcher}</li>
- * </ul>
+ * Checks that scheduling distributes requests across two registered mock Prefill workers.
  */
 class MultipleWorkersTest extends FlexLBMockTestBase {
 

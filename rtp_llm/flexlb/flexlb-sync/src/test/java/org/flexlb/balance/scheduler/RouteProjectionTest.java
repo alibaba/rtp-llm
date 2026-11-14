@@ -28,9 +28,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Canonical frozen-snapshot route timeline and candidate contract. */
+/**
+ * Canonical frozen-snapshot route timeline and candidate contract.
+ */
 class RouteProjectionTest {
-
     @Test
     void disabledExecutionBudgetDoesNotConstructAnUnusedPrefixPredictor() {
         PrefillTimePredictor.Evaluator evaluator =
@@ -722,17 +723,6 @@ class RouteProjectionTest {
                 items -> items.stream().mapToLong(PrefillBatchFeatures.Item::seqLen).sum());
     }
 
-    private static PrefillTimePredictor.Evaluator suffixFailingBatchEvaluator() {
-        return evaluator(
-                (tokens, hits) -> tokens,
-                items ->
-                        items.stream().anyMatch(item -> item.seqLen() == 999L)
-                                ? Double.NaN
-                                : items.stream()
-                                        .mapToLong(PrefillBatchFeatures.Item::seqLen)
-                                        .sum());
-    }
-
     private static PrefillTimePredictor.Evaluator evaluator(
             SinglePrediction single, BatchPrediction batch) {
         return new PrefillTimePredictor.Evaluator() {
@@ -748,11 +738,28 @@ class RouteProjectionTest {
         };
     }
 
+    private static PrefillTimePredictor.Evaluator suffixFailingBatchEvaluator() {
+        return evaluator(
+                (tokens, hits) -> tokens,
+                items ->
+                        items.stream().anyMatch(item -> item.seqLen() == 999L)
+                                ? Double.NaN
+                                : items.stream()
+                                        .mapToLong(PrefillBatchFeatures.Item::seqLen)
+                                        .sum());
+    }
+
+    /**
+     * Supplies test-controlled single-request execution predictions.
+     */
     @FunctionalInterface
     private interface SinglePrediction {
         long predict(long totalTokens, long hitTokens);
     }
 
+    /**
+     * Supplies test-controlled batch execution predictions.
+     */
     @FunctionalInterface
     private interface BatchPrediction {
         double predict(List<PrefillBatchFeatures.Item> items);

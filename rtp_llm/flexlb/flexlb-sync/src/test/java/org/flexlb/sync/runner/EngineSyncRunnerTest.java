@@ -48,27 +48,25 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks worker discovery reconciliation and exact poll-lease release on rejected submissions.
+ */
 @ExtendWith(MockitoExtension.class)
 class EngineSyncRunnerTest {
+    private static final long STATUS_STALE_AFTER_US = 10_000_000L;
 
     private final String modelName = "test-model";
 
     @Mock private EndpointRegistry endpointRegistry;
-
     private WorkerDirectory workerDirectory;
-
     @Mock private WorkerAddressService workerAddressService;
-
     @Mock private ExecutorService statusCheckExecutor;
-
     @Mock private EngineHealthReporter engineHealthReporter;
-
     @Mock private EngineGrpcService engineGrpcService;
 
     private final RoleType roleType = RoleType.PREFILL;
 
     @Mock private CacheAwareService cacheAwareService;
-
     @Mock private DynamicCacheIntervalService cacheIntervalService;
 
     private final long syncRequestTimeoutMs = 5000L;
@@ -76,7 +74,6 @@ class EngineSyncRunnerTest {
     @Mock private LongAdder syncCount;
 
     private final long syncEngineStatusInterval = 20L;
-    private static final long STATUS_STALE_AFTER_US = 10_000_000L;
 
     private EngineSyncRunner engineSyncRunner;
 
@@ -450,106 +447,6 @@ class EngineSyncRunnerTest {
         verify(engineHealthReporter).reportRunningLoadVariance(RoleType.PREFILL.toString(), 200.0);
     }
 
-    private EngineSyncRunner varianceRunner(WorkerDirectory directory) {
-        return new EngineSyncRunner(
-                modelName,
-                directory,
-                workerAddressService,
-                statusCheckExecutor,
-                engineHealthReporter,
-                engineGrpcService,
-                RoleType.PREFILL,
-                cacheAwareService,
-                cacheIntervalService,
-                syncRequestTimeoutMs,
-                syncCount,
-                syncEngineStatusInterval,
-                false,
-                STATUS_STALE_AFTER_US);
-    }
-
-    private void assertTopologyReplacement(String oldGroup, String newGroup) {
-        ConfigService configService = Mockito.mock(ConfigService.class);
-        Mockito.when(configService.loadBalanceConfig())
-                .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
-        EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
-        WorkerDirectory directory = new WorkerDirectory(registry);
-        String ipPort = "127.0.0.1:61000@0";
-        WorkerStatus oldStatus =
-                RunnerTestSupport.discovered(
-                        RoleType.PREFILL, oldGroup, "127.0.0.1", 61000, 61001, "site-a");
-        assertNotNull(oldStatus.tryBeginStatusPoll());
-        discover(directory, oldStatus);
-        RunnerTestSupport.publishEndpoint(registry, RoleType.PREFILL, ipPort, oldStatus);
-        WorkerHost replacement =
-                new WorkerHost("127.0.0.1", 61000, 61001, 61005, "site-b", newGroup);
-        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
-                .thenReturn(List.of(replacement));
-
-        EngineSyncRunner runner =
-                new EngineSyncRunner(
-                        modelName,
-                        directory,
-                        workerAddressService,
-                        statusCheckExecutor,
-                        engineHealthReporter,
-                        engineGrpcService,
-                        RoleType.PREFILL,
-                        cacheAwareService,
-                        cacheIntervalService,
-                        syncRequestTimeoutMs,
-                        syncCount,
-                        syncEngineStatusInterval,
-                        false,
-                        STATUS_STALE_AFTER_US);
-        try {
-            // First discovery pass retires the old topology generation: it
-            // detaches the endpoint, marks the status RETIRING, and removes the
-            // business identity from the map. The replacement generation is
-            // deliberately deferred until real endpoint retirement has removed
-            // the RETIRING holder, so no routable identity exists yet.
-            runner.run();
-
-            assertFalse(
-                    directory.statusSnapshot(RoleType.PREFILL).containsKey(ipPort),
-                    "old generation is retired and removed; replacement is deferred");
-            assertNull(
-                    registry.get(RoleType.PREFILL, ipPort),
-                    "old endpoint is detached immediately and replacement is unpublished");
-            // A subsequent discovery pass publishes the replacement generation
-            // for the same address under the new topology group.
-            runner.run();
-
-            WorkerStatus current = directory.statusSnapshot(RoleType.PREFILL).get(ipPort);
-            assertTrue(current != oldStatus);
-            assertTrue(current.getGenerationId() > oldStatus.getGenerationId());
-            assertEquals(newGroup, current.getGroup());
-            assertFalse(
-                    current.pollHealth().reportedAlive(),
-                    "replacement is not routable before its first status commit");
-            assertNull(
-                    registry.get(RoleType.PREFILL, ipPort),
-                    "replacement endpoint is unpublished before its first status commit");
-        } finally {
-            registry.close();
-        }
-    }
-
-    private static WorkerStatus varianceStatus(String ip, int port, double stepLatencyMs) {
-        WorkerStatus status =
-                RunnerTestSupport.discovered(RoleType.PREFILL, "", ip, port, port + 1, "");
-        RunnerTestSupport.publish(
-                status,
-                RunnerTestSupport.response(status, true, 1L, 0L, 0L, stepLatencyMs, Map.of()));
-        assertNotNull(status.tryBeginStatusPoll());
-        assertNotNull(status.tryBeginCachePoll());
-        return status;
-    }
-
-    private static void discover(WorkerDirectory directory, WorkerStatus status) {
-        directory.currentOrDiscover(status.getRole(), status.getLogicalIpPort(), () -> status);
-    }
-
     @Test
     void should_forward_discovered_worker_status_port_to_status_runner() {
         WorkerHost host = new WorkerHost("127.0.0.1", 8080, 8081, 8085, 18081, "", "", "");
@@ -663,5 +560,105 @@ class EngineSyncRunnerTest {
 
         verify(statusCheckExecutor).submit(any(GrpcWorkerStatusRunner.class));
         verify(statusCheckExecutor, never()).submit(any(GrpcCacheStatusCheckRunner.class));
+    }
+
+    private EngineSyncRunner varianceRunner(WorkerDirectory directory) {
+        return new EngineSyncRunner(
+                modelName,
+                directory,
+                workerAddressService,
+                statusCheckExecutor,
+                engineHealthReporter,
+                engineGrpcService,
+                RoleType.PREFILL,
+                cacheAwareService,
+                cacheIntervalService,
+                syncRequestTimeoutMs,
+                syncCount,
+                syncEngineStatusInterval,
+                false,
+                STATUS_STALE_AFTER_US);
+    }
+
+    private void assertTopologyReplacement(String oldGroup, String newGroup) {
+        ConfigService configService = Mockito.mock(ConfigService.class);
+        Mockito.when(configService.loadBalanceConfig())
+                .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
+        EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
+        WorkerDirectory directory = new WorkerDirectory(registry);
+        String ipPort = "127.0.0.1:61000@0";
+        WorkerStatus oldStatus =
+                RunnerTestSupport.discovered(
+                        RoleType.PREFILL, oldGroup, "127.0.0.1", 61000, 61001, "site-a");
+        assertNotNull(oldStatus.tryBeginStatusPoll());
+        discover(directory, oldStatus);
+        RunnerTestSupport.publishEndpoint(registry, RoleType.PREFILL, ipPort, oldStatus);
+        WorkerHost replacement =
+                new WorkerHost("127.0.0.1", 61000, 61001, 61005, "site-b", newGroup);
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(List.of(replacement));
+
+        EngineSyncRunner runner =
+                new EngineSyncRunner(
+                        modelName,
+                        directory,
+                        workerAddressService,
+                        statusCheckExecutor,
+                        engineHealthReporter,
+                        engineGrpcService,
+                        RoleType.PREFILL,
+                        cacheAwareService,
+                        cacheIntervalService,
+                        syncRequestTimeoutMs,
+                        syncCount,
+                        syncEngineStatusInterval,
+                        false,
+                        STATUS_STALE_AFTER_US);
+        try {
+            // First discovery pass retires the old topology generation: it
+            // detaches the endpoint, marks the status RETIRING, and removes the
+            // business identity from the map. The replacement generation is
+            // deliberately deferred until real endpoint retirement has removed
+            // the RETIRING holder, so no routable identity exists yet.
+            runner.run();
+
+            assertFalse(
+                    directory.statusSnapshot(RoleType.PREFILL).containsKey(ipPort),
+                    "old generation is retired and removed; replacement is deferred");
+            assertNull(
+                    registry.get(RoleType.PREFILL, ipPort),
+                    "old endpoint is detached immediately and replacement is unpublished");
+            // A subsequent discovery pass publishes the replacement generation
+            // for the same address under the new topology group.
+            runner.run();
+
+            WorkerStatus current = directory.statusSnapshot(RoleType.PREFILL).get(ipPort);
+            assertTrue(current != oldStatus);
+            assertTrue(current.getGenerationId() > oldStatus.getGenerationId());
+            assertEquals(newGroup, current.getGroup());
+            assertFalse(
+                    current.pollHealth().reportedAlive(),
+                    "replacement is not routable before its first status commit");
+            assertNull(
+                    registry.get(RoleType.PREFILL, ipPort),
+                    "replacement endpoint is unpublished before its first status commit");
+        } finally {
+            registry.close();
+        }
+    }
+
+    private static void discover(WorkerDirectory directory, WorkerStatus status) {
+        directory.currentOrDiscover(status.getRole(), status.getLogicalIpPort(), () -> status);
+    }
+
+    private static WorkerStatus varianceStatus(String ip, int port, double stepLatencyMs) {
+        WorkerStatus status =
+                RunnerTestSupport.discovered(RoleType.PREFILL, "", ip, port, port + 1, "");
+        RunnerTestSupport.publish(
+                status,
+                RunnerTestSupport.response(status, true, 1L, 0L, 0L, stepLatencyMs, Map.of()));
+        assertNotNull(status.tryBeginStatusPoll());
+        assertNotNull(status.tryBeginCachePoll());
+        return status;
     }
 }

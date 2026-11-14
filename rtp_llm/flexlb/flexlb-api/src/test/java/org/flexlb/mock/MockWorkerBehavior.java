@@ -3,25 +3,7 @@ package org.flexlb.mock;
 import org.flexlb.engine.grpc.EngineRpcService;
 
 /**
- * Behavior configuration for mock workers (Builder pattern).
- *
- * <p>Controls how the mock gRPC service responds to requests:
- * <ul>
- *   <li>{@code enqueueDelayMs} — delay before responding to EnqueueBatch</li>
- *   <li>{@code failOnEnqueue} — return error response for EnqueueBatch</li>
- *   <li>{@code availableConcurrency} — WorkerStatusPB.available_concurrency</li>
- *   <li>{@code availableKvCache} — WorkerStatusPB.available_kv_cache</li>
- *   <li>{@code totalKvCache} — WorkerStatusPB.total_kv_cache</li>
- * </ul>
- *
- * <pre>{@code
- * MockWorkerBehavior.builder()
- *     .enqueueDelayMs(5000)
- *     .failOnEnqueue(false)
- *     .availableConcurrency(10)
- *     .availableKvCache(1000000L)
- *     .build()
- * }</pre>
+ * Builds mock-worker response settings for enqueue delays, failures and worker status.
  */
 public final class MockWorkerBehavior {
 
@@ -99,6 +81,9 @@ public final class MockWorkerBehavior {
                 .roleType(roleType);
     }
 
+    /**
+     * Builds mock worker behavior with independently configured timing and failure controls.
+     */
     public static final class Builder {
         private long enqueueDelayMs = 0;
         private boolean failOnEnqueue = false;

@@ -23,7 +23,6 @@ import java.util.concurrent.atomic.LongAdder;
 @Slf4j
 @Component
 public class ServerScheduleLatencyRecorder {
-
     private static final int MAX_TRACKED_MS = 120_000;
 
     private volatile Window window = new Window();
@@ -144,6 +143,13 @@ public class ServerScheduleLatencyRecorder {
         return context.getPriority();
     }
 
+    private static double round3(double value) {
+        return Math.round(value * 1000.0) / 1000.0;
+    }
+
+    /**
+     * Groups arrival, completion and stage-latency samples for one reporting window.
+     */
     private static final class Window {
         private final WindowRate arrivals = new WindowRate();
         private final WindowRate completions = new WindowRate();
@@ -157,6 +163,9 @@ public class ServerScheduleLatencyRecorder {
         private final LatencyHistogram ackResponse = new LatencyHistogram();
     }
 
+    /**
+     * Counts events and their observation interval to calculate the window's rate.
+     */
     private static final class WindowRate {
         private final LongAdder count = new LongAdder();
         private final AtomicLong firstNanos = new AtomicLong(Long.MAX_VALUE);
@@ -168,10 +177,6 @@ public class ServerScheduleLatencyRecorder {
             lastNanos.accumulateAndGet(timestampNanos, Math::max);
         }
 
-        private long count() {
-            return count.sum();
-        }
-
         private double qps() {
             long samples = count();
             long first = firstNanos.get();
@@ -181,8 +186,15 @@ public class ServerScheduleLatencyRecorder {
             }
             return round3((samples - 1) * 1_000_000_000.0 / (last - first));
         }
+
+        private long count() {
+            return count.sum();
+        }
     }
 
+    /**
+     * Accumulates millisecond samples and computes count, maximum and percentile snapshots.
+     */
     private static final class LatencyHistogram {
         private final AtomicLongArray buckets = new AtomicLongArray(MAX_TRACKED_MS + 1);
         private final LongAdder count = new LongAdder();
@@ -242,12 +254,11 @@ public class ServerScheduleLatencyRecorder {
         }
     }
 
+    /**
+     * Freezes latency statistics so reporting does not retain mutable histogram buckets.
+     */
     private record LatencySnapshot(
             long count, long p50, long p90, long p95, long p99, long max, double mean) {
         private static final LatencySnapshot EMPTY = new LatencySnapshot(0, 0, 0, 0, 0, 0, 0.0);
-    }
-
-    private static double round3(double value) {
-        return Math.round(value * 1000.0) / 1000.0;
     }
 }

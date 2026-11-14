@@ -26,31 +26,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * KV v2 fix #5 — decode admission reuse deduction (production
- * {@code DecodeRpcServerNew}: {@code reuse_block_size =
- * generate_stream->reuseBlockSize()}; net new allocation =
- * {@code total_blocks − reuse_block_size}; reused blocks are referenced,
- * never re-allocated; the decode engine re-matches against its OWN LRU at
- * hand-off, which is also the decode LRU's read path).
- *
- * <p>Coverage:
- * <ol>
- *   <li><b>Net allocation</b> — decode admission with LRU hits allocates
- *       {@code total − hit_blocks} into the RUNNING layer (held) and pins the
- *       hits as references in the LRU layer (referenced), never as fresh
- *       running blocks.</li>
- *   <li><b>Net-demand gate</b> — the TOTAL_AND_AVAILABLE gate evaluates the
- *       NET demand: a fully-reused request admits even when
- *       {@code total_demand > available} (reuse only pins references;
- *       production reuse reduces need_blocks BEFORE the capacity gate).</li>
- *   <li><b>Positive feedback</b> — the prefix-match read itself refreshes LRU
- *       recency, so matched chains age slower than un-matched ones, and the
- *       same prefix's hit count never decreases across rounds.</li>
- *   <li><b>Cancelled streams never admit</b> — a cancelled decode stream
- *       leaves no LRU entries (production cancel runs free()); the terminal
- *       race where the cancel lands after the step-boundary claim releases
- *       the lease without LRU handover instead of admitting it.</li>
- * </ol>
+ * Checks Decode admission using its own reusable cache prefix and the remaining net block
+ * requirement.
  */
 class DecodeReuseAdmissionTest {
 

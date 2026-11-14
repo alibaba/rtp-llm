@@ -4,6 +4,9 @@ import lombok.Getter;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.enums.StatusEnum;
 
+/**
+ * Carries FlexLB error details across internal service boundaries.
+ */
 public class FlexLBException extends RuntimeException {
 
     @Getter private final int code;

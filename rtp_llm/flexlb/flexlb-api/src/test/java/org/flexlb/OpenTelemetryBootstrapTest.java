@@ -29,6 +29,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks trace configuration, resource identity and exported spans with isolated environment
+ * settings.
+ */
 @ExtendWith(SystemStubsExtension.class)
 class OpenTelemetryBootstrapTest {
     @TempDir Path directory;

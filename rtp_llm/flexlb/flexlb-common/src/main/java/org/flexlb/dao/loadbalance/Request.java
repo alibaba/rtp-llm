@@ -10,6 +10,10 @@ import lombok.ToString;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Carries normalized scheduling input, including roles, token data, cache metadata and request
+ * limits.
+ */
 @Getter
 @Setter
 @ToString
@@ -50,10 +54,6 @@ public class Request {
     @JsonProperty("request_id")
     private String requestId;
 
-    public void setRequestId(String requestId) {
-        this.requestId = requestId;
-    }
-
     /** Upstream generation timeout retained for transport compatibility. */
     @JsonProperty("generate_timeout")
     private long generateTimeout = DEFAULT_GENERATE_TIMEOUT_MS;
@@ -86,4 +86,8 @@ public class Request {
      */
     @JsonProperty("priority")
     private int priority = 0;
+
+    public void setRequestId(String requestId) {
+        this.requestId = requestId;
+    }
 }

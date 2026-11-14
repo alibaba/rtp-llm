@@ -28,27 +28,13 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Validates the {@code /metrics} and {@code /snapshot} HTTP endpoints of the
- * mock control server after processing requests.
- *
- * <p>Starts a 2P/4D cluster, enqueues 20 requests, waits for completion, then
- * verifies that:
- * <ul>
- *   <li>{@code /metrics?per_engine=true} (Python per-engine series) reports
- *       accepted/completed/running/waiting per engine, cross-checked against
- *       the per-engine values in {@code /snapshot}</li>
- *   <li>Default-mode {@code /metrics} role-aggregated accepted/completed match
- *       the snapshot-derived totals</li>
- *   <li>{@code /snapshot} (JSON) reports {@code leak_detected=false} for all engines</li>
- *   <li>Aggregate accepted across prefill engines = 20</li>
- *   <li>Aggregate completed across decode engines = 20</li>
- *   <li>All engines have inflight = 0 and no errors</li>
- * </ul>
+ * Processes requests through a mock cluster and checks HTTP metrics and snapshots against the
+ * resulting engine state.
  */
 class MetricsValidationTest {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
+
     private static final int BASE_PORT = 62800;
 
     /** Pattern: {@code metric_name{engine_name="...",role="...",grpc_port="12345",engine_ip="..."} value} */
@@ -394,15 +380,6 @@ class MetricsValidationTest {
         return status.getAvailableKvCache();
     }
 
-    private JsonNode engineByPort(MockEngineTestCluster cluster, int grpcPort) throws Exception {
-        for (JsonNode engine : cluster.snapshot()) {
-            if (engine.get("port").asInt() == grpcPort) {
-                return engine;
-            }
-        }
-        throw new AssertionError("engine not found in /snapshot: port " + grpcPort);
-    }
-
     private void awaitEngine(
             MockEngineTestCluster cluster,
             int grpcPort,
@@ -420,6 +397,15 @@ class MetricsValidationTest {
             Thread.sleep(50);
         }
         throw new AssertionError(message + "; last snapshot: " + last);
+    }
+
+    private JsonNode engineByPort(MockEngineTestCluster cluster, int grpcPort) throws Exception {
+        for (JsonNode engine : cluster.snapshot()) {
+            if (engine.get("port").asInt() == grpcPort) {
+                return engine;
+            }
+        }
+        throw new AssertionError("engine not found in /snapshot: port " + grpcPort);
     }
 
     // ──────────── Prometheus parser ────────────

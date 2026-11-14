@@ -51,6 +51,15 @@ struct GrammarCompileResult {
     absl::Status                               status = absl::OkStatus();
 };
 
+class GrammarCompileHandle {
+private:
+    friend class XGrammarBackend;
+
+    GrammarKeyCpp                            key_;
+    std::shared_future<GrammarCompileResult> future_;
+    std::optional<GrammarCompileResult>      result_;
+};
+
 struct GrammarBackendStats {
     int64_t compile_total               = 0;
     int64_t compile_invalid             = 0;
@@ -91,6 +100,14 @@ public:
     // Creates a fresh per-stream matcher from a grammar key. Matcher state itself
     // is never shared across streams.
     absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>> createMatcherFromKey(const GrammarKeyCpp& key);
+
+    // Starts compilation without waiting. A saturated queue is returned as
+    // DEFERRED so prefetch never rejects a user request.
+    GrammarCompileHandle prefetch(const GrammarKeyCpp& key);
+
+    // Installs a fresh matcher from a prefetched result. Every consumer retains
+    // the normal compile timeout and retry behavior.
+    absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>> createMatcherFromHandle(GrammarCompileHandle& handle);
 
     GrammarBackendStats stats() const;
     void                clear();
@@ -150,6 +167,8 @@ private:
     GrammarCompileResult                                       invokeCompiler(const GrammarKeyCpp& key);
     GrammarCompileResult                                       compileSync(const GrammarKeyCpp& key);
     GrammarCompileResult runCompileTask(const GrammarKeyCpp& key, const std::string& id);
+    GrammarCompileHandle acquireCompile(const GrammarKeyCpp& key, bool is_prefetch);
+    GrammarCompileResult waitForCompile(GrammarCompileHandle& handle);
 
     absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>>
     createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled);

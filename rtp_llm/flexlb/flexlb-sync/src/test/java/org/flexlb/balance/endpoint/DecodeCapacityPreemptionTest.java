@@ -24,7 +24,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Exercise one demand and budget through selection, planning and authoritative commit. */
+/**
+ * Exercise one demand and budget through selection, planning and authoritative commit.
+ */
 class DecodeCapacityPreemptionTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})

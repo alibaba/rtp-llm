@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <list>
 #include <memory>
 #include <utility>
@@ -13,20 +14,26 @@
 
 namespace rtp_llm {
 
+/** Scheduler output for one execution round. Only PP scheduling populates finished_request_ids. */
+struct ScheduleOutput {
+    std::list<GenerateStreamPtr> streams;
+    std::vector<int64_t>         finished_request_ids;
+};
+
 class SchedulerBase {
 public:
     virtual ~SchedulerBase() {}
     virtual absl::Status enqueue(const GenerateStreamPtr& stream) = 0;
     virtual std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
-    enqueueGroup(const std::vector<GenerateStreamPtr>& streams)     = 0;
-    virtual absl::StatusOr<std::list<GenerateStreamPtr>> schedule() = 0;
+                                           enqueueGroup(const std::vector<GenerateStreamPtr>& streams) = 0;
+    virtual absl::StatusOr<ScheduleOutput> schedule()                                                  = 0;
 
     // Conservative-KV scheduling variant for async execution. The async path
     // schedules step N+1 before step N's specUpdate has run, so seq_len is not
     // yet authoritative. Conservative variants reserve the maximum possible
     // accept_len (propose_step + 1), then release surplus blocks once the real
     // accept_len is known.
-    virtual absl::StatusOr<std::list<GenerateStreamPtr>> scheduleConservative(int /*propose_step*/) {
+    virtual absl::StatusOr<ScheduleOutput> scheduleConservative(int /*propose_step*/) {
         return schedule();
     }
     virtual absl::Status stop()             = 0;
@@ -41,7 +48,6 @@ public:
         return {};
     }
     virtual void updateSchedulerInfo(const std::string& scheduler_info) {}
-
 };
 
 }  // namespace rtp_llm

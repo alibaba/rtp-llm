@@ -5,6 +5,9 @@ import org.flexlb.config.ConfigValidationException;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.util.JsonUtils;
 
+/**
+ * Parses and validates model service endpoint topology before it is published to readers.
+ */
 public final class ModelServiceConfigParser {
 
     private static final String CONFIG_NAME = "MODEL_SERVICE_CONFIG";

@@ -10,6 +10,9 @@ import java.util.Map;
 import java.util.OptionalInt;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Selects the configuration document parser matching the declared schema version.
+ */
 public final class ConfigDocumentParserResolver {
 
     static final String CONFIG_SCHEMA_VERSION_ENV = "FLEXLB_CONFIG_SCHEMA_VERSION";

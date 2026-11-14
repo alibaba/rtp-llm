@@ -26,9 +26,10 @@ import java.util.OptionalLong;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 
-/** Exact-capability fakes for final delivery-strategy tests. */
+/**
+ * Exact-capability fakes for final delivery-strategy tests.
+ */
 public final class DeliveryStrategyTestSupport {
-
     static final PrefillTimePredictor.Evaluator EVALUATOR =
             new PrefillTimePredictor.Evaluator() {
                 @Override
@@ -43,6 +44,8 @@ public final class DeliveryStrategyTestSupport {
                             .sum();
                 }
             };
+
+    private DeliveryStrategyTestSupport() {}
 
     public static void stubRouteDelivery(
             RequestRegistry requests,
@@ -82,8 +85,6 @@ public final class DeliveryStrategyTestSupport {
                 .claimRouteDelivery(Mockito.any(), Mockito.any());
     }
 
-    private DeliveryStrategyTestSupport() {}
-
     static ScheduledRequest item(long requestId) {
         return item(requestId, 50, requestId, 100L, 10L);
     }
@@ -104,8 +105,32 @@ public final class DeliveryStrategyTestSupport {
         return item;
     }
 
+    static CapacityBoundary unavailable() {
+        return CapacityBoundary.unavailable(
+                new CapacityBoundary.Availability() {
+                    @Override
+                    public boolean isAvailable() {
+                        return false;
+                    }
+
+                    @Override
+                    public void addListener(Runnable listener) {}
+
+                    @Override
+                    public void removeListener(Runnable listener) {}
+                },
+                new RouteProjection.AdmissionBlockSemantics(
+                        "TEST_BLOCK",
+                        RouteProjection.AfterProbeAdmission.BLOCKED,
+                        "TEST_BLOCK",
+                        RoleType.PREFILL));
+    }
+
     record TestBoundary(ScheduledRequest item, CapacityBoundary result) {}
 
+    /**
+     * Exposes delivery preparation and commit boundaries to strategy tests.
+     */
     static final class TestContext {
 
         private boolean commit = true;
@@ -159,9 +184,12 @@ public final class DeliveryStrategyTestSupport {
         }
     }
 
-    /** Concrete endpoint capabilities used by the real delivery transaction. */
+    /**
+     * Concrete endpoint capabilities used by the real delivery transaction.
+     */
     static final class TestEndpointCapabilities {
         private WorkSnapshot precedingWork = new WorkSnapshot(1_000L, List.of(), List.of(), 0L);
+
         private final PrefillEndpoint prefill = Mockito.mock(PrefillEndpoint.class);
         private final PrefillEndpoint.RouteCommitAdmission routeCommit =
                 Mockito.mock(PrefillEndpoint.RouteCommitAdmission.class);
@@ -172,7 +200,9 @@ public final class DeliveryStrategyTestSupport {
                 new IdentityHashMap<>();
         private final Map<String, ScheduledRequest> itemsByRequestId = new HashMap<>();
         private final List<PrefillState.CommittedHandoff> handoffs = new ArrayList<>();
+
         private PrefillState.BatchReservation batchReservation;
+
         private int permitAttempt;
         private int rejectPermitAt = -1;
 
@@ -264,6 +294,18 @@ public final class DeliveryStrategyTestSupport {
                     PrefillState.CapacityStatus.ACQUIRED, batchReservation);
         }
 
+        private List<PrefillState.CommittedHandoff> committedHandoffs(int count) {
+            List<PrefillState.CommittedHandoff> committed = new ArrayList<>(count);
+            for (int index = 0; index < count; index++) {
+                PrefillState.CommittedHandoff handoff =
+                        Mockito.mock(PrefillState.CommittedHandoff.class);
+                Mockito.when(handoff.precedingWork()).thenReturn(precedingWork);
+                handoffs.add(handoff);
+                committed.add(handoff);
+            }
+            return committed;
+        }
+
         private DecodeEndpoint.EngineDispatchPermitAcquisition acquirePermit(String requestId) {
             if (permitAttempt++ == rejectPermitAt) {
                 return new DecodeEndpoint.EngineDispatchPermitAcquisition(
@@ -280,22 +322,12 @@ public final class DeliveryStrategyTestSupport {
             return new DecodeEndpoint.EngineDispatchPermitAcquisition(
                     DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, permit);
         }
-
-        private List<PrefillState.CommittedHandoff> committedHandoffs(int count) {
-            List<PrefillState.CommittedHandoff> committed = new ArrayList<>(count);
-            for (int index = 0; index < count; index++) {
-                PrefillState.CommittedHandoff handoff =
-                        Mockito.mock(PrefillState.CommittedHandoff.class);
-                Mockito.when(handoff.precedingWork()).thenReturn(precedingWork);
-                handoffs.add(handoff);
-                committed.add(handoff);
-            }
-            return committed;
-        }
     }
 
+    /**
+     * Injects request preparation, commit and completion outcomes under test control.
+     */
     static final class TestRequestRegistry {
-
         private final RequestRegistry requests = Mockito.mock(RequestRegistry.class);
         private final List<ScheduledRequest> prepared = new ArrayList<>();
         private final List<ScheduledRequest> committed = new ArrayList<>();
@@ -306,6 +338,7 @@ public final class DeliveryStrategyTestSupport {
         private final List<ScheduledRequest> failedPrepared = new ArrayList<>();
         private final List<Throwable> preparedFailures = new ArrayList<>();
         private final List<String> events = new ArrayList<>();
+
         private ScheduledRequest preparationLostFor;
         private ScheduledRequest commitLostFor;
         private ScheduledRequest throwCommitFor;
@@ -397,69 +430,6 @@ public final class DeliveryStrategyTestSupport {
                     .failDeliveryPreparation(Mockito.any(), Mockito.any());
         }
 
-        private DeliveryClaim claim(
-                ScheduledRequest exactItem,
-                DeliveryClaimKind kind,
-                long correlationId,
-                BooleanSupplier endpointHandoff) {
-            committed.add(exactItem);
-            identities.add(new ClaimIdentity(kind, correlationId));
-            if (exactItem == throwCommitFor) {
-                throw new IllegalStateException(
-                        "synthetic slot commit failure " + exactItem.requestId());
-            }
-            if (exactItem == commitLostFor) {
-                return null;
-            }
-            if (!endpointHandoff.getAsBoolean()) {
-                return null;
-            }
-            events.add("point-of-no-return-" + exactItem.requestId());
-            DeliveryClaim claim = Mockito.mock(DeliveryClaim.class);
-            ReflectionTestUtils.setField(claim, "item", exactItem);
-            Mockito.doAnswer(
-                            inv -> {
-                                complete(claim, inv.getArgument(0));
-                                return null;
-                            })
-                    .when(claim)
-                    .complete(Mockito.any());
-            Mockito.doAnswer(
-                            inv -> {
-                                precedingWork.put(exactItem, inv.getArgument(1));
-                                unstartedWorkMs.put(exactItem, inv.getArgument(2));
-                                return null;
-                            })
-                    .when(requests)
-                    .setDeliveryPrediction(Mockito.eq(claim), Mockito.any(), Mockito.anyLong());
-            Mockito.doAnswer(
-                            inv -> {
-                                requests.setDeliveryPrediction(
-                                        claim, inv.getArgument(1), inv.getArgument(2));
-                                complete(claim, DeliveryResult.delivered());
-                                return null;
-                            })
-                    .when(requests)
-                    .publishRoute(Mockito.eq(claim), Mockito.any(), Mockito.anyLong());
-            return claim;
-        }
-
-        private void complete(DeliveryClaim exactClaim, DeliveryResult completion) {
-            ScheduledRequest item =
-                    (ScheduledRequest) ReflectionTestUtils.getField(exactClaim, "item");
-            beforeCompletion.run();
-            completions.add(new CompletionEvent(item, completion));
-            events.add("complete-" + item.requestId());
-            if (item == throwCompletionFor) {
-                throw new IllegalStateException("synthetic completion failure " + item.requestId());
-            }
-        }
-
-        private void failDeliveryPreparation(ScheduledRequest exactItem, Throwable cause) {
-            failedPrepared.add(exactItem);
-            preparedFailures.add(cause);
-        }
-
         void preparationLostFor(ScheduledRequest item) {
             preparationLostFor = item;
         }
@@ -531,6 +501,69 @@ public final class DeliveryStrategyTestSupport {
         RequestRegistry requests() {
             return requests;
         }
+
+        private DeliveryClaim claim(
+                ScheduledRequest exactItem,
+                DeliveryClaimKind kind,
+                long correlationId,
+                BooleanSupplier endpointHandoff) {
+            committed.add(exactItem);
+            identities.add(new ClaimIdentity(kind, correlationId));
+            if (exactItem == throwCommitFor) {
+                throw new IllegalStateException(
+                        "synthetic slot commit failure " + exactItem.requestId());
+            }
+            if (exactItem == commitLostFor) {
+                return null;
+            }
+            if (!endpointHandoff.getAsBoolean()) {
+                return null;
+            }
+            events.add("point-of-no-return-" + exactItem.requestId());
+            DeliveryClaim claim = Mockito.mock(DeliveryClaim.class);
+            ReflectionTestUtils.setField(claim, "item", exactItem);
+            Mockito.doAnswer(
+                            inv -> {
+                                complete(claim, inv.getArgument(0));
+                                return null;
+                            })
+                    .when(claim)
+                    .complete(Mockito.any());
+            Mockito.doAnswer(
+                            inv -> {
+                                precedingWork.put(exactItem, inv.getArgument(1));
+                                unstartedWorkMs.put(exactItem, inv.getArgument(2));
+                                return null;
+                            })
+                    .when(requests)
+                    .setDeliveryPrediction(Mockito.eq(claim), Mockito.any(), Mockito.anyLong());
+            Mockito.doAnswer(
+                            inv -> {
+                                requests.setDeliveryPrediction(
+                                        claim, inv.getArgument(1), inv.getArgument(2));
+                                complete(claim, DeliveryResult.delivered());
+                                return null;
+                            })
+                    .when(requests)
+                    .publishRoute(Mockito.eq(claim), Mockito.any(), Mockito.anyLong());
+            return claim;
+        }
+
+        private void complete(DeliveryClaim exactClaim, DeliveryResult completion) {
+            ScheduledRequest item =
+                    (ScheduledRequest) ReflectionTestUtils.getField(exactClaim, "item");
+            beforeCompletion.run();
+            completions.add(new CompletionEvent(item, completion));
+            events.add("complete-" + item.requestId());
+            if (item == throwCompletionFor) {
+                throw new IllegalStateException("synthetic completion failure " + item.requestId());
+            }
+        }
+
+        private void failDeliveryPreparation(ScheduledRequest exactItem, Throwable cause) {
+            failedPrepared.add(exactItem);
+            preparedFailures.add(cause);
+        }
     }
 
     record ClaimIdentity(DeliveryClaimKind kind, long correlationId) {}
@@ -543,6 +576,9 @@ public final class DeliveryStrategyTestSupport {
             long predictedMs,
             String decisionReason) {}
 
+    /**
+     * Captures prepared submissions and controls synchronous or delayed completion.
+     */
     static final class TestBatchSubmission {
 
         private CapacityBoundary prepareBoundary;
@@ -635,8 +671,10 @@ public final class DeliveryStrategyTestSupport {
         }
     }
 
+    /**
+     * Captures route and batch delivery observations for strategy assertions.
+     */
     static final class TestTelemetry {
-
         private final List<List<ScheduledRequest>> routes = new ArrayList<>();
         private final List<BatchTelemetry> batches = new ArrayList<>();
         private final DeliveryMetrics metrics = Mockito.mock(DeliveryMetrics.class);
@@ -671,6 +709,18 @@ public final class DeliveryStrategyTestSupport {
                             org.mockito.ArgumentMatchers.anyLong());
         }
 
+        List<List<ScheduledRequest>> routes() {
+            return List.copyOf(routes);
+        }
+
+        List<BatchTelemetry> batches() {
+            return List.copyOf(batches);
+        }
+
+        DeliveryMetrics metrics() {
+            return metrics;
+        }
+
         private void routesDelivered(int remainingQueueDepth, List<ScheduledRequest> exactItems) {
             routes.add(List.copyOf(exactItems));
         }
@@ -685,20 +735,11 @@ public final class DeliveryStrategyTestSupport {
                     new BatchTelemetry(
                             batchId, decisionReason, remainingQueueDepth, dispatched, predictedMs));
         }
-
-        List<List<ScheduledRequest>> routes() {
-            return List.copyOf(routes);
-        }
-
-        List<BatchTelemetry> batches() {
-            return List.copyOf(batches);
-        }
-
-        DeliveryMetrics metrics() {
-            return metrics;
-        }
     }
 
+    /**
+     * Stores one batch delivery observation for test assertions.
+     */
     record BatchTelemetry(
             long batchId,
             String decisionReason,
@@ -708,26 +749,5 @@ public final class DeliveryStrategyTestSupport {
         BatchTelemetry {
             dispatched = List.copyOf(dispatched);
         }
-    }
-
-    static CapacityBoundary unavailable() {
-        return CapacityBoundary.unavailable(
-                new CapacityBoundary.Availability() {
-                    @Override
-                    public boolean isAvailable() {
-                        return false;
-                    }
-
-                    @Override
-                    public void addListener(Runnable listener) {}
-
-                    @Override
-                    public void removeListener(Runnable listener) {}
-                },
-                new RouteProjection.AdmissionBlockSemantics(
-                        "TEST_BLOCK",
-                        RouteProjection.AfterProbeAdmission.BLOCKED,
-                        "TEST_BLOCK",
-                        RoleType.PREFILL));
     }
 }

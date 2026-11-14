@@ -11,9 +11,18 @@ repos:
     # Formatters
   - repo: local
     hooks:
+      - id: flexlb-java-conventions
+        name: Check FlexLB Java member order and changed-class Javadoc
+        entry: python rtp_llm/flexlb/tools/check_flexlb_java.py
+        language: python
+        additional_dependencies:
+          - tree-sitter==0.23.2
+          - tree-sitter-java==0.23.5
+        files: ^rtp_llm/flexlb/.*\.java$
+        require_serial: true
       - id: flexlb-java-format
-        name: Format FlexLB Java (Spotless / google-java-format)
-        entry: rtp_llm/flexlb/mvnw -f rtp_llm/flexlb/pom.xml --batch-mode --quiet spotless:apply -Pspotless-check
+        name: Check FlexLB Java (Spotless / google-java-format)
+        entry: rtp_llm/flexlb/mvnw -f rtp_llm/flexlb/pom.xml --batch-mode --quiet spotless:check -Pspotless-check
         language: system
         files: ^rtp_llm/flexlb/.*\.java$
         pass_filenames: false

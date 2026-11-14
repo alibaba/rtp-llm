@@ -1,5 +1,8 @@
 package org.flexlb.constant;
 
+/**
+ * Names the Nacos configuration subscription identifiers and defaults.
+ */
 public class NacosConfigConstants {
 
     public static final String NACOS_SERVER_ADDR = "FLEXLB_NACOS_SERVER_ADDR";

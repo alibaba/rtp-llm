@@ -15,9 +15,10 @@ import org.mockito.Mockito;
 
 import java.util.Map;
 
-/** Package-local fixtures for the frozen status/endpoint composition boundary. */
+/**
+ * Package-local fixtures for the frozen status/endpoint composition boundary.
+ */
 public final class RunnerTestSupport {
-
     private static final EndpointEventProjector NOOP_EVENT_SINK =
             Mockito.mock(EndpointEventProjector.class);
 
@@ -37,16 +38,28 @@ public final class RunnerTestSupport {
                 new PlacementAvailability());
     }
 
-    public static WorkerStatus discovered(
-            RoleType role, String group, String ip, int port, int grpcPort, String site) {
-        return WorkerStatus.createDiscovered(role, group, ip, port, grpcPort, site);
-    }
-
     public static WorkerStatus alive(
             RoleType role, String group, String ip, int port, int grpcPort, String site) {
         WorkerStatus status = discovered(role, group, ip, port, grpcPort, site);
         publish(status, response(status, true, 1L));
         return status;
+    }
+
+    public static WorkerStatus discovered(
+            RoleType role, String group, String ip, int port, int grpcPort, String site) {
+        return WorkerStatus.createDiscovered(role, group, ip, port, grpcPort, site);
+    }
+
+    public static void publish(WorkerStatus status, WorkerStatusResponse response) {
+        status.lock.lock();
+        try {
+            WorkerStatus.PreparedStatus prepared =
+                    status.prepareNewStatus(status.freezeStatusResponse(response));
+            status.publishPreparedStatus(prepared);
+            status.recordSuccessfulPoll(response.isAlive());
+        } finally {
+            status.lock.unlock();
+        }
     }
 
     public static WorkerStatusResponse response(WorkerStatus status, boolean alive, long version) {
@@ -73,18 +86,6 @@ public final class RunnerTestSupport {
         response.setStepLatencyMs(stepLatencyMs);
         response.setRunningTaskInfo(runningTasks);
         return response;
-    }
-
-    public static void publish(WorkerStatus status, WorkerStatusResponse response) {
-        status.lock.lock();
-        try {
-            WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(response));
-            status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(response.isAlive());
-        } finally {
-            status.lock.unlock();
-        }
     }
 
     public static WorkerEndpoint publishEndpoint(

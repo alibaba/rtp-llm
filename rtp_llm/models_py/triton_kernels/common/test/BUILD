@@ -1,3 +1,5 @@
+load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
+
 py_test (
     name = "silu_mul_masked_test",
     srcs = ["silu_mul_masked_test.py"],
@@ -54,4 +56,54 @@ py_test(
         "gpu_count": "1",
     },
     tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "fp8_small_quant_test",
+    srcs = ["fp8_small_quant_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+py_library(
+    testonly = True,
+    name = "vocab_gather_test_support",
+    srcs = ["vocab_gather_fixture.py"],
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+models_py_test(
+    name = "silu_fp8_quant_test",
+    src = "silu_fp8_quant_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+)
+
+models_py_test(
+    name = "vocab_byte_gather_test",
+    src = "vocab_byte_gather_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    deps = [
+        ":vocab_gather_test_support",
+    ],
+)
+
+models_py_test(
+    name = "zero_centered_compile_test",
+    src = "zero_centered_compile_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+)
+
+models_py_test(
+    name = "grouped_qk_norm_test",
+    src = "grouped_qk_norm_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+)
+
+models_py_test(
+    name = "vocab_lookup_test",
+    src = "vocab_lookup_test.py",
+    gpu = "RTX_5000_PRO_CU13",
 )

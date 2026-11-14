@@ -5,6 +5,9 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+/**
+ * Checks optimizer protocol JSON field compatibility.
+ */
 class OptimizerProtocolDtoTest {
 
     @Test

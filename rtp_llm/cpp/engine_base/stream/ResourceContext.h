@@ -18,6 +18,7 @@ struct ResourceContext {
 
     RoleType role_type{RoleType::PDFUSION};
     bool     decode_entrance{false};  // PD反转模式：Decode侧作为请求入口
+    bool defer_grammar_to_pp_tail{false};
 
     bool reuse_cache{false};
     bool enable_device_cache{true};

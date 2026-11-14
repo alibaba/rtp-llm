@@ -11,6 +11,9 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+/**
+ * Creates the selected monitoring client while respecting an existing provider bean.
+ */
 @Slf4j
 @Configuration
 @ConditionalOnProperty(name = "flexlb.monitor.provider", havingValue = "micrometer")

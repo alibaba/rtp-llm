@@ -36,6 +36,7 @@ public:
 
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
+    absl::Status pp_step();
     absl::Status startLoop();
     int64_t      getLastScheduleTime() override;
     void         reportMetrics(RtpLLMEngineMetricsCollector collector) {
@@ -52,56 +53,58 @@ private:
                                               bool                    is_cuda,
                                               bool                    drop_broad_sync);
 
+    static int calculateReserveStep(const EngineInitParams& params);
+
     void                            initScheduler();
     std::shared_ptr<GenerateStream> createStream(const std::shared_ptr<GenerateInput>& input);
     bool validateStreamForScheduling(const GenerateStreamPtr& stream, bool require_decode = true) const;
-    std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
-    WarmUpResult                    warmUp(const EngineInitParams& params);
-    WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
-    WarmUpResult                    decodeWarmUp(const EngineInitParams& params);
+    std::shared_ptr<GenerateStream>   createMinFakeStream(int32_t max_new_tokens);
+    WarmUpResult                      warmUp(const EngineInitParams& params);
+    WarmUpResult                      prefillWarmUp(const EngineInitParams& params);
+    WarmUpResult                      decodeWarmUp(const EngineInitParams& params);
     absl::StatusOr<GenerateStreamPtr> runPrefillWarmupShape(const std::shared_ptr<GenerateInput>& generate_input,
-                                                            const ResourceContext& resource_context,
-                                                            int                    reuse_length,
-                                                            int64_t                token_budget);
-    std::shared_ptr<KVCacheManager> createWarmupCacheManager();
-    void                            initLoadBalance();
-    absl::Status                    trySaveStepError() const;
-    void                            loop();
-    void                            normalizeSystemPromptCacheConfig();
-    void                            initCacheManager(std::optional<WarmUpResult> warm_up_result);
-    static void                     initializeAndPublishCacheManager(ResourceContext&                            resource_context,
-                                                                     int&                                        kv_cache_group_num,
-                                                                     RoleType                                    role_type,
-                                                                     std::shared_ptr<KVCacheManager>             cache_manager,
-                                                                     const std::function<bool(KVCacheManager&)>& initializer);
-    absl::Status                    initSystemPrompt();
-    std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
-    size_t                          getWarmUpInputLength() const;
-    static size_t                   reserveStepForStream(size_t configured_reserve_step, bool is_prefill_only);
+                                                            const ResourceContext&                resource_context,
+                                                            int                                   reuse_length,
+                                                            int64_t                               token_budget);
+    std::shared_ptr<KVCacheManager>   createWarmupCacheManager();
+    void                              initLoadBalance();
+    absl::Status                      trySaveStepError() const;
+    void                              loop();
+    void                              normalizeSystemPromptCacheConfig();
+    void                              initCacheManager(std::optional<WarmUpResult> warm_up_result);
+    static void                       initializeAndPublishCacheManager(ResourceContext&                            resource_context,
+                                                                       int&                                        kv_cache_group_num,
+                                                                       RoleType                                    role_type,
+                                                                       std::shared_ptr<KVCacheManager>             cache_manager,
+                                                                       const std::function<bool(KVCacheManager&)>& initializer);
+    absl::Status                      initSystemPrompt();
+    size_t                            reserveStepForStream(bool is_prefill_only) const;
+    std::shared_ptr<GenerateInput>    makeFakeInput(size_t seq_len);
+    size_t                            getWarmUpInputLength() const;
     static size_t warmUpReservedBlockCount(size_t seq_len, size_t reserve_tokens, size_t tokens_per_block);
     static bool   shouldEarlyReturnEmptyBatch(bool streams_empty, int64_t tp_size);
     static bool   shouldAddMtpFakePrefill(bool has_prefill, bool use_batch_decode_scheduler, int64_t dp_size);
     void          mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
 
-    void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
+    void initExecutor(const EngineInitParams& params);
 
     bool isMTPEagle() override;
     bool isEagle() override;
     bool isDSpark() override;
 
 private:
-    autil::ThreadPtr                              loop_thread_;
-    std::atomic<bool>                             running_{false};
-    std::unique_ptr<Executor>                     executor_;
-    ModelConfig                                   model_config_;
-    py::object                                    custom_output_selector_;
-    ParallelismConfig                             parallelism_config;
-    RuntimeConfig                                 runtime_config;
-    EPLBConfig                                    eplb_config;
-    PDSepConfig                                   pd_sep_config;
-    ProfilingDebugLoggingConfig                   profiling_debug_logging_config;
-    KVCacheConfig                                 kv_cache_config;
-    CacheStoreConfig                              cache_store_config;
+    autil::ThreadPtr            loop_thread_;
+    std::atomic<bool>           running_{false};
+    std::unique_ptr<Executor>   executor_;
+    ModelConfig                 model_config_;
+    py::object                  custom_output_selector_;
+    ParallelismConfig           parallelism_config;
+    RuntimeConfig               runtime_config;
+    EPLBConfig                  eplb_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    KVCacheConfig               kv_cache_config;
+    CacheStoreConfig            cache_store_config;
 
     SpeculativeExecutionConfig                    sp_config;
     kmonitor::MetricsReporterPtr                  metrics_reporter_;

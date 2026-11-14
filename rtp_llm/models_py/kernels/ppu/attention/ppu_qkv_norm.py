@@ -8,10 +8,6 @@ import triton.language as tl
 from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
     _trap_invalid_kv_access,
 )
-from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
-    trap_invalid_kv_access_enabled,
-    validate_slot_mapping,
-)
 
 
 @triton.jit
@@ -30,7 +26,6 @@ def _qkv_norm(
     CACHE_STRIDE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     CACHE_BLOCKS: tl.constexpr,
-    TRAP_INVALID: tl.constexpr,
     ROWS: tl.constexpr,
     QUANTIZE_Q: tl.constexpr,
     STRIDE: tl.constexpr,
@@ -38,6 +33,7 @@ def _qkv_norm(
     KD: tl.constexpr,
     RD: tl.constexpr,
     EPS: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     kind = tl.program_id(1)
@@ -87,7 +83,7 @@ def _qkv_norm(
                 block = slot // BLOCK_SIZE
                 pos = slot % BLOCK_SIZE
                 if block < 0 or block >= CACHE_BLOCKS:
-                    _trap_invalid_kv_access(TRAP_INVALID)
+                    _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
                 base_cache = CACHE + block * CACHE_STRIDE
                 data = base_cache + pos * 576
                 scales = base_cache + BLOCK_SIZE * 576 + pos * 8
@@ -187,13 +183,6 @@ def normalize_decode_qkv(
         slot_mapping = slot_mapping[:rows]
         if slot_mapping.dtype != torch.long:
             slot_mapping = slot_mapping.to(torch.long)
-        validate_slot_mapping(
-            "swa.quantize_and_insert.slot_mapping",
-            slot_mapping,
-            block_size=int(swa_cache.shape[1]),
-            num_blocks=int(swa_cache.shape[0]),
-            negative_mode="skip_minus_one",
-        )
     if rows:
         _qkv_norm[(rows, 2)](
             raw,
@@ -210,7 +199,6 @@ def normalize_decode_qkv(
             CACHE_STRIDE=swa_cache.stride(0) if write_cache else 0,
             BLOCK_SIZE=swa_cache.shape[1] if write_cache else 1,
             CACHE_BLOCKS=swa_cache.shape[0] if write_cache else 0,
-            TRAP_INVALID=trap_invalid_kv_access_enabled(),
             ROWS=rows,
             QUANTIZE_Q=quantize_q,
             STRIDE=1536,
@@ -218,6 +206,7 @@ def normalize_decode_qkv(
             KD=512,
             RD=64,
             EPS=eps,
+            TRAP_INVALID_KV_ACCESS=True,
             num_warps=4,
         )
     if quantize_q:

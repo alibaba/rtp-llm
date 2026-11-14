@@ -3,7 +3,9 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.Setter;
 
-/** Runtime policy shared by service-discovery clients. */
+/**
+ * Runtime policy shared by service-discovery clients.
+ */
 @Getter
 @Setter
 public final class ServiceDiscoveryRuntimeConfig {

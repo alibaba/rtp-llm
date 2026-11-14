@@ -51,7 +51,7 @@ class PureTpRouterBase(FusedMoeDataRouter):
         self, output: torch.Tensor, extra_finalize_args: Optional[FinalizeArgs]
     ) -> torch.Tensor:
         if self.tp_size > 1 and not should_skip_tp_allreduce(extra_finalize_args):
-            return all_reduce(output, group=Group.TP)
+            return getattr(self, "tp_all_reduce", all_reduce)(output, group=Group.TP)
         return output
 
     @classmethod
@@ -278,3 +278,10 @@ class PureTpRouterFp4PerGroup(PureTpRouterBase):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """FP4 per-group quantization"""
         return a1, None
+
+
+class PureTpRouterNvfp4Cutlass(PureTpRouterFp4PerGroup):
+    """Replicated tokens and global IDs for CUTLASS expert/tensor parallelism."""
+
+    def __init__(self, config, quant_config):
+        PureTpRouterBase.__init__(self, config, quant_config, do_recompute_topk=False)

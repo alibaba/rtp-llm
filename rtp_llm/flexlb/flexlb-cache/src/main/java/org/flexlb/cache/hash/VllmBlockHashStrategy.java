@@ -5,6 +5,9 @@ import org.flexlb.util.BlockCacheKeyCalculator;
 
 import java.util.List;
 
+/**
+ * Builds vLLM-compatible block hashes from tokens and lookahead inputs.
+ */
 public final class VllmBlockHashStrategy implements BlockHashStrategy {
 
     @Override

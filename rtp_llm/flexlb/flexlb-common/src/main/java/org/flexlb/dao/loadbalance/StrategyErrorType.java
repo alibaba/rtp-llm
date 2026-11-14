@@ -2,6 +2,9 @@ package org.flexlb.dao.loadbalance;
 
 import lombok.Getter;
 
+/**
+ * Pairs strategy error codes with their scheduling rejection reasons and default messages.
+ */
 @Getter
 public enum StrategyErrorType {
     CONNECT_FAILED(8202, false),

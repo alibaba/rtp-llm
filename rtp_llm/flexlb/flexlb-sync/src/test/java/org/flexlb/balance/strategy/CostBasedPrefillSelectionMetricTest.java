@@ -49,6 +49,10 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks Prefill selection observations and metric failures without changing valid selection
+ * results.
+ */
 class CostBasedPrefillSelectionMetricTest {
     private static final int FULL_FLEET_SIZE = 750;
 

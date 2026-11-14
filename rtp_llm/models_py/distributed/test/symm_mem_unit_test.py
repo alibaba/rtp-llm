@@ -25,12 +25,20 @@ class SymmMemConfigurationTest(unittest.TestCase):
     def test_collective_init_calls_symm_mem_without_custom_ar_config(self) -> None:
         world_group = object()
         communicator_module = MagicMock()
-        config = SimpleNamespace(world_rank=0, world_size=2, tp_size=2, dp_size=1)
+        config = SimpleNamespace(
+            world_rank=0, world_size=2, tp_size=2, dp_size=1, pp_size=1
+        )
 
         group_namespace = SimpleNamespace(WORLD=world_group)
         with patch.object(
             collective.torch.distributed, "group", group_namespace
-        ), patch.object(collective, "_get_symm_mem", return_value=communicator_module):
+        ), patch.object(collective.torch.distributed, "new_group"), patch.object(
+            collective.torch.distributed, "barrier"
+        ), patch.dict(
+            collective._group_map, {}, clear=True
+        ), patch.object(
+            collective, "_get_symm_mem", return_value=communicator_module
+        ):
             collective._create_process_groups(
                 config,
                 "nccl",

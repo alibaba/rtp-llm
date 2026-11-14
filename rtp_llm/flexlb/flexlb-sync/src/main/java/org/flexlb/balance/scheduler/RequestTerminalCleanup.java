@@ -6,9 +6,14 @@ import org.flexlb.balance.preemption.VictimTerminal;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.util.Logger;
 
-/** Executes an already-owned terminal action, then commits its terminal record and publishes. */
+/**
+ * Executes an already-owned terminal action, then commits its terminal record and publishes.
+ *
+ * <p>A slot first claims a terminal action. Cleanup attempts resource release and endpoint
+ * effects, signals preemption when present, then commits the terminal record and returns the
+ * publication permit. Failures are accumulated so independent cleanup steps can still run.
+ */
 final class RequestTerminalCleanup {
-
     private final ExpirationTimer expirationTimer;
     private final RequestSchedulerReporter reporter;
 
@@ -59,6 +64,68 @@ final class RequestTerminalCleanup {
                     terminalFailure);
         }
         return result.terminal() == null ? null : result.publication();
+    }
+
+    // ── 独立执行与异常汇总 ──
+
+    static Throwable runStep(Throwable first, Runnable leaf) {
+        if (leaf == null) {
+            return first;
+        }
+        try {
+            leaf.run();
+            return first;
+        } catch (Throwable failure) {
+            return appendFailure(first, failure);
+        }
+    }
+
+    static Throwable appendFailure(Throwable first, Throwable next) {
+        if (first == null) {
+            return next;
+        }
+        if (first != next) {
+            first.addSuppressed(next);
+        }
+        return first;
+    }
+
+    // ── 派发失败：分别结算 Prefill 与 Decode ──
+
+    void settlePrefill(ScheduledRequest exact, boolean expired) {
+        if (exact.prefillEp() == null) {
+            return;
+        }
+        if (expired) {
+            exact.prefillEp().removeQueued(exact, "REQUEST_INACTIVE");
+            exact.prefillEp().expireCommittedItem(exact);
+        } else {
+            exact.prefillEp().settleFailedRequest(exact);
+        }
+    }
+
+    boolean settleDecode(ScheduledRequest exact, DeliveryResult.Status source, boolean expired) {
+        if (exact.decodeEp() == null || exact.decodeReservation() == null) {
+            return true;
+        }
+        if (expired) {
+            exact.decodeEp()
+                    .release(exact.decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
+            return true;
+        }
+        return exact.decodeEp().settleFailedRequest(exact.decodeReservation(), source);
+    }
+
+    static void rethrowCleanup(Throwable failure) {
+        if (failure instanceof RuntimeException runtime) {
+            throw runtime;
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
+        if (failure != null) {
+            throw new IllegalStateException("request slot cleanup failed", failure);
+        }
     }
 
     private void releaseEndpoints(TerminalAction action) {
@@ -127,67 +194,5 @@ final class RequestTerminalCleanup {
             }
         }
         rethrowCleanup(failure);
-    }
-
-    // ── 派发失败：分别结算 Prefill 与 Decode ──
-
-    void settlePrefill(ScheduledRequest exact, boolean expired) {
-        if (exact.prefillEp() == null) {
-            return;
-        }
-        if (expired) {
-            exact.prefillEp().removeQueued(exact, "REQUEST_INACTIVE");
-            exact.prefillEp().expireCommittedItem(exact);
-        } else {
-            exact.prefillEp().settleFailedRequest(exact);
-        }
-    }
-
-    boolean settleDecode(ScheduledRequest exact, DeliveryResult.Status source, boolean expired) {
-        if (exact.decodeEp() == null || exact.decodeReservation() == null) {
-            return true;
-        }
-        if (expired) {
-            exact.decodeEp()
-                    .release(exact.decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
-            return true;
-        }
-        return exact.decodeEp().settleFailedRequest(exact.decodeReservation(), source);
-    }
-
-    // ── 独立执行与异常汇总 ──
-
-    static Throwable runStep(Throwable first, Runnable leaf) {
-        if (leaf == null) {
-            return first;
-        }
-        try {
-            leaf.run();
-            return first;
-        } catch (Throwable failure) {
-            return appendFailure(first, failure);
-        }
-    }
-
-    static Throwable appendFailure(Throwable first, Throwable next) {
-        if (first == null) {
-            return next;
-        }
-        if (first != next) {
-            first.addSuppressed(next);
-        }
-        return first;
-    }
-
-    static void rethrowCleanup(Throwable failure) {
-        if (failure instanceof RuntimeException runtime) {
-            throw runtime;
-        }
-        if (failure instanceof Error error) {
-            throw error;
-        }
-        if (failure != null) {
-            throw new IllegalStateException("request slot cleanup failed", failure);
-        }
     }
 }

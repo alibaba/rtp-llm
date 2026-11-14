@@ -38,9 +38,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
-/** The configured limit, real worker publication lock and canonical request ledger together. */
+/**
+ * The configured limit, real worker publication lock and canonical request ledger together.
+ */
 class WorkerBatcherRequestCapacityTest {
-
     @ParameterizedTest
     @CsvSource({"false,90,false", "true,50,false", "true,0,false", "true,90,true"})
     void queuedPreemptionHonorsDisabledPolicyAndStrictlyHigherPriority(
@@ -180,13 +181,6 @@ class WorkerBatcherRequestCapacityTest {
                                                     .equals("claimRouteDelivery")));
             verify(fixture.runtime.events()).onQueuedItemPreempted(victim, incoming);
         }
-    }
-
-    private static FlexlbConfig preemptionConfig() {
-        FlexlbConfig config = productionConfig();
-        config.setDispatcher(DispatcherConfig.nonBatch());
-        config.getScheduler().setOrdering(QueueOrderingConfig.priority());
-        return config;
     }
 
     @Test
@@ -335,6 +329,13 @@ class WorkerBatcherRequestCapacityTest {
         }
     }
 
+    private static FlexlbConfig preemptionConfig() {
+        FlexlbConfig config = productionConfig();
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getScheduler().setOrdering(QueueOrderingConfig.priority());
+        return config;
+    }
+
     private static FlexlbConfig productionConfig() {
         FlexlbConfig config = new FlexlbConfig();
         config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
@@ -389,6 +390,9 @@ class WorkerBatcherRequestCapacityTest {
         return new Fixture(endpoint, delivery, parked, runtime);
     }
 
+    /**
+     * Owns resources used to exercise worker batcher request-capacity limits.
+     */
     private record Fixture(
             PrefillEndpoint endpoint,
             DeliveryStrategy delivery,

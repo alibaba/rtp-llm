@@ -689,6 +689,37 @@ TEST(BlockTreeCacheFactoryUtilityTest, TierBlockCountsUseWideIntermediateProduct
               (std::vector<size_t>{size_t{1} << 30}));
 }
 
+TEST_F(BlockTreeCacheFactoryTest, FactoryConsumesNegotiatedBlockCounts) {
+    const auto    config = makeSingleConfig();
+    block_transfer_engine_test::TempDirGuard disk_dir("negotiated_tier_counts");
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    kv_cache_config.enable_disk_cache      = true;
+    kv_cache_config.disk_cache_size_mb     = 1;
+    kv_cache_config.disk_cache_paths       = disk_dir.path;
+    kv_cache_config.disk_cache_buffered_io = true;
+    auto layout                          = planBlockTreeCacheLayout(config, kv_cache_config);
+    ASSERT_NE(layout, nullptr);
+    ASSERT_EQ(layout->sizing.group_sets.size(), 1u);
+    EXPECT_EQ(layout->sizing.group_sets[0].first_tag, config.groups().front().tag);
+    EXPECT_EQ(layout->sizing.group_sets[0].pool_stride, layout->backing_layouts[0].pool_stride);
+    EXPECT_EQ(layout->sizing.host_budget_bytes, 1024u * 1024u);
+    layout->block_nums.emplace();
+    layout->block_nums->host[CacheGroupType::FULL] = 5;
+    layout->block_nums->disk[CacheGroupType::FULL] = 7;
+
+    auto allocator = initAllocator<CoordinatorCacheManager>(config);
+    auto cache     = createBlockTreeCache(
+        config, kv_cache_config, allocator, ParallelismConfig{}, nullptr, nullptr, nullptr, layout);
+    ASSERT_NE(cache, nullptr);
+    ASSERT_EQ(cache->groupSets().size(), 1u);
+    ASSERT_NE(cache->groupSets().front()->hostPool(), nullptr);
+    EXPECT_EQ(cache->groupSets().front()->hostPool()->totalBlocksNum(), 4u);
+    ASSERT_NE(cache->groupSets().front()->diskPool(), nullptr);
+    EXPECT_EQ(cache->groupSets().front()->diskPool()->totalBlocksNum(), 6u);
+}
+
 TEST(BlockTreeCacheFactoryUtilityTest, ResolveDiskMountPathUsesLocalRankAndRejectsInvalidShape) {
     EXPECT_EQ(resolveDiskMountPath("/mnt/d0,/mnt/d1,/mnt/d2", 3, 0), "/mnt/d0");
     EXPECT_EQ(resolveDiskMountPath(" /mnt/d0 , /mnt/d1 ", 2, 1), "/mnt/d1");

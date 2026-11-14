@@ -41,6 +41,10 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks that successful scheduling updates standby metadata without allowing metadata failure to
+ * replace the response.
+ */
 class FlexlbScheduleLocalStandbyTest {
 
     @ParameterizedTest

@@ -49,6 +49,13 @@ cc_library(
 )
 
 cc_library(
+    name = "tp_cache_transfer_layout",
+    hdrs = ["LinearTpCacheLayout.h", "MhaTpCacheLayout.h", "TpCacheTransferPlan.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "kv_cache_specs",
     srcs = [
         "KVCacheSpecDesc.cc",
@@ -66,6 +73,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":block_info",
+        ":tp_cache_transfer_layout",
         ":cache_group_type",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/model_utils:model_utils",
@@ -104,6 +112,34 @@ cc_library(
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings/core:types",
+    ],
+)
+
+cc_library(
+    name = "cache_capacity_negotiator",
+    srcs = ["CacheCapacityNegotiator.cc"],
+    hdrs = ["CacheCapacityNegotiator.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":batch_kv_cache_resource",
+        ":cache_config",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/config:config_modules",
+    ],
+)
+
+cc_library(
+    name = "pp_topology_validator",
+    srcs = ["PPTopologyValidator.cc"],
+    hdrs = ["PPTopologyValidator.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_capacity_negotiator",
+        ":cache_config",
+        ":cache_group_type",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
     ],
 )
 
@@ -312,6 +348,8 @@ cc_library(
         ":coordinator_cache_manager",
         ":prefill_cache_hit_metrics_reporter",
         "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/cpp/config:rank_layout",
+        "//rtp_llm/cpp/config:stage_layer_range",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core:type_convert",

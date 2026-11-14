@@ -10,6 +10,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks exact poll-lease acquisition, transfer and release.
+ */
 class WorkerStatusPollLeaseTest {
 
     @Test

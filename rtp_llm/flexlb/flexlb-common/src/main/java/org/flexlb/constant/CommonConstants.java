@@ -1,5 +1,8 @@
 package org.flexlb.constant;
 
+/**
+ * Names shared defaults and diagnostic markers used across FlexLB modules.
+ */
 public class CommonConstants {
 
     public static final String FUNCTION = "aigc.text-generation.generation";

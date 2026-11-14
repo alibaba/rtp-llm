@@ -143,18 +143,18 @@ TEST_F(ModelDataTest, testMtpHiddenShapeRejectsInvalidMetadataBeforeAllocation) 
 
 TEST_F(ModelDataTest, testShapeHintsCarryExactPackedBroadcastPlacement) {
     GptModelInputs inputs;
-    inputs.combo_tokens             = torch::zeros({8}, torch::kInt32).cuda();
-    inputs.input_lengths            = torch::zeros({1}, torch::kInt32).cuda();
-    inputs.sequence_lengths         = torch::zeros({1}, torch::kInt32).cuda();
-    inputs.prefix_lengths           = torch::zeros({1}, torch::kInt32).cuda();
+    inputs.combo_tokens                     = torch::zeros({8}, torch::kInt32).cuda();
+    inputs.input_lengths                    = torch::zeros({1}, torch::kInt32).cuda();
+    inputs.sequence_lengths                 = torch::zeros({1}, torch::kInt32).cuda();
+    inputs.prefix_lengths                   = torch::zeros({1}, torch::kInt32).cuda();
     inputs.cache_store_publish_start_tokens = torch::tensor({4}, torch::kInt32);
-    inputs.kv_cache_kernel_block_id = torch::zeros({4, 1, 93}, torch::kInt32).cuda();
-    inputs.kv_cache_block_id        = torch::zeros({4, 1, 93}, torch::kInt32);
-    inputs.kv_cache_group_types     = torch::zeros({4}, torch::kInt32);
-    inputs.kv_cache_update_mapping  = torch::zeros({2, 3}, torch::kInt32).cuda();
-    inputs.request_id               = torch::zeros({1}, torch::kInt64);
-    inputs.request_pd_separation    = torch::zeros({1}, torch::kBool);
-    inputs.lm_output_indexes        = torch::zeros({7}, torch::kInt32).cuda();
+    inputs.kv_cache_kernel_block_id         = torch::zeros({4, 1, 93}, torch::kInt32).cuda();
+    inputs.kv_cache_block_id                = torch::zeros({4, 1, 93}, torch::kInt32);
+    inputs.kv_cache_group_types             = torch::zeros({4}, torch::kInt32);
+    inputs.kv_cache_update_mapping          = torch::zeros({2, 3}, torch::kInt32).cuda();
+    inputs.request_id                       = torch::zeros({1}, torch::kInt64);
+    inputs.request_pd_separation            = torch::zeros({1}, torch::kBool);
+    inputs.lm_output_indexes                = torch::zeros({7}, torch::kInt32).cuda();
     // This is the exact mixed-device DSpARK TP2 case that previously made
     // rank 0 send 1504 CPU bytes while rank 1 waited for 1600.
     inputs.combo_position_ids = torch::zeros({24}, torch::kInt32).cuda();
@@ -222,6 +222,22 @@ TEST_F(ModelDataTest, testTpSyncBlockTableShapesPreserve2DAnd3D) {
               (std::vector<int64_t>{4, 2, 7}));
 }
 
+TEST_F(ModelDataTest, testOffloadAndShutdownControlFlagsAreIndependent) {
+    for (int enabled = 0; enabled < 3; ++enabled) {
+        GptModelInputs inputs;
+        inputs.shutdown        = enabled == 0;
+        inputs.is_draft_extend = enabled == 1;
+        if (enabled == 2) {
+            inputs.kv_cache_generation_updates = torch::zeros({1, 2}, torch::kInt64);
+        }
+        const auto hints = getModelInputShapeHints(inputs);
+        const auto flags = static_cast<uint32_t>(hints[GptModelInputIndex::modelControlFlags]);
+        EXPECT_EQ((flags & GptModelInputControlFlag::kControlShutdown) != 0, enabled == 0);
+        EXPECT_EQ((flags & GptModelInputControlFlag::kControlDraftExtend) != 0, enabled == 1);
+        EXPECT_EQ((flags & GptModelInputControlFlag::kControlHasKvGenerations) != 0, enabled == 2);
+    }
+}
+
 TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     GptModelInputs inputs;
     inputs.need_all_logits           = true;
@@ -229,6 +245,7 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     inputs.need_moe_gating           = true;
     inputs.warmup                    = true;
     inputs.skip_run                  = true;
+    inputs.shutdown                  = true;
     inputs.is_fake_stream            = true;
     inputs.is_target_verify          = true;
     inputs.is_draft_extend           = true;
@@ -249,6 +266,7 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlNeedMoeGating));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlWarmup));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlSkipRun));
+    EXPECT_TRUE(has(GptModelInputControlFlag::kControlShutdown));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlFakeStream));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlTargetVerify));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlDraftExtend));
@@ -450,6 +468,16 @@ TEST(ModelInputTpSyncChild, DISABLED_RunRank) {
     EXPECT_TRUE(!inputs.kv_cache_group_types.defined() || inputs.kv_cache_group_types.numel() == 0);
     EXPECT_TRUE(!inputs.kv_cache_update_mapping.defined() || inputs.kv_cache_update_mapping.numel() == 0);
     EXPECT_FALSE(inputs.kv_cache_generation_updates.defined());
+
+    /** Shutdown must reach TP peers before the empty-batch return, including clearing a previous terminal flag. */
+    for (bool shutdown : {false, true, false}) {
+        inputs          = GptModelInputs{};
+        inputs.skip_run = rank == 0;
+        inputs.shutdown = rank == 0 ? shutdown : !shutdown;
+        tpSyncModelInputs(inputs, config);
+        EXPECT_TRUE(inputs.skip_run);
+        EXPECT_EQ(inputs.shutdown, shutdown);
+    }
 
     // Both children exercise sender-side rejection, so malformed metadata cannot strand a peer in a collective.
     config.tp_rank = 0;

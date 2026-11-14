@@ -37,27 +37,12 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Unit tests for the status-report fault-injection family (12 new types):
- * 9 getWorkerStatus output-layer faults (suppress_finished / suppress_running /
- * suppress_rids / no_respond / fake_task / duplicate_finished / cursor_regress /
- * version_regress / zombie_running) and 3 EnqueueBatch ack faults
- * (enqueue_ack_partial_fail / enqueue_ack_error_code / enqueue_ack_drop),
- * plus the execution-phase partial-failure injection
- * (prefill_async_partial_fail: batch members that fail AT the prefill
- * completion callback and surface as typed terminals on the status channel —
- * production "stream->reportError → dequeue fills task_info.error_code /
- * error_message → finished_task_list" semantics).
- *
- * <p>All injections go through the real HTTP /inject endpoint of
- * {@link MockControlServer} (Java type format) and are asserted against the
- * gRPC service directly, mirroring {@link ComprehensiveFaultInjectionTest}.
+ * Checks worker-status fault injection and its effects on reported running and finished tasks.
  */
 class StatusFaultInjectionTest {
-
     private static final AtomicInteger PORT_ALLOCATOR = new AtomicInteger(63100);
 
     @TempDir Path tempDir;
-
     private ScheduledExecutorService scheduler;
     private MockControlServer controlServer;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
@@ -788,40 +773,6 @@ class StatusFaultInjectionTest {
                 "the survivor's frame is the normal terminal frame");
     }
 
-    /** Async FetchResponse / GenerateStreamCall collector (MultiFrameStreamTtft
-     *  style, adapted so several streams can be opened before the batch runs). */
-    private static final class StreamCollector {
-        final List<EngineRpcService.GenerateOutputsPB> frames = new CopyOnWriteArrayList<>();
-        final AtomicReference<Throwable> error = new AtomicReference<>();
-        final CountDownLatch terminal = new CountDownLatch(1);
-
-        StreamObserver<EngineRpcService.GenerateOutputsPB> observer() {
-            return new StreamObserver<>() {
-                @Override
-                public void onNext(EngineRpcService.GenerateOutputsPB value) {
-                    frames.add(value);
-                }
-
-                @Override
-                public void onError(Throwable t) {
-                    error.set(t);
-                    terminal.countDown();
-                }
-
-                @Override
-                public void onCompleted() {
-                    terminal.countDown();
-                }
-            };
-        }
-
-        void await(long ms) throws InterruptedException {
-            assertTrue(
-                    terminal.await(ms, TimeUnit.MILLISECONDS),
-                    "stream must terminate (completed or error) within " + ms + "ms");
-        }
-    }
-
     // ════════════════════════════════════════════════════════════════
     //  Cluster scaffolding (direct service calls, MockControlServer on :0)
     // ════════════════════════════════════════════════════════════════
@@ -964,5 +915,41 @@ class StatusFaultInjectionTest {
 
     private MockPerformanceModel model(String formula) throws Exception {
         return MockEngineTestSupport.performanceModel(tempDir, formula);
+    }
+
+    /**
+     * Async FetchResponse / GenerateStreamCall collector (MultiFrameStreamTtft
+     *  style, adapted so several streams can be opened before the batch runs).
+     */
+    private static final class StreamCollector {
+        final List<EngineRpcService.GenerateOutputsPB> frames = new CopyOnWriteArrayList<>();
+        final AtomicReference<Throwable> error = new AtomicReference<>();
+        final CountDownLatch terminal = new CountDownLatch(1);
+
+        StreamObserver<EngineRpcService.GenerateOutputsPB> observer() {
+            return new StreamObserver<>() {
+                @Override
+                public void onNext(EngineRpcService.GenerateOutputsPB value) {
+                    frames.add(value);
+                }
+
+                @Override
+                public void onError(Throwable t) {
+                    error.set(t);
+                    terminal.countDown();
+                }
+
+                @Override
+                public void onCompleted() {
+                    terminal.countDown();
+                }
+            };
+        }
+
+        void await(long ms) throws InterruptedException {
+            assertTrue(
+                    terminal.await(ms, TimeUnit.MILLISECONDS),
+                    "stream must terminate (completed or error) within " + ms + "ms");
+        }
     }
 }

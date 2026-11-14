@@ -8,6 +8,9 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/**
+ * Checks SGLang-compatible block hashing against the expected cache-key contract.
+ */
 class SglangBlockHashStrategyTest {
 
     private final BlockHashStrategy strategy = new SglangBlockHashStrategy();

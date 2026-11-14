@@ -27,12 +27,11 @@ from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
-from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.distribute.distributed_server import (
-    get_dp_addrs_from_world_info,
-    get_world_info,
+    get_dp_rpc_addresses,
+    get_eplb_stage_root_addresses,
 )
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
@@ -424,21 +423,19 @@ class FrontendApp(object):
         self.separated_frontend = separated_frontend
 
         # Compute all DP addresses for broadcast operations (e.g. update_scheduler_info)
-        engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
-        world_info = get_world_info(
-            server_config=py_env_configs.server_config,
-            distribute_config=py_env_configs.distribute_config,
-            parallelism_config=py_env_configs.parallelism_config,
-        )
-        dp_addresses = get_dp_addrs_from_world_info(
-            world_info=world_info,
-            parallelism_config=engine_config.parallelism_config,
-        )
+        dp_addresses = get_dp_rpc_addresses(py_env_configs)
         client_config = self.py_env_configs.grpc_config.get_client_config()
+        # Resolve stage roots only on PP EPLB updates, after backend bootstrap.
+        eplb_address_resolver = None
+        if py_env_configs.parallelism_config.pp_size > 1:
+            eplb_address_resolver = lambda: get_eplb_stage_root_addresses(
+                py_env_configs
+            )
         self.grpc_client = GrpcClientWrapper(
             self.server_config.rpc_server_port,
             dp_addresses=dp_addresses,
             client_config=client_config,
+            eplb_address_resolver=eplb_address_resolver,
         )
 
         logging.info(

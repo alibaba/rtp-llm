@@ -27,6 +27,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks correlation of predicted cache hits with worker feedback and duplicate feedback handling.
+ */
 class CacheHitFeedbackTrackerTest {
 
     @Test

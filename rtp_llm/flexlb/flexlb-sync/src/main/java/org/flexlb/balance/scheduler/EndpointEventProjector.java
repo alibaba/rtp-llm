@@ -19,7 +19,6 @@ import java.util.Objects;
  */
 @Component
 public final class EndpointEventProjector {
-
     private final RequestRegistry scheduler;
 
     public EndpointEventProjector(RequestRegistry scheduler) {
@@ -147,6 +146,14 @@ public final class EndpointEventProjector {
         }
     }
 
+    private static void logErrorNoFail(String format, Object... arguments) {
+        try {
+            Logger.error(format, arguments);
+        } catch (Throwable ignoredDiagnosticFailure) {
+            // Continue projecting the remaining exact facts.
+        }
+    }
+
     private void projectDecodeStatus(
             DecodeEndpoint source, List<DecodeEndpoint.WorkerStatusFact> facts) {
         for (DecodeEndpoint.WorkerStatusFact fact : facts) {
@@ -193,14 +200,6 @@ public final class EndpointEventProjector {
                         reservation.endpointGenerationId(),
                         failure);
             }
-        }
-    }
-
-    private static void logErrorNoFail(String format, Object... arguments) {
-        try {
-            Logger.error(format, arguments);
-        } catch (Throwable ignoredDiagnosticFailure) {
-            // Continue projecting the remaining exact facts.
         }
     }
 }

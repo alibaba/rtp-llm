@@ -1,8 +1,11 @@
 #pragma once
 
 #include "absl/status/statusor.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -15,8 +18,45 @@ namespace rtp_llm {
 class Executor {
 public:
     Executor() {};
-    virtual absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) = 0;
+    virtual absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) = 0;
 
+    /** Complete pending work on the engine loop thread before executor teardown. */
+    virtual absl::Status finish() {
+        return absl::OkStatus();
+    }
+
+    // Batch-recording helpers shared by executors. They cannot live in
+    // rtp_llm/cpp/observability: engine_base/stream already depends on that
+    // library (RecordedBatch in StreamGroups, identity publishing in
+    // GenerateStream), so a back-dependency on stream types would close a
+    // library cycle. The executor base is the common seam of both consumers.
+protected:
+    // Build the RecordedBatch from the gatherer-frozen CPU length snapshot.
+    // Returns nullptr unless the recorder is enabled for this batch
+    // (inputs.record_execution_id). Throws when the snapshot is missing or
+    // its slot counts disagree with the stream groups; callers contain it
+    // (recording must never fail the serving step).
+    std::shared_ptr<RecordedBatch> recordBatchInputs(const GptModelInputs& inputs, const StreamGroups& groups) const;
+    // Structural record-id gate: owner (recorder enabled, non-warmup,
+    // non-special worker, tp_rank 0) plus a real, non-empty batch. Decode-step
+    // policy (sampling) is executor-side and composed by the caller.
+    static bool shouldRecordBatch(bool owner, bool has_request_stream, size_t total_model_batch_size);
+
+    // Batch recording decode sampling ratio, clamped from
+    // ProfilingDebugLoggingConfig by each executor ctor.
+    double record_decode_sample_rate_ = 0.1;
+    // Deterministic decode-step sampling credit (Bresenham-style): each
+    // decode step adds record_decode_sample_rate_; crossing 1.0 records the
+    // step and spends one unit, keeping the long-run recorded fraction exact
+    // without an RNG. process()/decodeStep() run only on the engine loop
+    // thread, so this plain state needs no lock; warmup/propose/non-tp0
+    // executors never advance it (short-circuit && in the caller).
+    double record_decode_sample_credit_ = 0.0;
+    // Decode-step recording sampling; advances the credit only when called
+    // (decode gate), so non-decode steps never consume samples.
+    bool sampleDecodeStep();
+
+public:
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,
                                                    const EPLBConfig&        eplb_config,

@@ -146,3 +146,31 @@ py_test(
         "gpu_count": "1",
     },
 )
+
+test_suite(
+    name = "qwen4_exp_layer_test",
+    tests = [
+        "//rtp_llm/models_py/model_desc/test/qwen4_exp:ple_cache_test",
+        "//rtp_llm/models_py/model_desc/test/qwen4_exp:ple_graph_test",
+        "//rtp_llm/models_py/model_desc/test/qwen4_exp:ple_host_test",
+        "//rtp_llm/models_py/model_desc/test/qwen4_exp:ple_prefetch_test",
+        "//rtp_llm/models_py/model_desc/test/qwen4_exp:qsa_wiring_test",
+        "//rtp_llm/models_py/model_desc/test/qwen4_exp:wiring_test",
+    ],
+)
+
+alias(
+    name = "qwen4_exp_mtp_test",
+    actual = "//rtp_llm/models_py/model_desc/test/qwen4_exp:mtp_test",
+)
+
+py_test(
+    name = "pp_stage_construction_test",
+    srcs = ["pp_stage_construction_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)

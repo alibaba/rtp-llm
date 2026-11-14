@@ -41,5 +41,29 @@ class ModelConfigAttentionTest(unittest.TestCase):
                 )
 
 
+class ModelConfigMtpHiddenSizeTest(unittest.TestCase):
+    def test_hidden_width_product_boundaries(self):
+        maximum = 2**63 - 1
+        for hidden, multiplier in ((1024, 4), (maximum, 1), (maximum // 2, 2)):
+            with self.subTest(hidden=hidden, multiplier=multiplier):
+                config = ModelConfig()
+                config.hidden_size = hidden
+                config.hc_mult = multiplier
+                self.assertEqual(config.getMtpInputHiddenSize(), hidden * multiplier)
+        for hidden, multiplier, error in (
+            (0, 1, "cannot resolve"),
+            (-1, 1, "cannot resolve"),
+            (1, 0, "cannot resolve"),
+            (1, -1, "cannot resolve"),
+            (maximum, 2, "overflows int64_t"),
+        ):
+            with self.subTest(hidden=hidden, multiplier=multiplier):
+                config = ModelConfig()
+                config.hidden_size = hidden
+                config.hc_mult = multiplier
+                with self.assertRaisesRegex(RuntimeError, error):
+                    config.getMtpInputHiddenSize()
+
+
 if __name__ == "__main__":
     unittest.main()

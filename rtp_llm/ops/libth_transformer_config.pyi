@@ -107,6 +107,7 @@ class AttentionConfigs:
     kernel_tokens_per_block: int
     use_logn_attn: bool
     use_mla: bool
+    use_sparse_gqa_fmha: bool
     v_head_dim: int
     def __init__(self) -> None:
         ...
@@ -956,6 +957,12 @@ class OpaqueBlockEntryCountMode:
     KERNEL_BLOCK_COMPRESSED: typing.ClassVar[OpaqueBlockEntryCountMode]
     STATE_RING: typing.ClassVar[OpaqueBlockEntryCountMode]
 
+class TpCacheTransferMode:
+    LEGACY: typing.ClassVar[TpCacheTransferMode]
+    REPLICATED: typing.ClassVar[TpCacheTransferMode]
+    MHA_HEADS: typing.ClassVar[TpCacheTransferMode]
+    LINEAR_QKV: typing.ClassVar[TpCacheTransferMode]
+
 class CpPrefillSliceLayout:
     NONE: typing.ClassVar[CpPrefillSliceLayout]
     PAYLOAD: typing.ClassVar[CpPrefillSliceLayout]
@@ -995,6 +1002,7 @@ class CacheOffloadPolicy:
     def __init__(self) -> None: ...
 
 class KVCacheSpecDesc:
+    tp_transfer_mode: TpCacheTransferMode
     tag: str
     cache_type: KVCacheSpecType
     dtype: DataType
@@ -1089,6 +1097,8 @@ class ModelConfig:
     def __init__(self) -> None:
         ...
     def getAttentionConfigs(self, arg0: int) -> AttentionConfigs:
+        ...
+    def getMtpInputHiddenSize(self) -> int:
         ...
     def isGatedActivation(self) -> bool:
         ...

@@ -23,12 +23,18 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
-/** Orchestrates the KVCM and complete local-snapshot cache matching sources. */
+/**
+ * Orchestrates the KVCM and complete local-snapshot cache matching sources.
+ *
+ * <p>A query chooses LOCAL_SYNC when KVCM is disabled, otherwise consults the active failover
+ * source. KVCM query failure falls back to Local Standby for that query; comparison telemetry is
+ * best effort and must not replace the query result.
+ */
 @Slf4j
 @Component
 public class CacheMatchQueryOrchestrator {
-
     private static final long KVCM_WARNING_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1);
+
     private static final KvcmHealthSnapshot NO_KVCM_HEALTH =
             new KvcmHealthSnapshot(null, 0, 0, 0, 0, 0, "not applicable");
 
@@ -120,13 +126,6 @@ public class CacheMatchQueryOrchestrator {
         }
     }
 
-    public CacheMatchSource effectiveSource() {
-        if (!configuration.isKvcmEnabled()) {
-            return CacheMatchSource.LOCAL_SYNC;
-        }
-        return failoverManager.activeSource();
-    }
-
     public CacheMatchStatus status() {
         KvcmHealthSnapshot health =
                 configuration.isKvcmEnabled() ? failoverManager.healthSnapshot() : NO_KVCM_HEALTH;
@@ -148,6 +147,13 @@ public class CacheMatchQueryOrchestrator {
                 localStandbyCacheManager.maximumEntryCount());
     }
 
+    public CacheMatchSource effectiveSource() {
+        if (!configuration.isKvcmEnabled()) {
+            return CacheMatchSource.LOCAL_SYNC;
+        }
+        return failoverManager.activeSource();
+    }
+
     private CacheMatchResult queryLocalSync(CacheMatchQuery query, long startTimeNs) {
         if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
             return emptyResult(CacheMatchSource.LOCAL_SYNC, startTimeNs, query.blockSize());
@@ -161,6 +167,23 @@ public class CacheMatchQueryOrchestrator {
                         query.group());
         return new CacheMatchResult(
                 matches, CacheMatchSource.LOCAL_SYNC, elapsedUs(startTimeNs), query.blockSize());
+    }
+
+    private CacheMatchResult emptyResult(
+            CacheMatchSource source, long startTimeNs, long blockSize) {
+        return new CacheMatchResult(
+                Collections.emptyMap(), source, elapsedUs(startTimeNs), blockSize);
+    }
+
+    private long elapsedUs(long startTimeNs) {
+        return (System.nanoTime() - startTimeNs) / 1_000;
+    }
+
+    private CacheMatchResult queryAndTrackLocalStandby(CacheMatchQuery query, long startTimeNs) {
+        CacheMatchResult result = queryLocalStandby(query, startTimeNs);
+        trackComparisonBestEffort(
+                query, () -> comparisonService.trackResolvedLocalStandbyPrediction(query, result));
+        return result;
     }
 
     private CacheMatchResult queryLocalStandby(CacheMatchQuery query, long startTimeNs) {
@@ -190,13 +213,6 @@ public class CacheMatchQueryOrchestrator {
         }
     }
 
-    private CacheMatchResult queryAndTrackLocalStandby(CacheMatchQuery query, long startTimeNs) {
-        CacheMatchResult result = queryLocalStandby(query, startTimeNs);
-        trackComparisonBestEffort(
-                query, () -> comparisonService.trackResolvedLocalStandbyPrediction(query, result));
-        return result;
-    }
-
     private void trackComparisonBestEffort(CacheMatchQuery query, Runnable tracker) {
         try {
             tracker.run();
@@ -206,15 +222,5 @@ public class CacheMatchQueryOrchestrator {
                     query.requestId(),
                     error);
         }
-    }
-
-    private CacheMatchResult emptyResult(
-            CacheMatchSource source, long startTimeNs, long blockSize) {
-        return new CacheMatchResult(
-                Collections.emptyMap(), source, elapsedUs(startTimeNs), blockSize);
-    }
-
-    private long elapsedUs(long startTimeNs) {
-        return (System.nanoTime() - startTimeNs) / 1_000;
     }
 }

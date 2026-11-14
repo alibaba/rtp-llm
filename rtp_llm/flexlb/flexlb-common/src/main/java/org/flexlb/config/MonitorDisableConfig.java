@@ -12,6 +12,9 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.ConfigurationCondition.ConfigurationPhase;
 import org.springframework.context.annotation.Primary;
 
+/**
+ * Installs no-op monitoring and denies metric publication when monitoring is disabled.
+ */
 @Configuration
 public class MonitorDisableConfig {
     @Bean
@@ -28,6 +31,9 @@ public class MonitorDisableConfig {
         return MeterFilter.deny();
     }
 
+    /**
+     * Determines whether the monitoring configuration needs a no-op client.
+     */
     static final class NoOpMonitorCondition extends AnyNestedCondition {
 
         NoOpMonitorCondition() {

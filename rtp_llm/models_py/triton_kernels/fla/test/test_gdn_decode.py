@@ -202,12 +202,8 @@ def test_fused_recurrent_cuda_graph_padding_row_does_not_touch_cache():
     torch.manual_seed(23)
     q = torch.randn(graph_batch, seqlen, heads, dim, dtype=dtype, device=device)
     k = torch.randn_like(q)
-    v = torch.randn(
-        graph_batch, seqlen, value_heads, dim, dtype=dtype, device=device
-    )
-    beta = torch.rand(
-        graph_batch, seqlen, value_heads, dtype=dtype, device=device
-    )
+    v = torch.randn(graph_batch, seqlen, value_heads, dim, dtype=dtype, device=device)
+    beta = torch.rand(graph_batch, seqlen, value_heads, dtype=dtype, device=device)
     g = F.logsigmoid(
         torch.rand(
             graph_batch,
@@ -218,9 +214,7 @@ def test_fused_recurrent_cuda_graph_padding_row_does_not_touch_cache():
         )
     )
 
-    block_map = torch.zeros(
-        graph_batch, 16, dtype=torch.int32, device=device
-    )
+    block_map = torch.zeros(graph_batch, 16, dtype=torch.int32, device=device)
     next_block = 1
     for row, sequence_length in enumerate(sequence_lengths):
         block_count = math.ceil(sequence_length / seq_size_per_block) + seqlen
@@ -277,6 +271,70 @@ def test_fused_recurrent_cuda_graph_padding_row_does_not_touch_cache():
 
     assert_close("padding output", valid_out, padded_out[:valid_batch], 0.0)
     assert_close("padding cache", valid_cache, padded_cache, 0.0)
+    assert_close(
+        "padding row initialized",
+        padded_out[valid_batch:],
+        torch.zeros_like(padded_out[valid_batch:]),
+        0.0,
+    )
+
+
+def test_fused_recurrent_dummy_page_output_is_initialized():
+    from unittest import mock
+
+    B, T, H, HV, D = 7, 4, 8, 24, 128
+    q = torch.randn(B, T, H, D, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    v = torch.randn(B, T, HV, D, device="cuda", dtype=torch.bfloat16)
+    g = -torch.ones(B, T, HV, device="cuda")
+    beta = torch.ones(B, T, HV, device="cuda", dtype=torch.bfloat16) * 0.5
+    state = torch.randn(2, HV, D, D, device="cuda")
+    before = state.clone()
+    blocks = torch.zeros(B, 64, device="cuda", dtype=torch.int32)
+    lengths = torch.full((B,), 8191, device="cuda", dtype=torch.int32)
+    original = torch.Tensor.new_empty
+
+    def poisoned(tensor, *args, **kwargs):
+        value = original(tensor, *args, **kwargs)
+        value.fill_(float("nan"))
+        return value
+
+    with mock.patch.object(torch.Tensor, "new_empty", poisoned):
+        got, _ = fused_recurrent_gated_delta_rule(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state=state,
+            block_map=blocks,
+            seq_size_per_block=128,
+            sequence_lengths=lengths,
+            use_qk_l2norm_in_kernel=True,
+        )
+    torch.cuda.synchronize()
+    assert_close("dummy output initialized", got, torch.zeros_like(got), 0.0)
+    assert_close("dummy cache untouched", state, before, 0.0)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        replayed, _ = fused_recurrent_gated_delta_rule(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state=state,
+            block_map=blocks,
+            seq_size_per_block=128,
+            sequence_lengths=lengths,
+            use_qk_l2norm_in_kernel=True,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert_close(
+        "dummy graph output initialized", replayed, torch.zeros_like(replayed), 0.0
+    )
+    assert_close("dummy graph cache untouched", state, before, 0.0)
 
 
 if __name__ == "__main__":
@@ -293,3 +351,4 @@ if __name__ == "__main__":
             )
     test_fused_recurrent_narrow_block_map_view()
     test_fused_recurrent_cuda_graph_padding_row_does_not_touch_cache()
+    test_fused_recurrent_dummy_page_output_is_initialized()

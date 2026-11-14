@@ -6,7 +6,9 @@ import lombok.Setter;
 import java.util.EnumSet;
 import java.util.Set;
 
-/** Resource reclamation policy for priority-ordered queues; all stages are enabled by default. */
+/**
+ * Resource reclamation policy for priority-ordered queues; all stages are enabled by default.
+ */
 @Getter
 @Setter
 public final class PreemptionConfig {

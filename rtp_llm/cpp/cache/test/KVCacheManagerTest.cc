@@ -51,8 +51,7 @@ protected:
         createDevice();
     }
 
-    void TearDown() override {
-    }
+    void TearDown() override {}
 
 private:
 };
@@ -1805,6 +1804,58 @@ public:
     ErrorInfo                   completion_error{ErrorInfo::OkStatus()};
 };
 
+TEST_F(KVCacheManagerTest, ExecuteFunctionSkipsAbsentGroupSetOnlyWithPP) {
+    for (const int pp_size : {1, 2}) {
+        SCOPED_TRACE(::testing::Message() << "pp_size=" << pp_size);
+        auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+        KVCacheConfig     kv_cache_config;
+        ParallelismConfig parallelism_config;
+        kv_cache_config.enable_memory_cache  = true;
+        kv_cache_config.memory_cache_size_mb = 1;
+        parallelism_config.pp_size           = pp_size;
+        parallelism_config.pp_rank           = pp_size > 1 ? 1 : 0;
+        parallelism_config.world_size        = pp_size;
+        parallelism_config.world_rank        = parallelism_config.pp_rank;
+        auto manager =
+            std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config, parallelism_config);
+        ASSERT_TRUE(manager->init());
+        auto engine                                      = std::make_shared<RecordingBatchTransferEngine>();
+        manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
+
+        FunctionRequestPB request;
+        auto*             mem_request = request.mutable_mem_request();
+        mem_request->set_copy_direction(MemoryOperationRequestPB::H2D);
+        mem_request->set_timeout_ms(1000);
+        for (const int block_id : {1, 2}) {
+            auto* item = mem_request->add_copy_items();
+            item->add_group_tags("absent_group");
+            item->set_mem_block(block_id);
+            auto* block = item->add_group_blocks();
+            block->set_tag("absent_group");
+            block->set_block_id(block_id);
+        }
+        FunctionResponsePB response;
+
+        EXPECT_TRUE(manager->executeFunction(request, response));
+        ASSERT_TRUE(response.has_mem_response());
+        EXPECT_EQ(response.mem_response().code(),
+                  pp_size > 1 ? MemoryOperationResponsePB::OK : MemoryOperationResponsePB::INVALID_REQUEST);
+        ASSERT_EQ(response.mem_response().block_errors_size(), mem_request->copy_items_size());
+        const auto result = BlockTransferRequestConverter::decodeTransferResult(response.mem_response(),
+                                                                                mem_request->copy_items_size());
+        EXPECT_EQ(result.ok(), pp_size > 1);
+        EXPECT_EQ(result.status.code(), pp_size > 1 ? ErrorCode::NONE_ERROR : ErrorCode::INVALID_PARAMS);
+        const auto expected_error = pp_size > 1 ? CacheCopyError::NONE : CacheCopyError::INVALID_REQUEST;
+        EXPECT_EQ(result.copy_error, expected_error);
+        EXPECT_EQ(result.block_errors, std::vector<CacheCopyError>(mem_request->copy_items_size(), expected_error));
+        if (pp_size > 1) {
+            EXPECT_TRUE(result.status.ToString().empty());
+        }
+        EXPECT_EQ(engine->submitted_batch_count, 0u);
+        EXPECT_EQ(engine->submitted_descriptor_count, 0u);
+    }
+}
+
 TEST_F(KVCacheManagerTest, ExecuteFunctionValidatesTimeoutBeforeSubmittingTransfer) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
@@ -1962,62 +2013,85 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsInvalidRequestForMixedPartialAn
     }
 }
 
-TEST_F(KVCacheManagerTest, MultiRankZeroUsesDedicatedBroadcastManager) {
-    auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
-    KVCacheConfig     kv_cache_config;
-    ParallelismConfig parallelism_config;
-    RuntimeConfig     runtime_config;
-    kv_cache_config.enable_memory_cache  = true;
-    kv_cache_config.memory_cache_size_mb = 1;
-    parallelism_config.tp_size           = 2;
-    parallelism_config.tp_rank           = 0;
-    parallelism_config.world_size        = 2;
-    runtime_config.worker_grpc_addrs     = {"127.0.0.1:12345", "127.0.0.1:12346"};
+TEST_F(KVCacheManagerTest, FirstStageRootBroadcastsAcrossAllPPAndTPWorkers) {
+    for (const auto& [pp_size, tp_size] : std::vector<std::pair<int, int>>{{1, 2}, {2, 1}, {2, 2}}) {
+        SCOPED_TRACE(::testing::Message() << "pp_size=" << pp_size << ", tp_size=" << tp_size);
+        auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+        KVCacheConfig     kv_cache_config;
+        ParallelismConfig parallelism_config;
+        RuntimeConfig     runtime_config;
+        kv_cache_config.enable_memory_cache  = true;
+        kv_cache_config.memory_cache_size_mb = 1;
+        parallelism_config.tp_size           = tp_size;
+        parallelism_config.tp_rank           = 0;
+        parallelism_config.pp_size           = pp_size;
+        parallelism_config.pp_rank           = 0;
+        parallelism_config.dp_size           = 2;
+        parallelism_config.world_size        = pp_size * parallelism_config.dp_size * parallelism_config.tp_size;
+        parallelism_config.world_rank        = 0;
+        const size_t worker_count            = static_cast<size_t>(pp_size * tp_size);
+        for (size_t worker = 0; worker < worker_count; ++worker) {
+            runtime_config.worker_grpc_addrs.push_back("127.0.0.1:" + std::to_string(12345 + worker));
+        }
 
-    auto manager = std::make_shared<KVCacheManager>(
-        cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
-    ASSERT_TRUE(manager->init());
-    ASSERT_NE(manager->blockTreeCache(), nullptr);
-    ASSERT_NE(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_, nullptr);
-    EXPECT_EQ(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_->workerNum(), 2u);
+        auto manager = std::make_shared<KVCacheManager>(
+            cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
+        ASSERT_TRUE(manager->init());
+        ASSERT_NE(manager->blockTreeCache(), nullptr);
+        ASSERT_NE(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_, nullptr);
+        EXPECT_EQ(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_->workerNum(),
+                  worker_count);
 
-    FunctionRequestPB request;
-    appendValidGroupedTransfer(manager, request);
-    FunctionResponsePB response;
-    EXPECT_TRUE(manager->executeFunction(request, response));
-    ASSERT_TRUE(response.has_mem_response());
-    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::OK);
+        const auto& broadcast = manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_;
+        EXPECT_EQ(broadcast->worker_addrs_, runtime_config.worker_grpc_addrs);
+    }
 }
 
-TEST_F(KVCacheManagerTest, NonZeroMultiRankHasNoLocalBroadcastManager) {
-    auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
-    KVCacheConfig     kv_cache_config;
-    ParallelismConfig parallelism_config;
-    RuntimeConfig     runtime_config;
-    kv_cache_config.enable_memory_cache  = true;
-    kv_cache_config.memory_cache_size_mb = 1;
-    parallelism_config.tp_size           = 2;
-    parallelism_config.tp_rank           = 1;
-    parallelism_config.world_size        = 2;
-    parallelism_config.world_rank        = 1;
-    runtime_config.worker_grpc_addrs     = {"127.0.0.1:12345", "127.0.0.1:12346"};
+TEST_F(KVCacheManagerTest, NonRootRanksHaveNoBroadcastManager) {
+    struct RankCase {
+        int pp_size;
+        int pp_rank;
+        int tp_size;
+        int tp_rank;
+    };
+    for (const RankCase rank : std::vector<RankCase>{{1, 0, 2, 1}, {2, 1, 1, 0}}) {
+        SCOPED_TRACE(::testing::Message()
+                     << "pp=" << rank.pp_rank << "/" << rank.pp_size << ", tp=" << rank.tp_rank << "/" << rank.tp_size);
+        auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+        KVCacheConfig     kv_cache_config;
+        ParallelismConfig parallelism_config;
+        RuntimeConfig     runtime_config;
+        kv_cache_config.enable_memory_cache  = true;
+        kv_cache_config.memory_cache_size_mb = 1;
+        parallelism_config.pp_size           = rank.pp_size;
+        parallelism_config.pp_rank           = rank.pp_rank;
+        parallelism_config.tp_size           = rank.tp_size;
+        parallelism_config.tp_rank           = rank.tp_rank;
+        parallelism_config.world_size        = rank.pp_size * rank.tp_size;
+        parallelism_config.world_rank        = rank.pp_rank * rank.tp_size + rank.tp_rank;
+        for (int worker = 0; worker < rank.pp_size * rank.tp_size; ++worker) {
+            runtime_config.worker_grpc_addrs.push_back("127.0.0.1:" + std::to_string(12345 + worker));
+        }
 
-    auto manager = std::make_shared<KVCacheManager>(
-        cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
-    ASSERT_TRUE(manager->init());
-    ASSERT_NE(manager->blockTreeCache(), nullptr);
-    EXPECT_EQ(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_, nullptr);
+        auto manager = std::make_shared<KVCacheManager>(
+            cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
+        ASSERT_TRUE(manager->init());
+        ASSERT_NE(manager->blockTreeCache(), nullptr);
+        EXPECT_EQ(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_, nullptr);
+    }
 }
 
-TEST_F(KVCacheManagerTest, MultiRankZeroRejectsMismatchedBroadcastAddressCount) {
+TEST_F(KVCacheManagerTest, FirstStageRootRejectsMismatchedBroadcastAddressCount) {
     auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig     kv_cache_config;
     ParallelismConfig parallelism_config;
     RuntimeConfig     runtime_config;
+    parallelism_config.pp_size       = 2;
+    parallelism_config.pp_rank       = 0;
     parallelism_config.tp_size       = 2;
     parallelism_config.tp_rank       = 0;
-    parallelism_config.world_size    = 2;
-    runtime_config.worker_grpc_addrs = {"127.0.0.1:12345"};
+    parallelism_config.world_size    = 4;
+    runtime_config.worker_grpc_addrs = {"127.0.0.1:12345", "127.0.0.1:12346"};
 
     auto manager = std::make_shared<KVCacheManager>(
         cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
@@ -2923,12 +2997,12 @@ TEST_F(KVCacheManagerTest, OffloadCapacityChargesEveryPhysicalOwner) {
     setTestGroupPolicies(config, {policy});
     KVCacheConfig options;
     options.enable_sparse_kv_offload          = true;
-    options.sparse_kv_offload_hot_cache_mode = "dynamic";
+    options.sparse_kv_offload_hot_cache_mode  = "dynamic";
     options.sparse_kv_offload_host_mb         = 1;
     options.sparse_kv_offload_test_hbm_blocks = 2;
     options.test_block_num                    = 6;
-    const auto result = CacheConfigCreator::configureOffloadCapacity(
-        config, options, kOffloadAllocationChunkBytes + 4096, 1);
+    const auto result =
+        CacheConfigCreator::configureOffloadCapacity(config, options, kOffloadAllocationChunkBytes + 4096, 1);
     ASSERT_EQ(config.tiered_cache_configs.size(), 1u);
     const auto& capacity = config.tiered_cache_configs.at("default");
     EXPECT_EQ(capacity.total_blocks, 6u);
@@ -2940,19 +3014,18 @@ TEST_F(KVCacheManagerTest, OffloadCapacityChargesEveryPhysicalOwner) {
     EXPECT_EQ(result.gpu_bytes, kOffloadAllocationChunkBytes + 3148u);
 }
 
-
 TEST_F(KVCacheManagerTest, StaticOffloadCapacityOmitsDynamicMetadataAndRejectsInvalidMode) {
     auto config =
         makeSingleGroupCacheConfig(makeResolvedMlaSpec(TYPE_BF16, 16, 8, 4, "default"), CacheGroupType::FULL, 2, 6);
-    auto policy = config.group("default").policy;
+    auto policy    = config.group("default").policy;
     policy.offload = {true, 8};
     setTestGroupPolicies(config, {policy});
     KVCacheConfig options;
-    options.enable_sparse_kv_offload = true;
-    options.sparse_kv_offload_host_mb = 1;
+    options.enable_sparse_kv_offload          = true;
+    options.sparse_kv_offload_host_mb         = 1;
     options.sparse_kv_offload_test_hbm_blocks = 2;
-    options.test_block_num = 6;
-    const auto result = CacheConfigCreator::configureOffloadCapacity(config, options, 4096, 1);
+    options.test_block_num                    = 6;
+    const auto result                         = CacheConfigCreator::configureOffloadCapacity(config, options, 4096, 1);
     EXPECT_FALSE(config.tiered_cache_configs.at("default").dynamic_hot_cache);
     EXPECT_EQ(result.fixed_bytes, 1752u);
     EXPECT_EQ(result.gpu_bytes, 2952u);
@@ -2990,21 +3063,21 @@ TEST_F(KVCacheManagerTest, OffloadCapacityChargesSharedRuntimeOnceButKeepsBothSt
     model.kv_cache_spec_descs = {{desc}, {desc}};
     KVCacheConfig options;
     options.enable_sparse_kv_offload          = true;
-    options.sparse_kv_offload_hot_cache_mode = "dynamic";
+    options.sparse_kv_offload_hot_cache_mode  = "dynamic";
     options.sparse_kv_offload_host_mb         = 1;
     options.sparse_kv_offload_test_hbm_blocks = 2;
     options.test_block_num                    = 6;
     auto separate                             = CacheConfigCreator::createConfig(model, {}, options);
     EXPECT_EQ(separate.offload_runtime_counts.at("default"), 2u);
-    const auto baseline = CacheConfigCreator::configureOffloadCapacity(
-        separate, options, kOffloadAllocationChunkBytes + 4096, 1);
+    const auto baseline =
+        CacheConfigCreator::configureOffloadCapacity(separate, options, kOffloadAllocationChunkBytes + 4096, 1);
     for (auto& layer : model.kv_cache_spec_descs) {
         layer.front().offload_runtime_group = 0;
     }
     auto shared = CacheConfigCreator::createConfig(model, {}, options);
     EXPECT_EQ(shared.offload_runtime_counts.at("default"), 1u);
     const size_t shared_budget = kOffloadAllocationChunkBytes + 2604;
-    const auto result = CacheConfigCreator::configureOffloadCapacity(shared, options, shared_budget, 1);
+    const auto   result        = CacheConfigCreator::configureOffloadCapacity(shared, options, shared_budget, 1);
     EXPECT_EQ(result.config.total_blocks, 6u);
     EXPECT_EQ(result.hbm_bytes, baseline.hbm_bytes);
     EXPECT_EQ(result.host_bytes, baseline.host_bytes);
@@ -3020,28 +3093,28 @@ TEST_F(KVCacheManagerTest, OffloadCapacityChargesSharedRuntimeOnceButKeepsBothSt
 
 TEST_F(KVCacheManagerTest, WarmupOffloadPublishesRealStorageWithDeploymentSelectionCapacity) {
     ModelConfig model;
-    model.num_layers                   = 2;
-    model.data_type                    = TYPE_BF16;
-    model.attn_config.use_mla           = true;
-    model.attn_config.kv_lora_rank      = 16;
-    model.attn_config.rope_head_dim     = 8;
-    model.attn_config.tokens_per_block = 8;
+    model.num_layers                          = 2;
+    model.data_type                           = TYPE_BF16;
+    model.attn_config.use_mla                 = true;
+    model.attn_config.kv_lora_rank            = 16;
+    model.attn_config.rope_head_dim           = 8;
+    model.attn_config.tokens_per_block        = 8;
     model.attn_config.kernel_tokens_per_block = 4;
     KVCacheSpecDesc desc;
-    desc.tag        = "default";
-    desc.cache_type = MultiHeadLatentAttention;
-    desc.offload    = CacheOffloadPolicy{true, 257};
+    desc.tag                  = "default";
+    desc.cache_type           = MultiHeadLatentAttention;
+    desc.offload              = CacheOffloadPolicy{true, 257};
     model.kv_cache_spec_descs = {{desc}, {desc}};
     KVCacheConfig options;
     options.enable_sparse_kv_offload = true;
     // Production capacity overrides must not enlarge the temporary backing.
-    options.test_block_num = 10000;
-    options.sparse_kv_offload_host_mb = 1024;
+    options.test_block_num                    = 10000;
+    options.sparse_kv_offload_host_mb         = 1024;
     options.sparse_kv_offload_test_hbm_blocks = 100;
     for (bool dynamic : {false, true}) {
         options.sparse_kv_offload_hot_cache_mode = dynamic ? "dynamic" : "static";
-        const auto config = CacheConfigCreator::createWarmupConfig(model, {}, options, 3);
-        auto manager = std::make_shared<KVCacheManager>(config, true);
+        const auto config                        = CacheConfigCreator::createWarmupConfig(model, {}, options, 3);
+        auto       manager                       = std::make_shared<KVCacheManager>(config, true);
         ASSERT_TRUE(manager->init());
         const auto layout = manager->getMainModelGroupedCacheLayerLayout();
         for (int layer = 0; layer < 2; ++layer) {
@@ -3059,7 +3132,7 @@ TEST_F(KVCacheManagerTest, WarmupOffloadPublishesRealStorageWithDeploymentSelect
         }
     }
     options.enable_sparse_kv_offload = false;
-    const auto legacy = CacheConfigCreator::createWarmupConfig(model, {}, options);
+    const auto legacy                = CacheConfigCreator::createWarmupConfig(model, {}, options);
     EXPECT_TRUE(legacy.tiered_cache_configs.empty());
     EXPECT_EQ(legacy.group("default").block_num, 2u);
 }
@@ -3083,7 +3156,7 @@ TEST_F(KVCacheManagerTest, OffloadMtpBudgetsDraftAndProjectsItsStorageToLocalLay
     draft.kv_cache_spec_descs  = {{desc}};
     KVCacheConfig options;
     options.enable_sparse_kv_offload          = true;
-    options.sparse_kv_offload_hot_cache_mode = "dynamic";
+    options.sparse_kv_offload_hot_cache_mode  = "dynamic";
     options.sparse_kv_offload_host_mb         = 1;
     options.sparse_kv_offload_test_hbm_blocks = 2;
     options.test_block_num                    = 6;
@@ -3094,8 +3167,8 @@ TEST_F(KVCacheManagerTest, OffloadMtpBudgetsDraftAndProjectsItsStorageToLocalLay
     ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     EXPECT_EQ(config.offload_runtime_counts.at("default"), 2u);
     EXPECT_EQ(config.blockSizeBytesForGroup("default"), 576u);
-    const auto capacity = CacheConfigCreator::configureOffloadCapacity(
-        config, options, kOffloadAllocationChunkBytes + (1 << 20), 8);
+    const auto capacity =
+        CacheConfigCreator::configureOffloadCapacity(config, options, kOffloadAllocationChunkBytes + (1 << 20), 8);
     EXPECT_EQ(capacity.fixed_bytes, kOffloadAllocationChunkBytes + 5220u);
     EXPECT_EQ(capacity.metadata_bytes, 432u);
     EXPECT_EQ(capacity.gpu_bytes, kOffloadAllocationChunkBytes + 6804u);

@@ -25,15 +25,8 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 @Component
 public class GrpcServerTimingInterceptor implements ServerInterceptor {
-
     private static final Context.Key<RequestMessageSize> REQUEST_MESSAGE_SIZE_KEY =
             Context.key("requestMessageSize");
-
-    private final AtomicLong lastScheduleArrivalNanos = new AtomicLong(System.nanoTime());
-
-    public long getLastScheduleArrivalNanos() {
-        return lastScheduleArrivalNanos.get();
-    }
 
     /**
      * Context key carrying the gRPC server entry timestamp (epoch millis).
@@ -42,6 +35,12 @@ public class GrpcServerTimingInterceptor implements ServerInterceptor {
     public static final Context.Key<Long> GRPC_ENTRY_TIME_KEY = Context.key("grpcEntryTime");
 
     public static final Context.Key<Long> GRPC_ENTRY_NANOS_KEY = Context.key("grpcEntryNanos");
+
+    private final AtomicLong lastScheduleArrivalNanos = new AtomicLong(System.nanoTime());
+
+    public long getLastScheduleArrivalNanos() {
+        return lastScheduleArrivalNanos.get();
+    }
 
     /**
      * Convenience method to retrieve the current gRPC entry time from the
@@ -101,11 +100,6 @@ public class GrpcServerTimingInterceptor implements ServerInterceptor {
         };
     }
 
-    private static class RequestMessageSize {
-        private final AtomicLong bytes = new AtomicLong();
-        private volatile boolean messageReceived;
-    }
-
     @Override
     public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
             ServerCall<ReqT, RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {
@@ -121,5 +115,13 @@ public class GrpcServerTimingInterceptor implements ServerInterceptor {
                         .withValue(GRPC_ENTRY_TIME_KEY, grpcEntryTime)
                         .withValue(GRPC_ENTRY_NANOS_KEY, grpcEntryNanos);
         return Contexts.interceptCall(ctx, call, headers, next);
+    }
+
+    /**
+     * Tracks bytes observed for one request, distinguishing an absent measurement from zero bytes.
+     */
+    private static class RequestMessageSize {
+        private final AtomicLong bytes = new AtomicLong();
+        private volatile boolean messageReceived;
     }
 }

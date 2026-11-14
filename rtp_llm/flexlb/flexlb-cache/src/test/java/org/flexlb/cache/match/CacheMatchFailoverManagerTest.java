@@ -27,8 +27,10 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks cache-match failover transitions and conditions for returning to the primary provider.
+ */
 class CacheMatchFailoverManagerTest {
-
     @Test
     void manualFallbackRecordsOperatorActionWhenAlreadyOnStandby() {
         KvcmGrpcClient client = mock(KvcmGrpcClient.class);
@@ -187,14 +189,6 @@ class CacheMatchFailoverManagerTest {
         }
     }
 
-    private long manualFailoverWarnings(ListAppender<ILoggingEvent> appender) {
-        return appender.list.stream()
-                .filter(
-                        event ->
-                                event.getFormattedMessage().contains("manual failover is required"))
-                .count();
-    }
-
     @Test
     void manualFallbackRemainsActiveAfterKvcmRecovers() {
         KvcmGrpcClient client = mock(KvcmGrpcClient.class);
@@ -234,6 +228,14 @@ class CacheMatchFailoverManagerTest {
 
         manager.recoverPrimaryManually();
         assertEquals(CacheMatchSource.KVCM, manager.activeSource());
+    }
+
+    private long manualFailoverWarnings(ListAppender<ILoggingEvent> appender) {
+        return appender.list.stream()
+                .filter(
+                        event ->
+                                event.getFormattedMessage().contains("manual failover is required"))
+                .count();
     }
 
     @SuppressWarnings("unchecked")

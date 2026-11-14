@@ -6,16 +6,14 @@ import lombok.Data;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 
+/**
+ * Carries one engine task's identity, phase and reported execution progress.
+ */
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class TaskInfo {
-
     @JsonProperty("request_id")
     private String requestId;
-
-    public void setRequestId(String requestId) {
-        this.requestId = requestId;
-    }
 
     @JsonProperty("prefix_length")
     private long prefixLength; // cache hit len
@@ -116,4 +114,8 @@ public class TaskInfo {
 
     @JsonProperty("last_completed_prefill_step_id")
     private long lastCompletedPrefillStepId;
+
+    public void setRequestId(String requestId) {
+        this.requestId = requestId;
+    }
 }

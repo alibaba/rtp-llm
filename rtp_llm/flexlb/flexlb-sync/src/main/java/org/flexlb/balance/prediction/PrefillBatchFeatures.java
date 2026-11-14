@@ -4,7 +4,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.ToLongFunction;
 
-/** Immutable, payload-free features retained for prediction and learning. */
+/**
+ * Immutable, payload-free features retained for prediction and learning.
+ */
 public record PrefillBatchFeatures(List<Item> items) {
 
     public PrefillBatchFeatures {
@@ -28,6 +30,9 @@ public record PrefillBatchFeatures(List<Item> items) {
         return items.size();
     }
 
+    /**
+     * Validates the token and cache-hit features contributed by one batch member.
+     */
     public record Item(long seqLen, long hitCache) {
         public Item {
             if (seqLen < 0L) {

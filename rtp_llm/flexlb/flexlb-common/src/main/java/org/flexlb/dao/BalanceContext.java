@@ -22,14 +22,12 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * @author zjw
- * description:
- * date: 2025/3/11
+ * Carries one scheduling request's input, selected route and completion future across routing and
+ * queue admission.
  */
 @Data
 @ToString
 public class BalanceContext {
-
     // ======================== Basic =======================//
 
     private final FlexlbConfig config;
@@ -42,7 +40,6 @@ public class BalanceContext {
     private long originalNumericRequestId;
 
     private Response response;
-
     @ToString.Exclude private ByteString generateInputPb;
 
     /** Captured at RPC entry and carried through asynchronous scheduling. */
@@ -60,6 +57,7 @@ public class BalanceContext {
     private long serviceStartNanos = System.nanoTime();
 
     private long totalTimeUs;
+
     private Long requestArrivalDelayMs;
     private Long requestBodyReadAndDeserializeTimeUs;
     private Long requestBodyBytes;
@@ -170,6 +168,11 @@ public class BalanceContext {
                 : request == null ? 50 : request.getPriority();
     }
 
+    public boolean requestExpired(long nowMs) {
+        long expiresAtMs = getRequestExpiresAtMs();
+        return expiresAtMs <= 0 || nowMs >= expiresAtMs;
+    }
+
     /**
      * Absolute request expiration timestamp in Unix epoch milliseconds.
      */
@@ -181,11 +184,6 @@ public class BalanceContext {
             return config.queueScheduler().resolveExpiresAtMs(startTime);
         }
         return Long.MAX_VALUE;
-    }
-
-    public boolean requestExpired(long nowMs) {
-        long expiresAtMs = getRequestExpiresAtMs();
-        return expiresAtMs <= 0 || nowMs >= expiresAtMs;
     }
 
     /** Direct accessor for immutable scheduling metadata. */
@@ -253,6 +251,9 @@ public class BalanceContext {
                 routingTelemetryState.routingAttempts);
     }
 
+    /**
+     * Retains request-local routing observations without changing the selected route.
+     */
     private static final class RoutingTelemetryState {
         private String cacheSource;
         private long cacheQueryUs;
@@ -265,6 +266,9 @@ public class BalanceContext {
         private final EnumMap<RoleType, Integer> routingAttempts = new EnumMap<>(RoleType.class);
     }
 
+    /**
+     * Captures routing timings and selection evidence for request reporting.
+     */
     public record RoutingTelemetry(
             String cacheSource,
             long cacheQueryUs,

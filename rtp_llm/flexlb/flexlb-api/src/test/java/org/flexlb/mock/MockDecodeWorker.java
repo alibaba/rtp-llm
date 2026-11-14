@@ -3,18 +3,8 @@ package org.flexlb.mock;
 import org.flexlb.engine.grpc.EngineRpcService;
 
 /**
- * Mock decode worker — a gRPC server that simulates a decode engine
- * without loading any model.
- *
- * <p>Role-specific behavior:
- * <ul>
- *   <li>Configurable {@code enqueueDelayMs} to simulate decode generation time</li>
- *   <li>Returns healthy WorkerStatus with available KV cache</li>
- * </ul>
- *
- * <p>In PD-separated architecture, the decode worker receives requests only
- * after the prefill worker completes.  The mock decode worker's gRPC port
- * is used for status synchronization.
+ * Runs a mock Decode gRPC worker with configurable response timing, failures and status
+ * observations.
  */
 public class MockDecodeWorker extends MockWorker {
 

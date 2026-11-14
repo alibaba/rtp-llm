@@ -16,7 +16,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Real endpoint accounting used by delivery callback ordering tests. */
+/**
+ * Real endpoint accounting used by delivery callback ordering tests.
+ */
 public final class DeliverySettlementTestSupport {
     private final ReentrantLock lock = new ReentrantLock();
     public final PrefillState prefill =
@@ -79,6 +81,18 @@ public final class DeliverySettlementTestSupport {
         return result.schedulerFacts();
     }
 
+    public static void dispatchDecode(
+            DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
+        queueDecode(endpoint, reservation);
+        var permit =
+                endpoint.acquireDispatchPermit(
+                                reservation, new DecodeEndpoint.AdmissionCapacity(0, 100L))
+                        .permit();
+        assertNotNull(permit);
+        assertEquals(
+                DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED, permit.dispatch());
+    }
+
     public static void queueDecode(
             DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
         WorkerStatusResponse response = new WorkerStatusResponse();
@@ -90,18 +104,6 @@ public final class DeliverySettlementTestSupport {
         try (var pin = endpoint.tryPinGeneration()) {
             assertTrue(endpoint.markQueued(pin, reservation));
         }
-    }
-
-    public static void dispatchDecode(
-            DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
-        queueDecode(endpoint, reservation);
-        var permit =
-                endpoint.acquireDispatchPermit(
-                                reservation, new DecodeEndpoint.AdmissionCapacity(0, 100L))
-                        .permit();
-        assertNotNull(permit);
-        assertEquals(
-                DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED, permit.dispatch());
     }
 
     public static void decodeStatus(DecodeEndpoint endpoint, long requestId, boolean finished) {

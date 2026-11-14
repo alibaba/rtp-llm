@@ -77,12 +77,13 @@ private:
     void                            multimodalProcess(PrefillGenerateContext& prefill_context);
     void                            remoteAllocateResource(PrefillGenerateContext& prefill_context);
     GenerateRequestPB               buildAllocateRequest(PrefillGenerateContext& prefill_context);
-    void                            enqueueRequest(PrefillGenerateContext& prefill_context);
-    void                            remoteLoadCacheStart(PrefillGenerateContext& prefill_context);
-    void                            pollLocalOutput(PrefillGenerateContext& prefill_context);
-    void                            remoteLoadCacheEnd(PrefillGenerateContext& prefill_context);
-    void                            remoteGenerate(PrefillGenerateContext& prefill_context);
-    void                            pollRemoteOutput(PrefillGenerateContext& prefill_context);
+    void        fillStagePeerGroups(GenerateRequestPB& alloc_request, const std::vector<std::string>& workers);
+    void        enqueueRequest(PrefillGenerateContext& prefill_context);
+    void        remoteLoadCacheStart(PrefillGenerateContext& prefill_context);
+    void        pollLocalOutput(PrefillGenerateContext& prefill_context);
+    void        remoteLoadCacheEnd(PrefillGenerateContext& prefill_context);
+    void        remoteGenerate(PrefillGenerateContext& prefill_context);
+    void        pollRemoteOutput(PrefillGenerateContext& prefill_context);
     static void mergeMultimodalLengths(GenerateOutputsPB& response, const std::map<int, int>& multimodal_lengths);
     static void mergeCacheReuseInfo(AuxInfoPB& aux_info,
                                     int        prefill_total_reuse_len,

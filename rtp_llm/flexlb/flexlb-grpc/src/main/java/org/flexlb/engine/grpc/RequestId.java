@@ -11,6 +11,27 @@ public final class RequestId {
     private RequestId() {}
 
     /**
+     * Validate the current Engine's int64 generation boundary before admitting a batch request.
+     * The Master keeps the original string ID; it does not normalize or remap it.
+     */
+    public static void requireMatchingGenerateInput(String requestId, ByteString generateInput) {
+        if (generateInput.isEmpty()) {
+            throw new IllegalArgumentException("generate_input is required for BATCH generation");
+        }
+        EngineRpcService.GenerateInputPB input;
+        try {
+            input = EngineRpcService.GenerateInputPB.parseFrom(generateInput);
+        } catch (InvalidProtocolBufferException error) {
+            throw new IllegalArgumentException(
+                    "generate_input must contain a valid GenerateInputPB", error);
+        }
+        if (!parse(input).equals(requestId)) {
+            throw new IllegalArgumentException(
+                    "BATCH request_id must be the canonical int64 decimal string matching generate_input.request_id");
+        }
+    }
+
+    /**
      * 读取 Worker Status 的请求 ID，优先使用字符串字段。
      */
     public static String parse(EngineRpcService.TaskInfoPBOrBuilder message) {
@@ -51,27 +72,6 @@ public final class RequestId {
     /** 将引擎消息中的 int64 请求 ID 转为字符串。 */
     public static String parse(EngineRpcService.EnqueueBatchErrorPBOrBuilder message) {
         return Long.toString(message.getRequestId());
-    }
-
-    /**
-     * Validate the current Engine's int64 generation boundary before admitting a batch request.
-     * The Master keeps the original string ID; it does not normalize or remap it.
-     */
-    public static void requireMatchingGenerateInput(String requestId, ByteString generateInput) {
-        if (generateInput.isEmpty()) {
-            throw new IllegalArgumentException("generate_input is required for BATCH generation");
-        }
-        EngineRpcService.GenerateInputPB input;
-        try {
-            input = EngineRpcService.GenerateInputPB.parseFrom(generateInput);
-        } catch (InvalidProtocolBufferException error) {
-            throw new IllegalArgumentException(
-                    "generate_input must contain a valid GenerateInputPB", error);
-        }
-        if (!parse(input).equals(requestId)) {
-            throw new IllegalArgumentException(
-                    "BATCH request_id must be the canonical int64 decimal string matching generate_input.request_id");
-        }
     }
 
     /**

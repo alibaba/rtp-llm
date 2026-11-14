@@ -10,9 +10,10 @@ import org.flexlb.config.VictimStage;
 
 import java.util.EnumSet;
 
-/** Test-only builders for the public scheduler and dispatcher variants. */
+/**
+ * Test-only builders for the public scheduler and dispatcher variants.
+ */
 public final class SchedulingTestConfig {
-
     private SchedulingTestConfig() {}
 
     public static FlexlbConfig batchConfig() {
@@ -21,15 +22,31 @@ public final class SchedulingTestConfig {
         return config;
     }
 
-    public static SchedulerConfig usePriorityQueue(FlexlbConfig config) {
-        SchedulerConfig queue = activeQueueOrNew(config);
-        QueueOrderingConfig priority =
-                queue.getOrdering().getType() == QueueOrderingConfig.Type.PRIORITY
-                        ? queue.getOrdering()
-                        : QueueOrderingConfig.priority();
-        queue.setOrdering(priority);
-        config.setScheduler(queue);
-        return queue;
+    public static FlexlbConfig newConfig() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.getDispatcher().setMaxInflightPerPrefillWorker(2);
+        configureRequiredValues(config);
+        return config;
+    }
+
+    public static void configureRequiredValues(FlexlbConfig config) {
+        if (config.getRequestLifecycle().getRequest().getTimeoutMs() == null) {
+            config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
+        }
+        if (config.getRequestLifecycle().getDecision().getLifetime() == null) {
+            config.getRequestLifecycle().getDecision().setLifetime(2.0);
+        }
+    }
+
+    public static DispatcherConfig useBatchDispatcher(FlexlbConfig config) {
+        configureRequiredValues(config);
+        if (config.getDispatcher().getType() == DispatcherConfig.Type.BATCH) {
+            return config.getDispatcher();
+        }
+        DispatcherConfig batch = new DispatcherConfig();
+        batch.setMaxInflightPerPrefillWorker(2);
+        config.setDispatcher(batch);
+        return batch;
     }
 
     public static SchedulerConfig useFifoQueue(FlexlbConfig config) {
@@ -56,17 +73,6 @@ public final class SchedulingTestConfig {
         return fixedWindow;
     }
 
-    public static DispatcherConfig useBatchDispatcher(FlexlbConfig config) {
-        configureRequiredValues(config);
-        if (config.getDispatcher().getType() == DispatcherConfig.Type.BATCH) {
-            return config.getDispatcher();
-        }
-        DispatcherConfig batch = new DispatcherConfig();
-        batch.setMaxInflightPerPrefillWorker(2);
-        config.setDispatcher(batch);
-        return batch;
-    }
-
     public static DispatcherConfig useNonBatchDispatcher(FlexlbConfig config) {
         configureRequiredValues(config);
         if (config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH) {
@@ -76,15 +82,6 @@ public final class SchedulingTestConfig {
         nonBatch.setMaxInflightPerPrefillWorker(64);
         config.setDispatcher(nonBatch);
         return nonBatch;
-    }
-
-    public static PreemptionConfig preemption(FlexlbConfig config) {
-        usePriorityQueue(config);
-        QueueOrderingConfig priority = config.priorityOrdering();
-        if (priority.getPreemption() == null) {
-            priority.setPreemption(new PreemptionConfig());
-        }
-        return priority.getPreemption();
     }
 
     public static void allowVictim(FlexlbConfig config, VictimStage stage) {
@@ -97,6 +94,26 @@ public final class SchedulingTestConfig {
         preemption.setAllowedVictimStages(stages);
     }
 
+    public static PreemptionConfig preemption(FlexlbConfig config) {
+        usePriorityQueue(config);
+        QueueOrderingConfig priority = config.priorityOrdering();
+        if (priority.getPreemption() == null) {
+            priority.setPreemption(new PreemptionConfig());
+        }
+        return priority.getPreemption();
+    }
+
+    public static SchedulerConfig usePriorityQueue(FlexlbConfig config) {
+        SchedulerConfig queue = activeQueueOrNew(config);
+        QueueOrderingConfig priority =
+                queue.getOrdering().getType() == QueueOrderingConfig.Type.PRIORITY
+                        ? queue.getOrdering()
+                        : QueueOrderingConfig.priority();
+        queue.setOrdering(priority);
+        config.setScheduler(queue);
+        return queue;
+    }
+
     public static void disallowVictim(FlexlbConfig config, VictimStage stage) {
         PreemptionConfig preemption = preemption(config);
         EnumSet<VictimStage> stages =
@@ -105,22 +122,6 @@ public final class SchedulingTestConfig {
                         : EnumSet.copyOf(preemption.getAllowedVictimStages());
         stages.remove(stage);
         preemption.setAllowedVictimStages(stages);
-    }
-
-    public static FlexlbConfig newConfig() {
-        FlexlbConfig config = new FlexlbConfig();
-        config.getDispatcher().setMaxInflightPerPrefillWorker(2);
-        configureRequiredValues(config);
-        return config;
-    }
-
-    public static void configureRequiredValues(FlexlbConfig config) {
-        if (config.getRequestLifecycle().getRequest().getTimeoutMs() == null) {
-            config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
-        }
-        if (config.getRequestLifecycle().getDecision().getLifetime() == null) {
-            config.getRequestLifecycle().getDecision().setLifetime(2.0);
-        }
     }
 
     private static SchedulerConfig activeQueueOrNew(FlexlbConfig config) {

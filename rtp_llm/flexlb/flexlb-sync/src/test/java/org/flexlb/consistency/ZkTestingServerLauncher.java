@@ -7,28 +7,8 @@ import java.net.ServerSocket;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Standalone ZooKeeper process launcher for the HA case-test harness.
- *
- * <p>Lives on the flexlb-sync <b>test</b> classpath so it never pollutes the
- * production artifact. It uses only the JDK and curator-test's
- * {@link TestingServer} (no additional dependencies).</p>
- *
- * <p>Harness contract:
- * <pre>
- *   java -cp &lt;flexlb-sync test classpath&gt; \
- *       org.flexlb.consistency.ZkTestingServerLauncher --port &lt;p&gt;
- * </pre>
- * <ul>
- *   <li>After the embedded ZK is up, prints exactly one line
- *       {@code ZK_READY <connectString>} to stdout and flushes.</li>
- *   <li>{@code --port 0} (the default) picks a free port automatically; the
- *       ready line reports the actually bound port.</li>
- *   <li>Stays alive until it receives SIGTERM/SIGINT or its stdin reaches
- *       EOF (the harness may close the pipe to stop the server).</li>
- *   <li>Before exiting it prints {@code ZK_STOPPED} exactly once.</li>
- *   <li>Any startup failure prints the reason to stderr and exits with
- *       code 1.</li>
- * </ul></p>
+ * Starts an embedded ZooKeeper process for HA test harnesses and exposes its connection address. It
+ * lives only on the test classpath.
  */
 public final class ZkTestingServerLauncher {
 

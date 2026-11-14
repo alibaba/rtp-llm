@@ -20,50 +20,10 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Worker status sync: verify that the master correctly retrieves and applies
- * worker status changes via the gRPC GetWorkerStatus call.
- *
- * <p>Flow:
- * 1. Start mock prefill with available_concurrency = 10
- * 2. Submit request → succeed (normal operation)
- * 3. Call {@code grpcClient.getWorkerStatusAsync()} → verify response has concurrency = 10
- * 4. Apply status update to WorkerStatus and PrefillEndpoint (simulates EngineSyncRunner)
- * 5. Verify WorkerStatus reflects concurrency = 10
- * 6. Change mock prefill behavior: available_concurrency = 0 (worker full)
- * 7. Call {@code grpcClient.getWorkerStatusAsync()} again → verify concurrency = 0
- * 8. Apply status update
- * 9. Verify WorkerStatus reflects concurrency = 0 (master perceives worker is full)
- * 10. Clean up
- *
- * <p>Key mechanism:
- * <ul>
- *   <li>The gRPC client calls {@code getWorkerStatus} with a {@code StatusVersionPB}
- *       request containing the latest finished task version</li>
- *   <li>The mock returns a {@code WorkerStatusPB} with configurable
- *       {@code available_concurrency}, {@code available_kv_cache}, {@code total_kv_cache},
- *       {@code alive}, {@code status_version}, etc.</li>
- *   <li>{@link EngineStatusConverter#convertToStatusObservation} converts the PB
- *       directly to an immutable observation</li>
- *   <li>The prepared observation updates the committed in-memory status</li>
- *   <li>The prepared-status transaction atomically commits the WorkerStatus
- *       observation and projects endpoint-owned reconciliation facts</li>
- * </ul>
- *
- * <p>Note: In production, {@link org.flexlb.sync.runner.GrpcWorkerStatusRunner} performs
- * this flow periodically. The test calls the gRPC method directly to test the link
- * without requiring the full sync runner infrastructure (WorkerAddressService,
- * statusCheckExecutor, EngineHealthReporter, etc.).
+ * Checks that worker status polling updates scheduler capacity and subsequent admission decisions.
  */
 class WorkerStatusSyncTest extends FlexLBMockTestBase {
-
     private static final long SYNC_TIMEOUT_MS = 5000;
-
-    @Test
-    void nonNumericRoutingIdDoesNotInventAnEngineInputId() {
-        var context = createBalanceContext("request-a");
-        assertEquals("request-a", context.getRequestId());
-        assertEquals(ByteString.EMPTY, context.getGenerateInputPb());
-    }
 
     @Override
     protected MockWorkerBehavior createPrefillBehavior() {
@@ -73,6 +33,13 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
     @Override
     protected FlexlbConfig createConfig() {
         return super.createConfig();
+    }
+
+    @Test
+    void nonNumericRoutingIdDoesNotInventAnEngineInputId() {
+        var context = createBalanceContext("request-a");
+        assertEquals("request-a", context.getRequestId());
+        assertEquals(ByteString.EMPTY, context.getGenerateInputPb());
     }
 
     @Test

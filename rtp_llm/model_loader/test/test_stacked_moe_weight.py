@@ -20,6 +20,7 @@ from rtp_llm.model_loader.ffn_weight import (
     MoeWeight,
     iter_stacked_moe_weights,
 )
+from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.per_block_fp8_quant_weight import V4PerBlockFp8Weight
 from rtp_llm.model_loader.tensor_source import StackSplitTensorSource, TensorSource
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, identity
@@ -245,11 +246,9 @@ class TestBuildStackedKeyConfig(unittest.TestCase):
             stacked=True,
         )
 
-        wi = MagicMock()
-        wi.weight = moe_weight
-        wi.layer_id = 0
-
-        result = ModelLoader._build_stacked_key_config([wi])
+        result = ModelLoader._build_stacked_key_config(
+            ModelWeightInfo(weights=[], layer_weights=[moe_weight])
+        )
         self.assertIn("model.layers.0.moe.w1", result)
         self.assertIn("model.layers.0.moe.w2", result)
         template = result["model.layers.0.moe.w1"]
@@ -272,11 +271,9 @@ class TestBuildStackedKeyConfig(unittest.TestCase):
             stacked=True,
         )
 
-        wi = MagicMock()
-        wi.weight = moe_weight
-        wi.layer_id = 0
-
-        result = ModelLoader._build_stacked_key_config([wi])
+        result = ModelLoader._build_stacked_key_config(
+            ModelWeightInfo(weights=[], layer_weights=[[moe_weight]])
+        )
         self.assertEqual(len(result), 0)
 
     def test_non_stacked_weights_ignored(self):
@@ -290,11 +287,9 @@ class TestBuildStackedKeyConfig(unittest.TestCase):
             stacked=False,
         )
 
-        wi = MagicMock()
-        wi.weight = moe_weight
-        wi.layer_id = 0
-
-        result = ModelLoader._build_stacked_key_config([wi])
+        result = ModelLoader._build_stacked_key_config(
+            ModelWeightInfo(weights=[], layer_weights=[[moe_weight]])
+        )
         self.assertEqual(len(result), 0)
 
 

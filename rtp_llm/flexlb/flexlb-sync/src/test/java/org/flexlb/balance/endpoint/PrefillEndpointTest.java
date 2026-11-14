@@ -52,8 +52,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
+/**
+ * Checks Prefill queue ownership, batch commitment and exact request release.
+ */
 class PrefillEndpointTest {
-
     private PrefillEndpoint endpoint;
     private FlexlbConfig config;
     private BatchSchedulerReporter endpointReporter;
@@ -105,18 +107,6 @@ class PrefillEndpointTest {
         } finally {
             routeEndpoint.close();
         }
-    }
-
-    private PrefillEndpoint routeEndpoint(FlexlbConfig routeConfig, String ip) {
-        PrefillEndpoint routeEndpoint =
-                new PrefillEndpoint(
-                        EndpointTestSupport.workerStatus(RoleType.PREFILL, ip, 8080, 8090),
-                        routeConfig,
-                        EndpointTestSupport.routeStrategy(requestRuntime),
-                        requestRuntime.events(),
-                        endpointReporter);
-        routeEndpoint.startGeneration();
-        return routeEndpoint;
     }
 
     @Test
@@ -1485,20 +1475,6 @@ class PrefillEndpointTest {
         }
     }
 
-    private static void applyHeartbeat(PrefillEndpoint endpoint, WorkerStatusResponse response) {
-        WorkerStatus status = endpoint.getStatus();
-        Runnable projection;
-        status.lock.lock();
-        try {
-            response.setStatusVersion(status.appliedStatusCursor().statusVersion());
-            projection =
-                    endpoint.observeStatusHeartbeat(status, status.freezeStatusResponse(response));
-        } finally {
-            status.lock.unlock();
-        }
-        projection.run();
-    }
-
     @Test
     void closePreservesRegisteredLifecycleAndRejectsNewBatchReservations() {
         ScheduledRequest item = createScheduledRequest(1L, 500, 200);
@@ -1551,6 +1527,32 @@ class PrefillEndpointTest {
         assertEquals(0, endpoint.queuedRequestCount());
     }
 
+    private PrefillEndpoint routeEndpoint(FlexlbConfig routeConfig, String ip) {
+        PrefillEndpoint routeEndpoint =
+                new PrefillEndpoint(
+                        EndpointTestSupport.workerStatus(RoleType.PREFILL, ip, 8080, 8090),
+                        routeConfig,
+                        EndpointTestSupport.routeStrategy(requestRuntime),
+                        requestRuntime.events(),
+                        endpointReporter);
+        routeEndpoint.startGeneration();
+        return routeEndpoint;
+    }
+
+    private static void applyHeartbeat(PrefillEndpoint endpoint, WorkerStatusResponse response) {
+        WorkerStatus status = endpoint.getStatus();
+        Runnable projection;
+        status.lock.lock();
+        try {
+            response.setStatusVersion(status.appliedStatusCursor().statusVersion());
+            projection =
+                    endpoint.observeStatusHeartbeat(status, status.freezeStatusResponse(response));
+        } finally {
+            status.lock.unlock();
+        }
+        projection.run();
+    }
+
     // ---- helpers ----
 
     private PrefillEndpoint newFixedWindowEndpoint(long fixedWaitMs) {
@@ -1571,6 +1573,18 @@ class PrefillEndpointTest {
         return created;
     }
 
+    private static void configureBatch(
+            FlexlbConfig target,
+            int maxRequests,
+            long maxCollectionWaitMs,
+            Integer maxInflightBatches) {
+        target.fixedWindowDecision().setMaxRequests(maxRequests);
+        target.fixedWindowDecision().setMaxCollectionWaitMs(maxCollectionWaitMs);
+        if (maxInflightBatches != null) {
+            target.getDispatcher().setMaxInflightPerPrefillWorker(maxInflightBatches);
+        }
+    }
+
     private static PrefillEndpoint newEndpointWithFormula(String expression) {
         WorkerStatus status =
                 EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.9", 8089, 8099);
@@ -1589,6 +1603,14 @@ class PrefillEndpointTest {
                         mock(BatchSchedulerReporter.class));
         created.startGeneration();
         return created;
+    }
+
+    private static void setFormula(FlexlbConfig target, String expression) {
+        target.getRouter()
+                .getRoles()
+                .getPrefill()
+                .getExecutionTimeEstimator()
+                .setExpression(expression);
     }
 
     private ScheduledRequest createPriorityScheduledRequest(
@@ -1620,6 +1642,17 @@ class PrefillEndpointTest {
                 Map.of(Long.toString(requestId), taskInfo(requestId, batchId, null, 500, 0)));
         response.setRunningTaskInfo(Map.of());
         EndpointTestSupport.applyStatus(target, response).run();
+    }
+
+    private static TaskInfo taskInfo(
+            long requestId, long batchId, TaskPhase phase, int errorCode, long executionTimeMs) {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(Long.toString(requestId));
+        task.setBatchId(batchId);
+        task.setPhase(phase);
+        task.setErrorCode(errorCode);
+        task.setExecutionTimeMs(executionTimeMs);
+        return task;
     }
 
     private static void reportSuccessfulBatchMember(
@@ -1725,26 +1758,6 @@ class PrefillEndpointTest {
                 System.currentTimeMillis());
     }
 
-    private static void configureBatch(
-            FlexlbConfig target,
-            int maxRequests,
-            long maxCollectionWaitMs,
-            Integer maxInflightBatches) {
-        target.fixedWindowDecision().setMaxRequests(maxRequests);
-        target.fixedWindowDecision().setMaxCollectionWaitMs(maxCollectionWaitMs);
-        if (maxInflightBatches != null) {
-            target.getDispatcher().setMaxInflightPerPrefillWorker(maxInflightBatches);
-        }
-    }
-
-    private static void setFormula(FlexlbConfig target, String expression) {
-        target.getRouter()
-                .getRoles()
-                .getPrefill()
-                .getExecutionTimeEstimator()
-                .setExpression(expression);
-    }
-
     private static TaskInfo priorityCanceledTask(long requestId, long batchId) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(Long.toString(requestId));
@@ -1752,17 +1765,6 @@ class PrefillEndpointTest {
         task.setErrorCode(8429);
         task.setErrorMessage("priority preempted");
         task.setPriorityPreemptionProgress(PriorityPreemptionProgress.CANCELED);
-        return task;
-    }
-
-    private static TaskInfo taskInfo(
-            long requestId, long batchId, TaskPhase phase, int errorCode, long executionTimeMs) {
-        TaskInfo task = new TaskInfo();
-        task.setRequestId(Long.toString(requestId));
-        task.setBatchId(batchId);
-        task.setPhase(phase);
-        task.setErrorCode(errorCode);
-        task.setExecutionTimeMs(executionTimeMs);
         return task;
     }
 

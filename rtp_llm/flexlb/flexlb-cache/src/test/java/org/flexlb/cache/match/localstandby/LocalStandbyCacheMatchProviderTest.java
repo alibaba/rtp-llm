@@ -34,6 +34,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks local standby cache queries and their provider result representation.
+ */
 class LocalStandbyCacheMatchProviderTest {
 
     private final CacheMetricsReporter reporter = mock(CacheMetricsReporter.class);

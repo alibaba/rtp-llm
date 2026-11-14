@@ -27,8 +27,10 @@ import java.util.function.Consumer;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * Checks configuration-source initialization, updates and failure handling.
+ */
 class ConfigServiceTest {
-
     private ConfigService configService;
 
     @AfterEach
@@ -498,6 +500,15 @@ class ConfigServiceTest {
         assertThat(source.closed).isTrue();
     }
 
+    private void assertInvalidInitialContent(String content, String expectedMessage) {
+        FakeConfigSource source = new FakeConfigSource("Nacos", 200, content);
+
+        assertThatThrownBy(() -> createService(List.of(environmentSource(Map.of()), source)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasStackTraceContaining(expectedMessage);
+        assertThat(source.closed).isTrue();
+    }
+
     private ConfigService createService(List<ConfigSource> sources) {
         for (ConfigSource source : sources) {
             if (!(source instanceof EnvironmentConfigSource)) {
@@ -524,15 +535,9 @@ class ConfigServiceTest {
         }
     }
 
-    private void assertInvalidInitialContent(String content, String expectedMessage) {
-        FakeConfigSource source = new FakeConfigSource("Nacos", 200, content);
-
-        assertThatThrownBy(() -> createService(List.of(environmentSource(Map.of()), source)))
-                .isInstanceOf(IllegalStateException.class)
-                .hasStackTraceContaining(expectedMessage);
-        assertThat(source.closed).isTrue();
-    }
-
+    /**
+     * Publishes test-controlled configuration changes through the configuration-source contract.
+     */
     private static final class FakeConfigSource implements ConfigSource {
         private final String name;
         private final int priority;

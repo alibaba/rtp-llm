@@ -5,7 +5,9 @@ import org.flexlb.dao.loadbalance.Response;
 
 import java.util.concurrent.CompletableFuture;
 
-/** One request identity retained by the model-wide ordered queue. */
+/**
+ * One request identity retained by the model-wide ordered queue.
+ */
 final class GlobalQueueEntry {
 
     final BalanceContext context;

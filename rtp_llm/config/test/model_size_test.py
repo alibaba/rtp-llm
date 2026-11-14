@@ -190,7 +190,7 @@ class ExpertWeightDtypeSizeTest(unittest.TestCase):
             config = _moe_model_config(ckpt_path, V4_PRO_SHAPE, "fp4")
             self.assertEqual(config.quant_algo.getWeightBits(), 8)
 
-            moe_params = config.moe_weight_param_count()
+            moe_params = config.moe_weight_param_count(len(config.moe_layer_index))
             size = config.eval_model_weight_size()
             # Only the routed-expert slice is repriced (1.0 -> 0.54 B/param);
             # the dense slice and the embeddings keep the legacy pricing.
@@ -232,7 +232,7 @@ class ExpertWeightDtypeSizeTest(unittest.TestCase):
             # their estimate drops the same way; only the routed-expert
             # slice changes and every decision margin only widens.
             config.expert_weight_dtype = "fp4"
-            moe_params = config.moe_weight_param_count()
+            moe_params = config.moe_weight_param_count(len(config.moe_layer_index))
             embedding = 2 * (V4_FLASH_SHAPE["vocab"] * V4_FLASH_SHAPE["hidden"])
             dense_params = _legacy_layer_param_count(V4_FLASH_SHAPE) - moe_params
             self.assertAlmostEqual(
@@ -307,7 +307,7 @@ class ExpertWeightDtypeSizeTest(unittest.TestCase):
             config = _moe_model_config(ckpt_path, V4_FLASH_SHAPE)
             config.quant_algo.setQuantAlgo("w4a8_int4_per_channel", 4, 32)
             self.assertEqual(config.quant_algo.getWeightBits(), 4)
-            moe_params = config.moe_weight_param_count()
+            moe_params = config.moe_weight_param_count(len(config.moe_layer_index))
             dense_params = _legacy_layer_param_count(V4_FLASH_SHAPE) - moe_params
             embedding = 2 * (V4_FLASH_SHAPE["vocab"] * V4_FLASH_SHAPE["hidden"])
 
@@ -335,7 +335,7 @@ class ExpertWeightDtypeSizeTest(unittest.TestCase):
             config.quant_algo.setQuantAlgo("w4a8_int4_per_channel", 4, 32)
             config.dense_weight_dtype = "fp8"
             config.expert_weight_dtype = "fp4"
-            moe_params = config.moe_weight_param_count()
+            moe_params = config.moe_weight_param_count(len(config.moe_layer_index))
             dense_params = _legacy_layer_param_count(V4_FLASH_SHAPE) - moe_params
             embedding = 2 * (V4_FLASH_SHAPE["vocab"] * V4_FLASH_SHAPE["hidden"])
             self.assertAlmostEqual(
@@ -480,8 +480,11 @@ class WeightConvertDeviceDecisionReplayTest(unittest.TestCase):
         loader = object.__new__(ModelLoader)
         loader._load_config = SimpleNamespace(
             force_cpu_load_weights=False,
+            num_layers=config.num_layers,
+            layer_range=range(config.num_layers),
             ep_size=4,
             tp_size=4,
+            ffn_tp_size=4,
             exported_device=SimpleNamespace(
                 get_mem_info=lambda: SimpleNamespace(free=free_gib * 1024**3)
             ),

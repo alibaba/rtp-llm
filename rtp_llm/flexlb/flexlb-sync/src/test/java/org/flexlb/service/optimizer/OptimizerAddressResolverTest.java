@@ -32,9 +32,12 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks optimizer discovery startup, refresh, recovery and shutdown across providers.
+ */
 class OptimizerAddressResolverTest {
-
     private static final String DOMAIN = "optimizer.test.domain.com";
+
     private static final int PORT = 8082;
     private static final long POLL_INTERVAL_MS = 10L;
 
@@ -321,15 +324,6 @@ class OptimizerAddressResolverTest {
         resolver.shutdown();
     }
 
-    private static void awaitAddresses(OptimizerAddressResolver resolver, List<String> expected)
-            throws Exception {
-        long deadline = System.nanoTime() + 1_000_000_000L;
-        while (!resolver.getAddresses().equals(expected) && System.nanoTime() < deadline) {
-            Thread.sleep(5);
-        }
-        assertEquals(expected, resolver.getAddresses());
-    }
-
     private static Endpoint endpoint(ServiceDiscoveryType type) {
         DiscoveryConfig discovery = new DiscoveryConfig();
         discovery.setType(type);
@@ -341,5 +335,14 @@ class OptimizerAddressResolverTest {
         endpoint.setProtocol("http");
         endpoint.setDiscovery(discovery);
         return endpoint;
+    }
+
+    private static void awaitAddresses(OptimizerAddressResolver resolver, List<String> expected)
+            throws Exception {
+        long deadline = System.nanoTime() + 1_000_000_000L;
+        while (!resolver.getAddresses().equals(expected) && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        assertEquals(expected, resolver.getAddresses());
     }
 }

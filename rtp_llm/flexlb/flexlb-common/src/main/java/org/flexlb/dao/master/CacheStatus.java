@@ -9,6 +9,9 @@ import lombok.NoArgsConstructor;
 
 import java.util.Set;
 
+/**
+ * Carries a worker cache snapshot or diff together with its version and capacity evidence.
+ */
 @Data
 @JsonIgnoreProperties(ignoreUnknown = true)
 @NoArgsConstructor

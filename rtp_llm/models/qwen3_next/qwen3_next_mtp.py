@@ -90,6 +90,9 @@ class Qwen3NextMTPMixin:
     _mtp_moe_layer_index = (0,)
     _mtp_use_base_rope = False
 
+    def support_pp(self) -> bool:
+        return False
+
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config = super()._create_config(ckpt_path)

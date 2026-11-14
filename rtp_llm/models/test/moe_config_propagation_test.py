@@ -93,6 +93,7 @@ class MoeConfigPropagationTest(unittest.TestCase):
                         use_batch_decode_scheduler=False,
                     ),
                     pd_sep_config=SimpleNamespace(role_type=RoleType.PREFILL),
+                    parallelism_config=ParallelismConfig(),
                 )
 
                 ModelFactory.update_engine_config_from_model_config(
@@ -383,11 +384,17 @@ class MoeConfigPropagationTest(unittest.TestCase):
             * ffn_w_count
             * config.expert_num
         )
-        self.assertEqual(config.moe_weight_param_count(), expected_moe_weights)
+        self.assertEqual(
+            config.moe_weight_param_count(moe_layer_count), expected_moe_weights
+        )
 
-        count_with_dense_layers = config.layer_weight_param_count()
+        count_with_dense_layers = config.layer_weight_param_count(
+            config.num_layers, moe_layer_count
+        )
         config.dense_inter_size = 0
-        count_without_dense_layers = config.layer_weight_param_count()
+        count_without_dense_layers = config.layer_weight_param_count(
+            config.num_layers, moe_layer_count
+        )
         self.assertEqual(
             count_with_dense_layers - count_without_dense_layers,
             dense_layer_count * 11008 * config.hidden_size * ffn_w_count,

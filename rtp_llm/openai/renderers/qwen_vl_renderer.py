@@ -1,5 +1,5 @@
 import copy
-from typing import Any, List
+from typing import Any, List, Optional
 
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
@@ -102,7 +102,10 @@ class Qwen2VLRenderer(QwenRenderer):
         return arguments
 
     def _render_messages(
-        self, request: ChatCompletionRequest, add_vision_id: bool
+        self,
+        request: ChatCompletionRequest,
+        add_vision_id: bool,
+        enable_thinking: Optional[bool] = None,
     ) -> PromptWithMMInput:
         urls = []
         types = []
@@ -183,6 +186,8 @@ class Qwen2VLRenderer(QwenRenderer):
         request_chat_template_kwargs = request.get_chat_template_kwargs()
         if request_chat_template_kwargs is not None:
             chat_template_kwargs.update(request_chat_template_kwargs)
+        if enable_thinking is not None:
+            chat_template_kwargs["enable_thinking"] = enable_thinking
         prompt = self.tokenizer.apply_chat_template(
             final_messages, **chat_template_kwargs
         )

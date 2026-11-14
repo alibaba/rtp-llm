@@ -74,7 +74,7 @@ protected:
                                                                  const std::unordered_set<GenerateStream*>* admitted_streams = nullptr);
     std::unordered_set<GenerateStream*> evaluateWaitingStreams(std::list<GenerateStreamPtr>& waiting_streams,
                                                                bool include_running_mode = true);
-    void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
+    virtual void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
     size_t countInitedKVCacheStreams() const;
     void   appendTaskInfos(std::vector<EngineScheduleInfo::TaskInfo>& task_list,
                            const std::list<GenerateStreamPtr>&         streams) const;

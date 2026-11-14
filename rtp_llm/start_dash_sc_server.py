@@ -21,47 +21,57 @@ from rtp_llm.utils.concurrency_controller import (
 setup_logging()
 
 
-def _install_hot_hook_runtime(role: str) -> None:
-    try:
-        from rtp_llm.utils.hot_hook_runtime import install_if_enabled
+def _install_hot_hook_runtime(role: str, py_env_configs) -> None:
+    """Install the hot hook runtime from the parsed config.
 
-        if install_if_enabled():
-            logging.info("RTP hot hook runtime installed for %s", role)
+    The single switch is the hot-hook config path (--hot_hook_config /
+    RTP_HOT_HOOK_CONFIG): a non-empty path pointing at a loadable JSON enables
+    the runtime; no path means no install.
+    """
+    try:
+        from rtp_llm.utils.hot_hook_runtime import install_from_config
+
+        config_path = py_env_configs.hot_hook_config.config_path
+        if config_path and install_from_config(config_path):
+            logging.info(
+                "RTP hot hook runtime installed for %s (config=%s)", role, config_path
+            )
     except Exception as e:
         logging.error("failed to install RTP hot hook runtime for %s: %s", role, e)
 
 
 def start_dash_sc_server(
-    rank_id: int,
+    world_rank: int,
     server_id: int,
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
     bind_barrier=None,
 ):
-    _install_hot_hook_runtime(f"dash_sc_rank_{rank_id}_server_{server_id}")
+    pc = py_env_configs.parallelism_config
+    # Topology uses the global rank; listening ports use the derived local rank.
+    set_parallelism_config(
+        pc,
+        world_rank,
+        py_prefill_cp_config=py_env_configs.prefill_cp_config,
+    )
+    local_rank = pc.local_rank
+    _install_hot_hook_runtime(
+        f"dash_sc_rank_{local_rank}_server_{server_id}", py_env_configs
+    )
     logging.info(
-        f"[PROCESS_START]Start dash_sc server process rank_{rank_id}_server_{server_id}"
+        f"[PROCESS_START]Start dash_sc server process rank_{local_rank}_server_{server_id}"
     )
     start_time = time.time()
     from rtp_llm.dash_sc import DashScApp
 
-    if rank_id == 0 and server_id == 0:
+    if local_rank == 0 and server_id == 0:
         logging.info(f"import DashScApp took {time.time() - start_time:.2f}s")
 
     py_env_configs.server_config.frontend_server_id = server_id
-    set_parallelism_config(
-        py_env_configs.parallelism_config,
-        rank_id,
-        py_env_configs.prefill_cp_config,
-    )
-    py_env_configs.server_config.set_local_rank(
-        py_env_configs.parallelism_config.local_rank
-    )
-    py_env_configs.distribute_config.set_local_rank(
-        py_env_configs.parallelism_config.local_rank
-    )
-    setproctitle(f"rtp_llm_dash_sc_server_rank_{rank_id}_server_{server_id}")
+    py_env_configs.server_config.set_local_rank(local_rank)
+    py_env_configs.distribute_config.set_local_rank(local_rank)
+    setproctitle(f"rtp_llm_dash_sc_server_rank_{local_rank}_server_{server_id}")
 
     try:
         set_global_controller(global_controller)

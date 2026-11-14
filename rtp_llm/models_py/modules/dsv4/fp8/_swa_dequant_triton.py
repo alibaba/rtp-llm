@@ -29,12 +29,6 @@ from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
     CPByteSlicedSlotCompaction,
 )
-from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
-    invalid_kv_access_validation_enabled,
-    trap_invalid_kv_access_enabled,
-    validate_block_table_lookup,
-    validate_slot_mapping,
-)
 
 
 @dataclass
@@ -269,26 +263,6 @@ def dequantize_and_gather_k_cache(
     )
 
     num_reqs = seq_lens.shape[0]
-    if invalid_kv_access_validation_enabled():
-        seq_i64 = seq_lens.detach().reshape(-1).to(torch.int64)
-        if gather_lens is None:
-            gather_i64 = seq_i64
-        else:
-            gather_i64 = gather_lens.detach().reshape(-1).to(torch.int64)
-        max_gather = int(gather_i64.max().item()) if int(gather_i64.numel()) > 0 else 0
-        if max_gather > 0:
-            steps = torch.arange(max_gather, device=seq_lens.device, dtype=torch.int64)
-            pos = seq_i64[:, None] - gather_i64[:, None] + steps[None, :]
-            use = steps[None, :] < gather_i64[:, None]
-            req = torch.arange(num_reqs, device=seq_lens.device, dtype=torch.int64)
-            validate_block_table_lookup(
-                "swa.dequantize_and_gather.block_table",
-                block_table,
-                req[:, None].expand_as(pos),
-                pos // int(block_size),
-                use,
-                num_blocks=int(k_cache.shape[0]),
-            )
     NUM_WORKERS = 128
     _dequantize_and_gather_k_kernel[(num_reqs, NUM_WORKERS)](
         out,
@@ -311,7 +285,7 @@ def dequantize_and_gather_k_cache(
         output_dim=HEAD_DIM,
         fp8_max=FP8_MAX,
         n_quant_blocks=NOPE_TILES,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        TRAP_INVALID_KV_ACCESS=True,
     )
 
 
@@ -498,7 +472,7 @@ def _launch_dequantize_and_gather_k_slots_unchecked(
         num_cache_blocks=int(num_cache_blocks),
         fp8_max=FP8_MAX,
         n_quant_blocks=NOPE_TILES,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        TRAP_INVALID_KV_ACCESS=True,
         CP_RANK_MAJOR_RAW=bool(cp_rank_major_raw),
     )
 
@@ -569,13 +543,6 @@ def dequantize_and_gather_k_cache_slots(
         return
 
     slots_i64 = slot_mapping.to(device=out.device, dtype=torch.int64).contiguous()
-    validate_slot_mapping(
-        "swa.dequantize_and_gather.slot_mapping",
-        slots_i64.reshape(-1),
-        block_size=int(k_cache.shape[1]),
-        num_blocks=int(k_cache.shape[0]),
-        negative_mode="skip_any",
-    )
     gather_lens_i32 = (
         None
         if gather_lens is None
@@ -650,13 +617,6 @@ def try_dequantize_and_gather_k_cache_slots_to_workspace(
     if batch_size == 0 or max_gather_len == 0:
         return True
 
-    validate_slot_mapping(
-        "swa.dequantize_and_gather.workspace_slot_mapping",
-        slot_mapping.reshape(-1),
-        block_size=int(k_cache.shape[1]),
-        num_blocks=int(k_cache.shape[0]),
-        negative_mode="skip_any",
-    )
     _launch_dequantize_and_gather_k_slots_unchecked(
         out,
         k_cache,
@@ -1003,7 +963,7 @@ def try_gather_k_cache_packed_to_flat(
         scale_dim=SCALE_BYTES_PER_TOKEN,
         entry_bytes=ENTRY_BYTES,
         BATCH_BLOCK=batch_block,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        TRAP_INVALID_KV_ACCESS=True,
         num_warps=4,
     )
     return True
@@ -1464,13 +1424,6 @@ def dequantize_slots_to_bf16(
     if N == 0:
         return out
     slots_i64 = slot_indices.reshape(-1).to(torch.int64).contiguous()
-    validate_slot_mapping(
-        "swa.dequantize_slots.slot_indices",
-        slots_i64,
-        block_size=block_size,
-        num_blocks=int(pool_3d.shape[0]),
-        negative_mode="skip_any",
-    )
     _dequantize_slots_kernel[(N,)](
         out,
         out.stride(0),
@@ -1485,7 +1438,7 @@ def dequantize_slots_to_bf16(
         token_data_size=TOKEN_DATA_SIZE,
         num_cache_blocks=int(pool_3d.shape[0]),
         n_quant_blocks=NOPE_TILES,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        TRAP_INVALID_KV_ACCESS=True,
     )
     return out
 

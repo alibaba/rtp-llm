@@ -32,10 +32,14 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
 
+/**
+ * Resolves grouped worker hosts and caches the last nonempty discovery result. Empty results or
+ * discovery failures do not silently discard that fallback.
+ */
 @Service("workerAddressService")
 public class WorkerAddressService {
-
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+
     private static final long EMPTY_WORKER_WARNING_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1);
 
     private final EngineHealthReporter engineHealthReporter;
@@ -79,18 +83,6 @@ public class WorkerAddressService {
         serviceDiscoveryExecutor.shutdown();
     }
 
-    @Scheduled(fixedRate = 2000)
-    private void reportExecutorMetrics() {
-        try {
-            engineHealthReporter.reportThreadPoolInfo(
-                    ENGINE_BALANCING_THREAD_POOL_INFO,
-                    "serviceDiscoveryExecutor",
-                    serviceDiscoveryExecutor);
-        } catch (Throwable failure) {
-            logger.warn("Failed to report service discovery executor metrics", failure);
-        }
-    }
-
     public List<WorkerHost> getEngineWorkerList(String modelName, RoleType modelEndpointType) {
         List<WorkerHost> workerHosts = new ArrayList<>();
         List<Pair<String, Endpoint>> endpoints =
@@ -127,6 +119,18 @@ public class WorkerAddressService {
                     modelName, modelEndpointType, discoveredHostCount);
         }
         return workerHosts;
+    }
+
+    @Scheduled(fixedRate = 2000)
+    private void reportExecutorMetrics() {
+        try {
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO,
+                    "serviceDiscoveryExecutor",
+                    serviceDiscoveryExecutor);
+        } catch (Throwable failure) {
+            logger.warn("Failed to report service discovery executor metrics", failure);
+        }
     }
 
     /**
@@ -187,9 +191,6 @@ public class WorkerAddressService {
                 lastNonEmptyHostsByEndpoint.getOrDefault(endpoint, List.of()), null);
     }
 
-    private record ServiceHosts(
-            List<WorkerHost> discoveredOrCachedHostsForStatusCheck, Integer discoveredHostCount) {}
-
     private void reportWorkerAvailability(
             String modelName, Endpoint endpoint, List<WorkerHost> hosts) {
         WorkerAvailabilityLogState state =
@@ -217,6 +218,12 @@ public class WorkerAddressService {
         }
     }
 
+    private record ServiceHosts(
+            List<WorkerHost> discoveredOrCachedHostsForStatusCheck, Integer discoveredHostCount) {}
+
+    /**
+     * Rate-limits empty-discovery warnings and records the transition back to available workers.
+     */
     private static final class WorkerAvailabilityLogState {
 
         // Zero means workers are available; otherwise this is the next empty-list warning deadline.

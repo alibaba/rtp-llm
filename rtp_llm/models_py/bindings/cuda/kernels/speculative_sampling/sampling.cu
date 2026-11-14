@@ -356,7 +356,7 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
     __syncthreads();
     sum_relu_q_minus_p = temp_storage.block_aggregate.value;
     DType u            = uniform_samples[row_idx * (num_speculative_tokens + 1) + min(pos + 1, num_speculative_tokens)]
-              * sum_relu_q_minus_p;
+                         * sum_relu_q_minus_p;
 
     DType aggregate_relu_q_minus_p(0);
     for (uint32_t i = 0; i < flashinfer::ceil_div(target_vocab_size, BLOCK_THREADS * VEC_SIZE); ++i) {
@@ -405,6 +405,221 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
             output_token_ids[row_idx * (num_speculative_tokens + 1) + p] = -1;
         }
     }
+}
+
+// Parallelize vocabulary tiles as in vLLM's rejection-sampling statistics.
+// Accept both the actual full draft distribution and the point-mass contract.
+// Keep RTP's original 1024-thread / vec4 CUB reductions and serial tile-sum
+// order, then reuse its original inverse-CDF selection (and random draws).
+__global__ void rejectionResidualTileSums(const float* draft_probs,
+                                          const int*   draft_ids,
+                                          const float* uniforms,
+                                          const float* target_probs,
+                                          const int*   target_ids,
+                                          int          target_stride,
+                                          int*         output_ids,
+                                          int*         accepted,
+                                          const bool*  do_sample,
+                                          int          steps,
+                                          int          vocab,
+                                          bool         point_mass,
+                                          float*       tile_sums,
+                                          int*         rejected_positions) {
+    constexpr int     Threads = 1024;
+    constexpr int     Vec     = 4;
+    extern __shared__ __align__(alignof(SamplingTempStorage<float, Threads, SCAN_ALGO, REDUCE_ALGO>)) uint8_t bytes[];
+    auto&          temp = reinterpret_cast<SamplingTempStorage<float, Threads, SCAN_ALGO, REDUCE_ALGO>&>(bytes);
+    __shared__ int rejected;
+    const int      row = blockIdx.x, tile = blockIdx.y, tx = threadIdx.x;
+    if (tx == 0) {
+        int        pos        = steps;
+        const bool stochastic = do_sample[row];
+        for (int i = 0; i < steps; ++i) {
+            const int   draft  = draft_ids[row * steps + i];
+            const int   target = target_ids[(row * (steps + 1) + i) * target_stride + target_stride - 1];
+            const float q      = target_probs[(row * (steps + 1) + i) * vocab + draft];
+            const float u      = uniforms[row * (steps + 1) + i];
+            const float p      = point_mass ? 1.0f : draft_probs[(row * steps + i) * vocab + draft];
+            const bool  accept = (stochastic && u * p < q) || (!stochastic && target == draft);
+            if (accept) {
+                if (tile == 0)
+                    output_ids[row * (steps + 1) + i] = draft;
+            } else {
+                pos = i;
+                if (!stochastic && tile == 0) {
+                    output_ids[row * (steps + 1) + i] = target;
+                    for (int j = i + 1; j <= steps; ++j)
+                        output_ids[row * (steps + 1) + j] = -1;
+                }
+                break;
+            }
+        }
+        if (tile == 0) {
+            accepted[row] = pos + 1;
+            if (pos == steps) {
+                output_ids[row * (steps + 1) + pos] =
+                    target_ids[(row * (steps + 1) + pos) * target_stride + target_stride - 1];
+            }
+        }
+        rejected = stochastic && pos < steps ? pos : -1;
+        if (tile == 0)
+            rejected_positions[row] = rejected;
+    }
+    __syncthreads();
+    if (rejected < 0)
+        return;
+    const int                     col = (tile * Threads + tx) * Vec;
+    flashinfer::vec_t<float, Vec> q, p;
+    q.fill(0.0f);
+    p.fill(0.0f);
+    if (col < vocab) {
+        q.load(target_probs + (row * (steps + 1) + rejected) * vocab + col);
+        if (point_mass) {
+            synthesizePointMassProbVec<Vec>(p, draft_ids[row * steps + rejected], col);
+        } else {
+            p.load(draft_probs + (row * steps + rejected) * vocab + col);
+        }
+    }
+    float residual[Vec];
+#pragma unroll
+    for (int j = 0; j < Vec; ++j)
+        residual[j] = max(q[j] - p[j], 0.0f);
+    const float sum = BlockReduce<float, Threads, REDUCE_ALGO>(temp.block_prim.reduce).template Sum<Vec>(residual);
+    if (tx == 0)
+        tile_sums[row * gridDim.y + tile] = sum;
+}
+
+__global__ void rejectionSelectResidualTile(const float* draft_probs,
+                                            const int*   draft_ids,
+                                            const float* uniforms,
+                                            const float* target_probs,
+                                            int*         output_ids,
+                                            int          steps,
+                                            int          vocab,
+                                            bool         point_mass,
+                                            const float* tile_sums,
+                                            const int*   rejected_positions,
+                                            int          tiles) {
+    constexpr int     Threads = 1024;
+    constexpr int     Vec     = 4;
+    extern __shared__ __align__(alignof(SamplingTempStorage<float, Threads, SCAN_ALGO, REDUCE_ALGO>)) uint8_t bytes[];
+    auto&            temp = reinterpret_cast<SamplingTempStorage<float, Threads, SCAN_ALGO, REDUCE_ALGO>&>(bytes);
+    __shared__ int   selected_tile;
+    __shared__ float selected_prefix, draw;
+    const int        row = blockIdx.x, tx = threadIdx.x;
+    const int        pos = rejected_positions[row];
+    if (pos < 0)
+        return;
+    if (tx == 0) {
+        float sum = 0.0f;
+        // Preserve the exact original increasing-tile FP32 addition order.
+        for (int i = 0; i < tiles; ++i)
+            sum += tile_sums[row * tiles + i];
+        draw          = uniforms[row * (steps + 1) + min(pos + 1, steps)] * sum;
+        float prefix  = 0.0f;
+        selected_tile = -1;
+        for (int i = 0; i < tiles; ++i) {
+            const float local = tile_sums[row * tiles + i];
+            if (prefix + local > draw) {
+                selected_tile = i;
+                break;
+            }
+            prefix += local;
+        }
+        selected_prefix = prefix;
+        temp.sampled_id = vocab - 1;
+    }
+    __syncthreads();
+    const int tile = selected_tile;
+    if (tile >= 0) {
+        const int                     col = (tile * Threads + tx) * Vec;
+        flashinfer::vec_t<float, Vec> q, p, residual;
+        q.fill(0.0f);
+        p.fill(0.0f);
+        if (col < vocab) {
+            q.load(target_probs + (row * (steps + 1) + pos) * vocab + col);
+            if (point_mass) {
+                synthesizePointMassProbVec<Vec>(p, draft_ids[row * steps + pos], col);
+            } else {
+                p.load(draft_probs + (row * steps + pos) * vocab + col);
+            }
+        }
+#pragma unroll
+        for (int j = 0; j < Vec; ++j)
+            residual[j] = max(q[j] - p[j], 0.0f);
+        float prefix = selected_prefix;
+        // Original invokeRejectionSampling instantiates DETERMINISTIC=false.
+        DeviceSamplingFromProb<Vec, Threads, SCAN_ALGO, REDUCE_ALGO, false, float>(
+            tile, vocab, [](float x) { return x > 0; }, draw, residual, prefix, &temp);
+    }
+    __syncthreads();
+    if (tx == 0) {
+        output_ids[row * (steps + 1) + pos] = temp.sampled_id;
+        for (int i = pos + 1; i <= steps; ++i)
+            output_ids[row * (steps + 1) + i] = -1;
+    }
+}
+
+cudaError_t invokeSplitRejectionSampling(const float* draft_probs,
+                                         const int*   draft_ids,
+                                         const float* uniforms,
+                                         const float* target_probs,
+                                         const int*   target_ids,
+                                         int          target_stride,
+                                         int*         output_ids,
+                                         int*         accepted,
+                                         const bool*  do_sample,
+                                         int          batch,
+                                         int          steps,
+                                         int          vocab,
+                                         bool         point_mass,
+                                         float*       tile_sums,
+                                         int*         rejected_positions,
+                                         cudaStream_t stream) {
+    if (batch == 0)
+        return cudaSuccess;
+    if (batch < 0 || steps != 3 || vocab != 248320 || target_stride <= 0 || (!point_mass && draft_probs == nullptr))
+        return cudaErrorInvalidValue;
+    constexpr int Threads = 1024;
+    const int     tiles   = (vocab + Threads * 4 - 1) / (Threads * 4);
+    const int     bytes   = sizeof(SamplingTempStorage<float, Threads, SCAN_ALGO, REDUCE_ALGO>);
+    // The dynamic shared-memory opt-in is a per-function constant; applying it
+    // once avoids repeating the driver call on every sampling step.
+    static bool attributes_applied = false;
+    if (!attributes_applied) {
+        FLASHINFER_CUDA_CALL(
+            cudaFuncSetAttribute(rejectionResidualTileSums, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes));
+        FLASHINFER_CUDA_CALL(
+            cudaFuncSetAttribute(rejectionSelectResidualTile, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes));
+        attributes_applied = true;
+    }
+    rejectionResidualTileSums<<<dim3(batch, tiles), Threads, bytes, stream>>>(draft_probs,
+                                                                              draft_ids,
+                                                                              uniforms,
+                                                                              target_probs,
+                                                                              target_ids,
+                                                                              target_stride,
+                                                                              output_ids,
+                                                                              accepted,
+                                                                              do_sample,
+                                                                              steps,
+                                                                              vocab,
+                                                                              point_mass,
+                                                                              tile_sums,
+                                                                              rejected_positions);
+    FLASHINFER_CUDA_CALL(cudaGetLastError());
+    rejectionSelectResidualTile<<<batch, Threads, bytes, stream>>>(draft_probs,
+                                                                   draft_ids,
+                                                                   uniforms,
+                                                                   target_probs,
+                                                                   output_ids,
+                                                                   steps,
+                                                                   vocab,
+                                                                   point_mass,
+                                                                   tile_sums,
+                                                                   rejected_positions,
+                                                                   tiles);
+    return cudaGetLastError();
 }
 
 template<typename DType, typename IdType>

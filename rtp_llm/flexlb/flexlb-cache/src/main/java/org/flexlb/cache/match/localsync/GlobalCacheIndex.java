@@ -21,7 +21,6 @@ import java.util.concurrent.locks.ReentrantLock;
 @Slf4j
 @Component
 public class GlobalCacheIndex {
-
     /**
      * Core storage structure: block_hash_id -> Set<engine_ip:engine_port>
      */
@@ -152,6 +151,29 @@ public class GlobalCacheIndex {
     }
 
     /**
+     * Clear all data
+     */
+    public void clear() {
+
+        lock.lock();
+        try {
+            blockToEnginesMap.clear();
+            totalMappings.reset();
+        } finally {
+            lock.unlock();
+        }
+        log.info("Cleared global cache index");
+    }
+
+    public long totalBlocks() {
+        return blockToEnginesMap.mappingCount();
+    }
+
+    public long totalMappings() {
+        return totalMappings.sum();
+    }
+
+    /**
      * Prefix match calculation
      *
      * @param engineIpPorts  logical worker identities in {@code ip:port@engineIndex} format
@@ -219,13 +241,6 @@ public class GlobalCacheIndex {
     }
 
     /**
-     * Check if collection is empty
-     */
-    private boolean isEmpty(List<?> list) {
-        return list == null || list.isEmpty();
-    }
-
-    /**
      * Get engine set for specified cache block
      */
     private Set<String> getEnginesForBlock(Long blockCacheKey) {
@@ -237,25 +252,9 @@ public class GlobalCacheIndex {
     }
 
     /**
-     * Clear all data
+     * Check if collection is empty
      */
-    public void clear() {
-
-        lock.lock();
-        try {
-            blockToEnginesMap.clear();
-            totalMappings.reset();
-        } finally {
-            lock.unlock();
-        }
-        log.info("Cleared global cache index");
-    }
-
-    public long totalBlocks() {
-        return blockToEnginesMap.mappingCount();
-    }
-
-    public long totalMappings() {
-        return totalMappings.sum();
+    private boolean isEmpty(List<?> list) {
+        return list == null || list.isEmpty();
     }
 }

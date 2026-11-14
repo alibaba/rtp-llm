@@ -35,48 +35,29 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Autonomous client-gone cancellation (production C++ engine alignment):
- * when the client's GenerateStream / FetchResponse stream breaks mid-flight,
- * the engine itself must clean the request up within a short window (the
- * production engine checks IsCancelled in its per-token loop).
- *
- * <p>Coverage matrix (the four required behaviours):
- * <ol>
- *   <li><b>prefill direct break</b> — the prefill is executing the request:
- *       runningTasks entry dropped, cancelled_rids recorded, typed CANCELLED
- *       terminal published, census counts it — all within 1s of the break;</li>
- *   <li><b>P→D propagation</b> — the break lands on the prefill AFTER the
- *       decode hand-off (both a broken GenerateStream and a broken
- *       FetchResponse): the decode cleans its slot/KV bookkeeping and records
- *       its own CANCELLED terminal, the prefill publishes the typed terminal
- *       carrying the request identity (tryCancelDownstream contract);</li>
- *   <li><b>decode direct break</b> — NON_BATCH style direct-to-decode stream:
- *       cleanup plus the terminal reported IMMEDIATELY (no stale-inflight TTL
- *       wait — the 5s decode step is still far from finishing);</li>
- *   <li><b>race idempotence + no false positives</b> — client-gone vs the
- *       explicit Cancel RPC in both orderings publish exactly one terminal
- *       (the cancel() claim), and a stream that completes NORMALLY never
- *       triggers the detector (the listener re-checks isCancelled()).</li>
- * </ol>
- *
- * <p>Real Netty gRPC servers are required (in-process calls run on
- * {@code Context.ROOT}, which the detector deliberately ignores), with the
- * break driven by a raw {@link ClientCall#cancel} so exactly one stream dies
- * while any sibling stream on the same engine stays alive.
+ * Checks that broken client output streams trigger autonomous engine cleanup without requiring a
+ * separate master cancellation.
  */
 class StreamCancelAutonomousTest {
-
     /** Fresh range above the 62000-63900 blocks used by the existing suites. */
     private static final AtomicInteger PORT_ALLOCATOR = new AtomicInteger(64000);
 
     @TempDir Path tempDir;
-
     private ScheduledExecutorService scheduler;
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
     private Map<Integer, Server> serversByPort;
     private JavaMockEngineCluster.ClusterStats stats;
+
+    // ════════════════════════════════════════════════════════════════
+    //  Cluster bootstrap (DynamicEngineScaleTest pattern, no control server)
+    // ════════════════════════════════════════════════════════════════
+
+    private int basePort;
+
+    /** Actual decode port — with 0 prefill engines the decode takes basePort+0. */
+    private int decodePortValue;
 
     @AfterEach
     void tearDown() throws InterruptedException {
@@ -449,15 +430,6 @@ class StreamCancelAutonomousTest {
                 "stats line must carry cancel_census_client_gone: " + line);
     }
 
-    // ════════════════════════════════════════════════════════════════
-    //  Cluster bootstrap (DynamicEngineScaleTest pattern, no control server)
-    // ════════════════════════════════════════════════════════════════
-
-    private int basePort;
-
-    /** Actual decode port — with 0 prefill engines the decode takes basePort+0. */
-    private int decodePortValue;
-
     private int prefillPort() {
         return basePort;
     }
@@ -589,6 +561,9 @@ class StreamCancelAutonomousTest {
         throw new AssertionError(message);
     }
 
+    /**
+     * Supplies a polling condition for autonomous stream-cancellation tests.
+     */
     private interface BooleanSupplier {
         boolean getAsBoolean();
     }
@@ -608,6 +583,7 @@ class StreamCancelAutonomousTest {
         private final ClientCall<?, EngineRpcService.GenerateOutputsPB> call;
         private final AtomicInteger frames = new AtomicInteger();
         private final CountDownLatch closed = new CountDownLatch(1);
+
         private volatile Status closeStatus;
 
         private ClientStream(
@@ -616,12 +592,22 @@ class StreamCancelAutonomousTest {
             this.call = call;
         }
 
+        @Override
+        public void close() {
+            channel.shutdownNow();
+        }
+
         static ClientStream generateStream(int port, EngineRpcService.GenerateInputPB input) {
             return open(port, RpcServiceGrpc.getGenerateStreamCallMethod(), input);
         }
 
         static ClientStream fetchResponse(int port, EngineRpcService.FetchRequestPB request) {
             return open(port, RpcServiceGrpc.getFetchResponseMethod(), request);
+        }
+
+        /** Simulate the client dying: cancel exactly this call mid-flight. */
+        void breakStream() {
+            call.cancel("client stream gone", null);
         }
 
         private static <ReqT> ClientStream open(
@@ -655,16 +641,6 @@ class StreamCancelAutonomousTest {
             call.sendMessage(request);
             call.halfClose();
             return stream;
-        }
-
-        /** Simulate the client dying: cancel exactly this call mid-flight. */
-        void breakStream() {
-            call.cancel("client stream gone", null);
-        }
-
-        @Override
-        public void close() {
-            channel.shutdownNow();
         }
     }
 }

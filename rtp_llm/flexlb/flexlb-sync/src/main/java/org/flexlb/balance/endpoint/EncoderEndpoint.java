@@ -13,11 +13,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Encoder endpoint with local decisions that have not appeared in WorkerStatus.
  * Its task IDs also identify which status facts belong to this exact endpoint.
+ *
+ * <p>Selection records a pending request and its uncached-token estimate. Status observations
+ * reconcile those records and publish endpoint events; forgetting a request or retiring the
+ * endpoint removes its local tracking.
  */
 public final class EncoderEndpoint extends WorkerEndpoint {
-
-    private record RequestObservation(boolean seenInWorker, long estimatedUncachedTokens) {}
-
     private final EndpointEventProjector endpointEvents;
     private final ConcurrentMap<String, RequestObservation> requestObservations =
             new ConcurrentHashMap<>();
@@ -64,17 +65,6 @@ public final class EncoderEndpoint extends WorkerEndpoint {
         }
     }
 
-    private boolean removeRequestObservation(String requestId) {
-        RequestObservation removed = requestObservations.remove(requestId);
-        if (removed == null) {
-            return false;
-        }
-        if (!removed.seenInWorker()) {
-            pendingRequestCount.decrementAndGet();
-        }
-        return true;
-    }
-
     /**
      * Count selected requests still awaiting their first WorkerStatus task.
      */
@@ -100,10 +90,6 @@ public final class EncoderEndpoint extends WorkerEndpoint {
         return total;
     }
 
-    private static long addSaturated(long total, long additional) {
-        return Long.MAX_VALUE - total < additional ? Long.MAX_VALUE : total + additional;
-    }
-
     @Override
     public Runnable applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(ws);
@@ -124,6 +110,31 @@ public final class EncoderEndpoint extends WorkerEndpoint {
                     "Status observation belongs to another WorkerStatus generation");
         }
         return projectStatus(observation, false);
+    }
+
+    @Override
+    protected void closeEndpoint() {
+        List<String> requestIds = List.copyOf(requestObservations.keySet());
+        for (String requestId : requestIds) {
+            removeRequestObservation(requestId);
+        }
+        endpointEvents.onEncoderGenerationRetired(this, requestIds);
+        endpointEvents.onEncoderCapacityChanged();
+    }
+
+    private boolean removeRequestObservation(String requestId) {
+        RequestObservation removed = requestObservations.remove(requestId);
+        if (removed == null) {
+            return false;
+        }
+        if (!removed.seenInWorker()) {
+            pendingRequestCount.decrementAndGet();
+        }
+        return true;
+    }
+
+    private static long addSaturated(long total, long additional) {
+        return Long.MAX_VALUE - total < additional ? Long.MAX_VALUE : total + additional;
     }
 
     private Runnable projectStatus(
@@ -157,13 +168,5 @@ public final class EncoderEndpoint extends WorkerEndpoint {
                 != null;
     }
 
-    @Override
-    protected void closeEndpoint() {
-        List<String> requestIds = List.copyOf(requestObservations.keySet());
-        for (String requestId : requestIds) {
-            removeRequestObservation(requestId);
-        }
-        endpointEvents.onEncoderGenerationRetired(this, requestIds);
-        endpointEvents.onEncoderCapacityChanged();
-    }
+    private record RequestObservation(boolean seenInWorker, long estimatedUncachedTokens) {}
 }

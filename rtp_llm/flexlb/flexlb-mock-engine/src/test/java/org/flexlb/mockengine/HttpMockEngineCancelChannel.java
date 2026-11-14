@@ -13,17 +13,8 @@ import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * TEST-ONLY {@link EngineCancelChannel} that forwards cancel intents to the
- * Java mock engine cluster's HTTP control plane ({@code POST /cancel_request},
- * see MockControlServer in flexlb-mock-engine). This is the cross-process
- * wiring for accepted-eviction (8429) online evaluation: the master process
- * cannot reach the in-process MockEngineCancelChannel, so the cancel intent
- * travels over the mock control plane instead.
- *
- * <p>Contract mirror of MockEngineCancelChannel: a cancel is an intent
- * injection only — settlement requires original-Prefill WorkerStatus carrying
- * typed {@code CANCELED+8429}. Never throws synchronously; transport failures surface as a
- * failed future, local branches as a completed {@code CancelAck}.
+ * Sends test cancellation intents through the mock cluster's HTTP control endpoint and maps replies
+ * to the engine cancellation contract.
  */
 public class HttpMockEngineCancelChannel implements EngineCancelChannel {
 

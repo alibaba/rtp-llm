@@ -5,6 +5,9 @@ import com.fasterxml.jackson.annotation.JsonValue;
 
 import java.util.Arrays;
 
+/**
+ * Identifies the supported endpoint-discovery providers.
+ */
 public enum ServiceDiscoveryType {
     VIPSERVER("vipserver"),
     DASHSCOPE("dashscope"),

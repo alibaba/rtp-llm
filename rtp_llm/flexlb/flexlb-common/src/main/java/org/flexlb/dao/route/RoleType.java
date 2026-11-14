@@ -8,6 +8,9 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import java.util.HashMap;
 import java.util.Map;
 
+/**
+ * Defines worker roles and their supported Prefill, Decode and multimodal responsibilities.
+ */
 @Getter
 public enum RoleType {
     PDFUSION("PDFUSION", "Prefill-Decode Fusion"),
@@ -16,10 +19,6 @@ public enum RoleType {
     VIT("VIT", "Vision Transformer"),
     ENCODER("ENCODER", "MultiModal Encoder"),
     FRONTEND("FRONTEND", "Frontend");
-
-    @JsonValue private final String code;
-    private final String description;
-
     private static final Map<String, RoleType> CODE_MAP = new HashMap<>();
 
     static {
@@ -28,19 +27,22 @@ public enum RoleType {
         }
     }
 
+    @JsonValue private final String code;
+    private final String description;
+
     RoleType(String code, String description) {
         this.code = code;
         this.description = description;
     }
 
-    /** Whether this role executes Prefill work, including fused Prefill/Decode. */
-    public boolean supportsPrefill() {
-        return this == PREFILL || this == PDFUSION;
-    }
-
     /** Whether cache polling supplies detailed block keys for the routing index. */
     public boolean requiresCacheKeys() {
         return supportsPrefill();
+    }
+
+    /** Whether this role executes Prefill work, including fused Prefill/Decode. */
+    public boolean supportsPrefill() {
+        return this == PREFILL || this == PDFUSION;
     }
 
     /**

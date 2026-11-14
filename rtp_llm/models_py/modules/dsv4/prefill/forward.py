@@ -102,7 +102,6 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 import torch
 
 from rtp_llm.models_py.modules.dsv4 import _profiler
-from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.cp import (
     build_cp_context_for_forward,
     cp_gather_last_by_request,
@@ -197,8 +196,6 @@ def _prefill_fast_path_enabled(
     if not _env_flag("DSV4_PREFILL_FAST_PATH", "1"):
         return False
     if prepare_hidden_fn is not None:
-        return False
-    if _rt.ENABLED:
         return False
     if layer_calls is None:
         layer_calls = _prefill_fast_path_layer_calls(v4)
@@ -424,15 +421,6 @@ def forward_layers(
     if cu_seqlens is not None:
         cu_seqlens = cu_seqlens.reshape(-1).contiguous()
 
-    # MOEDBG hook (mirrors V4Transformer.forward standalone path so the
-    # smoke / production prefill path produces the same per-layer dump
-    # consumed by /tmp/moedbg_runs diff scripts).  Read once per forward.
-    _rt_on = _rt.ENABLED
-    if _rt_on:
-        _rt.begin(seqlen=int(input_ids.size(0)))
-        if _rt._get_buf() is None:
-            _rt_on = False
-
     # Tagged inputs carry a group-local physical block table in each value.
     # Preserve that tag when pairing a writer with each LayerKVCache below.
     cache_store_source = (
@@ -455,13 +443,9 @@ def forward_layers(
 
     if prepare_hidden_fn is None:
         h = v4.embed(input_ids)  # [T_total, dim]
-        if _rt_on:
-            _rt.record("prefill_embed_out", h)
         h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
     else:
         h = prepare_hidden_fn(input_ids=input_ids, positions=positions)
-    if _rt_on:
-        _rt.record("prefill_embed_hc_expanded", h)
 
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     capture_aux = bool(capture_ids)
@@ -645,8 +629,6 @@ def forward_layers(
                         v4.capture_aux_hidden(layer_idx, h)
                     if capture_context is not None:
                         capture_context.capture_layer(layer_idx, h)
-                    if _rt_on:
-                        _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
                     if write_cache_store_impl_by_tag:
                         for layer_cache in kv_cache.get_layer_cache_groups(layer_idx):
                             writer = write_cache_store_impl_by_tag.get(
@@ -666,38 +648,6 @@ def forward_layers(
                                 f"for layer {layer_idx}; got {len(layer_caches)}"
                             )
                         write_cache_store_impl(layer_caches[0])
-                    if _rt_on:
-                        _rt.record(f"layer{layer_idx:02d}_out", h)
-                        if cp_ctx is None:
-                            layer_last = h[-1:].contiguous()
-                        else:
-                            layer_last_pos = cp_ctx.seq_len_total - 1
-                            layer_last_mask = (
-                                cp_ctx.global_positions == layer_last_pos
-                            ) & cp_ctx.local_is_real
-                            layer_last = h[layer_last_mask].contiguous()
-                            dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
-                            if dbg_pos >= 0:
-                                layer_pos_mask = (
-                                    cp_ctx.global_positions == dbg_pos
-                                ) & cp_ctx.local_is_real
-                                _rt.record(
-                                    f"layer{layer_idx:02d}_pos{dbg_pos}",
-                                    h[layer_pos_mask].contiguous(),
-                                )
-                            layer_tail_mask = (
-                                (
-                                    cp_ctx.global_positions
-                                    >= max(cp_ctx.seq_len_total - 128, 0)
-                                )
-                                & (cp_ctx.global_positions < cp_ctx.seq_len_total)
-                                & cp_ctx.local_is_real
-                            )
-                            _rt.record(
-                                f"layer{layer_idx:02d}_tail128",
-                                h[layer_tail_mask].contiguous(),
-                            )
-                        _rt.record(f"layer{layer_idx:02d}_last", layer_last)
     finally:
         # Always drop the per-layer ``common.workspace`` references, even if a
         # layer raises mid-prefill (e.g. a CUDA OOM under memory pressure —
@@ -725,69 +675,7 @@ def forward_layers(
     # Framework ``RMSNorm`` expects 2D, which matches the [T, dim] shape here.
     with record_range_ctx():
         h = v4._hc_head_reduce(h)  # [T, dim]
-        if _rt_on:
-            _rt.record("prefill_hc_reduced", h)
         h = v4.norm(h)  # [T, dim]
-    if _rt_on:
-        _rt.record("prefill_final_norm", h)
-        if cp_ctx is None:
-            last_h = h[-1:].contiguous()
-        else:
-            last_pos = cp_ctx.seq_len_total - 1
-            last_mask = (cp_ctx.global_positions == last_pos) & cp_ctx.local_is_real
-            last_h = h[last_mask].contiguous()
-        _rt.record("lm_last_hidden", last_h)
-        lm_logits = torch.mm(
-            last_h.to(v4.head_weight.dtype), v4.head_weight.t()
-        ).float()
-        _rt.record("lm_logits_last", lm_logits)
-        top_k = min(16, lm_logits.size(-1))
-        lm_top_values, lm_top_indices = torch.topk(lm_logits, k=top_k, dim=-1)
-        _rt.record("lm_top_values", lm_top_values)
-        _rt.record("lm_top_indices", lm_top_indices)
-
-    if _rt_on:
-        extra: dict = {
-            "input_ids_shape": tuple(input_ids.shape),
-            "input_ids": input_ids.detach().cpu(),
-            "path": "prefill",
-            "positions": positions.detach().cpu(),
-            "cu_seqlens": cu_seqlens.detach().cpu(),
-        }
-        if cp_ctx is not None:
-            extra.update(
-                {
-                    "cp_size": cp_ctx.cp_size,
-                    "cp_rank": cp_ctx.cp_rank,
-                    "chunk_length": cp_ctx.chunk_length,
-                    "padded_seq_len": cp_ctx.padded_seq_len,
-                    "seq_len_full": cp_ctx.seq_len_full,
-                    "prefix_length": cp_ctx.prefix_length,
-                    "seq_len_total": cp_ctx.seq_len_total,
-                    "relative_positions": cp_ctx.relative_positions.detach().cpu(),
-                    "global_positions": cp_ctx.global_positions.detach().cpu(),
-                    "unpad_restore": cp_ctx.unpad_restore.detach().cpu(),
-                    "local_is_real": cp_ctx.local_is_real.detach().cpu(),
-                }
-            )
-        else:
-            extra.update(
-                {
-                    "cp_size": 1,
-                    "cp_rank": 0,
-                    "seq_len_full": int(input_ids.size(0)),
-                    "prefix_length": 0,
-                    "seq_len_total": int(input_ids.size(0)),
-                }
-            )
-        if attn_inputs is not None:
-            for name in ("input_lengths", "prefix_lengths", "sequence_lengths"):
-                value = getattr(attn_inputs, name, None)
-                if value is not None and value.numel() > 0:
-                    extra[name] = value.detach().cpu()
-        step = getattr(v4, "_dbg_step", 0)
-        _rt.dump(step=step, extra=extra)
-        v4._dbg_step = step + 1
     # The per-forward ``PrefillWorkspace`` (prefill-Q + optional CP
     # gather/restore scratch) is a local of this function: it drops here on
     # return, returning ~16 GiB to the caching allocator so the MTP draft

@@ -15,6 +15,9 @@ import static org.flexlb.constant.DeploymentIdentityConstants.WHALE_BIZ_NAME;
 import static org.flexlb.constant.DeploymentIdentityConstants.WHALE_DEPLOYMENT_NAME;
 import static org.flexlb.constant.DeploymentIdentityConstants.WHALE_ZONE_NAME;
 
+/**
+ * Checks deployment identity parsing and required identity fields.
+ */
 class DeploymentIdentityTest {
 
     @Test

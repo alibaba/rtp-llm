@@ -25,14 +25,14 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
-/** 与 Python config.py 共享 JSON 配置契约。 */
+/**
+ * 与 Python config.py 共享 JSON 配置契约。
+ */
 @JsonAutoDetect(
         fieldVisibility = JsonAutoDetect.Visibility.ANY,
         setterVisibility = JsonAutoDetect.Visibility.NONE)
 final class TraceConfig {
-
     static final String ENV = "RTP_LLM_TRACE_CONFIG";
-
     private static final Set<String> FIELDS =
             Set.of(
                     "enabled",
@@ -86,10 +86,6 @@ final class TraceConfig {
     private Integer httpTimeoutMs;
     private String source;
 
-    public boolean enabled() {
-        return Boolean.TRUE.equals(enabled);
-    }
-
     public double samplerRatio() {
         return samplerRatio == null ? 1.0 : samplerRatio;
     }
@@ -126,27 +122,14 @@ final class TraceConfig {
         return source;
     }
 
-    static final class ConfigException extends IllegalArgumentException {
-        final String field;
-        final String code;
-
-        ConfigException(String field, String code) {
-            super(field + ":" + code);
-            this.field = field;
-            this.code = code;
-        }
-    }
-
     @Override
     public String toString() {
         // 不输出 headers：其中可能含接收端凭证。
         return "TraceConfig(enabled=" + enabled() + ", source=" + source + ")";
     }
 
-    static TraceConfig disabled() {
-        TraceConfig config = new TraceConfig();
-        config.source = "disabled";
-        return config;
+    public boolean enabled() {
+        return Boolean.TRUE.equals(enabled);
     }
 
     static TraceConfig parse(String raw) {
@@ -165,6 +148,12 @@ final class TraceConfig {
         validateScalarNulls(root);
         TraceConfig config = map(root);
         validate(config);
+        return config;
+    }
+
+    static TraceConfig disabled() {
+        TraceConfig config = new TraceConfig();
+        config.source = "disabled";
         return config;
     }
 
@@ -338,6 +327,26 @@ final class TraceConfig {
         }
     }
 
+    private static void validateHeaders(Map<String, String> headers) {
+        Map<String, String> seen = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : headers.entrySet()) {
+            String name = entry.getKey();
+            String value = entry.getValue();
+            String normalized = name.toLowerCase(Locale.ROOT);
+            if (!name.matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+                    || RESERVED.contains(normalized)
+                    || value == null
+                    || value.isBlank()
+                    || !value.equals(value.strip())
+                    || value.chars().anyMatch(c -> c < 32 && c != '\t' || c == 127 || c > 255)) {
+                throw new ConfigException("headers", "invalid_header");
+            }
+            if (seen.putIfAbsent(normalized, value) != null) {
+                throw new ConfigException("headers", "duplicate_header");
+            }
+        }
+    }
+
     private static ConfigException mapError(MismatchedInputException error) {
         String field = error.getPath().isEmpty() ? "config" : error.getPath().get(0).getFieldName();
         if (!FIELDS.contains(field == null ? "" : field)) {
@@ -386,39 +395,6 @@ final class TraceConfig {
         validateCertificate(config.certificate());
     }
 
-    private static void validateHeaders(Map<String, String> headers) {
-        Map<String, String> seen = new LinkedHashMap<>();
-        for (Map.Entry<String, String> entry : headers.entrySet()) {
-            String name = entry.getKey();
-            String value = entry.getValue();
-            String normalized = name.toLowerCase(Locale.ROOT);
-            if (!name.matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+")
-                    || RESERVED.contains(normalized)
-                    || value == null
-                    || value.isBlank()
-                    || !value.equals(value.strip())
-                    || value.chars().anyMatch(c -> c < 32 && c != '\t' || c == 127 || c > 255)) {
-                throw new ConfigException("headers", "invalid_header");
-            }
-            if (seen.putIfAbsent(normalized, value) != null) {
-                throw new ConfigException("headers", "duplicate_header");
-            }
-        }
-    }
-
-    private static void validateCertificate(String certificate) {
-        if (certificate.isEmpty()) {
-            return;
-        }
-        try (var input = Files.newInputStream(Path.of(certificate))) {
-            if (CertificateFactory.getInstance("X.509").generateCertificates(input).isEmpty()) {
-                throw new ConfigException("certificate", "invalid_certificate");
-            }
-        } catch (Exception ignored) {
-            throw new ConfigException("certificate", "invalid_certificate");
-        }
-    }
-
     private static void validateEndpoint(String endpoint) {
         try {
             URI uri = new URI(endpoint);
@@ -435,6 +411,33 @@ final class TraceConfig {
             }
         } catch (Exception ignored) {
             throw new ConfigException("endpoint", "invalid_endpoint");
+        }
+    }
+
+    private static void validateCertificate(String certificate) {
+        if (certificate.isEmpty()) {
+            return;
+        }
+        try (var input = Files.newInputStream(Path.of(certificate))) {
+            if (CertificateFactory.getInstance("X.509").generateCertificates(input).isEmpty()) {
+                throw new ConfigException("certificate", "invalid_certificate");
+            }
+        } catch (Exception ignored) {
+            throw new ConfigException("certificate", "invalid_certificate");
+        }
+    }
+
+    /**
+     * Carries the invalid trace configuration field and its diagnostic code.
+     */
+    static final class ConfigException extends IllegalArgumentException {
+        final String field;
+        final String code;
+
+        ConfigException(String field, String code) {
+            super(field + ":" + code);
+            this.field = field;
+            this.code = code;
         }
     }
 }

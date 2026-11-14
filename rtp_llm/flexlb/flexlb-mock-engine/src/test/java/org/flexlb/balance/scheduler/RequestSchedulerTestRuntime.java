@@ -31,9 +31,10 @@ import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
-/** Test-only composition root for mock-engine end-to-end scheduler tests. */
+/**
+ * Test-only composition root for mock-engine end-to-end scheduler tests.
+ */
 public final class RequestSchedulerTestRuntime implements AutoCloseable {
-
     private final RequestRegistry lifecycle;
     private final EndpointEventProjector endpointEvents;
     private final PlacementAvailability placementAvailability = new PlacementAvailability();
@@ -194,6 +195,12 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         projection.run();
     }
 
+    @Override
+    public void close() {
+        evictionManager.shutdown();
+        runtime.shutdown();
+    }
+
     private static SelectedRole select(WorkerEndpoint.GenerationPin pin, ServerStatus status) {
         try {
             return switch (status.getRole()) {
@@ -210,12 +217,15 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         }
     }
 
-    @Override
-    public void close() {
-        evictionManager.shutdown();
-        runtime.shutdown();
+    private static ModelMetaConfig emptyModelMeta() {
+        ModelMetaConfig meta = org.mockito.Mockito.mock(ModelMetaConfig.class);
+        org.mockito.Mockito.when(meta.requiredRoles()).thenReturn(List.of());
+        return meta;
     }
 
+    /**
+     * Defers route selection until the test runtime binds its actual router.
+     */
     private static final class BindingRouter extends DefaultRouter {
         private DefaultRouter delegate;
 
@@ -239,14 +249,6 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     emptyModelMeta());
         }
 
-        private synchronized void bind(DefaultRouter exactRouter) {
-            Objects.requireNonNull(exactRouter, "exactRouter");
-            if (delegate != null) {
-                throw new IllegalStateException("test router was already bound");
-            }
-            delegate = exactRouter;
-        }
-
         @Override
         public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context) {
             return requireBound().select(context);
@@ -258,17 +260,19 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             return requireBound().select(context, policyGroup);
         }
 
+        private synchronized void bind(DefaultRouter exactRouter) {
+            Objects.requireNonNull(exactRouter, "exactRouter");
+            if (delegate != null) {
+                throw new IllegalStateException("test router was already bound");
+            }
+            delegate = exactRouter;
+        }
+
         private synchronized DefaultRouter requireBound() {
             if (delegate == null) {
                 throw new IllegalStateException("test router is not bound");
             }
             return delegate;
         }
-    }
-
-    private static ModelMetaConfig emptyModelMeta() {
-        ModelMetaConfig meta = org.mockito.Mockito.mock(ModelMetaConfig.class);
-        org.mockito.Mockito.when(meta.requiredRoles()).thenReturn(List.of());
-        return meta;
     }
 }

@@ -9,6 +9,9 @@ import org.springframework.context.annotation.Configuration;
 
 import java.util.List;
 
+/**
+ * Combines configured text-map propagators for trace context transport.
+ */
 @Configuration
 public class OtelPropagationConfiguration {
 

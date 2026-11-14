@@ -55,8 +55,10 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks dispatcher metrics and per-request trace propagation across batch submission.
+ */
 class DefaultBatchDispatcherTest {
-
     private ConfigService configService;
     private EngineGrpcClient grpcClient;
     private FlexlbConfig config;
@@ -173,114 +175,6 @@ class DefaultBatchDispatcherTest {
         assertDispatchedTraceContexts(false, true);
     }
 
-    private void assertDispatchedTraceContexts(boolean enabled, boolean validScheduleContext)
-            throws Exception {
-        org.flexlb.telemetry.FlexlbTrace.configure(
-                enabled ? io.opentelemetry.api.OpenTelemetry.noop() : null, "");
-        PrefillEndpoint prefillEp = createPrefillEndpoint();
-        ScheduledRequest first = createScheduledRequest(501L, 500, 200, prefillEp);
-        ScheduledRequest second = createScheduledRequest(502L, 500, 200, prefillEp);
-        first.ctx()
-                .setGenerateInputPb(
-                        generateInputWithTraceContext(
-                                        501L,
-                                        "00-11111111111111111111111111111111-1111111111111111-01",
-                                        "vendor=one")
-                                .toByteString());
-        second.ctx()
-                .setGenerateInputPb(
-                        generateInputWithTraceContext(
-                                        502L,
-                                        "00-22222222222222222222222222222222-2222222222222222-01",
-                                        "vendor=two")
-                                .toByteString());
-        if (validScheduleContext) {
-            first.ctx()
-                    .setTraceContext(
-                            scheduleContext(
-                                    "11111111111111111111111111111111",
-                                    "aaaaaaaaaaaaaaaa",
-                                    "schedule"));
-            second.ctx()
-                    .setTraceContext(
-                            scheduleContext(
-                                    "22222222222222222222222222222222", "bbbbbbbbbbbbbbbb", ""));
-        } else {
-            first.ctx().setTraceContext(io.opentelemetry.context.Context.root());
-            second.ctx().setTraceContext(null);
-        }
-
-        List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
-        when(grpcClient.batchEnqueueAsync(
-                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
-                .thenAnswer(
-                        inv -> {
-                            sent.add(inv.getArgument(2));
-                            return CompletableFuture.completedFuture(
-                                    ackResponse(92L, List.of(501L, 502L)));
-                        });
-
-        submit(List.of(first, second), 92L, 100, "trace_context", callback);
-
-        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
-        assertEquals(1, sent.size());
-        List<EngineRpcService.EnqueueBatchExternalInputPB> requests =
-                sent.getFirst().getDpSlots(0).getRequestsList();
-        assertEquals(2, requests.size());
-        EngineRpcService.GenerateInputPB firstSent =
-                requests.stream()
-                        .map(EngineRpcService.EnqueueBatchExternalInputPB::getInput)
-                        .filter(input -> input.getRequestId() == 501L)
-                        .findFirst()
-                        .orElseThrow();
-        EngineRpcService.GenerateInputPB secondSent =
-                requests.stream()
-                        .map(EngineRpcService.EnqueueBatchExternalInputPB::getInput)
-                        .filter(input -> input.getRequestId() == 502L)
-                        .findFirst()
-                        .orElseThrow();
-        boolean replaced = enabled && validScheduleContext;
-        assertEquals(
-                "00-11111111111111111111111111111111-"
-                        + (replaced ? "aaaaaaaaaaaaaaaa" : "1111111111111111")
-                        + "-01",
-                firstSent.getRequestInfo().getTraceContext().getTraceparent());
-        assertEquals(
-                replaced ? "vendor=schedule" : "vendor=one",
-                firstSent.getRequestInfo().getTraceContext().getTracestate());
-        assertEquals(
-                "00-22222222222222222222222222222222-"
-                        + (replaced ? "bbbbbbbbbbbbbbbb" : "2222222222222222")
-                        + "-01",
-                secondSent.getRequestInfo().getTraceContext().getTraceparent());
-        assertEquals(
-                replaced ? "" : "vendor=two",
-                secondSent.getRequestInfo().getTraceContext().getTracestate());
-        assertEquals(
-                "vendor=one",
-                EngineRpcService.GenerateInputPB.parseFrom(first.ctx().getGenerateInputPb())
-                        .getRequestInfo()
-                        .getTraceContext()
-                        .getTracestate(),
-                "dispatch must not mutate the queued payload");
-    }
-
-    private static io.opentelemetry.context.Context scheduleContext(
-            String traceId, String spanId, String vendor) {
-        var state = io.opentelemetry.api.trace.TraceState.builder();
-        if (!vendor.isEmpty()) {
-            state.put("vendor", vendor);
-        }
-        return io.opentelemetry.context.Context.root()
-                .with(
-                        io.opentelemetry.api.trace.Span.wrap(
-                                io.opentelemetry.api.trace.SpanContext.create(
-                                        traceId,
-                                        spanId,
-                                        io.opentelemetry.api.trace.TraceFlags.getSampled(),
-                                        state.build())));
-    }
-
     @Test
     void oldDescriptorRoundTripPreservesNestedTraceContextUnknownField() throws Exception {
         EngineRpcService.GenerateInputPB payload =
@@ -305,117 +199,6 @@ class DefaultBatchDispatcherTest {
         assertEquals(
                 payload.getRequestInfo().getTraceContext(),
                 reparsed.getRequestInfo().getTraceContext());
-    }
-
-    private static EngineRpcService.GenerateInputPB generateInputWithTraceContext(
-            long requestId, String traceparent, String tracestate) {
-        return EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
-                .setRequestInfo(
-                        EngineRpcService.RequestInfoPB.newBuilder()
-                                .setTraceContext(
-                                        EngineRpcService.TraceContextPB.newBuilder()
-                                                .setTraceparent(traceparent)
-                                                .setTracestate(tracestate)
-                                                .build())
-                                .build())
-                .build();
-    }
-
-    private static Descriptors.Descriptor legacyGenerateInputDescriptor() throws Exception {
-        DescriptorProtos.DescriptorProto requestInfo =
-                DescriptorProtos.DescriptorProto.newBuilder()
-                        .setName("RequestInfoPB")
-                        .addField(
-                                optionalField(
-                                        "frontend_ip",
-                                        1,
-                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
-                                        null))
-                        .addField(
-                                optionalField(
-                                        "dash_ip",
-                                        2,
-                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
-                                        null))
-                        .addField(
-                                optionalField(
-                                        "trace_id",
-                                        3,
-                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
-                                        null))
-                        .addField(
-                                optionalField(
-                                        "request_id",
-                                        4,
-                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
-                                        null))
-                        .addField(
-                                optionalField(
-                                        "source_role",
-                                        5,
-                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
-                                        null))
-                        .build();
-        DescriptorProtos.DescriptorProto generateConfig =
-                DescriptorProtos.DescriptorProto.newBuilder().setName("GenerateConfigPB").build();
-        DescriptorProtos.DescriptorProto generateInput =
-                DescriptorProtos.DescriptorProto.newBuilder()
-                        .setName("GenerateInputPB")
-                        .addField(
-                                optionalField(
-                                        "request_id",
-                                        1,
-                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64,
-                                        null))
-                        .addField(
-                                optionalField(
-                                        "generate_config",
-                                        4,
-                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_MESSAGE,
-                                        ".legacy_trace.GenerateConfigPB"))
-                        .addField(
-                                optionalField(
-                                        "request_info",
-                                        9,
-                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_MESSAGE,
-                                        ".legacy_trace.RequestInfoPB"))
-                        .addField(
-                                optionalField(
-                                        "priority",
-                                        10,
-                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT32,
-                                        null))
-                        .build();
-        DescriptorProtos.FileDescriptorProto file =
-                DescriptorProtos.FileDescriptorProto.newBuilder()
-                        .setName("legacy_trace_generate_input.proto")
-                        .setPackage("legacy_trace")
-                        .setSyntax("proto3")
-                        .addMessageType(requestInfo)
-                        .addMessageType(generateConfig)
-                        .addMessageType(generateInput)
-                        .build();
-        return Descriptors.FileDescriptor.buildFrom(file, new Descriptors.FileDescriptor[0])
-                .findMessageTypeByName("GenerateInputPB");
-    }
-
-    private static DescriptorProtos.FieldDescriptorProto optionalField(
-            String name,
-            int number,
-            DescriptorProtos.FieldDescriptorProto.Type type,
-            String typeName) {
-        DescriptorProtos.FieldDescriptorProto.Builder builder =
-                DescriptorProtos.FieldDescriptorProto.newBuilder()
-                        .setName(name)
-                        .setNumber(number)
-                        .setLabel(DescriptorProtos.FieldDescriptorProto.Label.LABEL_OPTIONAL)
-                        .setType(type);
-        if (typeName != null) {
-            builder.setTypeName(typeName);
-        }
-        return builder.build();
     }
 
     @Test
@@ -1158,150 +941,6 @@ class DefaultBatchDispatcherTest {
         assertEquals(RoleType.PREFILL, RoleTypeProtoConverter.fromRoleAddr(addr));
     }
 
-    private static EngineRpcService.GenerateInputPB sentInput(
-            EngineRpcService.EnqueueBatchRequestPB request) {
-        return request.getDpSlotsList().getFirst().getRequestsList().getFirst().getInput();
-    }
-
-    // ---- helpers ----
-
-    private PreparedSubmission reservePermit() {
-        CapacityBoundary.Attempt<?> accepted = dispatcher.tryPrepareSubmission();
-        assertTrue(accepted.accepted());
-        return assertInstanceOf(PreparedSubmission.class, accepted.value());
-    }
-
-    private CapacityBoundary unavailableBoundary() {
-        CapacityBoundary.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
-        assertFalse(rejected.accepted());
-        assertEquals(CapacityBoundary.Status.UNAVAILABLE, rejected.boundary().status());
-        return rejected.boundary();
-    }
-
-    private void submit(
-            List<ScheduledRequest> items,
-            long batchId,
-            long predictedMs,
-            String reason,
-            BiConsumer<ScheduledRequest, DeliveryResult> observer) {
-        reservePermit()
-                .submit(sender -> sender.sendBatch(items, batchId, predictedMs, reason, observer));
-    }
-
-    private static void submit(
-            PreparedSubmission submission,
-            List<ScheduledRequest> items,
-            long batchId,
-            long predictedMs,
-            String reason,
-            BiConsumer<ScheduledRequest, DeliveryResult> observer) {
-        submission.submit(
-                sender -> sender.sendBatch(items, batchId, predictedMs, reason, observer));
-    }
-
-    private static void awaitAvailable(
-            CapacityBoundary.Availability availability, Object capacityMonitor)
-            throws InterruptedException {
-        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        synchronized (capacityMonitor) {
-            while (!availability.isAvailable()) {
-                long remainingNanos = deadlineNanos - System.nanoTime();
-                if (remainingNanos <= 0) {
-                    throw new AssertionError("dispatcher capacity did not become available");
-                }
-                TimeUnit.NANOSECONDS.timedWait(capacityMonitor, remainingNanos);
-            }
-        }
-    }
-
-    private PrefillEndpoint createPrefillEndpoint() {
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
-        when(endpoint.getHttpPort()).thenReturn(8080);
-        when(endpoint.getGrpcPort()).thenReturn(8090);
-        return endpoint;
-    }
-
-    private ScheduledRequest createScheduledRequest(
-            long requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {
-        Request request = new Request();
-        request.setRequestId(Long.toString(requestId));
-        request.setSeqLen(seqLen);
-
-        BalanceContext ctx = new BalanceContext(config);
-        ctx.setRequest(request);
-
-        // Provide a valid GenerateInputPB bytes (minimum: requestId + empty config)
-        EngineRpcService.GenerateInputPB input =
-                RequestIdFixtures.write(
-                                EngineRpcService.GenerateInputPB.newBuilder(),
-                                Long.toString(requestId))
-                        .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
-                        .build();
-        ctx.setGenerateInputPb(input.toByteString());
-
-        ServerStatus prefill = new ServerStatus();
-        prefill.setRole(RoleType.PREFILL);
-        prefill.setServerIp("127.0.0.1");
-        prefill.setHttpPort(8080);
-        prefill.setGrpcPort(8090);
-        prefill.setDpRank(0L);
-        DebugInfo debugInfo = new DebugInfo();
-        debugInfo.setHitCacheLen(hitCacheLen);
-        prefill.setDebugInfo(debugInfo);
-
-        return new ScheduledRequest(
-                ctx,
-                new CompletableFuture<>(),
-                null,
-                prefill,
-                null,
-                prefillEp,
-                null,
-                null,
-                System.currentTimeMillis());
-    }
-
-    private EngineRpcService.EnqueueBatchResponsePB ackResponse(
-            long batchId, List<Long> successIds) {
-        EngineRpcService.EnqueueBatchResponsePB.Builder builder =
-                EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(batchId);
-        for (long id : successIds) {
-            builder.addSuccesses(
-                    EngineRpcService.EnqueueBatchSuccessPB.newBuilder().setRequestId(id).build());
-        }
-        return builder.build();
-    }
-
-    // ---- Test callback ----
-
-    private static class TestCallback implements BiConsumer<ScheduledRequest, DeliveryResult> {
-        final AtomicInteger successCount = new AtomicInteger(0);
-        final AtomicInteger failureCount = new AtomicInteger(0);
-        final AtomicInteger uncertainCount = new AtomicInteger(0);
-        final CountDownLatch successLatch = new CountDownLatch(1);
-        final CountDownLatch failureLatch = new CountDownLatch(1);
-        final CountDownLatch uncertainLatch = new CountDownLatch(1);
-        volatile Throwable lastError;
-
-        @Override
-        public void accept(ScheduledRequest exactItem, DeliveryResult completion) {
-            if (completion.status() == DeliveryResult.Status.DELIVERED) {
-                successCount.incrementAndGet();
-                successLatch.countDown();
-            } else if (completion.status() == DeliveryResult.Status.NOT_SENT
-                    || completion.status() == DeliveryResult.Status.PREFILL_REJECTED) {
-                lastError = completion.cause();
-                failureCount.incrementAndGet();
-                failureLatch.countDown();
-            } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
-                lastError = completion.cause();
-                uncertainCount.incrementAndGet();
-                uncertainLatch.countDown();
-            }
-        }
-    }
-
     @Test
     void completionBeforeRegistrationReturnsReleasesCountAndBytes() throws Exception {
         dispatcher.shutdown();
@@ -1640,6 +1279,340 @@ class DefaultBatchDispatcherTest {
                 "shutdown must complete after a byte-budget rejection");
     }
 
+    private void assertDispatchedTraceContexts(boolean enabled, boolean validScheduleContext)
+            throws Exception {
+        org.flexlb.telemetry.FlexlbTrace.configure(
+                enabled ? io.opentelemetry.api.OpenTelemetry.noop() : null, "");
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        ScheduledRequest first = createScheduledRequest(501L, 500, 200, prefillEp);
+        ScheduledRequest second = createScheduledRequest(502L, 500, 200, prefillEp);
+        first.ctx()
+                .setGenerateInputPb(
+                        generateInputWithTraceContext(
+                                        501L,
+                                        "00-11111111111111111111111111111111-1111111111111111-01",
+                                        "vendor=one")
+                                .toByteString());
+        second.ctx()
+                .setGenerateInputPb(
+                        generateInputWithTraceContext(
+                                        502L,
+                                        "00-22222222222222222222222222222222-2222222222222222-01",
+                                        "vendor=two")
+                                .toByteString());
+        if (validScheduleContext) {
+            first.ctx()
+                    .setTraceContext(
+                            scheduleContext(
+                                    "11111111111111111111111111111111",
+                                    "aaaaaaaaaaaaaaaa",
+                                    "schedule"));
+            second.ctx()
+                    .setTraceContext(
+                            scheduleContext(
+                                    "22222222222222222222222222222222", "bbbbbbbbbbbbbbbb", ""));
+        } else {
+            first.ctx().setTraceContext(io.opentelemetry.context.Context.root());
+            second.ctx().setTraceContext(null);
+        }
+
+        List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
+        when(grpcClient.batchEnqueueAsync(
+                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                .thenAnswer(
+                        inv -> {
+                            sent.add(inv.getArgument(2));
+                            return CompletableFuture.completedFuture(
+                                    ackResponse(92L, List.of(501L, 502L)));
+                        });
+
+        submit(List.of(first, second), 92L, 100, "trace_context", callback);
+
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        assertEquals(1, sent.size());
+        List<EngineRpcService.EnqueueBatchExternalInputPB> requests =
+                sent.getFirst().getDpSlots(0).getRequestsList();
+        assertEquals(2, requests.size());
+        EngineRpcService.GenerateInputPB firstSent =
+                requests.stream()
+                        .map(EngineRpcService.EnqueueBatchExternalInputPB::getInput)
+                        .filter(input -> input.getRequestId() == 501L)
+                        .findFirst()
+                        .orElseThrow();
+        EngineRpcService.GenerateInputPB secondSent =
+                requests.stream()
+                        .map(EngineRpcService.EnqueueBatchExternalInputPB::getInput)
+                        .filter(input -> input.getRequestId() == 502L)
+                        .findFirst()
+                        .orElseThrow();
+        boolean replaced = enabled && validScheduleContext;
+        assertEquals(
+                "00-11111111111111111111111111111111-"
+                        + (replaced ? "aaaaaaaaaaaaaaaa" : "1111111111111111")
+                        + "-01",
+                firstSent.getRequestInfo().getTraceContext().getTraceparent());
+        assertEquals(
+                replaced ? "vendor=schedule" : "vendor=one",
+                firstSent.getRequestInfo().getTraceContext().getTracestate());
+        assertEquals(
+                "00-22222222222222222222222222222222-"
+                        + (replaced ? "bbbbbbbbbbbbbbbb" : "2222222222222222")
+                        + "-01",
+                secondSent.getRequestInfo().getTraceContext().getTraceparent());
+        assertEquals(
+                replaced ? "" : "vendor=two",
+                secondSent.getRequestInfo().getTraceContext().getTracestate());
+        assertEquals(
+                "vendor=one",
+                EngineRpcService.GenerateInputPB.parseFrom(first.ctx().getGenerateInputPb())
+                        .getRequestInfo()
+                        .getTraceContext()
+                        .getTracestate(),
+                "dispatch must not mutate the queued payload");
+    }
+
+    private PrefillEndpoint createPrefillEndpoint() {
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.getIp()).thenReturn("127.0.0.1");
+        when(endpoint.getHttpPort()).thenReturn(8080);
+        when(endpoint.getGrpcPort()).thenReturn(8090);
+        return endpoint;
+    }
+
+    private ScheduledRequest createScheduledRequest(
+            long requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {
+        Request request = new Request();
+        request.setRequestId(Long.toString(requestId));
+        request.setSeqLen(seqLen);
+
+        BalanceContext ctx = new BalanceContext(config);
+        ctx.setRequest(request);
+
+        // Provide a valid GenerateInputPB bytes (minimum: requestId + empty config)
+        EngineRpcService.GenerateInputPB input =
+                RequestIdFixtures.write(
+                                EngineRpcService.GenerateInputPB.newBuilder(),
+                                Long.toString(requestId))
+                        .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
+                        .build();
+        ctx.setGenerateInputPb(input.toByteString());
+
+        ServerStatus prefill = new ServerStatus();
+        prefill.setRole(RoleType.PREFILL);
+        prefill.setServerIp("127.0.0.1");
+        prefill.setHttpPort(8080);
+        prefill.setGrpcPort(8090);
+        prefill.setDpRank(0L);
+        DebugInfo debugInfo = new DebugInfo();
+        debugInfo.setHitCacheLen(hitCacheLen);
+        prefill.setDebugInfo(debugInfo);
+
+        return new ScheduledRequest(
+                ctx,
+                new CompletableFuture<>(),
+                null,
+                prefill,
+                null,
+                prefillEp,
+                null,
+                null,
+                System.currentTimeMillis());
+    }
+
+    private static EngineRpcService.GenerateInputPB generateInputWithTraceContext(
+            long requestId, String traceparent, String tracestate) {
+        return EngineRpcService.GenerateInputPB.newBuilder()
+                .setRequestId(requestId)
+                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
+                .setRequestInfo(
+                        EngineRpcService.RequestInfoPB.newBuilder()
+                                .setTraceContext(
+                                        EngineRpcService.TraceContextPB.newBuilder()
+                                                .setTraceparent(traceparent)
+                                                .setTracestate(tracestate)
+                                                .build())
+                                .build())
+                .build();
+    }
+
+    private static io.opentelemetry.context.Context scheduleContext(
+            String traceId, String spanId, String vendor) {
+        var state = io.opentelemetry.api.trace.TraceState.builder();
+        if (!vendor.isEmpty()) {
+            state.put("vendor", vendor);
+        }
+        return io.opentelemetry.context.Context.root()
+                .with(
+                        io.opentelemetry.api.trace.Span.wrap(
+                                io.opentelemetry.api.trace.SpanContext.create(
+                                        traceId,
+                                        spanId,
+                                        io.opentelemetry.api.trace.TraceFlags.getSampled(),
+                                        state.build())));
+    }
+
+    private EngineRpcService.EnqueueBatchResponsePB ackResponse(
+            long batchId, List<Long> successIds) {
+        EngineRpcService.EnqueueBatchResponsePB.Builder builder =
+                EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(batchId);
+        for (long id : successIds) {
+            builder.addSuccesses(
+                    EngineRpcService.EnqueueBatchSuccessPB.newBuilder().setRequestId(id).build());
+        }
+        return builder.build();
+    }
+
+    private void submit(
+            List<ScheduledRequest> items,
+            long batchId,
+            long predictedMs,
+            String reason,
+            BiConsumer<ScheduledRequest, DeliveryResult> observer) {
+        reservePermit()
+                .submit(sender -> sender.sendBatch(items, batchId, predictedMs, reason, observer));
+    }
+
+    // ---- helpers ----
+
+    private PreparedSubmission reservePermit() {
+        CapacityBoundary.Attempt<?> accepted = dispatcher.tryPrepareSubmission();
+        assertTrue(accepted.accepted());
+        return assertInstanceOf(PreparedSubmission.class, accepted.value());
+    }
+
+    private static void submit(
+            PreparedSubmission submission,
+            List<ScheduledRequest> items,
+            long batchId,
+            long predictedMs,
+            String reason,
+            BiConsumer<ScheduledRequest, DeliveryResult> observer) {
+        submission.submit(
+                sender -> sender.sendBatch(items, batchId, predictedMs, reason, observer));
+    }
+
+    private static Descriptors.Descriptor legacyGenerateInputDescriptor() throws Exception {
+        DescriptorProtos.DescriptorProto requestInfo =
+                DescriptorProtos.DescriptorProto.newBuilder()
+                        .setName("RequestInfoPB")
+                        .addField(
+                                optionalField(
+                                        "frontend_ip",
+                                        1,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
+                                        null))
+                        .addField(
+                                optionalField(
+                                        "dash_ip",
+                                        2,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
+                                        null))
+                        .addField(
+                                optionalField(
+                                        "trace_id",
+                                        3,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
+                                        null))
+                        .addField(
+                                optionalField(
+                                        "request_id",
+                                        4,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
+                                        null))
+                        .addField(
+                                optionalField(
+                                        "source_role",
+                                        5,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
+                                        null))
+                        .build();
+        DescriptorProtos.DescriptorProto generateConfig =
+                DescriptorProtos.DescriptorProto.newBuilder().setName("GenerateConfigPB").build();
+        DescriptorProtos.DescriptorProto generateInput =
+                DescriptorProtos.DescriptorProto.newBuilder()
+                        .setName("GenerateInputPB")
+                        .addField(
+                                optionalField(
+                                        "request_id",
+                                        1,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64,
+                                        null))
+                        .addField(
+                                optionalField(
+                                        "generate_config",
+                                        4,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_MESSAGE,
+                                        ".legacy_trace.GenerateConfigPB"))
+                        .addField(
+                                optionalField(
+                                        "request_info",
+                                        9,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_MESSAGE,
+                                        ".legacy_trace.RequestInfoPB"))
+                        .addField(
+                                optionalField(
+                                        "priority",
+                                        10,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT32,
+                                        null))
+                        .build();
+        DescriptorProtos.FileDescriptorProto file =
+                DescriptorProtos.FileDescriptorProto.newBuilder()
+                        .setName("legacy_trace_generate_input.proto")
+                        .setPackage("legacy_trace")
+                        .setSyntax("proto3")
+                        .addMessageType(requestInfo)
+                        .addMessageType(generateConfig)
+                        .addMessageType(generateInput)
+                        .build();
+        return Descriptors.FileDescriptor.buildFrom(file, new Descriptors.FileDescriptor[0])
+                .findMessageTypeByName("GenerateInputPB");
+    }
+
+    private static DescriptorProtos.FieldDescriptorProto optionalField(
+            String name,
+            int number,
+            DescriptorProtos.FieldDescriptorProto.Type type,
+            String typeName) {
+        DescriptorProtos.FieldDescriptorProto.Builder builder =
+                DescriptorProtos.FieldDescriptorProto.newBuilder()
+                        .setName(name)
+                        .setNumber(number)
+                        .setLabel(DescriptorProtos.FieldDescriptorProto.Label.LABEL_OPTIONAL)
+                        .setType(type);
+        if (typeName != null) {
+            builder.setTypeName(typeName);
+        }
+        return builder.build();
+    }
+
+    private static EngineRpcService.GenerateInputPB sentInput(
+            EngineRpcService.EnqueueBatchRequestPB request) {
+        return request.getDpSlotsList().getFirst().getRequestsList().getFirst().getInput();
+    }
+
+    private CapacityBoundary unavailableBoundary() {
+        CapacityBoundary.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
+        assertFalse(rejected.accepted());
+        assertEquals(CapacityBoundary.Status.UNAVAILABLE, rejected.boundary().status());
+        return rejected.boundary();
+    }
+
+    private static void awaitAvailable(
+            CapacityBoundary.Availability availability, Object capacityMonitor)
+            throws InterruptedException {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        synchronized (capacityMonitor) {
+            while (!availability.isAvailable()) {
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0) {
+                    throw new AssertionError("dispatcher capacity did not become available");
+                }
+                TimeUnit.NANOSECONDS.timedWait(capacityMonitor, remainingNanos);
+            }
+        }
+    }
+
     /**
      * Shutdown "completes" for this contract when the executors are shut
      * down with no pending work: pool threads may linger for their 60s
@@ -1665,5 +1638,37 @@ class DefaultBatchDispatcherTest {
         return dispatchExecutor.isShutdown()
                 && dispatchExecutor.getQueue().isEmpty()
                 && dispatchExecutor.getActiveCount() == 0;
+    }
+
+    // ---- Test callback ----
+
+    /**
+     * Captures a batch callback result for dispatcher assertions.
+     */
+    private static class TestCallback implements BiConsumer<ScheduledRequest, DeliveryResult> {
+        final AtomicInteger successCount = new AtomicInteger(0);
+        final AtomicInteger failureCount = new AtomicInteger(0);
+        final AtomicInteger uncertainCount = new AtomicInteger(0);
+        final CountDownLatch successLatch = new CountDownLatch(1);
+        final CountDownLatch failureLatch = new CountDownLatch(1);
+        final CountDownLatch uncertainLatch = new CountDownLatch(1);
+        volatile Throwable lastError;
+
+        @Override
+        public void accept(ScheduledRequest exactItem, DeliveryResult completion) {
+            if (completion.status() == DeliveryResult.Status.DELIVERED) {
+                successCount.incrementAndGet();
+                successLatch.countDown();
+            } else if (completion.status() == DeliveryResult.Status.NOT_SENT
+                    || completion.status() == DeliveryResult.Status.PREFILL_REJECTED) {
+                lastError = completion.cause();
+                failureCount.incrementAndGet();
+                failureLatch.countDown();
+            } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
+                lastError = completion.cause();
+                uncertainCount.incrementAndGet();
+                uncertainLatch.countDown();
+            }
+        }
     }
 }

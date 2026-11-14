@@ -28,28 +28,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * the first ~58% of the send window.
  */
 class JavaLoadClientResultCollectionTest {
-
-    private static JavaLoadClient.RequestResult realRow(String rid, double sendStartEpochMs) {
-        JavaLoadClient.RequestResult result = new JavaLoadClient.RequestResult();
-        result.rid = rid;
-        result.status = "ok";
-        result.sendStartEpochMs = sendStartEpochMs;
-        result.totalMs = 42.0;
-        return result;
-    }
-
-    private static JavaLoadClient.RequestResult delayedRow(String rid, long sleepMs)
-            throws InterruptedException {
-        Thread.sleep(sleepMs);
-        return realRow(rid, 1_000.0);
-    }
-
-    private static JavaLoadClient.RequestResult failingRow(long sleepMs)
-            throws InterruptedException {
-        Thread.sleep(sleepMs);
-        throw new RuntimeException("boom");
-    }
-
     @Test
     void slowHeadFutureDoesNotBlockCompletedTailFutures() {
         // Defect shape: future[0] is a stuck RPC; futures behind it complete
@@ -187,5 +165,26 @@ class JavaLoadClientResultCollectionTest {
                         executor.shutdownNow();
                     }
                 });
+    }
+
+    private static JavaLoadClient.RequestResult delayedRow(String rid, long sleepMs)
+            throws InterruptedException {
+        Thread.sleep(sleepMs);
+        return realRow(rid, 1_000.0);
+    }
+
+    private static JavaLoadClient.RequestResult realRow(String rid, double sendStartEpochMs) {
+        JavaLoadClient.RequestResult result = new JavaLoadClient.RequestResult();
+        result.rid = rid;
+        result.status = "ok";
+        result.sendStartEpochMs = sendStartEpochMs;
+        result.totalMs = 42.0;
+        return result;
+    }
+
+    private static JavaLoadClient.RequestResult failingRow(long sleepMs)
+            throws InterruptedException {
+        Thread.sleep(sleepMs);
+        throw new RuntimeException("boom");
     }
 }

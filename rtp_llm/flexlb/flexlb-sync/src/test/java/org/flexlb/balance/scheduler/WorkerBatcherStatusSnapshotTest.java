@@ -18,6 +18,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks coherent worker capacity observations and fallback values in batcher snapshots.
+ */
 class WorkerBatcherStatusSnapshotTest {
 
     @Test

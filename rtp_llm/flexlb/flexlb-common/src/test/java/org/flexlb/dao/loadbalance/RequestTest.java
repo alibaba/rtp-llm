@@ -6,6 +6,9 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
+/**
+ * Checks request conversion and validation while preserving request metadata.
+ */
 class RequestTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();

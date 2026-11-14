@@ -1,5 +1,8 @@
 package org.flexlb.config;
 
+/**
+ * Names the supported configuration schema versions and the current standard.
+ */
 public final class ConfigSchemaVersion {
 
     /** Historical combined FlexLB and model-service document; also used when no version is declared. */

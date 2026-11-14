@@ -26,22 +26,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Block-pool capacity model (v2) unit tests — the mock counterpart of the
- * production C++ admission chain this model mirrors:
- *
- * <ul>
- *   <li>{@code acquire} = {@code KVCacheAllocator::evaluateInitCapacity}
- *       (TOTAL_AND_AVAILABLE gate + 5% reserve watermark) coupled with
- *       {@code KVCacheGroup::ensureFreeBlocks} (free-first, LRU-tail eviction).</li>
- *   <li>{@code admit} = completion handover to the LRU ({@code release != delete},
- *       {@code free != available}: pure-LRU blocks stay available).</li>
- *   <li>{@code grow} = per-step decode growth ({@code incrMalloc}).</li>
- *   <li>Enqueue-batch LACK_MEM = the master-visible synchronous rejection surface
- *       (error code 602 = production {@code MALLOC_FAILED}).</li>
- * </ul>
- *
- * <p>Mandatory paths per the capacity-model acceptance list: "LRU eviction
- * triggered, then allocation succeeds" and "LACK_MEM rejection".
+ * Checks KV block admission, reserve capacity, LRU eviction and release against the mock engine's
+ * allocation contract.
  */
 class BlockPoolCapacityTest {
 

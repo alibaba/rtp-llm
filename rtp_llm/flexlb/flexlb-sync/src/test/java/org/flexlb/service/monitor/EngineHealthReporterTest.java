@@ -53,8 +53,10 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks worker health and cache feedback metric values, labels and failure accounting.
+ */
 class EngineHealthReporterTest {
-
     private final FlexMonitor monitor = mock(FlexMonitor.class);
     private final CacheMetricsReporter cacheMetricsReporter = mock(CacheMetricsReporter.class);
     private final EngineGrpcClient engineGrpcClient = mock(EngineGrpcClient.class);
@@ -851,15 +853,6 @@ class EngineHealthReporterTest {
         }
     }
 
-    @Configuration
-    @EnableScheduling
-    static class SchedulingConfiguration {
-        @Bean
-        TaskScheduler taskScheduler() {
-            return mock(TaskScheduler.class);
-        }
-    }
-
     @Test
     void shouldSkipWorkerBlockSizeBeforeStatusIsAvailable() {
         when(workerDirectory.getWorkerStatuses(RoleType.PREFILL, null))
@@ -1328,5 +1321,17 @@ class EngineHealthReporterTest {
             workerStatus.lock.unlock();
         }
         return workerStatus;
+    }
+
+    /**
+     * Supplies the scheduled executor required by the health-reporting test context.
+     */
+    @Configuration
+    @EnableScheduling
+    static class SchedulingConfiguration {
+        @Bean
+        TaskScheduler taskScheduler() {
+            return mock(TaskScheduler.class);
+        }
     }
 }

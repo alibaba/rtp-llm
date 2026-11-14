@@ -8,6 +8,9 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * Checks service discovery provider configuration and selection.
+ */
 class ServiceDiscoveryConfigurationTest {
 
     private final ApplicationContextRunner contextRunner =

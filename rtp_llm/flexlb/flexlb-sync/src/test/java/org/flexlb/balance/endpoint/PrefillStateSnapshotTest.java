@@ -32,6 +32,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks coherent Prefill snapshots and admission rollback across concurrent state changes.
+ */
 class PrefillStateSnapshotTest {
     private final AtomicLong clock = new AtomicLong(100);
     private final ReentrantLock lock = new ReentrantLock();
@@ -470,6 +473,19 @@ class PrefillStateSnapshotTest {
         }
     }
 
+    private List<ScheduledRequest> waitingItems() {
+        return capture().activeItems();
+    }
+
+    private PrefillState.Snapshot capture() {
+        lock.lock();
+        try {
+            return state.snapshotUnderLock();
+        } finally {
+            lock.unlock();
+        }
+    }
+
     private void reconcile(
             Map<String, TaskInfo> finished,
             Map<String, TaskInfo> active,
@@ -507,15 +523,6 @@ class PrefillStateSnapshotTest {
         return item;
     }
 
-    private PrefillState.Snapshot capture() {
-        lock.lock();
-        try {
-            return state.snapshotUnderLock();
-        } finally {
-            lock.unlock();
-        }
-    }
-
     private void enqueue(ScheduledRequest item) {
         lock.lock();
         try {
@@ -523,9 +530,5 @@ class PrefillStateSnapshotTest {
         } finally {
             lock.unlock();
         }
-    }
-
-    private List<ScheduledRequest> waitingItems() {
-        return capture().activeItems();
     }
 }

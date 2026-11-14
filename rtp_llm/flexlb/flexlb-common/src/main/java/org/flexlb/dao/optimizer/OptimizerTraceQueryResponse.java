@@ -6,6 +6,9 @@ import lombok.Data;
 
 import java.util.List;
 
+/**
+ * Decodes an optimizer trace-query result and normalizes unknown error codes.
+ */
 @Data
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class OptimizerTraceQueryResponse {

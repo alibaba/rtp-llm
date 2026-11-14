@@ -20,19 +20,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Verifies that the mock engine actually waits for the formula-computed duration
- * when {@code sleep_scale = 1.0} (realistic timing).
- *
- * <p>Configures a 1P/2D cluster with:
- * <ul>
- *   <li>Prefill {@code fixed_ms = 100} (100 ms per prefill batch)</li>
- *   <li>Decode {@code step_ms = 5} with {@code outputLen = 10} and
- *       {@code tokens_per_step = 1} → 10 steps × 5 ms = 50 ms per decode request</li>
- * </ul>
- *
- * <p>Enqueues 5 requests and measures the wall-clock completion time of each.
- * Each request should take at least ~150 ms (100 ms prefill + 50 ms decode)
- * and no more than 300 ms, proving the engine honours realistic delays.
+ * Checks that mock-engine execution waits for configured formula durations when sleep scaling is
+ * one.
  */
 class RealisticTimingTest {
 

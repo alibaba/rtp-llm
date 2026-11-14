@@ -5,6 +5,9 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks engine RPC retry policy and applicable transport statuses.
+ */
 class EngineGrpcClientRetryPolicyTest {
 
     @Test

@@ -49,6 +49,7 @@ cc_library(
         "*.cc",
     ], exclude = ["CompleteTokenIds.cc"]),
     deps = [
+        "//rtp_llm/cpp/observability:execution_recorder",
         ":generate_types",
         ":generate_config",
         ":complete_token_ids",

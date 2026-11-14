@@ -36,6 +36,9 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks discovery fallback across empty results, failures, timeouts and executor saturation.
+ */
 @ExtendWith(MockitoExtension.class)
 class WorkerAddressServiceTest {
 

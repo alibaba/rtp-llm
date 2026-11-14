@@ -24,19 +24,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** The resource ledger can run without an Endpoint, scheduler, RPC client or callback. */
+/**
+ * The resource ledger can run without an Endpoint, scheduler, RPC client or callback.
+ */
 class DecodeStateTest {
     private static final AdmissionCapacity CAPACITY = new AdmissionCapacity(2, 100);
-
-    private static void assertAdmissionMetricsMatch(DecodeState state) {
-        var full = state.resourceSnapshot();
-        var metrics = state.admissionStats();
-        assertEquals(full.reserved().size(), metrics.reserved());
-        assertEquals(full.runningCount(), metrics.running());
-        assertEquals(full.acceptedCount(), metrics.accepted());
-        assertEquals(full.routing().inputKvReserved(), metrics.inputKvTokens());
-        assertEquals(full.routing().engineLoad(), metrics.engineLoad());
-    }
 
     @Test
     void returnedPermitCannotDispatchOrReleaseItsReplacement() {
@@ -349,14 +341,6 @@ class DecodeStateTest {
         assertEquals(0, state.routingView().engineCapacityUsed());
     }
 
-    private static TaskInfo task(long requestId, TaskPhase phase) {
-        TaskInfo task = new TaskInfo();
-        task.setRequestId(Long.toString(requestId));
-        task.setInputLength(100L);
-        task.setPhase(phase);
-        return task;
-    }
-
     @Test
     void returnedPreemptionCanRollBackBeforeDeliveryWithoutDroppingVictim() {
         WorkerStatus status = status();
@@ -499,11 +483,40 @@ class DecodeStateTest {
         assertAdmissionMetricsMatch(state);
     }
 
+    private static void assertAdmissionMetricsMatch(DecodeState state) {
+        var full = state.resourceSnapshot();
+        var metrics = state.admissionStats();
+        assertEquals(full.reserved().size(), metrics.reserved());
+        assertEquals(full.runningCount(), metrics.running());
+        assertEquals(full.acceptedCount(), metrics.accepted());
+        assertEquals(full.routing().inputKvReserved(), metrics.inputKvTokens());
+        assertEquals(full.routing().engineLoad(), metrics.engineLoad());
+    }
+
+    private static TaskInfo task(long requestId, TaskPhase phase) {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(Long.toString(requestId));
+        task.setInputLength(100L);
+        task.setPhase(phase);
+        return task;
+    }
+
     private static WorkerStatus status() {
         WorkerStatus status =
                 EndpointTestSupport.workerStatus(RoleType.DECODE, "127.0.0.1", 8000, 8001);
         EndpointTestSupport.publishStatus(status, response());
         return status;
+    }
+
+    private static WorkerStatusResponse response() {
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRole(RoleType.DECODE);
+        response.setAlive(true);
+        response.setTotalKvCacheTokens(10_000L);
+        response.setAvailableKvCacheTokens(10_000L);
+        response.setRunningTaskInfo(Map.of());
+        response.setFinishedTaskInfo(Map.of());
+        return response;
     }
 
     private static DecodeState.CalibrationResult calibrate(
@@ -523,16 +536,5 @@ class DecodeStateTest {
         } finally {
             status.lock.unlock();
         }
-    }
-
-    private static WorkerStatusResponse response() {
-        WorkerStatusResponse response = new WorkerStatusResponse();
-        response.setRole(RoleType.DECODE);
-        response.setAlive(true);
-        response.setTotalKvCacheTokens(10_000L);
-        response.setAvailableKvCacheTokens(10_000L);
-        response.setRunningTaskInfo(Map.of());
-        response.setFinishedTaskInfo(Map.of());
-        return response;
     }
 }

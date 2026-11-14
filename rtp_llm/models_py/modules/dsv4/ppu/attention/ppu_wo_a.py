@@ -102,6 +102,9 @@ class PpuWoAFp8Linear(nn.Module):
         )
         self._einsum = _resolve_deep_gemm_symbol("fp8_einsum")
         self._decode_attention_gemm = False
+        self._attn_gemm_ep_size = None
+        self._attn_gemm_tp_size = None
+        self._attn_gemm_profile = "auto"
 
     def _decode_config(self, m):
         if not self._decode_attention_gemm:
@@ -109,7 +112,13 @@ class PpuWoAFp8Linear(nn.Module):
         from rtp_llm.models_py.kernels.ppu.attention.ppu_attention_gemm import decode_attention_gemm_config
 
         return decode_attention_gemm_config(
-            m, self.rank, self.k_local, groups=self.groups
+            m,
+            self.rank,
+            self.k_local,
+            groups=self.groups,
+            ep_size=self._attn_gemm_ep_size,
+            tp_size=self._attn_gemm_tp_size,
+            profile=self._attn_gemm_profile,
         )
 
     def forward_permuted(self, payload, scales):

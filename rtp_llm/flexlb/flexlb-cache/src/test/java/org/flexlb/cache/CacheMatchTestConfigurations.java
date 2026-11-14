@@ -7,7 +7,9 @@ import org.flexlb.config.ModelMetaConfig;
 
 import java.util.function.Consumer;
 
-/** Test builders that keep topology and FlexLB behavior configuration separate. */
+/**
+ * Test builders that keep topology and FlexLB behavior configuration separate.
+ */
 public final class CacheMatchTestConfigurations {
 
     private CacheMatchTestConfigurations() {}

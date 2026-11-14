@@ -1,7 +1,13 @@
+from types import SimpleNamespace
 from unittest import TestCase, main
+from unittest.mock import patch
 
+from rtp_llm import start_backend_server as backend_server
 from rtp_llm.config.py_config_modules import DeepEPConfig
-from rtp_llm.config.server_config_setup import auto_configure_deepep
+from rtp_llm.config.server_config_setup import (
+    auto_configure_deepep,
+    finalize_rank_local_deepep_internode,
+)
 from rtp_llm.ops import CPRotateMethod, MoeConfig, ParallelismConfig, RoleType
 
 
@@ -895,6 +901,127 @@ class AutoConfigureDeepepTest(TestCase):
 
         self.assertFalse(self.moe_config.use_all_gather)
         self._assert_deepep_config(moe=True, low_latency=False, internode=False)
+
+
+class AutoConfigurePPDeepepTest(TestCase):
+    def _configs(self, pp_size, dp_size, tp_size, local_world_size, world_rank=0):
+        parallel = ParallelismConfig()
+        parallel.pp_size = pp_size
+        parallel.dp_size = dp_size
+        parallel.tp_size = tp_size
+        parallel.ep_size = dp_size * tp_size
+        parallel.world_size = pp_size * dp_size * tp_size
+        parallel.local_world_size = local_world_size
+        parallel.world_rank = world_rank
+        moe = MoeConfig()
+        moe.use_all_gather = False
+        return moe, DeepEPConfig(), parallel
+
+    def test_auto_modes_use_stage_size(self):
+        # PP stages are either wholly inside a node or span whole nodes.
+        cases = (
+            (2, 2, 1, 4, False),
+            (2, 8, 1, 8, False),
+            (2, 16, 1, 8, True),
+            (2, 1, 1, 1, False),
+        )
+        for role in (RoleType.PDFUSION, RoleType.PREFILL, RoleType.DECODE):
+            for pp, dp, tp, local, internode in cases:
+                with self.subTest(role=role, pp=pp, dp=dp, tp=tp, local=local):
+                    moe, explicit, parallel = self._configs(pp, dp, tp, local)
+                    auto_configure_deepep(moe, explicit, parallel, role, 321)
+                    self.assertEqual(moe.use_deepep_moe, dp * tp > 1)
+                    self.assertEqual(
+                        moe.use_deepep_low_latency,
+                        role == RoleType.DECODE and dp * tp > 1,
+                    )
+                    self.assertEqual(moe.use_deepep_internode, internode)
+                    self.assertEqual(moe.ll_num_max_token, 321)
+
+    def test_auto_modes_use_current_stage_node_span(self):
+        # world=24/local=8/pp=4 gives stage groups [0..5], [6..11],
+        # [12..17], and [18..23]. Only the middle two cross node boundaries.
+        for world_rank, internode in (
+            (0, False),
+            (6, True),
+            (8, True),
+            (18, False),
+        ):
+            with self.subTest(world_rank=world_rank, internode=internode):
+                moe, explicit, parallel = self._configs(
+                    pp_size=4,
+                    dp_size=3,
+                    tp_size=2,
+                    local_world_size=8,
+                    world_rank=world_rank,
+                )
+                auto_configure_deepep(
+                    moe, explicit, parallel, RoleType.PDFUSION, 321
+                )
+                self.assertTrue(moe.use_deepep_moe)
+                self.assertEqual(moe.use_deepep_internode, internode)
+                moe.use_deepep_internode = not internode
+                finalize_rank_local_deepep_internode(moe, explicit, parallel)
+                self.assertEqual(moe.use_deepep_internode, internode)
+
+    def test_local_rank_reconfigures_deepep_after_world_rank_is_set(self):
+        configs = SimpleNamespace(
+            parallelism_config=SimpleNamespace(pp_size=4, world_rank=0),
+            prefill_cp_config=None,
+            moe_config=SimpleNamespace(ll_num_max_token=321),
+            deep_ep_config=object(),
+            role_config=SimpleNamespace(role_type=RoleType.PDFUSION),
+        )
+
+        with (
+            patch.object(backend_server, "_install_hot_hook_runtime"),
+            patch.object(backend_server, "copy_gemm_config"),
+            patch.object(
+                backend_server,
+                "set_parallelism_config",
+                side_effect=lambda config, rank, *_: setattr(
+                    config, "world_rank", rank
+                ),
+            ),
+            patch.object(
+                backend_server,
+                "finalize_rank_local_deepep_internode",
+                side_effect=RuntimeError("stop after rank-local refresh"),
+            ) as refresh,
+            self.assertRaisesRegex(RuntimeError, "rank-local refresh"),
+        ):
+            backend_server.local_rank_start(None, configs, world_rank=6)
+
+        refresh.assert_called_once()
+        self.assertEqual(refresh.call_args.args[2].world_rank, 6)
+
+    def test_pp_preserves_explicit_settings(self):
+        for field in (
+            "use_deepep_moe",
+            "use_deepep_low_latency",
+            "use_deepep_internode",
+            "use_mori_ep",
+        ):
+            for value in (False, True):
+                with self.subTest(field=field, value=value):
+                    moe, explicit, parallel = self._configs(2, 8, 1, 8)
+                    setattr(explicit, field, value)
+                    auto_configure_deepep(moe, explicit, parallel, RoleType.DECODE, 321)
+                    finalize_rank_local_deepep_internode(moe, explicit, parallel)
+                    self.assertEqual(getattr(moe, field), value)
+                    self.assertEqual(moe.ll_num_max_token, 321)
+
+    def test_all_gather_stays_selected(self):
+        moe, explicit, parallel = self._configs(2, 2, 1, 2)
+        moe.use_all_gather = True
+        moe.moe_strategy = "fp8_per_block_pure_dp"
+        auto_configure_deepep(moe, explicit, parallel, RoleType.DECODE, 321)
+        finalize_rank_local_deepep_internode(moe, explicit, parallel)
+        self.assertTrue(moe.use_all_gather)
+        self.assertFalse(moe.use_deepep_moe)
+        self.assertFalse(moe.use_deepep_low_latency)
+        self.assertFalse(moe.use_deepep_internode)
+        self.assertEqual(moe.ll_num_max_token, 321)
 
 
 if __name__ == "__main__":

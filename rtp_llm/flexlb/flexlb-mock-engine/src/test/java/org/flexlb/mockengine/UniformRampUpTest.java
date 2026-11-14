@@ -17,119 +17,12 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Tests for the uniform-mode traffic ramp-up (RAMP_UP_SECONDS).
- *
- * <p>Two independent knobs are deliberately kept separate:
- * <ul>
- *   <li>FLEXLB_WARMUP_SECONDS — orchestrator-level prepare sleep with zero
- *       traffic before load starts (default on, 10s; lives in
- *       run_online_eval.sh, not in the client);</li>
- *   <li>RAMP_UP_SECONDS — arrival-process shaping inside uniform mode: the
- *       per-shard QPS climbs linearly from 0 to the target over N seconds,
- *       then holds constant (default 0 = off, legacy fixed interval).</li>
- * </ul>
- *
- * <p>The ideal ramped schedule inverts the triangle-integral arrival count
- * {@code N(t) = perShardQps * t^2 / (2 * ramp)} (see
- * {@code JavaLoadClient.uniformDueSeconds}), so pacing quality is conserved:
- * the ramp neither drops nor adds sends.
+ * Checks uniform traffic ramp-up separately from the orchestrator's idle warm-up delay.
  */
 class UniformRampUpTest {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @TempDir Path tempDir;
-
-    private Path writeTrace(int n) throws IOException {
-        Path trace = tempDir.resolve("trace.jsonl");
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < n; i++) {
-            sb.append("{\"request_id\":\"rid-")
-                    .append(i)
-                    .append("\",\"il\":32,\"ol\":4,\"ts\":")
-                    .append(i * 1000L)
-                    .append("}\n");
-        }
-        Files.writeString(trace, sb.toString());
-        return trace;
-    }
-
-    private JavaLoadClient.Config config(
-            String traceFile,
-            String outDir,
-            int durationS,
-            int limit,
-            int numShards,
-            int shardIndex,
-            boolean loop,
-            String sendMode,
-            double sendModeQps,
-            double rampUpSeconds) {
-        return new JavaLoadClient.Config(
-                traceFile,
-                "127.0.0.1:7001",
-                "127.0.0.1:7003",
-                durationS,
-                16,
-                1000.0,
-                1,
-                outDir,
-                numShards,
-                shardIndex,
-                limit,
-                120_000L,
-                500.0,
-                false,
-                loop,
-                1,
-                1,
-                0L,
-                120,
-                true,
-                "engine_service",
-                "",
-                false,
-                10,
-                1000,
-                0,
-                0,
-                "",
-                false,
-                "",
-                true,
-                0,
-                0,
-                sendMode,
-                sendModeQps,
-                rampUpSeconds,
-                true,
-                List.of());
-    }
-
-    private List<JsonNode> readPerRequest(Path outDir) throws IOException {
-        List<JsonNode> rows = new ArrayList<>();
-        for (String line : Files.readAllLines(outDir.resolve("client_events.jsonl"))) {
-            if (!line.isBlank()) {
-                rows.add(MAPPER.readTree(line));
-            }
-        }
-        return rows;
-    }
-
-    /** Due times in seconds relative to the first send (sorted). */
-    private List<Double> readRelativeDues(Path outDir) throws IOException {
-        List<Double> dues = new ArrayList<>();
-        for (JsonNode row : readPerRequest(outDir)) {
-            dues.add(row.get("send_due_epoch_ms").asDouble());
-        }
-        dues.sort(null);
-        double t0 = dues.get(0);
-        List<Double> rel = new ArrayList<>();
-        for (double d : dues) {
-            rel.add((d - t0) / 1000.0);
-        }
-        return rel;
-    }
 
     // ------------------------------------------------------------------
     // Config validation.
@@ -296,5 +189,96 @@ class UniformRampUpTest {
                     1e-6,
                     "non-uniform interval at index " + i);
         }
+    }
+
+    private Path writeTrace(int n) throws IOException {
+        Path trace = tempDir.resolve("trace.jsonl");
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < n; i++) {
+            sb.append("{\"request_id\":\"rid-")
+                    .append(i)
+                    .append("\",\"il\":32,\"ol\":4,\"ts\":")
+                    .append(i * 1000L)
+                    .append("}\n");
+        }
+        Files.writeString(trace, sb.toString());
+        return trace;
+    }
+
+    private JavaLoadClient.Config config(
+            String traceFile,
+            String outDir,
+            int durationS,
+            int limit,
+            int numShards,
+            int shardIndex,
+            boolean loop,
+            String sendMode,
+            double sendModeQps,
+            double rampUpSeconds) {
+        return new JavaLoadClient.Config(
+                traceFile,
+                "127.0.0.1:7001",
+                "127.0.0.1:7003",
+                durationS,
+                16,
+                1000.0,
+                1,
+                outDir,
+                numShards,
+                shardIndex,
+                limit,
+                120_000L,
+                500.0,
+                false,
+                loop,
+                1,
+                1,
+                0L,
+                120,
+                true,
+                "engine_service",
+                "",
+                false,
+                10,
+                1000,
+                0,
+                0,
+                "",
+                false,
+                "",
+                true,
+                0,
+                0,
+                sendMode,
+                sendModeQps,
+                rampUpSeconds,
+                true,
+                List.of());
+    }
+
+    /** Due times in seconds relative to the first send (sorted). */
+    private List<Double> readRelativeDues(Path outDir) throws IOException {
+        List<Double> dues = new ArrayList<>();
+        for (JsonNode row : readPerRequest(outDir)) {
+            dues.add(row.get("send_due_epoch_ms").asDouble());
+        }
+        dues.sort(null);
+        double t0 = dues.get(0);
+        List<Double> rel = new ArrayList<>();
+        for (double d : dues) {
+            rel.add((d - t0) / 1000.0);
+        }
+        return rel;
+    }
+
+    private List<JsonNode> readPerRequest(Path outDir) throws IOException {
+        List<JsonNode> rows = new ArrayList<>();
+        for (String line : Files.readAllLines(outDir.resolve("client_events.jsonl"))) {
+            if (!line.isBlank()) {
+                rows.add(MAPPER.readTree(line));
+            }
+        }
+        return rows;
     }
 }

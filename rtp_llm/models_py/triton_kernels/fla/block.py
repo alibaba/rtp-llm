@@ -267,3 +267,48 @@ def store_ssm_state_to_block_map(
         CONV_STRIDE_TOKEN=token_stride_ssm_state,
         CHUNK_SIZE=chunk_size,
     )
+
+
+@triton.jit(do_not_specialize=["TABLE_STRIDE", "CACHE_STRIDE"])
+def store_page_checkpoints_kernel(
+    Checkpoints,
+    Final,
+    Starts,
+    Cu,
+    Prefix,
+    Table,
+    Cache,
+    TABLE_STRIDE,
+    CACHE_STRIDE,
+    HEADS: tl.constexpr,
+    PAGE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    batch, page, tile = (
+        tl.program_id(0).to(tl.int64),
+        tl.program_id(1).to(tl.int64),
+        tl.program_id(2).to(tl.int64),
+    )
+    length = tl.load(Cu + batch + 1) - tl.load(Cu + batch)
+    prefix = tl.load(Prefix + batch)
+    col = tile * BLOCK + tl.arange(0, BLOCK)
+    width: tl.constexpr = HEADS * 128 * 128
+    valid_page = page * PAGE < length
+    block = tl.load(
+        Table + batch * TABLE_STRIDE + prefix // PAGE + page, valid_page, other=0
+    ).to(tl.int64)
+    final_page = (page + 1) * PAGE >= length
+    checkpoint = tl.load(Starts + batch) + page
+    a = tl.load(
+        Checkpoints + checkpoint * width + col,
+        valid_page & ~final_page & (col < width),
+        other=0,
+    )
+    b = tl.load(
+        Final + batch * width + col, valid_page & final_page & (col < width), other=0
+    )
+    tl.store(
+        Cache + block * CACHE_STRIDE + col,
+        tl.where(final_page, b, a),
+        valid_page & (block > 0) & (col < width),
+    )

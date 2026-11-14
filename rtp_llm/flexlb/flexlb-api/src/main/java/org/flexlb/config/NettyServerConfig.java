@@ -6,6 +6,10 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import reactor.netty.resources.LoopResources;
 
+/**
+ * Configures HTTP event loops and socket options from startup settings. Spring disposes the shared
+ * loop resources when the application context closes.
+ */
 @Configuration
 public class NettyServerConfig {
 

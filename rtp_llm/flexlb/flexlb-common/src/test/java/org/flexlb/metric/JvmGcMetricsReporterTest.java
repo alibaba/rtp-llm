@@ -21,6 +21,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
 
+/**
+ * Checks JVM garbage-collection metric registration and sampling.
+ */
 class JvmGcMetricsReporterTest {
 
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();

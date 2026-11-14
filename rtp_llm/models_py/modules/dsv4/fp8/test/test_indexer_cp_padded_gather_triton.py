@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import unittest
 from types import SimpleNamespace
-from unittest import mock
 
 import torch
 from torch.profiler import ProfilerActivity, profile
@@ -157,19 +155,15 @@ class IndexerCPPaddedGatherTritonTest(unittest.TestCase):
 
         fused_q = torch.empty_like(ref_q)
         fused_scale = torch.empty_like(ref_scale)
-        with mock.patch.dict(
-            os.environ,
-            {"DSV4_TRAP_INVALID_KV_ACCESS": "0"},
-        ):
-            fused = try_gather_indexer_k_to_padded(
-                pool,
-                block_table,
-                padded,
-                actual,
-                fused_q,
-                fused_scale,
-                total_actual_tokens=total_actual,
-            )
+        fused = try_gather_indexer_k_to_padded(
+            pool,
+            block_table,
+            padded,
+            actual,
+            fused_q,
+            fused_scale,
+            total_actual_tokens=total_actual,
+        )
         self.assertTrue(fused)
         torch.cuda.synchronize()
         self.assertTrue(torch.equal(fused_q.view(torch.uint8), ref_q.view(torch.uint8)))
@@ -225,32 +219,30 @@ class IndexerCPPaddedGatherTritonTest(unittest.TestCase):
         expected_q[2:4].fill_(0x3C)
         expected_s[2:4].fill_(0x3C)
 
-        for first_actual, trap in ((1, "0"), (0, "1")):
-            with self.subTest(first_actual=first_actual, trap=trap):
-                actual = torch.tensor(
-                    [first_actual, 2, 0], dtype=torch.int64, device=self.device
-                )
-                out_q = torch.empty(
-                    (7, INDEXER_HEAD_DIM),
-                    dtype=torch.float8_e4m3fn,
-                    device=self.device,
-                )
-                out_s = torch.empty((7, 4), dtype=torch.uint8, device=self.device)
-                with mock.patch.dict(os.environ, {"DSV4_TRAP_INVALID_KV_ACCESS": trap}):
-                    self.assertTrue(
-                        try_gather_indexer_k_to_padded(
-                            pool,
-                            table,
-                            padded,
-                            actual,
-                            out_q,
-                            out_s,
-                            total_actual_tokens=first_actual + 2,
-                        )
-                    )
-                torch.cuda.synchronize()
-                self.assertTrue(torch.equal(out_q.view(torch.uint8), expected_q))
-                self.assertTrue(torch.equal(out_s, expected_s))
+        # first_actual=0 keeps every table lookup off the reserved block 0, so the
+        # always-on invalid-KV-access trap stays silent; the trap-off twin
+        # (first_actual=1) exercised a production-unreachable configuration.
+        actual = torch.tensor([0, 2, 0], dtype=torch.int64, device=self.device)
+        out_q = torch.empty(
+            (7, INDEXER_HEAD_DIM),
+            dtype=torch.float8_e4m3fn,
+            device=self.device,
+        )
+        out_s = torch.empty((7, 4), dtype=torch.uint8, device=self.device)
+        self.assertTrue(
+            try_gather_indexer_k_to_padded(
+                pool,
+                table,
+                padded,
+                actual,
+                out_q,
+                out_s,
+                total_actual_tokens=2,
+            )
+        )
+        torch.cuda.synchronize()
+        self.assertTrue(torch.equal(out_q.view(torch.uint8), expected_q))
+        self.assertTrue(torch.equal(out_s, expected_s))
 
     def test_unsupported_input_leaves_outputs_untouched(self) -> None:
         pool = torch.zeros(
@@ -302,10 +294,7 @@ class IndexerCPPaddedGatherTritonTest(unittest.TestCase):
         )
         out_scale = torch.empty((4, 4), dtype=torch.uint8, device=self.device)
         stream = torch.cuda.Stream(device=self.device)
-        with torch.cuda.stream(stream), mock.patch.dict(
-            os.environ,
-            {"DSV4_TRAP_INVALID_KV_ACCESS": "0"},
-        ):
+        with torch.cuda.stream(stream):
             pool.copy_(source)
             self.assertTrue(
                 try_gather_indexer_k_to_padded(
@@ -393,244 +382,240 @@ class IndexerCPPaddedGatherTritonTest(unittest.TestCase):
     def test_warmup_shapes_cover_production_shapes_without_recompile(self) -> None:
         _restore_dequantize_scatter_packed_k_cache_flat_kernel.device_caches.clear()
         _cp_gather_indexer_k_to_padded_kernel.device_caches.clear()
-        with mock.patch.dict(
-            os.environ,
-            {"DSV4_TRAP_INVALID_KV_ACCESS": "0"},
-        ):
-            warm_lens = torch.full((4,), 2, dtype=torch.int32, device=self.device)
-            self.assertTrue(
-                try_restore_dequantize_scatter_packed_k_cache_flat(
-                    torch.empty(
-                        (4, 2, HEAD_DIM), dtype=torch.bfloat16, device=self.device
-                    ),
-                    torch.zeros(
-                        (8, ENTRY_BYTES), dtype=torch.uint8, device=self.device
-                    ),
-                    torch.arange(8, dtype=torch.int64, device=self.device),
-                    warm_lens,
-                    0,
-                    seq_lens_total=8,
-                )
+        warm_lens = torch.full((4,), 2, dtype=torch.int32, device=self.device)
+        self.assertTrue(
+            try_restore_dequantize_scatter_packed_k_cache_flat(
+                torch.empty(
+                    (4, 2, HEAD_DIM), dtype=torch.bfloat16, device=self.device
+                ),
+                torch.zeros(
+                    (8, ENTRY_BYTES), dtype=torch.uint8, device=self.device
+                ),
+                torch.arange(8, dtype=torch.int64, device=self.device),
+                warm_lens,
+                0,
+                seq_lens_total=8,
             )
-            torch.cuda.synchronize()
-            pool_cache_after_warmup = _triton_cache_size(
+        )
+        torch.cuda.synchronize()
+        pool_cache_after_warmup = _triton_cache_size(
+            _restore_dequantize_scatter_packed_k_cache_flat_kernel
+        )
+        self.assertEqual(pool_cache_after_warmup, 1)
+
+        prod_lens = torch.full((4,), 2, dtype=torch.int32, device=self.device)
+        self.assertTrue(
+            try_restore_dequantize_scatter_packed_k_cache_flat(
+                torch.empty(
+                    (4, 11, HEAD_DIM), dtype=torch.bfloat16, device=self.device
+                ),
+                torch.zeros(
+                    (1024, ENTRY_BYTES), dtype=torch.uint8, device=self.device
+                ),
+                torch.arange(8, dtype=torch.int64, device=self.device),
+                prod_lens,
+                0,
+                seq_lens_total=8,
+            )
+        )
+        torch.cuda.synchronize()
+        self.assertEqual(
+            _triton_cache_size(
                 _restore_dequantize_scatter_packed_k_cache_flat_kernel
-            )
-            self.assertEqual(pool_cache_after_warmup, 1)
+            ),
+            pool_cache_after_warmup,
+        )
 
-            prod_lens = torch.full((4,), 2, dtype=torch.int32, device=self.device)
-            self.assertTrue(
-                try_restore_dequantize_scatter_packed_k_cache_flat(
-                    torch.empty(
-                        (4, 11, HEAD_DIM), dtype=torch.bfloat16, device=self.device
-                    ),
-                    torch.zeros(
-                        (1024, ENTRY_BYTES), dtype=torch.uint8, device=self.device
-                    ),
-                    torch.arange(8, dtype=torch.int64, device=self.device),
-                    prod_lens,
-                    0,
-                    seq_lens_total=8,
-                )
-            )
-            torch.cuda.synchronize()
-            self.assertEqual(
-                _triton_cache_size(
-                    _restore_dequantize_scatter_packed_k_cache_flat_kernel
+        strided_out = torch.empty_strided(
+            (4, 11, HEAD_DIM),
+            (11 * 513 + 1, 513, 1),
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        self.assertTrue(
+            try_restore_dequantize_scatter_packed_k_cache_flat(
+                strided_out,
+                torch.zeros(
+                    (1024, ENTRY_BYTES), dtype=torch.uint8, device=self.device
                 ),
-                pool_cache_after_warmup,
+                torch.arange(8, dtype=torch.int64, device=self.device),
+                prod_lens,
+                0,
+                seq_lens_total=8,
             )
+        )
+        torch.cuda.synchronize()
+        self.assertEqual(
+            _triton_cache_size(
+                _restore_dequantize_scatter_packed_k_cache_flat_kernel
+            ),
+            pool_cache_after_warmup,
+        )
 
-            strided_out = torch.empty_strided(
-                (4, 11, HEAD_DIM),
-                (11 * 513 + 1, 513, 1),
-                dtype=torch.bfloat16,
-                device=self.device,
-            )
-            self.assertTrue(
-                try_restore_dequantize_scatter_packed_k_cache_flat(
-                    strided_out,
-                    torch.zeros(
-                        (1024, ENTRY_BYTES), dtype=torch.uint8, device=self.device
-                    ),
-                    torch.arange(8, dtype=torch.int64, device=self.device),
-                    prod_lens,
-                    0,
-                    seq_lens_total=8,
-                )
-            )
-            torch.cuda.synchronize()
-            self.assertEqual(
-                _triton_cache_size(
-                    _restore_dequantize_scatter_packed_k_cache_flat_kernel
+        divisible_lens = torch.full((4,), 4, dtype=torch.int32, device=self.device)
+        self.assertTrue(
+            try_restore_dequantize_scatter_packed_k_cache_flat(
+                torch.empty(
+                    (4, 17, HEAD_DIM), dtype=torch.bfloat16, device=self.device
                 ),
-                pool_cache_after_warmup,
-            )
-
-            divisible_lens = torch.full((4,), 4, dtype=torch.int32, device=self.device)
-            self.assertTrue(
-                try_restore_dequantize_scatter_packed_k_cache_flat(
-                    torch.empty(
-                        (4, 17, HEAD_DIM), dtype=torch.bfloat16, device=self.device
-                    ),
-                    torch.zeros(
-                        (1024, ENTRY_BYTES), dtype=torch.uint8, device=self.device
-                    ),
-                    torch.arange(16, dtype=torch.int64, device=self.device),
-                    divisible_lens,
-                    0,
-                    seq_lens_total=16,
-                )
-            )
-            torch.cuda.synchronize()
-            self.assertEqual(
-                _triton_cache_size(
-                    _restore_dequantize_scatter_packed_k_cache_flat_kernel
+                torch.zeros(
+                    (1024, ENTRY_BYTES), dtype=torch.uint8, device=self.device
                 ),
-                pool_cache_after_warmup,
+                torch.arange(16, dtype=torch.int64, device=self.device),
+                divisible_lens,
+                0,
+                seq_lens_total=16,
             )
+        )
+        torch.cuda.synchronize()
+        self.assertEqual(
+            _triton_cache_size(
+                _restore_dequantize_scatter_packed_k_cache_flat_kernel
+            ),
+            pool_cache_after_warmup,
+        )
 
-            warm_pool = torch.zeros(
-                (2, 4, INDEXER_ENTRY_BYTES), dtype=torch.uint8, device=self.device
+        warm_pool = torch.zeros(
+            (2, 4, INDEXER_ENTRY_BYTES), dtype=torch.uint8, device=self.device
+        )
+        warm_bt = torch.ones((4, 1), dtype=torch.int32, device=self.device)
+        warm_padded = torch.full((4,), 2, dtype=torch.int64, device=self.device)
+        warm_actual = torch.ones(4, dtype=torch.int64, device=self.device)
+        self.assertTrue(
+            try_gather_indexer_k_to_padded(
+                warm_pool,
+                warm_bt,
+                warm_padded,
+                warm_actual,
+                torch.empty(
+                    (8, INDEXER_HEAD_DIM),
+                    dtype=torch.float8_e4m3fn,
+                    device=self.device,
+                ),
+                torch.empty((8, 4), dtype=torch.uint8, device=self.device),
+                total_actual_tokens=4,
             )
-            warm_bt = torch.zeros((4, 1), dtype=torch.int32, device=self.device)
-            warm_padded = torch.full((4,), 2, dtype=torch.int64, device=self.device)
-            warm_actual = torch.ones(4, dtype=torch.int64, device=self.device)
-            self.assertTrue(
-                try_gather_indexer_k_to_padded(
-                    warm_pool,
-                    warm_bt,
-                    warm_padded,
-                    warm_actual,
-                    torch.empty(
-                        (8, INDEXER_HEAD_DIM),
-                        dtype=torch.float8_e4m3fn,
-                        device=self.device,
-                    ),
-                    torch.empty((8, 4), dtype=torch.uint8, device=self.device),
-                    total_actual_tokens=4,
-                )
-            )
-            torch.cuda.synchronize()
-            indexer_cache_after_warmup = _triton_cache_size(
-                _cp_gather_indexer_k_to_padded_kernel
-            )
-            self.assertEqual(indexer_cache_after_warmup, 1)
+        )
+        torch.cuda.synchronize()
+        indexer_cache_after_warmup = _triton_cache_size(
+            _cp_gather_indexer_k_to_padded_kernel
+        )
+        self.assertEqual(indexer_cache_after_warmup, 1)
 
-            self.assertTrue(
-                try_gather_indexer_k_to_padded(
-                    warm_pool,
-                    warm_bt[:3],
-                    warm_padded[:3],
-                    warm_actual[:3],
-                    torch.empty(
-                        (6, INDEXER_HEAD_DIM),
-                        dtype=torch.float8_e4m3fn,
-                        device=self.device,
-                    ),
-                    torch.empty((6, 4), dtype=torch.uint8, device=self.device),
-                    total_actual_tokens=3,
-                )
+        self.assertTrue(
+            try_gather_indexer_k_to_padded(
+                warm_pool,
+                warm_bt[:3],
+                warm_padded[:3],
+                warm_actual[:3],
+                torch.empty(
+                    (6, INDEXER_HEAD_DIM),
+                    dtype=torch.float8_e4m3fn,
+                    device=self.device,
+                ),
+                torch.empty((6, 4), dtype=torch.uint8, device=self.device),
+                total_actual_tokens=3,
             )
-            torch.cuda.synchronize()
-            self.assertEqual(
-                _triton_cache_size(_cp_gather_indexer_k_to_padded_kernel),
-                indexer_cache_after_warmup,
-            )
+        )
+        torch.cuda.synchronize()
+        self.assertEqual(
+            _triton_cache_size(_cp_gather_indexer_k_to_padded_kernel),
+            indexer_cache_after_warmup,
+        )
 
-            prod_pool = torch.zeros(
-                (1024, 64, INDEXER_ENTRY_BYTES),
+        prod_pool = torch.zeros(
+            (1024, 64, INDEXER_ENTRY_BYTES),
+            dtype=torch.uint8,
+            device=self.device,
+        )
+        prod_bt = torch.ones((4, 128), dtype=torch.int32, device=self.device)
+        prod_padded = torch.full((4,), 64, dtype=torch.int64, device=self.device)
+        prod_actual = torch.full((4,), 2, dtype=torch.int64, device=self.device)
+        self.assertTrue(
+            try_gather_indexer_k_to_padded(
+                prod_pool,
+                prod_bt,
+                prod_padded,
+                prod_actual,
+                torch.empty(
+                    (256, INDEXER_HEAD_DIM),
+                    dtype=torch.float8_e4m3fn,
+                    device=self.device,
+                ),
+                torch.empty((256, 4), dtype=torch.uint8, device=self.device),
+                total_actual_tokens=8,
+            )
+        )
+        torch.cuda.synchronize()
+        self.assertEqual(
+            _triton_cache_size(_cp_gather_indexer_k_to_padded_kernel),
+            indexer_cache_after_warmup,
+        )
+
+        for expected_cache_size, (batch_block, runtime_batch) in enumerate(
+            ((8, 5), (64, 63)), start=2
+        ):
+            pool = torch.zeros(
+                (2, 4, INDEXER_ENTRY_BYTES),
                 dtype=torch.uint8,
                 device=self.device,
             )
-            prod_bt = torch.zeros((4, 128), dtype=torch.int32, device=self.device)
-            prod_padded = torch.full((4,), 64, dtype=torch.int64, device=self.device)
-            prod_actual = torch.full((4,), 2, dtype=torch.int64, device=self.device)
+            block_table = torch.ones(
+                (batch_block, 1), dtype=torch.int32, device=self.device
+            )
+            padded = torch.full(
+                (batch_block,), 2, dtype=torch.int64, device=self.device
+            )
+            actual = torch.ones(batch_block, dtype=torch.int64, device=self.device)
             self.assertTrue(
                 try_gather_indexer_k_to_padded(
-                    prod_pool,
-                    prod_bt,
-                    prod_padded,
-                    prod_actual,
+                    pool,
+                    block_table,
+                    padded,
+                    actual,
                     torch.empty(
-                        (256, INDEXER_HEAD_DIM),
+                        (2 * batch_block, INDEXER_HEAD_DIM),
                         dtype=torch.float8_e4m3fn,
                         device=self.device,
                     ),
-                    torch.empty((256, 4), dtype=torch.uint8, device=self.device),
-                    total_actual_tokens=8,
+                    torch.empty(
+                        (2 * batch_block, 4),
+                        dtype=torch.uint8,
+                        device=self.device,
+                    ),
+                    total_actual_tokens=batch_block,
+                )
+            )
+            torch.cuda.synchronize()
+            cache_after_bucket_warmup = _triton_cache_size(
+                _cp_gather_indexer_k_to_padded_kernel
+            )
+            self.assertEqual(cache_after_bucket_warmup, expected_cache_size)
+
+            self.assertTrue(
+                try_gather_indexer_k_to_padded(
+                    pool,
+                    block_table[:runtime_batch],
+                    padded[:runtime_batch],
+                    actual[:runtime_batch],
+                    torch.empty(
+                        (2 * runtime_batch, INDEXER_HEAD_DIM),
+                        dtype=torch.float8_e4m3fn,
+                        device=self.device,
+                    ),
+                    torch.empty(
+                        (2 * runtime_batch, 4),
+                        dtype=torch.uint8,
+                        device=self.device,
+                    ),
+                    total_actual_tokens=runtime_batch,
                 )
             )
             torch.cuda.synchronize()
             self.assertEqual(
                 _triton_cache_size(_cp_gather_indexer_k_to_padded_kernel),
-                indexer_cache_after_warmup,
+                cache_after_bucket_warmup,
             )
-
-            for expected_cache_size, (batch_block, runtime_batch) in enumerate(
-                ((8, 5), (64, 63)), start=2
-            ):
-                pool = torch.zeros(
-                    (2, 4, INDEXER_ENTRY_BYTES),
-                    dtype=torch.uint8,
-                    device=self.device,
-                )
-                block_table = torch.zeros(
-                    (batch_block, 1), dtype=torch.int32, device=self.device
-                )
-                padded = torch.full(
-                    (batch_block,), 2, dtype=torch.int64, device=self.device
-                )
-                actual = torch.ones(batch_block, dtype=torch.int64, device=self.device)
-                self.assertTrue(
-                    try_gather_indexer_k_to_padded(
-                        pool,
-                        block_table,
-                        padded,
-                        actual,
-                        torch.empty(
-                            (2 * batch_block, INDEXER_HEAD_DIM),
-                            dtype=torch.float8_e4m3fn,
-                            device=self.device,
-                        ),
-                        torch.empty(
-                            (2 * batch_block, 4),
-                            dtype=torch.uint8,
-                            device=self.device,
-                        ),
-                        total_actual_tokens=batch_block,
-                    )
-                )
-                torch.cuda.synchronize()
-                cache_after_bucket_warmup = _triton_cache_size(
-                    _cp_gather_indexer_k_to_padded_kernel
-                )
-                self.assertEqual(cache_after_bucket_warmup, expected_cache_size)
-
-                self.assertTrue(
-                    try_gather_indexer_k_to_padded(
-                        pool,
-                        block_table[:runtime_batch],
-                        padded[:runtime_batch],
-                        actual[:runtime_batch],
-                        torch.empty(
-                            (2 * runtime_batch, INDEXER_HEAD_DIM),
-                            dtype=torch.float8_e4m3fn,
-                            device=self.device,
-                        ),
-                        torch.empty(
-                            (2 * runtime_batch, 4),
-                            dtype=torch.uint8,
-                            device=self.device,
-                        ),
-                        total_actual_tokens=runtime_batch,
-                    )
-                )
-                torch.cuda.synchronize()
-                self.assertEqual(
-                    _triton_cache_size(_cp_gather_indexer_k_to_padded_kernel),
-                    cache_after_bucket_warmup,
-                )
 
 
 if __name__ == "__main__":

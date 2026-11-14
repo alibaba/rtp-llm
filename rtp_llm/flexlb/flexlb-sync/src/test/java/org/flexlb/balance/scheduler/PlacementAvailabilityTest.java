@@ -12,6 +12,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks placement availability versions for exact endpoints, groups and topology changes.
+ */
 class PlacementAvailabilityTest {
 
     @Test

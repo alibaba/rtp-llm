@@ -25,7 +25,6 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 @Slf4j
 final class LocalServiceDiscovery implements ServiceDiscovery {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /**
@@ -46,10 +45,10 @@ final class LocalServiceDiscovery implements ServiceDiscovery {
         this.file = Objects.requireNonNull(file, "discovery file");
     }
 
-    @Override
-    public void validate(Endpoint endpoint) {
-        if (endpoint == null || StringUtils.isBlank(endpoint.getAddress())) {
-            throw new IllegalArgumentException("endpoint address must not be blank");
+    public void listen(String address, ServiceHostListener listener) {
+        // Notify the listener once with the current view.
+        if (listener != null) {
+            listener.onHostsChanged(getHosts(address));
         }
     }
 
@@ -57,6 +56,13 @@ final class LocalServiceDiscovery implements ServiceDiscovery {
     public List<WorkerHost> getHosts(Endpoint endpoint) {
         validate(endpoint);
         return getHosts(endpoint.getAddress());
+    }
+
+    @Override
+    public void validate(Endpoint endpoint) {
+        if (endpoint == null || StringUtils.isBlank(endpoint.getAddress())) {
+            throw new IllegalArgumentException("endpoint address must not be blank");
+        }
     }
 
     public List<WorkerHost> getHosts(String address) {
@@ -73,13 +79,6 @@ final class LocalServiceDiscovery implements ServiceDiscovery {
             logFallbackOnce(e);
         }
         return lastGoodSnapshot.getOrDefault(address, List.of());
-    }
-
-    public void listen(String address, ServiceHostListener listener) {
-        // Notify the listener once with the current view.
-        if (listener != null) {
-            listener.onHostsChanged(getHosts(address));
-        }
     }
 
     @Override

@@ -20,7 +20,9 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Contract tests for the canonical route-projection value boundary. */
+/**
+ * Contract tests for the canonical route-projection value boundary.
+ */
 class RouteProjectionTest {
 
     @Test
@@ -156,6 +158,9 @@ class RouteProjectionTest {
                 .projectionPolicy();
     }
 
+    /**
+     * Counts full prediction evaluations to check projection caching.
+     */
     private static final class CountingEvaluator implements PrefillTimePredictor.Evaluator {
         private final AtomicInteger invocations = new AtomicInteger();
 

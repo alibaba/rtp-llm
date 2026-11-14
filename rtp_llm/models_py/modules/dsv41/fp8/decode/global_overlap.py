@@ -7,7 +7,6 @@ from dataclasses import dataclass
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4 import _record_tensor
 from rtp_llm.models_py.modules.dsv41.attn_type import INDEXER_KV
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_global, _v41_decode_indexer
 from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
@@ -20,13 +19,11 @@ _GLOBAL_COMPUTE_STREAMS: dict[int, torch.cuda.Stream] = {}
 def is_supported(attn, x, positions, req_ids, starts) -> bool:
     if (
         os.environ.get("DSV41_OVERLAP_GLOBAL_QKV", "0") != "1"
-        or os.environ.get("MOEDBG", "0") != "0"
         or not attn.is_kv_source
         or attn.compress_ratio not in (1, 2)
         or not x.is_cuda
         or x.ndim != 3
         or not 0 < x.shape[0] * x.shape[1] <= 64
-        or _record_tensor.should_record_layer(attn.layer_id)
         or not _v41_decode_global.is_supported(attn, x, positions, req_ids, starts)
     ):
         return False

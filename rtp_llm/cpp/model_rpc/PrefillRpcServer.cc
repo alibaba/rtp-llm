@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include <exception>
 #include "autil/Scope.h"
+#include "rtp_llm/cpp/model_rpc/StagePeerGroups.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -14,7 +15,9 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -32,77 +35,121 @@ namespace rtp_llm {
 
 namespace {
 
+// P/D stages own this stream serially. Use a private completion queue so their
+// blocking API can observe cancellation even when no Decode packet arrives.
+// In batch mode the FetchResponse ServerContext is bound after ALLOCATE, so
+// linking only the ClientContext's original parent cannot cover that path.
+class CancellableDecodeClientStream final: public PrefillGenerateContext::ClientStream {
+public:
+    CancellableDecodeClientStream(RpcService::Stub*              stub,
+                                  std::shared_ptr<ClientContext> context,
+                                  std::function<bool()>          is_cancelled):
+        context_(std::move(context)), is_cancelled_(std::move(is_cancelled)) {
+        stream_  = stub->AsyncRemoteGenerate(context_.get(), &completion_queue_, &operation_tag_);
+        started_ = waitForOperation();
+    }
+
+    ~CancellableDecodeClientStream() override {
+        // Do not invoke the borrowed owner callback during member destruction.
+        // Its cancel-state members may already have been destroyed.
+        if (!finished_) {
+            context_->TryCancel();
+            finish(/*observe_owner=*/false);
+        }
+        completion_queue_.Shutdown();
+        void* tag = nullptr;
+        bool  ok  = false;
+        while (completion_queue_.Next(&tag, &ok)) {}
+    }
+
+    bool Read(GenerateOutputsPB* response) override {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        if (!started_ || finished_) {
+            return false;
+        }
+        stream_->Read(response, &operation_tag_);
+        return waitForOperation();
+    }
+
+    bool Write(const GenerateRequestPB& request, grpc::WriteOptions options) override {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        if (!started_ || finished_) {
+            return false;
+        }
+        stream_->Write(request, options, &operation_tag_);
+        return waitForOperation();
+    }
+
+    bool WritesDone() override {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        if (!started_ || finished_) {
+            return false;
+        }
+        stream_->WritesDone(&operation_tag_);
+        return waitForOperation();
+    }
+
+    grpc::Status Finish() override {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        return finish(/*observe_owner=*/true);
+    }
+
+    void WaitForInitialMetadata() override {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        if (started_ && !finished_) {
+            stream_->ReadInitialMetadata(&operation_tag_);
+            waitForOperation();
+        }
+    }
+
+    bool NextMessageSize(uint32_t*) override {
+        return false;
+    }
+
+private:
+    bool waitForOperation(bool observe_owner = true) {
+        while (true) {
+            if (observe_owner && is_cancelled_ && is_cancelled_()) {
+                context_->TryCancel();
+            }
+            void* tag      = nullptr;
+            bool  ok       = false;
+            auto  deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(100);
+            auto  result   = completion_queue_.AsyncNext(&tag, &ok, deadline);
+            if (result == grpc::CompletionQueue::NextStatus::TIMEOUT) {
+                continue;
+            }
+            if (result == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
+                return false;
+            }
+            RTP_LLM_CHECK_WITH_INFO(tag == &operation_tag_, "unexpected P/D RPC completion tag");
+            return ok;
+        }
+    }
+
+    grpc::Status finish(bool observe_owner) {
+        if (!finished_) {
+            stream_->Finish(&status_, &operation_tag_);
+            if (!waitForOperation(observe_owner) && status_.ok()) {
+                status_ = grpc::Status(grpc::StatusCode::UNKNOWN, "Decode RPC completion queue closed");
+            }
+            finished_ = true;
+        }
+        return status_;
+    }
+
+    grpc::CompletionQueue                                                                         completion_queue_;
+    std::shared_ptr<ClientContext>                                                                context_;
+    std::function<bool()>                                                                         is_cancelled_;
+    std::unique_ptr<grpc::ClientAsyncReaderWriterInterface<GenerateRequestPB, GenerateOutputsPB>> stream_;
+    std::mutex                                                                                    operation_mutex_;
+    grpc::Status                                                                                  status_;
+    char                                                                                          operation_tag_ = 0;
+    bool                                                                                          started_  = false;
+    bool                                                                                          finished_ = false;
+};
+
 constexpr auto kDecodeChannelReadyTimeoutCap = std::chrono::milliseconds(15000);
-
-bool envValueIsTrue(const char* value) {
-    return value != nullptr
-           && (strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 || strcasecmp(value, "on") == 0
-               || strcasecmp(value, "yes") == 0);
-}
-
-bool prefillTraceLogEnabled() {
-    static const bool enabled = []() {
-        const char* value = std::getenv("PREFILL_TRACE_LOG_ENABLE");
-        if (value == nullptr) {
-            value = std::getenv("PREFILL_CACHE_DEBUG_LOG");
-        }
-        if (value == nullptr) {
-            value = std::getenv("KV_CACHE_DEBUG_LOG");
-        }
-        return envValueIsTrue(value);
-    }();
-    return enabled;
-}
-
-const char* prefillStageName(PrefillStatInfo::ExecuteStage stage) {
-    switch (stage) {
-        case PrefillStatInfo::start:
-            return "start";
-        case PrefillStatInfo::getRpcConnection:
-            return "getRpcConnection";
-        case PrefillStatInfo::multimodalProcess:
-            return "multimodalProcess";
-        case PrefillStatInfo::remoteAllocateResource:
-            return "remoteAllocateResource";
-        case PrefillStatInfo::enqueueRequest:
-            return "enqueueRequest";
-        case PrefillStatInfo::remoteLoadCacheStart:
-            return "remoteLoadCacheStart";
-        case PrefillStatInfo::pollLocalOutput:
-            return "pollLocalOutput";
-        case PrefillStatInfo::remoteLoadCacheEnd:
-            return "remoteLoadCacheEnd";
-        case PrefillStatInfo::RemoteGenerate:
-            return "RemoteGenerate";
-        case PrefillStatInfo::pollRemoteOutput:
-            return "pollRemoteOutput";
-        case PrefillStatInfo::finish:
-            return "finish";
-        default:
-            return "unknown";
-    }
-}
-
-void logPrefillFailureTrace(const char* event, PrefillGenerateContext& prefill_context) {
-    if (!prefillTraceLogEnabled()) {
-        return;
-    }
-    RTP_LLM_LOG_WARNING("Prefill request trace: event=%s request_id=%ld request_key=%s stage=%s retry_times=%ld "
-                        "retry_cost_time_ms=%ld execute_time_ms=%ld decode_addr=%s grpc_code=%d grpc_message=%s "
-                        "error_code=%d error_message=%s",
-                        event,
-                        prefill_context.request_id,
-                        prefill_context.request_key.c_str(),
-                        prefillStageName(prefill_context.stat_info.stage),
-                        prefill_context.retry_times,
-                        prefill_context.retry_cost_time_ms,
-                        prefill_context.executeTimeMs(),
-                        prefill_context.decode_addr.c_str(),
-                        static_cast<int>(prefill_context.error_status.error_code()),
-                        prefill_context.error_status.error_message().c_str(),
-                        static_cast<int>(prefill_context.error_info.code()),
-                        prefill_context.error_info.ToString().c_str());
-}
 
 }  // namespace
 
@@ -148,7 +195,10 @@ std::optional<ErrorInfo> PrefillRpcServer::parseDownstreamError(const grpc::Stat
             }                                                                                                          \
         }                                                                                                              \
         auto status = prefill_context.closeGrpcStream(ErrorCodeToString(new_error_code));                              \
-        if (!status.ok()) {                                                                                            \
+        if (prefill_context.isRequestCancelled()) {                                                                     \
+            new_error_code = ErrorCode::CANCELLED;                                                                       \
+            new_error_msg  = "request is cancelled";                                                                    \
+        } else if (!status.ok()) {                                                                                     \
             const auto& error_msg = status.error_message();                                                            \
             if (error_msg.find("Connect Failed") != std::string::npos) {                                               \
                 new_error_code = ErrorCode::CONNECT_FAILED;                                                            \
@@ -188,7 +238,6 @@ std::optional<ErrorInfo> PrefillRpcServer::parseDownstreamError(const grpc::Stat
             prefill_context.getStream()->reportEvent(StreamEvents::Error, new_error_code, new_error_msg);              \
         }                                                                                                              \
         setContextError(prefill_context, ErrorInfo(new_error_code, new_error_msg));                                    \
-        logPrefillFailureTrace("client_grpc_error", prefill_context);                                                  \
         return;                                                                                                        \
     }
 
@@ -296,7 +345,6 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
         setContextError(
             prefill_context,
             ErrorInfo(ErrorCode::GET_HOST_FAILED, "get host for decode cluster " + decode_cluster_name_ + " failed"));
-        logPrefillFailureTrace("get_rpc_connection_no_decode_host", prefill_context);
         return;
     }
     auto decode_addr = host->ip + ":" + std::to_string(host->rpc_port);
@@ -324,7 +372,6 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
                                           + " failed: " + connect_status.status().ToString()));
         }
         prefill_context.decode_addr = decode_addr;
-        logPrefillFailureTrace("get_rpc_connection_failed", prefill_context);
         return;
     }
     prefill_context.decode_addr     = decode_addr;
@@ -362,7 +409,6 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
         RTP_LLM_LOG_WARNING("request [%ld] rejected: %s", prefill_context.request_id, error.ToString().c_str());
         prefill_context.setRetryable(false);
         setContextError(prefill_context, error);
-        logPrefillFailureTrace("multimodal_process_failed", prefill_context);
         return;
     }
 
@@ -374,7 +420,6 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
     if (!result.ok()) {
         prefill_context.setRetryable(isRetryableMultimodalError(result.code()));
         setContextError(prefill_context, result);
-        logPrefillFailureTrace("multimodal_process_failed", prefill_context);
         return;
     }
     prefill_context.markMultimodalProcessed(true);
@@ -404,7 +449,25 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
     for (const auto& address : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(address);
     }
+    fillStagePeerGroups(alloc_request, prefill_context.prefill_worker_cache_store_addrs);
     return alloc_request;
+}
+
+void PrefillRpcServer::fillStagePeerGroups(GenerateRequestPB& alloc_request, const std::vector<std::string>& workers) {
+    /** Single-stage prefill keeps flat peer addresses; PP additionally publishes stage routing. */
+    const auto groups = buildStagePeerGroups(maga_init_params_.parallelism_config, workers);
+    if (groups.empty()) {
+        return;
+    }
+    for (const auto& group : groups) {
+        auto* group_pb = alloc_request.add_stage_peer_groups();
+        group_pb->set_layer_begin(group.range.begin);
+        group_pb->set_layer_count(group.range.size);
+        group_pb->set_is_last_stage(group.is_last_stage);
+        for (const auto& peer : group.peer_addrs) {
+            group_pb->add_peer_addrs(peer);
+        }
+    }
 }
 
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
@@ -418,7 +481,14 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
         setContextError(prefill_context, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline exhausted"));
         return;
     }
-    auto client_context = std::make_shared<ClientContext>();
+    std::shared_ptr<ClientContext> client_context;
+    if (prefill_context.server_context) {
+        grpc::PropagationOptions options;
+        options.enable_cancellation_propagation().disable_deadline_propagation();
+        client_context = ClientContext::FromServerContext(*prefill_context.server_context, options);
+    } else {
+        client_context = std::make_shared<ClientContext>();
+    }
     // P->D CLIENT span: each retry rebuilds ClientContext and opens a NEW
     // physical RemoteGenerate bidi stream (stub->RemoteGenerate
     // below), so one CLIENT span per attempt matches the OTel "one span per
@@ -460,8 +530,15 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
         client_context->TryCancel();
     }
     // With neither a request deadline nor max RPC timeout, gRPC keeps no deadline.
-    prefill_context.client_stream =
-        std::move(prefill_context.grpc_connection.stub->RemoteGenerate(client_context.get()));
+    if (prefill_context.server_context) {
+        prefill_context.client_stream = prefill_context.grpc_connection.stub->RemoteGenerate(client_context.get());
+    } else {
+        // Batch enqueue opens the stream before FetchResponse binds its ServerContext.
+        prefill_context.client_stream = std::make_shared<CancellableDecodeClientStream>(
+            prefill_context.grpc_connection.stub.get(),
+            client_context,
+            [&prefill_context] { return prefill_context.isRequestCancelled(); });
+    }
     auto&             client_stream = prefill_context.client_stream;
     GenerateRequestPB alloc_request = buildAllocateRequest(prefill_context);
 
@@ -472,15 +549,6 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Read(&allocate_response), ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED);
     prefill_context.supports_prefill_completion = allocate_response.supports_prefill_completion();
-    if (prefillTraceLogEnabled() && allocate_response.has_error_info()
-        && allocate_response.error_info().error_code() != 0) {
-        RTP_LLM_LOG_WARNING("Prefill request trace: event=remote_allocate_response_error request_id=%ld "
-                            "decode_addr=%s remote_error_code=%d remote_error_message=%s",
-                            prefill_context.request_id,
-                            prefill_context.decode_addr.c_str(),
-                            static_cast<int>(allocate_response.error_info().error_code()),
-                            allocate_response.error_info().error_message().c_str());
-    }
     RTP_LLM_LOG_DEBUG("request [%ld] remote allocate resource done", prefill_context.request_id);
 }
 
@@ -501,7 +569,6 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
     prefill_context.stat_info.remote_load_cache_wait_stream_rt_us += currentTimeUs() - start_time_us;
     if (wait_result.hasError()) {
         setContextError(prefill_context, wait_result);
-        logPrefillFailureTrace("wait_stream_before_run_failed", prefill_context);
         return;
     }
     AtomicGuard       request_guard(loading_cache_requests_);
@@ -543,7 +610,6 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
                     prefill_context, ErrorInfo(ErrorCode::UNKNOWN_ERROR, first_status.error_message()), first_status);
             }
         }
-        logPrefillFailureTrace("poll_local_output_failed", prefill_context);
         return;
     }
     RTP_LLM_LOG_DEBUG("request [%ld] poll local output end", prefill_context.request_id);
@@ -553,7 +619,6 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
         prefill_context.finished = true;
         auto error_info          = stream->statusInfo();
         setContextError(prefill_context, error_info);
-        logPrefillFailureTrace("local_stream_failed", prefill_context);
     }
 }
 
@@ -620,6 +685,8 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
 
     auto sp_output_buffer = stream->getSPOutputBuffer();
 
+    /** P and D configure PP independently. Include MTP/EAGLE proposal probabilities and draft hidden
+     * in the PD handoff so a non-PP D can verify the candidate and continue multi-step drafting. */
     if (sp_output_buffer && !engine_->isDSpark()) {
         auto all_probs_cpu =
             sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
@@ -698,6 +765,10 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             return;
         }
     }
+    if (prefill_context.isRequestCancelled()) {
+        setContextError(prefill_context, ErrorInfo(ErrorCode::CANCELLED, "request cancelled"));
+        return;
+    }
     auto status = prefill_context.closeGrpcStream();
     if (!status.ok() && status.error_code() != grpc::StatusCode::CANCELLED) {
         CLIENT_GRPC_RET_IF_ERROR(prefill_context, false, ErrorCode::REMOTE_GENERATE_FAILED);
@@ -766,7 +837,6 @@ grpc::Status PrefillRpcServer::syncPrefix(PrefillGenerateContext& prefill_contex
     EXECUTE_WITH_RETRY(
         prepareAllocateResource, prefill_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
     if (prefill_context.hasError()) {
-        logPrefillFailureTrace("prepare_allocate_failed", prefill_context);
         RTP_LLM_LOG_WARNING(
             "request [%ld] prepare allocate resource failed after retry [%ld] times, cost time ms [%ld], "
             "max retry time [%ld], max retry timeout ms [%ld], retryable [%d], error code [%d:%s]",
@@ -820,31 +890,11 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     const auto&        request_config = request->generate_config();
     // Resolve generation mode before routing so the router and converter preserve the same
     // legacy bare-zero semantics and reject the same explicit prefill-only conflicts.
-    const int raw_max_new_tokens      = request_config.max_new_tokens();
     const int resolved_max_new_tokens = QueryConverter::resolveMaxNewTokens(request_config);
     auto      pd_separation           = resolved_max_new_tokens > 1 && request_config.num_beams() <= 1
                          && request_config.variable_num_beams().size() == 0
                          && request_config.num_return_sequences() <= 1 && request_config.can_use_pd_separation();
-    if (prefillTraceLogEnabled()) {
-        RTP_LLM_LOG_INFO("Prefill request trace: event=recv request_id=%ld pd_separation=%d token_ids=%d "
-                         "raw_max_new_tokens=%d resolved_max_new_tokens=%d num_beams=%d num_return_sequences=%d "
-                         "can_use_pd_separation=%d timeout_ms=%ld",
-                         request->request_id(),
-                         pd_separation,
-                         request->token_ids_size(),
-                         raw_max_new_tokens,
-                         resolved_max_new_tokens,
-                         request->generate_config().num_beams(),
-                         request->generate_config().num_return_sequences(),
-                         request->generate_config().can_use_pd_separation(),
-                         static_cast<int64_t>(request->generate_config().timeout_ms()));
-    }
     if (!pd_separation) {
-        if (prefillTraceLogEnabled()) {
-            RTP_LLM_LOG_INFO("Prefill request trace: event=bypass_local request_id=%ld token_ids=%d",
-                             request->request_id(),
-                             request->token_ids_size());
-        }
         return LocalRpcServer::GenerateStreamCall(server_context, request, writer);
     }
 
@@ -926,17 +976,14 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         setContextError(prefill_context,
                         error_info,
                         serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, error_info));
-        logPrefillFailureTrace("catch_invalid_argument", prefill_context);
         return prefill_context.error_status;
     } catch (const std::exception& e) {
         auto error_msg = "request [" + prefill_context.request_key + "] catch exception [" + e.what() + "]";
         setContextError(prefill_context, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_msg));
-        logPrefillFailureTrace("catch_exception", prefill_context);
         return prefill_context.error_status;
     } catch (...) {
         auto error_msg = "request [" + prefill_context.request_key + "] catch unknown exception";
         setContextError(prefill_context, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_msg));
-        logPrefillFailureTrace("catch_unknown_exception", prefill_context);
         return prefill_context.error_status;
     }
 

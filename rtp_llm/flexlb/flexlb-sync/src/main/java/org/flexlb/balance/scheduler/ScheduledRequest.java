@@ -29,7 +29,6 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  */
 public final class ScheduledRequest implements Prioritized {
-
     private static final AtomicLong ENQUEUE_SEQUENCE = new AtomicLong();
 
     private final BalanceContext ctx;
@@ -38,6 +37,7 @@ public final class ScheduledRequest implements Prioritized {
     private final ServerStatus prefill;
     private final PrefillEndpoint prefillEp;
     private final DecodeBinding decodeBinding;
+
     private final long enqueuedAtMs;
     private final long enqueueSequence;
     private final long expiresAtMs;
@@ -111,12 +111,6 @@ public final class ScheduledRequest implements Prioritized {
                         : schedulingConfig.getDispatcher().getMaxInflightPerPrefillWorker();
     }
 
-    // -- accessors --
-
-    public BalanceContext ctx() {
-        return ctx;
-    }
-
     /** O(1) wire-size bound; grouping must not parse or copy GenerateInput payloads. */
     public long batchPayloadSizeUpperBound() {
         var input = ctx().getGenerateInputPb();
@@ -128,22 +122,10 @@ public final class ScheduledRequest implements Prioritized {
                 + roleAddressSizeUpperBound(decode());
     }
 
-    private static long roleAddressSizeUpperBound(ServerStatus status) {
-        if (status == null) {
-            return 0L;
-        }
-        // Tags, lengths, enum, role name and two int32 ports fit in 64 bytes.
-        // UTF-8 requires at most three bytes per Java UTF-16 code unit.
-        String ip = status.getServerIp();
-        return 64L + (ip == null ? 0L : 3L * ip.length());
-    }
+    // -- accessors --
 
-    public CompletableFuture<Response> future() {
-        return future;
-    }
-
-    public Response routeResponse() {
-        return routeResponse;
+    public BalanceContext ctx() {
+        return ctx;
     }
 
     public ServerStatus prefill() {
@@ -152,6 +134,14 @@ public final class ScheduledRequest implements Prioritized {
 
     public ServerStatus decode() {
         return decodeBinding.status();
+    }
+
+    public CompletableFuture<Response> future() {
+        return future;
+    }
+
+    public Response routeResponse() {
+        return routeResponse;
     }
 
     public PrefillEndpoint prefillEp() {
@@ -191,34 +181,6 @@ public final class ScheduledRequest implements Prioritized {
         return routeDelivery;
     }
 
-    /** Bind the sole publish-time route reservation before ACTIVE becomes visible. */
-    boolean bindPublishedRouteReservation(PrefillState.RouteReservation reservation) {
-        return publishedRouteReservation.compareAndSet(
-                null, Objects.requireNonNull(reservation, "reservation"));
-    }
-
-    /** Transfer the sole uncommitted route reservation to delivery or cleanup. */
-    PrefillState.RouteReservation takePublishedRouteReservation() {
-        return publishedRouteReservation.getAndSet(null);
-    }
-
-    /** Observe without transferring; optimistic preparation does not transfer ownership. */
-    PrefillState.RouteReservation publishedRouteReservation() {
-        return publishedRouteReservation.get();
-    }
-
-    /** Transfer only the reservation validated during optimistic preparation. */
-    boolean takePublishedRouteReservation(PrefillState.RouteReservation expected) {
-        return publishedRouteReservation.compareAndSet(
-                Objects.requireNonNull(expected, "expected"), null);
-    }
-
-    /** Restore ownership after a pre-commit operation made no state change. */
-    boolean restorePublishedRouteReservation(PrefillState.RouteReservation reservation) {
-        return publishedRouteReservation.compareAndSet(
-                null, Objects.requireNonNull(reservation, "reservation"));
-    }
-
     /**
      * Normalized request priority. Satisfies {@link Prioritized#priority()}
      * for the per-worker ordered active index.
@@ -254,11 +216,52 @@ public final class ScheduledRequest implements Prioritized {
         return hitCache;
     }
 
+    /** Bind the sole publish-time route reservation before ACTIVE becomes visible. */
+    boolean bindPublishedRouteReservation(PrefillState.RouteReservation reservation) {
+        return publishedRouteReservation.compareAndSet(
+                null, Objects.requireNonNull(reservation, "reservation"));
+    }
+
+    /** Transfer the sole uncommitted route reservation to delivery or cleanup. */
+    PrefillState.RouteReservation takePublishedRouteReservation() {
+        return publishedRouteReservation.getAndSet(null);
+    }
+
+    /** Observe without transferring; optimistic preparation does not transfer ownership. */
+    PrefillState.RouteReservation publishedRouteReservation() {
+        return publishedRouteReservation.get();
+    }
+
+    /** Transfer only the reservation validated during optimistic preparation. */
+    boolean takePublishedRouteReservation(PrefillState.RouteReservation expected) {
+        return publishedRouteReservation.compareAndSet(
+                Objects.requireNonNull(expected, "expected"), null);
+    }
+
+    /** Restore ownership after a pre-commit operation made no state change. */
+    boolean restorePublishedRouteReservation(PrefillState.RouteReservation reservation) {
+        return publishedRouteReservation.compareAndSet(
+                null, Objects.requireNonNull(reservation, "reservation"));
+    }
+
+    private static long roleAddressSizeUpperBound(ServerStatus status) {
+        if (status == null) {
+            return 0L;
+        }
+        // Tags, lengths, enum, role name and two int32 ports fit in 64 bytes.
+        // UTF-8 requires at most three bytes per Java UTF-16 code unit.
+        String ip = status.getServerIp();
+        return 64L + (ip == null ? 0L : 3L * ip.length());
+    }
+
     /** Extract cache-hit length from a {@link ServerStatus} debug info. */
     private static long hitCacheOf(ServerStatus ss) {
         return ss != null && ss.getDebugInfo() != null ? ss.getDebugInfo().getHitCacheLen() : 0;
     }
 
+    /**
+     * Identifies the Decode ownership mode captured by a scheduled request.
+     */
     public enum DecodeMode {
         IMMEDIATE,
         WAIT_AT_PLACEMENT,

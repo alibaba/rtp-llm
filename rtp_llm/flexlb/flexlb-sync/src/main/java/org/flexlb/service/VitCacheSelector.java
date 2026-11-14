@@ -19,44 +19,46 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
 
-/** Selects cache-affine ViT endpoints and owns temporary cold-key placements. */
+/**
+ * Selects cache-affine ViT endpoints and owns temporary cold-key placements.
+ */
 @Component
 public class VitCacheSelector {
     private static final long MIN_PENDING_TTL_MS = 120_000;
     private static final long MAX_PENDING_TTL_MS = 600_000;
     private static final int MAX_PENDING = 100_000;
+
     private final VitCacheDirectory directory;
     private final WorkerDirectory workers;
     private final LinkedHashMap<String, Placement> pending = new LinkedHashMap<>();
+
     private long pendingPrunedAt;
-
-    private record Placement(WorkerStatus worker, String instance, long expiry) {
-        boolean matches(Candidate candidate, long now) {
-            return candidate != null
-                    && worker == candidate.worker()
-                    && expiry > now
-                    && (instance == null || Objects.equals(instance, candidate.instance()));
-        }
-    }
-
-    private record MatchScore(int hashHits, int embeddingHits, int gpuHits, int pendingHits)
-            implements Comparable<MatchScore> {
-        @Override
-        public int compareTo(MatchScore other) {
-            int result = Integer.compare(hashHits, other.hashHits);
-            if (result == 0) {
-                result = Integer.compare(embeddingHits, other.embeddingHits);
-            }
-            if (result == 0) {
-                result = Integer.compare(gpuHits, other.gpuHits);
-            }
-            return result == 0 ? Integer.compare(pendingHits, other.pendingHits) : result;
-        }
-    }
 
     public VitCacheSelector(VitCacheDirectory directory, WorkerDirectory workers) {
         this.directory = directory;
         this.workers = workers;
+    }
+
+    /** Holds the selected endpoint generation through the admission handoff. */
+    public synchronized SelectedRole selectPinned(BalanceContext ctx, String group) {
+        ServerStatus result =
+                ctx.getRequest().getSelectedVit() == null
+                        ? select(ctx, group)
+                        : validate(ctx, group);
+        if (!result.isSuccess()) {
+            return null;
+        }
+        WorkerEndpoint.GenerationPin pin =
+                workers.captureEndpoint(
+                        RoleType.VIT, result.getServerIp() + ":" + result.getHttpPort());
+        if (pin == null) {
+            return null;
+        }
+        if (pin.generationId() != result.getWorkerGeneration()) {
+            pin.close();
+            return null;
+        }
+        return SelectedRole.stateless(pin, result);
     }
 
     public synchronized ServerStatus select(BalanceContext ctx, String group) {
@@ -148,28 +150,6 @@ public class VitCacheSelector {
         }
     }
 
-    /** Holds the selected endpoint generation through the admission handoff. */
-    public synchronized SelectedRole selectPinned(BalanceContext ctx, String group) {
-        ServerStatus result =
-                ctx.getRequest().getSelectedVit() == null
-                        ? select(ctx, group)
-                        : validate(ctx, group);
-        if (!result.isSuccess()) {
-            return null;
-        }
-        WorkerEndpoint.GenerationPin pin =
-                workers.captureEndpoint(
-                        RoleType.VIT, result.getServerIp() + ":" + result.getHttpPort());
-        if (pin == null) {
-            return null;
-        }
-        if (pin.generationId() != result.getWorkerGeneration()) {
-            pin.close();
-            return null;
-        }
-        return SelectedRole.stateless(pin, result);
-    }
-
     private static ServerStatus errorStatus(StrategyErrorType error) {
         ServerStatus status = new ServerStatus();
         status.setCode(error.getErrorCode());
@@ -188,5 +168,36 @@ public class VitCacheSelector {
         status.setRequestId(requestId);
         status.setSuccess(true);
         return status;
+    }
+
+    /**
+     * Checks whether a retained multimodal placement still matches the candidate generation and
+     * expiry.
+     */
+    private record Placement(WorkerStatus worker, String instance, long expiry) {
+        boolean matches(Candidate candidate, long now) {
+            return candidate != null
+                    && worker == candidate.worker()
+                    && expiry > now
+                    && (instance == null || Objects.equals(instance, candidate.instance()));
+        }
+    }
+
+    /**
+     * Orders multimodal candidates by the configured cache coverage and residency preference.
+     */
+    private record MatchScore(int hashHits, int embeddingHits, int gpuHits, int pendingHits)
+            implements Comparable<MatchScore> {
+        @Override
+        public int compareTo(MatchScore other) {
+            int result = Integer.compare(hashHits, other.hashHits);
+            if (result == 0) {
+                result = Integer.compare(embeddingHits, other.embeddingHits);
+            }
+            if (result == 0) {
+                result = Integer.compare(gpuHits, other.gpuHits);
+            }
+            return result == 0 ? Integer.compare(pendingHits, other.pendingHits) : result;
+        }
     }
 }

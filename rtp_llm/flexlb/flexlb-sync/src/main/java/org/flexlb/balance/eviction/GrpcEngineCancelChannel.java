@@ -12,20 +12,9 @@ import org.springframework.stereotype.Component;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Production {@link EngineCancelChannel} that forwards cancel intents to the
- * victim's original Prefill worker via the engine gRPC
- * {@code RpcService.Cancel} method. The original Prefill is the authoritative
- * producer of typed {@code CANCELED}; Decode does not implement Cancel.
- *
- * <p>Transport behavior is independent from admission policy:
- * {@code preemption.allowedVictimStages} must include
- * {@code DECODE_ENGINE_OWNED} before the planner can use this transport.
- *
- * <p>Contract mirror of {@link EngineCancelChannel}: a cancel is an intent
- * injection only — settlement requires original-Prefill WorkerStatus carrying
- * typed {@code CANCELED+8429}. The engine Cancel RPC distinguishes ACCEPTED from NOT_FOUND;
- * these map to the matching local outcomes, while
- * any transport failure to {@code failed()} — never throws synchronously.
+ * Sends cancellation to the victim's original Prefill worker and maps replies or transport failures
+ * to asynchronous outcomes. RPC acceptance injects intent; release still requires the original
+ * worker's typed cancellation feedback.
  */
 @Slf4j
 @Component

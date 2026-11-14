@@ -28,7 +28,7 @@ import shutil
 import uuid
 import weakref
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Callable, Mapping, Optional
 
 import numpy as np
 import torch
@@ -315,6 +315,61 @@ def _prefault_host_tensor(tensor: torch.Tensor, name: str) -> None:
     )
 
 
+def _load_engram_tables(
+    root: Path, weight_map: Mapping, prefix: str, expected: tuple
+) -> tuple:
+    """Load one engram layer's embed pair as the /dev/shm staging copy source.
+
+    Invoked at most once per table, by the flock winner, on a cache miss —
+    attaching processes never read the big tensors. Uses stock per-tensor
+    ``safe_open`` (measured ~102 MB/s per stream on the CI NAS; the
+    fastsafetensors loaders bring no gain here — their fast shm copier is
+    GPU-oriented while the nogds CPU copier benchmarks below the plain
+    per-tensor stream).
+    """
+    from time import perf_counter
+
+    weight_name, scale_name = prefix + "embed.weight", prefix + "embed.scale"
+    for name in (weight_name, scale_name):
+        if name not in weight_map:
+            raise KeyError(f"V4.1 checkpoint is missing {name}")
+    started = perf_counter()
+    from safetensors import safe_open
+
+    pair = []
+    for name in (weight_name, scale_name):
+        with safe_open(
+            root / weight_map[name], framework="pt", device="cpu"
+        ) as file:
+            pair.append(file.get_tensor(name))
+    weight, scales = pair
+    reader = "per-tensor"
+    rows, width = expected
+    if tuple(weight.shape) != expected:
+        raise ValueError(
+            f"Engram table shape {weight.shape} does not match {expected}"
+        )
+    if tuple(scales.shape) != (rows, width // 32):
+        raise ValueError(
+            f"Engram scale shape {scales.shape} does not match {(rows, width // 32)}"
+        )
+    if (
+        weight.dtype != torch.float8_e4m3fn
+        or weight.element_size() != 1
+        or scales.element_size() != 1
+    ):
+        raise ValueError("Pinned Engram tables require native FP8/E8M0 bytes")
+    nbytes = weight.numel() + scales.numel()
+    logger.info(
+        "Engram %s read %.2f GiB from checkpoint in %.1fs (%s)",
+        prefix,
+        nbytes / 1024**3,
+        perf_counter() - started,
+        reader,
+    )
+    return weight, scales
+
+
 def _live_leases(data_path: Path):
     leases = []
     for lease in data_path.parent.glob(data_path.name + ".lease.*"):
@@ -330,12 +385,52 @@ def _live_leases(data_path: Path):
     return leases
 
 
+_ENGRAM_TABLE_TTL_SECONDS = 3600  # GC window; active attaches refresh mtime
+
+
+def _prune_expired_engram_tables() -> None:
+    """Drop stale /dev/shm Engram tables so persistence stays bounded.
+
+    The staged tables survive the process group that created them (the cold
+    staging of ~94 GiB per layer is far too expensive to repeat per run);
+    this TTL prune, taken under the creating digest's lock, bounds the
+    resident set. Tables with live leases are never pruned.
+    """
+    import time
+
+    cutoff = time.time() - _ENGRAM_TABLE_TTL_SECONDS
+    for table in Path("/dev/shm").glob(f"rtp_llm_engram_{os.getuid()}_*"):
+        if "." in table.name:  # .partial/.lease artifacts have their own paths
+            continue
+        try:
+            stat = table.stat()
+            if stat.st_mtime >= cutoff:
+                continue
+            if _live_leases(table):
+                continue
+            if table.stat().st_ino != stat.st_ino:
+                # The name now maps to a freshly created table (a creator
+                # replaced it after our expiry verdict on the old inode);
+                # never let the prune unlink a live generation.
+                continue
+            table.unlink(missing_ok=True)
+            logger.info("Pruned expired Engram shared table %s", table)
+        except FileNotFoundError:
+            continue
+
+
 def _release_shared_table(data_path, lock_path, lease_path):
     with open(lock_path, "a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         Path(lease_path).unlink(missing_ok=True)
         if not _live_leases(Path(data_path)):
-            Path(data_path).unlink(missing_ok=True)
+            # Keep the staged table for the next run on this host: the ~94 GiB
+            # cold staging amortizes across runs and is reclaimed by the TTL
+            # prune instead. Refresh mtime so the TTL measures last use.
+            try:
+                os.utime(data_path)
+            except OSError:
+                pass
 
 
 class _CudaArrayView:
@@ -356,19 +451,50 @@ class _PinnedSharedTable:
     Disk-backed MAP_SHARED mappings cannot be CUDA-registered on all drivers.
     A tmpfs mapping supports registration without the private COW copies that
     pinning a safetensors MAP_PRIVATE mapping could introduce. A lock protects
-    one-time creation. Per-process leases remove the file after the last reader
-    exits; stale leases from SIGKILL are pruned on the next access.
+    one-time creation. Per-process leases keep the table's mtime fresh while
+    readers are attached; after the last reader exits the table stays resident
+    for the next run on this host and is reclaimed by the TTL prune. Stale
+    leases from SIGKILL are pruned on the next access.
+
+    The copy source may be a lazy ``loader`` callable invoked only by the lock
+    winner on a cache miss, so attaching readers never read the checkpoint.
     """
 
-    def __init__(self, weight, scales, source_identity, device):
+    def __init__(
+        self,
+        weight,
+        scales,
+        source_identity,
+        device,
+        *,
+        loader: Optional[Callable[[], tuple]] = None,
+        table_shape: Optional[tuple] = None,
+    ):
         digest = hashlib.sha256(source_identity.encode()).hexdigest()[:24]
         data_path = Path("/dev/shm") / f"rtp_llm_engram_{os.getuid()}_{digest}"
         lock_path = Path("/tmp") / (data_path.name + ".lock")
         lease_path = Path(str(data_path) + f".lease.{os.getpid()}.{uuid.uuid4().hex}")
-        weight_bytes = weight.numel()
-        total_bytes = weight_bytes + scales.numel()
-        if weight.element_size() != 1 or scales.element_size() != 1:
-            raise ValueError("Pinned Engram tables require native FP8/E8M0 bytes")
+        if loader is None:
+            weight_bytes = weight.numel()
+            scale_bytes = scales.numel()
+            if weight.element_size() != 1 or scales.element_size() != 1:
+                raise ValueError("Pinned Engram tables require native FP8/E8M0 bytes")
+            weight_shape, weight_dtype = tuple(weight.shape), weight.dtype
+            scales_shape = tuple(scales.shape)
+        else:
+            if weight is not None or scales is not None or table_shape is None:
+                raise ValueError(
+                    "PinnedSharedTable lazy mode takes table_shape, not tensors"
+                )
+            rows, width = table_shape
+            # Same block-size expression as HostEngramEmbedding so the shared
+            # file geometry and the consumer's scale view can never disagree.
+            weight_shape, scales_shape = table_shape, (rows, width // 32)
+            weight_dtype = torch.float8_e4m3fn
+            weight_bytes, scale_bytes = rows * width, rows * (width // 32)
+            if weight_dtype.itemsize != 1:
+                raise ValueError("Pinned Engram tables require native FP8/E8M0 bytes")
+        total_bytes = weight_bytes + scale_bytes
         with open(lock_path, "a+b") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             _live_leases(data_path)
@@ -377,6 +503,7 @@ class _PinnedSharedTable:
                     os.kill(int(partial.name.rsplit(".", 1)[1]), 0)
                 except ProcessLookupError:
                     partial.unlink(missing_ok=True)
+            _prune_expired_engram_tables()
             if not data_path.exists():
                 free = shutil.disk_usage(data_path.parent).free
                 if free < total_bytes:
@@ -384,6 +511,10 @@ class _PinnedSharedTable:
                         f"Engram needs {total_bytes / 1024**3:.2f} GiB shared RAM, "
                         f"but /dev/shm has {free / 1024**3:.2f} GiB free"
                     )
+                # At most one invocation, by the flock winner, only on a miss;
+                # attaching processes (lock waiters that find the file present)
+                # never materialize the ~94 GiB pair from the checkpoint.
+                sources = (weight, scales) if loader is None else loader()
                 partial = Path(str(data_path) + f".partial.{os.getpid()}")
                 try:
                     with open(partial, "w+b") as file:
@@ -393,7 +524,7 @@ class _PinnedSharedTable:
                         try:
                             destination = np.frombuffer(mapping, dtype=np.uint8)
                             offset = 0
-                            for tensor in (weight, scales):
+                            for tensor in sources:
                                 source = tensor.view(torch.uint8).reshape(-1).numpy()
                                 for begin in range(0, source.size, 64 * 1024**2):
                                     end = min(begin + 64 * 1024**2, source.size)
@@ -401,7 +532,7 @@ class _PinnedSharedTable:
                                         begin:end
                                     ]
                                 offset += source.size
-                            del destination, source
+                            del destination, source, sources
                         finally:
                             mapping.close()
                     os.replace(partial, data_path)
@@ -420,9 +551,13 @@ class _PinnedSharedTable:
             with open(data_path, "r+b") as file:
                 mapping = mmap.mmap(file.fileno(), total_bytes)
             lease_path.touch(mode=0o600)
+            try:
+                os.utime(data_path)  # refresh LRU for the TTL prune
+            except OSError:
+                pass
         self.storage = torch.frombuffer(mapping, dtype=torch.uint8)
-        self.weight = self.storage[:weight_bytes].view(weight.dtype).view(weight.shape)
-        self.scales = self.storage[weight_bytes:].view(torch.uint8).view(scales.shape)
+        self.weight = self.storage[:weight_bytes].view(weight_dtype).view(weight_shape)
+        self.scales = self.storage[weight_bytes:].view(torch.uint8).view(scales_shape)
         self._lease_finalizer = weakref.finalize(
             self, _release_shared_table, str(data_path), str(lock_path), str(lease_path)
         )
@@ -679,29 +814,43 @@ class Engram(nn.Module):
             ) as file:
                 return file.get_tensor(name)
 
-        table, scales = load("embed.weight"), load("embed.scale")
         expected = (layout.num_embeddings[layer_hash_index], layout.head_dim)
-        if tuple(table.shape) != expected:
-            raise ValueError(
-                f"Engram table shape {table.shape} does not match {expected}"
-            )
         pinned = None
         if torch.device(device).type == "cuda":
             from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
-            identity = [str(root.resolve()), prefix]
+            # "staging-v2" salts the digest: tables staged by the removed
+            # fastsafetensors view path could be silently corrupted (its
+            # generator freed the 94 GiB backing buffer before the staging
+            # copy read it); the salt orphans any such table for TTL prune.
+            identity = [str(root.resolve()), prefix, "staging-v2"]
             for suffix in ("embed.weight", "embed.scale"):
                 path = root / weight_map[prefix + suffix]
                 stat = path.stat()
                 identity.extend(
                     [str(path.resolve()), str(stat.st_size), str(stat.st_mtime_ns)]
                 )
-            pinned = _PinnedSharedTable(table, scales, "|".join(identity), device)
+            # Lazy source: only the flock winner materializes the ~94 GiB pair
+            # (per-tensor safe_open reads inside _load_engram_tables); processes that
+            # find the shared table already present never read it at all.
+            pinned = _PinnedSharedTable(
+                None,
+                None,
+                "|".join(identity),
+                device,
+                loader=lambda: _load_engram_tables(root, weight_map, prefix, expected),
+                table_shape=expected,
+            )
             table, scales = pinned.weight, pinned.scales
             projection = V41MXFP8Linear(
                 load("wkv.weight").to(device), load("wkv.scale").to(device)
             )
         else:
+            table, scales = load("embed.weight"), load("embed.scale")
+            if tuple(table.shape) != expected:
+                raise ValueError(
+                    f"Engram table shape {table.shape} does not match {expected}"
+                )
             _prefault_host_tensor(table, prefix + "embed.weight")
             _prefault_host_tensor(scales, prefix + "embed.scale")
             projection = _ReferenceWKV(

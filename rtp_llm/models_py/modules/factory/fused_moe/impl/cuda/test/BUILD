@@ -26,4 +26,3 @@ py_test (
     ],
     exec_properties = {"gpu": "L20_CU13"},
 )
-

@@ -6,6 +6,9 @@ import lombok.Getter;
 import lombok.Setter;
 import org.flexlb.balance.prediction.DecodeCostFormula;
 
+/**
+ * Groups role-selection policies and the traffic rules used to choose a routing group.
+ */
 @Getter
 @Setter
 public final class RoutingConfig {
@@ -16,6 +19,9 @@ public final class RoutingConfig {
     private volatile TrafficPolicyConfig groupSelector;
     private RolesConfig roles = new RolesConfig();
 
+    /**
+     * Holds the independent Prefill and Decode selection policies.
+     */
     @Getter
     @Setter
     public static final class RolesConfig {
@@ -23,6 +29,9 @@ public final class RoutingConfig {
         private DecodeConfig decode = new DecodeConfig();
     }
 
+    /**
+     * Configures execution-time estimation and bounded cache-affinity preference.
+     */
     @Getter
     @Setter
     public static final class PrefillConfig {
@@ -31,6 +40,9 @@ public final class RoutingConfig {
         private CacheAffinityConfig cacheAffinity;
     }
 
+    /**
+     * Selects the estimator and the expression used to predict Prefill execution work.
+     */
     @Getter
     @Setter
     public static final class ExecutionTimeEstimatorConfig {
@@ -43,6 +55,9 @@ public final class RoutingConfig {
         LEARNING
     }
 
+    /**
+     * Bounds cache preference by extra TTFT, prefix-hit percentage and outstanding uncached work.
+     */
     @Getter
     @Setter
     public static final class CacheAffinityConfig {
@@ -62,6 +77,9 @@ public final class RoutingConfig {
         private long maxOutstandingUncachedTokens;
     }
 
+    /**
+     * Combines Decode cost ranking with the independent admission limits.
+     */
     @Getter
     @Setter
     public static final class DecodeConfig {
@@ -69,6 +87,9 @@ public final class RoutingConfig {
         private DecodeAvailabilityConfig availability = new DecodeAvailabilityConfig();
     }
 
+    /**
+     * Caches the compiled Decode cost expression and refreshes it when the expression changes.
+     */
     @Getter
     @Setter
     public static final class DecodeCostEstimatorConfig {
@@ -98,6 +119,9 @@ public final class RoutingConfig {
         }
     }
 
+    /**
+     * Limits Decode KV usage percentage and optional concurrent engine requests.
+     */
     @Getter
     @Setter
     public static final class DecodeAvailabilityConfig {

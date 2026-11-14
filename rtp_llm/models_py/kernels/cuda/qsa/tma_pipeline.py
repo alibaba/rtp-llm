@@ -1,0 +1,553 @@
+"""Explicit TMA and warp-MMA scheduling for SM120 causal QSA prefill.
+
+Imported only after the shape, device and selection-provenance checks.
+"""
+
+import torch
+import triton
+from triton.experimental import gluon as g
+from triton.experimental.gluon import language as gl
+from triton.experimental.gluon.language import (
+    BlockedLayout,
+    DotOperandLayout,
+    NVMMADistributedLayout,
+    NVMMASharedLayout,
+    SliceLayout,
+)
+from triton.experimental.gluon.language.nvidia.hopper import (
+    fence_async_shared,
+    mbarrier,
+    mma_v2,
+    tma,
+)
+from triton.experimental.gluon.nvidia.hopper import TensorDescriptor
+
+
+@g.jit
+def _value_half(
+    Smem,
+    start: gl.constexpr,
+    S,
+    kt,
+    KN: gl.constexpr,
+    mma: gl.constexpr,
+    rhs: gl.constexpr,
+    CHECK_LENGTH: gl.constexpr,
+):
+    value = Smem.slice(start, 128, dim=1).load(mma)
+    rows = gl.arange(0, KN, layout=SliceLayout(1, mma))
+    if CHECK_LENGTH:
+        value = gl.where((kt * KN + rows < S)[:, None], value, 0.0)
+    return gl.convert_layout(value, rhs)
+
+
+@g.jit
+def _packed_pv(
+    hi,
+    lo,
+    Smem,
+    acc,
+    S,
+    kt,
+    QM: gl.constexpr,
+    KN: gl.constexpr,
+    mma: gl.constexpr,
+    rhs: gl.constexpr,
+    CHECK_LENGTH: gl.constexpr,
+):
+    left, right = acc.reshape((QM, 2, 128)).permute((0, 2, 1)).split()
+    left = gl.convert_layout(left, mma, assert_trivial=True)
+    right = gl.convert_layout(right, mma, assert_trivial=True)
+    value = _value_half(Smem, 0, S, kt, KN, mma, rhs, CHECK_LENGTH)
+    left = mma_v2(hi, value, left)
+    left = mma_v2(lo, value, left)
+    value = _value_half(Smem, 128, S, kt, KN, mma, rhs, CHECK_LENGTH)
+    right = mma_v2(hi, value, right)
+    right = mma_v2(lo, value, right)
+    # Splitting accumulator columns only renames registers in this MMA layout.
+    return gl.convert_layout(
+        gl.join(left, right).permute((0, 2, 1)).reshape((QM, 256)),
+        mma,
+        assert_trivial=True,
+    )
+
+
+@g.jit
+def _producer(
+    K,
+    V,
+    buf,
+    full,
+    empty,
+    S,
+    POSITIONS: gl.constexpr,
+    G: gl.constexpr,
+    KN: gl.constexpr,
+    D: gl.constexpr,
+    SLOTS: gl.constexpr,
+    Base,
+    Tile,
+):
+    tile = Tile
+    tiles = gl.cdiv(gl.minimum(S, (tile + 1) * POSITIONS), KN)
+    for operand in range(2 * tiles):
+        slot = operand % SLOTS
+        iteration = operand // SLOTS
+        if operand >= SLOTS:
+            mbarrier.wait(empty.index(slot), (iteration - 1) & 1)
+        mbarrier.expect(full.index(slot), KN * D * 2)
+        kt = tiles - 1 - operand // 2
+        if operand % 2 == 0:
+            tma.async_copy_global_to_shared(
+                K, [Base + kt * KN, 0], full.index(slot), buf.index(slot)
+            )
+        else:
+            tma.async_copy_global_to_shared(
+                V, [Base + kt * KN, 0], full.index(slot), buf.index(slot)
+            )
+
+
+@g.jit
+def _attention_step(
+    q,
+    K,
+    V,
+    Mask,
+    buf,
+    full,
+    empty,
+    S,
+    WORDS,
+    D: gl.constexpr,
+    G: gl.constexpr,
+    QM: gl.constexpr,
+    KN: gl.constexpr,
+    PIPE: gl.constexpr,
+    SLOTS: gl.constexpr,
+    WM: gl.constexpr,
+    EARLY: gl.constexpr,
+    Base,
+    TAIL: gl.constexpr,
+    iteration,
+    tiles,
+    pos,
+    live,
+    c,
+    maximum,
+    normalizer,
+    acc,
+    CHECK_LENGTH: gl.constexpr,
+):
+    mma: gl.constexpr = NVMMADistributedLayout(
+        version=[2, 0], warps_per_cta=[WM, 4 // WM], instr_shape=[16, 8]
+    )
+    lhs: gl.constexpr = DotOperandLayout(0, mma, 2)
+    rhs: gl.constexpr = DotOperandLayout(1, mma, 2)
+    kt = tiles - 1 - iteration
+    if PIPE:
+        ks = (2 * iteration) % SLOTS
+        vs = (2 * iteration + 1) % SLOTS
+        kp = ((2 * iteration) // SLOTS) & 1
+        vp = ((2 * iteration + 1) // SLOTS) & 1
+    else:
+        ks = 0
+        vs = 1
+        kp = iteration & 1
+        vp = iteration & 1
+        mbarrier.expect(full.index(ks), KN * D * 2)
+        tma.async_copy_global_to_shared(
+            K, [Base + kt * KN, 0], full.index(ks), buf.index(ks)
+        )
+        mbarrier.expect(full.index(vs), KN * D * 2)
+        tma.async_copy_global_to_shared(
+            V, [Base + kt * KN, 0], full.index(vs), buf.index(vs)
+        )
+    mbarrier.wait(full.index(ks), kp, deps=[buf])
+    k = buf.index(ks).permute((1, 0)).load(rhs)
+    scores = mma_v2(q, k, gl.full((QM, KN), 0.0, gl.float32, mma)) * (
+        D**-0.5 * 1.4426950408889634
+    )
+    if PIPE:
+        # All compute warps must finish their generic shared-memory reads before
+        # the producer can overwrite this slot with another asynchronous transfer.
+        gl.thread_barrier()
+        fence_async_shared()
+        mbarrier.arrive(empty.index(ks))
+    column = kt * KN + c
+    bits = gl.load(
+        Mask + (Base + pos[:, None]) * WORDS + column[None, :] // 32,
+        live[:, None] & ((column[None, :] < S) if CHECK_LENGTH else True),
+        other=0,
+    ).to(gl.uint32)
+    selected = ((bits >> (column[None, :] % 32)) & 1) != 0
+    scores = gl.where(selected, scores, -float("inf"))
+    next_max = gl.maximum(maximum, gl.max(scores, 1))
+    safe_max = gl.where(next_max == -float("inf"), 0.0, next_max)
+    alpha = gl.exp2(maximum - safe_max)
+    p = gl.exp2(scores - safe_max[:, None])
+    # Retain the BF16 rounding residual while using warp MMA for both PV terms.
+    hi = p.to(gl.bfloat16)
+    lo = (p - hi.to(gl.float32)).to(gl.bfloat16)
+    hi = gl.convert_layout(hi, lhs)
+    lo = gl.convert_layout(lo, lhs)
+    acc = acc * alpha[:, None]
+    if EARLY:
+        normalizer = normalizer * alpha + gl.sum(p, 1)
+        maximum = next_max
+    mbarrier.wait(full.index(vs), vp, deps=[buf])
+    if TAIL == 2 and QM == 32:
+        acc = _packed_pv(
+            hi, lo, buf.index(vs), acc, S, kt, QM, KN, mma, rhs, CHECK_LENGTH
+        )
+    else:
+        if CHECK_LENGTH and TAIL == 2:
+            v = buf.index(vs).load(mma)
+            vr = gl.arange(0, KN, layout=SliceLayout(1, mma))
+            v = gl.convert_layout(gl.where((kt * KN + vr < S)[:, None], v, 0.0), rhs)
+        else:
+            v = buf.index(vs).load(rhs)
+            if CHECK_LENGTH and TAIL == 1:
+                vr = gl.arange(0, KN, layout=SliceLayout(1, rhs))
+                v = gl.where((kt * KN + vr < S)[:, None], v, 0.0)
+        acc = mma_v2(hi, v, acc)
+        acc = mma_v2(lo, v, acc)
+    gl.thread_barrier()
+    fence_async_shared()
+    if PIPE:
+        mbarrier.arrive(empty.index(vs))
+    if not EARLY:
+        normalizer = normalizer * alpha + gl.sum(p, 1)
+        maximum = next_max
+    return maximum, normalizer, acc
+
+
+@g.jit
+def _consumer(
+    Q,
+    K,
+    V,
+    Mask,
+    O,
+    buf,
+    full,
+    empty,
+    S,
+    WORDS,
+    D: gl.constexpr,
+    G: gl.constexpr,
+    QM: gl.constexpr,
+    KN: gl.constexpr,
+    POSITIONS: gl.constexpr,
+    QH: gl.constexpr,
+    QS: gl.constexpr,
+    OH: gl.constexpr,
+    OS: gl.constexpr,
+    PIPE: gl.constexpr,
+    SLOTS: gl.constexpr,
+    WM: gl.constexpr,
+    EARLY: gl.constexpr,
+    Base,
+    Tile,
+    TAIL: gl.constexpr,
+):
+    mma: gl.constexpr = NVMMADistributedLayout(
+        version=[2, 0], warps_per_cta=[WM, 4 // WM], instr_shape=[16, 8]
+    )
+    lhs: gl.constexpr = DotOperandLayout(0, mma, 2)
+    load_layout: gl.constexpr = BlockedLayout([1, 4], [4, 8], [4, 1], [1, 0])
+    tile = Tile
+    group = gl.program_id(0 if G == 4 else 1)
+    rr = gl.arange(0, QM, layout=SliceLayout(1, load_layout))
+    dd = gl.arange(0, D, layout=SliceLayout(0, load_layout))
+    pp = tile * POSITIONS + rr // G
+    hh = group * G + rr % G
+    active = (rr < POSITIONS * G) & (pp < S)
+    q = gl.load(
+        Q + hh[:, None] * QH + (Base + pp[:, None]) * QS + dd[None, :],
+        active[:, None],
+        other=0.0,
+    )
+    q = gl.convert_layout(q, lhs)
+    r = gl.arange(0, QM, layout=SliceLayout(1, mma))
+    c = gl.arange(0, KN, layout=SliceLayout(0, mma))
+    pos = tile * POSITIONS + r // G
+    live = (r < POSITIONS * G) & (pos < S)
+    maximum = gl.full((QM,), -float("inf"), gl.float32, SliceLayout(1, mma))
+    normalizer = gl.full((QM,), 0.0, gl.float32, SliceLayout(1, mma))
+    acc = gl.full((QM, D), 0.0, gl.float32, mma)
+    tiles = gl.cdiv(gl.minimum(S, (tile + 1) * POSITIONS), KN)
+    # Visit the only potentially partial KV tile first. Earlier tiles are
+    # inside this request; their sparse membership checks remain necessary.
+    if tiles > 0:
+        maximum, normalizer, acc = _attention_step(
+            q,
+            K,
+            V,
+            Mask,
+            buf,
+            full,
+            empty,
+            S,
+            WORDS,
+            D,
+            G,
+            QM,
+            KN,
+            PIPE,
+            SLOTS,
+            WM,
+            EARLY,
+            Base,
+            TAIL,
+            0,
+            tiles,
+            pos,
+            live,
+            c,
+            maximum,
+            normalizer,
+            acc,
+            True,
+        )
+    for iteration in range(1, tiles):
+        maximum, normalizer, acc = _attention_step(
+            q,
+            K,
+            V,
+            Mask,
+            buf,
+            full,
+            empty,
+            S,
+            WORDS,
+            D,
+            G,
+            QM,
+            KN,
+            PIPE,
+            SLOTS,
+            WM,
+            EARLY,
+            Base,
+            TAIL,
+            iteration,
+            tiles,
+            pos,
+            live,
+            c,
+            maximum,
+            normalizer,
+            acc,
+            False,
+        )
+    output = gl.where(normalizer[:, None] > 0, acc / normalizer[:, None], 0.0)
+    dc = gl.arange(0, D, layout=SliceLayout(0, mma))
+    heads = group * G + r % G
+    gl.store(
+        O + heads[:, None] * OH + (Base + pos[:, None]) * OS + dc[None, :],
+        output.to(O.dtype.element_ty),
+        live[:, None],
+    )
+
+
+@g.jit
+def _execute_prefill(
+    Q,
+    K,
+    V,
+    Mask,
+    O,
+    S,
+    WORDS,
+    D: gl.constexpr,
+    G: gl.constexpr,
+    QM: gl.constexpr,
+    KN: gl.constexpr,
+    POSITIONS: gl.constexpr,
+    QH: gl.constexpr,
+    QS: gl.constexpr,
+    OH: gl.constexpr,
+    OS: gl.constexpr,
+    PIPE: gl.constexpr,
+    WM: gl.constexpr,
+    EARLY: gl.constexpr,
+    Base,
+    Tile,
+    TAIL: gl.constexpr,
+):
+    # K and V occupy successive slots in one ring, allowing V to arrive
+    # while QK and softmax execute without allocating separate K/V pipelines.
+    slots: gl.constexpr = 3 if PIPE and TAIL != 1 else 2
+    buf = gl.allocate_shared_memory(gl.bfloat16, [slots, KN, D], K.layout)
+    full = gl.allocate_shared_memory(gl.int64, [slots, 1], mbarrier.MBarrierLayout())
+    empty = gl.allocate_shared_memory(gl.int64, [slots, 1], mbarrier.MBarrierLayout())
+    for i in gl.static_range(slots):
+        mbarrier.init(full.index(i), count=1)
+        mbarrier.init(empty.index(i), count=1)
+    fence_async_shared()
+    if PIPE:
+        gl.warp_specialize(
+            [
+                (
+                    _consumer,
+                    (
+                        Q,
+                        K,
+                        V,
+                        Mask,
+                        O,
+                        buf,
+                        full,
+                        empty,
+                        S,
+                        WORDS,
+                        D,
+                        G,
+                        QM,
+                        KN,
+                        POSITIONS,
+                        QH,
+                        QS,
+                        OH,
+                        OS,
+                        True,
+                        slots,
+                        WM,
+                        EARLY,
+                        Base,
+                        Tile,
+                        TAIL,
+                    ),
+                ),
+                (
+                    _producer,
+                    (K, V, buf, full, empty, S, POSITIONS, G, KN, D, slots, Base, Tile),
+                ),
+            ],
+            worker_num_warps=[4],
+            worker_num_regs=[24],
+        )
+    else:
+        _consumer(
+            Q,
+            K,
+            V,
+            Mask,
+            O,
+            buf,
+            full,
+            empty,
+            S,
+            WORDS,
+            D,
+            G,
+            QM,
+            KN,
+            POSITIONS,
+            QH,
+            QS,
+            OH,
+            OS,
+            False,
+            slots,
+            WM,
+            EARLY,
+            Base,
+            Tile,
+            TAIL,
+        )
+    for i in gl.static_range(slots):
+        mbarrier.invalidate(full.index(i))
+        mbarrier.invalidate(empty.index(i))
+
+
+@g.jit(do_not_specialize=["S", "WORDS"])
+def _pipelined_prefill(
+    Q,
+    K,
+    V,
+    Mask,
+    O,
+    S,
+    WORDS,
+    G: gl.constexpr,
+    QM: gl.constexpr,
+    QH: gl.constexpr,
+    QS: gl.constexpr,
+    OS: gl.constexpr,
+    PIPE: gl.constexpr,
+    EARLY: gl.constexpr,
+):
+    positions: gl.constexpr = QM // G
+    tile = gl.cdiv(S, positions) - 1 - gl.program_id(1 if G == 4 else 0)
+    _execute_prefill(
+        Q,
+        K,
+        V,
+        Mask,
+        O,
+        S,
+        WORDS,
+        256,
+        G,
+        QM,
+        32,
+        positions,
+        QH,
+        QS,
+        256,
+        OS,
+        PIPE,
+        QM // 16,
+        EARLY,
+        0,
+        tile,
+        0,
+    )
+
+
+_KV_LAYOUT = NVMMASharedLayout(128, 16)
+
+
+def run_prefill(q, k, v, membership):
+    _, heads, tokens, dim = q.shape
+    query_tile, group_heads = (
+        (16, 12) if heads == 12 and tokens <= 512 else (32, 4 if heads == 12 else 6)
+    )
+    # A separate producer pays off when enough short queries run in parallel.
+    # Longer query tiles need the occupancy available with two operand slots.
+    pipeline = heads == 6 and tokens <= 1024
+    early_state = query_tile == 32
+    key_tile = 32
+    words = triton.cdiv(tokens, 32)
+    output = torch.empty(
+        (1, tokens, heads, dim), dtype=q.dtype, device=q.device
+    ).transpose(1, 2)
+    layout = _KV_LAYOUT
+    key = TensorDescriptor(k, [tokens, dim], [k.stride(2), 1], [key_tile, dim], layout)
+    value = TensorDescriptor(
+        v, [tokens, dim], [v.stride(2), 1], [key_tile, dim], layout
+    )
+    positions = query_tile // group_heads
+    # Adjacent head groups traverse the same KV tiles together.
+    grid = (triton.cdiv(tokens, positions), heads // group_heads)
+    if group_heads == 4:
+        grid = grid[::-1]
+    _pipelined_prefill[grid](
+        q,
+        key,
+        value,
+        membership,
+        output,
+        tokens,
+        words,
+        group_heads,
+        query_tile,
+        q.stride(1),
+        q.stride(2),
+        output.stride(2),
+        pipeline,
+        early_state,
+        num_warps=4,
+    )
+    return output

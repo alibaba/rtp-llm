@@ -34,6 +34,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks control endpoints for logging changes and cache-match failover, including forwarded
+ * requests and invalid actions.
+ */
 @ExtendWith(MockitoExtension.class)
 class FlexlbControlServerTest {
 

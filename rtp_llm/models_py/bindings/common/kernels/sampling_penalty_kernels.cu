@@ -16,11 +16,54 @@
 
 #include <assert.h>
 #include <float.h>
+#include <cstdint>
 
 // #include "driver_types.h"
 #include "rtp_llm/models_py/bindings/common/kernels/sampling_penalty_kernels.h"
 
 namespace rtp_llm {
+
+// Two-dimensional row/vocabulary tiling follows vLLM's _temperature_kernel
+// (Apache-2.0). Preserve RTP's reciprocal epsilon, multiplication and FTZ
+// compilation unit; do not substitute vLLM's different temperature formula.
+template<bool Vectorized>
+__global__ void samplerTiledTemperature(float* logits, const float* temperatures, int vocab) {
+    __shared__ float inverse;
+    const int        row = blockIdx.x;
+    if (threadIdx.x == 0)
+        inverse = 1.0f / (temperatures[row] + 1e-6f);
+    __syncthreads();
+    constexpr int tile       = 4096;
+    float*        row_logits = logits + static_cast<int64_t>(row) * vocab;
+#pragma unroll
+    for (int j = 0; j < tile / (256 * 4); ++j) {
+        const int col = blockIdx.y * tile + (j * 256 + threadIdx.x) * 4;
+        if (col < vocab) {
+            if constexpr (Vectorized) {
+                float4 value = reinterpret_cast<float4*>(row_logits)[col / 4];
+                value.x *= inverse;
+                value.y *= inverse;
+                value.z *= inverse;
+                value.w *= inverse;
+                reinterpret_cast<float4*>(row_logits)[col / 4] = value;
+            } else {
+#pragma unroll
+                for (int i = 0; i < 4; ++i)
+                    row_logits[col + i] *= inverse;
+            }
+        }
+    }
+}
+
+void invokeTiledTemperaturePenalty(
+    float* logits, const float* temperatures, int batch_size, int vocab, cudaStream_t stream) {
+    assert(batch_size > 0 && batch_size <= 32 && vocab == 248320);
+    const dim3 grid(batch_size, (vocab + 4095) / 4096);
+    if (reinterpret_cast<uintptr_t>(logits) % 16 == 0)
+        samplerTiledTemperature<true><<<grid, 256, 0, stream>>>(logits, temperatures, vocab);
+    else
+        samplerTiledTemperature<false><<<grid, 256, 0, stream>>>(logits, temperatures, vocab);
+}
 
 template<typename T>
 __global__ void batchApplyTemperaturePenalty(T*           logits,

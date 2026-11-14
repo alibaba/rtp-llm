@@ -36,6 +36,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks application readiness and orderly shutdown of its registered resources.
+ */
 class ApplicationLifecycleTest {
     @Test
     void contextCloseDrainsTransportBeforeDestroyingServingResources() throws Exception {

@@ -15,17 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Task35 场景 B：饱和集群下高优先级提前执行的量化验证。
- *
- * <p>P70/P50/P30 各 50 个请求轮转提交到单 prefill 集群；Auto-TPM 的优先级
- * 批队列（priority desc → arrival asc FIFO）应使高优先级请求显著更早到达引擎。
- * 双重断言：平均引擎到达位次 + 平均调度延迟（submit → 引擎 enqueue 到达）
- * 均满足 P70 < P50 < P30，并输出量化数值；全部请求必须到达成功终态。
- *
- * <p>时序设计（hold-then-flip）：先用大批次上限 + 长 fixedWait 停住派发，
- * 把 150 个请求全部无冲突地压进优先级队列（消除提交/派发并发导致的
- * queueVersion 冲突 8515），确认队列饱和后一次性翻小批次参数放行 ——
- * fixed_window 派发线程每 ~1ms 重读 config，翻转即时生效。
+ * 在饱和 mock 集群中交错提交不同优先级请求，通过引擎到达位次和调度延迟验证高优先级先执行。
  */
 class PriorityLatencyE2ETest {
 

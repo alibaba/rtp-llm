@@ -2,7 +2,12 @@ import pickle
 from unittest import TestCase, main
 
 from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_FIELD_VALUES
-from rtp_llm.ops import CacheOffloadPolicy, KVCacheConfig, KVCacheSpecDesc
+from rtp_llm.ops import (
+    CacheOffloadPolicy,
+    KVCacheConfig,
+    KVCacheSpecDesc,
+    TpCacheTransferMode,
+)
 
 EVENT_PICKLE_FIELDS = tuple(KV_CACHE_EVENT_FIELD_VALUES)
 
@@ -236,6 +241,31 @@ class KVCacheConfigPickleTest(TestCase):
         legacy.__setstate__(desc.__getstate__()[:20])
         self.assertEqual(legacy.tag, "default")
         self.assertIsNone(legacy.offload)
+
+    def test_descriptor_tp_transfer_and_offload_states_are_compatible(self):
+        desc = KVCacheSpecDesc()
+        desc.tp_transfer_mode = TpCacheTransferMode.REPLICATED
+        policy = CacheOffloadPolicy()
+        policy.enabled = True
+        policy.max_selected_rows = 256
+        desc.offload = policy
+        desc.offload_runtime_group = 7
+        restored = pickle.loads(pickle.dumps(desc))
+        self.assertEqual(restored.tp_transfer_mode, TpCacheTransferMode.REPLICATED)
+        self.assertTrue(restored.offload.enabled)
+        self.assertEqual(restored.offload_runtime_group, 7)
+        state = desc.__getstate__()
+        main_state = (*state[:20], TpCacheTransferMode.MHA_HEADS)
+        restored = KVCacheSpecDesc.__new__(KVCacheSpecDesc)
+        restored.__setstate__(main_state)
+        self.assertEqual(restored.tp_transfer_mode, TpCacheTransferMode.MHA_HEADS)
+        self.assertIsNone(restored.offload)
+        self.assertIsNone(restored.offload_runtime_group)
+        previous = KVCacheSpecDesc.__new__(KVCacheSpecDesc)
+        previous.__setstate__(state[:22])
+        self.assertTrue(previous.offload.enabled)
+        self.assertEqual(previous.offload_runtime_group, 7)
+        self.assertEqual(previous.tp_transfer_mode, TpCacheTransferMode.LEGACY)
 
     def test_legacy_offload_policy_preserves_full_batch_quota(self):
         restored = CacheOffloadPolicy.__new__(CacheOffloadPolicy)

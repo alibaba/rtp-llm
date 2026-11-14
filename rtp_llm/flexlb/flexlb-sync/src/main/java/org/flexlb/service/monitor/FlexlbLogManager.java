@@ -10,6 +10,10 @@ import org.springframework.stereotype.Service;
 
 import java.util.Objects;
 
+/**
+ * Applies FlexLB logger-group level and console-output changes from configuration or control
+ * requests.
+ */
 @Service
 public class FlexlbLogManager {
 

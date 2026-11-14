@@ -292,7 +292,7 @@ class Qwen3_5MoeVisionAttention(nn.Module):
             self.config._attn_implementation, eager_attention_forward
         )
 
-        if default_attn_impl == "flash_attention_2":
+        if self.config._attn_implementation == "flash_attention_2":
             # Flash Attention: Use cu_seqlens for variable length attention
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
             attn_output, _ = attention_interface(

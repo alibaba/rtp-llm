@@ -52,10 +52,11 @@ struct AttentionConfigs {
     bool            need_rope_kv_cache  = true;
 
     // sparse attention config
-    bool is_sparse        = false;
-    int  indexer_head_dim = 0;
-    int  indexer_head_num = 0;
-    int  indexer_topk     = 0;
+    bool is_sparse           = false;
+    bool use_sparse_gqa_fmha = false;
+    int  indexer_head_dim    = 0;
+    int  indexer_head_num    = 0;
+    int  indexer_topk        = 0;
 
     // DeepSeek-V4 specific
     // Per-layer attention type schedule. Length == num_layers (+1 for MTP).

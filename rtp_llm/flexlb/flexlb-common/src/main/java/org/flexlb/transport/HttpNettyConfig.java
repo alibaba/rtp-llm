@@ -22,6 +22,9 @@ import org.springframework.context.annotation.Configuration;
 
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Groups connection, timeout and pool settings for the HTTP client.
+ */
 @Configuration
 public class HttpNettyConfig {
 

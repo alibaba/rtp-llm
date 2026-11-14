@@ -8,6 +8,7 @@
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <cstddef>
+#include <map>
 #include <optional>
 #include <string>
 #include <memory>
@@ -19,20 +20,33 @@
 namespace rtp_llm {
 
 enum class ParallelMode {
-    TP        = 0,
-    DP        = 1,
-    DP_AND_TP = 2,
-    FFN_TP    = 3,
-    EP        = 4,
-    EPLB      = 5,
+    TP = 0,
+    DP = 1,
+    /** Spans all ranks, including every PP stage. */
+    WORLD  = 2,
+    FFN_TP = 3,
+    EP     = 4,
+    EPLB   = 5,
+    /** Spans all TP/DP ranks in the current PP stage; aliases WORLD when pp_size is one. */
+    STAGE = 6,
+    /** Spans PP stages with the same DP/TP coordinates. */
+    PP = 7,
 };
 
 // A batch includes two parts: context batch and decoder batch.
 // context batch is request for initial word, decoder batch is request for incremental word.
 // ids and lengths are int32_t
 struct GptModelInputs {
-    torch::Tensor engram_token_windows;
-    torch::Tensor mm_features_spans;
+    // Input-owner-only snapshot captured while assembling this exact batch.
+    // Not broadcast to TP peers and never read back from CUDA for recording.
+    struct RecordedLengths {
+        std::vector<int32_t> q_tokens;
+        std::vector<int32_t> kv_tokens_before;
+    };
+    std::optional<RecordedLengths> record_lengths;
+    int64_t                        record_execution_id = 0;
+    torch::Tensor                  engram_token_windows;
+    torch::Tensor                  mm_features_spans;
     // input_lengths holds original input length for requests,
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
@@ -45,11 +59,11 @@ struct GptModelInputs {
     torch::Tensor custom_output_indexes;
     // Kept for ModelInputsLogger/legacy micro-batch consumers; the async
     // scheduling redesign no longer populates it (stays undefined).
-    torch::Tensor lm_output_lengths;        // [total_batch_size]
-    torch::Tensor prefix_lengths;           // [context_batch_size]
+    torch::Tensor lm_output_lengths;  // [total_batch_size]
+    torch::Tensor prefix_lengths;     // [context_batch_size]
     // First token of this request's FULL cache-store write; zero on its first chunk.
     torch::Tensor cache_store_publish_start_tokens;  // [context_batch_size], optional
-    torch::Tensor sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
+    torch::Tensor sequence_lengths_plus_1;           // optional CUDA mirror for target-verify linear attention
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]
@@ -102,6 +116,7 @@ struct GptModelInputs {
     bool need_moe_gating        = false;
     bool warmup                 = false;
     bool skip_run               = false;
+    bool shutdown               = false;
     bool is_fake_stream         = false;
 
     // Linear attention target verify should write draft tokens mamba states
@@ -112,6 +127,9 @@ struct GptModelInputs {
     // The executor sets the round's role before asynchronous preparation;
     // target hidden states may not exist until after that preparation starts.
     bool is_draft_extend = false;
+
+    /** Upstream stage activations; excluded from TP input synchronization. */
+    std::map<std::string, torch::Tensor> pp_intermediates;
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
@@ -125,6 +143,7 @@ public:
 
 struct GptModelOutputs {
     torch::Tensor logits;
+    // Same selected LM output rows as logits, independent of need_all_logits.
     torch::Tensor hidden_states;
     torch::Tensor all_hidden_states;
     torch::Tensor all_logits;
@@ -146,6 +165,9 @@ struct GptModelOutputs {
     torch::Tensor custom_output;
     // The dispatcher turns handler failures into per-stream execution errors.
     std::string custom_output_error;
+
+    /** Downstream activations from a non-last target stage. */
+    std::map<std::string, torch::Tensor> pp_intermediates;
 };
 
 struct CopyParams {
@@ -372,10 +394,22 @@ struct RejectionSamplingParams {
     torch::Tensor output_token_ids_d;
     torch::Tensor output_accepted_token_num_d;
     torch::Tensor do_sample_d;
-    // True when draft_probs_d is a degenerate point mass on draft_token_ids_d
-    // (in-model proposers such as DSpARK emit tokens, not per-vocab probs).
-    // The kernel then treats q(draft) == 1 instead of reading draft_probs_d.
+    /**
+     * True selects an implicit point-mass proposal distribution: q is 1 at
+     * each draft token and 0 elsewhere. The kernel does not read draft_probs_d,
+     * so that tensor may be undefined.
+     * PP uses this for greedy MTP, DSpARK handoff padding and fake streams.
+     * Normal DSpARK proposals carry sampled tokens and dense q; keep this
+     * false so verification uses the actual proposal distribution.
+     */
     bool draft_probs_point_mass = false;
+};
+
+struct RejectionSamplingLaunchConfig {
+    int batch_size;
+    int num_speculative_tokens;
+    int target_vocab_size;
+    int target_token_stride;
 };
 
 struct MappingDraft2TargetParams {

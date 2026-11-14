@@ -6,6 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/**
+ * Checks strategy error codes and their public response mapping.
+ */
 class StrategyErrorTypeTest {
 
     @Test

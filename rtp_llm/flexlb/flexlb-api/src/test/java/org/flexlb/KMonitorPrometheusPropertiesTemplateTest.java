@@ -8,6 +8,9 @@ import java.util.Properties;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * Checks that the application packages the Turbo-only KMonitor properties template.
+ */
 class KMonitorPrometheusPropertiesTemplateTest {
 
     @Test

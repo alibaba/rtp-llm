@@ -28,11 +28,13 @@ import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollbackRes
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.sameIdentitySequence;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.throwRollbackFailure;
 
-/** Individual route admission, ownership, publication, and projection. */
+/**
+ * Individual route admission, ownership, publication, and projection.
+ */
 public final class RouteDeliveryStrategy implements DeliveryStrategy {
-
     private static final RouteProjection.DeliveryProjection PROJECTION =
             new RouteProjectionPolicy();
+
     private final RequestRegistry requests;
     private final DeliveryMetrics telemetry;
 
@@ -50,6 +52,23 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             throw new IllegalArgumentException("route delivery requires at least one candidate");
         }
         return prepareTransaction(candidates, evaluator);
+    }
+
+    @Override
+    public double projectGroupDurationMs(
+            List<ScheduledRequest> items, PrefillTimePredictor.Evaluator evaluator) {
+        double totalMs = 0.0;
+        for (ScheduledRequest item : items) {
+            totalMs +=
+                    PrefillPredictionBoundary.predictSingleRequestMs(
+                            evaluator, item.seqLen(), item.hitCache());
+        }
+        return PrefillPredictionBoundary.requireValidDecisionGroupMs(totalMs);
+    }
+
+    @Override
+    public RouteProjection.DeliveryProjection projectionPolicy() {
+        return PROJECTION;
     }
 
     private RouteTransaction prepareTransaction(
@@ -91,6 +110,25 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             }
             throw propagate(failure);
         }
+    }
+
+    private static Throwable close(AutoCloseable capability) {
+        try {
+            capability.close();
+            return null;
+        } catch (Throwable failure) {
+            return failure;
+        }
+    }
+
+    private static RuntimeException propagate(Throwable failure) {
+        if (failure instanceof RuntimeException runtimeFailure) {
+            return runtimeFailure;
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
+        return new IllegalStateException("route delivery failed", failure);
     }
 
     private void deliver(
@@ -147,39 +185,6 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         }
     }
 
-    private record ClaimedRoute(ScheduledRequest item, DeliveryClaim claim) {}
-
-    @Override
-    public double projectGroupDurationMs(
-            List<ScheduledRequest> items, PrefillTimePredictor.Evaluator evaluator) {
-        double totalMs = 0.0;
-        for (ScheduledRequest item : items) {
-            totalMs +=
-                    PrefillPredictionBoundary.predictSingleRequestMs(
-                            evaluator, item.seqLen(), item.hitCache());
-        }
-        return PrefillPredictionBoundary.requireValidDecisionGroupMs(totalMs);
-    }
-
-    @Override
-    public RouteProjection.DeliveryProjection projectionPolicy() {
-        return PROJECTION;
-    }
-
-    private static long predict(PrefillTimePredictor.Evaluator evaluator, ScheduledRequest item) {
-        return PrefillPredictionBoundary.predictSingleRequestMs(
-                evaluator, item.seqLen(), item.hitCache());
-    }
-
-    private static Throwable close(AutoCloseable capability) {
-        try {
-            capability.close();
-            return null;
-        } catch (Throwable failure) {
-            return failure;
-        }
-    }
-
     private static Throwable append(Throwable first, Throwable next) {
         if (next == null) {
             return first;
@@ -193,27 +198,29 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         return first;
     }
 
-    private static RuntimeException propagate(Throwable failure) {
-        if (failure instanceof RuntimeException runtimeFailure) {
-            return runtimeFailure;
-        }
-        if (failure instanceof Error error) {
-            throw error;
-        }
-        return new IllegalStateException("route delivery failed", failure);
+    private static long predict(PrefillTimePredictor.Evaluator evaluator, ScheduledRequest item) {
+        return PrefillPredictionBoundary.predictSingleRequestMs(
+                evaluator, item.seqLen(), item.hitCache());
     }
 
-    /** Ordered route callback payload and sole owner of its exact members. */
+    private record ClaimedRoute(ScheduledRequest item, DeliveryClaim claim) {}
+
+    /**
+     * Ordered route callback payload and sole owner of its exact members.
+     */
     static final class RouteTransaction implements Transaction {
         private final RouteDeliveryStrategy owner;
         private final PrefillEndpoint prefill;
+
         private List<ScheduledRequest> items = List.of();
         private ScheduledRequest blockedItem;
         private CapacityBoundary blockedResult;
         private ArrayList<PrefillState.RouteReservation> reservations;
         private ArrayList<Boolean> itemOwnedReservations;
+
         private final java.util.IdentityHashMap<ScheduledRequest, Long> predictions =
                 new java.util.IdentityHashMap<>();
+
         private ArrayList<PrefillAdmissionResources.Member> members;
         private PrefillAdmissionResources.CommittedAdmissionOwner committed;
 
@@ -233,66 +240,6 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             this.prefill = null;
             this.blockedItem = blockedItem;
             this.blockedResult = blockedResult;
-        }
-
-        private static RouteTransaction blocked(
-                RouteDeliveryStrategy owner,
-                ScheduledRequest blockedItem,
-                CapacityBoundary blockedResult) {
-            return new RouteTransaction(owner, blockedItem, blockedResult);
-        }
-
-        synchronized CapacityBoundary.Attempt<ScheduledRequest> append(
-                ScheduledRequest exact, PrefillTimePredictor.Evaluator evaluator) {
-            requirePrepared("append");
-            long predictedMs = predict(evaluator, exact);
-            final CapacityBoundary.Attempt<ScheduledRequest> acceptedItem;
-            try {
-                acceptedItem = accepted(exact);
-                int capacity = Math.addExact(members.size(), 1);
-                reservations.ensureCapacity(capacity);
-                members.ensureCapacity(capacity);
-            } catch (Throwable failure) {
-                return failed(failure);
-            }
-
-            PrefillState.RouteReservation published = exact.publishedRouteReservation();
-            try {
-                if (published == null) {
-                    return failed(
-                            new IllegalStateException(
-                                    "ACTIVE NON_BATCH request lost its publish-time route reservation: request_id="
-                                            + exact.requestId()));
-                }
-                published.updatePrediction(exact, predictedMs);
-            } catch (Throwable failure) {
-                return failed(failure);
-            }
-            predictions.put(exact, predictedMs);
-            PrefillState.RouteReservation reservation = published;
-            final CapacityBoundary.Attempt<PrefillAdmissionResources.Member> memberAttempt;
-            try {
-                memberAttempt = prepareMember(exact);
-            } catch (Throwable failure) {
-                return failed(failure);
-            }
-            if (!memberAttempt.accepted()) {
-                return rejected(memberAttempt.boundary());
-            }
-            reservations.add(reservation);
-            itemOwnedReservations.add(true);
-            members.add(memberAttempt.value());
-            return acceptedItem;
-        }
-
-        private synchronized void select(
-                List<ScheduledRequest> exactItems,
-                ScheduledRequest exactBlockedItem,
-                CapacityBoundary exactBlockedResult) {
-            requirePrepared("select");
-            items = exactItems;
-            blockedItem = exactBlockedItem;
-            blockedResult = exactBlockedResult;
         }
 
         @Override
@@ -409,6 +356,72 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             }
         }
 
+        synchronized CapacityBoundary.Attempt<ScheduledRequest> append(
+                ScheduledRequest exact, PrefillTimePredictor.Evaluator evaluator) {
+            requirePrepared("append");
+            long predictedMs = predict(evaluator, exact);
+            final CapacityBoundary.Attempt<ScheduledRequest> acceptedItem;
+            try {
+                acceptedItem = accepted(exact);
+                int capacity = Math.addExact(members.size(), 1);
+                reservations.ensureCapacity(capacity);
+                members.ensureCapacity(capacity);
+            } catch (Throwable failure) {
+                return failed(failure);
+            }
+
+            PrefillState.RouteReservation published = exact.publishedRouteReservation();
+            try {
+                if (published == null) {
+                    return failed(
+                            new IllegalStateException(
+                                    "ACTIVE NON_BATCH request lost its publish-time route reservation: request_id="
+                                            + exact.requestId()));
+                }
+                published.updatePrediction(exact, predictedMs);
+            } catch (Throwable failure) {
+                return failed(failure);
+            }
+            predictions.put(exact, predictedMs);
+            PrefillState.RouteReservation reservation = published;
+            final CapacityBoundary.Attempt<PrefillAdmissionResources.Member> memberAttempt;
+            try {
+                memberAttempt = prepareMember(exact);
+            } catch (Throwable failure) {
+                return failed(failure);
+            }
+            if (!memberAttempt.accepted()) {
+                return rejected(memberAttempt.boundary());
+            }
+            reservations.add(reservation);
+            itemOwnedReservations.add(true);
+            members.add(memberAttempt.value());
+            return acceptedItem;
+        }
+
+        private static RouteTransaction blocked(
+                RouteDeliveryStrategy owner,
+                ScheduledRequest blockedItem,
+                CapacityBoundary blockedResult) {
+            return new RouteTransaction(owner, blockedItem, blockedResult);
+        }
+
+        private synchronized void select(
+                List<ScheduledRequest> exactItems,
+                ScheduledRequest exactBlockedItem,
+                CapacityBoundary exactBlockedResult) {
+            requirePrepared("select");
+            items = exactItems;
+            blockedItem = exactBlockedItem;
+            blockedResult = exactBlockedResult;
+        }
+
+        private void requirePrepared(String operation) {
+            if (reservations == null || itemOwnedReservations == null || members == null) {
+                throw new IllegalStateException(operation + " requires PREPARED route admission");
+            }
+        }
+
         private synchronized PrefillAdmissionResources.CommittedAdmissionOwner takeCommitted() {
             PrefillAdmissionResources.CommittedAdmissionOwner exactCommitted = committed;
             if (exactCommitted == null) {
@@ -444,16 +457,13 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             }
             return failure;
         }
-
-        private void requirePrepared(String operation) {
-            if (reservations == null || itemOwnedReservations == null || members == null) {
-                throw new IllegalStateException(operation + " requires PREPARED route admission");
-            }
-        }
     }
 
+    /**
+     * Projects independent route delivery using cumulative service offsets rather than shared batch
+     * duration.
+     */
     private static final class RouteProjectionPolicy implements RouteProjection.DeliveryProjection {
-
         private static final ThreadLocal<RoutePlanning> PLANNING =
                 ThreadLocal.withInitial(RoutePlanning::new);
         private static final ThreadLocal<RouteService> SERVICE =
@@ -481,18 +491,22 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             return service;
         }
 
+        private static long saturatedAdd(long left, long right) {
+            return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
+        }
+
+        /**
+         * Extends cached route offsets while the candidate list remains an unchanged identity
+         * prefix.
+         */
         private static final class RoutePlanning implements RouteProjection.GroupPlanning {
             private GroupPlanner.Item[] previous = new GroupPlanner.Item[0];
             private long[] offsets = new long[0];
+
             private int previousSize;
             private int computedThrough;
-            private RouteProjection.Predictions predictions;
 
-            private void reset(RouteProjection.Predictions exactPredictions) {
-                predictions = exactPredictions;
-                previousSize = 0;
-                computedThrough = -1;
-            }
+            private RouteProjection.Predictions predictions;
 
             @Override
             public double durationMs(List<GroupPlanner.Item> prefix, int requiredThroughIndex) {
@@ -523,6 +537,12 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 return offsets[requiredThroughIndex];
             }
 
+            private void reset(RouteProjection.Predictions exactPredictions) {
+                predictions = exactPredictions;
+                previousSize = 0;
+                computedThrough = -1;
+            }
+
             private boolean isIdentityPrefix(List<GroupPlanner.Item> next) {
                 if (previousSize > next.size()) {
                     return false;
@@ -544,21 +564,19 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             }
         }
 
+        /**
+         * Calculates member completion offsets for one frozen route-delivery plan.
+         */
         private static final class RouteService implements RouteProjection.GroupService {
             private GroupPlanner.Plan<GroupPlanner.Item> plan;
             private RouteProjection.Predictions predictions;
             private long[] offsets = new long[0];
+
             private int computedThrough;
 
-            private void reset(
-                    GroupPlanner.Plan<GroupPlanner.Item> exactPlan,
-                    RouteProjection.Predictions exactPredictions) {
-                plan = exactPlan;
-                predictions = exactPredictions;
-                if (offsets.length < exactPlan.items().size()) {
-                    offsets = java.util.Arrays.copyOf(offsets, exactPlan.items().size());
-                }
-                computedThrough = -1;
+            @Override
+            public long totalDurationMs() {
+                return completionOffsetMs(plan.items().size() - 1);
             }
 
             @Override
@@ -576,14 +594,16 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 return offsets[memberIndex];
             }
 
-            @Override
-            public long totalDurationMs() {
-                return completionOffsetMs(plan.items().size() - 1);
+            private void reset(
+                    GroupPlanner.Plan<GroupPlanner.Item> exactPlan,
+                    RouteProjection.Predictions exactPredictions) {
+                plan = exactPlan;
+                predictions = exactPredictions;
+                if (offsets.length < exactPlan.items().size()) {
+                    offsets = java.util.Arrays.copyOf(offsets, exactPlan.items().size());
+                }
+                computedThrough = -1;
             }
-        }
-
-        private static long saturatedAdd(long left, long right) {
-            return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
         }
     }
 }

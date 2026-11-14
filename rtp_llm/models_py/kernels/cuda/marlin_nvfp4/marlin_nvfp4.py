@@ -1,0 +1,428 @@
+"""NVFP4 weight-only Marlin MoE for SM90 and SM120.
+
+Weight/scale conversion follows vLLM v0.31.0 marlin_utils_fp4.py (Apache-2.0).
+"""
+
+import functools
+import inspect
+import math
+from pathlib import Path
+
+import torch
+import triton
+import triton.language as tl
+from torch.torch_version import TorchVersion
+
+# Bound both the per-CTA alignment tensors and the routed activation scratch.
+# Expert padding uses at most eight slots per route.
+_MAX_ROUTES_PER_CHUNK = 4096
+
+
+@functools.lru_cache(maxsize=1)
+def load_library():
+    major, minor = torch.cuda.get_device_capability()
+    arch = major * 10 + minor
+    if arch not in (90, 120):
+        raise RuntimeError("Qwen NVFP4 Marlin requires SM90 or SM120")
+    # Preserve Bazel runfiles paths: resolving this source symlink would point
+    # outside the runfiles tree containing the packaged library.
+    library = Path(__file__).parents[4] / "libs/libmarlin_nvfp4.so"
+    if not library.is_file():
+        raise RuntimeError(
+            f"NVFP4 Marlin library missing: {library}; install a CUDA 13 build"
+        )
+    torch.ops.load_library(str(library))
+    return str(library)
+
+
+def prepare_weight(q, sf, global_sf):
+    experts, n, packed_k = q.shape
+    k = packed_k * 2
+    assert n % 64 == 0 and k % 128 == 0 and sf.shape == (experts, n, k // 16)
+    out = torch.empty((experts, k // 16, n * 2), device=q.device, dtype=torch.int32)
+    for expert in range(experts):
+        out[expert] = torch.ops.rtp_qwen4_marlin.gptq_marlin_repack(
+            q[expert].view(torch.int32).T.contiguous(), k, n, 4, False
+        )
+    perm = [i + 8 * j for i in range(8) for j in range(8)]
+    scales = sf.to(torch.bfloat16).transpose(1, 2).contiguous()
+    max_sf = scales.float().max().item()
+    factor = (
+        2.0 ** int(math.floor(math.log2(448.0 / max_sf))) if 0 < max_sf < 448 else 1.0
+    )
+    scales = scales.reshape(-1, 64)[:, perm].reshape(experts, k // 16, n)
+    scales = scales.half().reshape(-1, 4)[:, [0, 2, 1, 3]].reshape(experts * k // 16, n)
+    scales = (scales.float() * factor).half() * 128
+    scales[scales < 2] = 0
+    scales = (
+        (scales.view(torch.int16) << 1).view(torch.float8_e4m3fn)[:, 1::2].contiguous()
+    )
+    return (
+        out,
+        scales.reshape(experts, k // 16, n),
+        global_sf.float() * (2.0**119 / factor),
+    )
+
+
+@triton.jit
+def _count(
+    IDS,
+    OFFSETS,
+    SORTED,
+    EXPERT_IDS,
+    PADDED,
+    ROUTES: tl.constexpr,
+    EXPERTS: tl.constexpr,
+    FIRST: tl.constexpr,
+    RTILE: tl.constexpr,
+    SLOTS: tl.constexpr,
+    STILE: tl.constexpr,
+    BLOCKS: tl.constexpr,
+    BTILE: tl.constexpr,
+):
+    r = tl.arange(0, RTILE)
+    ids = tl.load(IDS + r, r < ROUTES, other=-1) - FIRST
+    valid = (r < ROUTES) & (ids >= 0) & (ids < EXPERTS)
+    counts = tl.histogram(ids, EXPERTS, mask=valid)
+    padded = tl.cdiv(counts, 8) * 8
+    inclusive = tl.cumsum(padded)
+    e = tl.arange(0, EXPERTS)
+    tl.store(OFFSETS + e, inclusive - padded)
+    tl.store(PADDED, tl.sum(padded))
+    s = tl.arange(0, STILE)
+    tl.store(SORTED + s, ROUTES, s < SLOTS)
+    b = tl.arange(0, BTILE)
+    tl.store(EXPERT_IDS + b, 0, b < BLOCKS)
+
+
+@triton.jit
+def _scatter(
+    IDS,
+    OFFSETS,
+    SORTED,
+    EXPERT_IDS,
+    ROUTES: tl.constexpr,
+    EXPERTS: tl.constexpr,
+    FIRST: tl.constexpr,
+    RTILE: tl.constexpr,
+):
+    route = tl.program_id(0)
+    expert = tl.load(IDS + route)
+    local = expert - FIRST
+    if local >= 0 and local < EXPERTS:
+        r = tl.arange(0, RTILE)
+        earlier = tl.load(IDS + r, r < route, other=-1)
+        ordinal = tl.sum(((r < route) & (earlier == expert)).to(tl.int32))
+        dst = tl.load(OFFSETS + local) + ordinal
+        tl.store(SORTED + dst, route)
+        if ordinal % 8 == 0:
+            tl.store(EXPERT_IDS + dst // 8, local)
+
+
+@triton.jit
+def _align_small(
+    IDS,
+    SORTED,
+    EXPERT_IDS,
+    PADDED,
+    ROUTES: tl.constexpr,
+    EXPERTS: tl.constexpr,
+    FIRST: tl.constexpr,
+    RTILE: tl.constexpr,
+    SLOTS: tl.constexpr,
+    STILE: tl.constexpr,
+    BLOCKS: tl.constexpr,
+    BTILE: tl.constexpr,
+):
+    r = tl.arange(0, RTILE)
+    ids = tl.load(IDS + r, r < ROUTES, other=-1) - FIRST
+    valid = (r < ROUTES) & (ids >= 0) & (ids < EXPERTS)
+    counts = tl.histogram(ids, EXPERTS, mask=valid)
+    padded = tl.cdiv(counts, 8) * 8
+    offsets = tl.cumsum(padded) - padded
+    original_offsets = tl.cumsum(counts) - counts
+    total = tl.sum(padded)
+    tl.store(PADDED, total)
+    s = tl.arange(0, STILE)
+    tl.store(SORTED + s, ROUTES, s < SLOTS)
+    b = tl.arange(0, BTILE)
+    tl.store(EXPERT_IDS + b, 0, b < BLOCKS)
+    # Include the original route index to keep each expert's token order stable.
+    key = tl.where(valid, ids * (ROUTES + 1) + r, 2147483647)
+    key = tl.sort(key, descending=False)
+    local = tl.where(key != 2147483647, key // (ROUTES + 1), 0)
+    route = key % (ROUTES + 1)
+    ordinal = r - tl.gather(original_offsets, local, axis=0)
+    dst = tl.gather(offsets, local, axis=0) + ordinal
+    # Padding and route writes can be issued by different threads in this CTA.
+    tl.debug_barrier()
+    tl.store(SORTED + dst, route, key != 2147483647)
+    tl.store(EXPERT_IDS + dst // 8, local, (key != 2147483647) & (ordinal % 8 == 0))
+
+
+def align(ids, experts, first):
+    routes = ids.numel()
+    active = min(routes, experts)
+    blocks = active + (routes - active) // 8
+    slots = blocks * 8
+    sorted_ids = torch.empty(slots, device=ids.device, dtype=torch.int32)
+    expert_ids = torch.empty(blocks, device=ids.device, dtype=torch.int32)
+    padded = torch.empty(1, device=ids.device, dtype=torch.int32)
+    if routes <= 80:
+        _align_small[(1,)](
+            ids,
+            sorted_ids,
+            expert_ids,
+            padded,
+            ROUTES=routes,
+            EXPERTS=experts,
+            FIRST=first,
+            RTILE=triton.next_power_of_2(routes),
+            SLOTS=slots,
+            STILE=triton.next_power_of_2(slots),
+            BLOCKS=blocks,
+            BTILE=triton.next_power_of_2(blocks),
+            num_warps=4,
+        )
+        return sorted_ids, expert_ids, padded
+    offsets = torch.empty(experts, device=ids.device, dtype=torch.int32)
+    _count[(1,)](
+        ids,
+        offsets,
+        sorted_ids,
+        expert_ids,
+        padded,
+        ROUTES=routes,
+        EXPERTS=experts,
+        FIRST=first,
+        RTILE=triton.next_power_of_2(routes),
+        SLOTS=slots,
+        STILE=triton.next_power_of_2(slots),
+        BLOCKS=blocks,
+        BTILE=triton.next_power_of_2(blocks),
+        num_warps=4,
+    )
+    if routes <= 320:
+        _scatter[(routes,)](
+            ids,
+            offsets,
+            sorted_ids,
+            expert_ids,
+            ROUTES=routes,
+            EXPERTS=experts,
+            FIRST=first,
+            RTILE=triton.next_power_of_2(routes),
+            num_warps=4,
+        )
+    else:
+        _scatter_by_expert[(experts,)](
+            ids,
+            offsets,
+            sorted_ids,
+            expert_ids,
+            ROUTES=routes,
+            FIRST=first,
+            RTILE=triton.next_power_of_2(routes),
+            num_warps=8,
+        )
+    return sorted_ids, expert_ids, padded
+
+
+@triton.jit
+def _scatter_by_expert(
+    IDS,
+    OFFSETS,
+    SORTED,
+    EXPERT_IDS,
+    ROUTES: tl.constexpr,
+    FIRST: tl.constexpr,
+    RTILE: tl.constexpr,
+):
+    local = tl.program_id(0)
+    r = tl.arange(0, RTILE)
+    ids = tl.load(IDS + r, r < ROUTES, other=-1)
+    valid = (r < ROUTES) & (ids == local + FIRST)
+    ordinal = tl.cumsum(valid.to(tl.int32), 0) - 1
+    dst = tl.load(OFFSETS + local) + ordinal
+    tl.store(SORTED + dst, r, valid)
+    tl.store(EXPERT_IDS + dst // 8, local, valid & (ordinal % 8 == 0))
+
+
+@triton.jit
+def _activate(
+    X,
+    Y,
+    IDS,
+    N: tl.constexpr,
+    FIRST: tl.constexpr,
+    EXPERTS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    route = tl.program_id(0)
+    col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    expert = tl.load(IDS + route)
+    valid = (expert >= FIRST) & (expert < FIRST + EXPERTS)
+    gate = tl.load(X + route * (2 * N) + col, (col < N) & valid, other=0).to(tl.float32)
+    up = tl.load(X + route * (2 * N) + N + col, (col < N) & valid, other=0).to(
+        tl.float32
+    )
+    silu = (gate / (1.0 + tl.exp(-gate))).to(tl.bfloat16).to(tl.float32)
+    tl.store(Y + route * N + col, silu * up, col < N)
+
+
+@triton.jit
+def _sum(
+    X,
+    OUT,
+    IDS,
+    K: tl.constexpr,
+    TOPK: tl.constexpr,
+    FIRST: tl.constexpr,
+    EXPERTS: tl.constexpr,
+    BLOCK: tl.constexpr,
+    KTILE: tl.constexpr,
+):
+    row = tl.program_id(0)
+    col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    t = tl.arange(0, KTILE)
+    ids = tl.load(IDS + row * TOPK + t, t < TOPK, other=-1)
+    valid = (t < TOPK) & (ids >= FIRST) & (ids < FIRST + EXPERTS)
+    values = tl.load(
+        X + (row * TOPK + t[:, None]) * K + col[None, :],
+        valid[:, None] & (col[None, :] < K),
+        other=0,
+    ).to(tl.float32)
+    tl.store(OUT + row * K + col, tl.sum(values, 0), col < K)
+
+
+class Nvfp4MarlinMoE:
+    @staticmethod
+    def is_supported() -> bool:
+        """Callers must check compatibility before constructing this kernel."""
+        if (
+            TorchVersion(torch.__version__) < (2, 10)
+            or torch.version.hip is not None
+            or not torch.cuda.is_available()
+            or torch.cuda.get_device_capability() not in ((9, 0), (12, 0))
+        ):
+            return False
+        try:
+            return (
+                "mask" in inspect.signature(getattr(tl, "histogram", None)).parameters
+            )
+        except (TypeError, ValueError):
+            return False
+
+    def __init__(self, q1, s1, g1, q2, s2, g2, ep_size, ep_rank=0):
+        load_library()
+        self.experts, both_n, packed_k = q1.shape
+        self.n, self.k = both_n // 2, packed_k * 2
+        self._one_row_sm120 = (self.k, self.n) == (
+            2560,
+            640,
+        ) and torch.cuda.get_device_capability(q1.device) == (12, 0)
+        self.first = self.experts * ep_rank
+        self.w1, self.s1, self.g1 = prepare_weight(
+            torch.cat((q1[:, self.n :], q1[:, : self.n]), 1),
+            torch.cat((s1[:, self.n :], s1[:, : self.n]), 1),
+            g1,
+        )
+        self.w2, self.s2, self.g2 = prepare_weight(q2, s2, g2)
+        self.workspaces = {}
+
+    def __call__(self, x, ids, weights):
+        topk = ids.shape[1]
+        assert 0 < topk <= _MAX_ROUTES_PER_CHUNK
+        chunk_tokens = _MAX_ROUTES_PER_CHUNK // topk
+        if x.shape[0] <= chunk_tokens:
+            return self._forward_chunk(x, ids, weights)
+
+        out = torch.empty_like(x)
+        for start in range(0, x.shape[0], chunk_tokens):
+            end = start + chunk_tokens
+            self._forward_chunk(
+                x[start:end], ids[start:end], weights[start:end], out[start:end]
+            )
+        return out
+
+    def _forward_chunk(self, x, ids, weights, out=None):
+        m, k = x.shape
+        assert (
+            0 < m
+            and k == self.k
+            and x.dtype == torch.bfloat16
+            and ids.dtype == torch.int32
+        )
+        topk = ids.shape[1]
+        stream = torch.cuda.current_stream(x.device).cuda_stream
+        if stream not in self.workspaces:
+            self.workspaces[stream] = torch.zeros(
+                torch.cuda.get_device_properties(x.device).multi_processor_count * 4,
+                device=x.device,
+                dtype=torch.int32,
+            )
+        workspace = self.workspaces[stream]
+        sorted_ids, expert_ids, padded = align(ids, self.experts, self.first)
+        upgate = torch.empty((m * topk, self.n * 2), device=x.device, dtype=x.dtype)
+        activated = torch.empty((m * topk, self.n), device=x.device, dtype=x.dtype)
+        down = torch.empty((m * topk, k), device=x.device, dtype=x.dtype)
+        if out is None:
+            out = torch.empty_like(x)
+        for a, c, w, sf, glob, size_m, n, kk, kt, weighted in [
+            (x, upgate, self.w1, self.s1, self.g1, m, 2 * self.n, k, topk, False),
+            (activated, down, self.w2, self.s2, self.g2, m * topk, k, self.n, 1, True),
+        ]:
+            thread_config = (
+                (128, 64, 2 if weighted else 1)
+                if m == 1 and self._one_row_sm120
+                else (-1, -1, -1)
+            )
+            torch.ops.rtp_qwen4_marlin.moe_wna16_marlin_gemm(
+                a,
+                c,
+                w,
+                None,
+                sf,
+                None,
+                glob,
+                None,
+                workspace,
+                sorted_ids,
+                expert_ids,
+                padded,
+                weights,
+                8,
+                kt,
+                weighted,
+                562949953487106,
+                size_m,
+                n,
+                kk,
+                False,
+                True,
+                False,
+                *thread_config,
+            )
+            if not weighted:
+                _activate[(m * topk, triton.cdiv(self.n, 256))](
+                    upgate,
+                    activated,
+                    ids,
+                    N=self.n,
+                    FIRST=self.first,
+                    EXPERTS=self.experts,
+                    BLOCK=256,
+                )
+        _sum[(m, triton.cdiv(k, 256))](
+            down,
+            out,
+            ids,
+            K=k,
+            TOPK=topk,
+            FIRST=self.first,
+            EXPERTS=self.experts,
+            BLOCK=256,
+            KTILE=triton.next_power_of_2(topk),
+            num_warps=4,
+        )
+        return out

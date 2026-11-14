@@ -8,6 +8,9 @@ import org.junit.jupiter.api.Test;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
+/**
+ * Checks console-appender attachment and removal.
+ */
 class LogbackStdoutControllerTest {
 
     @Test

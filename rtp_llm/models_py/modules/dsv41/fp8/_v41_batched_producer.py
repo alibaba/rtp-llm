@@ -416,7 +416,7 @@ def _compress_kernel(
     ENTRIES: tl.constexpr,
     POOL_STRIDE,
     BLOCKS,
-    TRAP: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
 ):
     width = tl.load(widths + tl.program_id(0))
     # The callee sees the same compact row program_id. Only its reduction
@@ -447,7 +447,7 @@ def _compress_kernel(
                 ENTRIES,
                 POOL_STRIDE,
                 BLOCKS,
-                TRAP,
+                TRAP_INVALID_KV_ACCESS,
                 128 >> i,
             )
 
@@ -521,7 +521,7 @@ def compress_main(
             main_pool.shape[1],
             main_pool.stride(0),
             main_pool.shape[0],
-            legacy.trap_invalid_kv_access_enabled(),
+            TRAP_INVALID_KV_ACCESS=True,
             num_warps=4,
             enable_fp_fusion=False,
         )
@@ -694,6 +694,7 @@ def _restore_projected_kernel(
     WIDTH: tl.constexpr,
     CP_SIZE: tl.constexpr,
     BLOCK: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
 ):
     element = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     row, column = element // WIDTH, element % WIDTH
@@ -710,7 +711,7 @@ def _restore_projected_kernel(
         & (local < LOCAL_START + LOCAL_ROWS)
     )
     if tl.sum((valid & ~mapped).to(tl.int32), 0) > 0:
-        legacy._trap()
+        legacy._trap(TRAP_INVALID_KV_ACCESS)
     bits = tl.load(
         gathered.to(tl.pointer_type(tl.uint32)) + source_row * INPUT_STRIDE + column,
         valid & mapped,
@@ -796,6 +797,7 @@ def restore_projected_group(
             width,
             cp_size,
             2048,
+            TRAP_INVALID_KV_ACCESS=True,
             num_warps=4,
         )
         stream = torch.cuda.current_stream(device)

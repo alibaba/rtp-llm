@@ -43,45 +43,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 /**
- * Cross-process 8429 wiring integration test (C1 three-piece set, self-test
- * evidence): a REAL {@link MockControlServer} on a real HTTP port +
- * {@link HttpMockEngineCancelChannel} pointed at it, asserting:
- * <ul>
- *   <li>a live request and its priority-cancel terminal record return ACCEPTED;
- *       completed-before-cancel requests return NOT_FOUND; never-seen rids
- *       (including wrongly routed Prefill targets) return REQUEST_FENCED with the
- *       request fence installed engine-side (block-2 fix — the
- *       channel previously crashed on this branch with an unknown status),</li>
- *   <li>armed cancel fault injections (cancel_no_respond / cancel_error /
- *       cancel_unexpected_status) surface as failed channel futures with
- *       zero engine-state change, and clearing the injection restores the
- *       normal path,</li>
- *   <li>a Decode target returns HTTP 501 / a failed channel future, matching
- *       the production UNIMPLEMENTED contract,</li>
- *   <li>the raw /cancel_request JSON still exposes the mock control-plane
- *       detail (found / already_finished / phase) for self-test evidence —
- *       including a queued decode request (opt-in
- *       {@code decode.report_queued_as_kv_allocated}) reporting phase
- *       KV_ALLOCATED — the accepted-layer contract Phase 5 eviction needs,</li>
- *   <li>the CANCELLED terminal surfaces in the next WorkerStatus finished
- *       list (iron rule 4 confirmation source),</li>
- *   <li>unknown engine port → UNSUPPORTED (HTTP 404),</li>
- *   <li>transport failure (dead URL) → failed future, never a synchronous
- *       throw.</li>
- * </ul>
+ * Checks cancellation over the mock engine's actual HTTP control endpoint, including accepted,
+ * finished and absent-request outcomes.
  */
 class HttpMockCancelIntegrationTest {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private static final int BASE_PORT = 63500;
 
     @TempDir Path tempDir;
-
     private ScheduledExecutorService scheduler;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
     private MockControlServer controlServer;
     private JavaMockEngineCluster.FastRpcService prefillService;
     private JavaMockEngineCluster.FastRpcService decodeService;
+
     private int nextPortOffset;
 
     @BeforeEach
@@ -623,6 +599,16 @@ class HttpMockCancelIntegrationTest {
         controlServer.start();
     }
 
+    private MockPerformanceModel model(double decodeStepMs, boolean reportQueuedAsKvAllocated)
+            throws Exception {
+        Map<String, Object> decodeConfig = new LinkedHashMap<>();
+        if (reportQueuedAsKvAllocated) {
+            decodeConfig.put("report_queued_as_kv_allocated", true);
+        }
+        return MockEngineTestSupport.performanceModel(
+                tempDir, "10", 0.1, decodeStepMs, Map.of(), decodeConfig);
+    }
+
     private boolean scheduleOwnedDecode(String requestId) throws Exception {
         prefillService.registerDecodeOwnership(Long.parseLong(requestId), decodeService);
         boolean accepted =
@@ -631,6 +617,24 @@ class HttpMockCancelIntegrationTest {
             prefillService.clearDecodeOwnership(Long.parseLong(requestId), decodeService);
         }
         return accepted;
+    }
+
+    private static boolean invokeScheduleDecodeCompletion(
+            JavaMockEngineCluster.FastRpcService service,
+            MockPerformanceModel.RequestShape shape,
+            long batchId,
+            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue)
+            throws Exception {
+        return MockEngineTestSupport.scheduleDecodeCompletion(
+                service, shape, batchId, responseQueue);
+    }
+
+    private MockPerformanceModel.RequestShape shapeOf(long requestId) throws Exception {
+        return MockEngineTestSupport.requestShape(decodeService.getPerformance(), requestId, 8);
+    }
+
+    private MockPerformanceModel.RequestShape shapeOf(String requestId) throws Exception {
+        return shapeOf(Long.parseLong(requestId));
     }
 
     private boolean scheduleOwnedDecode(long requestId) throws Exception {
@@ -650,33 +654,5 @@ class HttpMockCancelIntegrationTest {
                 WorkerStatus.createDiscovered(
                         RoleType.DECODE, "test", "127.0.0.1", grpcPort - 2, grpcPort, null);
         return new DecodeEndpoint(status, mock(EndpointEventProjector.class));
-    }
-
-    private MockPerformanceModel model(double decodeStepMs, boolean reportQueuedAsKvAllocated)
-            throws Exception {
-        Map<String, Object> decodeConfig = new LinkedHashMap<>();
-        if (reportQueuedAsKvAllocated) {
-            decodeConfig.put("report_queued_as_kv_allocated", true);
-        }
-        return MockEngineTestSupport.performanceModel(
-                tempDir, "10", 0.1, decodeStepMs, Map.of(), decodeConfig);
-    }
-
-    private MockPerformanceModel.RequestShape shapeOf(long requestId) throws Exception {
-        return MockEngineTestSupport.requestShape(decodeService.getPerformance(), requestId, 8);
-    }
-
-    private MockPerformanceModel.RequestShape shapeOf(String requestId) throws Exception {
-        return shapeOf(Long.parseLong(requestId));
-    }
-
-    private static boolean invokeScheduleDecodeCompletion(
-            JavaMockEngineCluster.FastRpcService service,
-            MockPerformanceModel.RequestShape shape,
-            long batchId,
-            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue)
-            throws Exception {
-        return MockEngineTestSupport.scheduleDecodeCompletion(
-                service, shape, batchId, responseQueue);
     }
 }

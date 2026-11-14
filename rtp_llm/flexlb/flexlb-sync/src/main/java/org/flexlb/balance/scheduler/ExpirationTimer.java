@@ -28,175 +28,16 @@ import java.util.function.Predicate;
  * Engine cancellation acknowledgements or terminal status delivery.
  */
 final class ExpirationTimer implements AutoCloseable {
-
-    private enum DeadlineState {
-        PREPARED,
-        FIRED_BEFORE_INSTALL,
-        ARMED,
-        CONSUMED,
-        CANCELED
-    }
-
-    /** Exact capabilities detached together from one slot during shutdown. */
-    record DetachedDeadlines(
-            RequestDeadline requestDeadline,
-            DecisionDeadline decisionDeadline,
-            InactivityDeadline inactivityDeadline) {}
-
-    /** Timers detached atomically at ACTIVE -> TERMINALIZING. */
-    static final class DetachedRequestTimers {
-        private final RequestDeadline requestDeadline;
-        private final InactivityDeadline inactivityDeadline;
-        private final DecisionDeadline detachedDecisionDeadline;
-        private boolean released;
-
-        DetachedRequestTimers(
-                RequestDeadline requestDeadline,
-                DecisionDeadline detachedDecisionDeadline,
-                InactivityDeadline inactivityDeadline) {
-            this.requestDeadline = requestDeadline;
-            this.inactivityDeadline = inactivityDeadline;
-            this.detachedDecisionDeadline = detachedDecisionDeadline;
-        }
-
-        synchronized void release(ExpirationTimer timer) {
-            if (released) {
-                return;
-            }
-            released = true;
-            Throwable failure = null;
-            if (inactivityDeadline != null) {
-                try {
-                    timer.cancel(inactivityDeadline);
-                } catch (Throwable timerFailure) {
-                    failure = timerFailure;
-                }
-            }
-            if (requestDeadline != null) {
-                try {
-                    timer.cancel(requestDeadline);
-                } catch (Throwable timerFailure) {
-                    failure = RequestTerminalCleanup.appendFailure(failure, timerFailure);
-                }
-            }
-            if (detachedDecisionDeadline != null) {
-                try {
-                    timer.cancel(detachedDecisionDeadline);
-                } catch (Throwable admissionFailure) {
-                    failure = RequestTerminalCleanup.appendFailure(failure, admissionFailure);
-                }
-            }
-            RequestTerminalCleanup.rethrowCleanup(failure);
-        }
-    }
-
-    private enum CloseState {
-        OPEN,
-        CLOSING,
-        CLOSED
-    }
-
-    private abstract static class DeadlineRegistration {
-        private final ExpirationTimer owner;
-        private DeadlineState state = DeadlineState.PREPARED;
-        private ScheduledFuture<?> scheduled;
-
-        private DeadlineRegistration(ExpirationTimer owner) {
-            this.owner = owner;
-        }
-
-        private synchronized void installScheduled(ScheduledFuture<?> exactScheduled) {
-            if (scheduled != null) {
-                throw new IllegalStateException("deadline already owns a scheduled task");
-            }
-            scheduled = exactScheduled;
-            if (state == DeadlineState.CANCELED) {
-                exactScheduled.cancel(false);
-            }
-        }
-
-        /** Publish only after the exact slot has stored this capability. */
-        final synchronized boolean publishAfterInstall() {
-            return switch (state) {
-                case PREPARED -> {
-                    state = DeadlineState.ARMED;
-                    yield false;
-                }
-                case FIRED_BEFORE_INSTALL -> {
-                    state = DeadlineState.CONSUMED;
-                    yield true;
-                }
-                case CANCELED, CONSUMED -> false;
-                case ARMED ->
-                        throw new IllegalStateException("deadline capability was published twice");
-            };
-        }
-
-        final synchronized boolean consume() {
-            return switch (state) {
-                case PREPARED -> {
-                    state = DeadlineState.FIRED_BEFORE_INSTALL;
-                    yield false;
-                }
-                case ARMED -> {
-                    state = DeadlineState.CONSUMED;
-                    yield true;
-                }
-                case FIRED_BEFORE_INSTALL, CONSUMED, CANCELED -> false;
-            };
-        }
-
-        final boolean cancel() {
-            ScheduledFuture<?> exactScheduled;
-            synchronized (this) {
-                if (state == DeadlineState.CONSUMED || state == DeadlineState.CANCELED) {
-                    return false;
-                }
-                state = DeadlineState.CANCELED;
-                exactScheduled = scheduled;
-            }
-            if (exactScheduled != null) {
-                exactScheduled.cancel(false);
-            }
-            return true;
-        }
-    }
-
-    /** Exact one-shot capability for one request's absolute scheduling deadline. */
-    static final class RequestDeadline extends DeadlineRegistration {
-        private RequestDeadline(ExpirationTimer owner) {
-            super(owner);
-        }
-    }
-
-    /** Wake-up to recheck the latest request activity, not proof of expiration. */
-    static final class InactivityDeadline extends DeadlineRegistration {
-        private InactivityDeadline(ExpirationTimer owner) {
-            super(owner);
-        }
-    }
-
-    /** Exact one-shot capability for request visibility and PD handoff detection. */
-    static final class DecisionDeadline extends DeadlineRegistration {
-        private final long deadlineAtMs;
-
-        private DecisionDeadline(ExpirationTimer owner, long deadlineAtMs) {
-            super(owner);
-            this.deadlineAtMs = deadlineAtMs;
-        }
-
-        long deadlineAtMs() {
-            return deadlineAtMs;
-        }
-    }
-
     private final RequestRegistry lifecycle;
     private final ConfigService config;
     private final LongSupplier clock;
     private final ScheduledThreadPoolExecutor executor;
     private final Object registrationMonitor = new Object();
+
     private CloseState closeState = CloseState.OPEN;
+
     private int inflightRegistrations;
+
     private Throwable closeFailure;
 
     ExpirationTimer(RequestRegistry lifecycle, ConfigService config) {
@@ -218,6 +59,53 @@ final class ExpirationTimer implements AutoCloseable {
                         new ThreadPoolExecutor.AbortPolicy());
         executor.setRemoveOnCancelPolicy(true);
         executor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+    }
+
+    // ── 关闭：等待注册完成，摘除并取消全部句柄 ──
+
+    @Override
+    public void close() {
+        boolean interrupted = false;
+        boolean closeOwner = false;
+        synchronized (registrationMonitor) {
+            if (closeState == CloseState.OPEN) {
+                closeState = CloseState.CLOSING;
+                closeOwner = true;
+            }
+            while (closeState == CloseState.CLOSING
+                    && (!closeOwner || inflightRegistrations != 0)) {
+                try {
+                    registrationMonitor.wait();
+                } catch (InterruptedException interruption) {
+                    interrupted = true;
+                }
+            }
+            if (!closeOwner) {
+                Throwable completedFailure = closeFailure;
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+                rethrow(completedFailure);
+                return;
+            }
+        }
+
+        Throwable failure = detachAllDeadlines();
+        try {
+            executor.shutdownNow();
+        } catch (RuntimeException | Error shutdownFailure) {
+            failure = append(failure, shutdownFailure);
+        } finally {
+            synchronized (registrationMonitor) {
+                closeFailure = failure;
+                closeState = CloseState.CLOSED;
+                registrationMonitor.notifyAll();
+            }
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        rethrow(failure);
     }
 
     // ── 调度期限：注册、安装与触发 ──
@@ -245,17 +133,6 @@ final class ExpirationTimer implements AutoCloseable {
             }
             throw timerStopped;
         }
-    }
-
-    private boolean installRequestDeadline(RequestSlot exactSlot, RequestDeadline exactDeadline) {
-        synchronized (exactSlot) {
-            return lifecycle.isCurrentSlot(exactSlot)
-                    && exactSlot.installRequestDeadline(exactDeadline);
-        }
-    }
-
-    private void requestDeadlineExpired(RequestSlot slot, RequestDeadline exact) {
-        slot.onSchedulingDeadline(exact);
     }
 
     // ── 可见性期限：计划、注册、触发与取消 ──
@@ -292,17 +169,6 @@ final class ExpirationTimer implements AutoCloseable {
         }
     }
 
-    private boolean installDecisionDeadline(RequestSlot exactSlot, DecisionDeadline exactDeadline) {
-        synchronized (exactSlot) {
-            return lifecycle.isCurrentSlot(exactSlot)
-                    && exactSlot.installDecisionDeadline(exactDeadline);
-        }
-    }
-
-    private void decisionDeadlineExpired(RequestSlot slot, DecisionDeadline exact) {
-        slot.onDecisionVisibilityDeadline(exact);
-    }
-
     void releaseDecisionDeadline(DecisionDeadline exact) {
         if (exact == null) {
             return;
@@ -312,6 +178,29 @@ final class ExpirationTimer implements AutoCloseable {
         } catch (Throwable failure) {
             Logger.error("Decision deadline cancellation failed", failure);
         }
+    }
+
+    void release(DecisionDeadline cleanup) {
+        if (cleanup == null) {
+            return;
+        }
+        try {
+            cancel(cleanup);
+        } catch (Throwable failure) {
+            Logger.error("Decision timer cleanup failed", failure);
+        }
+    }
+
+    boolean cancel(InactivityDeadline exactDeadline) {
+        return requireOwner(exactDeadline).cancel();
+    }
+
+    boolean cancel(RequestDeadline exactDeadline) {
+        return requireOwner(exactDeadline).cancel();
+    }
+
+    boolean cancel(DecisionDeadline exactDeadline) {
+        return requireOwner(exactDeadline).cancel();
     }
 
     // ── 沉默期限：计划、注册与续期检查 ──
@@ -348,6 +237,63 @@ final class ExpirationTimer implements AutoCloseable {
             }
             throw timerStopped;
         }
+    }
+
+    // ── 保留期维护：先清终态目录，再扫描 Endpoint 孤儿 ──
+
+    /** Run one complete maintenance pass using one dynamic policy snapshot. */
+    void maintain(BiConsumer<Long, Predicate<String>> exactSweeper) {
+        if (lifecycle.isShuttingDown()) {
+            return;
+        }
+        long ttlMs =
+                config.loadBalanceConfig().getWorkerRegistry().getHealth().getStatusStaleAfterMs();
+        long nowMs = clock.getAsLong();
+        List<RequestSlot> exactSlots = List.of();
+        Throwable failure = null;
+        try {
+            exactSlots = lifecycle.snapshotSlots();
+        } catch (RuntimeException | Error snapshotFailure) {
+            failure = snapshotFailure;
+        }
+
+        long terminalRecordCutoff = subtractSaturated(nowMs, ttlMs);
+        for (RequestSlot exactSlot : exactSlots) {
+            try {
+                lifecycle.removeExactTerminalRecord(exactSlot, terminalRecordCutoff);
+            } catch (RuntimeException | Error removalFailure) {
+                failure = append(failure, removalFailure);
+            }
+        }
+
+        try {
+            exactSweeper.accept(ttlMs, lifecycle::retainForSchedulerCleanup);
+        } catch (RuntimeException | Error sweepFailure) {
+            failure = append(failure, sweepFailure);
+        }
+        rethrow(failure);
+    }
+
+    private boolean installRequestDeadline(RequestSlot exactSlot, RequestDeadline exactDeadline) {
+        synchronized (exactSlot) {
+            return lifecycle.isCurrentSlot(exactSlot)
+                    && exactSlot.installRequestDeadline(exactDeadline);
+        }
+    }
+
+    private void requestDeadlineExpired(RequestSlot slot, RequestDeadline exact) {
+        slot.onSchedulingDeadline(exact);
+    }
+
+    private boolean installDecisionDeadline(RequestSlot exactSlot, DecisionDeadline exactDeadline) {
+        synchronized (exactSlot) {
+            return lifecycle.isCurrentSlot(exactSlot)
+                    && exactSlot.installDecisionDeadline(exactDeadline);
+        }
+    }
+
+    private void decisionDeadlineExpired(RequestSlot slot, DecisionDeadline exact) {
+        slot.onDecisionVisibilityDeadline(exact);
     }
 
     private void inactivityDeadlineExpired(RequestSlot slot, InactivityDeadline exact) {
@@ -406,6 +352,17 @@ final class ExpirationTimer implements AutoCloseable {
         }
     }
 
+    private void schedule(DeadlineRegistration exact, Runnable callback, long delayMs) {
+        ScheduledFuture<?> scheduled;
+        try {
+            scheduled = executor.schedule(callback, delayMs, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException rejected) {
+            exact.cancel();
+            throw rejected;
+        }
+        exact.installScheduled(scheduled);
+    }
+
     private void endRegistration() {
         synchronized (registrationMonitor) {
             if (inflightRegistrations <= 0) {
@@ -418,17 +375,6 @@ final class ExpirationTimer implements AutoCloseable {
         }
     }
 
-    private void schedule(DeadlineRegistration exact, Runnable callback, long delayMs) {
-        ScheduledFuture<?> scheduled;
-        try {
-            scheduled = executor.schedule(callback, delayMs, TimeUnit.MILLISECONDS);
-        } catch (RejectedExecutionException rejected) {
-            exact.cancel();
-            throw rejected;
-        }
-        exact.installScheduled(scheduled);
-    }
-
     private long delayUntil(long deadlineAtMs) {
         long nowMs = clock.getAsLong();
         if (deadlineAtMs <= nowMs) {
@@ -438,124 +384,12 @@ final class ExpirationTimer implements AutoCloseable {
         return delayMs < 0L ? Long.MAX_VALUE : delayMs;
     }
 
-    boolean cancel(InactivityDeadline exactDeadline) {
-        return requireOwner(exactDeadline).cancel();
-    }
-
-    boolean cancel(RequestDeadline exactDeadline) {
-        return requireOwner(exactDeadline).cancel();
-    }
-
-    boolean cancel(DecisionDeadline exactDeadline) {
-        return requireOwner(exactDeadline).cancel();
-    }
-
-    void release(DecisionDeadline cleanup) {
-        if (cleanup == null) {
-            return;
-        }
-        try {
-            cancel(cleanup);
-        } catch (Throwable failure) {
-            Logger.error("Decision timer cleanup failed", failure);
-        }
-    }
-
-    private DeadlineRegistration requireOwner(DeadlineRegistration exact) {
-        if (exact.owner != this) {
-            throw new IllegalArgumentException("deadline belongs to another ExpirationTimer");
-        }
-        return exact;
-    }
-
-    // ── 保留期维护：先清终态目录，再扫描 Endpoint 孤儿 ──
-
-    /** Run one complete maintenance pass using one dynamic policy snapshot. */
-    void maintain(BiConsumer<Long, Predicate<String>> exactSweeper) {
-        if (lifecycle.isShuttingDown()) {
-            return;
-        }
-        long ttlMs =
-                config.loadBalanceConfig().getWorkerRegistry().getHealth().getStatusStaleAfterMs();
-        long nowMs = clock.getAsLong();
-        List<RequestSlot> exactSlots = List.of();
-        Throwable failure = null;
-        try {
-            exactSlots = lifecycle.snapshotSlots();
-        } catch (RuntimeException | Error snapshotFailure) {
-            failure = snapshotFailure;
-        }
-
-        long terminalRecordCutoff = subtractSaturated(nowMs, ttlMs);
-        for (RequestSlot exactSlot : exactSlots) {
-            try {
-                lifecycle.removeExactTerminalRecord(exactSlot, terminalRecordCutoff);
-            } catch (RuntimeException | Error removalFailure) {
-                failure = append(failure, removalFailure);
-            }
-        }
-
-        try {
-            exactSweeper.accept(ttlMs, lifecycle::retainForSchedulerCleanup);
-        } catch (RuntimeException | Error sweepFailure) {
-            failure = append(failure, sweepFailure);
-        }
-        rethrow(failure);
-    }
-
     private static long subtractSaturated(long value, long decrement) {
         try {
             return Math.subtractExact(value, decrement);
         } catch (ArithmeticException underflow) {
             return Long.MIN_VALUE;
         }
-    }
-
-    // ── 关闭：等待注册完成，摘除并取消全部句柄 ──
-
-    @Override
-    public void close() {
-        boolean interrupted = false;
-        boolean closeOwner = false;
-        synchronized (registrationMonitor) {
-            if (closeState == CloseState.OPEN) {
-                closeState = CloseState.CLOSING;
-                closeOwner = true;
-            }
-            while (closeState == CloseState.CLOSING
-                    && (!closeOwner || inflightRegistrations != 0)) {
-                try {
-                    registrationMonitor.wait();
-                } catch (InterruptedException interruption) {
-                    interrupted = true;
-                }
-            }
-            if (!closeOwner) {
-                Throwable completedFailure = closeFailure;
-                if (interrupted) {
-                    Thread.currentThread().interrupt();
-                }
-                rethrow(completedFailure);
-                return;
-            }
-        }
-
-        Throwable failure = detachAllDeadlines();
-        try {
-            executor.shutdownNow();
-        } catch (RuntimeException | Error shutdownFailure) {
-            failure = append(failure, shutdownFailure);
-        } finally {
-            synchronized (registrationMonitor) {
-                closeFailure = failure;
-                closeState = CloseState.CLOSED;
-                registrationMonitor.notifyAll();
-            }
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
-        }
-        rethrow(failure);
     }
 
     private Throwable detachAllDeadlines() {
@@ -588,18 +422,6 @@ final class ExpirationTimer implements AutoCloseable {
         }
     }
 
-    private Throwable cancelDetached(DeadlineRegistration exact, Throwable failure) {
-        if (exact == null) {
-            return failure;
-        }
-        try {
-            requireOwner(exact).cancel();
-        } catch (RuntimeException | Error cancelFailure) {
-            return append(failure, cancelFailure);
-        }
-        return failure;
-    }
-
     // ── 异常汇总 ──
 
     private static Throwable append(Throwable first, Throwable next) {
@@ -612,12 +434,207 @@ final class ExpirationTimer implements AutoCloseable {
         return first;
     }
 
+    private Throwable cancelDetached(DeadlineRegistration exact, Throwable failure) {
+        if (exact == null) {
+            return failure;
+        }
+        try {
+            requireOwner(exact).cancel();
+        } catch (RuntimeException | Error cancelFailure) {
+            return append(failure, cancelFailure);
+        }
+        return failure;
+    }
+
+    private DeadlineRegistration requireOwner(DeadlineRegistration exact) {
+        if (exact.owner != this) {
+            throw new IllegalArgumentException("deadline belongs to another ExpirationTimer");
+        }
+        return exact;
+    }
+
     private static void rethrow(Throwable failure) {
         if (failure instanceof RuntimeException runtime) {
             throw runtime;
         }
         if (failure instanceof Error error) {
             throw error;
+        }
+    }
+
+    private enum DeadlineState {
+        PREPARED,
+        FIRED_BEFORE_INSTALL,
+        ARMED,
+        CONSUMED,
+        CANCELED
+    }
+
+    /**
+     * Exact capabilities detached together from one slot during shutdown.
+     */
+    record DetachedDeadlines(
+            RequestDeadline requestDeadline,
+            DecisionDeadline decisionDeadline,
+            InactivityDeadline inactivityDeadline) {}
+
+    /**
+     * Timers detached atomically at ACTIVE -> TERMINALIZING.
+     */
+    static final class DetachedRequestTimers {
+        private final RequestDeadline requestDeadline;
+        private final InactivityDeadline inactivityDeadline;
+        private final DecisionDeadline detachedDecisionDeadline;
+        private boolean released;
+
+        DetachedRequestTimers(
+                RequestDeadline requestDeadline,
+                DecisionDeadline detachedDecisionDeadline,
+                InactivityDeadline inactivityDeadline) {
+            this.requestDeadline = requestDeadline;
+            this.inactivityDeadline = inactivityDeadline;
+            this.detachedDecisionDeadline = detachedDecisionDeadline;
+        }
+
+        synchronized void release(ExpirationTimer timer) {
+            if (released) {
+                return;
+            }
+            released = true;
+            Throwable failure = null;
+            if (inactivityDeadline != null) {
+                try {
+                    timer.cancel(inactivityDeadline);
+                } catch (Throwable timerFailure) {
+                    failure = timerFailure;
+                }
+            }
+            if (requestDeadline != null) {
+                try {
+                    timer.cancel(requestDeadline);
+                } catch (Throwable timerFailure) {
+                    failure = RequestTerminalCleanup.appendFailure(failure, timerFailure);
+                }
+            }
+            if (detachedDecisionDeadline != null) {
+                try {
+                    timer.cancel(detachedDecisionDeadline);
+                } catch (Throwable admissionFailure) {
+                    failure = RequestTerminalCleanup.appendFailure(failure, admissionFailure);
+                }
+            }
+            RequestTerminalCleanup.rethrowCleanup(failure);
+        }
+    }
+
+    private enum CloseState {
+        OPEN,
+        CLOSING,
+        CLOSED
+    }
+
+    /**
+     * Coordinates timer installation, publication, consumption and cancellation for one exact
+     * deadline.
+     */
+    private abstract static class DeadlineRegistration {
+        private final ExpirationTimer owner;
+
+        private DeadlineState state = DeadlineState.PREPARED;
+        private ScheduledFuture<?> scheduled;
+
+        private DeadlineRegistration(ExpirationTimer owner) {
+            this.owner = owner;
+        }
+
+        /** Publish only after the exact slot has stored this capability. */
+        final synchronized boolean publishAfterInstall() {
+            return switch (state) {
+                case PREPARED -> {
+                    state = DeadlineState.ARMED;
+                    yield false;
+                }
+                case FIRED_BEFORE_INSTALL -> {
+                    state = DeadlineState.CONSUMED;
+                    yield true;
+                }
+                case CANCELED, CONSUMED -> false;
+                case ARMED ->
+                        throw new IllegalStateException("deadline capability was published twice");
+            };
+        }
+
+        final synchronized boolean consume() {
+            return switch (state) {
+                case PREPARED -> {
+                    state = DeadlineState.FIRED_BEFORE_INSTALL;
+                    yield false;
+                }
+                case ARMED -> {
+                    state = DeadlineState.CONSUMED;
+                    yield true;
+                }
+                case FIRED_BEFORE_INSTALL, CONSUMED, CANCELED -> false;
+            };
+        }
+
+        final boolean cancel() {
+            ScheduledFuture<?> exactScheduled;
+            synchronized (this) {
+                if (state == DeadlineState.CONSUMED || state == DeadlineState.CANCELED) {
+                    return false;
+                }
+                state = DeadlineState.CANCELED;
+                exactScheduled = scheduled;
+            }
+            if (exactScheduled != null) {
+                exactScheduled.cancel(false);
+            }
+            return true;
+        }
+
+        private synchronized void installScheduled(ScheduledFuture<?> exactScheduled) {
+            if (scheduled != null) {
+                throw new IllegalStateException("deadline already owns a scheduled task");
+            }
+            scheduled = exactScheduled;
+            if (state == DeadlineState.CANCELED) {
+                exactScheduled.cancel(false);
+            }
+        }
+    }
+
+    /**
+     * Exact one-shot capability for one request's absolute scheduling deadline.
+     */
+    static final class RequestDeadline extends DeadlineRegistration {
+        private RequestDeadline(ExpirationTimer owner) {
+            super(owner);
+        }
+    }
+
+    /**
+     * Wake-up to recheck the latest request activity, not proof of expiration.
+     */
+    static final class InactivityDeadline extends DeadlineRegistration {
+        private InactivityDeadline(ExpirationTimer owner) {
+            super(owner);
+        }
+    }
+
+    /**
+     * Exact one-shot capability for request visibility and PD handoff detection.
+     */
+    static final class DecisionDeadline extends DeadlineRegistration {
+        private final long deadlineAtMs;
+
+        private DecisionDeadline(ExpirationTimer owner, long deadlineAtMs) {
+            super(owner);
+            this.deadlineAtMs = deadlineAtMs;
+        }
+
+        long deadlineAtMs() {
+            return deadlineAtMs;
         }
     }
 }

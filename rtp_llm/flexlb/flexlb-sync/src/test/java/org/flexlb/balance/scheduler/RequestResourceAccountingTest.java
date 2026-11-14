@@ -38,9 +38,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Resource assertions use real endpoint ledgers, not invocations of mocked release methods. */
+/**
+ * Resource assertions use real endpoint ledgers, not invocations of mocked release methods.
+ */
 class RequestResourceAccountingTest {
     private static final String ID = "101";
+
     private static final long HARD_KV = 160L;
     private static final long EXPECTED_KV = 320L;
     private static final long TOTAL_KV = 10_000L;
@@ -275,6 +278,47 @@ class RequestResourceAccountingTest {
         }
     }
 
+    private static TaskInfo task(String id) {
+        var task = new TaskInfo();
+        task.setRequestId(id);
+        task.setInputLength(HARD_KV);
+        task.setPhase(TaskPhase.RUNNING);
+        return task;
+    }
+
+    private static WorkerStatusResponse status(
+            RoleType role,
+            long version,
+            Map<String, TaskInfo> running,
+            Map<String, TaskInfo> finished,
+            long freeKv) {
+        var response = new WorkerStatusResponse();
+        response.setRole(role);
+        response.setAlive(true);
+        response.setStatusVersion(version);
+        response.setLatestFinishedVersion(finished.isEmpty() ? 0L : version);
+        response.setRunningTaskInfo(running);
+        response.setRunningQueryLen((long) running.size());
+        response.setFinishedTaskInfo(finished);
+        response.setTotalKvCacheTokens(TOTAL_KV);
+        response.setAvailableKvCacheTokens(freeKv);
+        return response;
+    }
+
+    private static void applyStatus(WorkerEndpoint endpoint, WorkerStatusResponse response) {
+        var worker = endpoint.getStatus();
+        Runnable projection;
+        worker.lock.lock();
+        try {
+            projection =
+                    endpoint.applyPreparedStatus(
+                            worker, worker.prepareNewStatus(worker.freezeStatusResponse(response)));
+        } finally {
+            worker.lock.unlock();
+        }
+        projection.run();
+    }
+
     private enum LocalEnd {
         CANCEL,
         FUTURE_CANCEL,
@@ -282,6 +326,9 @@ class RequestResourceAccountingTest {
         SHUTDOWN
     }
 
+    /**
+     * Owns a request handoff scenario and checks reservation release and capacity reuse.
+     */
     private static final class Fixture implements AutoCloseable {
         final RequestRegistry requests;
         final SchedulerRuntime runtime;
@@ -294,6 +341,7 @@ class RequestResourceAccountingTest {
         final RequestSlot.AdmissionHandle admission;
         final DecodeEndpoint.AdmissionCapacity capacity =
                 new DecodeEndpoint.AdmissionCapacity(1, 90);
+
         long version = 1;
 
         Fixture() {
@@ -390,6 +438,18 @@ class RequestResourceAccountingTest {
             }
         }
 
+        @Override
+        public void close() {
+            try {
+                admission.close();
+                prefillHandoff.close();
+                routeReservation.close();
+                runtime.shutdown();
+            } finally {
+                decode.close();
+            }
+        }
+
         DeliveryClaim handoff() {
             var acquisition = decode.acquireDispatchPermit(reservation, capacity);
             assertEquals(
@@ -406,13 +466,6 @@ class RequestResourceAccountingTest {
             }
         }
 
-        void assertReserved() {
-            assertEquals(1, requests.trackedRequestCount());
-            assertEquals(1, prefill.getLocallyOwnedRequestCount());
-            assertEquals(HARD_KV, decode.routingView().inputKvReserved());
-            assertEquals(EXPECTED_KV, decode.routingView().inputAndMaxOutputKvReserved());
-        }
-
         void assertHandedOff() {
             assertReserved();
             assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());
@@ -422,26 +475,11 @@ class RequestResourceAccountingTest {
                             .fits());
         }
 
-        void assertEmpty() {
-            assertEquals(0, requests.trackedRequestCount(), "request inflight");
-            assertEquals(0, prefill.queuedRequestCount(), "Prefill queue membership");
-            assertEquals(0, prefill.getLocallyOwnedRequestCount(), "Prefill inflight");
-            assertEquals(
-                    0, prefill.getIndividuallyTrackedRequestCount(), "Prefill individual lease");
-            assertEquals(0, prefill.getInflightBatchCount(), "Prefill batch occupancy");
-            var view = decode.resourceSnapshot();
-            assertEquals(0, view.routing().inputKvReserved(), "Decode hard KV reservation");
-            assertEquals(
-                    0,
-                    view.routing().inputAndMaxOutputKvReserved(),
-                    "Decode expected KV reservation");
-            assertEquals(0, view.activeDispatchPermits(), "Decode dispatch permits");
-            assertEquals(0, view.queuedCount(), "Decode queued ownership");
-            assertEquals(0, view.acceptedCount(), "Decode accepted streams");
-            assertEquals(0, view.runningCount(), "Decode running streams");
-            assertEquals(0, view.engineCapacityUsed(), "Decode request capacity");
-            assertTrue(view.reserved().isEmpty());
-            assertTrue(view.confirmed().isEmpty());
+        void assertReserved() {
+            assertEquals(1, requests.trackedRequestCount());
+            assertEquals(1, prefill.getLocallyOwnedRequestCount());
+            assertEquals(HARD_KV, decode.routingView().inputKvReserved());
+            assertEquals(EXPECTED_KV, decode.routingView().inputAndMaxOutputKvReserved());
         }
 
         void assertCapacityReusable() {
@@ -475,6 +513,28 @@ class RequestResourceAccountingTest {
             assertEmpty();
         }
 
+        void assertEmpty() {
+            assertEquals(0, requests.trackedRequestCount(), "request inflight");
+            assertEquals(0, prefill.queuedRequestCount(), "Prefill queue membership");
+            assertEquals(0, prefill.getLocallyOwnedRequestCount(), "Prefill inflight");
+            assertEquals(
+                    0, prefill.getIndividuallyTrackedRequestCount(), "Prefill individual lease");
+            assertEquals(0, prefill.getInflightBatchCount(), "Prefill batch occupancy");
+            var view = decode.resourceSnapshot();
+            assertEquals(0, view.routing().inputKvReserved(), "Decode hard KV reservation");
+            assertEquals(
+                    0,
+                    view.routing().inputAndMaxOutputKvReserved(),
+                    "Decode expected KV reservation");
+            assertEquals(0, view.activeDispatchPermits(), "Decode dispatch permits");
+            assertEquals(0, view.queuedCount(), "Decode queued ownership");
+            assertEquals(0, view.acceptedCount(), "Decode accepted streams");
+            assertEquals(0, view.runningCount(), "Decode running streams");
+            assertEquals(0, view.engineCapacityUsed(), "Decode request capacity");
+            assertTrue(view.reserved().isEmpty());
+            assertTrue(view.confirmed().isEmpty());
+        }
+
         void expire() {
             requests.expireInactiveRequest(
                     requests.requestSlot(ID), System.currentTimeMillis() + TTL + 1);
@@ -484,58 +544,5 @@ class RequestResourceAccountingTest {
                 Map<String, TaskInfo> running, Map<String, TaskInfo> finished, long freeKv) {
             applyStatus(decode, status(RoleType.DECODE, version++, running, finished, freeKv));
         }
-
-        @Override
-        public void close() {
-            try {
-                admission.close();
-                prefillHandoff.close();
-                routeReservation.close();
-                runtime.shutdown();
-            } finally {
-                decode.close();
-            }
-        }
-    }
-
-    private static TaskInfo task(String id) {
-        var task = new TaskInfo();
-        task.setRequestId(id);
-        task.setInputLength(HARD_KV);
-        task.setPhase(TaskPhase.RUNNING);
-        return task;
-    }
-
-    private static WorkerStatusResponse status(
-            RoleType role,
-            long version,
-            Map<String, TaskInfo> running,
-            Map<String, TaskInfo> finished,
-            long freeKv) {
-        var response = new WorkerStatusResponse();
-        response.setRole(role);
-        response.setAlive(true);
-        response.setStatusVersion(version);
-        response.setLatestFinishedVersion(finished.isEmpty() ? 0L : version);
-        response.setRunningTaskInfo(running);
-        response.setRunningQueryLen((long) running.size());
-        response.setFinishedTaskInfo(finished);
-        response.setTotalKvCacheTokens(TOTAL_KV);
-        response.setAvailableKvCacheTokens(freeKv);
-        return response;
-    }
-
-    private static void applyStatus(WorkerEndpoint endpoint, WorkerStatusResponse response) {
-        var worker = endpoint.getStatus();
-        Runnable projection;
-        worker.lock.lock();
-        try {
-            projection =
-                    endpoint.applyPreparedStatus(
-                            worker, worker.prepareNewStatus(worker.freezeStatusResponse(response)));
-        } finally {
-            worker.lock.unlock();
-        }
-        projection.run();
     }
 }

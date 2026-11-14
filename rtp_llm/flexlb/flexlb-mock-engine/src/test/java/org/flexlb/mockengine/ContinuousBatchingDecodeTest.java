@@ -31,48 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * Unit tests for the per-step continuous batching decode engine (production
- * FIFOScheduler alignment, task#51).
- *
- * <p>Model under test: every admitted decode request becomes a DecodeStream in
- * a per-engine running batch; a single chained scheduler tick advances ALL
- * running streams one step per tick (tokens_per_step tokens per stream; this
- * suite pins tokens_per_step=1 so the step-count assertions below stay exact
- * — the MTP fold is covered by ProductionCaliberDecodeTest), with the step
- * duration priced from the step_ms_by_batch curve at the CURRENT running
- * count when the step is armed (a mid-flight joiner waits for the next
- * boundary — awaitsFirstStep). A stream exhausting its step budget completes
- * at that boundary and the waiting-queue head is promoted immediately
- * (production top-up).
- *
- * <p>Observation channel: each request is admitted with its OWN
- * LinkedBlockingQueue (the direct generate_stream path), so the terminal
- * frame's arrival timestamp IS the completion timestamp — no polling
- * quantisation. The curve used everywhere is [[1, 100], [2, 200]] ms with
- * sleep_scale 1.0 / jitter 0 (flat single-point curve where noted), giving
- * clean, widely separated timings.
- *
- * <ol>
- *   <li>{@link #stepDurationRepricesWhenBatchSizeChanges} — a second stream
- *       joining mid-flight drags the shared step from 100 ms to 200 ms: the
- *       first stream's completion is provably later than its solo timeline
- *       (2 × 100 ms) and the joiner finishes strictly after it.</li>
- *   <li>{@link #slotConservationWaitingDrainAndTopUpOrder} — 8 requests vs
- *       cap 3: running + waiting + completed is invariant at every sample,
- *       activeDecode never exceeds the cap, all 8 complete, counters settle
- *       at zero, and terminal frames arrive in FIFO admission order (the
- *       waiting queue drains head-first).</li>
- *   <li>{@link #longStreamDoesNotBlockShortStream} — an ol=20 stream and an
- *       ol=2 stream share the batch: the short stream completes ~1.7 s before
- *       the long one, and the long stream ACCELERATES after the short one
- *       leaves (step re-priced 200 → 100 ms), finishing far below the
- *       no-reprice bound.</li>
- *   <li>{@link #cancelRunningStreamPromotesWaitingHeadImmediately} —
- *       cancelling a running stream frees its slot and promotes the waiting
- *       head in the SAME locked section (no step-boundary wait): counters
- *       reflect the promotion instantly, the cancelled request never sees a
- *       terminal frame, and every surviving request drains to completion.</li>
- * </ol>
+ * Checks shared Decode ticks, per-step progress and queue admission across changing running batches.
  */
 class ContinuousBatchingDecodeTest {
 

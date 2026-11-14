@@ -30,6 +30,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks asynchronous standby comparisons and their completion and timeout behavior.
+ */
 class LocalStandbyComparisonServiceTest {
 
     @Test

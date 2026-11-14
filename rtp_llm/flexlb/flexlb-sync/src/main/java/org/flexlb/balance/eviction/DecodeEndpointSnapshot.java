@@ -7,7 +7,9 @@ import org.flexlb.enums.DecodeTaskPhase;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Victims and placement occupancy captured under one endpoint admission lock. */
+/**
+ * Victims and placement occupancy captured under one endpoint admission lock.
+ */
 public record DecodeEndpointSnapshot(
         DecodeEndpoint endpoint,
         String endpointId,

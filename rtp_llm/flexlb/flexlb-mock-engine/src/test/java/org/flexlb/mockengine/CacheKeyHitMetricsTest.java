@@ -30,24 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Key-level cache-hit observability (the production
- * recent_cache_key_hit_count / total_count caliber) the mock reports as two
- * cumulative counters on {@code /metrics} in BOTH emission modes plus the
- * {@code /snapshot} terminal state:
- *
- * <ul>
- *   <li>{@code mock_engine_cache_key_hits_total} — Σ raw prefix-match run
- *       lengths (matched key count) recorded at the prefill admission hit
- *       computation (MockPerformanceModel.shape's prefixHitBlocks call).</li>
- *   <li>{@code mock_engine_cache_keys_requested_total} — Σ request blockKeys
- *       sizes observed at the same point; an empty-bh request adds 0/0 and
- *       never contributes.</li>
- * </ul>
- *
- * <p>Fixture shape (the known-hit structure the report chain test mirrors):
- * a cold request parks keys [k1,k2,k3] in the LRU; the warm re-request hits
- * all 3; a [k1,k2,k9] request hits only the 2-key prefix (the k9 miss
- * truncates the run) — cumulative 5 hits over 9 requested keys.
+ * Checks cumulative cache-key hit and lookup counts in metric output and terminal snapshots.
  */
 class CacheKeyHitMetricsTest {
 

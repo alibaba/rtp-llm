@@ -22,8 +22,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Shared lifecycle primitives for scheduler contract tests. */
+/**
+ * Shared lifecycle primitives for scheduler contract tests.
+ */
 final class RequestLifecycleTestSupport {
+    private RequestLifecycleTestSupport() {}
+
     /** Seed cancellation in state-only fixtures without exposing an internal production operation. */
     static boolean recordCancellation(RequestSlot slot, CancelReason reason, String message) {
         return Boolean.TRUE.equals(
@@ -37,8 +41,6 @@ final class RequestLifecycleTestSupport {
             return ReflectionTestUtils.invokeMethod(slot, decision, arguments);
         }
     }
-
-    private RequestLifecycleTestSupport() {}
 
     static BalanceContext context(FlexlbConfig config, long requestId) {
         return context(config, Long.toString(requestId));
@@ -88,6 +90,15 @@ final class RequestLifecycleTestSupport {
         return claim;
     }
 
+    static DeliveryClaim claimRouteWithoutPrediction(
+            RequestRegistry registry, ScheduledRequest item, BooleanSupplier handoff) {
+        var admission =
+                org.mockito.Mockito.mock(PrefillAdmissionResources.CommittedAdmissionOwner.class);
+        org.mockito.Mockito.when(admission.transferToEndpoint(item))
+                .thenAnswer(call -> handoff.getAsBoolean());
+        return registry.claimRouteDelivery(item, admission);
+    }
+
     static DeliveryClaim claimBatch(
             RequestRegistry registry,
             ScheduledRequest item,
@@ -100,15 +111,6 @@ final class RequestLifecycleTestSupport {
         return claim;
     }
 
-    static DeliveryClaim claimRouteWithoutPrediction(
-            RequestRegistry registry, ScheduledRequest item, BooleanSupplier handoff) {
-        var admission =
-                org.mockito.Mockito.mock(PrefillAdmissionResources.CommittedAdmissionOwner.class);
-        org.mockito.Mockito.when(admission.transferToEndpoint(item))
-                .thenAnswer(call -> handoff.getAsBoolean());
-        return registry.claimRouteDelivery(item, admission);
-    }
-
     static DeliveryClaim claimBatchWithoutPrediction(
             RequestRegistry registry,
             ScheduledRequest item,
@@ -119,11 +121,6 @@ final class RequestLifecycleTestSupport {
         org.mockito.Mockito.when(transaction.transferToEndpoint(item))
                 .thenAnswer(call -> handoff.getAsBoolean());
         return registry.claimBatchDelivery(item, transaction);
-    }
-
-    private static WorkSnapshot emptyWork() {
-        return new WorkSnapshot(
-                System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L);
     }
 
     // State-only fixtures deliberately seed a phase without executing publication or timers.
@@ -174,6 +171,14 @@ final class RequestLifecycleTestSupport {
                 });
     }
 
+    static void awaitCondition(BooleanSupplier condition) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
+            Thread.sleep(1L);
+        }
+        assertTrue(condition.getAsBoolean(), "condition did not become true");
+    }
+
     static void await(CountDownLatch latch) {
         try {
             if (!latch.await(5, TimeUnit.SECONDS)) {
@@ -185,12 +190,9 @@ final class RequestLifecycleTestSupport {
         }
     }
 
-    static void awaitCondition(BooleanSupplier condition) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
-            Thread.sleep(1L);
-        }
-        assertTrue(condition.getAsBoolean(), "condition did not become true");
+    private static WorkSnapshot emptyWork() {
+        return new WorkSnapshot(
+                System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L);
     }
 
     record Registered(ScheduledRequest item, CompletableFuture<Response> future) {}

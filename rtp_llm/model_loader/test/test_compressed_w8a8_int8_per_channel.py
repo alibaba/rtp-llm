@@ -74,6 +74,7 @@ def _load_config(exported_device):
     return LoadConfig(
         database=BaseDatabase(),
         num_layers=1,
+        layer_range=range(1),
         hidden_size=2,
         head_num=1,
         head_num_kv=1,

@@ -22,15 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
+/**
+ * Checks incremental prediction equivalence and reuse across batch growth, removals and concurrent
+ * sessions.
+ */
 class IncrementalPredictionTest {
-    static String formula() throws Exception {
-        try (var stream =
-                IncrementalPredictionTest.class.getResourceAsStream(
-                        "/prediction/deepseek-v4.txt")) {
-            return new String(stream.readAllBytes(), StandardCharsets.UTF_8);
-        }
-    }
-
     @Test
     void everyPrefixIsBitExactForRealFormulaAndNumericEdges() throws Exception {
         for (String expression :
@@ -65,6 +61,14 @@ class IncrementalPredictionTest {
                             "expression=" + expression + " prefix=" + prefix.size());
                 }
             }
+        }
+    }
+
+    static String formula() throws Exception {
+        try (var stream =
+                IncrementalPredictionTest.class.getResourceAsStream(
+                        "/prediction/deepseek-v4.txt")) {
+            return new String(stream.readAllBytes(), StandardCharsets.UTF_8);
         }
     }
 
@@ -269,14 +273,14 @@ class IncrementalPredictionTest {
                         return 100;
                     }
 
-                    public double batchPlanningDurationMs(List<GroupPlanner.Item> items) {
-                        return items.size() * 100.25;
-                    }
-
                     public long batchDurationMs(List<GroupPlanner.Item> items) {
                         fullCalls[0]++;
                         return PrefillPredictionBoundary.committedDecisionGroupMs(
                                 batchPlanningDurationMs(items));
+                    }
+
+                    public double batchPlanningDurationMs(List<GroupPlanner.Item> items) {
+                        return items.size() * 100.25;
                     }
 
                     public PrefillTimePredictor.BatchPrediction newBatchPrediction() {
@@ -330,13 +334,13 @@ class IncrementalPredictionTest {
                         return 11;
                     }
 
-                    public double batchPlanningDurationMs(List<GroupPlanner.Item> items) {
-                        return items.size() * 10.25;
-                    }
-
                     public long batchDurationMs(List<GroupPlanner.Item> items) {
                         recomputed[0]++;
                         return (long) Math.ceil(batchPlanningDurationMs(items));
+                    }
+
+                    public double batchPlanningDurationMs(List<GroupPlanner.Item> items) {
+                        return items.size() * 10.25;
                     }
 
                     public PrefillTimePredictor.BatchPrediction newBatchPrediction() {

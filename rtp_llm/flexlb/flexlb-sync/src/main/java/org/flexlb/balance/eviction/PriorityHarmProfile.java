@@ -95,7 +95,9 @@ public final class PriorityHarmProfile implements Comparable<PriorityHarmProfile
         }
     }
 
-    /** Mutable accumulator used only while one immutable plan is built. */
+    /**
+     * Mutable accumulator used only while one immutable plan is built.
+     */
     public static final class Builder {
 
         private final BigInteger[] harmByPriority =

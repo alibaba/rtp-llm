@@ -27,23 +27,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Unit tests for the completion backlog delivery protocol rework
- * (dual-flexlb HA prerequisite): {@code getWorkerStatus} used to head-trim
- * the shared {@code completions} queue by the CALLER's cursor, so with two
- * masters polling the same engine each keeping an independent cursor, the
- * first poller permanently destroyed the second poller's unconsumed records
- * (active-master inflight leak). The rework keeps the read path a pure
- * cursor filter (no destruction) and bounds the backlog with a retain
- * window trimmed by {@code periodicCleanup()}.
- *
- * <p>Coverage: dual-consumer non-starvation, single-consumer increment
- * protocol byte-compatibility (same cursor → same increment list), retain
- * window trimming (oldest first, latestVersion never regresses), and a
- * lagging consumer inside the window still receiving its backlog.
- *
- * <p>Completion readiness is awaited via {@code latestFinishedVersion}
- * (monotonic, unaffected by trimming) — after a cleanup the trimmed records
- * are no longer visible to a cursor-0 poll by design.
+ * Checks that independent status cursors can read retained completions without consuming another
+ * poller's records.
  */
 class CompletionRetainWindowTest {
 

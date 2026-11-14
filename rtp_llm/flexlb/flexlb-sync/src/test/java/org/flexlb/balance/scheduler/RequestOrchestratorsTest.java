@@ -26,7 +26,9 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Contracts for the scheduler runtime callbacks behind RequestScheduler. */
+/**
+ * Contracts for the scheduler runtime callbacks behind RequestScheduler.
+ */
 class RequestOrchestratorsTest {
 
     @Test

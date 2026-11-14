@@ -9,17 +9,12 @@ import lombok.Setter;
 @Getter
 @Setter
 public final class DispatcherConfig {
-
     public static final int DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER = 2;
     public static final int DEFAULT_MAX_INFLIGHT_PER_ENCODER_WORKER = Integer.MAX_VALUE;
     public static final int DEFAULT_FETCH_ATTACH_TIMEOUT_MS = 60_000;
 
-    public enum Type {
-        BATCH,
-        NON_BATCH
-    }
-
     private Type type = Type.BATCH;
+
     private int maxInflightPerPrefillWorker = DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER;
     private int maxInflightPerEncoderWorker = DEFAULT_MAX_INFLIGHT_PER_ENCODER_WORKER;
 
@@ -59,5 +54,10 @@ public final class DispatcherConfig {
             throw new ConfigValidationException(
                     "dispatcher.fetchAttachTimeoutMs", "must be greater than zero");
         }
+    }
+
+    public enum Type {
+        BATCH,
+        NON_BATCH
     }
 }

@@ -14,7 +14,9 @@ import java.util.List;
 
 import static org.mockito.Mockito.mock;
 
-/** Frozen-value builders shared by canonical route-projection tests. */
+/**
+ * Frozen-value builders shared by canonical route-projection tests.
+ */
 final class RouteProjectionTestSupport {
 
     static final long NOW_MS = 10_000L;
@@ -44,18 +46,18 @@ final class RouteProjectionTestSupport {
     static final PrefillTimePredictor.Evaluator TOKEN_EVALUATOR =
             new PrefillTimePredictor.Evaluator() {
                 @Override
-                public long estimateMs(long totalTokens, long hitTokens) {
-                    long sequence = Math.max(0L, totalTokens);
-                    long hit = Math.max(0L, Math.min(hitTokens, sequence));
-                    return (long) (sequence - hit + 0.3 * hit);
-                }
-
-                @Override
                 public double predictBatchMs(
                         org.flexlb.balance.prediction.PrefillBatchFeatures features) {
                     return features.items().stream()
                             .mapToLong(item -> estimateMs(item.seqLen(), item.hitCache()))
                             .sum();
+                }
+
+                @Override
+                public long estimateMs(long totalTokens, long hitTokens) {
+                    long sequence = Math.max(0L, totalTokens);
+                    long hit = Math.max(0L, Math.min(hitTokens, sequence));
+                    return (long) (sequence - hit + 0.3 * hit);
                 }
             };
 
