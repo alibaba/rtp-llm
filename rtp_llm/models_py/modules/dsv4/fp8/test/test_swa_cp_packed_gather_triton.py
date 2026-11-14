@@ -158,7 +158,6 @@ class SwaCPPackedGatherTritonTest(unittest.TestCase):
             os.environ,
             {
                 "DSV4_CP_DIRECT_FLAT_PACK": "1",
-                "DSV4_TRAP_INVALID_KV_ACCESS": "0",
             },
         ):
             self.assertTrue(
@@ -491,7 +490,6 @@ class SwaCPPackedGatherTritonTest(unittest.TestCase):
             os.environ,
             {
                 "DSV4_CP_DIRECT_FLAT_PACK": "1",
-                "DSV4_TRAP_INVALID_KV_ACCESS": "0",
             },
         ):
             pool.copy_(source)
@@ -537,7 +535,6 @@ class SwaCPPackedGatherTritonTest(unittest.TestCase):
             os.environ,
             {
                 "DSV4_CP_DIRECT_FLAT_PACK": "1",
-                "DSV4_TRAP_INVALID_KV_ACCESS": "0",
             },
         ):
             run()
@@ -573,7 +570,6 @@ class SwaCPPackedGatherTritonTest(unittest.TestCase):
             os.environ,
             {
                 "DSV4_CP_DIRECT_FLAT_PACK": "1",
-                "DSV4_TRAP_INVALID_KV_ACCESS": "0",
             },
         ):
             for index, (

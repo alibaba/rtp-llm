@@ -7,7 +7,6 @@ from typing import NamedTuple
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4 import _record_tensor
 from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCUnit
 from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import try_fused_post_pre
 
@@ -33,9 +32,7 @@ def _enabled() -> bool:
 def _plain_decode_block(layer) -> bool:
     from rtp_llm.models_py.modules.dsv41.block import Block
 
-    return type(layer) is Block and not _record_tensor.should_record_layer(
-        layer.layer_id
-    )
+    return type(layer) is Block
 
 
 def can_defer_decode_post(layer, next_layer, preserve_output: bool) -> bool:

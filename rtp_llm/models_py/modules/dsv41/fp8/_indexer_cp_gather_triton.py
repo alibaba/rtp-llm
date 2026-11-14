@@ -29,9 +29,6 @@ from rtp_llm.models_py.modules.dsv41.fp8._indexer_quant_triton import (
     INDEXER_HEAD_DIM,
     _trap_invalid_kv_access,
 )
-from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
-    trap_invalid_kv_access_enabled,
-)
 
 
 @triton.jit(do_not_specialize=["N"])
@@ -267,7 +264,7 @@ def try_gather_indexer_k_to_padded(
         D=INDEXER_HEAD_DIM,
         SCALE_BYTES=4,
         BATCH_BLOCK=batch_block,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        TRAP_INVALID_KV_ACCESS=True,
         num_warps=4,
     )
     return True
@@ -306,7 +303,7 @@ def gather_indexer_k_for_prefill(
         cache_block_size=cache_block_size,
         cache_stride_b=cache_stride_b,
         num_cache_blocks=int(kv_cache_packed.shape[0]),
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        TRAP_INVALID_KV_ACCESS=True,
         num_warps=4,
     )
     return k_quant, k_scale

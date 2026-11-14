@@ -17,7 +17,6 @@ from rtp_llm.models_py.model_desc.deepseek_v4_model import (
     _args_from_model_config,
     _resolve_dsv4_moe_strategy,
 )
-from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     chunked_moe_enabled,
@@ -130,47 +129,6 @@ class Dsv4MoeConfigTest(unittest.TestCase):
 
         self.assertTrue(block.ffn.is_decode_forward)
         self.assertTrue(torch.equal(output, x))
-
-    def test_debug_observer_preserves_tensor_names_and_position_filter(self):
-        layer = Block.__new__(Block)
-        nn.Module.__init__(layer)
-        layer.layer_id = 3
-        positions = torch.tensor([4, 9])
-        records = []
-
-        def record(level, name, tensor):
-            records.append((level, name, tensor.clone()))
-
-        with mock.patch.object(_rt, "should_record_layer", return_value=True):
-            with mock.patch.object(_rt, "_DBG_GLOBAL_POS", 9):
-                with mock.patch.object(_rt, "record_if_level", side_effect=record):
-                    observer = layer._moe_observer(positions)
-                    self.assertIsNotNone(observer)
-                    for kind in (
-                        "input",
-                        "topk_weights",
-                        "topk_indices",
-                        "routed_y",
-                        "shared_y",
-                        "final_y",
-                    ):
-                        observer(kind, torch.arange(4).view(2, 2))
-
-        names = [name for _, name, _ in records]
-        for suffix in (
-            "moe_x_in",
-            "moe_topk_weights",
-            "moe_topk_indices",
-            "moe_routed_y",
-            "moe_shared_y",
-            "moe_y",
-        ):
-            self.assertIn(f"L03_{suffix}", names)
-            self.assertIn(f"L03_{suffix}_pos9", names)
-        position_records = [
-            tensor for _, name, tensor in records if name.endswith("pos9")
-        ]
-        self.assertTrue(all(tensor.shape == (1, 2) for tensor in position_records))
 
     def test_dsv4_preserves_explicit_builtin_for_registry_validation(self):
         config = SimpleNamespace(moe_strategy="fp8_per_block_no_dp")
@@ -674,7 +632,6 @@ class Dsv4MoeConfigTest(unittest.TestCase):
                 self.assertEqual(received["moe_w1_layout"], "gate_up")
                 self.assertEqual(received["model_type"], "deepseek_v4")
                 self.assertTrue(received["chunking_enabled"])
-                self.assertEqual(received["observer_factory"], block._moe_observer)
                 self.assertTrue(torch.all(layer_weights[W.moe_w1][:, :inter] == 1))
                 self.assertTrue(torch.all(layer_weights[W.moe_w1][:, inter:] == 3))
                 self.assertNotIn(W.v4_routed_w1_w, layer_weights)

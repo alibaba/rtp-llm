@@ -268,8 +268,6 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 ), patch.dict(
                     prefill_forward.os.environ, {"DSV4_PREFILL_FAST_PATH": "1"}
                 ), patch.object(
-                    prefill_forward._rt, "ENABLED", False
-                ), patch.object(
                     prefill_forward, "PrefillWorkspace"
                 ), patch.object(
                     prefill_forward, "build_and_propagate_prefill_meta_fp8"
@@ -324,7 +322,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         v4 = _FakeV4()
         with patch.object(_profiler, "_RANGES_ENABLED", True), patch.dict(
             prefill_forward.os.environ, {"DSV4_PREFILL_FAST_PATH": "1"}
-        ), patch.object(prefill_forward._rt, "ENABLED", False), patch.object(
+        ), patch.object(
             prefill_forward, "PrefillWorkspace"
         ), patch.object(
             prefill_forward, "build_and_propagate_prefill_meta_fp8"
@@ -574,9 +572,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
             FakeV4.layers[0], "attn", FakeAttention.__new__(FakeAttention)
         )
 
-        with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
-            prefill_forward._rt, "ENABLED", False
-        ):
+        with patch.dict(prefill_forward.os.environ, {}, clear=True):
             self.assertTrue(
                 prefill_forward._prefill_fast_path_enabled(
                     FakeV4(), prepare_hidden_fn=None
@@ -586,9 +582,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
     def test_fast_path_layer_calls_are_cached_but_env_gated(self):
         v4 = _FakeV4()
 
-        with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
-            prefill_forward._rt, "ENABLED", False
-        ):
+        with patch.dict(prefill_forward.os.environ, {}, clear=True):
             layer_calls = prefill_forward._prefill_fast_path_layer_calls(v4)
             self.assertEqual(len(layer_calls), 2)
             self.assertIs(
@@ -604,7 +598,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
             prefill_forward.os.environ,
             {"DSV4_PREFILL_FAST_PATH": "0"},
             clear=True,
-        ), patch.object(prefill_forward._rt, "ENABLED", False):
+        ):
             self.assertFalse(
                 prefill_forward._prefill_fast_path_enabled(
                     v4, prepare_hidden_fn=None, layer_calls=layer_calls
@@ -630,7 +624,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
             prefill_forward.os.environ,
             {"DSV4_PREFILL_FAST_PATH": "0"},
             clear=True,
-        ), patch.object(prefill_forward._rt, "ENABLED", False):
+        ):
             self.assertFalse(
                 prefill_forward._prefill_fast_path_enabled(
                     FakeV4(), prepare_hidden_fn=None
@@ -652,21 +646,10 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
             FakeV4.layers[0], "attn", FakeAttention.__new__(FakeAttention)
         )
 
-        with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
-            prefill_forward._rt, "ENABLED", False
-        ):
+        with patch.dict(prefill_forward.os.environ, {}, clear=True):
             self.assertFalse(
                 prefill_forward._prefill_fast_path_enabled(
                     FakeV4(), prepare_hidden_fn=lambda **_: None
-                )
-            )
-
-        with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
-            prefill_forward._rt, "ENABLED", True
-        ):
-            self.assertFalse(
-                prefill_forward._prefill_fast_path_enabled(
-                    FakeV4(), prepare_hidden_fn=None
                 )
             )
 
@@ -674,9 +657,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         class NoLayersV4:
             pass
 
-        with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
-            prefill_forward._rt, "ENABLED", False
-        ):
+        with patch.dict(prefill_forward.os.environ, {}, clear=True):
             self.assertFalse(
                 prefill_forward._prefill_fast_path_enabled(
                     NoLayersV4(), prepare_hidden_fn=None
@@ -687,9 +668,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
             fp8_kv_cache = False
             layers = []
 
-        with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
-            prefill_forward._rt, "ENABLED", False
-        ):
+        with patch.dict(prefill_forward.os.environ, {}, clear=True):
             self.assertFalse(
                 prefill_forward._prefill_fast_path_enabled(
                     NonFp8V4(), prepare_hidden_fn=None
@@ -700,9 +679,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
             fp8_kv_cache = True
             layers = [object()]
 
-        with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
-            prefill_forward._rt, "ENABLED", False
-        ):
+        with patch.dict(prefill_forward.os.environ, {}, clear=True):
             self.assertFalse(
                 prefill_forward._prefill_fast_path_enabled(
                     FakeV4(), prepare_hidden_fn=None
@@ -723,8 +700,6 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         )
 
         with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
-            prefill_forward._rt, "ENABLED", False
-        ), patch.object(
             prefill_forward, "build_and_propagate_prefill_meta_fp8"
         ) as build_meta, patch.object(
             prefill_forward, "clear_prefill_meta_shared_fp8"
@@ -879,9 +854,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         v4.layers = []
         input_ids = torch.tensor([3, 4], dtype=torch.long)
 
-        with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
-            prefill_forward._rt, "ENABLED", False
-        ):
+        with patch.dict(prefill_forward.os.environ, {}, clear=True):
             out = prefill_forward.forward_layers(
                 v4,
                 kv_cache=None,
@@ -906,8 +879,6 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
             v4.hc_mult = 1
             v4.layers = [_FakeLayer(0, v4.calls)]
             with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
-                prefill_forward._rt, "ENABLED", False
-            ), patch.object(
                 v4, "norm", wraps=v4.norm
             ) as norm:
                 out = prefill_forward.forward_layers(
@@ -1010,7 +981,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         for enabled in (False, True, False):
             with self.subTest(capture=enabled), patch.dict(
                 prefill_forward.os.environ, {}, clear=True
-            ), patch.object(prefill_forward._rt, "ENABLED", False), patch.object(
+            ), patch.object(
                 v4, "norm", wraps=v4.norm
             ) as norm:
                 out = prefill_forward.forward_layers(
@@ -1046,8 +1017,6 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         )
 
         with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
-            prefill_forward._rt, "ENABLED", False
-        ), patch.object(
             prefill_forward, "build_and_propagate_prefill_meta_fp8"
         ) as build_meta, patch.object(
             prefill_forward, "clear_prefill_meta_shared_fp8"
@@ -1102,8 +1071,6 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         )
 
         with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
-            prefill_forward._rt, "ENABLED", False
-        ), patch.object(
             prefill_forward, "build_and_propagate_prefill_meta_fp8"
         ) as build_meta, patch.object(
             prefill_forward, "clear_prefill_meta_shared_fp8"
@@ -1142,8 +1109,6 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         )
 
         with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
-            prefill_forward._rt, "ENABLED", False
-        ), patch.object(
             prefill_forward, "build_and_propagate_prefill_meta_fp8"
         ) as build_meta, patch.object(
             prefill_forward, "clear_prefill_meta_shared_fp8"
@@ -1210,7 +1175,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
             prefill_forward.os.environ,
             {"DSV4_PREFILL_FAST_PATH": "0"},
             clear=True,
-        ), patch.object(prefill_forward._rt, "ENABLED", False), patch.object(
+        ), patch.object(
             prefill_forward, "build_and_propagate_prefill_meta_fp8"
         ), patch.object(
             prefill_forward, "clear_prefill_meta_shared_fp8"

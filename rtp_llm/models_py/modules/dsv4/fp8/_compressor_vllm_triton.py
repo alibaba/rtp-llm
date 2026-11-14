@@ -59,13 +59,6 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
-    invalid_kv_access_validation_enabled,
-    trap_invalid_kv_access_enabled,
-    validate_block_table_lookup,
-    validate_slot_mapping,
-)
-
 
 @triton.jit
 def _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS: tl.constexpr) -> None:
@@ -702,66 +695,6 @@ def _fused_num_warps(head_dim: int, compress_ratio: int, cfg: dict) -> int:
     return cfg["num_warps"]
 
 
-def _validate_fused_state_block_table(
-    *,
-    site: str,
-    block_table: torch.Tensor,
-    token_to_req_indices: torch.Tensor,
-    positions: torch.Tensor,
-    state_block_size: int,
-    num_state_blocks: int,
-    compress_ratio: int,
-    overlap: bool,
-    seq_start: int,
-    n_raw: int,
-    batched: bool,
-    seq_start_per_req: torch.Tensor,
-    cu_seq_per_req: torch.Tensor,
-) -> None:
-    if not invalid_kv_access_validation_enabled():
-        return
-
-    positions_i64 = positions.detach().reshape(-1).to(torch.int64)
-    req_i64 = token_to_req_indices.detach().reshape(-1).to(torch.int64)
-    boundary = (positions_i64 + 1) % int(compress_ratio) == 0
-    if not bool(boundary.any().item()):
-        return
-
-    boundary_pos = positions_i64[boundary]
-    boundary_req = req_i64[boundary]
-    token_count = (1 + int(overlap)) * int(compress_ratio)
-    tokens = torch.arange(token_count, device=positions.device, dtype=torch.int64)
-    gathered_pos = boundary_pos[:, None] - token_count + 1 + tokens[None, :]
-    mask_pos = gathered_pos >= 0
-
-    if batched:
-        rows = int(seq_start_per_req.shape[0])
-        safe_req = boundary_req.clamp(0, max(rows - 1, 0))
-        req_seq_start = seq_start_per_req.to(torch.int64)[safe_req]
-        req_cu_lo = cu_seq_per_req.to(torch.int64)[safe_req]
-        req_cu_hi = cu_seq_per_req.to(torch.int64)[safe_req + 1]
-        flat_idx_in_req = gathered_pos - req_seq_start[:, None]
-        req_n_raw = req_cu_hi - req_cu_lo
-        use_raw = (
-            mask_pos & (flat_idx_in_req >= 0) & (flat_idx_in_req < req_n_raw[:, None])
-        )
-    else:
-        flat_idx = gathered_pos - int(seq_start)
-        use_raw = mask_pos & (flat_idx >= 0) & (flat_idx < int(n_raw))
-
-    use_cache = mask_pos & ~use_raw
-    block_table_stride = int(block_table.shape[1])
-    block_indices = (gathered_pos // int(state_block_size)) % block_table_stride
-    validate_block_table_lookup(
-        site,
-        block_table,
-        boundary_req[:, None].expand_as(block_indices),
-        block_indices,
-        use_cache,
-        num_blocks=int(num_state_blocks),
-    )
-
-
 def run_save_partial_states(
     kv: torch.Tensor,  # [N, coff*head_dim] bf16/fp32, row-strided OK
     score: torch.Tensor,  # [N, coff*head_dim] bf16/fp32, row-strided OK
@@ -778,13 +711,6 @@ def run_save_partial_states(
     head_size = int(kv.shape[-1])
     state_width = int(state_cache.shape[-1] // 2)
     block_size = int(state_cache.shape[1])
-    validate_slot_mapping(
-        "compressor.save_partial_states.state_slot_mapping",
-        slot_mapping,
-        block_size=block_size,
-        num_blocks=int(state_cache.shape[0]),
-        negative_mode="skip_any",
-    )
     _save_partial_states_kernel[(N,)](
         kv,
         kv.stride(0),
@@ -803,7 +729,7 @@ def run_save_partial_states(
         TRITON_BLOCK_SIZE=triton.next_power_of_2(head_size),
         STATE_WIDTH=state_width,
         COMPRESS_RATIO=compress_ratio,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        TRAP_INVALID_KV_ACCESS=True,
     )
 
 
@@ -886,29 +812,6 @@ def run_fused_compress_kv_write(
         seq_start_per_req = positions
         cu_seq_per_req = positions
 
-    validate_slot_mapping(
-        "compressor.fused_compress.kv_slot_mapping",
-        kv_slot_mapping,
-        block_size=kv_block_size,
-        num_blocks=int(kv_cache.shape[0]),
-        negative_mode="skip_any",
-    )
-    _validate_fused_state_block_table(
-        site="compressor.fused_compress.state_block_table",
-        block_table=block_table,
-        token_to_req_indices=token_to_req_indices,
-        positions=positions,
-        state_block_size=state_block_size,
-        num_state_blocks=int(state_cache.shape[0]),
-        compress_ratio=compress_ratio,
-        overlap=overlap,
-        seq_start=seq_start,
-        n_raw=n_raw,
-        batched=batched,
-        seq_start_per_req=seq_start_per_req,
-        cu_seq_per_req=cu_seq_per_req,
-    )
-
     if head_dim == 512:
         kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
     else:
@@ -956,7 +859,7 @@ def run_fused_compress_kv_write(
         NUM_STATE_BLOCKS=int(state_cache.shape[0]),
         NUM_KV_BLOCKS=int(kv_cache.shape[0]),
         BATCHED=batched,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        TRAP_INVALID_KV_ACCESS=True,
         STATE_RING_ENTRIES=state_ring_entries,
         num_warps=_fused_num_warps(head_dim, compress_ratio, cfg),
     )

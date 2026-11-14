@@ -24,7 +24,6 @@ _ENV = {
     "DSV41_FUSED_DECODE_GLOBAL": "1",
     "DSV41_FUSED_DECODE_INDEXER": "1",
     "DSV41_FUSED_QKV_ROPE_CACHE": "1",
-    "MOEDBG": "0",
 }
 
 

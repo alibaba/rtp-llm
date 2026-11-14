@@ -48,8 +48,6 @@ class CompressorNormDispatchTest(unittest.TestCase):
                     positions = torch.tensor([3], dtype=torch.int64)
                     with (
                         patch.object(compressor, kernel_name) as kernel,
-                        patch.object(compressor, "validate_slot_mapping"),
-                        patch.object(compressor, "_validate_fused_state_block_table"),
                     ):
                         compressor.run_fused_compress_kv_write(
                             state_cache=torch.zeros(1, 16, 4 * head_dim),
@@ -82,11 +80,6 @@ class CompressorNormDispatchTest(unittest.TestCase):
 
     def test_hca_split_requires_the_explicit_flag(self):
         with (
-            patch.object(ppu_compressor, "validate_slot_mapping"),
-            patch.object(ppu_compressor, "_validate_fused_state_block_table"),
-            patch.object(
-                ppu_compressor, "trap_invalid_kv_access_enabled", return_value=True
-            ),
             patch.object(
                 ppu_compressor, "_fused_kv_compress_norm_rope_insert_sparse_attn"
             ) as baseline,
@@ -113,8 +106,6 @@ class CompressorNormDispatchTest(unittest.TestCase):
     def test_hca_split_ignores_stale_environment(self):
         with (
             patch.dict(os.environ, {"DSV4_PPU_HCA_SPLIT": "1"}),
-            patch.object(ppu_compressor, "validate_slot_mapping"),
-            patch.object(ppu_compressor, "_validate_fused_state_block_table"),
             patch.object(
                 ppu_compressor, "_fused_kv_compress_norm_rope_insert_sparse_attn"
             ) as baseline,

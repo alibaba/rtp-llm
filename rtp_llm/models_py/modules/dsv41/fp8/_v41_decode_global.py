@@ -22,10 +22,6 @@ from rtp_llm.models_py.modules.dsv41.attn_type import CSA_STATE, INDEXER_KV
 from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
-from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
-    invalid_kv_access_validation_enabled,
-    trap_invalid_kv_access_enabled,
-)
 from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
     _round_e2m1,
     _round_power_of_two_scale,
@@ -33,10 +29,11 @@ from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
 
 
 @triton.jit
-def _trap():
-    tl.inline_asm_elementwise(
-        "trap; // dummy $0", "=r", [], dtype=tl.int32, is_pure=False, pack=1
-    )
+def _trap(TRAP_INVALID_KV_ACCESS: tl.constexpr):
+    if TRAP_INVALID_KV_ACCESS:
+        tl.inline_asm_elementwise(
+            "trap; // dummy $0", "=r", [], dtype=tl.int32, is_pure=False, pack=1
+        )
 
 
 @triton.jit
@@ -100,7 +97,7 @@ def _compress_norm_main_store_kernel(
     MAIN_CACHE_STRIDE: tl.constexpr,
     MAIN_BLOCKS: tl.constexpr,
     STATE_BLOCKS: tl.constexpr,
-    TRAP: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
 ):
     token = tl.program_id(0).to(tl.int64)
     columns = tl.arange(0, 512)
@@ -118,9 +115,8 @@ def _compress_norm_main_store_kernel(
                 + request * STATE_STRIDE
                 + (previous_position // STATE_TPB) % STATE_COLS
             ).to(tl.int64)
-            if TRAP:
-                if block >= STATE_BLOCKS:
-                    _trap()
+            if block >= STATE_BLOCKS:
+                _trap(TRAP_INVALID_KV_ACCESS)
             row = block * STATE_EB + previous_position % STATE_EB
             previous = tl.load(state + row * 1024 + columns, block > 0, other=0)
             previous_score = tl.load(
@@ -156,9 +152,8 @@ def _compress_norm_main_store_kernel(
         RATIO,
     )
     if writable:
-        if TRAP:
-            if block >= MAIN_BLOCKS:
-                _trap()
+        if block >= MAIN_BLOCKS:
+            _trap(TRAP_INVALID_KV_ACCESS)
         rotated = _rope_bf16(latent, frequencies, (position // RATIO) * RATIO, 512)
         # FP4 GLOBAL store: group-16 E4M3 scales, the official compressed-KV
         # quantization. Byte-identical to quantize_and_insert_k_cache_fp4.
@@ -210,7 +205,7 @@ def _index_norm_store_state_kernel(
     STATE_STRIDE: tl.constexpr,
     INDEX_BLOCKS: tl.constexpr,
     STATE_BLOCKS: tl.constexpr,
-    TRAP: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
 ):
     token = tl.program_id(0).to(tl.int64)
     position = tl.load(positions + token).to(tl.int64)
@@ -225,9 +220,8 @@ def _index_norm_store_state_kernel(
         RATIO,
     )
     if writable:
-        if TRAP:
-            if block >= INDEX_BLOCKS:
-                _trap()
+        if block >= INDEX_BLOCKS:
+            _trap(TRAP_INVALID_KV_ACCESS)
         columns = tl.arange(0, 128)
         key = tl.load(projected + token * 128 + columns).to(tl.float32)
         inverse_rms = tl.rsqrt(tl.sum(key * key, 0) / 128 + EPS)
@@ -263,9 +257,8 @@ def _index_norm_store_state_kernel(
         end = tl.load(starts + request).to(tl.int64) + S
         effective_end = tl.minimum((block_in_sequence + 1) * STATE_TPB, end)
         if (block > 0) & (position + STATE_EB >= effective_end):
-            if TRAP:
-                if block >= STATE_BLOCKS:
-                    _trap()
+            if block >= STATE_BLOCKS:
+                _trap(TRAP_INVALID_KV_ACCESS)
             row = block * STATE_EB + position % STATE_EB
             columns = tl.arange(0, 512)
             tl.store(
@@ -290,7 +283,6 @@ def is_supported(attn, x, positions, req_ids, starts) -> bool:
         or (attn.head_dim, attn.index_head_dim, attn.rope_head_dim) != (512, 128, 64)
         or attn._block_tables_by_type is None
         or attn._kv_cache is None
-        or invalid_kv_access_validation_enabled()
     ):
         return False
     cp = attn._cp_ctx
@@ -423,7 +415,6 @@ def try_produce_global(attn, x, positions, req_ids, starts) -> bool:
         STATE_COLS=state_table.shape[1],
         STATE_STRIDE=state_table.stride(0),
         STATE_BLOCKS=state.shape[0] // state_eb,
-        TRAP=trap_invalid_kv_access_enabled(),
     )
     _compress_norm_main_store_kernel[(tokens,)](
         values,
@@ -448,6 +439,7 @@ def try_produce_global(attn, x, positions, req_ids, starts) -> bool:
         MAIN_CACHE_STRIDE=main.stride(0),
         MAIN_BLOCKS=main.shape[0],
         **state_geometry,
+        TRAP_INVALID_KV_ACCESS=True,
         num_warps=4,
         enable_fp_fusion=False,
     )
@@ -475,6 +467,7 @@ def try_produce_global(attn, x, positions, req_ids, starts) -> bool:
         INDEX_CACHE_STRIDE=index.stride(0),
         INDEX_BLOCKS=index.shape[0],
         **state_geometry,
+        TRAP_INVALID_KV_ACCESS=True,
         num_warps=4,
         enable_fp_fusion=False,
     )
