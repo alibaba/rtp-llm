@@ -15,7 +15,8 @@ import torch
 ROOT = Path(__file__).resolve().parents[6]
 PATH = ROOT / "rtp_llm/models_py/modules/dsv4/ppu/prefill/warmup.py"
 scope = dict(torch=torch, Mapping=Mapping, logging=logging, PyAttentionInputs=SimpleNamespace,
-             PyModelOutputs=lambda hidden, aux=None: (hidden, aux))
+             PyModelOutputs=lambda hidden, aux=None: (hidden, aux),
+             PrefillWorkspace=lambda device, **kwargs: SimpleNamespace(name="scratch"))
 tree = ast.parse(PATH.read_text())
 exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef)],
                         type_ignores=[]), str(PATH), "exec"), scope)
@@ -73,6 +74,21 @@ class PrefillWarmupTest(unittest.TestCase):
             a.input_lengths = torch.diff(self.cu)
         self.assertEqual(self.groups(), [(0, 1, 0, 3), (1, 2, 3, 7), (2, 4, 7, 10)])
 
+    def test_warmup_stream_s_padded_input_is_still_grouped(self):
+        # PyWrappedModel.cc sets is_s_padded for `inputs.warmup || inputs.is_fake_stream`,
+        # i.e. on every stream this helper exists for.
+        for a in self.attn.values():
+            a.is_s_padded = True
+        self.assertEqual(self.groups(), [(0, 2, 0, 5), (2, 4, 5, 10)])
+
+    def test_slice_keeps_warmup_padding_semantics(self):
+        attn = self.attn["swa_kv"]
+        attn.is_s_padded = True
+        attn.padding_offset = torch.zeros(10, dtype=torch.int32)
+        sliced = scope["slice_warmup_attention"](attn, 0, 2, 0, 5, self.cu, self.positions)
+        self.assertTrue(sliced.is_s_padded)
+        self.assertEqual(sliced.padding_offset.numel(), 5)
+
     def test_single_request_cannot_be_split(self):
         self.v4._prefill_ws_q_rows = 3
         with self.assertRaisesRegex(ValueError, "whole requests"):
@@ -113,7 +129,8 @@ class PrefillWarmupTest(unittest.TestCase):
             tables, self.attn, self.groups(), forward)
         self.assertEqual(calls, [list(range(5)), list(range(5, 10))])
         self.assertEqual(len(set(pointers)), 1)
-        self.assertEqual(aux[:, 0].tolist(), list(range(10)))
+        # The warmup stream is discarded, so the MTP target tensor is not materialised.
+        self.assertIsNone(aux)
         self.assertEqual(hidden[:, 0].tolist(), list(range(10)))
         self.assertIs(self.v4._mtp_hidden_buffer, fixed)
         self.assertIs(self.v4._mtp_last_hidden_buffer, last)
@@ -122,17 +139,27 @@ class PrefillWarmupTest(unittest.TestCase):
         gc.collect()
         self.assertTrue(all(r() is None for r in refs))
 
-        def fail(*args, **kwargs):
-            raise RuntimeError("layer failed")
+    def test_oversized_mtp_buffer_uses_one_reused_group_scratch(self):
+        fixed = torch.full((2, 4), -1.)
+        last = self.v4._mtp_last_hidden_buffer
+        self.v4._mtp_hidden_buffer = fixed
+        scratch_ptrs = []
+        tables = {tag: a.kv_cache_kernel_block_id for tag, a in self.attn.items()}
 
-        with self.assertRaisesRegex(RuntimeError, "layer failed"):
-            scope["forward_warmup_groups"](
-                self.v4, None, torch.arange(10), self.positions, self.cu,
-                tables, self.attn, self.groups(), fail)
-        gc.collect()
+        def forward(v4, kv, ids, positions, cu, blocks, **kwargs):
+            self.assertEqual(v4._mtp_hidden_buffer.size(0), len(ids))
+            scratch_ptrs.append(v4._mtp_hidden_buffer.data_ptr())
+            return ids[:, None].expand(-1, 2).float()
+
+        hidden, aux = scope["forward_warmup_groups"](
+            self.v4, None, torch.arange(10), self.positions, self.cu,
+            tables, self.attn, self.groups(), forward)
+        self.assertIsNone(aux)
+        self.assertEqual(len(scratch_ptrs), 2)
+        self.assertEqual(len(set(scratch_ptrs)), 1)
+        self.assertEqual(hidden[:, 0].tolist(), list(range(10)))
         self.assertIs(self.v4._mtp_hidden_buffer, fixed)
         self.assertIs(self.v4._mtp_last_hidden_buffer, last)
-        self.assertTrue(all(r() is None for r in refs))
 
 
 if __name__ == "__main__":
