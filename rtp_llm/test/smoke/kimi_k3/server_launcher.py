@@ -174,7 +174,6 @@ def launch_config(args):
         "SP_MODEL_TYPE": "" if target_only else model_type + "_mtp",
         "SP_CHECKPOINT_PATH": "" if target_only else str(draft),
         "SP_ACT_TYPE": "BF16",
-        "FT_DISABLE_CUSTOM_AR": "1",
         "GEN_NUM_PER_CIRCLE": "0" if target_only else "3",
         "ENABLE_LINEAR_REPLAY": (
             "1" if args.role == "DECODE" else os.environ.get("ENABLE_LINEAR_REPLAY", "0")

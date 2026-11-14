@@ -360,10 +360,10 @@ environmentBuffers(const BackendEnvironment& environment, int layer, const std::
     return environment.pools_by_tag.at(tag)->convertIndexToBuffer(std::distance(layers.begin(), it), block);
 }
 
-std::vector<BlockInfo> environmentOrdinalBuffers(const BackendEnvironment& environment,
-                                                 int                       layer_ordinal,
-                                                 const std::string&        tag,
-                                                 int                       block) {
+[[maybe_unused]] std::vector<BlockInfo> environmentOrdinalBuffers(const BackendEnvironment& environment,
+                                                                  int                       layer_ordinal,
+                                                                  const std::string&        tag,
+                                                                  int                       block) {
     const auto layers = environment.cache_config.layerIdsForGroup(tag);
     RTP_LLM_CHECK(layer_ordinal >= 0 && static_cast<size_t>(layer_ordinal) < layers.size());
     return environment.pools_by_tag.at(tag)->convertIndexToBuffer(static_cast<size_t>(layer_ordinal), block);

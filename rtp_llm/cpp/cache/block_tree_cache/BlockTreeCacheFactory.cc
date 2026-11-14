@@ -615,7 +615,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             return {};
         }
         RTP_LLM_CHECK_WITH_INFO(tokens > 0, "%s must be -1 or positive", name);
-        const auto tail_blocks = cache_config.reuse_cache_tail_blocks;
+        const auto tail_blocks = cache_config.reuse_cache_tail_blocks();
         RTP_LLM_CHECK_WITH_INFO(kv_cache_config.reuse_cache && tail_blocks > 0
                                     && tail_blocks < std::numeric_limits<int>::max(),
                                 "%s requires REUSE_CACHE and a finite REUSE_CACHE_TAIL_BLOCKS",
