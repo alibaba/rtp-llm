@@ -846,21 +846,21 @@ class PrefillBackendIntegrationTest(unittest.TestCase):
                     [result["case_id"] for result in results],
                 )
                 self.assertGreater(len(results), 1)
-                self.assertEqual(len(plan.cases) * 5 + 3, len(events))
+                self.assertEqual(len(plan.cases) * 9 + 3, len(events))
                 if transport == "dashsc_input_ids":
-                    self.assertEqual(len(plan.cases) * 4 + 2, len(wire_requests))
+                    self.assertEqual(len(plan.cases) * 8 + 2, len(wire_requests))
                 self.assertEqual({"batch_size": 1, "mode": "prefill"}, events[0][1])
                 self.assertTrue(
                     (run_root / "checkpoints" / "prefill_cache_probe.json").is_file()
                 )
                 events = events[3:]
-                for offset in range(0, len(events), 5):
+                for offset in range(0, len(events), 9):
                     self.assertEqual(
                         endpoint + "/update_scheduler_info", events[offset][0]
                     )
                     self.assertEqual(
-                        [endpoint] * 4,
-                        [url for (url, _) in events[offset + 1 : offset + 5]],
+                        [endpoint] * 8,
+                        [url for (url, _) in events[offset + 1 : offset + 9]],
                     )
                 for result in results:
                     self.assertEqual("ok", result["status"])

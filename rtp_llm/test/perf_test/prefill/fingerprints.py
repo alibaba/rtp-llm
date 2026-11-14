@@ -14,7 +14,8 @@ from rtp_llm.test.perf_test.prefill.measurement import PREFILL_MEASUREMENT_CONTR
 
 RUNNER_CONTRACT = {
     "name": "unified-prefill-runner",
-    "version": 2,
+    "version": 3,
+    "warmup_runs": 1,
     "prompt_contract": "exact-token-prefix-v1",
     "measurement_contract": PREFILL_MEASUREMENT_CONTRACT,
 }

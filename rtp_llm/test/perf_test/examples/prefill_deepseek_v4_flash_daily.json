@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "model": {
-    "label": "dsv4-pro-prefill-daily-L20A",
+    "label": "dsv4-flash-prefill-daily-L20A",
     "type": "deepseek_v4",
     "checkpoint": "/mnt/nas1/hf/DeepSeek-V4-Flash",
     "tokenizer": "/mnt/nas1/hf/DeepSeek-V4-Flash",

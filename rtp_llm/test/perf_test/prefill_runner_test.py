@@ -102,6 +102,8 @@ class prefill_runner_Client:
 
     def request(self, **request):
         self.requests.append(request)
+        if request["phase"] == "warmup":
+            return self.responses["measure", 0, request["request_index"]]
         return self.responses[
             request["phase"], request["run_index"], request["request_index"]
         ]
@@ -288,7 +290,7 @@ class PreflightReuseTest(unittest.TestCase):
         tokenizer = self.Tokenizer()
         runner, _ = self.runner(tokenizer, case, input_ids_only=True)
         runner.preflight([case])
-        self.assertEqual(4, tokenizer.long_encodes)
+        self.assertEqual(5, tokenizer.long_encodes)
 
     def test_text_transport_retains_full_text_id_consistency_check(self):
         for input_ids_only in (False, True):
@@ -453,7 +455,7 @@ class SeedBatchTest(unittest.TestCase):
     def test_seeds_overlap_in_batches_of_eight_with_short_tail(self):
         client, result = self.run_seeds([8] * 10)
         self.assertEqual("ok", result["status"])
-        self.assertEqual([8, 2, 10], [len(b["requests"]) for b in client.batches])
+        self.assertEqual([8, 2, 20], [len(b["requests"]) for b in client.batches])
         self.assertEqual(10, len(result["metrics"]["measurements"]))
 
     def test_token_budget_includes_output_and_skips_cold_members(self):
@@ -534,6 +536,119 @@ class SeedBatchTest(unittest.TestCase):
         _, result = self.run_seeds([8] * 4, client=client)
         self.assertEqual("request_failed", result["status"])
         self.assertEqual([], client.batches)
+
+
+class PrefillWarmupTest(unittest.TestCase):
+    def test_warmup_is_concurrent_independent_and_excluded_from_metrics(self):
+        for cache_len in (0, 8):
+            with self.subTest(cache_len=cache_len):
+                barrier = threading.Barrier(2, timeout=2)
+                requests = []
+                warmed = set()
+                lock = threading.Lock()
+
+                class Client:
+                    def configure_scheduler(self, batch_size, mode="prefill"):
+                        assert batch_size == 2
+
+                    def request(self, **request):
+                        with lock:
+                            requests.append(request)
+                        barrier.wait()
+                        phase = request["phase"]
+                        member = request["request_index"]
+                        if phase == "warmup":
+                            with lock:
+                                warmed.add(member)
+                        elif phase == "measure":
+                            assert warmed == {0, 1}, "measurement started before warmup"
+                        return dict(
+                            prefill_runner_response(
+                                len(request["input_ids"]),
+                                0 if phase == "seed" else cache_len,
+                                latency=(10000 if phase == "warmup" else 10),
+                            ),
+                            wait_time_ms=(9999 if phase == "warmup" else 2),
+                        )
+
+                result = PrefillRunner(
+                    Client(),
+                    prefill_runner_Tokenizer(),
+                    commit_tail_tokens=4,
+                    max_batch_tokens=4096,
+                    monotonic=iter([0.0, 0.2, 1.0, 1.5]).__next__,
+                ).run_case(prefill_runner_case(cache_len=cache_len, batch_size=2))
+                self.assertEqual("ok", result["status"], result)
+                warmup = [r for r in requests if r["phase"] == "warmup"]
+                formal = [r for r in requests if r["phase"] == "measure"]
+                self.assertEqual(2, len(warmup))
+                self.assertEqual(4, len(formal))
+                self.assertEqual({0, 1}, {r["run_index"] for r in formal})
+                for member in (0, 1):
+                    ids = [
+                        r["input_ids"]
+                        for r in warmup + formal
+                        if r["request_index"] == member
+                    ]
+                    self.assertEqual(3, len({tuple(tokens) for tokens in ids}))
+                    self.assertEqual(
+                        3, len({tuple(tokens[: cache_len + 4]) for tokens in ids})
+                    )
+                    self.assertTrue(
+                        all(tokens[:cache_len] == ids[0][:cache_len] for tokens in ids)
+                    )
+                metrics = result["metrics"]
+                self.assertEqual(2, result["runs"])
+                self.assertEqual(4, len(metrics["measurements"]))
+                self.assertEqual(10, metrics["latency_ms"])
+                self.assertEqual(2, metrics["wait_time_ms"])
+                self.assertEqual(
+                    56 if cache_len else 112, metrics["throughput_tokens_per_second"]
+                )
+
+    def test_failed_warmup_drains_batch_and_prevents_formal_measurement(self):
+        for failure in ("request", "shape", "reuse", "timing", "exception"):
+            with self.subTest(failure=failure):
+                completed = set()
+                requests = []
+                barrier = threading.Barrier(2, timeout=2)
+
+                class Client:
+                    def configure_scheduler(self, batch_size, mode="prefill"):
+                        pass
+
+                    def request(self, **request):
+                        requests.append(request)
+                        barrier.wait()
+                        try:
+                            response = prefill_runner_response(16, 0)
+                            if (
+                                request["phase"] == "warmup"
+                                and request["request_index"] == 0
+                            ):
+                                if failure == "exception":
+                                    raise RuntimeError("warmup transport failed")
+                                field, value = {
+                                    "request": ("success", False),
+                                    "shape": ("input_len", 15),
+                                    "reuse": ("reuse_len", 4),
+                                    "timing": ("latency_ms", float("nan")),
+                                }[failure]
+                                response[field] = value
+                            return response
+                        finally:
+                            completed.add(request["request_index"])
+
+                result = PrefillRunner(
+                    Client(),
+                    prefill_runner_Tokenizer(),
+                    commit_tail_tokens=4,
+                    max_batch_tokens=4096,
+                ).run_case(prefill_runner_case(cache_len=0, batch_size=2))
+                self.assertNotEqual("ok", result["status"])
+                self.assertIsNone(result["metrics"])
+                self.assertEqual({0, 1}, completed)
+                self.assertEqual(["warmup", "warmup"], [r["phase"] for r in requests])
 
 
 class PrefillRunnerTest(unittest.TestCase):
@@ -631,9 +746,12 @@ class PrefillRunnerTest(unittest.TestCase):
                         release.set()
                         worker.join(timeout=5)
                 self.assertEqual([], errors)
-                self.assertEqual(1 if failure == "submit" else 4, len(submitted))
+                self.assertEqual(1 if failure == "submit" else 8, len(submitted))
                 self.assertTrue(all((future.done() for future in submitted)))
-                self.assertEqual([], client.requests)
+                self.assertEqual(
+                    [] if failure == "submit" else ["warmup"] * 4,
+                    [request["phase"] for request in client.requests],
+                )
                 self.assertEqual(
                     "request_failed" if failure == "submit" else "invalid_timing",
                     results[0]["status"],
@@ -678,10 +796,11 @@ class PrefillRunnerTest(unittest.TestCase):
         )
         result = runner.run_case(prefill_runner_case())
         self.assertEqual("ok", result["status"])
-        self.assertEqual(3, len(client.requests))
+        self.assertEqual(4, len(client.requests))
         self.assertEqual("seed", client.requests[0]["phase"])
         self.assertEqual(
-            ["measure", "measure"], [r["phase"] for r in client.requests[1:]]
+            ["warmup", "measure", "measure"],
+            [r["phase"] for r in client.requests[1:]],
         )
         self.assertEqual(12.0, result["metrics"]["latency_ms"])
         self.assertEqual(12.0, result["metrics"]["ttft_ms"])
@@ -703,7 +822,10 @@ class PrefillRunnerTest(unittest.TestCase):
             max_batch_tokens=4096,
         ).run_case(prefill_runner_case(cache_len=0))
         self.assertEqual("ok", result["status"])
-        self.assertEqual(["measure", "measure"], [r["phase"] for r in client.requests])
+        self.assertEqual(
+            ["warmup", "measure", "measure"],
+            [r["phase"] for r in client.requests],
+        )
 
 
 class GroupedRunnerTest(unittest.TestCase):
@@ -715,11 +837,16 @@ class GroupedRunnerTest(unittest.TestCase):
 
             def request(self, **request):
                 self.requests.append(request)
-                if request["phase"] == "measure":
+                if request["phase"] in ("warmup", "measure"):
                     barrier.wait()
                     return prefill_runner_response(
                         len(request["input_ids"]),
-                        8 if bad_reuse or request["request_index"] == 0 else 0,
+                        (
+                            8
+                            if request["request_index"] == 0
+                            or (bad_reuse and request["phase"] == "measure")
+                            else 0
+                        ),
                         latency=10 * (request["request_index"] + 1),
                     )
                 return prefill_runner_response(len(request["input_ids"]), 0)
@@ -859,6 +986,11 @@ class ExternalPrefillSessionTest(unittest.TestCase):
                     prefill_external_aux(
                         prefill_external_CASE_INPUT_LEN,
                         prefill_external_CASE_CACHE_LEN,
+                        9000.0,
+                    ),
+                    prefill_external_aux(
+                        prefill_external_CASE_INPUT_LEN,
+                        prefill_external_CASE_CACHE_LEN,
                         12.5,
                     ),
                 ]
@@ -893,8 +1025,8 @@ class ExternalPrefillSessionTest(unittest.TestCase):
                 .splitlines()[0]
             )
             self.assertEqual("ok", persisted["status"])
-            self.assertEqual(4, len(server.requests))
-            (configure_seed, seed, configure_measure, measure) = server.requests
+            self.assertEqual(5, len(server.requests))
+            (configure_seed, seed, configure_measure, warmup, measure) = server.requests
             for update in (configure_seed, configure_measure):
                 self.assertEqual("/update_scheduler_info", update["path"])
                 self.assertEqual({"batch_size": 1, "mode": "prefill"}, update["body"])
@@ -902,6 +1034,7 @@ class ExternalPrefillSessionTest(unittest.TestCase):
             self.assertEqual("none", seed["headers"]["X-DashScope-LoggingConsent"])
             self.assertEqual(1, seed["body"]["generate_config"]["max_new_tokens"])
             self.assertNotEqual(seed["body"]["prompt"], measure["body"]["prompt"])
+            self.assertNotEqual(warmup["body"]["prompt"], measure["body"]["prompt"])
 
     def test_prefill_runner_flags_invalid_reuse_through_the_external_session(self):
         with tempfile.TemporaryDirectory() as directory:

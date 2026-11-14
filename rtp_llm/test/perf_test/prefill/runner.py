@@ -124,7 +124,7 @@ class PrefillRunner:
             if "sample_index" not in case:
                 continue
             try:
-                run_count = int(case["measure_runs"])
+                run_count = int(case["measure_runs"]) + 1
                 members = build_grouped_prompts(self.factory, case, run_count)
                 for index, member in enumerate(members):
                     owner = (case["case_id"], index)
@@ -305,6 +305,8 @@ class PrefillRunner:
                 return self._failure(case, "request_failed", str(error))
         batch_size = int(case["batch_size"])
         measure_runs = int(case["measure_runs"])
+        # The first prompt is a fixed warmup; formal rounds retain their IDs.
+        prompt_count = measure_runs + 1
         input_len = int(case["input_len"])
         cache_len = int(case["cache_len"])
         grouped = "request_groups" in case
@@ -312,7 +314,7 @@ class PrefillRunner:
             "concurrent_grouped_batch_v1" if grouped else PREFILL_MEASUREMENT_CONTRACT
         )
         members = (
-            build_grouped_prompts(self.factory, case, measure_runs)
+            build_grouped_prompts(self.factory, case, prompt_count)
             if grouped
             else [
                 {
@@ -323,7 +325,7 @@ class PrefillRunner:
                         f"{case['case_id']}_r{member}",
                         input_len,
                         cache_len,
-                        measure_runs,
+                        prompt_count,
                     ),
                 }
                 for member in range(batch_size)
@@ -351,7 +353,9 @@ class PrefillRunner:
             else int(case["compute_len"])
         )
         with ThreadPoolExecutor(max_workers=batch_size) as executor:
-            for run_index in range(measure_runs):
+            for prompt_index in range(prompt_count):
+                run_index = prompt_index - 1
+                warmup = run_index < 0
                 release = threading.Event()
                 aborted = False
 
@@ -361,12 +365,12 @@ class PrefillRunner:
                         raise RuntimeError("round setup aborted")
                     prompts = members[member]["prompts"]
                     return self.client.request(
-                        phase="measure",
+                        phase="warmup" if warmup else "measure",
                         case_id=case["case_id"],
                         request_index=member,
-                        run_index=run_index,
-                        prompt=prompts.run_texts[run_index],
-                        input_ids=prompts.run_ids[run_index],
+                        run_index=None if warmup else run_index,
+                        prompt=prompts.run_texts[prompt_index],
+                        input_ids=prompts.run_ids[prompt_index],
                         output_length=1,
                     )
 
@@ -376,8 +380,9 @@ class PrefillRunner:
                 try:
                     for member in range(batch_size):
                         futures.append(executor.submit(request_member, member))
-                    setup_status = "invalid_timing"
-                    started = self.monotonic()
+                    if not warmup:
+                        setup_status = "invalid_timing"
+                        started = self.monotonic()
                 except Exception as error:
                     aborted = True
                     setup_failure = (setup_status, str(error))
@@ -394,10 +399,10 @@ class PrefillRunner:
                         failures.append(str(error))
                 if setup_failure is not None:
                     return self._failure(case, *setup_failure)
-                elapsed_ms = (self.monotonic() - started) * 1000.0
+                elapsed_ms = 0.0 if warmup else (self.monotonic() - started) * 1000.0
                 if failures:
                     return self._failure(case, "request_failed", "; ".join(failures))
-                if not math.isfinite(elapsed_ms) or elapsed_ms <= 0:
+                if not warmup and (not math.isfinite(elapsed_ms) or elapsed_ms <= 0):
                     return self._failure(
                         case,
                         "invalid_timing",
@@ -411,6 +416,8 @@ class PrefillRunner:
                     )
                     if invalid is not None:
                         return self._failure(case, *invalid)
+                    if warmup:
+                        continue
                     measurements.append(
                         {
                             "run": run_index,
@@ -436,6 +443,8 @@ class PrefillRunner:
                             ),
                         }
                     )
+                if warmup:
+                    continue
                 round_rates.append(
                     compute_length
                     * (1 if grouped else batch_size)

@@ -555,6 +555,11 @@ class SshPrefillTest(unittest.TestCase):
                     prefill_external_aux(
                         prefill_external_CASE_INPUT_LEN,
                         prefill_external_CASE_CACHE_LEN,
+                        9000.0,
+                    ),
+                    prefill_external_aux(
+                        prefill_external_CASE_INPUT_LEN,
+                        prefill_external_CASE_CACHE_LEN,
                         12.5,
                     ),
                 ]
