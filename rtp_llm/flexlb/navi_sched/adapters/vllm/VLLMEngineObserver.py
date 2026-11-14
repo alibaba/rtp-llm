@@ -5812,6 +5812,20 @@ class VLLMEngineObserver:
         pp_size = int(getattr(parallel, "pipeline_parallel_size", 1))
         queue = getattr(self._engine_core, "batch_queue", None)
         queue_capacity = getattr(queue, "maxlen", 0) or 0
+        stepper = getattr(getattr(self._engine_core, "step_fn", None), "__self__", None)
+        module = sys.modules.get("vllm_torchtpu.core.pp_lazy_step")
+        stepper_type = getattr(module, "LazyPushStepper", None)
+        if (
+            stepper_type is not None
+            and isinstance(stepper, stepper_type)
+            and stepper.core is self._engine_core
+            and queue is stepper.in_flight
+            and type(stepper.stages) is int
+            and stepper.stages == pp_size
+        ):
+            # Native lazy push exposes its outstanding steps as a list; the
+            # physical stage count is its capacity, not deque.maxlen.
+            queue_capacity = stepper.stages
         if pp_size <= 1 or queue_capacity <= 1 or state.cancelled_request_ids:
             return
         try:

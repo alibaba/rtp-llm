@@ -357,6 +357,44 @@ class VLLMPipelineBatchSampleTest(unittest.TestCase):
         )
         logger.exception.assert_called_once()
 
+    def test_native_lazy_push_list_uses_physical_pipeline_stages(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        class LazyPushStepper:
+            def step(self):
+                pass
+
+        observer, args, events = self.make_case()
+        queue = [object()]
+        stepper = LazyPushStepper()
+        stepper.core = observer._engine_core
+        stepper.in_flight = queue
+        stepper.stages = 4
+        observer._engine_core.batch_queue = queue
+        observer._engine_core.batch_queue_size = 8
+        observer._engine_core.step_fn = stepper.step
+        with mock.patch.dict(
+            "sys.modules",
+            {
+                "vllm_torchtpu.core.pp_lazy_step": SimpleNamespace(
+                    LazyPushStepper=LazyPushStepper
+                ),
+            },
+        ):
+            observer._record_pipelined_prefill_batch_sample(*args)
+        self.assertEqual(1, len(events))
+        self.assertEqual(4, events[0]["native_async_queue_capacity"])
+        self.assertIs(queue, observer._engine_core.batch_queue)
+        self.assertEqual(1, len(queue))
+
+    def test_unrecognized_list_does_not_assume_native_async_capacity(self):
+        observer, args, events = self.make_case()
+        observer._engine_core.batch_queue = []
+        observer._engine_core.batch_queue_size = 8
+        observer._record_pipelined_prefill_batch_sample(*args)
+        self.assertEqual([], events)
+
     def test_cancelled_batch_is_not_used_as_complete_arrival_sample(self):
         observer, args, events = self.make_case()
         args[0].cancelled_request_ids.add(1)
