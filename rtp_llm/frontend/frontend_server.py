@@ -824,9 +824,24 @@ class FrontendServer(object):
                 if awi_request_id:
                     headers["x-awi-request-id"] = awi_request_id
             assert self._frontend_worker is not None
+            # Globally unique internal request id (same snowflake generator as
+            # the inference path). The pipeline_async default counter is
+            # per-frontend-process and several frontend workers feed one
+            # backend, so its small integers collide across workers; the
+            # one-shot prefill/reuse event guard and the barrier internal-id
+            # binding are keyed by that id, which silently suppressed events
+            # for whichever colliding request reached decode second.
+            sequence = self._global_controller.increment() % 4096  # 12 bits
+            internal_request_id = generate_request_id(
+                self.py_env_configs.server_config.ip,
+                self.py_env_configs.server_config.server_port,
+                self.server_id,
+                sequence,
+            )
             stream = self._frontend_worker.pipeline.pipeline_async(
                 prompt="",
                 prompt_token_ids=input_ids,
+                request_id=internal_request_id,
                 generate_config=generate_config,
                 headers=headers,
                 generate_env_config=self.py_env_configs.generate_env_config,
