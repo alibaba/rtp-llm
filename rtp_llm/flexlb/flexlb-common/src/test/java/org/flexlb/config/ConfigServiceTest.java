@@ -20,33 +20,56 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConfigServiceTest {
     @Test
-    void coldQueueWatermarkIsOptionalAndCannotExceedOrdinaryAdmission() {
-        assertNull(new RoutingConfig.TokenBalanceConfig().getColdEngineQueueAdmissionThreshold());
-        for (String fields : java.util.List.of(
-                "\"coldEngineQueueAdmissionThreshold\":-1,\"enableWindow\":true",
-                "\"coldEngineQueueAdmissionThreshold\":0",
-                "\"coldEngineQueueAdmissionThreshold\":0,\"enableWindow\":true,\"engineQueueAdmissionThreshold\":null",
-                "\"coldEngineQueueAdmissionThreshold\":31,\"enableWindow\":true,\"engineQueueAdmissionThreshold\":30")) {
-            assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse(
-                    "{\"router\":{\"roles\":{\"prefill\":{\"tokenBalance\":{" + fields + "}}}}}"));
-        }
-        var parsed = ConfigTestFixtures.parse("""
-                {"router":{"roles":{"prefill":{"tokenBalance":{"coldEngineQueueAdmissionThreshold":0,"enableWindow":true,"engineQueueAdmissionThreshold":30}}}}}
+    void cacheOrderedSingleDispatchConfigUsesOneTimeout() {
+        var config = ConfigService.parse("""
+                {
+                  "scheduler": {
+                    "decision": {"type": "SINGLE"},
+                    "ordering": {"prefillCostOrder": true}
+                  },
+                  "dispatcher": {"maxInflightPerPrefillWorker": 256},
+                  "dispatchTimeoutMs": 120000,
+                  "router": {"roles": {"prefill": {"tokenBalance": {
+                    "hotspotRescue": {"maxInputTokens": 64768, "maxIdlePendingTokens": 128768, "migrationIntervalMs": 500},
+                    "minPrefixHitPercent": 5, "enableWindow": true,
+                    "engineQueueAdmissionThreshold": 30, "maxPendingComputeTokens": 1000000
+                  }}}}
+                }
                 """);
-        assertEquals(0L, parsed.getRouter().getRoles().getPrefill().getTokenBalance().getColdEngineQueueAdmissionThreshold());
+        assertTrue(config.isQueue());
+        assertEquals(DecisionPolicyConfig.Type.SINGLE, config.decisionPolicy().getType());
+        assertTrue(config.getScheduler().getOrdering().isPrefillCostOrder());
+        assertEquals(DispatcherConfig.Type.NON_BATCH, config.getDispatcher().getType());
+        assertEquals(256, config.getDispatcher().getMaxInflightPerPrefillWorker());
+        assertEquals(120000L, config.getDispatchTimeoutMs());
+        var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
+        assertTrue(balance.isEnableWindow());
+        assertEquals(10000L, balance.getWindowMs());
+        assertEquals(5.0, balance.getMinPrefixHitPercent());
+        assertEquals(30L, balance.getEngineQueueAdmissionThreshold());
+        assertEquals(1000000L, balance.getMaxPendingComputeTokens());
+        assertEquals(5000L, balance.getEngineQueueOverloadDurationMs());
+        var rescue = balance.getHotspotRescue();
+        assertEquals(64768L, rescue.getMaxInputTokens());
+        assertEquals(128768L, rescue.getMaxIdlePendingTokens());
+        assertEquals(500L, rescue.getMigrationIntervalMs());
+        assertEquals(30L, rescue.getEngineQueueMigrationThreshold());
+        assertEquals(1, rescue.getMaxMigrationsPerRound());
     }
 
     @Test
-    void coldWindowAdmissionIsExplicitAndRequiresCompletedHistory() {
-        var balance = new RoutingConfig.TokenBalanceConfig();
-        org.junit.jupiter.api.Assertions.assertFalse(balance.isEnforcePendingComputeLimit());
-        org.junit.jupiter.api.Assertions.assertNull(balance.getMaxColdWindowComputeTokens());
-        for (String fields : java.util.List.of("\"maxColdWindowComputeTokens\":0,\"enableWindow\":true", "\"maxColdWindowComputeTokens\":100")) {
-            assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse(
-                    "{\"router\":{\"roles\":{\"prefill\":{\"tokenBalance\":{" + fields + "}}}}}"));
+    void removedAdmissionOptionsAreRejectedInsteadOfSilentlyIgnored() {
+        for (String field : java.util.List.of("enforcePendingComputeLimit", "maxColdWindowComputeTokens",
+                "coldEngineQueueAdmissionThreshold")) {
+            String value = field.equals("enforcePendingComputeLimit") ? "true" : "100";
+            var error = assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse(
+                    "{\"router\":{\"roles\":{\"prefill\":{\"tokenBalance\":{\"" + field + "\":" + value + "}}}}}"));
+            assertTrue(error.getMessage().contains(field), error.getMessage());
         }
-        var parsed = ConfigTestFixtures.parse("{\"router\":{\"roles\":{\"prefill\":{\"tokenBalance\":{\"maxColdWindowComputeTokens\":100,\"enableWindow\":true,\"enforcePendingComputeLimit\":true}}}}}");
-        assertEquals(100L, parsed.getRouter().getRoles().getPrefill().getTokenBalance().getMaxColdWindowComputeTokens());
+        var error = assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
+                {"scheduler":{"prefillQueueShedding":{"deadlineBudget":{"tokensPerSecond":70000}}}}
+                """));
+        assertTrue(error.getMessage().contains("prefillQueueShedding"), error.getMessage());
     }
 
     @Test
@@ -86,23 +109,6 @@ class ConfigServiceTest {
     }
 
     @Test
-    void requires_explicit_request_timeout_and_defaults_decision_lifetime() {
-        assertThrows(ConfigValidationException.class, () -> new ConfigService((String) null));
-        assertThrows(ConfigValidationException.class,
-                () -> new ConfigService("   "));
-        for (String patch : new String[]{
-                "{}",
-                "{\"requestLifecycle\":{\"decision\":{\"lifetime\":1}}}"}) {
-            assertThrows(ConfigValidationException.class, () -> ConfigService.parse(patch));
-        }
-        FlexlbConfig config = new ConfigService(ConfigTestFixtures.REQUIRED).loadBalanceConfig();
-        assertEquals(60000L, config.getRequestLifecycle().getRequest().getTimeoutMs());
-        assertEquals(2.0, config.getRequestLifecycle().getDecision().getLifetime());
-        FlexlbConfig defaults = ConfigService.parse("{\"requestLifecycle\":{\"request\":{\"timeoutMs\":1}}}");
-        assertEquals(2.0, defaults.getRequestLifecycle().getDecision().getLifetime());
-    }
-
-    @Test
     void retained_defaults_have_one_owner() {
         FlexlbConfig config = ConfigTestFixtures.parse("{}");
         assertEquals(3, config.getSchemaVersion());
@@ -111,7 +117,7 @@ class ConfigServiceTest {
         assertTrue(config.isQueue());
         assertFalse(config.isPriorityOrdering());
         assertTrue(config.isFixedWindowDecision());
-        assertEquals(3600000L, config.queueScheduler().getQueueTimeoutMs());
+        assertEquals(60000L, config.getDispatchTimeoutMs());
         assertEquals(8, config.decisionPolicy().getMaxRequests());
         assertEquals(300L, config.decisionPolicy().getMaxCollectionWaitMs());
         assertNull(config.decisionPolicy().getMaxPredictedExecutionMs());
@@ -173,7 +179,7 @@ class ConfigServiceTest {
                 "FLEXLB_MONITOR_MODE", "all"))
                 .loadBalanceConfig();
         assertEquals(FlexlbConfig.CURRENT_SCHEMA_VERSION, config.getSchemaVersion());
-        assertEquals(60000L, config.getRequestLifecycle().getRequest().getTimeoutMs());
+        assertEquals(60000L, config.getInternalRuntime().getRequestInactivityTimeoutMs());
     }
 
     @Test
@@ -185,7 +191,7 @@ class ConfigServiceTest {
                 .loadBalanceConfig();
 
         assertEquals(FlexlbConfig.CURRENT_SCHEMA_VERSION, config.getSchemaVersion());
-        assertEquals(60000L, config.getRequestLifecycle().getRequest().getTimeoutMs());
+        assertEquals(60000L, config.getInternalRuntime().getRequestInactivityTimeoutMs());
         assertThrows(ConfigValidationException.class, () -> new ConfigService(Map.of()));
         assertThrows(ConfigValidationException.class,
                 () -> new ConfigService(Map.of(ConfigService.FLEXLB_CONFIG_ENV, "   ")));
@@ -516,11 +522,7 @@ class ConfigServiceTest {
         assertInvalid("{\"router\":{\"roles\":{\"prefill\":{\"executionTimeEstimator\":{\"expression\":\"sum(unknownTokens)\"}}}}}", "expression");
         assertInvalid("{\"router\":{\"roles\":{\"prefill\":{\"cacheAffinity\":{\"maxExtraTtftMs\":-1}}}}}", "maxExtraTtftMs");
         assertInvalid("{\"router\":{\"roles\":{\"prefill\":{\"cacheAffinity\":{\"minPrefixHitPercent\":100.1}}}}}", "minPrefixHitPercent");
-        FlexlbConfig config = ConfigTestFixtures.parse("{}");
-        for (double invalid : new double[]{Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY}) {
-            config.getRequestLifecycle().getDecision().setLifetime(invalid);
-            assertThrows(ConfigValidationException.class, () -> FlexlbConfigValidator.validate(config));
-        }
+
     }
 
     @Test

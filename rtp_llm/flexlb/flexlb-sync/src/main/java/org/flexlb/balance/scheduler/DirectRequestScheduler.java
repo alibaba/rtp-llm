@@ -78,7 +78,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
                                 operation.finish();
                                 long now = System.currentTimeMillis();
                                 long visibility = PrefillPredictionBoundary.predictedVisibilityDeadlineMs(delivery.precedingWork(),
-                                        delivery.unstartedWorkMs(), context.data().getConfig().getRequestLifecycle().getDecision().getLifetime(), now);
+                                        delivery.unstartedWorkMs(), context.data().getConfig().getInternalRuntime().getEngineVisibilityMultiplier(), now);
                                 onDeliveryEvidence(delivery.claim(), new RouteDelivered(delivery.claim(), visibility, now));
                                 yield null;
                             }

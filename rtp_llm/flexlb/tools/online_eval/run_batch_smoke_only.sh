@@ -115,7 +115,7 @@ PY
 )
 
 # -- 2. Start FlexLB master (queue + priority ordering, batch dispatch) --
-DEFAULT_FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550}},"dispatcher":{"type":"BATCH","maxInflightPerPrefillWorker":4},"router":{"roles":{"decode":{"availability":{"maxEngineRequests":132}}}},"requestLifecycle":{"request":{"timeoutMs":300000},"decision":{"lifetime":2.0}}}'
+DEFAULT_FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550}},"dispatcher":{"type":"BATCH","maxInflightPerPrefillWorker":4},"router":{"roles":{"decode":{"availability":{"maxEngineRequests":132}}}},"dispatchTimeoutMs": 300000}'
 FLEXLB_CONFIG="${FLEXLB_CONFIG:-${DEFAULT_FLEXLB_CONFIG}}"
 echo "[2/4] Starting FlexLB master (BATCH / COST_BASED_PREFILL) ..."
 env ${FLEXLB_ENV_ARGS[@]+"${FLEXLB_ENV_ARGS[@]}"} \

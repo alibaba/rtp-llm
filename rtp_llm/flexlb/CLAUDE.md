@@ -252,10 +252,7 @@ FlexLB reads configuration from environment variables:
     "decision": {"type": "SINGLE"}
   },
   "dispatcher": {"type": "NON_BATCH"},
-  "requestLifecycle": {
-    "request": {"timeoutMs": 60000},
-    "decision": {"lifetime": 2.0}
-  }
+  "dispatchTimeoutMs": 60000
 }
 ```
 

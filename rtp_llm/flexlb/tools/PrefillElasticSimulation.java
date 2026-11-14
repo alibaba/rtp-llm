@@ -1,6 +1,5 @@
 import org.flexlb.balance.strategy.PrefillTokenBalance;
 import org.flexlb.balance.strategy.PrefillTokenWorkload;
-import org.flexlb.balance.scheduler.PrefillQueueShedding;
 
 import java.io.*;
 import java.nio.file.*;
@@ -11,10 +10,10 @@ import java.util.*;
  */
 public class PrefillElasticSimulation {
     static final int N = 150, INITIAL = 100, ROUNDS = 21;
-    static final double TPS = 70_000, TTL = 1_200_000, MAX_WAIT = 60_000, SHED_WAIT = 30_000;
+    static final double TPS = 70_000, TTL = 1_200_000, MAX_WAIT = 60_000;
     static final double[] LOADS = Arrays.stream(System.getProperty("flexlb.sim.loads", "0.2,0.5,0.8,1.2,1.5,1.5").split(",")).mapToDouble(Double::parseDouble).toArray();
     static final double GROWTH = growth(), MEAN_FACTOR = sumGrowth() / ROUNDS;
-    enum Policy { SHORT_TTFT, SHORT_TTFT_CAPPED, CACHE_ONLY, CACHE_WINDOW, ELASTIC, ADAPTIVE }
+    enum Policy { SHORT_TTFT, SHORT_TTFT_CAPPED, CACHE_ONLY, CACHE_WINDOW, ELASTIC }
     enum Scene { REPLAY, CONVERSATION, COLD_BURST, TTL_GAP, WARM_REPLAY, HOTSPOT, COLD_BURST_OPEN, SCALE_OUT, HOTSPOT_SCALE_OUT, RECOVERY_BURST, RAMP }
     record Cache(long tokens, double touched) { }
     static final class Query {
@@ -60,8 +59,7 @@ public class PrefillElasticSimulation {
         final Map<Long, Map<Integer, Cache>> cacheIndex=new HashMap<>();
         final double[] workScores=new double[N];
         final long[] pendingTokens=new long[N];
-        final PrefillQueueShedding.Controller sheddingController = new PrefillQueueShedding.Controller();
-        double lastShedding=-100;
+        double lastMigration=-100;
         final Random roots, lengths;
         final long[] corpus = new long[50_000];
         final PriorityQueue<Event> events=new PriorityQueue<>(Comparator.comparingDouble(Event::at).thenComparingLong(Event::sequence));
@@ -76,16 +74,12 @@ public class PrefillElasticSimulation {
         final long rescueLimit=Long.getLong("flexlb.sim.rescueLimit", 32768L);
         long rescued, localMigrations, graceTicks;
         final long[] droppedPriority = new long[3], completedPriority = new long[3];
-        final org.flexlb.config.PrefillQueueSheddingConfig sheddingConfig = new org.flexlb.config.PrefillQueueSheddingConfig();
-        final org.flexlb.balance.scheduler.PrefillTrafficTrend trend = new org.flexlb.balance.scheduler.PrefillTrafficTrend(
-                new org.flexlb.config.PrefillQueueSheddingConfig.RecoveryConfig());
         long[] prevCompute=new long[N], prevInput=new long[N], prevUseful=new long[N];
         Counters prev=new Counters(), measured; long[] measuredCompute, measuredInput, measuredUseful;
         Run(Policy policy, Scene scene,int seed,double stageSeconds,long window,long cap,boolean reorder,
             PrintWriter summary, PrintWriter timeline, PrintWriter perWorker) {
             this.policy=policy;this.scene=scene;this.seed=seed;this.stageMs=stageSeconds*1000;
             endMs=stageMs*LOADS.length;this.window=window;this.cap=cap;this.reorder=reorder;
-            sheddingConfig.setRecovery(new org.flexlb.config.PrefillQueueSheddingConfig.RecoveryConfig());
             this.summary=summary;this.timeline=timeline;this.perWorker=perWorker;
             roots=new Random(seed); lengths=new Random(seed^0x187abcd);
             for(int i=0;i<N;i++)workers[i]=new Worker(window);
@@ -102,8 +96,8 @@ public class PrefillElasticSimulation {
             }
         }
         boolean independent(){return true;}
-        boolean windowPolicy(){return policy==Policy.CACHE_WINDOW || policy==Policy.ELASTIC || policy==Policy.ADAPTIVE;}
-        boolean elastic(){return policy==Policy.ELASTIC || policy==Policy.ADAPTIVE;}
+        boolean windowPolicy(){return policy==Policy.CACHE_WINDOW || policy==Policy.ELASTIC;}
+        boolean elastic(){return policy==Policy.ELASTIC;}
         int priorityIndex(Query q){return q.priority==10 ? 0 : q.priority==50 ? 1 : 2;}
         void event(double at,int kind,Query q,int worker,List<Query> batch) {
             events.add(new Event(at,++eventId,kind,q,worker,batch));
@@ -130,7 +124,6 @@ public class PrefillElasticSimulation {
             return delay;
         }
         void arrive(Query q) {
-            trend.arrive(q.tokens);
             c.arrivals++;if(q.session<0)c.coldArrivals++;c.input+=q.tokens;c.theoretical+=q.prefix;
             waiting.put(q.id,q);maxQueue=Math.max(maxQueue,waiting.size());
         }
@@ -223,7 +216,7 @@ public class PrefillElasticSimulation {
             }
         }
         void route() {
-            if(now-lastShedding>=PrefillQueueShedding.SOFT_INTERVAL_MS)migrateLocal();
+            if(now-lastMigration>=100){migrateLocal();lastMigration=now;}
             // Scan all waiting requests once per 20ms scheduling round; blocked affinity cannot block cold work.
             // Optional ablation reorders only each already-present 32-item group, never defers an item.
             idleCount=0;
@@ -242,7 +235,6 @@ public class PrefillElasticSimulation {
                     long matched=0;var copies=cacheIndex.get(q.session);
                     if(copies!=null)for(var copy:copies.entrySet())if(copy.getKey()<active && now-copy.getValue().touched<TTL)
                         matched=Math.max(matched,Math.min(q.prefix,copy.getValue().tokens));
-                    trend.discard((q.tokens-matched)*1000.0/TPS/active);
                     waiting.remove(q.id);c.expired++;if(q.session<0)c.coldExpired++;continue;
                 }
                 int i=choose(q);if(i<0)continue;
@@ -253,30 +245,6 @@ public class PrefillElasticSimulation {
                 c.routedInput+=q.tokens;c.routedHit+=hits[i];
                 if(!w.running && !w.collecting){w.collecting=true;w.collectionDue=now+20;event(w.collectionDue,2,null,i,null);}
                 if(!w.running && w.queue.size()>=8)start(i);
-            }
-            if(now-lastShedding>=PrefillQueueShedding.SOFT_INTERVAL_MS){shed();lastShedding=now;}
-        }
-        void shed() {
-            var candidates=new ArrayList<PrefillQueueShedding.Candidate<Query>>();
-            for(Query q:waiting.values()){
-                long max=0;
-                var cached=cacheIndex.get(q.session);
-                if(cached!=null)for(var entry:cached.entrySet()) {
-                    Cache cache=entry.getValue();
-                    if(now-cache.touched<TTL)max=Math.max(max,Math.min(q.prefix,cache.tokens));
-                }
-                candidates.add(new PrefillQueueShedding.Candidate<>(q,q.priority,q.id,
-                    new PrefillQueueShedding.Estimate(q.tokens,max,Math.round((q.tokens-max)*1000/TPS),active),(long)Math.max(0,now-q.at)));
-            }
-            double queuedWork=candidates.stream().mapToDouble(item->item.estimate().fleetWorkMs()).sum();
-            var observed=trend.observe((long)now,queuedWork,(long)SHED_WAIT,(long)MAX_WAIT);
-            if(policy==Policy.ADAPTIVE && observed.grace())graceTicks++;
-            var victims=policy==Policy.ADAPTIVE ? PrefillQueueShedding.adaptiveVictims(candidates,sheddingConfig,observed,sheddingController,(long)now)
-                    : sheddingController.victims(candidates,(long)SHED_WAIT,(long)MAX_WAIT,(long)now);
-            for(Query q:victims) {
-                if(waiting.remove(q.id)!=null){c.dropped++;droppedPriority[priorityIndex(q)]++;
-                    long matched=0;for(int i=0;i<active;i++)matched=Math.max(matched,hit(i,q));
-                    trend.discard((q.tokens-matched)*1000.0/TPS/active);if(q.session<0)c.coldDropped++;}
             }
         }
         void start(int i) {

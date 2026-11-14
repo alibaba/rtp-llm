@@ -7,7 +7,6 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy.TokenEstimate;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.PrefillQueueSheddingConfig;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -89,19 +88,11 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private final Map<GlobalQueueEntry, WorkEstimate> costOrderEstimates = new IdentityHashMap<>();
     private record WorkEstimate(long atNanos, TokenEstimate tokens) { }
 
-    private final PrefillQueueSheddingConfig shedding;
-    private long nextSheddingNanos;
-    private final java.util.function.LongSupplier protectionClock;
-    private final Map<String, PrefillQueueShedding.Controller> sheddingControllers = new LinkedHashMap<>();
-    private final Map<String, PrefillDeadlineBudget> deadlineBudgets = new LinkedHashMap<>();
     private long nextRescueRetryNanos;
     private Set<PlacementKey> idleRescueDomains = Set.of();
     private long lastLocalMigrationNanos = Long.MIN_VALUE;
     private long nextRescueDomainScanNanos;
     private final org.flexlb.config.RoutingConfig.HotspotRescueConfig hotspotRescue;
-    /** Mutated only by the decision owner; ingress/retry events remain separately classified. */
-    private final Map<String, PrefillTrafficTrend> trafficTrends = new LinkedHashMap<>();
-    private volatile Map<String, Object> trafficTrendSnapshot = Map.of();
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition changed = lock.newCondition();
     private final OrderedRequestQueue orderedQueue;
@@ -109,9 +100,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     /** Entries exist only while the scheduler owns global placement. */
     // Mutations remain decision-owned under lock; deadline observers only perform lock-free lookup.
     private final Map<RequestContext, GlobalQueueEntry> queuedEntries = new ConcurrentHashMap<>();
-    private record QueueHardTimeout(String pool, long atMs) { }
-    private final ConcurrentLinkedQueue<QueueHardTimeout> hardTimeouts = new ConcurrentLinkedQueue<>();
-    private volatile Map<String, Object> coldProtectionSnapshot = Map.of();
     private final ArrayDeque<QueueEvent> events = new ArrayDeque<>();
     private final Set<Plan> pendingPreemptions = Collections.newSetFromMap(new IdentityHashMap<>());
     /** Waiting on local preemption slots, independent of physical Worker capacity edges. */
@@ -136,17 +124,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             DeliveryMetricsReporter reporter, DecodeCapacityAcquirer decodeCapacity,
             SchedulerRuntime runtime, PlacementAvailability availability,
             DecodeResources.AdmissionCapacity capacity, RecentCacheKeyTraceReporter traceReporter) {
-        this(config, router, reporter, decodeCapacity, runtime, availability, capacity, traceReporter,
-                () -> TimeUnit.NANOSECONDS.toMillis(System.nanoTime()));
-    }
-
-    QueuedRequestScheduler(FlexlbConfig config, RequestWorkerSelector router,
-            DeliveryMetricsReporter reporter, DecodeCapacityAcquirer decodeCapacity,
-            SchedulerRuntime runtime, PlacementAvailability availability,
-            DecodeResources.AdmissionCapacity capacity, RecentCacheKeyTraceReporter traceReporter,
-            java.util.function.LongSupplier protectionClock) {
         super(runtime, config, capacity, traceReporter);
-        this.protectionClock = Objects.requireNonNull(protectionClock, "protectionClock");
         this.queueSettings = QueueExecutionSettings.capture(config);
         this.prefillCostOrder = config.getScheduler().getOrdering().isPrefillCostOrder();
         this.router = Objects.requireNonNull(router, "router");
@@ -156,7 +134,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         this.availability = Objects.requireNonNull(availability, "availability");
         this.orderedQueue = new OrderedRequestQueue(queueSettings.priorityOrdering());
         this.waitingRequests = new PlacementCapacityWaitQueue(queueSettings.priorityOrdering(), availability);
-        this.shedding = config.queueScheduler().getPrefillQueueShedding();
         var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
         this.hotspotRescue = balance == null ? null : balance.getHotspotRescue();
         this.scanBudgetMultiplier = config.queueScheduler().getScanBudgetMultiplier();
@@ -186,35 +163,9 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         decisionThread.start();
     }
 
-    public Map<String, Object> trafficTrendSnapshot() { return trafficTrendSnapshot; }
-
-    public Map<String, Object> coldRequestProtectionSnapshot() { return coldProtectionSnapshot; }
-
-    @Override
-    protected void onQueueDeadlineAccepted(RequestContext ctx, ContextResult.Snapshot before) {
-        if (shedding == null || !shedding.isSustainedOverloadProtection()) { return; }
-        String pool;
-        if (before.route() != null) {
-            if (!before.route().coldTokenBalance()) { return; }
-            pool = ctx.prefillQueuePool();
-        } else {
-            var entry = queuedEntries.get(ctx);
-            var blocker = entry == null ? null : entry.lastBlocker;
-            if (blocker == null || !blocker.role().supportsPrefill() || !entry.knownColdRequest) { return; }
-            pool = trafficPool(entry);
-        }
-        if (router.isPrefillClusterOverloaded(pool)) {
-            hardTimeouts.add(new QueueHardTimeout(pool, protectionClock.getAsLong()));
-        }
-    }
-
     /** Latest queue wait cause and counters; this snapshot is not specific to the current request. */
     Map<String, Object> getLatestQueueWaitSnapshot() {
-        if (trafficTrendSnapshot.isEmpty() && coldProtectionSnapshot.isEmpty()) { return latestQueueWaitSnapshot; }
-        var result = new LinkedHashMap<>(latestQueueWaitSnapshot);
-        if (!trafficTrendSnapshot.isEmpty()) { result.put("trafficTrends", trafficTrendSnapshot); }
-        if (!coldProtectionSnapshot.isEmpty()) { result.put("coldRequestProtection", coldProtectionSnapshot); }
-        return Collections.unmodifiableMap(result);
+        return latestQueueWaitSnapshot;
     }
 
     @Override
@@ -431,20 +382,11 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                     checkState(queuedEntries.putIfAbsent(entry.context, entry) == null,
                             "duplicate global queue identity");
                     if (event.kind == EventKind.REQUEUE) {
-                        entry.classifyArrival = false;
                         entry.context.data().setPlanType("");
                         entry.context.data().setPlanCost(0L);
                         entry.context.data().setVictimCount(0);
                         orderedQueue.restore(entry);
                     } else {
-                        if (shedding != null && shedding.isSustainedOverloadProtection()) {
-                            sheddingControllers.computeIfAbsent(trafficPool(entry), ignored -> new PrefillQueueShedding.Controller()).arrive();
-                        }
-                        if (shedding != null && shedding.getRecovery() != null) {
-                            trafficTrends.computeIfAbsent(trafficPool(entry),
-                                    ignored -> new PrefillTrafficTrend(shedding.getRecovery()))
-                                    .arrive(Math.max(0L, entry.context.data().getRequest().getSeqLen()));
-                        }
                         orderedQueue.add(entry);
                         if (entry.context.data().getPlacementSequence() == 0L) { entry.context.data().setPlacementSequence(entry.sequence); }
                     }
@@ -514,7 +456,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                 runControlActions(controls);
                 if (completed != null) { processCompletedPlan(completed); }
                 migrateHotspotQueues();
-                shedOverloadedQueue();
                 lock.lock();
                 try {
                     // Control effects can restore an older entry, and a completed route
@@ -546,7 +487,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                                 || (!orderedQueue.hasUnscannedRequests() && !waitingRequests.hasReadyRequests()
                                     && (!prefillCostOrder || costOrderPending.isEmpty())))) {
                         try {
-                            if (shedding == null && hotspotRescue == null) { changed.await(); } else { changed.await(100L, TimeUnit.MILLISECONDS); break; }
+                            if (hotspotRescue == null) { changed.await(); } else { changed.await(100L, TimeUnit.MILLISECONDS); break; }
                         }
                         catch (InterruptedException interruption) {
                             if (closed.get()) { Thread.currentThread().interrupt(); }
@@ -577,12 +518,20 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                         } else {
                             plan.handle = claimAdmissionHandle(entry.context.data().getRequestId(), entry.context.data().getFuture());
                             if (plan.handle != null) {
-                                if (shedding != null) {
-                                    plan.estimate = router.estimateQueuedWork(entry.context, entry.routingGroup);
-                                }
                                 plan.result = Objects.requireNonNull(router.select(entry.context, entry.routingGroup), "placement result");
                                 plan.handle.recordDiagnostics(plan.result.diagnostics());
                                 plan.waitKey = plan.result.blocker();
+                                if (plan.result.status() == PlacementResult.Status.SUCCESS) {
+                                    plan.knownColdRequest = plan.result.value().coldTokenBalance();
+                                } else if (plan.result.status() == PlacementResult.Status.BLOCKED
+                                        && plan.waitKey.role().supportsPrefill()) {
+                                    try {
+                                        TokenEstimate tokens = router.estimateQueuedTokens(entry.context, entry.routingGroup);
+                                        plan.knownColdRequest = tokens != null && tokens.inputTokens() > 0 && tokens.hitTokens() == 0;
+                                    } catch (RuntimeException unavailable) {
+                                        Logger.debug("Prefill token estimate unavailable; retaining ordinary capacity retry", unavailable);
+                                    }
+                                }
                                 if (plan.result.status() == PlacementResult.Status.SUCCESS
                                         && plan.result.value().coldTokenBalance()) {
                                     dispatchColdRoute(plan);
@@ -617,7 +566,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                     long now = System.currentTimeMillis();
                     long visibility = org.flexlb.balance.prediction.PrefillPredictionBoundary.predictedVisibilityDeadlineMs(
                             delivery.precedingWork(), delivery.unstartedWorkMs(),
-                            plan.entry.context.data().getConfig().getRequestLifecycle().getDecision().getLifetime(), now);
+                            plan.entry.context.data().getConfig().getInternalRuntime().getEngineVisibilityMultiplier(), now);
                     onDeliveryEvidence(delivery.claim(), new ContextResult.RouteDelivered(delivery.claim(), visibility, now));
                 }
             });
@@ -636,14 +585,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     }
 
     private void processCompletedPlan(Plan plan) {
-        plan.entry.context.setPrefillQueuePool(trafficPool(plan.entry));
-        if (shedding != null && shedding.isSustainedOverloadProtection()
-                && plan.entry.classifyArrival && plan.estimate != null) {
-            plan.entry.classifyArrival = false;
-            if (plan.estimate.hitTokens() == 0L) {
-                sheddingControllers.computeIfAbsent(trafficPool(plan.entry), ignored -> new PrefillQueueShedding.Controller()).coldArrival();
-            }
-        }
         boolean retry = false;
         boolean completingPreemption = plan.preemptionCompleted;
         Map<String, Object> diagnostics = plan.result.diagnostics();
@@ -999,18 +940,13 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     }
 
     private boolean park(Plan plan, Map<String, Object> diagnostics) {
+        plan.entry.knownColdRequest = plan.knownColdRequest;
         int depth;
         int[] counts;
         boolean parked;
         lock.lock();
         try {
             if (!(!plan.entry.removed && !plan.entry.context.data().getFuture().isDone())) { return true; }
-            plan.entry.knownColdRequest = plan.estimate != null && plan.estimate.hitTokens() == 0L;
-            plan.entry.lastBlocker = plan.waitKey;
-            plan.entry.sheddingEstimate = plan.waitKey.role().supportsPrefill()
-                    ? plan.estimate != null ? plan.estimate : new PrefillQueueShedding.Estimate(
-                            Math.max(0L, plan.entry.context.data().getRequest().getSeqLen()), 0L, 0L, 1)
-                    : null;
             parked = waitingRequests.park(plan.entry, plan.waitKey, plan.availabilitySequence);
             if (parked && hotspotRescue != null && plan.waitKey.role().supportsPrefill()
                     && plan.entry.context.data().getRequest().getSeqLen() <= hotspotRescue.getMaxInputTokens()) {
@@ -1096,161 +1032,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         return detached;
     }
 
-    private static String trafficPool(GlobalQueueEntry entry) {
-        var vit = entry.context.data().getRequest().getSelectedVit();
-        return vit == null ? entry.routingGroup : vit.getGroup();
-    }
 
-    /** Only the decision owner removes global entries; all lifecycle effects run outside its lock. */
-    private void shedOverloadedQueue() {
-        long nowNanos = System.nanoTime();
-        if (shedding == null || nowNanos < nextSheddingNanos) { return; }
-        nextSheddingNanos = nowNanos + TimeUnit.MILLISECONDS.toNanos(
-                shedding.getDeadlineBudget() == null ? 100L : PrefillQueueShedding.SOFT_INTERVAL_MS);
-        QueueHardTimeout hard;
-        while ((hard = hardTimeouts.poll()) != null) {
-            sheddingControllers.computeIfAbsent(hard.pool(), ignored -> new PrefillQueueShedding.Controller()).hardTimeout(hard.atMs());
-        }
-        Map<String, List<PrefillQueueShedding.Candidate<GlobalQueueEntry>>> pools = new LinkedHashMap<>();
-        List<GlobalQueueEntry> victims = new ArrayList<>();
-        List<GlobalQueueEntry> expired = new ArrayList<>();
-        long nowMs = System.currentTimeMillis();
-        lock.lock();
-        try {
-            for (var entry : queuedEntries.values()) {
-                if (entry.removed || entry.sheddingEstimate == null || inFlight.contains(entry)
-                        || pendingPreemptions.stream().anyMatch(plan -> plan.entry == entry)
-                        || entry.context.data().getFuture().isDone()) { continue; }
-                var state = entry.context.snapshot();
-                if (state.phase() != Phase.OPEN || state.route() != null || state.placement() != null
-                        || state.cancellation() != null) { continue; }
-                if (entry.context.data().getRequestExpiresAtMs() <= nowMs) {
-                    expired.add(entry);
-                    continue;
-                }
-                String pool = trafficPool(entry);
-                pools.computeIfAbsent(pool, ignored -> new ArrayList<>()).add(
-                        new PrefillQueueShedding.Candidate<>(entry,
-                                entry.priority(), entry.sequence, entry.sheddingEstimate,
-                                Math.max(0L, TimeUnit.NANOSECONDS.toMillis(nowNanos - entry.queuedAtNanos))));
-            }
-        } finally { lock.unlock(); }
-        Map<String, Integer> poolWorkers = new LinkedHashMap<>();
-        // Fleet expansion changes service capacity immediately; do not shed using a parked
-        // request's old worker count while its placement retry is still waiting for a planner.
-        for (var pool : pools.entrySet()) {
-            int workers = router.currentPrefillWorkerCount(pool.getKey());
-            poolWorkers.put(pool.getKey(), workers);
-            if (workers <= 0) { continue; }
-            pool.setValue(pool.getValue().stream().map(candidate -> {
-                var estimate = candidate.estimate();
-                return new PrefillQueueShedding.Candidate<>(candidate.value(), candidate.priority(), candidate.sequence(),
-                        new PrefillQueueShedding.Estimate(estimate.inputTokens(), estimate.hitTokens(), estimate.workMs(), workers), candidate.waitedMs());
-            }).toList());
-        }
-        for (var entry : expired) {
-            var trend = trafficTrends.get(trafficPool(entry));
-            if (trend != null) { trend.discard(entry.sheddingEstimate.fleetWorkMs()); }
-        }
-        Map<String, Object> trends = new LinkedHashMap<>();
-        for (var tracked : trafficTrends.entrySet()) {
-            var pool = pools.getOrDefault(tracked.getKey(), List.of());
-            double work = pool.stream().mapToDouble(c -> c.estimate().fleetWorkMs()).sum();
-            var snapshot = tracked.getValue().observe(System.nanoTime() / 1_000_000L, work,
-                    shedding.getExpectedWaitThresholdMs(), shedding.getMaxWaitMs());
-            trends.put(tracked.getKey() == null ? "<default>" : "group:" + tracked.getKey(), snapshot);
-        }
-        trafficTrendSnapshot = Collections.unmodifiableMap(trends);
-        // Empty pools still advance recovery; a temporary empty queue must not erase hard evidence.
-        for (String pool : sheddingControllers.keySet()) { pools.computeIfAbsent(pool, ignored -> List.of()); }
-        for (var poolEntry : pools.entrySet()) {
-            var pool = poolEntry.getValue();
-            var snapshot = (PrefillTrafficTrend.Snapshot) trends.get(
-                    poolEntry.getKey() == null ? "<default>" : "group:" + poolEntry.getKey());
-            var controller = sheddingControllers.computeIfAbsent(poolEntry.getKey(), ignored -> new PrefillQueueShedding.Controller());
-            if (shedding.getDeadlineBudget() == null) {
-                victims.addAll(PrefillQueueShedding.adaptiveVictims(pool, shedding, snapshot, controller,
-                        protectionClock.getAsLong(), router.isPrefillClusterOverloaded(poolEntry.getKey())));
-            } else {
-                var budgetCandidates = new ArrayList<PrefillDeadlineBudget.Candidate<GlobalQueueEntry>>();
-                for (var candidate : pool) {
-                    var entry = candidate.value();
-                    // Cache may have warmed or expired since this request last attempted placement.
-                    var estimate = router.estimateQueuedWork(entry.context, entry.routingGroup);
-                    if (estimate == null) { budgetCandidates.clear(); break; }
-                    entry.sheddingEstimate = estimate;
-                    long deadline = Math.min(entry.context.data().getRequestExpiresAtMs(),
-                            entry.context.snapshot().inactivityExpiresAtMs());
-                    budgetCandidates.add(new PrefillDeadlineBudget.Candidate<>(entry, entry.priority(), entry.sequence,
-                            estimate.inputTokens() - estimate.hitTokens(), estimate.hitTokens() == 0L, Math.max(0L, deadline - nowMs)));
-                }
-                victims.addAll(deadlineBudgets.computeIfAbsent(poolEntry.getKey(), ignored -> new PrefillDeadlineBudget())
-                        .victims(budgetCandidates, router.deadlineBudgetFleet(poolEntry.getKey()),
-                                shedding.getDeadlineBudget(), queueSettings.priorityOrdering(), protectionClock.getAsLong()));
-            }
-        }
-        // Keep attribution alive until the real cancellation/publication wins Context arbitration.
-        for (var entry : expired) {
-            cancel(entry.context, 0L, CancelReason.DEADLINE_EXCEEDED);
-            removeRequest(entry);
-        }
-        Map<String, Integer> selected = new LinkedHashMap<>();
-        Map<String, Integer> accepted = new LinkedHashMap<>();
-        for (var victim : victims) {
-            String pool = trafficPool(victim);
-            selected.merge(pool, 1, Integer::sum);
-            var fleet = shedding.getDeadlineBudget() == null ? null : router.deadlineBudgetFleet(pool);
-            boolean overloaded = shedding.getDeadlineBudget() == null ? router.isPrefillClusterOverloaded(pool)
-                    : fleet != null && fleet.saturated(shedding.getDeadlineBudget());
-            if (!overloaded
-                    || router.hotPrefillQueueAllowsAdmission(victim.context, victim.routingGroup)) { continue; }
-            if (victim.sheddingEstimate.hitTokens() == 0L) {
-                var domain = new PlacementKey(victim.lastBlocker.role(), pool, null);
-                long observed = availability.lastChangedSequence(domain);
-                var admission = router.coldPrefillAdmission(victim.context, victim.routingGroup);
-                if (admission != org.flexlb.balance.strategy.CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY
-                        || availability.lastChangedSequence(domain) != observed) {
-                    // Enough current headroom vetoes historical overload. Replan
-                    // without pinning a worker; cold selection still happens at real admission.
-                    lock.lock();
-                    try {
-                        if (!victim.removed && !victim.context.data().getFuture().isDone()) {
-                            waitingRequests.remove(victim);
-                            orderedQueue.markRequestReadyForRetry(victim);
-                            changed.signal();
-                        }
-                    } finally { lock.unlock(); }
-                    continue;
-                }
-            }
-            boolean published = completeDecisionResponse(victim, buildErrorResponse(StrategyErrorType.RESOURCE_EXHAUSTED,
-                    shedding.getDeadlineBudget() != null ? "Prefill queue overload: cold work exceeds remaining dispatch deadline budget"
-                            : victim.sheddingEstimate.hitTokens() == 0L
-                            && TimeUnit.NANOSECONDS.toMillis(nowNanos - victim.queuedAtNanos) <= shedding.getExpectedWaitThresholdMs()
-                            ? "Prefill queue overload: sustained actual hard timeouts exhausted cold-request grace"
-                            : "Prefill queue overload: actual queue wait exceeded expectedWaitThresholdMs"));
-            if (published) {
-                accepted.merge(pool, 1, Integer::sum);
-                var trend = trafficTrends.get(pool);
-                if (trend != null) {
-                    int workers = poolWorkers.getOrDefault(pool, 0);
-                    trend.discard((double) victim.sheddingEstimate.workMs()
-                            / (workers > 0 ? workers : victim.sheddingEstimate.workers()));
-                }
-            }
-            removeRequest(victim);
-        }
-        for (var count : selected.entrySet()) {
-            sheddingControllers.get(count.getKey()).recordEvictions(protectionClock.getAsLong(),
-                    count.getValue(), accepted.getOrDefault(count.getKey(), 0));
-        }
-        var protection = new LinkedHashMap<String, Object>();
-        if (shedding.isSustainedOverloadProtection()) {
-            sheddingControllers.forEach((pool, controller) -> protection.put(
-                    pool == null ? "<default>" : "group:" + pool, controller.protectionSnapshot()));
-        }
-        coldProtectionSnapshot = Collections.unmodifiableMap(protection);
-    }
 
     private void removeRequest(GlobalQueueEntry entry) {
         boolean acquire = !lock.isHeldByCurrentThread();
@@ -1369,12 +1151,12 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         private org.flexlb.balance.eviction.DecodeCapacityAcquirer.PreemptionResult preemptionResult;
         private Throwable preemptionFailure;
         // The plan owns selection pins and uncommitted Decode capacity.
-        private PrefillQueueShedding.Estimate estimate;
         private PlacementResult<RequestRoute, PlacementKey> result;
         private PlacementResult<ImmediateRouteAdmission.Delivery, PlacementKey> immediateResult;
         private final long availabilitySequence;
         // Retained after selection pins close so the request can be parked.
         private PlacementKey waitKey;
+        private boolean knownColdRequest;
 
         private Plan(GlobalQueueEntry entry, long availabilitySequence) {
             this.entry = entry;

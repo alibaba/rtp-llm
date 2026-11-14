@@ -35,27 +35,15 @@ public final class MasterDiagnosticsServer {
     private final Semaphore captures = new Semaphore(1);
     private final EndpointRegistry registry;
     private final RequestRepository scheduler;
-    private final org.flexlb.balance.scheduler.SchedulerRuntime runtime;
 
     public MasterDiagnosticsServer(EndpointRegistry registry, RequestRepository scheduler) {
-        this(registry, scheduler, null);
-    }
-
-    @org.springframework.beans.factory.annotation.Autowired
-    public MasterDiagnosticsServer(EndpointRegistry registry, RequestRepository scheduler,
-                                   org.flexlb.balance.scheduler.SchedulerRuntime runtime) {
         this.registry = registry;
         this.scheduler = scheduler;
-        this.runtime = runtime;
     }
 
     @Bean
     public RouterFunction<ServerResponse> diagnosticRoutes() {
         return route().GET("/rtp_llm/debug/snapshot", this::snapshot)
-                .GET("/rtp_llm/debug/prefill_traffic", request -> ServerResponse.ok()
-                        .header("Cache-Control", "no-store").bodyValue(Map.of(
-                                "schema_version", 1, "captured_at_ms", System.currentTimeMillis(),
-                                "pools", runtime == null ? Map.of() : runtime.prefillTrafficSnapshot())))
                 .build();
     }
 

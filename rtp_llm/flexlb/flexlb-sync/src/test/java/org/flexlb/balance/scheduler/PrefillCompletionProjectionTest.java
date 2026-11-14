@@ -109,7 +109,7 @@ class PrefillCompletionProjectionTest {
                 var work = new WorkSnapshot(now, java.util.List.of(), java.util.List.of(), 0L);
                 requests.onDeliveryEvidence(claim, new RouteDelivered(claim,
                         PrefillPredictionBoundary.predictedVisibilityDeadlineMs(work, 30_000L,
-                                config.getRequestLifecycle().getDecision().getLifetime(), now), now));
+                                config.getInternalRuntime().getEngineVisibilityMultiplier(), now), now));
             }
             assertTrue(future.get(2L, TimeUnit.SECONDS).isSuccess());
             assertEquals(1L, prefill.ownership.admissionSummary(0, prefill.requestLimit).occupiedRequests());

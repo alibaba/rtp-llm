@@ -81,10 +81,7 @@ DEFAULT_FLEXLB_CONFIG = json.dumps(
                 },
             },
         },
-        "requestLifecycle": {
-            "request": {"timeoutMs": 300000},
-            "decision": {"lifetime": 2.0},
-        },
+        "dispatchTimeoutMs": 300000,
         "observability": {
             "cacheHit": {
                 "recentKeyWindow": {

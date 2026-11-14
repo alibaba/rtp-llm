@@ -9,13 +9,10 @@ import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.RouteTimelineProjector;
-import org.flexlb.balance.scheduler.PrefillDeadlineBudget;
-import org.flexlb.balance.scheduler.PrefillQueueShedding;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.PrefillQueueSheddingConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.SchedulingMetadata;
@@ -61,10 +58,7 @@ public class CostBasedPrefillStrategy {
     private final String deliveryMode;
     private final int maxInflightBatches;
     private final RoutingConfig.TokenBalanceConfig tokenBalance;
-    private final double minAcceptingWorkerPercent;
-    private final boolean deadlineBudgetEnabled;
     private final Object tokenSelectionLock = new Object();
-    private final PrefillQueuePressure queuePressure = new PrefillQueuePressure();
 
     public CostBasedPrefillStrategy(EndpointRegistry endpointRegistry,
                                     CacheAwareService cacheAwareService,
@@ -81,10 +75,6 @@ public class CostBasedPrefillStrategy {
         deliveryMode = config.getDispatcher().typeName();
         maxInflightBatches = config.getDispatcher().requiresGenerateInput() ? config.getDispatcher().getMaxInflightPerPrefillWorker() : 0;
         tokenBalance = config.getRouter().getRoles().getPrefill().getTokenBalance();
-        var shedding = config.isQueue() ? config.queueScheduler().getPrefillQueueShedding() : null;
-        deadlineBudgetEnabled = shedding != null && shedding.getDeadlineBudget() != null;
-        minAcceptingWorkerPercent = shedding == null
-                ? PrefillQueueSheddingConfig.DEFAULT_MIN_ACCEPTING_WORKER_PERCENT : shedding.getMinAcceptingWorkerPercent();
         var affinity = config.getRouter().getRoles().getPrefill().getCacheAffinity();
         cacheAffinity = affinity;
         cacheAffinityMinHitRate = affinity == null ? 0.0 : normalizedHitRate(affinity.getMinPrefixHitPercent());
@@ -116,40 +106,6 @@ public class CostBasedPrefillStrategy {
         return new TokenEstimate(request.getSeqLen(), hit);
     }
 
-    /** Advisory overload estimate includes busy workers, before admission-capacity filtering. */
-    public PrefillQueueShedding.Estimate estimateQueuedWork(
-            Request request, RoleType role, String group) {
-        var fleet = endpointRegistry.prefillRoutingSnapshot(role).stream()
-                .filter(entry -> group == null || group.equals(entry.endpoint().getStatus().topologySnapshot().group()))
-                .toList();
-        if (fleet.isEmpty()) { return null; }
-        var matches = cacheAwareService.findMatchingEngines(request.getBlockCacheKeys(), role,
-                fleet.stream().map(EndpointRegistry.PrefillRoutingEntry::address).toList());
-        long bestWork = Long.MAX_VALUE;
-        long bestHit = -1L;
-        for (var entry : fleet) {
-            var endpoint = entry.endpoint();
-            if (endpoint.predictor == null) { return null; }
-            long hit = calculateCacheMatch(endpoint, entry.address(), matches, request).effectiveHitTokens();
-            long work = PrefillPredictionBoundary.predictSingleRequestMs(
-                    endpoint.predictor.evaluator(), request.getSeqLen(), hit);
-            if (hit > bestHit || hit == bestHit && work < bestWork) {
-                bestHit = hit;
-                bestWork = work;
-            }
-        }
-        if (tokenBalance != null && !PrefillTokenBalance.cacheFirst(
-                bestHit, request.getSeqLen(), tokenBalance.getMinPrefixHitPercent())) {
-            bestHit = 0L;
-            bestWork = Long.MAX_VALUE;
-            for (var entry : fleet) {
-                bestWork = Math.min(bestWork, PrefillPredictionBoundary.predictSingleRequestMs(
-                        entry.endpoint().predictor.evaluator(), request.getSeqLen(), 0L));
-            }
-        }
-        return new PrefillQueueShedding.Estimate(
-                request.getSeqLen(), bestHit, bestWork, fleet.size());
-    }
 
     public PlacementResult<ServerStatus, RoleType> select(
             Request request,
@@ -465,35 +421,6 @@ public class CostBasedPrefillStrategy {
         return selectedIndex;
     }
 
-    public int currentPrefillWorkerCount(String group) {
-        return (int) endpointRegistry.prefillRoutingSnapshot(RoleType.PREFILL).stream()
-                .filter(entry -> group == null || group.equals(entry.endpoint().getStatus().topologySnapshot().group()))
-                .count();
-    }
-
-    /** Uses outstanding work once (Engine coverage is reconciled by the ownership ledger). */
-    public PrefillDeadlineBudget.Fleet deadlineBudgetFleet(RoleType role, String group) {
-        int workers = 0;
-        int saturated = 0;
-        double tokens = 0;
-        boolean known = tokenBalance != null;
-        for (var entry : endpointRegistry.prefillRoutingSnapshot(role)) {
-            var endpoint = entry.endpoint();
-            if (group != null && !group.equals(endpoint.getStatus().topologySnapshot().group())) { continue; }
-            workers++;
-            var work = endpoint.ownership.tokenWorkload();
-            tokens += (double) work.pendingTokens() + work.plannedTokens();
-            known &= endpoint.engineQueueAdmissionState() != org.flexlb.balance.endpoint.EngineQueueAdmission.State.UNKNOWN;
-            long observedAtUs = endpoint.getStatus().appliedObservation().observedAtUs();
-            known &= observedAtUs > 0L && System.nanoTime() / 1000L - observedAtUs <= 5_000_000L;
-            long waiting = endpoint.getStatus().committedWorkerStatus().fields().waitingQueryLen();
-            boolean nearlyFull = tokenBalance != null && tokenBalance.getEngineQueueAdmissionThreshold() != null
-                    && waiting >= Math.max(1.0, tokenBalance.getEngineQueueAdmissionThreshold() * 0.9);
-            if (nearlyFull || endpoint.engineQueueAdmissionBlocked() || !hasInflightCapacity(endpoint)
-                    || tokenBalance != null && work.pendingTokens() >= tokenBalance.getMaxPendingComputeTokens()) { saturated++; }
-        }
-        return new PrefillDeadlineBudget.Fleet(workers, saturated, tokens, known);
-    }
 
     private int migrationSourceCursor;
 
@@ -594,12 +521,8 @@ public class CostBasedPrefillStrategy {
         double minimum = Double.POSITIVE_INFINITY;
         for (int i = 0; i < candidates.size(); i++) {
             if (!PrefillTokenBalance.eligible(candidates.cacheHit(i), maxHit, cacheFirst)) { continue; }
-            if (!cacheFirst && candidates.endpoint(i).ownership.coldAdmissionBlocked()) { continue; }
             var work = candidates.endpoint(i).ownership.tokenWorkload();
             if (candidates.endpoint(i) == excluded || work.pendingTokens() + work.plannedTokens() > tokenBalance.getHotspotRescue().getMaxIdlePendingTokens()) { continue; }
-            if (tokenBalance.isEnforcePendingComputeLimit() && !PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())) { continue; }
-            if (!cacheFirst && !PrefillTokenBalance.withinColdWindow(work,
-                    Math.max(0L, seqLen - candidates.cacheHit(i)), candidates.endpoint(i).ownership.coldWindowComputeLimit())) { continue; }
             scores[i] = cacheFirst ? 0.0 : work.score() + Math.max(0L, seqLen);
             minimum = Math.min(minimum, scores[i]);
         }
@@ -619,14 +542,11 @@ public class CostBasedPrefillStrategy {
         double minimum = Double.POSITIVE_INFINITY;
         for (int i = 0; i < candidates.size(); i++) {
             if (!PrefillTokenBalance.eligible(candidates.cacheHit(i), maxHit, cacheFirst)) { continue; }
-            if (!cacheFirst && candidates.endpoint(i).ownership.coldAdmissionBlocked()) { continue; }
             var work = candidates.endpoint(i).ownership.tokenWorkload();
             // Preserve a busy cache leader by parking globally, where existing HIT_RATE shedding applies.
             if (candidates.endpoint(i).engineQueueAdmissionBlocked()
                     || !PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())
-                    && (tokenBalance.isEnforcePendingComputeLimit() || deadlineBudgetEnabled && !cacheFirst || !candidates.endpoint(i).engineQueueAllowsAdmission())) { continue; }
-            if (!cacheFirst && !PrefillTokenBalance.withinColdWindow(work,
-                    Math.max(0L, seqLen - candidates.cacheHit(i)), candidates.endpoint(i).ownership.coldWindowComputeLimit())) { continue; }
+                    && !candidates.endpoint(i).engineQueueAllowsAdmission()) { continue; }
             scores[i] = cacheFirst ? 0.0 : work.score() + Math.max(0L, seqLen);
             minimum = Math.min(minimum, scores[i]);
         }
@@ -641,100 +561,6 @@ public class CostBasedPrefillStrategy {
             if (candidates.endpoint(i).engineQueueAllowsAdmission()) { return true; }
         }
         return false;
-    }
-
-    /** Pool-wide shedding relief needs the same minimum fraction as the per-request cold veto. */
-    public boolean hasEngineQueueAdmission(RoleType role, String group) {
-        int workers = 0;
-        int accepting = 0;
-        for (var entry : endpointRegistry.prefillRoutingSnapshot(role)) {
-            if (group != null && !group.equals(entry.endpoint().getStatus().topologySnapshot().group())) { continue; }
-            workers++;
-            if (entry.endpoint().engineQueueAllowsAdmission() && hasInflightCapacity(entry.endpoint())) { accepting++; }
-        }
-        return enoughAcceptingWorkers(accepting, workers);
-    }
-
-    /** A hot request whose cache leader still accepts work must not be shed for other workers. */
-    public boolean hotRequestHasEngineQueueAdmission(Request request, RoleType role, String group) {
-        if (tokenBalance == null) { return false; }
-        var fleet = endpointRegistry.prefillRoutingSnapshot(role).stream()
-                .filter(entry -> group == null || group.equals(entry.endpoint().getStatus().topologySnapshot().group()))
-                .toList();
-        var matches = cacheAwareService.findMatchingEngines(request.getBlockCacheKeys(), role,
-                fleet.stream().map(EndpointRegistry.PrefillRoutingEntry::address).toList());
-        long maxHit = 0L;
-        long maxAcceptingHit = -1L;
-        for (var entry : fleet) {
-            long hit = calculateCacheMatch(entry.endpoint(), entry.address(), matches, request).effectiveHitTokens();
-            maxHit = Math.max(maxHit, hit);
-            if (entry.endpoint().engineQueueAllowsAdmission() && hasInflightCapacity(entry.endpoint())) { maxAcceptingHit = Math.max(maxAcceptingHit, hit); }
-        }
-        return PrefillTokenBalance.cacheFirst(maxHit, request.getSeqLen(), tokenBalance.getMinPrefixHitPercent())
-                && maxAcceptingHit == maxHit;
-    }
-
-    /** Global shedding pressure is independent of the per-worker dispatch watermark. */
-    public boolean isClusterOverloaded(RoleType role, String group) {
-        return isClusterOverloaded(role, group, System.nanoTime() / 1_000_000L);
-    }
-
-    boolean isClusterOverloaded(RoleType role, String group, long nowMs) {
-        int workers = 0;
-        int waiting = 0;
-        for (var entry : endpointRegistry.prefillRoutingSnapshot(role)) {
-            var endpoint = entry.endpoint();
-            if (group != null && !group.equals(endpoint.getStatus().topologySnapshot().group())) { continue; }
-            workers++;
-            var status = endpoint.getStatus().committedWorkerStatus();
-            if (status.cursor().statusVersion() >= 0L && status.fields().waitingQueryLen() > 10L) { waiting++; }
-        }
-        return queuePressure.observe(role, group, workers, waiting, nowMs);
-    }
-
-    private boolean enoughAcceptingWorkers(int accepting, int workers) {
-        return workers > 0 && accepting > 0 && accepting * 100.0 >= workers * minAcceptingWorkerPercent;
-    }
-
-    public enum ColdAdmission { AVAILABLE, INSUFFICIENT_CAPACITY, UNKNOWN }
-
-    /** Read-only veto for cold shedding. Use the routing admission filters, never a TTFT threshold.
-     * No cache affinity, route pin, soft token reservation or round-robin state is acquired here.
-     */
-    public ColdAdmission coldAdmission(Request request, SchedulingMetadata metadata, RoleType role, String group) {
-        if (tokenBalance == null) { return ColdAdmission.UNKNOWN; }
-        try {
-            var discovery = discoverAvailableEndpoints(request, metadata, role, group);
-            if (discovery.registeredCount() == 0) { return ColdAdmission.UNKNOWN; }
-            if (discovery.candidates().isEmpty()) { return ColdAdmission.INSUFFICIENT_CAPACITY; }
-            var blockers = new EnumMap<RoleType, Integer>(RoleType.class);
-            var candidates = new PrefillCandidateSet();
-            evaluateCandidates(discovery, request, metadata, Map.of(), new java.util.HashMap<>(), blockers,
-                    candidates, true);
-            // A different role or an indeterminate projection is not proof of Prefill overload.
-            if (candidates.size() == 0) { return ColdAdmission.UNKNOWN; }
-            int accepting = 0;
-            for (int i = 0; i < candidates.size(); i++) {
-                var endpoint = candidates.endpoint(i);
-                var work = endpoint.ownership.tokenWorkload();
-                if (!endpoint.ownership.coldAdmissionBlocked() && (PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())
-                        || !tokenBalance.isEnforcePendingComputeLimit() && !deadlineBudgetEnabled && endpoint.engineQueueAllowsAdmission())
-                        && PrefillTokenBalance.withinColdWindow(work, Math.max(0L, request.getSeqLen()), endpoint.ownership.coldWindowComputeLimit())) {
-                    accepting++;
-                    // Count the whole matching pool, including request-count and token-full workers.
-                    if (enoughAcceptingWorkers(accepting, discovery.registeredCount())) {
-                        return ColdAdmission.AVAILABLE;
-                    }
-                }
-            }
-            // Unresolved projections cannot prove that the accepting fraction is below the threshold.
-            if (candidates.size() < discovery.candidates().size()) { return ColdAdmission.UNKNOWN; }
-            return ColdAdmission.INSUFFICIENT_CAPACITY;
-        } catch (RuntimeException failure) {
-            // Missing/invalid telemetry must not become evidence authorizing early rejection.
-            Logger.debug("Cold Prefill admission check unavailable, request_id={}", request.getRequestId(), failure);
-            return ColdAdmission.UNKNOWN;
-        }
     }
 
     private static double normalizedHitRate(double configuredRate) {

@@ -66,6 +66,7 @@ class RequestEngineObservationTest {
     private static void verifyAtomicObservation(RoleType role) throws Exception {
         var fixture = RequestDeliveryClaimStateTest.fixture(DeliveryClaimKind.BATCH_ENQUEUE, false);
         var context = fixture.context();
+        assertInstanceOf(Granted.class, context.beginSend(fixture.delivery(), 1001L));
         context.recordDeliveryResult(new Prediction(fixture.delivery(), 3000L, 1002L));
         var before = context.snapshot();
         var visibility = before.deadlines().visibility();

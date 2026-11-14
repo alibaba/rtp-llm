@@ -215,14 +215,7 @@ DEFAULT_FLEXLB_CONFIG='{
       "requestTraceLogEnabled": false
     }
   },
-  "requestLifecycle": {
-    "request": {
-      "timeoutMs": 3600000
-    },
-    "decision": {
-      "lifetime": 2.0
-    }
-  }
+  "dispatchTimeoutMs": 3600000
 }'
 
 MOCK_PID=""

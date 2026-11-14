@@ -127,16 +127,6 @@ final class FlexlbConfigValidator {
         if (!config.isDirect()) {
             validateQueue(config.queueScheduler());
         }
-        if (config.isQueue() && config.queueScheduler().getPrefillQueueShedding() != null) {
-            if (config.queueScheduler().getPrefillQueueShedding().getDeadlineBudget() != null) {
-                require(config.getRouter().getRoles().getPrefill().getTokenBalance() != null,
-                        "scheduler.prefillQueueShedding.deadlineBudget", "requires tokenBalance work accounting");
-            }
-            require(config.getRouter().getRoles().getPrefill().getTokenBalance() != null
-                            || config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
-                            && config.decisionPolicy().getType() == DecisionPolicyConfig.Type.SINGLE,
-                    "scheduler.prefillQueueShedding", "requires tokenBalance backpressure or SINGLE decisions and NON_BATCH delivery");
-        }
         if (config.getScheduler().getOrdering() != null && config.getScheduler().getOrdering().isPrefillCostOrder()) {
             require(config.isQueue() && config.decisionPolicy().getType() == DecisionPolicyConfig.Type.SINGLE
                             && config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
@@ -144,14 +134,8 @@ final class FlexlbConfigValidator {
                     "scheduler.ordering.prefillCostOrder", "requires QUEUE, SINGLE, NON_BATCH and tokenBalance");
         }
         config.getDispatcher().validateFor(config.getScheduler());
-        validateRequestLifecycle(config.getRequestLifecycle());
+        requiredPositive(config.getDispatchTimeoutMs(), "dispatchTimeoutMs");
         validateRouting(config.getRouter());
-        var coldBalance = config.getRouter().getRoles().getPrefill().getTokenBalance();
-        if (coldBalance != null && coldBalance.getColdEngineQueueAdmissionThreshold() != null) {
-            require(config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH,
-                    "router.roles.prefill.tokenBalance.coldEngineQueueAdmissionThreshold", "requires NON_BATCH");
-        }
-
         validateWorkerRegistry(config.getWorkerRegistry());
         validateObservability(config.getObservability());
         FlexlbConfig.GrpcServerConfig grpc = config.getGrpcServer();
@@ -165,45 +149,6 @@ final class FlexlbConfigValidator {
     }
 
     private static void validateQueue(SchedulerConfig queue) {
-        positive(queue.getQueueTimeoutMs(), "scheduler.queueTimeoutMs");
-        var shedding = queue.getPrefillQueueShedding();
-        if (shedding != null) {
-            positive(shedding.getExpectedWaitThresholdMs(), "scheduler.prefillQueueShedding.expectedWaitThresholdMs");
-            require(shedding.getMaxWaitMs() >= shedding.getExpectedWaitThresholdMs(),
-                    "scheduler.prefillQueueShedding.maxWaitMs", "must be at least expectedWaitThresholdMs");
-            require(Double.isFinite(shedding.getMinAcceptingWorkerPercent())
-                            && shedding.getMinAcceptingWorkerPercent() > 0.0
-                            && shedding.getMinAcceptingWorkerPercent() <= 100.0,
-                    "scheduler.prefillQueueShedding.minAcceptingWorkerPercent", "must be finite and in (0, 100]");
-            var recovery = shedding.getRecovery();
-            var budget = shedding.getDeadlineBudget();
-            if (budget != null) {
-                String path = "scheduler.prefillQueueShedding.deadlineBudget.";
-                require(Double.isFinite(budget.getTokensPerSecond()) && budget.getTokensPerSecond() > 0,
-                        path + "tokensPerSecond", "must be finite and positive");
-                range(budget.getCapacityFactor(), 0.1, 1.0, path + "capacityFactor");
-                range(budget.getSaturatedWorkerPercent(), 50.0, 100.0, path + "saturatedWorkerPercent");
-                positive(budget.getSaturationHoldMs(), path + "saturationHoldMs");
-                positive(budget.getDispatchSlackMs(), path + "dispatchSlackMs");
-                require(budget.getDispatchSlackMs() < shedding.getMaxWaitMs(),
-                        path + "dispatchSlackMs", "must be less than maxWaitMs");
-            }
-            if (recovery != null) {
-                positive(recovery.getWindowMs(), "scheduler.prefillQueueShedding.recovery.windowMs");
-                require(recovery.getWindowMs() <= Long.MAX_VALUE / 4,
-                        "scheduler.prefillQueueShedding.recovery.windowMs", "is too large");
-                positive(recovery.getBurstProbeMs(), "scheduler.prefillQueueShedding.recovery.burstProbeMs");
-                require(recovery.getBurstProbeMs() <= shedding.getMaxWaitMs(),
-                        "scheduler.prefillQueueShedding.recovery.burstProbeMs", "must not exceed maxWaitMs");
-                positive(recovery.getMaxGraceMs(), "scheduler.prefillQueueShedding.recovery.maxGraceMs");
-                require(recovery.getMaxGraceMs() <= shedding.getMaxWaitMs(),
-                        "scheduler.prefillQueueShedding.recovery.maxGraceMs", "must not exceed maxWaitMs");
-                range(recovery.getWaitMultiplier(), 1.0, 10.0, "scheduler.prefillQueueShedding.recovery.waitMultiplier");
-                range(recovery.getMaxEvictionFraction(), 0.001, 1.0, "scheduler.prefillQueueShedding.recovery.maxEvictionFraction");
-                range(recovery.getMinArrivalDropFraction(), 0.001, 1.0, "scheduler.prefillQueueShedding.recovery.minArrivalDropFraction");
-                range(recovery.getMinQueueDrainFraction(), 0.001, 1.0, "scheduler.prefillQueueShedding.recovery.minQueueDrainFraction");
-            }
-        }
         require(Double.isFinite(queue.getScanBudgetMultiplier()) && queue.getScanBudgetMultiplier() >= 1.0,
                 "scheduler.scanBudgetMultiplier", "must be finite and at least 1.0");
         require(queue.getOrdering() != null, "scheduler.ordering", "is required for QUEUE");
@@ -274,10 +219,6 @@ final class FlexlbConfigValidator {
         var balance = prefill.getTokenBalance();
         if (balance != null) {
             positive(balance.getWindowMs(), "router.roles.prefill.tokenBalance.windowMs");
-            if (balance.getMaxColdWindowComputeTokens() != null) {
-                positive(balance.getMaxColdWindowComputeTokens(), "router.roles.prefill.tokenBalance.maxColdWindowComputeTokens");
-                require(balance.isEnableWindow(), "router.roles.prefill.tokenBalance.maxColdWindowComputeTokens", "requires enableWindow");
-            }
             range(balance.getMinPrefixHitPercent(), 0, RoutingConfig.PERCENTAGE_SCALE,
                     "router.roles.prefill.tokenBalance.minPrefixHitPercent");
             positive(balance.getMaxPendingComputeTokens(),
@@ -287,14 +228,6 @@ final class FlexlbConfigValidator {
             if (balance.getEngineQueueAdmissionThreshold() != null) {
                 nonNegative(balance.getEngineQueueAdmissionThreshold(),
                         "router.roles.prefill.tokenBalance.engineQueueAdmissionThreshold");
-            }
-            if (balance.getColdEngineQueueAdmissionThreshold() != null) {
-                String path = "router.roles.prefill.tokenBalance.coldEngineQueueAdmissionThreshold";
-                nonNegative(balance.getColdEngineQueueAdmissionThreshold(), path);
-                require(balance.isEnableWindow(), path, "requires enableWindow");
-                require(balance.getEngineQueueAdmissionThreshold() != null, path, "requires Engine queue admission");
-                require(balance.getColdEngineQueueAdmissionThreshold() <= balance.getEngineQueueAdmissionThreshold(),
-                        path, "must not exceed engineQueueAdmissionThreshold");
             }
             var rescue = balance.getHotspotRescue();
             if (rescue != null) {
@@ -357,16 +290,6 @@ final class FlexlbConfigValidator {
         }
     }
 
-    private static void validateRequestLifecycle(RequestLifecycleConfig lifecycle) {
-        require(lifecycle != null, "requestLifecycle", "is required");
-        require(lifecycle.getRequest() != null, "requestLifecycle.request", "is required");
-        requiredPositive(lifecycle.getRequest().getTimeoutMs(), "requestLifecycle.request.timeoutMs");
-        require(lifecycle.getDecision() != null, "requestLifecycle.decision", "is required");
-        Double lifetime = lifecycle.getDecision().getLifetime();
-        require(lifetime != null, "requestLifecycle.decision.lifetime", "is required");
-        require(Double.isFinite(lifetime) && lifetime >= 1.0,
-                "requestLifecycle.decision.lifetime", "must be finite and at least 1");
-    }
 
     private static void requiredPositive(Long value, String field) {
         require(value != null, field, "is required");

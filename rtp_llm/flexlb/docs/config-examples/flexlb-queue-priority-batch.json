@@ -2,7 +2,6 @@
   "schemaVersion": 3,
   "scheduler": {
     "type": "QUEUE",
-    "queueTimeoutMs": 3600000,
     "ordering": {
       "type": "PRIORITY",
       "defaultPriority": 50,
@@ -72,12 +71,5 @@
       "requestTraceLogEnabled": false
     }
   },
-  "requestLifecycle": {
-    "request": {
-      "timeoutMs": 3600000
-    },
-    "decision": {
-      "lifetime": 2.0
-    }
-  }
+  "dispatchTimeoutMs": 3600000
 }

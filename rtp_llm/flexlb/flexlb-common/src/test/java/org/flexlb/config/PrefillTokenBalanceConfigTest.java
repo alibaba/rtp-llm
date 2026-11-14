@@ -1,6 +1,7 @@
 package org.flexlb.config;
 
 import org.junit.jupiter.api.Test;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 class PrefillTokenBalanceConfigTest {
@@ -58,10 +59,4 @@ class PrefillTokenBalanceConfigTest {
         }
     }
 
-    @Test void batchSheddingRequiresTokenBackpressure() {
-        assertNotNull(ConfigTestFixtures.parse("""
-                {"scheduler":{"type":"QUEUE","decision":{"type":"FIXED_WINDOW"},"prefillQueueShedding":{}},
-                 "dispatcher":{"type":"BATCH"},"router":{"roles":{"prefill":{"tokenBalance":{}}}}}
-                """));
-    }
 }

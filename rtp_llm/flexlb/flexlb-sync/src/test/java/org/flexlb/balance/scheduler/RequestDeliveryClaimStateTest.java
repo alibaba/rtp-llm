@@ -91,7 +91,7 @@ class RequestDeliveryClaimStateTest {
         var expired = context.recordDeadline(deadline, 100_000L, null);
         assertEquals(UpdateKind.APPLIED, expired.kind());
         assertNull(expired.after().deadlines().request());
-        assertNull(expired.after().cancellation(), "handoff owns scheduling cancellation race");
+        assertEquals(CancelReason.DEADLINE_EXCEEDED, expired.after().cancellation().reason());
         assertInstanceOf(Rejected.class, context.beginSend(fixture.delivery(), 100_001L));
         assertEquals(SendState.NOT_STARTED, context.snapshot().delivery().send());
         context.recordDeliveryResult(new TransportResult(fixture.delivery(),

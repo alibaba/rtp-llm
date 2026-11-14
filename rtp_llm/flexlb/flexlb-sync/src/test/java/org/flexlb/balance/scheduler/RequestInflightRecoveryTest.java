@@ -293,7 +293,7 @@ class RequestInflightRecoveryTest {
                 claim = RequestProtocolTestSupport.claimBatchWithoutPrediction(owner, route, BATCH_ID, () -> true);
                 assertNotNull(claim);
                 assertTrue(owner.tryStartSend(claim));
-                owner.onDeliveryEvidence(claim, new ContextResult.Prediction(claim, org.flexlb.balance.prediction.PrefillPredictionBoundary.predictedVisibilityDeadlineMs(new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L), 30_000L, claim.owner().data().getConfig().getRequestLifecycle().getDecision().getLifetime(), System.currentTimeMillis()), System.currentTimeMillis()));
+                owner.onDeliveryEvidence(claim, new ContextResult.Prediction(claim, org.flexlb.balance.prediction.PrefillPredictionBoundary.predictedVisibilityDeadlineMs(new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L), 30_000L, claim.owner().data().getConfig().getInternalRuntime().getEngineVisibilityMultiplier(), System.currentTimeMillis()), System.currentTimeMillis()));
                 owner.onDeliveryEvidence(claim, new ContextResult.TransportResult(claim, result, System.currentTimeMillis()));
             }
         }

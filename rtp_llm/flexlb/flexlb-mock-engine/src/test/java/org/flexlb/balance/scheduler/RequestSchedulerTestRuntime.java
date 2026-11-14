@@ -211,22 +211,6 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         @Override CostBasedPrefillStrategy.TokenEstimate estimateQueuedTokens(RequestContext context, String group) {
             return requireBound().estimateQueuedTokens(context, group);
         }
-        @Override PrefillQueueShedding.Estimate estimateQueuedWork(RequestContext context, String group) {
-            return requireBound().estimateQueuedWork(context, group);
-        }
-        @Override PrefillDeadlineBudget.Fleet deadlineBudgetFleet(String group) {
-            return requireBound().deadlineBudgetFleet(group);
-        }
-        @Override boolean isPrefillClusterOverloaded(String group) { return requireBound().isPrefillClusterOverloaded(group); }
-        @Override boolean hasEngineQueueAdmission(String group) { return requireBound().hasEngineQueueAdmission(group); }
-        @Override boolean hotPrefillQueueAllowsAdmission(RequestContext context, String group) {
-            return requireBound().hotPrefillQueueAllowsAdmission(context, group);
-        }
-        @Override CostBasedPrefillStrategy.ColdAdmission coldPrefillAdmission(RequestContext context, String group) {
-            return requireBound().coldPrefillAdmission(context, group);
-        }
-        @Override public int currentPrefillWorkerCount(String group) { return requireBound().currentPrefillWorkerCount(group); }
-
         private synchronized RequestWorkerSelector requireBound() {
             if (delegate == null) {
                 throw new IllegalStateException("test router is not bound");

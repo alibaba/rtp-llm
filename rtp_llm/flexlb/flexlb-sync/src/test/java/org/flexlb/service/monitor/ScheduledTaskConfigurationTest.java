@@ -29,7 +29,7 @@ class ScheduledTaskConfigurationTest {
     void existingWorkerCleanupUsesTheFourThreadSchedulerWithOrWithoutLegacyMetricBean(
             boolean legacyMetricBean) throws Exception {
         var config = ConfigService.parse("""
-                {"requestLifecycle":{"request":{"timeoutMs":60000}},
+                {"dispatchTimeoutMs": 60000,
                  "workerRegistry":{"health":{"cleanupIntervalMs":1250}}}
                 """);
         var service = mock(ConfigService.class);

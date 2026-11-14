@@ -414,6 +414,8 @@ class DeliverySettlementTest {
         }
         var response = member.item().future().get(5, TimeUnit.SECONDS);
         assertTrue(response.isSuccess());
+        // ACK completion and the final sender/worker cleanup are independent continuations.
+        RequestProtocolTestSupport.awaitCondition(() -> !registry.requests.isCurrent(member.requestContext()));
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(0, decode.routingView().inflightHardKv());

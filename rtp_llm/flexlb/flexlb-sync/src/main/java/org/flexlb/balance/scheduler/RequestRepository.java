@@ -35,7 +35,7 @@ public final class RequestRepository {
                     if (data.getScheduler() != null || context.snapshot().key() != null) {
                         return RegistrationResult.CONTEXT_BOUND;
                     }
-                    long timeout = data.getConfig().getRequestLifecycle().getRequest().getTimeoutMs();
+                    long timeout = data.getConfig().getInternalRuntime().getRequestInactivityTimeoutMs();
                     if (timeout <= 0L) { throw new IllegalArgumentException("positive request inactivity timeout required"); }
                     if (!data.getConfig().getDispatcher().requiresGenerateInput()) { data.discardGenerateInput(); }
                     data.register(scheduler, response);

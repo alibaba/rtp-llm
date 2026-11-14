@@ -48,12 +48,7 @@ public class RequestWorkerSelector {
                         modelMetaConfig, "modelMetaConfig").requiredRoles());
     }
 
-    public int currentPrefillWorkerCount(String group) { return prefillSelector.currentPrefillWorkerCount(group); }
 
-    PrefillDeadlineBudget.Fleet deadlineBudgetFleet(String group) {
-        return requiredRoles.stream().filter(RoleType::supportsPrefill).findFirst()
-                .map(role -> prefillSelector.deadlineBudgetFleet(role, group)).orElse(null);
-    }
 
     public List<RequestRoute> hotspotMigrationCandidates(int limit) {
         return prefillSelector.hotspotMigrationCandidates(limit);
@@ -119,35 +114,9 @@ public class RequestWorkerSelector {
         }
     }
 
-    boolean hotPrefillQueueAllowsAdmission(RequestContext context, String policyGroup) {
-        var request = context.data().getRequest();
-        var vit = request.getSelectedVit();
-        String group = vit == null ? policyGroup : vit.getGroup();
-        return requiredRoles.stream().filter(RoleType::supportsPrefill)
-                .anyMatch(role -> prefillSelector.hotRequestHasEngineQueueAdmission(request, role, group));
-    }
 
-    boolean isPrefillClusterOverloaded(String group) {
-        return requiredRoles.stream().filter(RoleType::supportsPrefill)
-                .anyMatch(role -> prefillSelector.isClusterOverloaded(role, group));
-    }
 
-    boolean hasEngineQueueAdmission(String group) {
-        return requiredRoles.stream().filter(RoleType::supportsPrefill)
-                .anyMatch(role -> prefillSelector.hasEngineQueueAdmission(role, group));
-    }
 
-    CostBasedPrefillStrategy.ColdAdmission coldPrefillAdmission(RequestContext context, String policyGroup) {
-        var request = context.data().getRequest();
-        var vit = request.getSelectedVit();
-        String group = vit == null ? policyGroup : vit.getGroup();
-        for (RoleType role : requiredRoles) {
-            if (role.supportsPrefill()) {
-                return prefillSelector.coldAdmission(request, context.data().getSchedulingMetadata(), role, group);
-            }
-        }
-        return CostBasedPrefillStrategy.ColdAdmission.UNKNOWN;
-    }
 
     CostBasedPrefillStrategy.TokenEstimate estimateQueuedTokens(RequestContext context, String policyGroup) {
         var selectedVit = context.data().getRequest().getSelectedVit();
@@ -160,17 +129,6 @@ public class RequestWorkerSelector {
         return null;
     }
 
-    PrefillQueueShedding.Estimate estimateQueuedWork(RequestContext context, String policyGroup) {
-        // A pinned VIT selection further restricts the eligible Prefill pool.
-        var selectedVit = context.data().getRequest().getSelectedVit();
-        String group = selectedVit == null ? policyGroup : selectedVit.getGroup();
-        for (RoleType role : requiredRoles) {
-            if (role.supportsPrefill()) {
-                return prefillSelector.estimateQueuedWork(context.data().getRequest(), role, group);
-            }
-        }
-        return null;
-    }
 
     public Response routeVit(RequestContext context) {
         if (context == null || context.data().getRequest() == null) {

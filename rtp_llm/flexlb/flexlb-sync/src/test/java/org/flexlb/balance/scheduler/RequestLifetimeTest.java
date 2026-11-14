@@ -156,6 +156,7 @@ class RequestLifetimeTest {
     @Test
     void inactivityWatchSurvivesRouteResponseAndDecodeAcceptance() {
         Fixture fixture = fixture(true);
+        startDelivery(fixture.requestContext);
         var exact = fixture.requestContext.snapshot().deadlines().inactivity();
             assertTrue(matches(fixture.requestContext, exact));
             startDelivery(fixture.requestContext);
@@ -206,6 +207,7 @@ class RequestLifetimeTest {
     @Test
     void pdfusionEvidenceEndsMissingRequestDetectionButKeepsInactivityWatch() {
         Fixture fixture = fixture(false);
+        startDelivery(fixture.requestContext);
         var full = fixture.requestContext.snapshot().deadlines().inactivity();
         matches(fixture.requestContext, full);
         startDelivery(fixture.requestContext);
@@ -261,6 +263,7 @@ class RequestLifetimeTest {
     @Test
     void uncertainDeliveryKeepsTheInactivityDeadlineAndDoesNotCancelTheRequest() {
         Fixture fixture = fixture(true);
+        startDelivery(fixture.requestContext);
         var deadline = fixture.requestContext.snapshot().deadlines().inactivity();
             startDelivery(fixture.requestContext);
             startPrediction(fixture.scheduler, fixture.requestContext);
@@ -277,6 +280,7 @@ class RequestLifetimeTest {
     @Test
     void cancellationFirstCauseCannotSuppressTheInactivityWatch() {
         Fixture fixture = fixture(true);
+        startDelivery(fixture.requestContext);
         var deadline = fixture.requestContext.snapshot().deadlines().inactivity();
             startDelivery(fixture.requestContext);
             assertTrue(matches(fixture.requestContext, deadline));
@@ -387,6 +391,7 @@ class RequestLifetimeTest {
     @Test
     void timerChecksInactivityAfterThePublicFutureHasCompleted() throws Exception {
         Fixture fixture = fixture(true);
+        startDelivery(fixture.requestContext);
         AbstractRequestScheduler registry = fixture.scheduler;
         doAnswer(invocation -> {
             var token = invocation.getArgument(0, ExpirationTimer.Token.class);
@@ -411,6 +416,7 @@ class RequestLifetimeTest {
     @Test
     void timerCloseWaitsForAnAlreadyStartedInactivityHandoff() throws Exception {
         Fixture fixture = fixture(true);
+        startDelivery(fixture.requestContext);
         AbstractRequestScheduler registry = fixture.scheduler;
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
@@ -444,6 +450,7 @@ class RequestLifetimeTest {
     @Test
     void renewedActivityRearmsTheTimerUntilTheNewInactivityDeadline() throws Exception {
         Fixture fixture = fixture(true);
+        startDelivery(fixture.requestContext);
         AbstractRequestScheduler registry = fixture.scheduler;
         long start = fixture.requestContext.snapshot().createdAtMs();
         AtomicLong now = new AtomicLong(start + 100L);
@@ -545,6 +552,7 @@ class RequestLifetimeTest {
         var claim = (DeliveryClaim) ((Granted<?>) context.beginDelivery(context.snapshot().route(),
                 DeliveryClaimKind.BATCH_ENQUEUE, 1L, now)).value();
         context.commitDelivery(claim, true, now);
+        assertTrue(context.beginSend(claim, now) instanceof Granted<?>);
     }
 
     private static void acknowledge(RequestContext context) {
@@ -623,8 +631,8 @@ class RequestLifetimeTest {
 
     private static Fixture fixture(boolean separateDecode, double lifetime) {
         FlexlbConfig config = SchedulingTestConfig.newConfig();
-        config.getRequestLifecycle().getDecision().setLifetime(lifetime);
-        config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
+        config.getInternalRuntime().setEngineVisibilityMultiplier(lifetime);
+        config.getInternalRuntime().setRequestInactivityTimeoutMs(60_000L);
         SchedulingTestConfig.useNonBatchDispatcher(config);
         RequestContext context = RequestProtocolTestSupport.context(config, 101L);
         AbstractRequestScheduler owner = mock(AbstractRequestScheduler.class);
@@ -653,7 +661,7 @@ class RequestLifetimeTest {
     private static void predictDelivery(RequestContext context, WorkSnapshot work, long predictedMs, long nowMs) {
         startDelivery(context);
         long at = PrefillPredictionBoundary.predictedVisibilityDeadlineMs(work, predictedMs,
-                context.data().getConfig().getRequestLifecycle().getDecision().getLifetime(), nowMs);
+                context.data().getConfig().getInternalRuntime().getEngineVisibilityMultiplier(), nowMs);
         context.recordDeliveryResult(new Prediction(context.snapshot().delivery().identity(), at, nowMs));
     }
 

@@ -266,7 +266,7 @@ class RequestCompletionPublicationRaceTest {
     void inactivityWinsWhileAcknowledgementReportingAndTerminalCleanupAreBothPaused() throws Exception {
         var config = spy(SchedulingTestConfig.batchConfig());
         long timeoutMs = TimeUnit.HOURS.toMillis(1L);
-        config.getRequestLifecycle().getRequest().setTimeoutMs(timeoutMs);
+        config.getInternalRuntime().setRequestInactivityTimeoutMs(timeoutMs);
         var runtime = spy(config.getInternalRuntime());
         when(runtime.getBatchDispatchCompletionThreads()).thenReturn(1);
         when(config.getInternalRuntime()).thenReturn(runtime);
@@ -372,6 +372,40 @@ class RequestCompletionPublicationRaceTest {
                 registry.closeOutstandingAndTerminalize();
                 SchedulerTestSupport.timer(org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)).close();
                 SchedulerTestSupport.closeRequestExecutors(org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
+            }
+        }
+    }
+
+    @Test
+    @Timeout(15)
+    void routeAckQueuedBehindAnotherCallbackRechecksTheDispatchDeadline() throws Exception {
+        try (var completions = new ResponseCompletionExecutor(1)) {
+            Fixture fixture = fixture(completions, true, DeliveryClaimKind.ROUTE_DECISION);
+            var entered = new CountDownLatch(1);
+            var resume = new CountDownLatch(1);
+            completions.tryRegister().submit(() -> { entered.countDown(); await(resume); return true; });
+            try {
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                // The candidate was timely when created. Only the actual completion clock may authorize delivery.
+                var candidate = new ContextResult.ResponseCandidate(fixture.requestContext(),
+                        ContextResult.ResponseKind.ACK, null, 1L);
+                org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.scheduler(), "publishSelected",
+                        fixture.publication(), candidate, RequestFuture.Completion.RESPONSE,
+                        fixture.response(), null, false);
+                assertTrue(fixture.requestContext().isAwaitingDispatch());
+                assertFalse(fixture.requestContext().data().getFuture().isDone());
+                org.springframework.test.util.ReflectionTestUtils.setField(fixture.requestContext(),
+                        "absoluteDeadline", System.currentTimeMillis() - 1L);
+                resume.countDown();
+                var response = fixture.requestContext().data().getFuture().get(2, TimeUnit.SECONDS);
+                assertFalse(response.isSuccess());
+                assertEquals(CancelReason.DEADLINE_EXCEEDED, fixture.requestContext().snapshot().cancellation().reason());
+                SchedulerTestSupport.awaitRequestWork(fixture.scheduler().runtime);
+                assertEquals(0, fixture.scheduler().requests.liveRequestCount());
+            } finally {
+                resume.countDown();
+                SchedulerTestSupport.timer(fixture.scheduler().runtime).close();
+                SchedulerTestSupport.closeRequestExecutors(fixture.scheduler().runtime);
             }
         }
     }
@@ -616,6 +650,10 @@ class RequestCompletionPublicationRaceTest {
     private static Fixture fixture(ResponseCompletionExecutor responseExecutor) { return fixture(responseExecutor, true); }
 
     private static Fixture fixture(ResponseCompletionExecutor responseExecutor, boolean delivered) {
+        return fixture(responseExecutor, delivered, DeliveryClaimKind.BATCH_ENQUEUE);
+    }
+
+    private static Fixture fixture(ResponseCompletionExecutor responseExecutor, boolean delivered, DeliveryClaimKind kind) {
         var config = SchedulingTestConfig.batchConfig();
         RequestContext context = RequestProtocolTestSupport.context(config, 701L);
         AbstractRequestScheduler owner = RequestProtocolTestSupport.initialize(responseExecutor, context, mock(ExpirationTimer.class));
@@ -626,10 +664,14 @@ class RequestCompletionPublicationRaceTest {
         assertEquals(org.flexlb.balance.PlacementResult.Status.SUCCESS,
                 owner.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)));
         admission.finish();
-        var claim = owner.claimDelivery(item, DeliveryClaimKind.BATCH_ENQUEUE, 801L, null);
+        var claim = owner.claimDelivery(item, kind, kind == DeliveryClaimKind.BATCH_ENQUEUE ? 801L : 0L, null);
         assertNotNull(claim);
-        assertTrue(owner.tryStartSend(claim));
-        if (delivered) { context.recordDeliveryResult(new ContextResult.TransportResult(claim, DeliveryResult.delivered(), System.currentTimeMillis())); }
+        if (kind == DeliveryClaimKind.BATCH_ENQUEUE) { assertTrue(owner.tryStartSend(claim)); }
+        if (delivered) {
+            context.recordDeliveryResult(kind == DeliveryClaimKind.BATCH_ENQUEUE
+                    ? new ContextResult.TransportResult(claim, DeliveryResult.delivered(), System.currentTimeMillis())
+                    : new ContextResult.RouteDelivered(claim, 0L, System.currentTimeMillis()));
+        }
         var publication = new ResponsePublication(owner.runtime, context, true);
         if (delivered) { assertTrue(context.selectResponse(new ContextResult.ResponseCandidate(context, ContextResult.ResponseKind.CONFIRMATION,
                 null, System.currentTimeMillis())) instanceof ContextResult.Granted<?>); }

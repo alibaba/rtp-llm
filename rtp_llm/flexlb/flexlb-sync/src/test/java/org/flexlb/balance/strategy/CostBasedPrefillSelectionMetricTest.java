@@ -52,41 +52,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CostBasedPrefillSelectionMetricTest {
-    @Test
-    void coldWorkCannotEnterAQueuedWarmWorkerWhileHotWorkStillCan() {
-        registry.close();
-        var balance = new RoutingConfig.TokenBalanceConfig();
-        balance.setEngineQueueAdmissionThreshold(30L);
-        balance.setColdEngineQueueAdmissionThreshold(0L);
-        balance.setEnableWindow(true);
-        config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
-        config.getDispatcher().setMaxInflightPerPrefillWorker(256);
-        registry = StrategyTestSupport.endpointRegistry(SchedulingTestConfig.configService(config));
-        publish("10.0.0.1", 8080);
-        strategy = new CostBasedPrefillStrategy(registry, cache, reporter, cacheReporter, SchedulingTestConfig.configService(config));
-        var worker = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
-        var work = (PrefillTokenWorkload) org.springframework.test.util.ReflectionTestUtils.getField(worker.ownership, "tokenWorkload");
-        work.complete(1L, true);
-        updateEngineQueue(worker, 1L, 1L);
-        var cold = StrategyTestSupport.select(strategy, context.data().getRequest(), context.data().getSchedulingMetadata(), RoleType.PREFILL, null);
-        try {
-            assertEquals(PlacementResult.Status.BLOCKED, cold.status(), "cold work must wait outside an already queued warm Engine");
-        } finally { if (cold.value() != null) { cold.value().close(); } }
-        assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission(null));
-        context.data().setRequest(context.data().getRequest().toBuilder().cacheKeyBlockSize(100L).blockCacheKeys(List.of(1L)).build());
-        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(worker.ipPort(), 9));
-        try (var hot = select()) { assertEquals(worker, hot.prefillEp()); }
-        var update = updateEngineQueue(worker, 0L, 1L);
-        assertTrue(update.reconciliation().capacityReleased(), "waiting 1 -> 0 wakes parked cold work before the ordinary 30-request gate changes");
-        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
-        try (var resumed = select()) { assertEquals(worker, resumed.prefillEp()); }
-        updateEngineQueue(worker, 31L, 1L);
-        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(worker.ipPort(), 9));
-        assertEquals(PlacementResult.Status.BLOCKED, StrategyTestSupport.select(strategy,
-                context.data().getRequest(), context.data().getSchedulingMetadata(), RoleType.PREFILL, null).status(),
-                "ordinary waiting > 30 still blocks hot work immediately");
-    }
-
     private static final int FULL_FLEET_SIZE = 750;
 
     private FlexlbConfig config;
@@ -129,45 +94,6 @@ class CostBasedPrefillSelectionMetricTest {
     @AfterEach
     void tearDown() {
         registry.close();
-    }
-
-    @Test
-    void explicitComputeAdmissionPreservesCacheLeaderAndColdWindowPlans() {
-        registry.close();
-        var balance = new RoutingConfig.TokenBalanceConfig();
-        balance.setEnforcePendingComputeLimit(true);
-        balance.setMaxPendingComputeTokens(1000L);
-        balance.setEnableWindow(true);
-        balance.setMaxColdWindowComputeTokens(1500L);
-        config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
-        registry = StrategyTestSupport.endpointRegistry(SchedulingTestConfig.configService(config));
-        publish("10.0.0.1", 8080);
-        var worker = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
-        updateEngineQueue(worker, 0, 0);
-        strategy = new CostBasedPrefillStrategy(registry, cache, reporter, cacheReporter,
-                SchedulingTestConfig.configService(config));
-        var set = new PrefillCandidateSet(); set.reset(1);
-        set.addCandidate(worker.ipPort(), worker, new RouteProjection.Candidate(RouteProjection.Candidate.State.MODELED,
-                1, 1, RouteProjection.Candidate.InitialHeadDisposition.NONE, "", null, 900, 900), 0);
-        var route = mock(RequestRoute.class);
-        when(route.requestId()).thenReturn(123450L); when(route.seqLen()).thenReturn(1000L);
-        var lease = worker.ownership.reserveUnqueuedRoute(route, 1, 0).reservation();
-        assertNotNull(lease);
-        assertEquals(-1, strategy.selectBestCandidate(set, 1, RoleType.PREFILL, null, 1000),
-                "low Engine waiting cannot override the explicit pending-work cap, even for a hot leader");
-        worker.ownership.release(lease, null);
-        assertEquals(0, strategy.selectBestCandidate(set, 1, RoleType.PREFILL, null, 1000));
-        var work = (PrefillTokenWorkload) org.springframework.test.util.ReflectionTestUtils.getField(worker.ownership, "tokenWorkload");
-        work.complete(0, true);
-        try (var first = select()) {
-            assertEquals(worker, first.prefillEp());
-            var second = StrategyTestSupport.select(strategy, context.data().getRequest(), context.data().getSchedulingMetadata(), RoleType.PREFILL, null);
-            assertEquals(PlacementResult.Status.BLOCKED, second.status(), "soft plans must consume the advisory cold window before admission");
-            assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission(null));
-        }
-        assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission(null));
-        try (var recovered = select()) { assertEquals(worker, recovered.prefillEp()); }
-        assertEquals(0L, worker.ownership.tokenWorkload().plannedTokens());
     }
 
     @Test
@@ -612,8 +538,6 @@ class CostBasedPrefillSelectionMetricTest {
                 assertEquals(a, selected.prefillEp(), "low queue may bypass tokens only on a cache-eligible worker");
                 assertEquals(900L, selected.hitCache());
             }
-            assertTrue(strategy.hasEngineQueueAdmission(RoleType.PREFILL, null));
-            assertTrue(!strategy.hasEngineQueueAdmission(RoleType.PREFILL, "other"), "another pool cannot grant relief");
         } finally { a.ownership.release(lease, null); }
     }
 
@@ -649,9 +573,9 @@ class CostBasedPrefillSelectionMetricTest {
         try (var load = a.ownership.planTokenWork(1L); var selected = select()) {
             assertEquals(cold ? b : a, selected.prefillEp());
             assertEquals(cold ? 0L : 1000L, selected.hitCache());
-            var estimate = strategy.estimateQueuedWork(context.data().getRequest(), RoleType.PREFILL, null);
+            var estimate = strategy.estimateQueuedTokens(context.data().getRequest(), RoleType.PREFILL, null);
             assertEquals(cold ? 0L : 1000L, estimate.hitTokens());
-            assertEquals(cold ? input : input - 1000L, estimate.workMs());
+            assertEquals(cold ? input : input - 1000L, estimate.computeTokens());
             var endpoint = selected.prefillEp();
             var lease = endpoint.ownership.reserveUnqueuedRoute(selected, 1L, 0L).reservation();
             assertTrue(lease != null);
@@ -686,81 +610,6 @@ class CostBasedPrefillSelectionMetricTest {
         } finally { a.ownership.release(lease, null); }
     }
 
-    @Test
-    void coldAdmissionUsesCurrentCapacityWithoutCacheAffinityOrReservations() {
-        configureEngineQueueAdmission(false);
-        config.getRouter().getRoles().getPrefill().getTokenBalance().setEngineQueueAdmissionThreshold(null);
-        publish("10.0.0.2", 8080);
-        var a = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
-        var b = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
-        var leases = new java.util.ArrayList<org.flexlb.balance.endpoint.PrefillState.RouteReservation>();
-        try {
-            for (var endpoint : List.of(a, b)) {
-                updateEngineQueue(endpoint, 1, 0);
-                assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission(null));
-                var busy = mock(RequestRoute.class);
-                when(busy.requestId()).thenReturn(endpoint == a ? 21001L : 21002L);
-                when(busy.seqLen()).thenReturn(2_100_000L);
-                leases.add(endpoint.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation());
-            }
-            assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission(null));
-            b.ownership.release(leases.removeLast(), null);
-            assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission(null));
-            assertEquals(0L, b.ownership.tokenWorkload().pendingTokens());
-            assertEquals(0L, b.ownership.tokenWorkload().plannedTokens());
-            try (var selected = select()) { assertEquals(b, selected.prefillEp()); }
-        } finally {
-            a.ownership.release(leases.getFirst(), null);
-        }
-    }
-
-    @Test
-    void idleWorkerInAnotherGroupCannotAuthorizeTheRequest() {
-        configureEngineQueueAdmission();
-        var a = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
-        updateEngineQueue(a, 0, 0);
-        var status = StrategyTestSupport.workerStatus(RoleType.PREFILL, "other", "10.0.0.2", 8080, 8081,
-                true, 1_000_000L, 1_000_000L);
-        StrategyTestSupport.publishEndpoint(registry, RoleType.PREFILL, "10.0.0.2:8080", status);
-        var busy = mock(RequestRoute.class);
-        when(busy.requestId()).thenReturn(22001L); when(busy.seqLen()).thenReturn(2_100_000L);
-        var b = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
-        var lease = b.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation();
-        updateEngineQueue(b, 1, 0);
-        try {
-            assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission(null));
-            assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission("other"));
-            assertEquals(CostBasedPrefillStrategy.ColdAdmission.UNKNOWN, coldAdmission("missing"));
-        } finally { b.ownership.release(lease, null); }
-    }
-
-    @Test
-    void coldAdmissionRetainsInflightCapWhileBypassingTokenWaterline() {
-        configureEngineQueueAdmission();
-        var a = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
-        updateEngineQueue(a, 0, 0);
-        var leases = new java.util.ArrayList<org.flexlb.balance.endpoint.PrefillState.RouteReservation>();
-        var tasks = new java.util.HashMap<String, org.flexlb.dao.master.TaskInfo>();
-        try {
-            for (int i = 0; i < 10; i++) {
-                var busy = mock(RequestRoute.class);
-                when(busy.requestId()).thenReturn(23000L + i); when(busy.seqLen()).thenReturn(i == 0 ? 2_100_000L : 1L);
-                var lease = a.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation();
-                assertTrue(lease != null);
-                leases.add(lease);
-                tasks.put(Long.toString(23000L + i), runningTask(23000L + i, i == 0 ? 2_100_000L : 1L));
-                updateEngineQueue(a, 0, tasks.size(), tasks);
-            }
-            assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission(null));
-            a.ownership.release(leases.removeLast(), null);
-            tasks.remove("23009");
-            updateEngineQueue(a, 0, tasks.size(), tasks);
-            assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission(null), "Engine queue override admits full token backlog");
-            updateEngineQueue(a, 1, 0);
-            assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission(null));
-        } finally { for (var lease : leases) { a.ownership.release(lease, null); } }
-    }
-
     @ParameterizedTest
     @CsvSource({
             "100, 9, 10, false", "100, 10, 10, true", "100, 11, 10, true",
@@ -770,98 +619,6 @@ class CostBasedPrefillSelectionMetricTest {
             "20, 1, 7.5, false", "20, 2, 7.5, true",
             "2, 1, 100, false", "2, 2, 100, true"
     })
-    void coldSheddingVetoRequiresConfiguredFractionOfWholePool(
-            int workers, int accepting, double percent, boolean available) {
-        var policy = new org.flexlb.config.PrefillQueueSheddingConfig();
-        policy.setMinAcceptingWorkerPercent(percent);
-        config.queueScheduler().setPrefillQueueShedding(policy);
-        configureEngineQueueAdmission(false);
-        var leases = new java.util.LinkedHashMap<PrefillEndpoint, org.flexlb.balance.endpoint.PrefillState.RouteReservation>();
-        try {
-            for (int i = 1; i <= workers; i++) {
-                if (i > 1) { publish("10.0.0." + i, 8080); }
-                var endpoint = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0." + i + ":8080");
-                updateEngineQueue(endpoint, 1, 0);
-                if (i > accepting) {
-                    var busy = mock(RequestRoute.class);
-                    when(busy.requestId()).thenReturn(30000L + i);
-                    when(busy.seqLen()).thenReturn(2_100_000L);
-                    leases.put(endpoint, endpoint.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation());
-                }
-            }
-            assertEquals(available ? CostBasedPrefillStrategy.ColdAdmission.AVAILABLE
-                    : CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission(null));
-            for (var entry : registry.prefillRoutingSnapshot(RoleType.PREFILL)) {
-                assertEquals(leases.containsKey(entry.endpoint()) ? 2_100_000L : 0L,
-                        entry.endpoint().ownership.tokenWorkload().pendingTokens());
-                assertEquals(0L, entry.endpoint().ownership.tokenWorkload().plannedTokens());
-            }
-            Mockito.verifyNoInteractions(cache);
-        } finally { leases.forEach((endpoint, lease) -> endpoint.ownership.release(lease, null)); }
-    }
-
-    @Test
-    void requestCountBlockedWorkersRemainInPercentageDenominator() {
-        configureEngineQueueAdmission(false);
-        var leases = new java.util.LinkedHashMap<PrefillEndpoint, java.util.List<org.flexlb.balance.endpoint.PrefillState.RouteReservation>>();
-        try {
-            for (int i = 2; i <= 11; i++) {
-                publish("10.0.0." + i, 8080);
-                var endpoint = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0." + i + ":8080");
-                var owned = new java.util.ArrayList<org.flexlb.balance.endpoint.PrefillState.RouteReservation>();
-                leases.put(endpoint, owned);
-                for (int j = 0; j < 10; j++) {
-                    var busy = mock(RequestRoute.class);
-                    when(busy.requestId()).thenReturn(40000L + i * 10 + j);
-                    when(busy.seqLen()).thenReturn(1L);
-                    owned.add(endpoint.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation());
-                }
-            }
-            // One accepting worker out of eleven is below the default 10%, despite spare tokens.
-            assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission(null));
-            var freed = leases.entrySet().iterator().next();
-            freed.getKey().ownership.release(freed.getValue().removeLast(), null);
-            assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission(null));
-        } finally { leases.forEach((endpoint, owned) -> owned.forEach(lease -> endpoint.ownership.release(lease, null))); }
-    }
-
-    @Test
-    void percentageDenominatorExcludesWorkersOutsideTheRequestGroup() {
-        configureEngineQueueAdmission();
-        for (int i = 2; i <= 21; i++) { publish("10.0.0." + i, 8080); }
-        var status = StrategyTestSupport.workerStatus(RoleType.PREFILL, "isolated", "10.0.1.1", 8080, 8081,
-                true, 1_000_000L, 1_000_000L);
-        StrategyTestSupport.publishEndpoint(registry, RoleType.PREFILL, "10.0.1.1:8080", status);
-        // The sole accepting worker in this request's pool is 100%, not 1/22.
-        assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission("isolated"));
-        assertEquals(CostBasedPrefillStrategy.ColdAdmission.UNKNOWN, coldAdmission("missing"));
-    }
-
-    @ParameterizedTest
-    @CsvSource({"10, 2", "50, 6", "100, 11"})
-    void engineQueueReliefCannotBypassTheConfiguredWorkerFraction(double percent, int required) {
-        var policy = new org.flexlb.config.PrefillQueueSheddingConfig();
-        policy.setMinAcceptingWorkerPercent(percent);
-        config.queueScheduler().setPrefillQueueShedding(policy);
-        configureEngineQueueAdmission();
-        for (int i = 1; i <= 11; i++) {
-            if (i > 1) { publish("10.0.0." + i, 8080); }
-            updateEngineQueue((PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0." + i + ":8080"), 1, 0);
-        }
-        for (int i = 1; i <= required; i++) {
-            assertEquals(false, strategy.hasEngineQueueAdmission(RoleType.PREFILL, null));
-            updateEngineQueue((PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0." + i + ":8080"), 0, 0);
-        }
-        assertTrue(strategy.hasEngineQueueAdmission(RoleType.PREFILL, null));
-        assertEquals(false, strategy.hasEngineQueueAdmission(RoleType.PREFILL, "missing"));
-        // Group isolation applies to the early Engine-queue relief check as well.
-        var status = StrategyTestSupport.workerStatus(RoleType.PREFILL, "isolated", "10.0.1.1", 8080, 8081,
-                true, 1_000_000L, 1_000_000L);
-        StrategyTestSupport.publishEndpoint(registry, RoleType.PREFILL, "10.0.1.1:8080", status);
-        updateEngineQueue((PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.1.1:8080"), 0, 0);
-        assertTrue(strategy.hasEngineQueueAdmission(RoleType.PREFILL, "isolated"));
-    }
-
     @Test
     void engineQueueCannotBypassReportedStreamsAtTheInflightLimit() {
         configureEngineQueueAdmission();
@@ -871,9 +628,6 @@ class CostBasedPrefillSelectionMetricTest {
         when(busy.requestId()).thenReturn(20000L);
         when(busy.seqLen()).thenReturn(2_100_000L);
         assertNull(worker.ownership.reserveUnqueuedRoute(busy, 1, 10).reservation());
-        assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission(null));
-        assertTrue(!strategy.hasEngineQueueAdmission(RoleType.PREFILL, null));
-        assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null), "inflight capacity is not proof of sustained queue congestion");
         updateEngineQueue(worker, 0, 9);
         var lease = worker.ownership.reserveUnqueuedRoute(busy, 1, 10).reservation();
         assertNotNull(lease);
@@ -891,7 +645,6 @@ class CostBasedPrefillSelectionMetricTest {
             updateEngineQueue(worker, 0, 2);
         }
         updateEngineQueue(workers.get(0), 100, 0);
-        assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null));
         var used = new java.util.HashSet<PrefillEndpoint>();
         for (int i = 0; i < 60; i++) {
             try (var route = select()) {
@@ -900,80 +653,9 @@ class CostBasedPrefillSelectionMetricTest {
             }
         }
         assertEquals(3, used.size());
-        updateEngineQueue(workers.get(1), 100, 0);
-        assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null), "half the pool is not a majority");
-        updateEngineQueue(workers.get(2), 100, 0);
-        for (long ms = 0; ms < 10_000; ms += 100) {
-            assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null, ms));
-        }
-        assertTrue(strategy.isClusterOverloaded(RoleType.PREFILL, null, 10_000));
-        var request = context.data().getRequest().toBuilder().seqLen(1000L)
-                .blockCacheKeys(List.of(1L,2L,3L,4L,5L,6L,7L,8L,9L)).cacheKeyBlockSize(100L).build();
-        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(workers.get(3).ipPort(), 9));
-        assertTrue(strategy.hotRequestHasEngineQueueAdmission(request, RoleType.PREFILL, null));
-        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(workers.get(0).ipPort(), 9));
-        assertTrue(!strategy.hotRequestHasEngineQueueAdmission(request, RoleType.PREFILL, null));
-        assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, "missing"));
-        updateEngineQueue(workers.get(2), 0, 100);
-        assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null));
-        updateEngineQueue(workers.get(2), -1, 0);
-        assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null), "unknown telemetry is not congestion");
+
     }
 
-    @Test
-    void globalPressureCountsWaitingBelowTheDispatchWatermarkAndRotatingMajorities() {
-        var balance = new RoutingConfig.TokenBalanceConfig();
-        balance.setEngineQueueAdmissionThreshold(30L);
-        config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
-        registry.close();
-        registry = StrategyTestSupport.endpointRegistry(SchedulingTestConfig.configService(config));
-        var workers = new java.util.ArrayList<PrefillEndpoint>();
-        for (int i = 1; i <= 3; i++) {
-            publish("10.0.0." + i, 8080);
-            workers.add((PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0." + i + ":8080"));
-        }
-        strategy = new CostBasedPrefillStrategy(registry, cache, reporter, cacheReporter,
-                SchedulingTestConfig.configService(config));
-        for (var worker : workers) { updateEngineQueue(worker, 10, 0); }
-        for (long ms = 0; ms <= 10_000; ms += 100) {
-            assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null, ms));
-        }
-        for (long ms = 10_000; ms <= 20_000; ms += 100) {
-            int idle = (int) (ms / 100) % 3;
-            for (int i = 0; i < 3; i++) {
-                updateEngineQueue(workers.get(i), i == idle ? 10 : 11, 0);
-                assertTrue(workers.get(i).engineQueueAllowsAdmission());
-                assertTrue(!workers.get(i).engineQueueCongested());
-            }
-            assertEquals(ms >= 20_000, strategy.isClusterOverloaded(RoleType.PREFILL, null, ms));
-        }
-        updateEngineQueue(workers.get(0), 10, 0);
-        updateEngineQueue(workers.get(1), 10, 0);
-        assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null, 20_001));
-        updateEngineQueue(workers.get(0), 11, 0);
-        updateEngineQueue(workers.get(1), 11, 0);
-        assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null, 20_002));
-        assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null, 30_001));
-        assertTrue(strategy.isClusterOverloaded(RoleType.PREFILL, null, 30_002));
-        // Unknown telemetry contributes to the fleet size, but never to the waiting majority.
-        updateEngineQueue(workers.get(0), -1, 0);
-        updateEngineQueue(workers.get(1), -1, 0);
-        assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null, 30_003));
-        // Dispatch can oscillate at 30/31 without resetting the global pressure window.
-        for (long ms = 40_000; ms <= 50_000; ms += 100) {
-            long waiting = ms / 100 % 2 == 0 ? 30 : 31;
-            for (var worker : workers) {
-                updateEngineQueue(worker, waiting, 0);
-                assertEquals(waiting > 30, worker.engineQueueDispatchBlocked());
-                assertEquals(waiting <= 30, worker.engineQueueAllowsAdmission());
-            }
-            assertEquals(ms >= 50_000, strategy.isClusterOverloaded(RoleType.PREFILL, null, ms));
-        }
-    }
-
-    private CostBasedPrefillStrategy.ColdAdmission coldAdmission(String group) {
-        return strategy.coldAdmission(context.data().getRequest(), context.data().getSchedulingMetadata(), RoleType.PREFILL, group);
-    }
 
     private void configureEngineQueueAdmission() { configureEngineQueueAdmission(true); }
 

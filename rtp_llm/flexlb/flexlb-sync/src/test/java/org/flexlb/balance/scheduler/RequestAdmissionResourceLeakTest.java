@@ -194,7 +194,8 @@ class RequestAdmissionResourceLeakTest {
             var publication = RequestProtocolTestSupport.publication(() -> {
                 org.junit.jupiter.api.Assertions.assertFalse(Thread.holdsLock(context));
                 if (inactivityExpired) {
-                    RequestProtocolTestSupport.expireInactiveRequest(lifecycle, context, Long.MAX_VALUE);
+                    lifecycle.onDeadline(context.snapshot().deadlines().request(), Long.MAX_VALUE);
+                    SchedulerTestSupport.awaitRequestWork(lifecycle.runtime);
                 } else {
                     lifecycle.cancel(71L, 0L, reason);
                 }

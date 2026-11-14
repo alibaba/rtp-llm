@@ -470,14 +470,14 @@ final class RequestProtocolTestSupport {
     static void prediction(AbstractRequestScheduler scheduler, DeliveryClaim claim, WorkSnapshot work, long predictedMs) {
         long now = System.currentTimeMillis();
         long deadline = org.flexlb.balance.prediction.PrefillPredictionBoundary.predictedVisibilityDeadlineMs(
-                work, predictedMs, claim.owner().data().getConfig().getRequestLifecycle().getDecision().getLifetime(), now);
+                work, predictedMs, claim.owner().data().getConfig().getInternalRuntime().getEngineVisibilityMultiplier(), now);
         scheduler.onDeliveryEvidence(claim, new Prediction(claim, deadline, now));
     }
 
     static void routeDelivered(AbstractRequestScheduler scheduler, DeliveryClaim claim, WorkSnapshot work, long predictedMs) {
         long now = System.currentTimeMillis();
         long deadline = org.flexlb.balance.prediction.PrefillPredictionBoundary.predictedVisibilityDeadlineMs(
-                work, predictedMs, claim.owner().data().getConfig().getRequestLifecycle().getDecision().getLifetime(), now);
+                work, predictedMs, claim.owner().data().getConfig().getInternalRuntime().getEngineVisibilityMultiplier(), now);
         scheduler.onDeliveryEvidence(claim, new RouteDelivered(claim, deadline, now));
     }
 

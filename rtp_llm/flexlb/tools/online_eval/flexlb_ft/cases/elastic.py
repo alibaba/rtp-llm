@@ -629,7 +629,7 @@ def _pending_drain_spec(ctx: CaseContext) -> EnvSpec:
     differs from every other spec (elastic_spec=4, quota_spec=1), so the
     INITIAL-engine victim (prefill-0, permanently removed — a removed
     initial engine never comes back on its port/name) never poisons a
-    shared env: this spec owns a private one.  queueTimeoutMs is
+    shared env: this spec owns a private one.  dispatchTimeoutMs is
     intentionally left at the Java default (1h) — see
     PENDING_DRAIN_TERMINAL_S."""
     return EnvSpec(
@@ -639,7 +639,9 @@ def _pending_drain_spec(ctx: CaseContext) -> EnvSpec:
         perf=fault_env_perf(),
         master_profile=ctx.profile,
         discovery="discovery_file",
-        master_env={"FLEXLB_CONFIG": fault_env_config(max_inflight_per_prefill_worker=2)},
+        master_env={
+            "FLEXLB_CONFIG": fault_env_config(max_inflight_per_prefill_worker=2)
+        },
     )
 
 

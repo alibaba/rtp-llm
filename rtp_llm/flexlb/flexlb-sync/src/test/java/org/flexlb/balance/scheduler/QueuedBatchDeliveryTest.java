@@ -76,7 +76,7 @@ class QueuedBatchDeliveryTest {
         org.mockito.Mockito.doReturn(1).when(sizing).getBatchDispatchThreads();
         org.mockito.Mockito.doReturn(1).when(sizing).getBatchDispatchQueueCapacity();
         org.mockito.Mockito.doReturn(sizing).when(config).getInternalRuntime();
-        config.getRequestLifecycle().getRequest().setTimeoutMs(TIMEOUT_MS);
+        config.getInternalRuntime().setRequestInactivityTimeoutMs(TIMEOUT_MS);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
@@ -138,7 +138,7 @@ class QueuedBatchDeliveryTest {
 
     @ParameterizedTest
     @CsvSource({"CANCEL, false", "CANCEL, true", "TIMER, false", "TIMER, true",
-            "LATE_DEADLINE, false", "LATE_DEADLINE, true", "LATE_INACTIVITY, false", "LATE_INACTIVITY, true"})
+            "LATE_DEADLINE, false", "LATE_DEADLINE, true"})
     void invalidQueuedMembersNeverCrossHandoffAndReleaseExactResources(String expiry, boolean all)
             throws Exception {
         RequestRoute first = item(1L);
@@ -151,10 +151,9 @@ class QueuedBatchDeliveryTest {
             RequestContext requestContext = registry.requests.findActive(item.requestId());
             switch (expiry) {
                 case "CANCEL" -> registry.cancel(item.requestId(), 0L, CancelReason.CLIENT_CANCELLED);
-                case "TIMER" -> RequestProtocolTestSupport.expireInactiveRequest(registry, requestContext, requestContext.snapshot().createdAtMs() + TIMEOUT_MS);
+                case "TIMER" -> registry.onDeadline(requestContext.snapshot().deadlines().request(),
+                        requestContext.snapshot().deadlines().request().atMs());
                 case "LATE_DEADLINE" -> expireSchedulingFact(requestContext);
-                case "LATE_INACTIVITY" -> ReflectionTestUtils.setField(requestContext, "lastWorkerAtMs",
-                        System.currentTimeMillis() - TIMEOUT_MS - 1L);
                 default -> throw new AssertionError(expiry);
             }
         }
@@ -357,8 +356,6 @@ class QueuedBatchDeliveryTest {
                 case "CLIENT_CANCELLED" -> registry.cancel(item.requestId(), 0L, CancelReason.CLIENT_CANCELLED);
                 case "SHUTDOWN" -> registry.cancel(item.requestId(), 0L, CancelReason.SHUTDOWN);
                 case "DEADLINE" -> expireSchedulingFact(context);
-                case "INACTIVITY" -> ReflectionTestUtils.setField(context, "lastWorkerAtMs",
-                        System.currentTimeMillis() - TIMEOUT_MS - 1L);
                 default -> throw new AssertionError(cause);
             }
         }
@@ -403,7 +400,7 @@ class QueuedBatchDeliveryTest {
     }
 
     static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> invalidMemberSubsets() {
-        return java.util.stream.Stream.of("CLIENT_CANCELLED", "SHUTDOWN", "DEADLINE", "INACTIVITY").flatMap(cause ->
+        return java.util.stream.Stream.of("CLIENT_CANCELLED", "SHUTDOWN", "DEADLINE").flatMap(cause ->
                 java.util.stream.IntStream.range(0, 8).mapToObj(mask -> org.junit.jupiter.params.provider.Arguments.of(cause, mask)));
     }
 

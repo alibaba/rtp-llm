@@ -217,12 +217,7 @@ public final class SchedulingTestConfig {
     }
 
     public static void configureRequiredValues(FlexlbConfig config) {
-        if (config.getRequestLifecycle().getRequest().getTimeoutMs() == null) {
-            config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
-        }
-        if (config.getRequestLifecycle().getDecision().getLifetime() == null) {
-            config.getRequestLifecycle().getDecision().setLifetime(2.0);
-        }
+
     }
 
     private static SchedulerConfig activeQueueOrNew(FlexlbConfig config) {

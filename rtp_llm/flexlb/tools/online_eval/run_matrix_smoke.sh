@@ -211,17 +211,17 @@ set_group_config() {
   case "$1" in
     batch)
       SCHEDULING_PROFILE="queue-priority-batch"
-      FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550}},"dispatcher":{"type":"BATCH","maxInflightPerPrefillWorker":4},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA"}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132}}}},"requestLifecycle":{"request":{"timeoutMs":300000},"decision":{"lifetime":2.0}}}'
+      FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550}},"dispatcher":{"type":"BATCH","maxInflightPerPrefillWorker":4},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA"}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132}}}},"dispatchTimeoutMs": 300000}'
       TEST_RID_BASES=(10000 20000 30000)
       ;;
     direct)
       SCHEDULING_PROFILE="direct-non-batch"
-      FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"DIRECT"},"dispatcher":{"type":"NON_BATCH","maxInflightPerPrefillWorker":2},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA"}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132}}}},"requestLifecycle":{"request":{"timeoutMs":300000},"decision":{"lifetime":2.0}}}'
+      FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"DIRECT"},"dispatcher":{"type":"NON_BATCH","maxInflightPerPrefillWorker":2},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA"}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132}}}},"dispatchTimeoutMs": 300000}'
       TEST_RID_BASES=(40000 50000 60000)
       ;;
     queue)
       SCHEDULING_PROFILE="queue-fifo-non-batch"
-      FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"},"decision":{"type":"SINGLE"}},"dispatcher":{"type":"NON_BATCH","maxInflightPerPrefillWorker":2},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA"}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132}}}},"requestLifecycle":{"request":{"timeoutMs":300000},"decision":{"lifetime":2.0}}}'
+      FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"},"decision":{"type":"SINGLE"}},"dispatcher":{"type":"NON_BATCH","maxInflightPerPrefillWorker":2},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA"}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132}}}},"dispatchTimeoutMs": 300000}'
       TEST_RID_BASES=(70000 80000 90000)
       ;;
     *)

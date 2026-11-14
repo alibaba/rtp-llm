@@ -121,33 +121,34 @@ class GlobalQueueProgressTest {
         });
     }
 
-    @Test
-    void cacheSheddingRemovesLowBenefitOnlyAndDoesNotCrossPools() throws Exception {
-        var policy = new org.flexlb.config.PrefillQueueSheddingConfig();
-        policy.setExpectedWaitThresholdMs(1_000L);
-        policy.setMaxWaitMs(3_000L);
-        try (Fixture f = new Fixture(RoleType.PREFILL, false, policy)) {
-            when(f.router.isPrefillClusterOverloaded("a")).thenReturn(true);
-            when(f.router.coldPrefillAdmission(any(), nullable(String.class)))
-                    .thenReturn(org.flexlb.balance.strategy.CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY);
-            when(f.router.estimateQueuedWork(any(), nullable(String.class))).thenAnswer(call -> {
-                RequestContext ctx = call.getArgument(0);
-                return new PrefillQueueShedding.Estimate(100, ctx.data().getRequestId() == 1201L ? 0 : 90, 600, 1);
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void slowBlockedRequestEstimateDoesNotStopHealthyPoolPlanning(boolean costOrder) throws Exception {
+        var estimating = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var healthySelected = new CountDownLatch(1);
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            ReflectionTestUtils.setField(f.scheduler, "prefillCostOrder", costOrder);
+            var blockedEstimates = new AtomicInteger();
+            when(f.router.estimateQueuedTokens(any(), nullable(String.class))).thenAnswer(call -> {
+                RequestContext context = call.getArgument(0);
+                if (context.data().getRequestId() == 1901L
+                        && blockedEstimates.incrementAndGet() > (costOrder ? 1 : 0)) {
+                    estimating.countDown();
+                    await(release);
+                }
+                return new org.flexlb.balance.strategy.CostBasedPrefillStrategy.TokenEstimate(1000L, 0L);
             });
-            doReturn(PlacementResult.blocked(new PlacementKey(RoleType.PREFILL, "a", null)))
-                    .when(f.router).select(any(), nullable(String.class));
-            f.submit(1201L, "a");
-            f.submit(1202L, "a");
-            org.junit.jupiter.api.Assertions.assertThrows(java.util.concurrent.TimeoutException.class,
-                    () -> f.requests.get(1201L).get(600, TimeUnit.MILLISECONDS));
-            f.submit(1203L, "b"); // Fresh pool must not inherit another pool's overdue pressure.
-            var response = ArgumentCaptor.forClass(Response.class);
-            verify(f.lifecycle, timeout(5_000)).publish(eq(f.contexts.get(1201L)), response.capture(), eq(false));
-            assertEquals(org.flexlb.dao.loadbalance.StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getValue().getCode());
-            verify(f.lifecycle, never()).publish(eq(f.contexts.get(1202L)), any(), eq(false));
-            verify(f.lifecycle, never()).publish(eq(f.contexts.get(1203L)), any(), eq(false));
-            verify(f.eviction, never()).tryReclaim(any(), any());
-        }
+            f.onSelection = id -> { if (id == 1902L) { healthySelected.countDown(); } };
+            try {
+                f.submit(1901L, "a");
+                assertTrue(estimating.await(2, TimeUnit.SECONDS));
+                f.submit(1902L, "b");
+                assertTrue(healthySelected.await(2, TimeUnit.SECONDS),
+                        "a blocked pool's cache estimate must not stop planning for a healthy pool");
+            } finally { release.countDown(); }
+            awaitCondition(() -> f.admitted.contains(1902L));
+        } finally { release.countDown(); }
     }
 
     @Test
@@ -267,7 +268,7 @@ class GlobalQueueProgressTest {
     @Test
     void nonTerminalControlFactRestoresTheExactGlobalQueueEntry() throws Exception {
         // Configure the spy before the decision thread can enter another mocked method.
-        try (Fixture f = new Fixture(RoleType.PREFILL, false, null, true)) {
+        try (Fixture f = new Fixture(RoleType.PREFILL, false, true)) {
             f.submit(991L, "a");
             awaitCondition(() -> f.selected.contains(991L));
             QueuedRequestScheduler queue = (QueuedRequestScheduler)
@@ -814,16 +815,10 @@ class GlobalQueueProgressTest {
         }
 
         private Fixture(RoleType role, boolean preempt) {
-            this(role, preempt, null);
+            this(role, preempt, false);
         }
 
-        private Fixture(RoleType role, boolean preempt, org.flexlb.config.PrefillQueueSheddingConfig shedding) {
-            this(role, preempt, shedding, false);
-        }
-
-        private Fixture(RoleType role, boolean preempt, org.flexlb.config.PrefillQueueSheddingConfig shedding,
-                boolean realRegistration) {
-            config.queueScheduler().setPrefillQueueShedding(shedding);
+        private Fixture(RoleType role, boolean preempt, boolean realRegistration) {
             this.role = role;
             SchedulingTestConfig.useFifoQueue(config);
             if (preempt) {

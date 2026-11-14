@@ -11,28 +11,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PrefillTokenWorkloadTest {
-    @Test void coldWindowBudgetIncludesCompletedAndPlannedWorkAndRecoversAfterExpiry() {
-        var now = new java.util.concurrent.atomic.AtomicLong(1000);
-        var work = new PrefillTokenWorkload(10_000, now::get);
-        assertFalse(work.hasRecentCacheHit());
-        work.complete(80, true);
-        assertTrue(work.hasRecentCacheHit());
-        assertTrue(PrefillTokenBalance.withinColdWindow(work.snapshot(), 20, 100L));
-        try (var plan = work.plan(1)) {
-            assertFalse(PrefillTokenBalance.withinColdWindow(work.snapshot(), 20, 100L));
-        }
-        assertTrue(PrefillTokenBalance.withinColdWindow(work.snapshot(), 20, 100L));
-        assertFalse(PrefillTokenBalance.withinColdWindow(work.snapshot(), 101, 100L));
-        assertTrue(PrefillTokenBalance.withinColdWindow(work.snapshot(), 1000, null));
-        now.set(11_000);
-        assertFalse(work.hasRecentCacheHit());
-        assertTrue(PrefillTokenBalance.withinColdWindow(work.snapshot(), 101, 100L), "oversized cold work must eventually start when idle");
-        work.accept(101);
-        assertFalse(PrefillTokenBalance.withinColdWindow(work.snapshot(), 1, 100L));
-        work.release(101);
-        assertTrue(PrefillTokenBalance.withinColdWindow(work.snapshot(), 100, 100L));
-    }
-
     @Test void disabledWindowNeverReadsClockOrRetainsCompletions() {
         var work = new PrefillTokenWorkload(0, () -> { throw new AssertionError("window disabled"); });
         work.accept(100);

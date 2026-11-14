@@ -29,7 +29,7 @@ class RequestReconciliationFailureOwnershipTest {
     @ValueSource(booleans = {false, true})
     void transientDecodeReconciliationFailureRetainsFactsAndMatchingEvidenceCanRetry(boolean matchingDecodeTerminal) throws Exception {
         var config = SchedulingTestConfig.newConfig();
-        config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
+        config.getInternalRuntime().setRequestInactivityTimeoutMs(60_000L);
         var context = RequestProtocolTestSupport.context(config, 9721L);
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);

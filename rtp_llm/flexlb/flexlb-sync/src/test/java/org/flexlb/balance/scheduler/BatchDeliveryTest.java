@@ -484,7 +484,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
     }
 
     long duration(long atMs, long nowMs) {
-        return Math.round((atMs - nowMs - 10_000L) / config.getRequestLifecycle().getDecision().getLifetime());
+        return Math.round((atMs - nowMs - 10_000L) / config.getInternalRuntime().getEngineVisibilityMultiplier());
     }
 
     DecodeEndpoint realDecode() {

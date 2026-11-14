@@ -37,7 +37,7 @@ class RejectedDeliveryWithdrawalRaceTest {
     @Test
     void rejectedCommittedBatchTerminalizesOwnerBeforeCapacityListenerCanClaimWithdrawal() throws Exception {
         var config = SchedulingTestConfig.batchConfig();
-        config.getRequestLifecycle().getRequest().setTimeoutMs(TimeUnit.HOURS.toMillis(1));
+        config.getInternalRuntime().setRequestInactivityTimeoutMs(TimeUnit.HOURS.toMillis(1));
         var service = SchedulingTestConfig.configService(config);
         var reporter = mock(DeliveryMetricsReporter.class);
         var owner = SchedulerTestSupport.create(service, reporter, mock(RequestSchedulerReporter.class),

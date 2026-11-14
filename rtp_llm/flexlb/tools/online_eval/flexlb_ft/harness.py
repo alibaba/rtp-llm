@@ -1006,7 +1006,9 @@ def _build_preemption_cfg(preemption: dict) -> dict:
         raise ValueError(f"unsupported preemption settings: {sorted(unknown_fields)}")
     stages = list(preemption.get("allowed_victim_stages") or [])
     if not stages or any(stage not in VICTIM_STAGES for stage in stages):
-        raise ValueError(f"allowed_victim_stages must be a non-empty subset of {VICTIM_STAGES}")
+        raise ValueError(
+            f"allowed_victim_stages must be a non-empty subset of {VICTIM_STAGES}"
+        )
     return {"allowedVictimStages": stages}
 
 
@@ -1062,28 +1064,29 @@ def build_flexlb_config(
     max_requests: int = 32,
     max_collection_wait_ms: int = 10,
     max_predicted_execution_ms: int = 550,
-    queue_timeout_ms: Optional[int] = None,
     # Explicit functional-test workload values; these are not Java defaults.
     max_inflight_per_prefill_worker: int = 2,
-    request_timeout_ms: int = 60_000,
-    decision_lifetime: float = 2.0,
+    dispatch_timeout_ms: int = 60_000,
     status_rpc_ms: int = 1_000,
 ) -> str:
     """Generate schema-v3 JSON from scheduling policy and workload budgets."""
-    if decision not in ("single", "fixed_window") or dispatcher not in ("batch", "non_batch"):
+    if decision not in ("single", "fixed_window") or dispatcher not in (
+        "batch",
+        "non_batch",
+    ):
         raise ValueError("unsupported decision or dispatcher")
-    for name, value in (("max_inflight_per_prefill_worker", max_inflight_per_prefill_worker),
-                        ("queue_timeout_ms", queue_timeout_ms),
-                        ("request_timeout_ms", request_timeout_ms)):
-        if value is None and name == "queue_timeout_ms":
-            continue
+    for name, value in (
+        ("max_inflight_per_prefill_worker", max_inflight_per_prefill_worker),
+        ("dispatch_timeout_ms", dispatch_timeout_ms),
+    ):
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{name} must be a positive integer")
     import math
+
     if max_inflight_per_prefill_worker > 2_147_483_647:
-        raise ValueError("max_inflight_per_prefill_worker exceeds the Java integer limit")
-    if isinstance(decision_lifetime, bool) or not math.isfinite(decision_lifetime) or decision_lifetime < 1:
-        raise ValueError("decision_lifetime must be finite and at least 1")
+        raise ValueError(
+            "max_inflight_per_prefill_worker exceeds the Java integer limit"
+        )
     decision_cfg: dict = {"type": "SINGLE"}
     if decision == "fixed_window":
         decision_cfg = {
@@ -1101,29 +1104,37 @@ def build_flexlb_config(
         "ordering": _build_ordering_cfg(ordering, default_priority, preemption),
         "decision": decision_cfg,
     }
-    if queue_timeout_ms is not None:
-        scheduler_cfg["queueTimeoutMs"] = queue_timeout_ms
-    return json.dumps({
-        "schemaVersion": 3,
-        "scheduler": scheduler_cfg,
-        "dispatcher": dispatcher_cfg,
-        "requestLifecycle": {
-            "request": {"timeoutMs": request_timeout_ms},
-            "decision": {"lifetime": decision_lifetime},
-        },
-        "router": {"roles": {
-            "prefill": {
-                "executionTimeEstimator": {"type": "FORMULA", "expression": DSV4_PREFILL_EXPRESSION},
-                "cacheAffinity": {"maxExtraTtftMs": 20, "minPrefixHitPercent": 20},
+    return json.dumps(
+        {
+            "schemaVersion": 3,
+            "scheduler": scheduler_cfg,
+            "dispatcher": dispatcher_cfg,
+            "dispatchTimeoutMs": dispatch_timeout_ms,
+            "router": {
+                "roles": {
+                    "prefill": {
+                        "executionTimeEstimator": {
+                            "type": "FORMULA",
+                            "expression": DSV4_PREFILL_EXPRESSION,
+                        },
+                        "cacheAffinity": {
+                            "maxExtraTtftMs": 20,
+                            "minPrefixHitPercent": 20,
+                        },
+                    },
+                    "decode": {"availability": {"maxEngineRequests": 132}},
+                }
             },
-            "decode": {"availability": {"maxEngineRequests": 132}},
-        }},
-        "workerRegistry": {"health": {
-            "statusPollIntervalMs": 20,
-            "statusRpcTimeoutMs": status_rpc_ms,
-            "statusStaleAfterMs": max(10_000, status_rpc_ms * 2),
-        }},
-    }, separators=(",", ":"))
+            "workerRegistry": {
+                "health": {
+                    "statusPollIntervalMs": 20,
+                    "statusRpcTimeoutMs": status_rpc_ms,
+                    "statusStaleAfterMs": max(10_000, status_rpc_ms * 2),
+                }
+            },
+        },
+        separators=(",", ":"),
+    )
 
 
 def flexlb_config_for_profile(profile: str, **overrides) -> str:
@@ -1137,7 +1148,7 @@ def flexlb_config_for_profile(profile: str, **overrides) -> str:
         # Queue deadline for functional profiles: tight enough that the
         # queue-timeout gate cases can observe expiry without waiting for
         # the Java default (1h).
-        "queue_timeout_ms": 60_000,
+        "dispatch_timeout_ms": 60_000,
     }
     kwargs.update(overrides)
     return build_flexlb_config(**kwargs)
@@ -1446,7 +1457,11 @@ class EnvManager:
             )
             service_config = json.loads(menv["MODEL_SERVICE_CONFIG"])
             service_config["hosts"] = {
-                f"mock.{role}.hosts.address": [host.strip() for host in spec.domain_addrs[role].split(",") if host.strip()]
+                f"mock.{role}.hosts.address": [
+                    host.strip()
+                    for host in spec.domain_addrs[role].split(",")
+                    if host.strip()
+                ]
                 for role in ("prefill", "decode")
             }
             menv["MODEL_SERVICE_CONFIG"] = json.dumps(service_config)
@@ -2446,7 +2461,7 @@ DECODE_DOMAIN = "mock.decode.hosts.address"
 
 
 def fault_env_config(
-    request_timeout_ms: int = 30_000,
+    dispatch_timeout_ms: int = 30_000,
     max_inflight_per_prefill_worker: int = 4,
     status_rpc_ms: int = 1_000,
 ) -> str:
@@ -2455,7 +2470,7 @@ def fault_env_config(
         ordering="priority",
         decision="fixed_window",
         dispatcher="batch",
-        request_timeout_ms=request_timeout_ms,
+        dispatch_timeout_ms=dispatch_timeout_ms,
         max_inflight_per_prefill_worker=max_inflight_per_prefill_worker,
         status_rpc_ms=status_rpc_ms,
     )
@@ -2479,15 +2494,14 @@ def fault_env_perf() -> dict:
 
 
 def admission_config(
-    queue_timeout_ms: int = 60_000,
-    request_timeout_ms: int = 60_000,
-    decision_lifetime: float = 2.0,
+    dispatch_timeout_ms: int = 60_000,
 ) -> str:
     """Admission cases keep per-Prefill concurrency separate from queue/request deadlines."""
     return build_flexlb_config(
-        ordering="priority", decision="fixed_window", dispatcher="batch",
-        queue_timeout_ms=queue_timeout_ms,
-        request_timeout_ms=request_timeout_ms, decision_lifetime=decision_lifetime,
+        ordering="priority",
+        decision="fixed_window",
+        dispatcher="batch",
+        dispatch_timeout_ms=dispatch_timeout_ms,
     )
 
 
@@ -2504,8 +2518,6 @@ def elastic_spec(ctx: "CaseContext") -> EnvSpec:
     )
 
 
-
-
 def quota_spec(ctx: "CaseContext") -> EnvSpec:
     """1P+1D batch-credit fixture, with one concurrent batch per Prefill worker."""
     return EnvSpec(
@@ -2515,7 +2527,9 @@ def quota_spec(ctx: "CaseContext") -> EnvSpec:
         perf=fault_env_perf(),
         master_profile=ctx.profile,
         discovery="discovery_file",
-        master_env={"FLEXLB_CONFIG": fault_env_config(max_inflight_per_prefill_worker=1)},
+        master_env={
+            "FLEXLB_CONFIG": fault_env_config(max_inflight_per_prefill_worker=1)
+        },
     )
 
 
@@ -2541,7 +2555,7 @@ def _fault_spec(ctx: "CaseContext") -> EnvSpec:
         n_decode=2,
         perf=default_perf(),
         master_profile=ctx.profile,
-        master_env={"FLEXLB_CONFIG": admission_config(request_timeout_ms=30_000)},
+        master_env={"FLEXLB_CONFIG": admission_config(dispatch_timeout_ms=30_000)},
     )
 
 

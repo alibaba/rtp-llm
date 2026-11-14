@@ -266,7 +266,7 @@ class RequestWorkerSelectorTest {
                 assertTrue(requestContext.snapshot().phase() == ContextResult.Phase.OPEN);
                 assertEquals(RequestState.Phase.ACKNOWLEDGED, requests.requests.getRequestState(requestContext.data().getRequestId(), 0L).state());
             }
-            RequestProtocolTestSupport.expireInactiveRequest(requests, requestContext, System.currentTimeMillis() + context.data().getConfig().getRequestLifecycle().getRequest().getTimeoutMs());
+            RequestProtocolTestSupport.expireInactiveRequest(requests, requestContext, System.currentTimeMillis() + context.data().getConfig().getInternalRuntime().getRequestInactivityTimeoutMs());
             assertEquals(RequestState.Phase.TIMED_OUT, SchedulerTestSupport.repository(requests).getRequestState(9L, 0L).state());
             assertEquals(0, SchedulerTestSupport.repository(requests).liveRequestCount());
             verify((DecodeEndpoint) decode.endpoint).release(reservation, DecodeResources.ReleaseReason.EXPIRED);

@@ -192,7 +192,7 @@ class SchedulingErrorCodeMatrixTest {
     @MethodSource("batchModes")
     void engineRejectionRetainsItsDiagnostic(String mode) throws Exception {
         try (Fixture fixture = new Fixture(mode)) {
-            fixture.harness.config.getRequestLifecycle().getRequest().setTimeoutMs(500L);
+            fixture.harness.config.getInternalRuntime().setRequestInactivityTimeoutMs(500L);
             fixture.harness.prefillEngines.getFirst().setFaultConfig(FaultInjectionConfig.builder()
                     .failOnEnqueue(true).enqueueErrorMessage("injected admission rejection").build());
             var future = fixture.service.submit(fixture.context());

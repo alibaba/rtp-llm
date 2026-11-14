@@ -840,98 +840,15 @@ class ColdTokenDispatchTest {
     }
 
     @Test
-    void coldCapacityHeadDoesNotStrandAdmissibleParkedHotRequests() throws Exception {
-        try (var f = new Fixture(false, false, false, true, config -> {
-            config.getDispatcher().setMaxInflightPerPrefillWorker(256);
-            config.queueScheduler().setQueueTimeoutMs(120_000L);
-            config.getRequestLifecycle().getRequest().setTimeoutMs(100_000L);
-            var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
-            balance.setMinPrefixHitPercent(5);
-            balance.setMaxPendingComputeTokens(200_000L);
-            balance.setEngineQueueAdmissionThreshold(30L);
-            var rescue = new RoutingConfig.HotspotRescueConfig();
-            rescue.setMaxInputTokens(32768L);
-            rescue.setMaxIdlePendingTokens(64768L);
-            rescue.setMigrationIntervalMs(1000L);
-            balance.setHotspotRescue(rescue);
-            var shedding = new org.flexlb.config.PrefillQueueSheddingConfig();
-            var budget = new org.flexlb.config.PrefillQueueSheddingConfig.DeadlineBudgetConfig();
-            budget.setTokensPerSecond(70_000L);
-            shedding.setDeadlineBudget(budget);
-            config.queueScheduler().setPrefillQueueShedding(shedding);
-        })) {
-            when(f.cache.findMatchingEngines(any(), any(), any())).thenAnswer(call -> {
-                List<Long> keys = call.getArgument(0);
-                return keys.getFirst() == 111L ? Map.of(f.a.ipPort(), 19, f.b.ipPort(), 19) : Map.of();
-            });
-            var running = new java.util.ArrayList<org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB>();
-            for (int i = 0; i < 3; i++) {
-                running.add(org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB.newBuilder()
-                        .setBatchId(-1).setRequestId(7_000_000 + i).setInputLength(100_000)
-                        .setPhase(org.flexlb.engine.grpc.EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build());
-            }
-            var congested = new java.util.ArrayList<>(running);
-            for (int i = 0; i < 31; i++) {
-                congested.add(org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB.newBuilder()
-                        .setBatchId(-1).setRequestId(7_010_000 + i).setInputLength(1000).setIsWaiting(true)
-                        .setPhase(org.flexlb.engine.grpc.EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED).build());
-            }
-            f.observeTaskSnapshot(f.a, congested, List.of());
-            f.observeTaskSnapshot(f.b, congested, List.of());
-            var cold = f.context(7_100_000);
-            cold.data().setRequest(cold.data().getRequest().toBuilder().seqLen(100_000L).build());
-            var coldResponse = f.scheduler.submit(cold);
-            verify(f.router, timeout(1000)).select(same(cold), nullable(String.class));
-            var hot = f.context(7_100_001);
-            hot.data().setRequest(hot.data().getRequest().toBuilder()
-                    .seqLen(100_000L).cacheKeyBlockSize(5000L)
-                    .blockCacheKeys(java.util.stream.LongStream.range(111, 131).boxed().toList()).build());
-            var hotResponse = f.scheduler.submit(hot);
-            verify(f.router, timeout(1000)).select(same(hot), nullable(String.class));
-            var lock = (java.util.concurrent.locks.ReentrantLock) ReflectionTestUtils.getField(f.scheduler, "lock");
-            awaitCondition(() -> {
-                lock.lock();
-                try {
-                    var entries = (Map<RequestContext, GlobalQueueEntry>) ReflectionTestUtils.getField(f.scheduler, "queuedEntries");
-                    var waiters = (PlacementCapacityWaitQueue) ReflectionTestUtils.getField(f.scheduler, "waitingRequests");
-                    return entries.get(cold) != null && entries.get(hot) != null
-                            && waiters.isWaiting(entries.get(cold)) && waiters.isWaiting(entries.get(hot));
-                } finally { lock.unlock(); }
-            });
-            f.observeTaskSnapshot(f.a, running, List.of());
-            f.observeTaskSnapshot(f.b, running, List.of());
-            assertTrue(f.router.hotPrefillQueueAllowsAdmission(hot, null));
-            assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY,
-                    f.router.coldPrefillAdmission(cold, null));
-            assertTrue(hotResponse.get(2, TimeUnit.SECONDS).isSuccess(),
-                    "hot work must retry while the cold token gate remains closed");
-            assertFalse(coldResponse.isDone());
-            var fresh = f.context(7_100_002);
-            fresh.data().setRequest(fresh.data().getRequest().toBuilder().seqLen(100_000L).cacheKeyBlockSize(5000L)
-                    .blockCacheKeys(java.util.stream.LongStream.range(111, 131).boxed().toList()).build());
-            assertTrue(f.scheduler.submit(fresh).get(2, TimeUnit.SECONDS).isSuccess(),
-                    "both parked and new hot requests retain admission while cold work waits");
-            // Cold work still waits for a real reduction below its own token gate.
-            f.observeTaskSnapshot(f.a, running.subList(2, 3), running.subList(0, 2));
-            f.observeTaskSnapshot(f.b, running.subList(2, 3), running.subList(0, 2));
-            assertTrue(coldResponse.get(2, TimeUnit.SECONDS).isSuccess());
-            assertTrue(hotResponse.get(2, TimeUnit.SECONDS).isSuccess());
-        }
-    }
-
-    @Test
     void hotCapacityHeadDoesNotStrandAnotherWorkersCachedRequests() throws Exception {
         try (var f = new Fixture(false, false, false, true, config -> {
             config.getDispatcher().setMaxInflightPerPrefillWorker(256);
-            config.queueScheduler().setQueueTimeoutMs(120_000L);
-            config.getRequestLifecycle().getRequest().setTimeoutMs(100_000L);
+            config.setDispatchTimeoutMs(120_000L);
+            config.getInternalRuntime().setRequestInactivityTimeoutMs(100_000L);
             var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
             balance.setMinPrefixHitPercent(5);
             balance.setMaxPendingComputeTokens(200_000L);
             balance.setEngineQueueAdmissionThreshold(30L);
-            var shedding = new org.flexlb.config.PrefillQueueSheddingConfig();
-            shedding.setDeadlineBudget(new org.flexlb.config.PrefillQueueSheddingConfig.DeadlineBudgetConfig());
-            config.queueScheduler().setPrefillQueueShedding(shedding);
         })) {
             when(f.cache.findMatchingEngines(any(), any(), any())).thenAnswer(call -> {
                 List<Long> keys = call.getArgument(0);
@@ -959,8 +876,6 @@ class ColdTokenDispatchTest {
                 } finally { lock.unlock(); }
             });
             f.updateWaitingTasks(f.b, 0, false);
-            assertFalse(f.router.hotPrefillQueueAllowsAdmission(head, null));
-            assertTrue(f.router.hotPrefillQueueAllowsAdmission(hot, null));
             // Further healthy B status reports must not repeatedly retry only A's head.
             for (int i = 0; i < 5; i++) {
                 f.updateWaitingTasks(f.b, 0, false);
@@ -979,22 +894,27 @@ class ColdTokenDispatchTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource({"false,100", "false,80", "true,100", "true,80"})
-    void shrinkAndRandomTrafficReductionDoNotStrandSurvivingCacheCohorts(boolean shrink, int retainedPercent) throws Exception {
+    @org.junit.jupiter.params.provider.CsvSource({"false,100,false", "false,80,false", "true,100,false", "true,80,false",
+            "false,100,true", "false,80,true", "true,100,true", "true,80,true"})
+    void shrinkAndRandomTrafficReductionDoNotStrandSurvivingCacheCohorts(boolean shrink, int retainedPercent, boolean costOrder) throws Exception {
         try (var f = new Fixture(false, false, false, true, config -> {
             config.getDispatcher().setMaxInflightPerPrefillWorker(256);
-            config.queueScheduler().setQueueTimeoutMs(120_000L);
-            config.getRequestLifecycle().getRequest().setTimeoutMs(100_000L);
+            config.setDispatchTimeoutMs(120_000L);
+            config.queueScheduler().getOrdering().setPrefillCostOrder(costOrder);
+            config.getInternalRuntime().setRequestInactivityTimeoutMs(100_000L);
             var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
             balance.setMinPrefixHitPercent(5);
-            balance.setMaxPendingComputeTokens(200_000L);
+            balance.setMaxPendingComputeTokens(1_000_000L);
+            balance.setEnableWindow(true);
+            var rescue = new RoutingConfig.HotspotRescueConfig();
+            rescue.setMaxInputTokens(64_768L);
+            rescue.setMaxIdlePendingTokens(128_768L);
+            rescue.setMigrationIntervalMs(500L);
+            balance.setHotspotRescue(rescue);
             balance.setEngineQueueAdmissionThreshold(30L);
-            var shedding = new org.flexlb.config.PrefillQueueSheddingConfig();
-            shedding.setDeadlineBudget(new org.flexlb.config.PrefillQueueSheddingConfig.DeadlineBudgetConfig());
-            config.queueScheduler().setPrefillQueueShedding(shedding);
         })) {
             var workers = new java.util.ArrayList<PrefillEndpoint>(List.of(f.a, f.b));
-            for (int i = 3; i <= 13; i++) { workers.add((PrefillEndpoint) f.publish(RoleType.PREFILL, "127.0.0." + i)); }
+            for (int i = 3; i <= 30; i++) { workers.add((PrefillEndpoint) f.publish(RoleType.PREFILL, "127.0.0." + i)); }
             when(f.cache.findMatchingEngines(any(), any(), any())).thenAnswer(call -> {
                 List<Long> keys = call.getArgument(0);
                 List<String> candidates = call.getArgument(2);
@@ -1016,7 +936,7 @@ class ColdTokenDispatchTest {
             var responses = new java.util.ArrayList<java.util.concurrent.CompletableFuture<org.flexlb.dao.loadbalance.Response>>();
             var expectedWorkers = new java.util.ArrayList<PrefillEndpoint>();
             var sampling = new java.util.Random(17);
-            for (int i = 1; i < 12; i++) {
+            for (int i = 1; i < 25; i++) {
                 for (int request = 0; request < 10; request++) {
                     if (sampling.nextInt(100) >= retainedPercent) { continue; }
                     var ctx = f.context(7_300_000L + i * 100 + request);
@@ -1028,16 +948,17 @@ class ColdTokenDispatchTest {
             }
             awaitParked(f, requests);
             if (shrink) {
-                var removed = workers.getLast();
-                EndpointRegistry.Retirement retirement;
-                removed.getStatus().lock.lock();
-                try { retirement = f.endpoints.beginRetirement(RoleType.PREFILL, removed.ipPort(), removed.getStatus()); }
-                finally { removed.getStatus().lock.unlock(); }
-                retirement.complete(f.cache, org.slf4j.LoggerFactory.getLogger(getClass()));
-                assertEquals(12, f.endpoints.prefillRoutingSnapshot(RoleType.PREFILL).size());
-                verify(f.cache).removeEngineBlockCache(removed.ipPort());
+                for (var removed : workers.subList(25, 30)) {
+                    EndpointRegistry.Retirement retirement;
+                    removed.getStatus().lock.lock();
+                    try { retirement = f.endpoints.beginRetirement(RoleType.PREFILL, removed.ipPort(), removed.getStatus()); }
+                    finally { removed.getStatus().lock.unlock(); }
+                    retirement.complete(f.cache, org.slf4j.LoggerFactory.getLogger(getClass()));
+                    verify(f.cache).removeEngineBlockCache(removed.ipPort());
+                }
+                assertEquals(25, f.endpoints.prefillRoutingSnapshot(RoleType.PREFILL).size());
             } else { f.updateWaitingTasks(workers.getLast(), 0, false); }
-            for (int i = 1; i < 12; i++) { f.updateWaitingTasks(workers.get(i), 0, false); }
+            for (int i = 1; i < 25; i++) { f.updateWaitingTasks(workers.get(i), 0, false); }
             for (int i = 0; i < responses.size(); i++) {
                 assertTrue(responses.get(i).get(3, TimeUnit.SECONDS).isSuccess());
                 assertSame(expectedWorkers.get(i), requests.get(i).snapshot().route().prefillEp());
@@ -1079,8 +1000,8 @@ class ColdTokenDispatchTest {
         try (var f = new Fixture(false, false, false, true, config -> {
             config.getDispatcher().setMaxInflightPerPrefillWorker(256);
             config.getRouter().getRoles().getPrefill().getTokenBalance().setEngineQueueAdmissionThreshold(30L);
-            config.queueScheduler().setQueueTimeoutMs(120_000L);
-            config.getRequestLifecycle().getRequest().setTimeoutMs(100_000L);
+            config.setDispatchTimeoutMs(120_000L);
+            config.getInternalRuntime().setRequestInactivityTimeoutMs(100_000L);
             config.getRouter().getRoles().getPrefill().getTokenBalance().setMaxPendingComputeTokens(200_000L);
         })) {
             when(f.cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(f.a.ipPort(), 19));

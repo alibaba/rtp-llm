@@ -46,7 +46,7 @@ class FlexlbGrpcDrainTest {
         var timing = new GrpcServerTimingInterceptor();
         var config = mock(ConfigService.class);
         when(config.loadBalanceConfig()).thenReturn(ConfigService.parse("""
-                {"requestLifecycle":{"request":{"timeoutMs":60000}},
+                {"dispatchTimeoutMs": 60000,
                  "grpcServer":{"shutdownQuietPeriodMs":100}}
                 """));
         var routes = mock(org.flexlb.balance.scheduler.RequestScheduler.class);
@@ -172,7 +172,7 @@ class FlexlbGrpcDrainTest {
             var timing = new GrpcServerTimingInterceptor();
             var configService = mock(ConfigService.class);
             when(configService.loadBalanceConfig()).thenReturn(ConfigService.parse("""
-                    {"requestLifecycle":{"request":{"timeoutMs":60000}},
+                    {"dispatchTimeoutMs": 60000,
                      "grpcServer":{"shutdownQuietPeriodMs":%d}}
                     """.formatted(quietMs)));
             grpc = new FlexlbGrpcServer(null, configService, new MockEnvironment(),

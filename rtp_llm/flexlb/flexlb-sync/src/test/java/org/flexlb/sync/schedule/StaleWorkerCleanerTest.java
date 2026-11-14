@@ -32,7 +32,7 @@ class StaleWorkerCleanerTest {
     @Test
     void springSchedulesWorkerCleanupAtTheConfiguredInterval() {
         FlexlbConfig config = ConfigService.parse("""
-                {"requestLifecycle":{"request":{"timeoutMs":60000}},
+                {"dispatchTimeoutMs": 60000,
                  "workerRegistry":{"health":{"cleanupIntervalMs":1250}}}
                 """);
         ConfigService configService = mock(ConfigService.class);

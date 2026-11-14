@@ -706,15 +706,22 @@ _MONITOR_AUTO_TPM_ARGS = ["--flexlb.monitor.metric-whitelist=flexlb_auto_tpm"]
 
 
 def _prio_config(
-    *, ordering: str = "priority", preemption: Optional[dict] = None,
-    default_priority: Optional[int] = None, queue_timeout_ms: Optional[int] = None,
-    max_inflight_per_prefill_worker: int = 1, dispatcher: str = "non_batch",
+    *,
+    ordering: str = "priority",
+    preemption: Optional[dict] = None,
+    default_priority: Optional[int] = None,
+    dispatch_timeout_ms: Optional[int] = None,
+    max_inflight_per_prefill_worker: int = 1,
+    dispatcher: str = "non_batch",
 ) -> str:
     """Priority fixtures admit one request at a time unless a case sets another limit."""
     return build_flexlb_config(
-        ordering=ordering, decision="single", dispatcher=dispatcher,
-        default_priority=default_priority, preemption=preemption,
-        queue_timeout_ms=queue_timeout_ms,
+        ordering=ordering,
+        decision="single",
+        dispatcher=dispatcher,
+        default_priority=default_priority,
+        preemption=preemption,
+        dispatch_timeout_ms=dispatch_timeout_ms,
         max_inflight_per_prefill_worker=max_inflight_per_prefill_worker,
     )
 
@@ -760,13 +767,13 @@ def _q2_spec(ctx: CaseContext) -> EnvSpec:
     return _spec(
         ctx,
         "atpm_q2",
-        config=_prio_config(queue_timeout_ms=60_000),
+        config=_prio_config(dispatch_timeout_ms=60_000),
     )
 
 
 def _t1_spec(ctx: CaseContext) -> EnvSpec:
     """ENV-T1: queueTimeout 8s, no preemption (1P+4D)."""
-    return _spec(ctx, "prio_t1", config=_prio_config(queue_timeout_ms=8_000))
+    return _spec(ctx, "prio_t1", config=_prio_config(dispatch_timeout_ms=8_000))
 
 
 def _a1_spec(ctx: CaseContext) -> EnvSpec:
@@ -774,7 +781,7 @@ def _a1_spec(ctx: CaseContext) -> EnvSpec:
     return _spec(
         ctx,
         "atpm_a1",
-        config=_prio_config(queue_timeout_ms=7_000),
+        config=_prio_config(dispatch_timeout_ms=7_000),
     )
 
 
@@ -811,7 +818,9 @@ def _d1_spec(ctx: CaseContext) -> EnvSpec:
         "atpm_d1",
         n_prefill=2,
         config=_prio_config(
-            preemption=_PREEMPT_DECODE, max_inflight_per_prefill_worker=3, queue_timeout_ms=60_000
+            preemption=_PREEMPT_DECODE,
+            max_inflight_per_prefill_worker=3,
+            dispatch_timeout_ms=60_000,
         ),
         extra_args=_MONITOR_AUTO_TPM_ARGS,
     )
@@ -824,7 +833,9 @@ def _c1_spec(ctx: CaseContext) -> EnvSpec:
         "atpm_c1",
         n_prefill=2,
         n_decode=2,
-        config=_prio_config(max_inflight_per_prefill_worker=1, queue_timeout_ms=1500),
+        config=_prio_config(
+            max_inflight_per_prefill_worker=1, dispatch_timeout_ms=1500
+        ),
     )
 
 
@@ -861,7 +872,7 @@ def _o1_spec(ctx: CaseContext) -> EnvSpec:
     return _spec(
         ctx,
         "atpm_o1",
-        config=_prio_config(queue_timeout_ms=7_000),
+        config=_prio_config(dispatch_timeout_ms=7_000),
         master_debug_log=True,
         extra_args=_MONITOR_AUTO_TPM_ARGS,
     )
@@ -2401,7 +2412,7 @@ def atpm_timeout_attribution(ctx: CaseContext):
     """Admission-timeout expiry uniformity (PR7, [EV-1-FIXED] design-final
     form): under the intake3 PendingPlacementCoordinator (6ad0315f10) a
     capacity-blocked submitter parks with the schedule() RPC blocking
-    until its queueTimeoutMs deadline, then terminals as plain 8511
+    until its dispatchTimeoutMs deadline, then terminals as plain 8511
     BATCH_SLO_EXPIRED with admission_reject_reason=UNSPECIFIED(0) — the
     attributed form (8430 + HIGHER_PRIORITY_AHEAD / 8431 +
     RESOURCE_EXHAUSTED) needs the AdmissionFailureClassifier to run at
@@ -2424,7 +2435,7 @@ def atpm_timeout_attribution(ctx: CaseContext):
     expires 8511/UNSPECIFIED, 70_early completes.
 
     Deadline-no-extension (PR8, raw recording): the 70_late's terminal
-    wall-time / queueTimeoutMs(7000) must stay ~1 — the park never
+    wall-time / dispatchTimeoutMs(7000) must stay ~1 — the park never
     restarts expiresAtMs (A9-3 keeps prio_queue_timeout_terminal as
     PR8's ONLY band consumer; the raw value rides the case finish
     detail)."""
@@ -2827,7 +2838,9 @@ def atpm_error_code_family(ctx: CaseContext):
 
         m1 = _outcome_map(_drain(ops1, ph_fires + rej_fires))
         rej_codes = [m1[rej_lo][1], m1[rej_hi][1]]
-        deadline_waited = all(1.0 <= f.settled_s - f.submitted_s < 4.0 for f in rej_fires)
+        deadline_waited = all(
+            1.0 <= f.settled_s - f.submitted_s < 4.0 for f in rej_fires
+        )
         rej_reasons = [f.reason for f in rej_fires]
         placeholders_ok = m1[ph_a][0] and m1[ph_b][0]
         isolated1 = all(
@@ -3106,8 +3119,8 @@ def atpm_config_strict_reject(ctx: CaseContext):
     variants.append(("fifo_with_defaultPriority", json.dumps(cfg2)))
 
     cfg3 = json.loads(_prio_config())
-    del cfg3["requestLifecycle"]["request"]["timeoutMs"]
-    variants.append(("missing_request_timeout", json.dumps(cfg3)))
+    cfg3["dispatchTimeoutMs"] = 0
+    variants.append(("invalid_dispatch_timeout", json.dumps(cfg3)))
 
     results = []
     try:
@@ -3881,8 +3894,6 @@ def _max_engine_requests_1(config: str) -> str:
     return json.dumps(parsed, separators=(",", ":"))
 
 
-
-
 def _dr_live_spec(ctx: CaseContext) -> EnvSpec:
     """ENV for atpm_preempt_decode_reserved_live: BATCH dispatcher + the
     production-baseline stage set {DECODE_RESERVED} + a
@@ -3897,7 +3908,7 @@ def _dr_live_spec(ctx: CaseContext) -> EnvSpec:
         config=_prio_config(
             dispatcher="batch",
             preemption={"allowed_victim_stages": ["DECODE_RESERVED"]},
-            queue_timeout_ms=60_000,
+            dispatch_timeout_ms=60_000,
         ),
         extra_args=_MONITOR_AUTO_TPM_ARGS,
     )
@@ -3912,7 +3923,7 @@ def _nf_spec(ctx: CaseContext) -> EnvSpec:
         "atpm_nf",
         n_decode=1,
         config=_max_engine_requests_1(
-            _prio_config(preemption=_PREEMPT_DECODE, queue_timeout_ms=60_000)
+            _prio_config(preemption=_PREEMPT_DECODE, dispatch_timeout_ms=60_000)
         ),
     )
 
@@ -3930,12 +3941,10 @@ def _ts_spec(ctx: CaseContext) -> EnvSpec:
             _prio_config(
                 dispatcher="batch",
                 preemption=_PREEMPT_DECODE,
-                queue_timeout_ms=60_000,
+                dispatch_timeout_ms=60_000,
             )
         ),
     )
-
-
 
 
 @case(
