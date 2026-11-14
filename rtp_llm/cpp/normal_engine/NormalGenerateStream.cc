@@ -393,7 +393,8 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             // Prefill for single-group caches; multi-group caches may expose
             // the longer proven Decode reuse phase.
             side_data.prefill_use_independent_block_pools = rc.cache_manager->cacheConfig().groupNums() > 1;
-            side_data.total_reuse_len  = reuseLength();
+            // Chunk advancement changes the execution cursor, not the cache hit.
+            side_data.total_reuse_len  = initialReuseLength();
             side_data.local_reuse_len  = localReuseLength();
             side_data.remote_reuse_len = remoteReuseLength();
             side_data.memory_reuse_len = hostReuseLength();
