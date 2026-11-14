@@ -789,6 +789,18 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
             if (request_logger_)
                 request_logger_->log(external_input.input());
             const auto request_id = external_input.input().request_id();
+            if (external_input.input().multimodal_inputs_size() != 0) {
+                addBatchError(response,
+                              request_id,
+                              ErrorCode::INVALID_PARAMS,
+                              "EnqueueBatch does not support multimodal inputs");
+                continue;
+            }
+            const auto& config = external_input.input().generate_config();
+            if (config.num_beams() > 1 || config.variable_num_beams_size() != 0) {
+                addBatchError(response, request_id, ErrorCode::INVALID_PARAMS, "EnqueueBatch does not support beam search");
+                continue;
+            }
             if (dp_slot.dp_rank() != local_dp_rank) {
                 addBatchError(response,
                               request_id,

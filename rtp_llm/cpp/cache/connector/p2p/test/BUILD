@@ -49,6 +49,7 @@ cc_test(
         ":mock_generate_stream",
         ":test_rpc_server",
         "//rtp_llm/cpp/cache/connector/p2p:components",
+        "//rtp_llm/cpp/utils:rpc_completion_queue",
         "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan",
         "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan_glue",
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
