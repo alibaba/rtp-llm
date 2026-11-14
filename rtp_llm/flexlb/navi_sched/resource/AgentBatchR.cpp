@@ -1607,6 +1607,12 @@ bool AgentBatchR::setBackendExecutionPipelineStages(size_t stages)
     return _backendPipelineOccupancy.setStages(stages);
 }
 
+size_t AgentBatchR::getBackendExecutionPipelineStages() const
+{
+    autil::ScopedLock lock(_backendExecutionLock);
+    return _backendPipelineOccupancy.stages();
+}
+
 bool AgentBatchR::beginBackendExecution(int64_t eventTimeUs, int32_t requestCount)
 {
     if (eventTimeUs <= 0) {

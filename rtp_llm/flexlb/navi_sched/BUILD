@@ -1826,3 +1826,9 @@ py_test(
     python_version = "PY3",
     deps = [":py_sched_lib"],
 )
+
+cc_test(
+    name = "navi_sched_pp_initial_history_fit_test",
+    srcs = ["test/LatencyPpInitialFitTest.cpp"],
+    deps = [":navi_sched_role_lib", "//aios/unittest_framework", "//aios/navi:navi_ops_testlib"],
+)

@@ -304,6 +304,7 @@ public:
     CacheHitPathStats getCacheHitPathStats() const;
     int64_t getExecutionBusyTimeUs(int64_t currentTimeUs) const;
     bool setBackendExecutionPipelineStages(size_t stages);
+    size_t getBackendExecutionPipelineStages() const;
     bool beginBackendExecution(int64_t eventTimeUs = 0, int32_t requestCount = 0);
     void updateBackendWaitingRequests(
         int32_t requestCount, int32_t runningRequests = 0,

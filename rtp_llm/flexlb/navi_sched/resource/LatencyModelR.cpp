@@ -58,6 +58,8 @@ navi::ErrorCode LatencyModelR::init(navi::ResourceInitContext &ctx)
                               getResidualRuntimeConfig())) {
         return navi::EC_INIT_RESOURCE;
     }
+    _initialPpHistoryFitPending =
+        !restoredSnapshot && !_fitOnStart && _agentHistoryR->getHistory()->empty();
     if (restoredSnapshot) {
         const auto initialParameters = _nonLinearPrefillModelR->getInitialParameters();
         const auto zeroPointIndex = NonLinearPrefillModelR::ZERO_POINT_PARAMETER_INDEX;
@@ -167,6 +169,39 @@ bool LatencyModelR::recordSample(
         _lateRampSampleCount.fetch_add(1, std::memory_order_relaxed);
     }
     const auto evaluatingColdStart = !_coldStartCandidates.empty();
+    if (evaluatingColdStart) {
+        // Imported and restored models retain their existing validation path.
+        _initialPpHistoryFitPending = false;
+    }
+    const auto current = getSnapshot();
+    const auto initialPpHistoryFit =
+        _initialPpHistoryFitPending && current && !current->warmStarted &&
+        _agentBatchR && _agentBatchR->getBackendExecutionPipelineStages() > 1 &&
+        _nonLinearPrefillModelR->usesExecutionGeometry();
+    if (appended && !appendResult.trainingDeferred && initialPpHistoryFit) {
+        // Ordinary online updates barely move a fresh PP seed. Reuse the bounded
+        // history fitting recipe before switching to the normal online cadence.
+        if (_agentHistoryR->getHistory()->size() < INITIAL_PP_HISTORY_SAMPLE_COUNT) {
+            auto progress = std::make_shared<NaviSchedLatencyModelSnapshot>(*current);
+            progress->sessionSampleCount = _agentHistoryR->getSessionSampleCount();
+            progress->onlineFitUpdate = false;
+            publishSnapshot(progress);
+            updatedSnapshot = std::move(progress);
+            return true;
+        }
+        if (!fitInitialPpHistory(updatedSnapshot)) {
+            return false;
+        }
+        _initialPpHistoryFitPending = false;
+        _initialPpHistoryFitCount.fetch_add(1, std::memory_order_relaxed);
+        _agentHistoryR->clearPendingFitSamples();
+        if (appendResult.rampReplay) {
+            _rampReplayCount.fetch_add(1, std::memory_order_relaxed);
+        }
+        saveNeeded = _agentHistoryR->enabled();
+        refreshTrustLocked(updatedSnapshot);
+        return true;
+    }
     ColdStartSelectionResult selectionResult = ColdStartSelectionResult::PENDING;
     if (appended && !appendResult.trainingDeferred && evaluatingColdStart &&
         !selectColdStartCandidate(updatedSnapshot, selectionResult)) {
@@ -235,6 +270,35 @@ bool LatencyModelR::fitHistoryOnStart(
     snapshot->sessionSampleCount = _agentHistoryR->getSessionSampleCount();
     publishSnapshot(snapshot);
     updatedSnapshot = std::move(snapshot);
+    return true;
+}
+
+bool LatencyModelR::fitInitialPpHistory(
+    std::shared_ptr<const NaviSchedLatencyModelSnapshot> &updatedSnapshot)
+{
+    const auto current = getSnapshot();
+    const auto history = _agentHistoryR->getHistory();
+    if (!current || !current->valid()) {
+        return false;
+    }
+    const auto optimizerBefore = _nonLinearPrefillModelR->getOptimizerState();
+    std::vector<double> parameters;
+    if (!fitHistoryParameters(*history, current->parameters, parameters) ||
+        !_nonLinearPrefillModelR->validateConfiguredParameters(parameters)) {
+        _nonLinearPrefillModelR->restoreOptimizerState(optimizerBefore);
+        return false;
+    }
+    auto fitted = std::make_shared<NaviSchedLatencyModelSnapshot>(*current);
+    fitted->parameters = std::move(parameters);
+    fitted->optimizerState = _nonLinearPrefillModelR->getOptimizerState();
+    // Epochs are optimizer updates, not independent model revisions or evidence
+    // of prediction accuracy. Keep the existing trust requirement unchanged.
+    fitted->revision = current->revision + 1;
+    fitted->sessionSampleCount = _agentHistoryR->getSessionSampleCount();
+    fitted->onlineFitUpdate = true;
+    fitted->overloadPredictionTrusted = shouldTrustLocked(fitted->revision);
+    publishSnapshot(fitted);
+    updatedSnapshot = std::move(fitted);
     return true;
 }
 
@@ -350,6 +414,7 @@ bool LatencyModelR::applyColdStartCandidates(
     snapshot->onlineFitUpdate = true;
     snapshot->sessionSampleCount = _agentHistoryR->getSessionSampleCount();
     clearColdStartCandidates();
+    _initialPpHistoryFitPending = false;
     publishSnapshot(snapshot);
     updatedSnapshot = snapshot;
     _coldStartAppliedCount.fetch_add(1, std::memory_order_relaxed);
@@ -977,6 +1042,8 @@ navi::SummaryErrorCode LatencyModelR::getSummary(const std::string &query,
                                               currentTimeUs, getResidualRuntimeConfig())
                                         : 0.0;
     TABLE_ADD_COLUMN_VALUE(overview, "residual_decay_factor", residualDecay);
+    TABLE_ADD_COLUMN_VALUE(overview, "initial_pp_history_fit_count",
+                           _initialPpHistoryFitCount.load(std::memory_order_relaxed));
     TABLE_ADD_COLUMN_VALUE(overview, "online_fit_count",
                            _onlineFitCount.load(std::memory_order_relaxed));
     TABLE_ADD_COLUMN_VALUE(overview, "ramp_deferred_sample_count",

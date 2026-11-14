@@ -5,6 +5,7 @@
 #include "aios/navi_sched/data/MasterLatencyModelWarmupToAgentData.h"
 #include "aios/navi_sched/data/NaviSchedLatencySample.h"
 #include "aios/navi_sched/resource/AgentHistoryR.h"
+#include "aios/navi_sched/resource/AgentBatchR.h"
 #include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
 #include "aios/navi_sched/resource/LatencyResidualModel.h"
 #include "autil/Lock.h"
@@ -104,6 +105,8 @@ private:
         ColdStartSelectionResult &result);
     bool addColdStartCandidates(
         const std::vector<NaviSchedLatencyModelCandidate> &candidates);
+    bool fitInitialPpHistory(
+        std::shared_ptr<const NaviSchedLatencyModelSnapshot> &updatedSnapshot);
     bool fitParameters(const std::vector<NaviSchedLatencySample> &samples,
                        const std::vector<double> &initialParameters,
                        std::vector<double> &updatedParameters,
@@ -162,6 +165,11 @@ private:
     RESOURCE_DEPEND_ON(NonLinearPrefillModelR, _nonLinearPrefillModelR);
     RESOURCE_DEPEND_ON(AgentHistoryR, _agentHistoryR);
     RESOURCE_DEPEND_ON_FALSE(AgentSchedulerConfigR, _agentSchedulerConfigR);
+    RESOURCE_DEPEND_ON_FALSE(AgentBatchR, _agentBatchR);
+    // Only a fresh PP model waits for enough local samples before its first fit.
+    bool _initialPpHistoryFitPending = false;
+    std::atomic<uint64_t> _initialPpHistoryFitCount{0};
+    static constexpr size_t INITIAL_PP_HISTORY_SAMPLE_COUNT = 64;
     bool _fitOnStart = false;
     bool _restoredTrustedModel = false;
     std::string _latencyModelFingerprint;
