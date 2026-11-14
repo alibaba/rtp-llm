@@ -535,7 +535,7 @@ class RtpKvMetaExplicitConfigTest(unittest.TestCase):
             RtpKvMetaObjectClientConfig.from_kv_cache_config(config)
         self.assertNotIn("private-serializer-detail", str(caught.exception))
 
-    def test_resolves_vipserver_once_and_freezes_static_snapshot(self):
+    def test_resolves_initial_endpoints_and_preserves_vipserver_discovery(self):
         primary = _primary_config(
             enable_vipserver=True,
             vipserver_domain="kvcm.example",
@@ -561,6 +561,9 @@ class RtpKvMetaExplicitConfigTest(unittest.TestCase):
             ("10.0.0.1:18001", "[2001:db8::2]:18002"),
         )
         self.assertEqual(transfer["address"], list(derived.addresses))
+        self.assertTrue(transfer["enable_vipserver"])
+        self.assertEqual(transfer["vipserver_domain"], "kvcm.example")
+        self.assertEqual(derived.vipserver_domain, "kvcm.example")
 
     def test_rejects_malformed_vipserver_results_without_leaking_domain(self):
         primary = _primary_config(

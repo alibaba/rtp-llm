@@ -20,6 +20,7 @@ import torch
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+from rtp_llm.multimodal.kvcm.lookup import KvMetaLookupError
 from rtp_llm.multimodal.kvcm.tensor_object import (
     pack_object,
     plan_object,
@@ -258,6 +259,9 @@ class MMRemoteEmbeddingCache:
                 fields["error_code"] = name
             elif type(code) is int:
                 fields["error_code"] = code
+            reason = getattr(error, "reason", None)
+            if isinstance(reason, str) and len(reason) <= 80:
+                fields["error_reason"] = reason
             inflight = getattr(error, "data_transfer_may_be_inflight", None)
             if type(inflight) is bool:
                 fields["data_transfer_may_be_inflight"] = inflight
@@ -269,7 +273,8 @@ class MMRemoteEmbeddingCache:
         with self._stats_lock:
             self._stats[event] += 1
             count = self._stats[event]
-        if not self._audit_enabled:
+        failure = event in ("read_error", "write_error")
+        if not self._audit_enabled and not failure:
             return
         payload = dict(
             event=event,
@@ -284,7 +289,8 @@ class MMRemoteEmbeddingCache:
             **fields,
         )
         try:
-            logging.info("MM_EMB_REMOTE_JSON %s", json.dumps(payload, sort_keys=True))
+            log = logging.warning if failure else logging.info
+            log("MM_EMB_REMOTE_JSON %s", json.dumps(payload, sort_keys=True))
         except Exception:
             pass  # Optional evidence logging must not change cache behavior.
 
@@ -388,8 +394,11 @@ class MMRemoteEmbeddingCache:
                     size = client.object_size(
                         key, trace_id=trace_id, timeout_ms=timeout_ms
                     )
-                except Exception:
-                    self._retire_client(client)
+                except Exception as error:
+                    # The typed lookup error is metadata-only; discovery can
+                    # recover on the existing client without GPU registration.
+                    if not isinstance(error, KvMetaLookupError):
+                        self._retire_client(client, error)
                     raise
                 if size is None:
                     outcome = "miss"
@@ -523,7 +532,15 @@ class MMRemoteEmbeddingCache:
         except Exception:
             logging.warning("MM remote cache client cleanup failed", exc_info=True)
 
-    def _retire_client(self, client):
+    def _retire_client(self, client, error):
+        # A classified metadata failure leaves the connection and registered
+        # arena usable. Rebuilding them for every conflict/RPC failure is costly.
+        check = getattr(client, "is_transfer_quiescent", None)
+        try:
+            if callable(check) and check(error) is True:
+                return
+        except Exception:
+            pass
         # Detach a failed generation immediately, but do not close a shared
         # client while another admitted metadata/transfer operation uses it.
         # Waiting for that operation here could occupy both IO pool workers.
@@ -668,8 +685,8 @@ class MMRemoteEmbeddingCache:
                 with self._observe_stage("write", "transfer", buffer.numel()):
                     try:
                         client.save_one(key, buffer, trace_id=trace_id)
-                    except Exception:
-                        self._retire_client(client)
+                    except Exception as error:
+                        self._retire_client(client, error)
                         raise
                 api_ms = (time.perf_counter() - api_started) * 1000
                 outcome = "success"
@@ -802,8 +819,8 @@ class MMRemoteEmbeddingCache:
                 with self._observe_stage("read", "transfer", size):
                     try:
                         client.load_one(key, buffer, trace_id=trace_id)
-                    except Exception:
-                        self._retire_client(client)
+                    except Exception as error:
+                        self._retire_client(client, error)
                         raise
                 timing["sdk_api_ms"] = (time.perf_counter() - api_started) * 1000
                 return buffer

@@ -226,6 +226,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                 buffer = torch.zeros(16, dtype=torch.uint8)
                 with self.assertRaisesRegex(RuntimeError, "metadata RPC failed"):
                     getattr(transport, operation)("key", buffer)
+                self.assertTrue(transport.is_transfer_quiescent(native.side_effect))
                 self.assertFalse(transport._poisoned)
                 self.assertEqual(RegisteredObjectTransport._quarantined_transports, [])
                 native.side_effect = None

@@ -139,6 +139,64 @@ class RemoteCacheTest(unittest.TestCase):
             self.assertFalse(store.closed)
         factory.assert_called_once()
 
+    def test_quiescent_read_and_write_failures_reuse_the_same_client(self):
+        from unittest.mock import Mock
+        from rtp_llm.multimodal.kvcm.lookup import KvMetaLookupError
+
+        class RecoverableStore(Store):
+            def __init__(self, operation):
+                super().__init__()
+                self.operation = self.kind = operation
+                error_type = (
+                    KvMetaLookupError if operation == "metadata" else RuntimeError
+                )
+                self.error = error_type("metadata unavailable without pending DMA")
+
+            def is_transfer_quiescent(self, error):
+                return error is self.error and self.kind != "metadata"
+
+            def fail_once(self, operation):
+                if self.operation == operation:
+                    self.operation = None
+                    raise self.error
+
+            def object_size(self, *args, **kwargs):
+                self.fail_once("metadata")
+                return super().object_size(*args, **kwargs)
+
+            def save_one(self, *args, **kwargs):
+                self.fail_once("write")
+                return super().save_one(*args, **kwargs)
+
+            def load_one(self, *args, **kwargs):
+                self.fail_once("read")
+                return super().load_one(*args, **kwargs)
+
+        for operation in ("metadata", "read", "write"):
+            with self.subTest(operation=operation):
+                result = (torch.ones(2, 4), None)
+                store = RecoverableStore(operation)
+                store.objects["key"] = pack_object(plan_object(result))
+                factory = Mock(return_value=store)
+                remote = self.remote(
+                    None, client_factory=factory, namespace="test-revision"
+                )
+                if operation in ("metadata", "read"):
+                    self.assertIsNone(remote.load("key"))
+                else:
+                    remote.submit_result("key", result)
+                    deadline = time.monotonic() + 3
+                    while (
+                        remote.stats()["inflight_tasks"] and time.monotonic() < deadline
+                    ):
+                        time.sleep(0.005)
+                    self.assertEqual(remote.stats().get("write_error"), 1)
+                    remote.submit_result("key", result)
+                    self.assertTrue(store.saved.wait(2))
+                torch.testing.assert_close(remote.load("key")[0], result[0])
+                self.assertFalse(store.closed)
+                factory.assert_called_once()
+
     def test_deadline_after_initialization_keeps_client_for_next_request(self):
         from unittest.mock import Mock
 
@@ -186,6 +244,26 @@ class RemoteCacheTest(unittest.TestCase):
         ):
             remote.record("cache_admitted")
         self.assertEqual(remote.stats()["cache_admitted"], 2)
+
+    def test_failures_log_warning_even_when_audit_is_disabled(self):
+        remote = self.remote(Store())
+        remote._audit_enabled = False
+        with patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.logging.warning"
+        ) as warn:
+            remote.record(
+                "write_error", trace_id="trace", error_code="ER_INVALID_GRPCSTATUS"
+            )
+            payload = json.loads(warn.call_args.args[1])
+            self.assertEqual(payload["event"], "write_error")
+            self.assertEqual(payload["trace_id"], "trace")
+            self.assertEqual(payload["error_code"], "ER_INVALID_GRPCSTATUS")
+        with patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.logging.warning",
+            side_effect=RuntimeError("sink"),
+        ):
+            remote.record("read_error")
+        self.assertEqual(remote.stats()["read_error"], 1)
 
     def test_real_constructor_failure_is_separate_from_reuse(self):
         from unittest.mock import Mock

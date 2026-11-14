@@ -5,6 +5,7 @@ import struct
 import unittest
 import weakref
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import grpc
 import torch
@@ -160,6 +161,8 @@ class LookupTest(unittest.TestCase):
 
         def get(request, context):
             self.requests.append(request)
+            if getattr(self, "abort_code", None) is not None:
+                context.abort(self.abort_code, "bounded test overload")
             return self.response
 
         self.server.add_generic_rpc_handlers(
@@ -210,6 +213,44 @@ class LookupTest(unittest.TestCase):
         self.assertEqual(request.trace_id, "trace")
         self.response.hit_mask.values[0] = False
         self.assertIsNone(self.client.size("missing"))
+
+    def test_vipserver_refresh_replaces_stale_channels_and_recovers_after_empty_list(
+        self,
+    ):
+        address = self.client._addresses[0]
+        ip, port = address.rsplit(":", 1)
+        host = SimpleNamespace(ip=ip, port=int(port))
+        self.client._config.vipserver_domain = "kvcm.test"
+        self.client._set_endpoints(("127.0.0.1:1",))
+        old_channel = self.client._channels[0]
+        resolver = "rtp_llm.multimodal.kvcm.lookup._cached_vipserver_resolver"
+        with patch(resolver, return_value=[host]), patch.object(
+            old_channel, "close"
+        ) as close:
+            self.assertEqual(self.client.size("key"), 123)
+            close.assert_called_once()
+        old_channel.close()
+        channels = list(self.client._channels)
+        with patch(resolver, return_value=[host]):
+            self.assertEqual(self.client.size("key"), 123)
+        self.assertEqual(self.client._channels, channels)
+        count = len(self.requests)
+        with patch(resolver, return_value=[]):
+            with self.assertRaises(KvMetaLookupError) as caught:
+                self.client.size("key")
+        self.assertEqual(caught.exception.reason, "discovery")
+        self.assertEqual(len(self.requests), count)
+        with patch(resolver, return_value=[host]):
+            self.assertEqual(self.client.size("key"), 123)
+
+    def test_transport_error_preserves_grpc_code_and_recovers(self):
+        self.abort_code = grpc.StatusCode.RESOURCE_EXHAUSTED
+        with self.assertRaises(KvMetaLookupError) as caught:
+            self.client.size("key")
+        self.assertEqual(caught.exception.code, grpc.StatusCode.RESOURCE_EXHAUSTED)
+        self.assertEqual(caught.exception.reason, "grpc")
+        self.abort_code = None
+        self.assertEqual(self.client.size("key"), 123)
 
     def test_rejects_wrong_size_count_status_and_closed(self):
         self.response.locations[0].value_size = 10000

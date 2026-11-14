@@ -67,6 +67,7 @@ class RtpKvMetaObjectClientConfig:
     call_timeout_ms: int
     write_timeout_seconds: int
     max_object_bytes: int = DEFAULT_MAX_OBJECT_BYTES
+    vipserver_domain: str = ""
 
     @classmethod
     def from_env(
@@ -831,8 +832,8 @@ def _derive_primary_config(
     )
     transfer_config.update(
         {
-            "enable_vipserver": False,
-            "vipserver_domain": "",
+            "enable_vipserver": enable_vipserver,
+            "vipserver_domain": domain if enable_vipserver else "",
             "instance_group": instance_group,
             "instance_id": instance_id,
             "block_size": 1,
@@ -864,6 +865,7 @@ def _derive_primary_config(
 
     return RtpKvMetaObjectClientConfig(
         addresses=addresses,
+        vipserver_domain=domain if enable_vipserver else "",
         instance_id=instance_id,
         instance_group=instance_group,
         user_data=user_data,

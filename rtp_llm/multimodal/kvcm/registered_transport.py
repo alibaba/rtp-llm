@@ -97,15 +97,19 @@ class RegisteredObjectTransport:
                 "GDR operation failed; arena quarantined until worker restart"
             )
 
-    def _handle_failure(self, error):
-        # Legacy SDKs and unclassified CUDA/native exceptions remain unsafe.
+    def is_transfer_quiescent(self, error):
+        if self._closed or self._poisoned:
+            return False
         check = getattr(self._client, "is_transfer_quiescent", None)
         try:
-            if callable(check) and check(error) is True:
-                return
+            return callable(check) and check(error) is True
         except Exception:
-            pass
-        self._quarantine()
+            return False
+
+    def _handle_failure(self, error):
+        # Legacy SDKs and unclassified CUDA/native exceptions remain unsafe.
+        if not self.is_transfer_quiescent(error):
+            self._quarantine()
 
     def _view(self, tensor):
         self._check_available()
