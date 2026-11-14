@@ -11,6 +11,30 @@ from torch.distributed import ProcessGroup
 
 MiB = 1024 * 1024
 
+
+def _rendezvous_with_short_socket_path(buffer, group_name):
+    # PyTorch 2.11 IpcChannel uses the first configured temporary directory.
+    tmp_dir = next(
+        (
+            os.environ[key]
+            for key in ("TMPDIR", "TMP", "TEMP", "TEMPDIR")
+            if key in os.environ
+        ),
+        "/tmp",
+    )
+    if len(os.fsencode(f"{tmp_dir}/symm_mem-{os.getpid()}")) < 108:
+        return torch_symm_mem.rendezvous(buffer, group=group_name)
+    previous_tmpdir = os.environ.get("TMPDIR")
+    os.environ["TMPDIR"] = "/tmp"
+    try:
+        return torch_symm_mem.rendezvous(buffer, group=group_name)
+    finally:
+        if previous_tmpdir is None:
+            os.environ.pop("TMPDIR", None)
+        else:
+            os.environ["TMPDIR"] = previous_tmpdir
+
+
 TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
     9: {
         2: 64 * MiB,  # 64 MB
@@ -241,26 +265,7 @@ class TorchSymmMemCommunicator:
             self.disabled = True
             return
 
-        # Sandboxes with oversized TMPDIR paths kill the rendezvous's IPC
-        # socket bind with EINVAL before the exchange even starts (see
-        # _symm_mem_short_socket_dir). Scope the redirect to this call:
-        # torch probes the env when it builds the channel, all ranks run
-        # this same code, and restoring afterwards keeps the inherited
-        # TMPDIR for everything else the process does.
-        sock_dir = _symm_mem_short_socket_dir()
-        sock_env_vars = ("TMPDIR", "TEMP", "TEMPDIR")
-        sock_env_saved = {v: os.environ.get(v) for v in sock_env_vars}
-        try:
-            if sock_dir is not None:
-                for v in sock_env_vars:
-                    os.environ[v] = sock_dir
-            handle = torch_symm_mem.rendezvous(self.buffer, group=self.group.group_name)
-        finally:
-            for v, old in sock_env_saved.items():
-                if old is None:
-                    os.environ.pop(v, None)
-                else:
-                    os.environ[v] = old
+        handle = _rendezvous_with_short_socket_path(self.buffer, self.group.group_name)
 
         # The post-rendezvous checks are local verdicts too. If they split the
         # group, some ranks would call multimem_all_reduce_ while others fall

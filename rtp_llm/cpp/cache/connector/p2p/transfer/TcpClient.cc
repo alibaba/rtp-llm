@@ -118,7 +118,7 @@ std::shared_ptr<arpc::RPCChannelBase> TcpClient::getChannel(const std::string& i
     }
 
     channel_map_.emplace(spec, ChannelCacheEntry{new_channel, now});
-    RTP_LLM_LOG_INFO("tcp client new channel connect to %s", spec.c_str());
+    RTP_LLM_LOG_DEBUG("tcp client new channel connect to %s", spec.c_str());
     return new_channel;
 }
 

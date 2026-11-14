@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstring>
 #include <future>
 #include <map>
@@ -40,7 +41,13 @@ static bool syncRead(IRdmaConnection&                                           
                      std::chrono::seconds   timeout            = std::chrono::seconds(10)) {
     std::promise<bool> p;
     auto               future = p.get_future();
-    conn.read(pairs, [&p](bool ok) { p.set_value(ok); }, currentTimeMs() + deadline_offset_ms);
+    conn.read(
+        pairs,
+        [&p](TransferErrorCode ec, const std::string&) {
+            const bool ok = ec == TransferErrorCode::OK;
+            p.set_value(ok);
+        },
+        currentTimeMs() + deadline_offset_ms);
     if (future.wait_for(timeout) != std::future_status::ready) {
         return false;
     }
@@ -86,7 +93,13 @@ TEST_F(RdmaInitOnlyTest, B2_ReadOnFailedConnection_ImmediateReturnsFalse) {
 
     std::promise<bool> p;
     auto               future = p.get_future();
-    conn->read({}, [&p](bool ok) { p.set_value(ok); }, currentTimeMs() + kDeadlineMs);
+    conn->read(
+        {},
+        [&p](TransferErrorCode ec, const std::string&) {
+            const bool ok = ec == TransferErrorCode::OK;
+            p.set_value(ok);
+        },
+        currentTimeMs() + kDeadlineMs);
 
     ASSERT_EQ(future.wait_for(std::chrono::milliseconds(100)), std::future_status::ready);
     EXPECT_FALSE(future.get());
@@ -98,11 +111,81 @@ TEST_F(RdmaInitOnlyTest, B3_ReadInterleavedWithOnConnectFailed_CallbackFires) {
         std::promise<bool> p;
         auto               future = p.get_future();
         std::thread        t([&conn] { conn->onConnectFailed(nullptr); });
-        conn->read({}, [&p](bool ok) { p.set_value(ok); }, currentTimeMs() + kDeadlineMs);
+        conn->read(
+            {},
+            [&p](TransferErrorCode ec, const std::string&) {
+                const bool ok = ec == TransferErrorCode::OK;
+                p.set_value(ok);
+            },
+            currentTimeMs() + kDeadlineMs);
         t.join();
         ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
         EXPECT_FALSE(future.get());
     }
+}
+
+// ---------------------------------------------------------------------------
+// A1 fix: sweepExpiredPendingRequests fails orphaned requests in CONNECTING
+// ---------------------------------------------------------------------------
+
+TEST_F(RdmaInitOnlyTest, A1_SweepExpiredPending_FailsOrphanedRequest) {
+    auto conn = std::make_shared<RdmaConnection>(nullptr, "127.0.0.1", kTestPort, nullptr);
+    // state is CONNECTING; read() enqueues but cannot dispatch
+    std::promise<bool> p;
+    auto future = p.get_future();
+    conn->read(
+        {},
+        [&p](TransferErrorCode ec, const std::string&) {
+            const bool ok = ec == TransferErrorCode::OK;
+            p.set_value(ok);
+        },
+        currentTimeMs() - 1);  // already expired
+
+    // callback should NOT have fired yet (state is CONNECTING, flush does nothing)
+    ASSERT_NE(future.wait_for(std::chrono::milliseconds(50)), std::future_status::ready);
+
+    // sweep should find and fail the expired request
+    conn->sweepExpiredPendingRequests();
+
+    ASSERT_EQ(future.wait_for(std::chrono::milliseconds(100)), std::future_status::ready);
+    EXPECT_FALSE(future.get());
+}
+
+TEST_F(RdmaInitOnlyTest, A1_SweepKeepsNonExpiredRequests) {
+    auto conn = std::make_shared<RdmaConnection>(nullptr, "127.0.0.1", kTestPort, nullptr);
+
+    std::promise<bool> p_expired;
+    auto f_expired = p_expired.get_future();
+    conn->read(
+        {},
+        [&p_expired](TransferErrorCode ec, const std::string&) {
+            const bool ok = ec == TransferErrorCode::OK;
+            p_expired.set_value(ok);
+        },
+        currentTimeMs() - 1);
+
+    std::promise<bool> p_alive;
+    auto f_alive = p_alive.get_future();
+    conn->read(
+        {},
+        [&p_alive](TransferErrorCode ec, const std::string&) {
+            const bool ok = ec == TransferErrorCode::OK;
+            p_alive.set_value(ok);
+        },
+        currentTimeMs() + 60000);
+
+    conn->sweepExpiredPendingRequests();
+
+    // expired one should be failed
+    ASSERT_EQ(f_expired.wait_for(std::chrono::milliseconds(100)), std::future_status::ready);
+    EXPECT_FALSE(f_expired.get());
+
+    // non-expired one should NOT have been touched
+    ASSERT_NE(f_alive.wait_for(std::chrono::milliseconds(50)), std::future_status::ready);
+
+    // clean up: connect-failed drains remaining
+    conn->onConnectFailed(nullptr);
+    ASSERT_EQ(f_alive.wait_for(std::chrono::milliseconds(100)), std::future_status::ready);
 }
 
 // ============================================================================
@@ -301,19 +384,19 @@ TEST_F(RdmaClientServerTest, A3_ReadGpuToGpu_ContentVerified) {
 
 // ─── Group D: read request validation errors ─────────────────────────────────
 
-TEST_F(RdmaClientServerTest, D1_Read_UnregisteredLocalBuffer_ReturnsFalse) {
-    constexpr size_t kSize = 64;
-    auto [srv_blk, srv_tensor, remote] = allocAndRegCpuBlock(kSize, 0xAA);
-
-    auto unregistered = torch::empty({static_cast<int64_t>(kSize)}, torch::kUInt8);
-    allocated_tensors_.push_back(unregistered);
-
-    auto conn = client_->getConnection("127.0.0.1", kTestPort);
-    ASSERT_NE(conn, nullptr);
-
-    EXPECT_FALSE(syncRead(*conn, {{unregistered, remote}}));
-
-    server_mm_->deregUserMr(srv_blk);
+TEST_F(RdmaInitOnlyTest, ReadUnregisteredLocalBufferAbortsBeforePosting) {
+    EXPECT_EXIT(
+        {
+            auto mm = std::make_shared<RdmaMemoryManager>();
+            RdmaConnection conn(mm, "127.0.0.1", kTestPort, nullptr);
+            auto tensor = torch::empty({64}, torch::kUInt8);
+            auto remote = std::make_shared<RemoteBuffer>(0x1000, 64, nullptr);
+            std::vector<::accl::barex::rw_memp_t> mems;
+            std::string message;
+            conn.validateAndBuildRwMemps({{tensor, remote}}, mems, currentTimeMs() + kDeadlineMs, nullptr, message);
+        },
+        ::testing::KilledBySignal(SIGABRT),
+        "");
 }
 
 TEST_F(RdmaClientServerTest, D2_Read_SizeMismatch_ReturnsFalse) {
@@ -382,6 +465,35 @@ TEST_F(RdmaClientServerTest, E2_ConnectionPoolDoesNotExceedMaxConns) {
 
 // ─── Group F: concurrency ────────────────────────────────────────────────────
 
+TEST_F(RdmaInitOnlyTest, F0_ConcurrentSlotInstallHasSingleWinner) {
+    constexpr size_t kThreadCount = 16;
+    RdmaHostConnectionPool pool("127.0.0.1", kTestPort, 1);
+    std::atomic<size_t> installed_count{0};
+    std::vector<std::shared_ptr<RdmaConnection>> selected(kThreadCount);
+    std::vector<std::thread> threads;
+    threads.reserve(kThreadCount);
+
+    for (size_t i = 0; i < kThreadCount; ++i) {
+        threads.emplace_back([&, i]() {
+            auto candidate = std::make_shared<RdmaConnection>(nullptr, "127.0.0.1", kTestPort, nullptr);
+            auto result = pool.installOrGetExistingAt(0, candidate);
+            selected[i] = result.connection;
+            if (result.installed) {
+                installed_count.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    ASSERT_EQ(installed_count.load(std::memory_order_relaxed), 1u);
+    ASSERT_NE(selected.front(), nullptr);
+    for (const auto& connection : selected) {
+        EXPECT_EQ(connection, selected.front());
+    }
+}
+
 TEST_F(RdmaClientServerTest, F1_ConcurrentReads_NoCrash) {
     constexpr int     kNumThreads = 4;
     constexpr size_t  kSize       = 64;
@@ -410,9 +522,13 @@ TEST_F(RdmaClientServerTest, F1_ConcurrentReads_NoCrash) {
     std::vector<std::thread> threads;
     for (int i = 0; i < kNumThreads; ++i) {
         threads.emplace_back([&, i]() {
-            conn->read({{dst_tensors[i], remote}},
-                       [&promises, i](bool ok) { promises[i].set_value(ok); },
-                       currentTimeMs() + kDeadlineMs);
+            conn->read(
+                {{dst_tensors[i], remote}},
+                [&promises, i](TransferErrorCode ec, const std::string&) {
+                    const bool ok = ec == TransferErrorCode::OK;
+                    promises[i].set_value(ok);
+                },
+                currentTimeMs() + kDeadlineMs);
         });
     }
     for (auto& t : threads) {
@@ -437,3 +553,44 @@ TEST_F(RdmaClientServerTest, F1_ConcurrentReads_NoCrash) {
 }  // namespace barex_rdma
 }  // namespace transfer
 }  // namespace rtp_llm
+
+namespace rtp_llm::transfer::barex_rdma {
+TEST(RdmaReadErrorTest, MissingRemoteRkeyAborts) {
+    RdmaConnection conn(nullptr, "127.0.0.1", kTestPort, nullptr);
+    RemoteBuffer remote(0x1000, 64, nullptr);
+    EXPECT_EXIT(conn.remoteRkeyOrAbort(remote, 7), ::testing::KilledBySignal(SIGABRT), "");
+    remote.nic_rkeys = std::make_shared<std::map<uint32_t, uint32_t>>();
+    EXPECT_EXIT(conn.remoteRkeyOrAbort(remote, 7), ::testing::KilledBySignal(SIGABRT), "");
+    (*remote.nic_rkeys)[3] = 123;
+    EXPECT_EXIT(conn.remoteRkeyOrAbort(remote, 7), ::testing::KilledBySignal(SIGABRT), "");
+    EXPECT_EQ(conn.remoteRkeyOrAbort(remote, 3), 123u);
+}
+
+TEST(RdmaReadErrorTest, ConnectFailureAndPendingExpiryHaveDistinctCauses) {
+    RdmaConnection failed(nullptr, "10.0.0.7", 19875, nullptr);
+    failed.onConnectFailed(nullptr);
+    bool called = false;
+    failed.read(
+        {},
+        [&](TransferErrorCode ec, const std::string& message) {
+            called = true;
+            EXPECT_EQ(ec, TransferErrorCode::CONNECTION_FAILED);
+            EXPECT_NE(message.find("10.0.0.7:19875"), std::string::npos);
+        },
+        currentTimeMs() + 60000);
+    EXPECT_TRUE(called);
+    RdmaConnection pending(nullptr, "10.0.0.8", 19875, nullptr);
+    called = false;
+    pending.read(
+        {},
+        [&](TransferErrorCode ec, const std::string& message) {
+            called = true;
+            EXPECT_EQ(ec, TransferErrorCode::TIMEOUT);
+            EXPECT_NE(message.find("pending READ expired"), std::string::npos);
+            EXPECT_NE(message.find("10.0.0.8:19875"), std::string::npos);
+        },
+        currentTimeMs() - 1);
+    pending.sweepExpiredPendingRequests();
+    EXPECT_TRUE(called);
+}
+}  // namespace rtp_llm::transfer::barex_rdma

@@ -4,7 +4,6 @@
 
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/p2p/support/AsyncContext.h"
-#include "rtp_llm/cpp/cache/connector/p2p/support/KVCacheConnectorLayerContext.h"
 
 namespace rtp_llm {
 
@@ -24,8 +23,6 @@ public:
               int                                       read_block_num) = 0;
     virtual std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext>
     asyncWrite(const ::rtp_llm::KVCacheResourcePtr& resource, const std::shared_ptr<Meta>& meta) = 0;
-    virtual std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext>
-    asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) = 0;
 };
 
 }  // namespace rtp_llm

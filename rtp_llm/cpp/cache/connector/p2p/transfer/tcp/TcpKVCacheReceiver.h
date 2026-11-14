@@ -23,7 +23,8 @@ public:
               int      worker_thread_count,
               uint32_t anet_rpc_thread_num    = 3,
               uint32_t anet_rpc_queue_num     = 100,
-              int64_t  wait_check_interval_us = 1000);
+              int64_t  wait_check_interval_us = 1000,
+              uint32_t worker_queue_size      = 500);
 
     /// @brief No-op for TCP mode: memory registration is not required.
     bool regMem(const BlockInfo& block_info, uint64_t aligned_size = 0) override;

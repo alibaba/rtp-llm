@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "aios/network/arpc/arpc/ANetRPCController.h"
+#include <algorithm>
+#include <limits>
 
 namespace rtp_llm {
 namespace transfer {
@@ -20,6 +22,14 @@ inline TransferErrorCode transTcpErrorCode(::tcp_transfer::TcpTransferErrorCodeP
             return TransferErrorCode::TIMEOUT;
         case ::tcp_transfer::TCP_TRANSFER_TASK_CANCELLED:
             return TransferErrorCode::CANCELLED;
+        case ::tcp_transfer::TCP_TRANSFER_NOT_INITIALIZED:
+            return TransferErrorCode::NOT_INITIALIZED;
+        case ::tcp_transfer::TCP_TRANSFER_QUEUE_REJECTED:
+            return TransferErrorCode::QUEUE_REJECTED;
+        case ::tcp_transfer::TCP_TRANSFER_CONTEXT_DESTROYED:
+            return TransferErrorCode::CONTEXT_DESTROYED;
+        case ::tcp_transfer::TCP_TRANSFER_COPY_FAILED:
+            return TransferErrorCode::COPY_FAILED;
         default:
             return TransferErrorCode::UNKNOWN;
     }
@@ -38,25 +48,43 @@ public:
         request_(request),
         response_(response),
         controller_(controller),
-        callback_(callback) {}
+        callback_(std::move(callback)) {}
 
     ~TcpTransferClosure() {
         delete controller_;
     }
 
     void Run() override {
+        std::unique_ptr<TcpTransferClosure> self_guard(this);
         TransferErrorCode error_code = TransferErrorCode::OK;
         std::string       error_msg;
 
         if (controller_->Failed()) {
-            error_code = TransferErrorCode::RPC_FAILED;
-            error_msg  = "tcp transfer failed: " + controller_->ErrorText() + " peer [" + peer_ip_ + ":"
+            error_code = controller_->GetErrorCode() == arpc::ARPC_ERROR_TIMEOUT ? TransferErrorCode::TIMEOUT
+                                                                               : TransferErrorCode::RPC_FAILED;
+            error_msg  = "tcp transfer failed: rpc_code=" + std::to_string(controller_->GetErrorCode())
+                        + " " + controller_->ErrorText() + " peer [" + peer_ip_ + ":"
                         + std::to_string(peer_port_) + "]";
         } else if (response_->has_error_code() && response_->error_code() != ::tcp_transfer::TCP_TRANSFER_NONE_ERROR) {
             error_code = transTcpErrorCode(response_->error_code());
-            error_msg  = response_->has_error_message() ? response_->error_message() : "";
+            error_msg  = "wire_code=" + std::to_string(static_cast<int>(response_->error_code())) + ": "
+                         + (response_->has_error_message() ? response_->error_message() : "");
         }
 
+        if (error_code != TransferErrorCode::OK) {
+            error_msg += " [received_at location=TCPTransferClosure::Run peer=" + peer_ip_ + ":"
+                         + std::to_string(peer_port_) + " partition_layer_key=" + request_->unique_key() + "]";
+            RTP_LLM_LOG_WARNING("P2P TCP send RPC failed, partition_layer_key=%s peer=%s:%u "
+                                "transfer_code=%d transfer_name=%s rpc_code=%d wire_code=%d error=%s",
+                                request_->unique_key().c_str(),
+                                peer_ip_.c_str(),
+                                peer_port_,
+                                static_cast<int>(error_code),
+                                transferErrorCodeToString(error_code),
+                                controller_->GetErrorCode(),
+                                response_->has_error_code() ? static_cast<int>(response_->error_code()) : -1,
+                                error_msg.c_str());
+        }
         if (callback_) {
             callback_(error_code, error_msg);
         }
@@ -102,9 +130,10 @@ bool TcpKVCacheSender::setBlockBufferInfo(::tcp_transfer::TcpBlockBufferInfo* bl
     content->resize(block_info.size_bytes);
 
     CopyTask task;
-    task.src_ptr = block_info.addr;
-    task.size    = block_info.size_bytes;
-    task.dst_ptr = content->data();
+    task.device_index = block_info.device_index;
+    task.src_ptr      = block_info.addr;
+    task.size         = block_info.size_bytes;
+    task.dst_ptr      = content->data();
     copy_tasks.push_back(task);
     return true;
 }
@@ -114,8 +143,7 @@ TcpKVCacheSender::makeTransferRequest(const transfer::SendRequest&              
                                       const std::shared_ptr<TransferClientMetricsCollector>& collector) {
     auto transfer_request = std::make_shared<::tcp_transfer::TcpLayerBlockTransferRequest>();
     transfer_request->set_unique_key(request.unique_key);
-    transfer_request->set_deadline_ms(
-        std::max(request.deadline_ms - 10, currentTimeMs()));  // 10ms for network latency and processing time
+    transfer_request->set_timeout_ms(request.timeout_ms);
 
     if (request.block_info.empty()) {
         return nullptr;
@@ -138,11 +166,9 @@ TcpKVCacheSender::makeTransferRequest(const transfer::SendRequest&              
         }
     }
 
-    if (!copy_tasks.empty()) {
-        if (!cuda_copy_util_->batchCopyToHost(copy_tasks)) {
-            RTP_LLM_LOG_WARNING("TcpKVCacheSender: batchCopyToHost failed, unique_key: %s", request.unique_key.c_str());
-            return nullptr;
-        }
+    if (!copy_tasks.empty() && !cuda_copy_util_->batchCopyToHost(copy_tasks)) {
+        RTP_LLM_LOG_WARNING("TcpKVCacheSender: batchCopyToHost failed, unique_key: %s", request.unique_key.c_str());
+        return nullptr;
     }
     return transfer_request;
 }
@@ -153,6 +179,10 @@ void TcpKVCacheSender::loadToRemote(
     const std::shared_ptr<::tcp_transfer::TcpLayerBlockTransferRequest>& transfer_request,
     std::function<void(TransferErrorCode, const std::string&)>           callback,
     int64_t                                                              deadline_ms) {
+    if (deadline_ms <= currentTimeMs()) {
+        if (callback) callback(TransferErrorCode::TIMEOUT, "transfer deadline expired before TCP submission");
+        return;
+    }
     auto channel = tcp_client_->getChannel(ip, port);
     if (!channel) {
         if (callback) {
@@ -161,12 +191,21 @@ void TcpKVCacheSender::loadToRemote(
         return;
     }
 
+    // Refresh after sender queuing, D2H copy and channel acquisition. The wire
+    // and controller share the remaining per-request budget, without exporting
+    // another process's absolute clock or Prefill's static load timeout.
+    const auto remaining_ms = deadline_ms - currentTimeMs();
+    if (remaining_ms <= 0) {
+        if (callback) callback(TransferErrorCode::TIMEOUT, "transfer deadline expired during TCP preparation");
+        return;
+    }
+    const auto timeout_ms = std::min<int64_t>(remaining_ms, std::numeric_limits<int32_t>::max());
+    transfer_request->set_timeout_ms(timeout_ms);
     auto transfer_response = std::make_shared<::tcp_transfer::TcpLayerBlockTransferResponse>();
     auto controller        = new arpc::ANetRPCController();
-    auto timeout_ms        = deadline_ms - currentTimeMs();
-    controller->SetExpireTime(timeout_ms > 0 ? timeout_ms : 1);
-
-    auto closure = new TcpTransferClosure(ip, port, transfer_request, transfer_response, controller, callback);
+    controller->SetExpireTime(timeout_ms);
+    auto closure = new TcpTransferClosure(
+        ip, port, transfer_request, transfer_response, controller, callback);
     ::tcp_transfer::TcpTransferService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
                                                  ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
     stub.transfer(controller, transfer_request.get(), transfer_response.get(), closure);
@@ -186,13 +225,43 @@ void TcpKVCacheSender::send(const transfer::SendRequest&                        
         callback(error_code, error_msg);
     };
 
+    // makeTransferRequest is synchronous (D2H copy with cudaStreamSynchronize)
+    // and can block the dispatcher thread for a long time under cuda runtime
+    // contention; track the sync prefix latency and warn on slow paths.
+    const int64_t make_req_start_us = currentTimeUs();
     auto transfer_request = makeTransferRequest(request, collector);
-    if (!transfer_request) {
+    const int64_t make_req_cost_us = currentTimeUs() - make_req_start_us;
+    if (transfer_request == nullptr) {
+        if (make_req_cost_us >= 100000) {
+            RTP_LLM_LOG_WARNING("TcpKVCacheSender::send makeTransferRequest failed after %ld us, "
+                                "unique_key=%s, peer=%s:%u",
+                                make_req_cost_us,
+                                request.unique_key.c_str(),
+                                request.ip.c_str(),
+                                request.port);
+        }
         callback2(TransferErrorCode::BUILD_REQUEST_FAILED, "make transfer request failed");
         return;
     }
 
+    // loadToRemote = getChannel + arpc stub.transfer; only the synchronous
+    // prefix is measured here (the closure runs on arpc IO threads).
+    const int64_t load_remote_start_us = currentTimeUs();
     loadToRemote(request.ip, request.port, transfer_request, callback2, request.deadline_ms);
+    const int64_t load_remote_cost_us = currentTimeUs() - load_remote_start_us;
+
+    const int64_t total_sync_cost_us = make_req_cost_us + load_remote_cost_us;
+    if (total_sync_cost_us >= 100000) {
+        RTP_LLM_LOG_WARNING("TcpKVCacheSender::send slow sync prefix, "
+                            "unique_key=%s, peer=%s:%u, total_sync_us=%ld, "
+                            "make_req_us=%ld (cuda copy + sync), load_remote_us=%ld (getChannel + arpc submit)",
+                            request.unique_key.c_str(),
+                            request.ip.c_str(),
+                            request.port,
+                            total_sync_cost_us,
+                            make_req_cost_us,
+                            load_remote_cost_us);
+    }
 }
 
 }  // namespace tcp

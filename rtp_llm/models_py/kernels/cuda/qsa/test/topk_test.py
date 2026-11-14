@@ -1,4 +1,7 @@
+import os
+import tempfile
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -6,6 +9,15 @@ from rtp_llm.models_py.kernels.cuda.qsa.qsa_topk_triton import try_select_qsa_to
 from rtp_llm.models_py.kernels.cuda.qsa.test.reference.topk_reference import (
     select_qsa_paged_tokens as reference_topk,
 )
+
+
+def setUpModule():
+    # Torch's JIT lock survives a killed process in a shared build directory.
+    build_dir = tempfile.TemporaryDirectory()
+    unittest.addModuleCleanup(build_dir.cleanup)
+    env = patch.dict(os.environ, {"TORCH_EXTENSIONS_DIR": build_dir.name})
+    env.start()
+    unittest.addModuleCleanup(env.stop)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")

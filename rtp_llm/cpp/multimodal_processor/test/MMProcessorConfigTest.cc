@@ -19,7 +19,9 @@ TEST(MMProcessorConfigTest, resolvesOnlyValidIngressConfigurations) {
     EXPECT_EQ(resolveMMProcessorKind(true, VIT_SEPARATION_LOCAL, false, PDFUSION, 1, 0), MMProcessorKind::NONE);
     EXPECT_EQ(resolveMMProcessorKind(true, VIT_SEPARATION_LOCAL, true, PDFUSION, 1, 0), MMProcessorKind::INVALID);
     EXPECT_EQ(resolveMMProcessorKind(true, VIT_SEPARATION_LOCAL, true, PDFUSION, 0, 1), MMProcessorKind::INVALID);
-    EXPECT_EQ(resolveMMProcessorKind(true, VIT_SEPARATION_LOCAL, false, DECODE, 0, 0), MMProcessorKind::NONE);
+    EXPECT_EQ(resolveMMProcessorKind(true, VIT_SEPARATION_LOCAL, true, DECODE, 0, 0), MMProcessorKind::LOCAL);
+    EXPECT_EQ(resolveMMProcessorKind(true, VIT_SEPARATION_LOCAL, false, DECODE, 0, 0), MMProcessorKind::INVALID);
+    EXPECT_EQ(resolveMMProcessorKind(true, VIT_SEPARATION_REMOTE, false, DECODE, 0, 0), MMProcessorKind::NONE);
     // VIT and FRONTEND never own LLM multimodal ingress; a local engine there is an assembly error.
     EXPECT_EQ(resolveMMProcessorKind(true, VIT_SEPARATION_LOCAL, true, VIT, 0, 0), MMProcessorKind::INVALID);
     EXPECT_EQ(resolveMMProcessorKind(true, VIT_SEPARATION_LOCAL, true, FRONTEND, 0, 0), MMProcessorKind::INVALID);

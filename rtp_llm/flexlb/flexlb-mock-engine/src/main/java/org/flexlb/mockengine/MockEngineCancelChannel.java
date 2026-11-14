@@ -5,6 +5,7 @@ import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.engine.grpc.RequestId;
 
+import java.net.URI;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
@@ -29,8 +30,7 @@ public final class MockEngineCancelChannel implements EngineCancelChannel {
     @Override
     public CompletableFuture<CancelAck> cancel(
             CancelTarget target, String requestId, long timeoutMs) {
-        JavaMockEngineCluster.FastRpcService service =
-                target == null ? null : services.get(target.prefillGrpcPort());
+        JavaMockEngineCluster.FastRpcService service = services.get(prefillPort(target));
         if (service == null) {
             return CompletableFuture.completedFuture(CancelAck.UNSUPPORTED);
         }
@@ -87,6 +87,17 @@ public final class MockEngineCancelChannel implements EngineCancelChannel {
         } catch (Exception e) {
             // Contract: never throw synchronously; surface as a failed future.
             return CompletableFuture.failedFuture(e);
+        }
+    }
+
+    static int prefillPort(CancelTarget target) {
+        if (target == null || !target.isRoutable()) {
+            return -1;
+        }
+        try {
+            return URI.create("http://" + target.prefillAddress()).getPort();
+        } catch (IllegalArgumentException e) {
+            return -1;
         }
     }
 }

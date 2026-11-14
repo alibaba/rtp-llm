@@ -1,19 +1,18 @@
 #pragma once
 
-#include "autil/Thread.h"
-#include <mutex>
-#include <thread>
+#include <cstdint>
 #include <map>
-#include <vector>
 #include <memory>
-#include <condition_variable>
+#include <mutex>
 #include <string>
+
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
 
 namespace rtp_llm {
 
 class LayerCacheBuffer {
 public:
-    LayerCacheBuffer(int layer_id, std::string cache_tag);
+    LayerCacheBuffer(int layer_id, std::string cache_tag, int chunk_id = 0);
     ~LayerCacheBuffer() = default;
 
 public:
@@ -27,19 +26,28 @@ public:
     const std::string& cacheTag() const {
         return cache_tag_;
     }
+    int chunkId() const {
+        return chunk_id_;
+    }
+    std::string bufferKey() const {
+        return std::to_string(layer_id_) + ":" + cache_tag_;
+    }
     const std::map<int64_t, int>& blockIdMap() const {
         return block_id_map_;
     }
-
+    void setKVCacheResource(const KVCacheResourcePtr& resource) {
+        resource_ = resource;
+    }
 private:
     int                    layer_id_;
     std::string            cache_tag_;
+    int                    chunk_id_;
     std::map<int64_t, int> block_id_map_;  // [cache_key, block_id]
+    KVCacheResourcePtr     resource_;  // Rank-0 source hold for the sender's synchronous copy.
 };
 
 class LayerCacheBufferStore {
 public:
-    /// timeout_ms 建议与 CacheStoreConfig::p2p_layer_cache_buffer_store_timeout_ms 一致
     explicit LayerCacheBufferStore(uint64_t timeout_ms);
     ~LayerCacheBufferStore() = default;
 
@@ -49,16 +57,15 @@ public:
                              const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer);
     /// @brief 获取 unique_key 对应指定层的缓冲区，不存在返回 nullptr
     std::shared_ptr<LayerCacheBuffer>
-         getLayerCacheBuffer(const std::string& unique_key, int layer_id, const std::string& cache_tag) const;
-    void checkTimeout();
+    getLayerCacheBuffer(const std::string& unique_key, int layer_id, const std::string& cache_tag) const;
+    void                              checkTimeout();
 
 private:
     uint64_t timeout_ms_;
 
     mutable std::mutex mutex_;
-    // [unique_key, [(layer_id, tag), LayerCacheBuffer]]
-    std::map<std::string, std::map<std::pair<int, std::string>, std::shared_ptr<LayerCacheBuffer>>>
-        layer_cache_buffer_map_;
+    // [unique_key, [layer_id, LayerCacheBuffer]]
+    std::map<std::string, std::map<std::string, std::shared_ptr<LayerCacheBuffer>>> layer_cache_buffer_map_;
     // [unique_key, expired_time]
     std::map<std::string, int64_t> expired_time_map_;
 };

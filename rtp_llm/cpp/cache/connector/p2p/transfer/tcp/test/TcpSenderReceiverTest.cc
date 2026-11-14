@@ -141,6 +141,7 @@ TEST_F(TcpSenderOnlyTest, F1_EmptyBlockInfo_ImmediateBuildFailed) {
     req.unique_key  = "k_f1";
     req.block_info  = {};  // empty
     req.deadline_ms = currentTimeMs() + 5000;
+    req.timeout_ms = 5000;
 
     auto code = syncSend(*sender_, req);
     EXPECT_EQ(code, TransferErrorCode::BUILD_REQUEST_FAILED);
@@ -150,8 +151,8 @@ TEST_F(TcpSenderOnlyTest, F1_EmptyBlockInfo_ImmediateBuildFailed) {
 // D. Connection errors
 // ===========================================================================
 
-// D1/D3: Receiver is not running; arpc returns a channel object regardless, so
-//        the RPC is sent but times out → RPC_FAILED (controller->Failed()=true).
+// D1/D3: Receiver is not running; arpc still returns a channel object.
+// The queued request expires with ARPC_ERROR_TIMEOUT, which maps to TIMEOUT.
 TEST_F(TcpSenderOnlyTest, D1_ConnectionFailed_ReceiverNotRunning) {
     if (!device_initialized_) {
         GTEST_SKIP() << "No GPU device";
@@ -162,20 +163,70 @@ TEST_F(TcpSenderOnlyTest, D1_ConnectionFailed_ReceiverNotRunning) {
     req.port        = unused_port_;
     req.unique_key  = "k_d1";
     req.block_info  = makeBlocks(1, gpu_buf.data_ptr(), 64);
-    req.deadline_ms = currentTimeMs() + 1000;  // 1s deadline to keep the test fast
+    req.deadline_ms = currentTimeMs() + 1000;
+    req.timeout_ms = 1000;  // 1s deadline to keep the test fast
 
     auto code = syncSend(*sender_, req, std::chrono::seconds(5));
-    // anet always returns a channel object; connect failure surfaces as RPC_FAILED
-    // after the controller expire time elapses.
-    EXPECT_EQ(code, TransferErrorCode::RPC_FAILED);
+    // Preserve the typed deadline failure even when connection refusal preceded it.
+    EXPECT_EQ(code, TransferErrorCode::TIMEOUT);
 }
 
-// ===========================================================================
-// B. Timeout (integration)
-// ===========================================================================
+TEST_F(TcpSenderOnlyTest, DirectCopyPreservesEverySerializedByte) {
+    auto source = torch::arange(64, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+    at::cuda::getCurrentCUDAStream().synchronize();
+    SendRequest request;
+    request.unique_key = "direct-copy-byte-check";
+    for (int i = 0; i < 4; ++i) {
+        auto block = std::make_shared<KeyBlockInfo>();
+        block->blocks.push_back(BlockInfo{true, source.get_device(), 0, source.data_ptr<uint8_t>() + 16 * i, 16});
+        request.block_info.emplace(100 + i, std::move(block));
+    }
+    auto metrics = std::make_shared<TransferClientMetricsCollector>();
+    auto serialized = sender_->makeTransferRequest(request, metrics);
+    ASSERT_NE(serialized, nullptr);
+    ASSERT_EQ(serialized->blocks_size(), 4);
+    for (const auto& block : serialized->blocks()) {
+        ASSERT_GE(block.key(), 100);
+        ASSERT_LT(block.key(), 104);
+        ASSERT_EQ(block.blocks_size(), 1);
+        const auto& content = block.blocks(0).content();
+        ASSERT_EQ(content.size(), 16u);
+        for (size_t byte = 0; byte < content.size(); ++byte) {
+            EXPECT_EQ(static_cast<uint8_t>(content[byte]), 16 * (block.key() - 100) + byte);
+        }
+    }
+}
 
-// B1: Receiver is running but has not called recv(); the RPC enters wait_tasks_
-//     and times out after the deadline.
+TEST_F(TcpSenderOnlyTest, ExpiredTransferDoesNotSubmitTcpRpc) {
+    auto request = std::make_shared<::tcp_transfer::TcpLayerBlockTransferRequest>();
+    request->set_unique_key("expired-before-submit");
+    request->set_timeout_ms(60000);
+    int callbacks = 0;
+    sender_->loadToRemote("127.0.0.1", unused_port_, request,
+        [&](TransferErrorCode code, const std::string&) {
+            ++callbacks;
+            EXPECT_EQ(code, TransferErrorCode::TIMEOUT);
+        }, currentTimeMs() - 1);
+    EXPECT_EQ(callbacks, 1);
+}
+
+TEST_F(TcpSenderReceiverTest, WireTimeoutUsesRemainingRequestBudgetInsteadOfPrefillConfiguration) {
+    for (const int64_t static_timeout : {int64_t{0}, int64_t{-1}, int64_t{2147483648LL}}) {
+        auto request = std::make_shared<::tcp_transfer::TcpLayerBlockTransferRequest>();
+        request->set_unique_key("remaining-window-" + std::to_string(static_timeout));
+        request->set_timeout_ms(static_timeout);
+        auto completion = std::make_shared<std::promise<TransferErrorCode>>();
+        auto done = completion->get_future();
+        sender_->loadToRemote("127.0.0.1", test_port_, request,
+            [completion](TransferErrorCode code, const std::string&) { completion->set_value(code); },
+            currentTimeMs() + 250);
+        EXPECT_GT(request->timeout_ms(), 0);
+        EXPECT_LE(request->timeout_ms(), 250);
+        ASSERT_EQ(done.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        EXPECT_EQ(done.get(), TransferErrorCode::TIMEOUT);
+    }
+}
+
 TEST_F(TcpSenderReceiverTest, B1_SenderTimeout_ReceiverHasNoMatchingTask) {
     if (!device_initialized_) {
         GTEST_SKIP() << "No GPU device";
@@ -186,7 +237,8 @@ TEST_F(TcpSenderReceiverTest, B1_SenderTimeout_ReceiverHasNoMatchingTask) {
     req.port        = test_port_;
     req.unique_key  = "k_b1_integ";
     req.block_info  = makeBlocks(1, gpu_buf.data_ptr(), 64);
-    req.deadline_ms = currentTimeMs() + 500;  // short deadline
+    req.deadline_ms = currentTimeMs() + 500;
+    req.timeout_ms = 500;  // short deadline
 
     auto code = syncSend(*sender_, req, std::chrono::seconds(5));
     EXPECT_EQ(code, TransferErrorCode::TIMEOUT);
@@ -220,6 +272,7 @@ TEST_F(TcpSenderReceiverTest, C1_RecvCancelledBeforeRpcArrives_Integration) {
     send_req.unique_key  = "k_c1_integ";
     send_req.block_info  = makeBlocks(1, gpu_buf_send.data_ptr(), 64);
     send_req.deadline_ms = currentTimeMs() + 5000;
+    send_req.timeout_ms = 5000;
 
     auto code = syncSend(*sender_, send_req, std::chrono::seconds(5));
     EXPECT_EQ(code, TransferErrorCode::CANCELLED);
@@ -232,6 +285,62 @@ TEST_F(TcpSenderReceiverTest, C1_RecvCancelledBeforeRpcArrives_Integration) {
 
 // A1: Full end-to-end transfer: Receiver registers GPU buffer, Sender copies
 //     data over TCP, GPU content is verified.
+TEST_F(TcpSenderReceiverTest, IncrementalBatchesCompleteOnlyTheDecodeWindow) {
+    if (!device_initialized_) {
+        GTEST_SKIP() << "No GPU device";
+    }
+
+    constexpr size_t size = 64;
+    auto first_source = allocDevice(size);
+    auto final_source = allocDevice(size);
+    auto first_target = allocDevice(size);
+    auto final_target = allocDevice(size);
+    first_source.fill_(17);
+    final_source.fill_(42);
+    at::cuda::getCurrentCUDAStream().synchronize();
+
+    const auto deadline_ms = currentTimeMs() + 5000;
+    RecvRequest receive;
+    receive.unique_key = "incremental-window";
+    receive.deadline_ms = deadline_ms;
+    receive.block_info = makeBlocks(101, first_target.data_ptr(), size);
+    receive.block_info.merge(makeBlocks(102, final_target.data_ptr(), size));
+    auto copied_batches = std::make_shared<std::vector<std::vector<int64_t>>>();
+    receive.on_batch_copied = [copied_batches](const std::vector<int64_t>& keys) {
+        copied_batches->push_back(keys);
+        return keys == std::vector<int64_t>{102};
+    };
+    auto task = receiver_->recv(receive);
+    ASSERT_NE(task, nullptr);
+
+    SendRequest send;
+    send.ip = "127.0.0.1";
+    send.port = test_port_;
+    send.unique_key = receive.unique_key;
+    send.deadline_ms = deadline_ms;
+    send.timeout_ms = 5000;
+
+    send.block_info = makeBlocks(100, first_source.data_ptr(), size);
+    ASSERT_EQ(syncSend(*sender_, send), TransferErrorCode::OK);
+    EXPECT_FALSE(task->done());
+
+    send.block_info = makeBlocks(101, first_source.data_ptr(), size);
+    send.block_info.merge(makeBlocks(100, first_source.data_ptr(), size));
+    ASSERT_EQ(syncSend(*sender_, send), TransferErrorCode::OK);
+    EXPECT_FALSE(task->done());
+
+    send.block_info = makeBlocks(102, final_source.data_ptr(), size);
+    ASSERT_EQ(syncSend(*sender_, send), TransferErrorCode::OK);
+    EXPECT_TRUE(task->success());
+    EXPECT_TRUE(verifyDevice(first_target.data_ptr(), std::string(size, 17)));
+    EXPECT_TRUE(verifyDevice(final_target.data_ptr(), std::string(size, 42)));
+    EXPECT_EQ(*copied_batches, (std::vector<std::vector<int64_t>>{{}, {101}, {102}}));
+
+    receiver_->stealTask(receive.unique_key);
+    send.block_info = makeBlocks(100, first_source.data_ptr(), size);
+    EXPECT_EQ(syncSend(*sender_, send), TransferErrorCode::OK);
+}
+
 TEST_F(TcpSenderReceiverTest, A1_NormalTransfer_EndToEnd_Success) {
     if (!device_initialized_) {
         GTEST_SKIP() << "No GPU device";
@@ -263,6 +372,7 @@ TEST_F(TcpSenderReceiverTest, A1_NormalTransfer_EndToEnd_Success) {
     send_req.unique_key  = "k_a1_integ";
     send_req.block_info  = makeBlocks(1, gpu_src.data_ptr(), size);
     send_req.deadline_ms = currentTimeMs() + 5000;
+    send_req.timeout_ms = 5000;
 
     auto code = syncSend(*sender_, send_req, std::chrono::seconds(10));
     EXPECT_EQ(code, TransferErrorCode::OK);
@@ -317,6 +427,7 @@ TEST_F(TcpSenderReceiverTest, G2_MultipleSenders_ConcurrentKeys) {
         send_req.unique_key  = "k_g2_" + std::to_string(i);
         send_req.block_info  = makeBlocks(1, src_bufs[i].data_ptr(), size);
         send_req.deadline_ms = currentTimeMs() + 5000;
+        send_req.timeout_ms  = 5000;
 
         auto code = syncSend(*sender_, send_req, std::chrono::seconds(10));
         EXPECT_EQ(code, TransferErrorCode::OK) << "key index " << i;

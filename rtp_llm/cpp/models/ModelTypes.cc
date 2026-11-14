@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -113,6 +114,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
                             "cache_store_publish_start_tokens must be on CPU for TP sync");
     shape_hints[GptModelInputIndex::cacheStorePublishStartTokens] =
         inputs.cache_store_publish_start_tokens.defined() ? inputs.cache_store_publish_start_tokens.numel() : 0;
+    shape_hints[GptModelInputIndex::p2pFinalPrefill] =
+        inputs.p2p_final_prefill.defined() ? inputs.p2p_final_prefill.numel() : 0;
     shape_hints[GptModelInputIndex::maxKernelBlocksPerBatch] = kernel_block_table.width;
     shape_hints[GptModelInputIndex::maxBlocksPerBatch]       = block_table.width;
     shape_hints[GptModelInputIndex::cacheKeysWidth] =
@@ -200,7 +203,6 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     encode_flag(inputs.is_fake_stream, GptModelInputControlFlag::kControlFakeStream);
     encode_flag(inputs.is_target_verify, GptModelInputControlFlag::kControlTargetVerify);
     encode_flag(inputs.pd_separation, GptModelInputControlFlag::kControlPdSeparation);
-    encode_flag(inputs.decode_entrance, GptModelInputControlFlag::kControlDecodeEntrance);
     encode_flag(inputs.use_opaque_kv_cache_store, GptModelInputControlFlag::kControlOpaqueKvCacheStore);
     shape_hints[GptModelInputIndex::modelControlFlags]     = static_cast<int64_t>(control_flags);
     shape_hints[GptModelInputIndex::kvBlockStrideBytes]    = static_cast<int64_t>(inputs.kv_block_stride_bytes);
@@ -230,6 +232,7 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     encode_device(inputs.cache_keys, GptModelInputDeviceBit::kDeviceBitCacheKeys);
     encode_device(inputs.kv_cache_update_mapping, GptModelInputDeviceBit::kDeviceBitCacheUpdateMapping);
     encode_device(inputs.request_id, GptModelInputDeviceBit::kDeviceBitRequestId);
+    encode_device(inputs.request_deadline_ms, GptModelInputDeviceBit::kDeviceBitRequestDeadlineMs);
     encode_device(inputs.request_pd_separation, GptModelInputDeviceBit::kDeviceBitRequestPdSeparation);
     encode_device(inputs.lm_output_indexes, GptModelInputDeviceBit::kDeviceBitLmOutputIndexes);
     encode_device(inputs.combo_position_ids, GptModelInputDeviceBit::kDeviceBitComboPositionIds);
@@ -238,6 +241,9 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::tensorDeviceMap]          = static_cast<int64_t>(device_bits);
     shape_hints[GptModelInputIndex::kvCacheKernelBlockIdRank] = kernel_block_table.rank;
     shape_hints[GptModelInputIndex::kvCacheBlockIdRank]       = block_table.rank;
+    shape_hints[GptModelInputIndex::requestDeadlineMsLength] =
+        inputs.request_deadline_ms.defined() ? inputs.request_deadline_ms.numel() : 0;
+    shape_hints[GptModelInputIndex::p2pDeadlineSourceTimeMs] = currentTimeMs();
     return shape_hints;
 }
 
@@ -329,6 +335,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // execBroadcastCpu's fallback path keeps the NCCL+cudaSyncAndCheck
     // contract for cross-node TP.
     execBroadcastCpu({{shape_hints_t}, 0});
+    const auto source_time_ms = shape_hints_ptr[GptModelInputIndex::p2pDeadlineSourceTimeMs];
+    RTP_LLM_CHECK_WITH_INFO(source_time_ms > 0, "invalid P2P deadline source clock");
+    // Root request deadlines retain their identity across TP. Only local P2P
+    // layer retention uses this offset; later publication cannot renew a stored horizon.
+    inputs.p2p_deadline_clock_offset_ms = parallelism_config.tp_rank == 0 ? 0 : currentTimeMs() - source_time_ms;
 
     // multimodal features shape broadcast
     torch::Tensor mm_features_shape_t;
@@ -355,7 +366,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.is_fake_stream            = has_flag(GptModelInputControlFlag::kControlFakeStream);
     inputs.is_target_verify          = has_flag(GptModelInputControlFlag::kControlTargetVerify);
     inputs.pd_separation             = has_flag(GptModelInputControlFlag::kControlPdSeparation);
-    inputs.decode_entrance           = has_flag(GptModelInputControlFlag::kControlDecodeEntrance);
     inputs.use_opaque_kv_cache_store = has_flag(GptModelInputControlFlag::kControlOpaqueKvCacheStore);
     inputs.kv_block_stride_bytes =
         static_cast<size_t>(checkedHint(GptModelInputIndex::kvBlockStrideBytes, "kvBlockStrideBytes"));
@@ -498,10 +508,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.prefix_lengths       = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                {context_batch_size},
                                          pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
-        const auto publish_count =
-            checkedHint(GptModelInputIndex::cacheStorePublishStartTokens, "cacheStorePublishStartTokens");
-        inputs.cache_store_publish_start_tokens =
-            publish_count ? allocBuf(rtp_llm::DataType::TYPE_INT32, {publish_count}) : torch::Tensor();
+        const auto publish_count = checkedHint(GptModelInputIndex::cacheStorePublishStartTokens,
+                                               "cacheStorePublishStartTokens");
+        inputs.cache_store_publish_start_tokens = publish_count ?
+            allocBuf(rtp_llm::DataType::TYPE_INT32, {publish_count}) :
+            torch::Tensor();
+        const auto final_count = checkedHint(GptModelInputIndex::p2pFinalPrefill, "p2pFinalPrefill");
+        inputs.p2p_final_prefill = final_count ? allocBuf(rtp_llm::DataType::TYPE_BOOL, {final_count}) : torch::Tensor();
         if (max_kernel_blocks != 0) {
             // kv_cache_kernel_block_id residency follows the producer (rank 0): device only when
             // RTP_LLM_DEVICE_INPUT publishes it to CUDA. Follow the root bitmap so the packed-buffer
@@ -558,6 +571,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.lm_output_indexes     = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                 {checkedHint(GptModelInputIndex::lmOutputIndexes, "lmOutputIndexes")},
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
+        const auto deadline_length = checkedHint(GptModelInputIndex::requestDeadlineMsLength, "requestDeadlineMsLength");
+        inputs.request_deadline_ms = deadline_length ?
+            allocBuf(rtp_llm::DataType::TYPE_INT64, {deadline_length},
+                     pickAlloc(GptModelInputDeviceBit::kDeviceBitRequestDeadlineMs)) : torch::Tensor();
         if (combo_position_ids_size) {
             inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                  {combo_position_ids_size},
@@ -641,6 +658,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.sequence_lengths);
     collect(inputs.prefix_lengths);
     collect(inputs.cache_store_publish_start_tokens);
+    collect(inputs.p2p_final_prefill);
     if (max_kernel_blocks || max_blocks) {
         collect(wire_kernel_blocks);
         collect(wire_blocks);
@@ -655,6 +673,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.kv_cache_copy_token_lengths);
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);
+    collect(inputs.request_deadline_ms);
     collect(inputs.lm_output_indexes);
     if (combo_position_ids_size) {
         collect(inputs.combo_position_ids);

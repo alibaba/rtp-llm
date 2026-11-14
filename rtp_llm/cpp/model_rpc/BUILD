@@ -42,6 +42,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:error_code",
+        "@grpc//:grpc++",
     ],
 )
 
@@ -131,16 +133,17 @@ cc_library(
         "//rtp_llm/cpp/engine_base:profiler",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/metrics",
+        "//rtp_llm/cpp/multimodal_processor",
+        "//rtp_llm/cpp/normal_engine",
+        "//rtp_llm/cpp/utils:atomic_util",
+        "//rtp_llm/cpp/utils:deferred_completion_queue_drainer",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/utils:torch_cuda_oom",
-        "//rtp_llm/cpp/multimodal_processor",
         "//rtp_llm/cpp/multimodal_processor:mm_processor_config",
-        "//rtp_llm/cpp/normal_engine",
         "//rtp_llm/cpp/telemetry",
-        "//rtp_llm/cpp/utils:atomic_util",
         "//rtp_llm/cpp/utils:profiling_scope",
         "@havenask//aios/autil:scope",
     ],
@@ -179,8 +182,10 @@ cc_library(
     hdrs = ["BroadcastManager.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":rpc_error_code",
         ":model_rpc_pool",
         ":registered_cache_staging",
+        "//rtp_llm/cpp/utils:rpc_completion_queue",
     ],
 )
 

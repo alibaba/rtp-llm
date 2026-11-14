@@ -1,8 +1,10 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.h"
 
+#include <limits>
 #include <mutex>
 
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 namespace transfer {
@@ -20,19 +22,32 @@ bool TransferTask::success() const {
 }
 
 void TransferTask::cancel() {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
-    if (done_) {
-        return;
+    std::function<void()> done_callback;
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        if (done_) {
+            return;
+        }
+        if (!transferring_) {
+            // PENDING: fast fail，立即终止
+            done_               = true;
+            if (error_code_ == TransferErrorCode::OK) {
+                error_code_ = TransferErrorCode::CANCELLED;
+                error_msg_  = "TransferTask cancelled";
+            }
+            total_cost_time_us_ = currentTimeUs() - start_time_us_;
+            done_callback       = std::move(done_callback_);
+        } else {
+            // TRANSFERRING: 仅记录取消意图，等待 notifyDone() 真正结束
+            cancel_requested_ = true;
+            if (error_code_ == TransferErrorCode::OK) {
+                error_code_ = TransferErrorCode::CANCELLED;
+                error_msg_  = "TransferTask cancelled during transfer";
+            }
+        }
     }
-    if (!transferring_) {
-        // PENDING: fast fail，立即终止
-        done_               = true;
-        error_code_         = TransferErrorCode::CANCELLED;
-        error_msg_          = "TransferTask cancelled";
-        total_cost_time_us_ = currentTimeUs() - start_time_us_;
-    } else {
-        // TRANSFERRING: 仅记录取消意图，等待 notifyDone() 真正结束
-        cancel_requested_ = true;
+    if (done_callback) {
+        done_callback();
     }
 }
 
@@ -46,20 +61,31 @@ bool TransferTask::startTransfer() {
 }
 
 void TransferTask::forceCancel() {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
-    if (done_) {
-        return;
+    std::function<void()> done_callback;
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        if (done_) {
+            return;
+        }
+        done_               = true;
+        if (error_code_ == TransferErrorCode::OK) {
+            error_code_ = TransferErrorCode::CANCELLED;
+            error_msg_  = "TransferTask force cancelled";
+        }
+        total_cost_time_us_ = currentTimeUs() - start_time_us_;
+        done_callback       = std::move(done_callback_);
     }
-    done_               = true;
-    error_code_         = TransferErrorCode::CANCELLED;
-    error_msg_          = "TransferTask force cancelled";
-    total_cost_time_us_ = currentTimeUs() - start_time_us_;
+    if (done_callback) {
+        done_callback();
+    }
 }
 
 TransferErrorCode TransferTask::errorCode() const {
-    std::shared_lock<std::shared_mutex> lock(mutex_);
-    if (!done_ && currentTimeMs() >= deadline_ms_) {
-        return TransferErrorCode::TIMEOUT;
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (error_code_ == TransferErrorCode::OK && !done_ && currentTimeMs() >= deadline_ms_) {
+        // Capture an observed timeout without claiming physical completion.
+        error_code_ = TransferErrorCode::TIMEOUT;
+        error_msg_  = "TransferTask timed out";
     }
     return error_code_;
 }
@@ -69,35 +95,95 @@ std::string TransferTask::errorMessage() const {
     return error_msg_;
 }
 
-void TransferTask::notifyDone(bool success, TransferErrorCode error_code, const std::string& error_msg) {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
-    if (done_) {
+void TransferTask::recordError(TransferErrorCode error_code, const std::string& error_message) {
+    if (error_code == TransferErrorCode::OK) {
         return;
     }
-    done_ = true;
-    if (currentTimeMs() >= deadline_ms_) {
-        // deadline 已过，无论传输是否物理完成，对调用方均视为超时
-        error_code_ = TransferErrorCode::TIMEOUT;
-        error_msg_  = "TransferTask timed out";
-    } else if (cancel_requested_) {
-        error_code_ = TransferErrorCode::CANCELLED;
-        error_msg_  = "TransferTask cancelled during transfer";
-    } else {
-        error_code_ = success ? TransferErrorCode::OK : error_code;
-        error_msg_  = error_msg;
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (!done_ && error_code_ == TransferErrorCode::OK) {
+        error_code_ = error_code;
+        error_msg_  = error_message;
     }
-    total_cost_time_us_ = currentTimeUs() - start_time_us_;
+}
+
+void TransferTask::notifyDone(bool success, TransferErrorCode error_code, const std::string& error_msg) {
+    std::function<void()> done_callback;
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        if (done_) {
+            return;
+        }
+        done_ = true;
+        if (error_code_ != TransferErrorCode::OK) {
+            // An earlier cancellation/failure already owns the result.
+        } else if (!success) {
+            error_code_ = error_code;
+            error_msg_  = error_msg;
+        } else if (currentTimeMs() >= deadline_ms_) {
+            // deadline 已过，无论传输是否物理完成，对调用方均视为超时
+            error_code_ = TransferErrorCode::TIMEOUT;
+            error_msg_  = "TransferTask timed out";
+        } else if (cancel_requested_) {
+            error_code_ = TransferErrorCode::CANCELLED;
+            error_msg_  = "TransferTask cancelled during transfer";
+        } else {
+            error_code_ = TransferErrorCode::OK;
+            error_msg_  = error_msg;
+        }
+        total_cost_time_us_ = currentTimeUs() - start_time_us_;
+        done_callback       = std::move(done_callback_);
+    }
+    if (done_callback) {
+        done_callback();
+    }
+}
+
+void TransferTask::notifyBatchDone(const std::vector<int64_t>& keys) {
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        if (done_) {
+            return;
+        }
+        if (error_code_ == TransferErrorCode::OK && !cancel_requested_ && currentTimeMs() < deadline_ms_
+            && !on_batch_copied_(keys)) {
+            transferring_ = false;
+            return;
+        }
+    }
+    notifyDone(true);
+}
+
+void TransferTask::setDoneCallback(std::function<void()> callback) {
+    bool invoke_now = false;
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        if (done_) {
+            invoke_now = true;
+        } else {
+            done_callback_ = std::move(callback);
+        }
+    }
+    if (invoke_now && callback) {
+        callback();
+    }
 }
 
 // ==================== TransferTaskStore ====================
 
 std::shared_ptr<TransferTask>
-TransferTaskStore::addTask(const std::string& unique_key, transfer::KeyBlockInfoMap block_infos, int64_t deadline_ms) {
+TransferTaskStore::addTask(const std::string& unique_key,
+                           KeyBlockInfoMap block_infos,
+                           int64_t deadline_ms,
+                           BatchCopiedCallback on_batch_copied) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     if (task_map_.find(unique_key) != task_map_.end()) {
+        RTP_LLM_LOG_WARNING("P2P recv task registration rejected, stage=duplicate_recv_task "
+                            "partition_layer_key=%s deadline_ms=%ld",
+                            unique_key.c_str(), deadline_ms);
         return nullptr;
     }
-    auto task             = std::make_shared<TransferTask>(std::move(block_infos), deadline_ms);
+    auto task = std::make_shared<TransferTask>(std::move(block_infos), deadline_ms, std::move(on_batch_copied));
+    completed_batches_.erase(unique_key);
     task_map_[unique_key] = task;
     return task;
 }
@@ -105,7 +191,19 @@ TransferTaskStore::addTask(const std::string& unique_key, transfer::KeyBlockInfo
 std::shared_ptr<TransferTask> TransferTaskStore::getTask(const std::string& unique_key) const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     auto                                it = task_map_.find(unique_key);
-    return it != task_map_.end() ? it->second : nullptr;
+    if (it != task_map_.end()) {
+        return it->second;
+    }
+    const auto completed = completed_batches_.find(unique_key);
+    if (completed == completed_batches_.end() || currentTimeMs() >= completed->second) {
+        return nullptr;
+    }
+    static const auto completed_receipt = [] {
+        auto receipt = std::make_shared<TransferTask>(KeyBlockInfoMap{}, std::numeric_limits<int64_t>::max());
+        receipt->notifyDone(true);
+        return receipt;
+    }();
+    return completed_receipt;
 }
 
 std::shared_ptr<TransferTask> TransferTaskStore::stealTask(const std::string& unique_key) {
@@ -116,6 +214,19 @@ std::shared_ptr<TransferTask> TransferTaskStore::stealTask(const std::string& un
     }
     auto task = it->second;
     task_map_.erase(it);
+    const auto now_ms = currentTimeMs();
+    while (!completed_expiry_.empty() && completed_expiry_.begin()->first <= now_ms) {
+        const auto expired = completed_expiry_.begin();
+        const auto completed = completed_batches_.find(expired->second);
+        if (completed != completed_batches_.end() && completed->second == expired->first) {
+            completed_batches_.erase(completed);
+        }
+        completed_expiry_.erase(expired);
+    }
+    if (task->acceptsBatches() && task->success() && task->deadlineMs() > now_ms) {
+        completed_batches_.emplace(unique_key, task->deadlineMs());
+        completed_expiry_.emplace(task->deadlineMs(), unique_key);
+    }
     return task;
 }
 

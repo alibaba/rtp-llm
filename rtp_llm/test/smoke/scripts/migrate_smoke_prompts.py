@@ -14,6 +14,8 @@ import os
 import re
 import sys
 
+import json5
+
 SMOKE_DATA = os.path.join(os.path.dirname(__file__), "..", "data", "model")
 
 # Mapping: (prompt_pattern, prompt_type) -> prompt_id
@@ -102,7 +104,7 @@ def match_prompt(text, lang):
 
 def migrate_file(filepath, dry_run=False, clear_results=False):
     with open(filepath, "r", encoding="utf-8") as f:
-        data = json.load(f)
+        data = json5.load(f)
 
     if "query_result" not in data:
         return 0

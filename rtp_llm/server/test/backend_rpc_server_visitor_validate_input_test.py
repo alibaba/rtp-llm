@@ -117,6 +117,7 @@ class BackendRPCServerVisitorValidateInputTest(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(self.model_rpc_client.inputs, [])
 
     async def test_batch_enqueue_accepts_valid_prefill_only_generate_config(self):
+        self.visitor.pd_sep_config.role_type = RoleType.PDFUSION
         inputs = [
             _make_input(1, max_new_tokens=0),
             _make_input(self.visitor.max_seq_len, max_new_tokens=0),

@@ -73,6 +73,47 @@ TEST_F(TransferTaskTest, StartTransfer_AfterNotifyDone_ReturnsFalse) {
 
 // ==================== notifyDone() 正常路径 ====================
 
+TEST_F(TransferTaskTest, UpperLayerCanCompleteReceptionInOneBatch) {
+    const std::vector<int64_t> expected{101, 102};
+    TransferTask task({}, currentTimeMs() + 5000, [&](const auto& keys) { return keys == expected; });
+
+    ASSERT_TRUE(task.startTransfer());
+    task.notifyBatchDone(expected);
+    EXPECT_TRUE(task.success());
+}
+
+TEST_F(TransferTaskTest, CancelAfterUpperLayerKeepsReceptionOpen) {
+    TransferTask task({}, currentTimeMs() + 5000, [](const auto&) { return false; });
+    int completions = 0;
+    task.setDoneCallback([&] { ++completions; });
+
+    ASSERT_TRUE(task.startTransfer());
+    task.notifyBatchDone({101});
+    EXPECT_FALSE(task.done());
+    EXPECT_EQ(completions, 0);
+
+    task.cancel();
+    EXPECT_TRUE(task.done());
+    EXPECT_EQ(task.errorCode(), TransferErrorCode::CANCELLED);
+    EXPECT_EQ(completions, 1);
+}
+
+TEST_F(TransferTaskTest, CancelInFlightBatchWaitsForPhysicalCompletion) {
+    int copied_batches = 0;
+    TransferTask task({}, currentTimeMs() + 5000, [&](const auto&) {
+        ++copied_batches;
+        return true;
+    });
+    ASSERT_TRUE(task.startTransfer());
+    task.cancel();
+    EXPECT_FALSE(task.done());
+
+    task.notifyBatchDone({101});
+    EXPECT_TRUE(task.done());
+    EXPECT_EQ(task.errorCode(), TransferErrorCode::CANCELLED);
+    EXPECT_EQ(copied_batches, 0);
+}
+
 TEST_F(TransferTaskTest, NotifyDone_Success) {
     auto task = makeTask();
     task.startTransfer();
@@ -171,25 +212,22 @@ TEST_F(TransferTaskTest, NotifyDone_AfterTimeout_OverridesSuccess) {
     EXPECT_EQ(task.errorCode(), TransferErrorCode::TIMEOUT);
 }
 
-/// Timeout beats a physical failure: notifyDone(false, RPC_FAILED) after deadline -> TIMEOUT.
-TEST_F(TransferTaskTest, NotifyDone_AfterTimeout_OverridesFailure) {
+TEST_F(TransferTaskTest, FailedCompletionAfterDeadlinePreservesExplicitTransportCause) {
     auto task = makeExpiredTask();
     task.startTransfer();
-    task.notifyDone(false, TransferErrorCode::RPC_FAILED, "err");
-
+    task.notifyDone(false, TransferErrorCode::RPC_FAILED, "connection reset");
     EXPECT_TRUE(task.done());
-    EXPECT_EQ(task.errorCode(), TransferErrorCode::TIMEOUT);
+    EXPECT_EQ(task.errorCode(), TransferErrorCode::RPC_FAILED);
+    EXPECT_EQ(task.errorMessage(), "connection reset");
 }
 
-/// Timeout beats cancel_requested: timeout branch comes first inside notifyDone().
-TEST_F(TransferTaskTest, NotifyDone_AfterTimeout_OverridesCancelRequested) {
+TEST_F(TransferTaskTest, CancellationCapturedBeforeCompletionRemainsFirst) {
     auto task = makeExpiredTask();
     ASSERT_TRUE(task.startTransfer());
-    task.cancel();          // sets cancel_requested_ = true
-    task.notifyDone(true);  // but timeout fires first
-
+    task.cancel();
+    task.notifyDone(true);
     EXPECT_TRUE(task.done());
-    EXPECT_EQ(task.errorCode(), TransferErrorCode::TIMEOUT);  // not CANCELLED
+    EXPECT_EQ(task.errorCode(), TransferErrorCode::CANCELLED);
 }
 
 TEST_F(TransferTaskTest, NotifyDone_BeforeTimeout_Success_IsOK) {
@@ -429,4 +467,46 @@ TEST_F(TransferTaskTest, WorkerScenario_NotifyDone_AfterDeadline_IsTimeout) {
     EXPECT_EQ(task.errorCode(), TransferErrorCode::TIMEOUT);
 }
 
+TEST_F(TransferTaskTest, FirstFailureSurvivesCancelForceCancelAndLaterCompletion) {
+    TransferTask task({}, currentTimeMs() + 5000);
+    ASSERT_TRUE(task.startTransfer());
+    task.notifyDone(false, TransferErrorCode::RPC_FAILED, "connection reset peer=worker:9000");
+    task.cancel();
+    task.forceCancel();
+    task.notifyDone(false, TransferErrorCode::TIMEOUT, "later timeout");
+    EXPECT_EQ(task.errorCode(), TransferErrorCode::RPC_FAILED);
+    EXPECT_EQ(task.errorMessage(), "connection reset peer=worker:9000");
+}
+
+TEST_F(TransferTaskTest, ObservedTimeoutRemainsFirstWhilePhysicalTransferFinishes) {
+    TransferTask task({}, currentTimeMs() - 1);
+    ASSERT_TRUE(task.startTransfer());
+    EXPECT_EQ(task.errorCode(), TransferErrorCode::TIMEOUT);
+    EXPECT_FALSE(task.done());
+    task.notifyDone(false, TransferErrorCode::RPC_FAILED, "later connection failure");
+    EXPECT_TRUE(task.done());
+    EXPECT_EQ(task.errorCode(), TransferErrorCode::TIMEOUT);
+    EXPECT_EQ(task.errorMessage(), "TransferTask timed out");
+}
+
 }  // namespace rtp_llm
+
+namespace rtp_llm::transfer {
+TEST(TransferTaskFirstReadErrorTest, FailureSurvivesCancelUntilPhysicalCompletion) {
+    TransferTask task({}, currentTimeMs() + 60000);
+    ASSERT_TRUE(task.startTransfer());
+    int completed = 0;
+    task.setDoneCallback([&] { ++completed; });
+    task.recordError(TransferErrorCode::RDMA_FAILED, "first QP completion error");
+    task.recordError(TransferErrorCode::TIMEOUT, "later timeout");
+    task.cancel();
+    EXPECT_FALSE(task.done());
+    EXPECT_EQ(completed, 0);
+    EXPECT_EQ(task.errorMessage(), "first QP completion error");
+    task.notifyDone(false, TransferErrorCode::CANCELLED, "later cancellation completion");
+    EXPECT_TRUE(task.done());
+    EXPECT_EQ(completed, 1);
+    EXPECT_EQ(task.errorCode(), TransferErrorCode::RDMA_FAILED);
+    EXPECT_EQ(task.errorMessage(), "first QP completion error");
+}
+}  // namespace rtp_llm::transfer

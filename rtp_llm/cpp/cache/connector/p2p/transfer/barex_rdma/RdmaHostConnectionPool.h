@@ -15,6 +15,11 @@ struct ConnectionSlot {
     size_t                          index;
 };
 
+struct ConnectionInstallResult {
+    std::shared_ptr<RdmaConnection> connection;
+    bool                            installed;
+};
+
 /// @brief 管理特定 host:port 的固定大小 RDMA 连接池（Round-Robin 复用，懒创建）
 class RdmaHostConnectionPool {
 public:
@@ -23,11 +28,14 @@ public:
     /// @brief Round-Robin 获取下一个可用连接；若连接为空或已失败则返回 {nullptr, idx}
     ConnectionSlot getNextConnection();
 
-    /// @brief 仅在 slot 为空或 FAILED 时安装 new_conn；否则返回槽内已有连接（避免与 getNextConnection 之间的 TOCTOU 覆盖）
-    std::shared_ptr<RdmaConnection> installOrGetExistingAt(size_t idx,
-                                                          const std::shared_ptr<RdmaConnection>& new_conn);
+    /// @brief 仅在 slot 为空或 FAILED 时安装 new_conn；返回实际使用的连接及本次是否安装成功
+    ConnectionInstallResult installOrGetExistingAt(size_t idx,
+                                                   const std::shared_ptr<RdmaConnection>& new_conn);
 
     uint32_t getPoolSize() const { return pool_size_; }
+
+    /// @brief Sweep expired pending requests on all connections in this pool.
+    void sweepAllConnections();
 
     const std::string& getIp() const { return ip_; }
 

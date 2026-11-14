@@ -403,8 +403,24 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         return absl::OkStatus();
     }
 
+    if (cache_manager_ && model_input.pd_separation && !model_input.warmup && !model_input.is_fake_stream
+        && !model_input.skip_lm_head) {
+        cache_manager_->finishP2PPublication(model_input.p2p_final_prefill,
+                                             model_input.request_pd_separation,
+                                             model_input.request_id,
+                                             model_input.request_deadline_ms,
+                                             model_input.p2p_deadline_clock_offset_ms);
+    }
+
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
-        cudaSyncAndCheck();
+        if (cache_manager_ && cache_manager_->hasP2PConnector()) {
+            // P2P synchronizes KV readiness and transfer completion separately.
+            // Avoid waiting for independent transfer streams at forward completion.
+            cudaCurrentStreamSyncAndCheck();
+        } else {
+            // Preserve device-wide synchronization before releasing non-P2P buffers.
+            cudaSyncAndCheck();
+        }
         model_->releaseBuffers();
         if (profile_step_finish_) {
             profile_step_finish_();

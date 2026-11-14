@@ -77,6 +77,7 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@havenask//aios/autil:json",
+        "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
         "@havenask//aios/autil:lock_free",
         "//rtp_llm/models_py/bindings:op_defs",
     ] + select({

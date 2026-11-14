@@ -65,13 +65,14 @@ void GenerateStateMachine::handleWaiting() {
         auto result = stream_cache_resource_->initKVBlock();
         if (!result.ok()) {
             const auto role_type              = stream_cache_resource_->resourceContext().role_type;
-            const bool retryable_prefill_init = (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL)
-                                                && stream_cache_resource_->isContextStream();
-            if (absl::IsUnavailable(result) && retryable_prefill_init) {
+            const bool retryable_context_init = (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL
+                                                  || role_type == RoleType::DECODE)
+                                                 && stream_cache_resource_->isContextStream();
+            if (absl::IsUnavailable(result) && retryable_context_init) {
                 stream_cache_resource_->reportMallocRetry();
                 return;
             }
-            error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
+            reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "LACK MEM");
             status.store(StreamState::FINISHED, std::memory_order_release);
             releaseResource();
             return;
@@ -107,7 +108,7 @@ void GenerateStateMachine::handleWaiting() {
     // cache block tables aligned with the growing sequence length.
     auto result = stream_cache_resource_->incrKVBlock();
     if (!result.ok()) {
-        error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
+        reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "LACK MEM");
         status.store(StreamState::FINISHED, std::memory_order_release);
         releaseResource();
         return;
@@ -121,7 +122,12 @@ void GenerateStateMachine::handleLoading() {
         if (stream != nullptr) {
             stream->recordLoadingCacheDoneTime();
         }
-        status.store(StreamState::WAITING, std::memory_order_release);
+        if (events_.has(StreamEvents::GenerateDone)) {
+            status.store(StreamState::FINISHED, std::memory_order_release);
+            releaseResource();
+        } else {
+            status.store(StreamState::WAITING, std::memory_order_release);
+        }
     }
 }
 

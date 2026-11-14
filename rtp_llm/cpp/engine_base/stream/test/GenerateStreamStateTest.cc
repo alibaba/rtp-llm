@@ -171,6 +171,20 @@ TEST_F(GenerateStreamStateTest, testMallocRetryMetricsIndependentOfTerminalOutco
     }
 }
 
+TEST_F(GenerateStreamStateTest, testDecodeInitialCapacityPressureWaitsUntilRequestTimeout) {
+    auto stream = createStream({1, 2, 3}, false, RoleType::DECODE);
+    auto allocator = installRetryableInitMalloc();
+    stream->reportEvent(StreamEvents::CanRun);
+    for (int retry = 0; retry < 3; ++retry) {
+        EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
+        EXPECT_FALSE(stream->hasError());
+    }
+    // Request cancellation/deadline remains authoritative while capacity is unavailable.
+    stream->reportError(ErrorCode::GENERATE_TIMEOUT, "request deadline while waiting for KV capacity");
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+}
+
 TEST_F(GenerateStreamStateTest, testDirectStateManipulation) {
     auto stream = createStream();
     // WAITING -> LOADING_CACHE via direct manipulation
@@ -544,6 +558,9 @@ TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeMo
     run_model_if_eligible();
     EXPECT_TRUE(stream->isFinished());
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_EQ(stream->firstError().error.code(), ErrorCode::MALLOC_FAILED);
+    stream->reportError(ErrorCode::CANCELLED, "later cancellation");
+    EXPECT_EQ(stream->firstError().error.code(), ErrorCode::MALLOC_FAILED);
     EXPECT_NE(stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(model_entry_count, 0u);
     EXPECT_EQ(tracked_abort_count, 1u);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace rtp_llm {
@@ -7,13 +8,20 @@ namespace transfer {
 
 struct TransferBackendConfig {
     bool    cache_store_rdma_mode               = false;
-    int64_t rdma_transfer_wait_timeout_ms       = 180 * 1000;
     int     messager_io_thread_count            = 2;
     int     messager_worker_thread_count        = 16;
     int     rdma_max_block_pairs_per_connection = 0;
     int64_t cache_store_listen_port             = 0;
     int     cache_store_tcp_anet_rpc_thread_num = 3;
     int     cache_store_tcp_anet_rpc_queue_num  = 100;
+    int     cache_store_tcp_worker_queue_size   = 500;
+    int     rdma_transfer_worker_thread_count   = 16;
+    int     rdma_transfer_worker_queue_size     = 100;
+    bool    p2p_rdma_enable_h2d_copy            = false;
+    int64_t p2p_rdma_staging_total_bytes        = 0;
+    // Derived from CacheConfig::block_size_bytes, not exposed as a user configuration.
+    size_t  llm_kv_block_size_bytes             = 0;
+    int64_t rdma_disconnect_after_deadline_ms   = 10 * 1000;
     /// 0: 关闭 TcpClient channel idle 淘汰；大于 0 为毫秒
     int64_t tcp_channel_idle_ttl_ms = 0;
     /// 0: 关闭每 N 次 getChannel 的全表清扫，仅 miss 时清扫；大于 0 为间隔

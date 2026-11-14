@@ -33,6 +33,9 @@ public:
             rdma_conn->onConnectSuccess(conn);
         } else {
             RTP_LLM_LOG_ERROR("rdma connection callback on connect success, but rdma connection is nullptr");
+            if (conn) {
+                conn->Close();
+            }
         }
     }
 
@@ -56,6 +59,9 @@ RdmaClient::RdmaClient(const std::shared_ptr<IRdmaMemoryManager>&        memory_
     memory_manager_(memory_manager) {}
 
 RdmaClient::~RdmaClient() {
+    if (deadline_sweep_thread_) {
+        deadline_sweep_thread_->stop();
+    }
     // 清理所有连接池
     {
         std::unique_lock<std::shared_mutex> lock(host_connections_mutex_);
@@ -107,6 +113,15 @@ bool RdmaClient::init(int io_thread_count, int worker_thread_count) {
         "rdma client init success, io thread count %d, worker thread count %d",
         io_thread_count,
         worker_thread_count);
+
+    deadline_sweep_thread_ =
+        autil::LoopThread::createLoopThread(std::bind(&RdmaClient::sweepExpiredPendingRequests, this),
+                                            1000000,  // 1 second
+                                            "RdmaClientDeadlineSweep");
+    if (!deadline_sweep_thread_) {
+        RTP_LLM_LOG_WARNING("rdma client failed to create deadline sweep thread");
+    }
+
     return true;
 }
 
@@ -122,26 +137,34 @@ std::shared_ptr<IRdmaConnection> RdmaClient::getConnection(const std::string& ip
         return conn;
     }
 
-    auto new_conn = createNewConnection(ip, port);
+    auto new_conn = makeConnection(ip, port);
     if (!new_conn) {
         return nullptr;
     }
-    return pool->installOrGetExistingAt(idx, new_conn);
+    auto install_result = pool->installOrGetExistingAt(idx, new_conn);
+    if (!install_result.installed) {
+        return install_result.connection;
+    }
+
+    startConnection(new_conn, ip, port);
+    return new_conn;
 }
 
-std::shared_ptr<RdmaConnection> RdmaClient::createNewConnection(const std::string& ip, uint32_t port) {
+std::shared_ptr<RdmaConnection> RdmaClient::makeConnection(const std::string& ip, uint32_t port) {
     if (!memory_manager_) {
         RTP_LLM_LOG_WARNING("rdma client create connection failed, memory manager is nullptr");
         return nullptr;
     }
 
-    auto rdma_connection = std::make_shared<RdmaConnection>(memory_manager_, ip, port, metrics_reporter_);
+    return std::make_shared<RdmaConnection>(memory_manager_, ip, port, metrics_reporter_);
+}
 
-    auto callback = std::make_shared<RdmaClientConnectionCallback>(rdma_connection);
+void RdmaClient::startConnection(const std::shared_ptr<RdmaConnection>& connection,
+                                 const std::string&                     ip,
+                                 uint32_t                               port) {
+    auto callback = std::make_shared<RdmaClientConnectionCallback>(connection);
 
     client_->Connect(::accl::barex::TCP_V4, ip, port, callback);
-
-    return rdma_connection;
 }
 
 std::shared_ptr<RdmaHostConnectionPool> RdmaClient::getOrCreateConnectionPool(const std::string& ip, uint32_t port) {
@@ -166,6 +189,20 @@ std::shared_ptr<RdmaHostConnectionPool> RdmaClient::getOrCreateConnectionPool(co
     RTP_LLM_LOG_INFO("rdma client created connection pool to %s:%u, pool size: %u",
                      ip.c_str(), port, rdma_connections_per_host_);
     return pool;
+}
+
+void RdmaClient::sweepExpiredPendingRequests() {
+    std::vector<std::shared_ptr<RdmaHostConnectionPool>> pools;
+    {
+        std::shared_lock<std::shared_mutex> lock(host_connections_mutex_);
+        pools.reserve(host_connection_pools_.size());
+        for (auto& [_, pool] : host_connection_pools_) {
+            pools.push_back(pool);
+        }
+    }
+    for (auto& pool : pools) {
+        pool->sweepAllConnections();
+    }
 }
 
 }  // namespace barex_rdma

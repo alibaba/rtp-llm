@@ -51,7 +51,7 @@ void TcpTransferService::transfer(::google::protobuf::RpcController*            
                                   ::google::protobuf::Closure*                        done) {
     if (!wait_check_loop_thread_ || !worker_thread_pool_) {
         RTP_LLM_LOG_WARNING("TcpTransferService transfer failed: service not initialized");
-        response->set_error_code(::tcp_transfer::TCP_TRANSFER_UNKNOWN_ERROR);
+        response->set_error_code(::tcp_transfer::TCP_TRANSFER_NOT_INITIALIZED);
         response->set_error_message("TcpTransferService not initialized");
         done->Run();
         return;
@@ -103,7 +103,7 @@ void TcpTransferService::waitCheckProc() {
         if (ret != autil::ThreadPoolBase::ERROR_NONE) {
             RTP_LLM_LOG_WARNING("TcpTransferService push transfer task to thread pool failed, unique_key: %s",
                                 ctx->getUniqueKey().c_str());
-            ctx->run(false, TransferErrorCode::UNKNOWN, "push transfer task to thread pool failed");
+            ctx->run(false, TransferErrorCode::QUEUE_REJECTED, "push transfer task to thread pool failed");
         }
     }
 }
@@ -114,7 +114,7 @@ void TcpTransferService::transferViaTcp(const std::shared_ptr<TcpTaskContext>& c
         return;
     }
     if (!ctx->executeCopy(*cuda_copy_util_)) {
-        ctx->run(false, TransferErrorCode::BUFFER_MISMATCH, "copy blocks to device failed");
+        ctx->run(false, ctx->copyErrorCode(), ctx->copyErrorMessage());
         return;
     }
     ctx->run(true);

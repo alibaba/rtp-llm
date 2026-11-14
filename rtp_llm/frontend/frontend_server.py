@@ -344,6 +344,11 @@ class FrontendServer(object):
                 _record_http_status(trace_state, 200)
                 trace_state.finish(error=e)
             format_e = format_exception(e)
+            logging.warning(
+                "Frontend streaming failure: request_id=%s http_status=200 error_code=%s error_name=%s message=%s",
+                request.get(request_id_field_name), format_e.get("error_code"),
+                format_e.get("error_code_str"), format_e.get("message"),
+            )
             self._access_logger.log_exception_access(request, e, format_e)
             kmonitor.report(
                 AccMetrics.ERROR_QPS_METRIC,
@@ -597,6 +602,20 @@ class FrontendServer(object):
                 )
             assert self._frontend_worker is not None
             prompts = req.get("prompt_batch", [])
+            if len(prompts) > 1:
+                # Pipeline uses base_request_id + item index. Reserve the whole
+                # sequence range so another batch/single request cannot reuse it.
+                with self._global_controller.lock:
+                    sequence = self._global_controller.request_counter.value + 1
+                    if sequence % 4096 + len(prompts) > 4096:
+                        sequence += (-sequence) % 4096
+                    self._global_controller.request_counter.value = sequence + len(prompts) - 1
+            request_id = generate_request_id(
+                self.py_env_configs.server_config.ip,
+                self.py_env_configs.server_config.server_port,
+                self.server_id,
+                sequence,
+            )
             generate_config = req.get("generate_config", {})
             result = await self._frontend_worker.batch_infer(
                 prompts=prompts,
@@ -631,6 +650,11 @@ class FrontendServer(object):
     def _handle_exception(self, request: Dict[str, Any], e: BaseException):
         exception_json = format_exception(e)
         error_code_str = exception_json.get("error_code_str", "")
+        logging.warning(
+            "Frontend failure: request_id=%s http_status=500 error_code=%s error_name=%s message=%s",
+            request.get(request_id_field_name), exception_json.get("error_code"),
+            error_code_str, exception_json.get("message"),
+        )
         if isinstance(e, ConcurrencyException):
             kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
         elif isinstance(e, asyncio.CancelledError):

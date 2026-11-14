@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -56,6 +57,14 @@ public:
     bool          compactLastRankGroup(const CacheConfig& config, std::string_view tag) const;
 
     int localBlockCount(int seq_len) const;
+
+    // Projects a logical cache-key position to the physical block slot owned
+    // by the given CP rank. nullopt means that the rank does not own this key.
+    static std::optional<size_t> physicalBlockPosition(const CacheGroupPolicy& policy,
+                                                       size_t                  logical_position,
+                                                       size_t                  logical_count,
+                                                       int                     cp_rank,
+                                                       int                     cp_size);
 
     // Legacy FULL-page-RR helper. Prefer the group-aware overload for new code.
     int effectiveSeqLenForAlloc(int actual_seq_len) const;

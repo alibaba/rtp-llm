@@ -1120,21 +1120,6 @@ class MockRpcServicer:
             "BatchGenerateCall is not implemented by the mock engine",
         )
 
-    async def RemoteLoad(self, request, context):
-        return self.pb2.BroadcastLoadResponsePB()
-
-    async def RemoteGenerate(self, request_iterator, context):
-        async for _ in request_iterator:
-            break
-        if False:
-            yield self.pb2.GenerateOutputsPB()
-
-    async def RemoteFinish(self, request, context):
-        return self.pb2.EmptyPB()
-
-    async def RemoteFinishNew(self, request, context):
-        return self.pb2.EmptyPB()
-
     async def Cancel(self, request, context):
         if self.state.role != "prefill":
             import grpc
@@ -1208,12 +1193,6 @@ class MockRpcServicer:
 
     async def UpdateWeights(self, request, context):
         return self.pb2.EmptyPB()
-
-    async def RemoteGenerateNew(self, request, context):
-        return self.pb2.RemoteGenerateResponsePBNew(finished=True)
-
-    async def RemoteStore(self, request, context):
-        return self.pb2.RemoteStoreResponsePB()
 
     async def ExecuteFunction(self, request, context):
         return self.pb2.FunctionResponsePB()

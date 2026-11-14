@@ -63,7 +63,8 @@ private:
     iterateStreams(std::vector<std::shared_ptr<GenerateStreamWrapper>>&    streams,
                    const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                    const InferenceParsedRequest&                           req,
-                   autil::StageTime&                                       iterate_stage_timer);
+                   autil::StageTime&                                       iterate_stage_timer,
+                   bool*                                                   response_started = nullptr);
 
     std::shared_ptr<GenerateInput> fillGenerateInput(int64_t                                request_id,
                                                      const std::string&                     text,
@@ -71,7 +72,7 @@ private:
                                                      const std::shared_ptr<GenerateConfig>& generate_config);
 
     std::string doneResponse();
-    std::string sseResponse(const std::string& response);
+    std::string inferenceSseFrame(const std::string& response);
     std::string streamingResponse(const std::any& response);
     std::string completeResponse(const std::any& response);
     std::any    formatResponse(std::vector<MultiSeqsResponse> batch_state, bool batch_infer);
