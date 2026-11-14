@@ -426,3 +426,58 @@ filegroup(
     ], exclude = ["**/test/**", "**/tests/**"]) + [":ppu_jit_sources", "//rtp_llm:models/deepseek_v4.py"],
     visibility = ["//visibility:public"],
 )
+
+py_library(
+    name = "new_loader_core",
+    srcs = ["__init__.py", "model_loader.py", "module_base.py", "registry.py", "weight_mapper.py"],
+    deps = ["//rtp_llm:new_loader_device_type", "//rtp_llm:safetensors", "//rtp_llm:torch"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "new_loader_quant_methods",
+    srcs = [
+        "quant_methods/__init__.py",
+        "quant_methods/base.py",
+        "quant_methods/unquantized.py",
+    ],
+    deps = [
+        ":quantization_exclusion",
+        "//rtp_llm:torch",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "new_loader_layers",
+    srcs = [
+        "layers/__init__.py",
+        "layers/activation.py",
+        "layers/collectives.py",
+        "layers/embedding.py",
+        "layers/linear.py",
+        "layers/norm.py",
+    ],
+    deps = [
+        ":new_loader_core",
+        ":new_loader_quant_methods",
+        "//rtp_llm:ops",
+        "//rtp_llm:torch",
+        "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/models_py/distributed:rank_layout",
+    ] + select({
+        "@//:using_rocm": ["//rtp_llm/models_py/modules/base/rocm:rocm_base"],
+        "@//:using_cuda12": flashinfer,
+        "@//:using_cuda13_x86": flashinfer,
+        "@//:using_cuda13_arm": flashinfer,
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "quantization_exclusion",
+    srcs = ["quantization_exclusion.py"],
+    deps = ["//rtp_llm:new_loader_device_type"],
+    visibility = ["//visibility:public"],
+)
