@@ -59,12 +59,21 @@ class Dsv4ConfigTest(unittest.TestCase):
         self.moe.use_deepep_low_latency = True
         for gamma in (0, 1, 2, 3):
             self.config.gen_num_per_cycle = gamma
-            self.assertEqual(self.build().execution_options["DSV4_PPU_DECODE_METADATA"],
-                             "reference")
+            self.build()
         self.config.model_type = "deepseek_v4_mtp"
         self.config.num_layers = 1
         self.config.attn_config.layer_compress_ratios = [0]
         self.build()
+
+    def test_stale_reference_metadata_env_is_ignored(self):
+        self.parallel.role_type.name = "DECODE"
+        self.parallel.ep_size = 4
+        self.moe.use_deepep_low_latency = True
+        with patch.dict(os.environ, {
+            "DSV4_PPU_DECODE_METADATA": "reference",
+            "DSV4_PPU_DECODE_ROPE": "reference",
+        }):
+            self.build()
 
     def test_decode_ep1_rejected_for_single_and_multiple_tp_ranks(self):
         self.parallel.role_type.name = "DECODE"

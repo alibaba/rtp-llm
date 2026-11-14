@@ -131,6 +131,7 @@ def forward_layers(
     attention_inputs: Any = None,
     prepare_hidden_fn: Optional[Any] = None,
     capture_context: Optional[Any] = None,
+    workspace: Optional[PrefillWorkspace] = None,
 ) -> torch.Tensor:
     """Flat per-layer loop — vLLM-aligned layout.
 
@@ -163,8 +164,8 @@ def forward_layers(
     # other forward-local CUDA tensor. If embedding lands in the cached block
     # first, it can split the only contiguous region large enough for this
     # allocation and force the expandable allocator to map another region.
-    ws: Optional[PrefillWorkspace] = None
-    if v4.fp8_kv_cache:
+    ws: Optional[PrefillWorkspace] = workspace
+    if v4.fp8_kv_cache and ws is None:
         reserve_cp = (
             getattr(v4, "_cp_info", None) is not None
             and int(getattr(v4, "_cp_size", 1)) > 1
@@ -614,6 +615,40 @@ def forward_prefill(
         )
 
     block_tables_by_type = build_block_tables_batched(kv_cache, attn_inputs)
+
+    from rtp_llm.models_py.modules.dsv4.ppu.prefill.warmup import (
+        forward_warmup_groups,
+        reserved_page_warmup_groups,
+    )
+
+    # The engine's reserved-page warmup can exceed the fixed prefill workspace.
+    # Split it into whole-request groups so one scratch allocation is reused
+    # instead of growing `q_rows` to the full warmup token count.
+    groups = (
+        None
+        if is_capturing or _rt.ENABLED
+        else reserved_page_warmup_groups(
+            v4,
+            parallelism_config,
+            attn_inputs,
+            cu_seqlens,
+            input_ids.numel(),
+            prepare_hidden_fn,
+            capture_context,
+        )
+    )
+    if groups is not None:
+        return forward_warmup_groups(
+            v4,
+            kv_cache,
+            input_ids,
+            positions,
+            cu_seqlens,
+            block_tables_by_type,
+            attn_inputs,
+            groups,
+            forward_layers,
+        )
 
     fixed_mtp_buffer = v4._mtp_hidden_buffer
     temporary_mtp_buffer = None
