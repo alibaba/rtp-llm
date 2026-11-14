@@ -6,9 +6,6 @@ namespace rtp_llm {
 TEST(RemoteRpcServiceImplTest, RetiredPDMethodsReturnUnimplemented) {
     RemoteRpcServiceImpl service;
     grpc::ServerContext  context;
-    EXPECT_EQ(service.RemoteGenerate(&context, nullptr).error_code(), grpc::StatusCode::UNIMPLEMENTED);
-    EXPECT_EQ(service.RemoteLoad(&context, nullptr, nullptr).error_code(), grpc::StatusCode::UNIMPLEMENTED);
-    EXPECT_EQ(service.RemoteFinish(&context, nullptr, nullptr).error_code(), grpc::StatusCode::UNIMPLEMENTED);
     EXPECT_EQ(service.EnqueueGroup(&context, nullptr, nullptr).error_code(), grpc::StatusCode::UNIMPLEMENTED);
     EXPECT_EQ(service.FetchResponse(&context, nullptr, nullptr).error_code(), grpc::StatusCode::UNIMPLEMENTED);
     EXPECT_EQ(service.Cancel(&context, nullptr, nullptr).error_code(), grpc::StatusCode::INVALID_ARGUMENT);

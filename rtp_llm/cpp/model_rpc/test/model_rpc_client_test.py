@@ -3758,7 +3758,7 @@ class ClientSpanSettlementTest(TestCase):
 
             inp = self._make_input()
             inp.enqueued_by_master = True
-            inp.generate_config.role_addrs = [_prefill_role_addr("worker", 9000)]
+            inp.generate_config.role_addrs = [_decode_role_addr("worker", 9000)]
             with patch(
                 "rtp_llm.cpp.model_rpc.model_rpc_client._read_rpc_response",
                 controlled_read,

@@ -8,7 +8,7 @@ Frontend、FlexLB master、Prefill、Decode 必须来自同一发布版本，使
 
 本次切换不支持这四部分跨新旧版本混跑：
 
-- 旧 P→D 的 RemoteGenerate / RemoteLoad / RemoteFinish 不再承载请求。
+- P/D handoff 由 Decode 发起，使用 GetPeerInfo 查询 Prefill 拓扑，通过 StartLoad 获取 KV 和首 token。
 - 新请求从 Decode.GenerateStreamCall 获取输出；旧 EnqueueGroup / FetchResponse 不提供过渡实现。
 - 新 Decode 要求 Prefill 的 GetPeerInfo / StartLoad 与当前分组 KV 布局一致。KV 传输、远端缓存和 host-cache 对端仍须遵守同构建协议契约。
 

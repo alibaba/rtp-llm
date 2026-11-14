@@ -2082,7 +2082,6 @@ TEST_F(PPBatchStreamProcessorTest, PrefillOnlyDispatchFinishesWithoutTokensOrPdH
 
                 EXPECT_FALSE(healthy->hasError());
                 EXPECT_TRUE(healthy->hasEvent(StreamEvents::GenerateDone));
-                EXPECT_FALSE(healthy->hasEvent(StreamEvents::NeedRemoteGenerate));
                 EXPECT_EQ(healthy->completeTokenIdsVec(0), (std::vector<int>{1, 2}));
                 EXPECT_EQ(logits_processor->updates, 0);
                 auto output = healthy->nextOutput(1);
