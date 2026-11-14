@@ -17,10 +17,14 @@ struct GrammarConfig;
 
 class LogitsProcessorFactory {
 public:
-    static void init(const ModelConfig&             model_config,
-                     const GrammarConfig&           grammar_config,
-                     const std::string&             tree_decode_config,
-                     kmonitor::MetricsReporterPtr   metrics_reporter = nullptr);
+    static void init(const ModelConfig&           model_config,
+                     const GrammarConfig&         grammar_config,
+                     const std::string&           tree_decode_config,
+                     kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
+
+    // Call after request processing stops and before KMonitorFactory shutdown.
+    // Joins outstanding grammar compilation and releases its metrics reporter.
+    static void shutdown();
 
     static ErrorResult<std::vector<BaseLogitsProcessorPtr>>
     createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,

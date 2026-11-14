@@ -2306,7 +2306,11 @@ class AttentionFP8(nn.Module):
             selection = self._translate_compressed_selection(
                 cmp_local_raw, bsz, q_len, attn_metadata, CSA_KV
             )
-            plan.runtime.begin(selection.contiguous())
+            plan.runtime.begin(
+                selection.contiguous(),
+                request_keys=attn_metadata.pool_block_tables["csa_kv"][:bsz, 0],
+                request_ids=attn_metadata.req_id_per_token[: bsz * q_len],
+            )
         csa_compressor_meta = self._decode_compressor_meta_from_metadata(
             attn_metadata,
             state_attn_type=CSA_STATE,
@@ -2468,7 +2472,11 @@ class AttentionFP8(nn.Module):
                 selection = self._translate_compressed_selection(
                     cmp_local_raw, bsz, q_len, attn_metadata, cmp_attn_type
                 )
-                plan.runtime.begin(selection.contiguous())
+                plan.runtime.begin(
+                    selection.contiguous(),
+                    request_keys=cmp_pool_bt[:bsz, 0],
+                    request_ids=attn_metadata.req_id_per_token[:T],
+                )
             read = plan.runtime.acquire(plan.storage_index)
             cmp_global = read.indices
         else:

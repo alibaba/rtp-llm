@@ -490,15 +490,30 @@ class GenericMoeModel(GptModelBase):
     def initialize(self, init_resource) -> bool:
         if init_resource.kv_cache is None:
             return super().initialize(init_resource)
-        self.offload_plans = {}
         descs = self.config.kv_cache_spec_descs
-        if any(
+        if not any(
             desc.offload is not None and desc.offload.enabled
             for layer in descs
             for desc in layer
         ):
-            from rtp_llm.models_py.modules.offload.plan import build_offload_plans
+            self.release_sparse_kv_offload()
+            return super().initialize(init_resource)
+        from rtp_llm.models_py.modules.offload.plan import (
+            build_offload_plans,
+            offload_plan_signature,
+        )
 
+        max_write_rows = self.max_generate_batch_size * max(
+            1, int(self.config.gen_num_per_cycle) + 1
+        )
+        storage_signature = offload_plan_signature(init_resource.kv_cache, descs)
+        signature = (storage_signature, max_write_rows)
+        if getattr(self, "_offload_signature", None) == signature:
+            return super().initialize(init_resource)
+        # Drop every old adapter/writer reference before allocating a new
+        # metadata generation. Repeated graph-wrapper initialization reuses it.
+        self.release_sparse_kv_offload()
+        if storage_signature:
             self.offload_plans = build_offload_plans(init_resource.kv_cache, descs)
         for (layer, tag), plan in self.offload_plans.items():
             if not self._uses_sparse_mla() or tag != "default":
@@ -507,9 +522,9 @@ class GenericMoeModel(GptModelBase):
                 )
             self.layers[layer].self_attn.configure_offload(
                 plan,
-                self.max_generate_batch_size
-                * max(1, int(self.config.gen_num_per_cycle) + 1),
+                max_write_rows,
             )
+        self._offload_signature = signature
         return super().initialize(init_resource)
 
     def release_model_offload_resources(self) -> None:

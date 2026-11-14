@@ -389,7 +389,7 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     if (generate_stream->hasError()) {
         const auto error = generate_stream->statusInfo();
         finish_allocation_error(error.code() == ErrorCode::INVALID_PARAMS ? grpc::StatusCode::INVALID_ARGUMENT :
-                                                                          grpc::StatusCode::INTERNAL,
+                                                                            grpc::StatusCode::INTERNAL,
                                 error.code(),
                                 error.ToString());
         return;
@@ -828,8 +828,13 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 void DecodeRpcServer::markLoadedOffloadOverwrite(KVCacheManager&           manager,
                                                  const LoadKVCacheContext& context,
                                                  const LoadCacheResult&    result) {
-    if (!result.ok() || !manager.hasSparseKvOffload() || !manager.isAllocatorOwner()) {
+    if (!manager.hasSparseKvOffload() || !manager.isAllocatorOwner()) {
         return;
+    }
+    // A failed import may already have changed a subset of these blocks.
+    // Invalidate their hot copies without publishing a usable loaded prefix.
+    if (!result.ok()) {
+        RTP_LLM_LOG_DEBUG("invalidate partial offload import for request %s", context.request_key.c_str());
     }
     const auto& config = manager.cacheConfig();
     for (const auto& [tag, tiered] : config.tiered_cache_configs) {
@@ -898,8 +903,9 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGene
                                     decode_context.server_context,
                                     decode_context.prefill_cp_size};
 
-    // Publish only after every rank has finished loading, before the stream can
-    // enter localGenerate. Use the same projection as the actual load requests.
+    // Invalidate the destination projection used by the load requests,
+    // including potentially modified blocks on failure. Only a successful
+    // load may publish a completed prefix and enter localGenerate.
     const auto finish = [&](LoadCacheResult result) {
         markLoadedOffloadOverwrite(*engine_->resourceContext().cache_manager, load_context, result);
         return result;

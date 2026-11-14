@@ -19,9 +19,13 @@ namespace rtp_llm {
 namespace {
 
 bool dynamicOffloadHotCache(const KVCacheConfig& config) {
+    const auto& policy = config.sparse_kv_offload_policy;
+    RTP_LLM_CHECK_WITH_INFO(
+        policy == "rr" || policy == "lru", "sparse_kv_offload_policy must be rr or lru, got '%s'", policy.c_str());
     const auto& mode = config.sparse_kv_offload_hot_cache_mode;
     RTP_LLM_CHECK_WITH_INFO(mode == "static" || mode == "dynamic",
-                            "sparse_kv_offload_hot_cache_mode must be static or dynamic, got '%s'", mode.c_str());
+                            "sparse_kv_offload_hot_cache_mode must be static or dynamic, got '%s'",
+                            mode.c_str());
     return mode == "dynamic";
 }
 
@@ -375,7 +379,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   const ParallelismConfig& parallelism_config,
                                                   const KVCacheConfig&     kv_cache_config,
                                                   int                      gen_num_per_cycle) {
-    auto config        = createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+    auto config = createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config.reuse_cache_tail_blocks > 0, "reuse_cache_tail_blocks must be positive");
     config.reuse_cache_tail_blocks = kv_cache_config.reuse_cache_tail_blocks;
     auto groups                    = config.topology().groups();
@@ -422,9 +426,13 @@ CacheConfig CacheConfigCreator::createWarmupConfig(const ModelConfig&       mode
             RTP_LLM_CHECK_WITH_INFO(group.policy.offload.max_selected_rows > 0,
                                     "offload warmup requires a positive selection for tag=%s",
                                     group.tag.c_str());
-            config.tiered_cache_configs.emplace(
-                group.tag, TieredCacheConfig{blocks, 2, group.policy.offload.max_selected_rows,
-                                            group.policy.offload.max_requests, dynamicOffloadHotCache(kv_cache_config)});
+            config.tiered_cache_configs.emplace(group.tag,
+                                                TieredCacheConfig{blocks,
+                                                                  2,
+                                                                  group.policy.offload.max_selected_rows,
+                                                                  group.policy.offload.max_requests,
+                                                                  dynamicOffloadHotCache(kv_cache_config),
+                                                                  kv_cache_config.sparse_kv_offload_policy});
         }
     }
     RTP_LLM_CHECK_WITH_INFO(!kv_cache_config.enable_sparse_kv_offload || !config.tiered_cache_configs.empty(),
@@ -551,12 +559,13 @@ TieredCacheCapacity CacheConfigCreator::configureOffloadCapacity(CacheConfig&   
         layout.validate(group.kvBlockStrideBytes() / pages, group.kvScaleStrideBytes() / pages);
         const uint32_t page_rows = layout.rows_per_page;
         RTP_LLM_CHECK_WITH_INFO(pages <= UINT32_MAX / page_rows, "offload entry count overflow");
-        const uint32_t          rows     = page_rows * pages;
-        const uint32_t          selected = policy.offload.max_selected_rows;
+        const uint32_t rows     = page_rows * pages;
+        const uint32_t selected = policy.offload.max_selected_rows;
         RTP_LLM_CHECK_WITH_INFO(policy.offload.max_requests == 0 || selected % policy.offload.max_requests == 0,
                                 "offload selection capacity must contain a whole hot-cache quota per request");
-        const TieredCacheConfig capacity{0, 0, selected, policy.offload.max_requests, dynamic_hot_cache};
-        const uint64_t          resident = capacity.residentRows(page_rows);
+        const TieredCacheConfig capacity{
+            0, 0, selected, policy.offload.max_requests, dynamic_hot_cache, kv_cache_config.sparse_kv_offload_policy};
+        const uint64_t resident = capacity.residentRows(page_rows);
         RTP_LLM_CHECK_WITH_INFO(
             selected > 0 && resident < static_cast<uint64_t>(std::numeric_limits<int32_t>::max()),
             "offload tag=%s needs a positive selection fitting int32 after page alignment, S=%u page=%u",
@@ -578,8 +587,8 @@ TieredCacheCapacity CacheConfigCreator::configureOffloadCapacity(CacheConfig&   
             block_bytes % pages == 0, "offload tag=%s has a partial page stride", group.tag.c_str());
         addBudgetBytes(budget.fixed_gpu_bytes, block_bytes / pages, resident / page_rows);
         if (dynamic_hot_cache) {
-            addBudgetBytes(budget.fixed_gpu_bytes, sizeof(int64_t), resident);  // allocation epochs shared by tag
-            addBudgetBytes(budget.fixed_gpu_bytes, sizeof(int32_t));  // active hot rows
+            addBudgetBytes(budget.fixed_gpu_bytes, sizeof(int64_t), resident);     // allocation epochs shared by tag
+            addBudgetBytes(budget.fixed_gpu_bytes, sizeof(int32_t));               // active hot rows
             addBudgetBytes(budget.fixed_gpu_bytes, kOffloadAllocationChunkBytes);  // VMM tail rounding
         }
         // Shared selection state is per runtime; native KV and pack staging are per storage.
@@ -588,7 +597,10 @@ TieredCacheCapacity CacheConfigCreator::configureOffloadCapacity(CacheConfig&   
         size_t runtime_fixed = 0;
         addBudgetBytes(runtime_fixed, dynamic_hot_cache ? 28 : 20, resident);
         addBudgetBytes(runtime_fixed, 12, selected);
-        addBudgetBytes(runtime_fixed, 32);
+        // Request identity/generation, quota binding, per-request RR cursor and
+        // pending counters. Admission reuses the existing write-index scratch.
+        addBudgetBytes(runtime_fixed, 60, std::max<uint32_t>(1, policy.offload.max_requests));
+        addBudgetBytes(runtime_fixed, 36);  // scalar counters plus sticky device error
         addBudgetBytes(budget.fixed_gpu_bytes, runtime_fixed, runtimes);
         size_t pack_indices = 0;
         addBudgetBytes(pack_indices, 12, max_write_rows);

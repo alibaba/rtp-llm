@@ -99,7 +99,7 @@ resident_rows = ceil(max_selected_rows / rows_per_page) * rows_per_page
 
 `OffloadStorage` 保存 `total_blocks`、`hbm_blocks`、`rows_per_block`、`rows_per_page`、`max_selected_rows`、`host_planes`、`resident_planes` 和 `generations`。C++ 持有正式 KV 和热缓存内存，Python 只持有同一块内存的 tensor view。
 
-热缓存支持两种启动模式，使用 `--sparse_kv_offload_hot_cache_mode static|dynamic` 或环境变量 `SPARSE_KV_OFFLOAD_HOT_CACHE_MODE` 选择，默认 `static`。两种模式都共享一个热槽池；各请求没有固定独享的槽位范围，GPU gather 直接读取 pinned Host 的路径相同。
+热缓存支持两种启动模式，使用 `--sparse_kv_offload_hot_cache_mode static|dynamic` 或环境变量 `SPARSE_KV_OFFLOAD_HOT_CACHE_MODE` 选择，默认 `static`。两种模式都将热槽池划分成请求配额，驱逐只在对应请求的分区内执行；GPU gather 直接读取 pinned Host 的路径相同。
 
 | 模式 | HBM 分配 | 开销与适用条件 |
 |---|---|---|
@@ -115,6 +115,15 @@ resident_rows = ceil(max_selected_rows / rows_per_page) * rows_per_page
 默认 warmup 仍开启。warmup 期间热缓存增长所占的 driver 显存从 runtime 峰值测量中扣除，由 offload 的峰值容量预算统一计费。
 
 模型构造器会填写 `max_requests`。动态模式下，旧版序列化 policy 缺少此字段时保留 `max_requests=0`：有请求就使用旧版完整 batch 配额，空闲时释放，以兼容无法推导单请求配额的旧描述。
+
+驱逐策略使用 `--sparse_kv_offload_policy rr|lru` 或 `SPARSE_KV_OFFLOAD_POLICY` 选择，默认 `rr`。`static|dynamic` 控制物理内存分配，`rr|lru` 控制请求分区内的驱逐，两个开关独立。
+
+- `rr`：每个分区保留环形游标，跳过本轮受保护的行。
+- `lru`：按最近一次 selection 轮次选择最久未使用的行，同轮访问视为并列、按槽位索引打破平局。需要新槽位时排序该请求的配额，维护成本随缓存行数和请求数增加。
+
+请求身份为首个物理 cache page 与所属 block 的 generation。Batch 重排沿用身份，MTP 多个 query 通过 attention 的 query-to-request 映射使用同一配额；graph padding 不单独分配配额。动态缩容后落在未映射区域的分区重新绑定到当前已映射前缀，并使旧副本失效。旧版描述没有 `max_requests` 时保留单分区兼容行为。
+
+分区只限制驱逐范围：全局 `mapping/owners/miss list` 仍以 backing row 为键，本轮重复选中的同一 Host 行只记录一次 fetch，多个 query 复用同一 resident 索引；共享 runtime 的各层仍分别搬运自己的 KV。D侧 `reuse_cache=0` 的限制不变，不能据此开启共享前缀。分区换给新身份时清理旧映射。新增分区元数据已纳入 HBM 预算。
 
 同一 tag 的层共享 `generations`，但每层仍有自己的 `OffloadStorage` 和正式 KV。共享的是 block 版本与 runtime 管理状态，不是 KV 数据。
 
@@ -146,7 +155,7 @@ block allocation / overwrite
 
 | 接口 | 调用位置 | 行为 |
 |---|---|---|
-| `begin(backing_ids)` | MLA top-K 转成 `default` backing ID 后；V4 把 CSA 压缩 ID 转成全局 slot 后 | 检查 flat 行数，去重 HBM/Host 行，保护当前热槽，安排 miss 行从 Host 搬到每层 resident plane |
+| `begin(backing_ids, request_keys=..., request_ids=...)` | MLA top-K 转成 `default` backing ID 后；V4 把 CSA 压缩 ID 转成全局 slot 后 | 检查 flat 行数，去重 HBM/Host 行，保护当前热槽，安排 miss 行从 Host 搬到每层 resident plane |
 | `write(storage_index, KVWrite)` | MLA RoPE/pack 后；V4 compressor 写完 striped staging 后 | 等待本层 fetch，写入正式 HBM/Host backing，并同步仍有效的热副本 |
 | `acquire(storage_index)` | 进入原 sparse attention kernel 前 | 让当前计算流等待该层 fetch，返回 resident planes 和重映射后的索引 |
 | `drain()` | 共享组末层、下一次 `begin` 前、graph 生命周期边界 | 等待组内剩余搬运完成 |
@@ -220,6 +229,7 @@ reserve_blocks = ceil(reserve_step / seq_size_per_block)
 --sparse_kv_offload_host_mb 53248
 --sparse_kv_offload_hot_rows 2048
 --sparse_kv_offload_hot_cache_mode static
+--sparse_kv_offload_policy rr
 --kv_cache_mem_mb 0
 --reuse_cache 0
 ```

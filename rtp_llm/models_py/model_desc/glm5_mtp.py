@@ -35,17 +35,19 @@ class Glm5MtpModel(GenericMoeModel):
         # this same Python model. Keep the runtime/writer addresses captured by
         # the first wrapper valid when the second wrapper initializes.
         if getattr(self, "offload_plans", {}):
-            for (layer, tag), plan in self.offload_plans.items():
-                storage = init_resource.kv_cache.get_offload_storage(layer, tag)
-                if storage is None or (
-                    [plane.data_ptr() for plane in storage.resident_planes]
-                    != [plane.data_ptr() for plane in plan.storage.resident_planes]
-                    or storage.generations.data_ptr()
-                    != plan.storage.generations.data_ptr()
-                ):
-                    raise ValueError(
-                        "GLM MTP graph wrappers must share their KV storage"
-                    )
+            from rtp_llm.models_py.modules.offload.plan import offload_plan_signature
+
+            max_write_rows = self.max_generate_batch_size * max(
+                1, int(self.config.gen_num_per_cycle) + 1
+            )
+            signature = (
+                offload_plan_signature(
+                    init_resource.kv_cache, self.config.kv_cache_spec_descs
+                ),
+                max_write_rows,
+            )
+            if self._offload_signature != signature:
+                raise ValueError("GLM MTP graph wrappers must share their KV storage")
             return GptModelBase.initialize(self, init_resource)
         return super().initialize(init_resource)
 

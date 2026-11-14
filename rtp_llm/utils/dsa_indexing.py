@@ -21,7 +21,9 @@ def _get_indexer_type(config: Any, layer_idx: int) -> Optional[str]:
             raise ValueError(f"indexer_types does not cover layer {layer_idx}")
         value = _normalise_pattern_entry(indexer_types[layer_idx])
         if value not in ("full", "shared"):
-            raise ValueError(f"Unsupported DSA indexer type for layer {layer_idx}: {value}")
+            raise ValueError(
+                f"Unsupported DSA indexer type for layer {layer_idx}: {value}"
+            )
         return value
     pattern = getattr(config, "index_topk_pattern", None)
     if pattern is not None:
@@ -31,13 +33,15 @@ def _get_indexer_type(config: Any, layer_idx: int) -> Optional[str]:
             raise ValueError(f"index_topk_pattern does not cover layer {layer_idx}")
         value = _normalise_pattern_entry(pattern[layer_idx])
         if value not in ("full", "shared"):
-            raise ValueError(f"Unsupported DSA indexer type for layer {layer_idx}: {value}")
+            raise ValueError(
+                f"Unsupported DSA indexer type for layer {layer_idx}: {value}"
+            )
         return value
     return None
 
 
 def dsa_layer_skips_topk(config: Any, layer_idx: int) -> bool:
-    """Use the reference GLM branch's explicit-pattern/frequency precedence."""
+    """Resolve sharing only from an explicit per-layer pattern or offset."""
     if bool(getattr(config, "is_mtp", False)):
         return False
     layer_type = _get_indexer_type(config, layer_idx)
@@ -58,7 +62,11 @@ def dsa_layer_skips_topk(config: Any, layer_idx: int) -> bool:
         if offset <= 0:
             raise ValueError("index_skip_topk_offset must be positive")
         return max(layer_idx - offset + 1, 0) % freq != 0
-    return max(layer_idx - 1, 0) % freq != 0
+    raise ValueError(
+        "index_topk_freq > 1 requires explicit indexer_types, "
+        "index_topk_pattern or index_skip_topk_offset; "
+        "the layer-sharing offset must not be inferred across model families"
+    )
 
 
 def dsa_layer_has_indexer(config: Any, layer_idx: int) -> bool:

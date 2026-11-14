@@ -812,6 +812,15 @@ class DeepSeekV2(BaseModel):
                 )
                 config.index_topk_pattern = config_json.get("index_topk_pattern")
                 config.indexer_types = config_json.get("indexer_types")
+                # Validate before weight selection: this helper also controls
+                # indexer loading when sparse KV offload is disabled.
+                if (
+                    config.index_topk_freq > 1
+                    or config.index_topk_pattern is not None
+                    or config.indexer_types is not None
+                ):
+                    groups = build_dsa_indexer_groups(config, config.num_layers)
+                    logging.info("DSA indexer source -> shared layers: %s", groups)
 
     @staticmethod
     def get_weight_cls():

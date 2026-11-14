@@ -8,7 +8,12 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.offload import policy as eviction
 from rtp_llm.models_py.modules.offload.layout import FetchRows, LayoutOps
+from rtp_llm.models_py.modules.offload.policy import (
+    ERROR_INVALID_ROW,
+    ERROR_MISSING_ADMISSION,
+)
 
 if TYPE_CHECKING:
     from rtp_llm.ops import OffloadStorage
@@ -41,17 +46,24 @@ def _protect(
     MissCount,
     Generations,
     Versions,
-    BLOCK_ROWS: tl.constexpr,
-    N: tl.constexpr,
-    B: tl.constexpr,
+    Error,
+    TOTAL_ROWS: tl.constexpr,
+    ROWS_PER_BLOCK: tl.constexpr,
+    NUM_ROWS: tl.constexpr,
+    TILE_SIZE: tl.constexpr,
     HBM_ROWS: tl.constexpr,
     DYNAMIC: tl.constexpr,
 ):
     if tl.program_id(0) == 0:
         tl.store(MissCount, 0)
-    i = tl.program_id(0) * B + tl.arange(0, B)
-    token = tl.load(Ids + i, i < N, other=-1)
-    valid = (i < N) & (token >= HBM_ROWS)
+    i = tl.program_id(0) * TILE_SIZE + tl.arange(0, TILE_SIZE)
+    token = tl.load(Ids + i, i < NUM_ROWS, other=-1)
+    valid = (
+        (i < NUM_ROWS)
+        & (token >= HBM_ROWS)
+        & (token < TOTAL_ROWS)
+        & (tl.load(Error) == 0)
+    )
     slot = tl.load(Map + token, valid, other=-1)
     if DYNAMIC:
         mapped = valid & (slot >= 0) & (slot < tl.load(ActiveRows))
@@ -64,100 +76,15 @@ def _protect(
     epoch = tl.load(Epoch)
     tl.atomic_xchg(Protected + slot, epoch, valid & (slot >= 0))
     generation = tl.load(
-        Generations + token // BLOCK_ROWS, valid & (slot >= 0), other=-1
+        Generations + token // ROWS_PER_BLOCK, valid & (slot >= 0), other=-1
     )
     version = tl.load(Versions + slot, valid & (slot >= 0), other=-1)
     refresh = valid & ((slot < 0) | (version != generation))
-    physical = tl.where(token < HBM_ROWS, token, slot + HBM_ROWS)
-    tl.store(Slots + i, tl.where(refresh, -2, physical), i < N)
+    physical = tl.where(
+        (token >= 0) & (token < HBM_ROWS), token, tl.where(valid, slot + HBM_ROWS, -1)
+    )
+    tl.store(Slots + i, tl.where(refresh, -2, physical), i < NUM_ROWS)
     tl.atomic_min(Owners + token, i, refresh)
-
-
-@triton.jit
-def _admit(
-    Ids,
-    Slots,
-    Owners,
-    Map,
-    Tags,
-    Protected,
-    Epoch,
-    Clock,
-    Misses,
-    MissCount,
-    Generations,
-    Versions,
-    SlotEpochs,
-    HotEpoch,
-    ActiveRows,
-    BLOCK_ROWS: tl.constexpr,
-    N: tl.constexpr,
-    B: tl.constexpr,
-    CAPACITY: tl.constexpr,
-    DYNAMIC: tl.constexpr,
-):
-    i = tl.program_id(0) * B + tl.arange(0, B)
-    refresh = tl.load(Slots + i, i < N, other=-1) == -2
-    if tl.sum(refresh.to(tl.int32), 0) == 0:
-        return
-    token = tl.load(Ids + i, refresh, other=-1)
-    owner = tl.load(Owners + token, refresh, other=-1)
-    slot = tl.load(Map + token, refresh, other=-1)
-    owned = refresh & (owner == i)
-    generation = tl.load(Generations + token // BLOCK_ROWS, owned, other=-1)
-    pending = owned & (slot < 0)
-    count = tl.sum(owned.to(tl.int32), 0)
-    start = tl.atomic_add(MissCount, count, sem="relaxed")
-    offset = tl.cumsum(owned.to(tl.int32), 0) - 1
-    tl.store(Misses + start + offset, i, owned)
-    tl.store(Versions + slot, generation, owned & (slot >= 0))
-    epoch = tl.load(Epoch)
-    count = tl.sum(pending.to(tl.int32), 0)
-    if count == 0:
-        return
-    tokens = tl.sort(tl.where(pending, token, 0x7FFFFFFF), descending=False)
-    admitted = 0
-    if DYNAMIC:
-        capacity = tl.load(ActiveRows)
-        scan = tl.minimum(B, capacity)
-    else:
-        scan: tl.constexpr = min(B, CAPACITY)
-    first_ticket = tl.atomic_add(Clock, count, sem="relaxed")
-    while admitted < count:
-        lane = tl.arange(0, B)
-        if DYNAMIC:
-            # Active lanes span at most one cache; only the scalar ticket divides.
-            base = first_ticket % capacity
-            candidate = base + tl.where(lane < scan, lane, 0)
-            candidate = tl.where(candidate >= capacity, candidate - capacity, candidate)
-            candidate = candidate.to(tl.int32)
-        else:
-            candidate = ((first_ticket + lane) % CAPACITY).to(tl.int32)
-        available = (lane < scan) & (tl.load(Protected + candidate) != epoch)
-        rank = tl.cumsum(available.to(tl.int32), 0) - 1
-        attempt = available & (rank < count - admitted)
-        previous = tl.atomic_xchg(Protected + candidate, epoch, attempt)
-        claimed = attempt & (previous != epoch)
-        rank = tl.cumsum(claimed.to(tl.int32), 0) - 1
-        token = tl.gather(tokens, tl.where(claimed, admitted + rank, 0), 0)
-        generation = tl.load(Generations + token // BLOCK_ROWS, claimed, other=-1)
-        old = tl.load(Tags + candidate, claimed, other=-1)
-        if DYNAMIC:
-            old_allocation = tl.load(SlotEpochs + candidate, claimed, other=-1)
-            allocation = tl.load(HotEpoch + candidate, claimed, other=-1)
-            # A released slot's stale tag no longer owns the mapping: that token
-            # may already have been admitted elsewhere in this same kernel.
-            tl.store(Map + old, -1, claimed & (old >= 0) & (old_allocation == allocation))
-            tl.store(SlotEpochs + candidate, allocation, claimed)
-        else:
-            tl.store(Map + old, -1, claimed & (old >= 0))
-        tl.store(Tags + candidate, token, claimed)
-        tl.store(Versions + candidate, generation, claimed)
-        tl.store(Map + token, candidate, claimed)
-        admitted += tl.sum(claimed.to(tl.int32), 0)
-        # Reserve a whole retry tile atomically, including the one-victim case.
-        if admitted < count:
-            first_ticket = tl.atomic_add(Clock, scan, sem="relaxed")
 
 
 @triton.jit
@@ -167,16 +94,28 @@ def _finish_admission(
     Map,
     Owners,
     Epoch,
-    N: tl.constexpr,
+    Error,
+    NUM_ROWS: tl.constexpr,
     HBM_ROWS: tl.constexpr,
-    B: tl.constexpr,
+    TILE_SIZE: tl.constexpr,
 ):
-    i = tl.program_id(0) * B + tl.arange(0, B)
-    refresh = tl.load(Slots + i, i < N, other=-1) == -2
+    i = tl.program_id(0) * TILE_SIZE + tl.arange(0, TILE_SIZE)
+    refresh = tl.load(Slots + i, i < NUM_ROWS, other=-1) == -2
     token = tl.load(Ids + i, refresh, other=-1)
     slot = tl.load(Map + token, refresh, other=-1)
     owner = tl.load(Owners + token, refresh, other=-1)
-    tl.store(Slots + i, slot + HBM_ROWS, refresh)
+    missing = refresh & (slot < 0)
+    tl.atomic_or(
+        Error,
+        ERROR_MISSING_ADMISSION,
+        tl.sum(missing.to(tl.int32), 0) > 0,
+        sem="relaxed",
+    )
+    tl.store(
+        Slots + i,
+        tl.where((slot >= 0) & (tl.load(Error) == 0), slot + HBM_ROWS, -1),
+        refresh,
+    )
     tl.store(Owners + token, 0x7FFFFFFF, refresh & (owner == i))
     if tl.program_id(0) == 0:
         tl.store(Epoch, tl.load(Epoch) + 1)
@@ -193,15 +132,21 @@ def _write_resident_ids(
     SlotEpochs,
     HotEpoch,
     ActiveRows,
-    BLOCK_ROWS: tl.constexpr,
+    Error,
+    TOTAL_ROWS: tl.constexpr,
+    ROWS_PER_BLOCK: tl.constexpr,
     HBM_ROWS: tl.constexpr,
-    N: tl.constexpr,
-    B: tl.constexpr,
+    NUM_ROWS: tl.constexpr,
+    TILE_SIZE: tl.constexpr,
     DYNAMIC: tl.constexpr,
 ):
-    i = tl.program_id(0) * B + tl.arange(0, B)
-    token = tl.load(Ids + i, i < N, other=-1)
-    host = (i < N) & (token >= HBM_ROWS)
+    i = tl.program_id(0) * TILE_SIZE + tl.arange(0, TILE_SIZE)
+    token = tl.load(Ids + i, i < NUM_ROWS, other=-1)
+    bad = (i < NUM_ROWS) & ((token < -1) | (token >= TOTAL_ROWS))
+    tl.atomic_or(
+        Error, ERROR_INVALID_ROW, tl.sum(bad.to(tl.int32), 0) > 0, sem="relaxed"
+    )
+    host = (i < NUM_ROWS) & (token >= HBM_ROWS) & (token < TOTAL_ROWS)
     slot = tl.load(Map + token, host, other=-1)
     mapped = host & (slot >= 0)
     if DYNAMIC:
@@ -210,12 +155,12 @@ def _write_resident_ids(
         allocation = tl.load(SlotEpochs + slot, mapped, other=-1)
         expected = tl.load(HotEpoch + slot, mapped, other=-1)
     version = tl.load(Versions + slot, mapped, other=-1)
-    generation = tl.load(Generations + token // BLOCK_ROWS, host, other=-1)
+    generation = tl.load(Generations + token // ROWS_PER_BLOCK, host, other=-1)
     current = (slot >= 0) & (version == generation)
     if DYNAMIC:
         current = mapped & current & (tag == token) & (allocation == expected)
     resident = tl.where(current, slot + HBM_ROWS, -1)
-    tl.store(Out + i, tl.where(token < HBM_ROWS, token, resident), i < N)
+    tl.store(Out + i, tl.where(token < HBM_ROWS, token, resident), i < NUM_ROWS)
 
 
 class SparseOffloadRuntime:
@@ -275,7 +220,9 @@ class SparseOffloadRuntime:
                 if (expected is None) != (actual is None) or (
                     expected is not None and expected.data_ptr() != actual.data_ptr()
                 ):
-                    raise ValueError("group storages must share hot-cache capacity and allocation epochs")
+                    raise ValueError(
+                        "group storages must share hot-cache capacity and allocation epochs"
+                    )
             if not storage.host_planes or len(storage.host_planes) != len(
                 storage.resident_planes
             ):
@@ -310,11 +257,18 @@ class SparseOffloadRuntime:
         self.dynamic = self.active_rows is not None
         if not self.dynamic and self.hot_epoch is not None:
             raise ValueError("allocation epochs require a dynamic hot cache")
-        if self.dynamic and (self.active_rows.device != self.device or self.active_rows.dtype != torch.int32
-                or self.active_rows.numel() != 1 or self.hot_epoch is None
-                or self.hot_epoch.device != self.device or self.hot_epoch.dtype != torch.int64
-                or self.hot_epoch.shape != (capacity,)):
-            raise ValueError("hot cache needs a CUDA int32 capacity and int64 allocation epochs")
+        if self.dynamic and (
+            self.active_rows.device != self.device
+            or self.active_rows.dtype != torch.int32
+            or self.active_rows.numel() != 1
+            or self.hot_epoch is None
+            or self.hot_epoch.device != self.device
+            or self.hot_epoch.dtype != torch.int64
+            or self.hot_epoch.shape != (capacity,)
+        ):
+            raise ValueError(
+                "hot cache needs a CUDA int32 capacity and int64 allocation epochs"
+            )
         self.mapping = torch.full(
             (total * block,), -1, dtype=torch.int32, device=self.device
         )
@@ -325,13 +279,49 @@ class SparseOffloadRuntime:
         )
         self.protected = torch.zeros_like(self.versions)
         # Static kernels compile out allocation checks and need no extra arrays.
-        self.slot_epochs = torch.full_like(self.versions, -1) if self.dynamic else self.versions
+        self.slot_epochs = (
+            torch.full_like(self.versions, -1) if self.dynamic else self.versions
+        )
         self.epoch = torch.ones((), dtype=torch.int64, device=self.device)
-        self.clock = torch.zeros_like(self.epoch)
+        self.policy = getattr(first, "eviction_policy", "rr")
+        if self.policy not in ("rr", "lru"):
+            raise ValueError("sparse_kv_offload_policy must be rr or lru")
+        self._legacy_global = int(getattr(first, "max_requests", 0)) == 0
+        self.max_requests = max(1, int(getattr(first, "max_requests", 0)))
+        if maximum % self.max_requests:
+            raise ValueError(
+                "offload selection capacity must contain whole request quotas"
+            )
+        self.quota = maximum // self.max_requests
+        for storage in storages:
+            if (
+                getattr(storage, "eviction_policy", "rr") != self.policy
+                or max(1, int(getattr(storage, "max_requests", 0))) != self.max_requests
+            ):
+                raise ValueError(
+                    "group storages must share eviction policy and request quotas"
+                )
+        self.clock = torch.zeros(
+            (self.max_requests,), dtype=torch.int64, device=self.device
+        )
+        self._bound_keys = torch.zeros_like(self.clock)
+        self._bound_generations = torch.full_like(self.clock, -1)
+        self._seen_requests = torch.zeros_like(self.clock)
+        self._kept_partitions = torch.zeros_like(self.clock)
+        self._reset_partitions = torch.zeros_like(self.clock)
+        self._request_parts = torch.empty(
+            (self.max_requests,), dtype=torch.int32, device=self.device
+        )
+        self._first_requests = torch.empty_like(self._request_parts)
+        self._pending_count = torch.zeros_like(self._request_parts)
         self._slots = torch.empty((maximum,), dtype=torch.int32, device=self.device)
         self._misses = torch.empty_like(self._slots)
         self._write_slots = torch.empty_like(self._slots)
-        self._miss_count = torch.zeros((), dtype=torch.int32, device=self.device)
+        # Share the counter allocation, avoiding another allocator-sized chunk.
+        # Error is sticky across selections/replay; reset() explicitly clears it.
+        # Device-side validation accumulates the ERROR_* bits from policy.py.
+        self._counts = torch.zeros((2,), dtype=torch.int32, device=self.device)
+        self._miss_count, self.error = self._counts[0], self._counts[1]
         if not self.dynamic:
             self.active_rows = self._miss_count
             self.hot_epoch = self.versions
@@ -376,13 +366,58 @@ class SparseOffloadRuntime:
         ):
             torch.cuda.current_stream(self.device).wait_event(self.ready[storage_index])
 
-    def begin(self, backing_ids: torch.Tensor) -> None:
-        """Enqueue fetches for int32 backing IDs; -1 marks unused entries."""
+    def begin(
+        self,
+        backing_ids: torch.Tensor,
+        *,
+        request_keys: torch.Tensor | None = None,
+        request_ids: torch.Tensor | None = None,
+    ) -> None:
+        """Deduplicate Host reads globally; evict only within the owning request.
+
+        request_keys holds each request's first physical page ID. request_ids
+        maps each query (the first selection dimension) to that request, also
+        for ragged MTP verify/extend inputs. -1 selection entries are padding.
+        """
         ids = backing_ids
         self._check_ids(ids)
         n = ids.numel()
         if n > self.maximum:
             raise ValueError("flattened selection exceeds max_selected_rows")
+        anonymous = self._legacy_global or (
+            request_keys is None and request_ids is None
+        )
+        if anonymous:
+            if self.max_requests != 1:
+                raise ValueError("request identity is required for partitioned offload")
+            keys = query_requests = self._first_requests
+            requests, width, key_stride = 1, max(n, 1), 1
+        else:
+            if request_keys is None or request_ids is None or ids.ndim < 2:
+                raise ValueError(
+                    "offload needs request keys and one request ID per query"
+                )
+            keys, query_requests = request_keys, request_ids
+            if (
+                keys.device != self.device
+                or keys.dtype != torch.int32
+                or keys.ndim != 1
+                or not 0 < keys.numel() <= self.max_requests
+                or keys.stride(0) <= 0
+                or query_requests.device != self.device
+                or query_requests.dtype != torch.int32
+                or query_requests.ndim != 1
+                or not query_requests.is_contiguous()
+                or query_requests.numel() != ids.shape[0]
+            ):
+                raise ValueError("invalid offload request identity tensors")
+            requests, width, key_stride = (
+                keys.numel(),
+                prod(ids.shape[1:]),
+                keys.stride(0),
+            )
+            if width <= 0:
+                raise ValueError("offload query selection width must be positive")
         self.drain()
         compute = torch.cuda.current_stream(self.device)
         self._kickoff.record(compute)
@@ -391,6 +426,82 @@ class SparseOffloadRuntime:
         with torch.cuda.stream(self.transfer_stream):
             if n:
                 grid = (triton.cdiv(n, 256),)
+                eviction.mark_requests[(triton.cdiv(max(n, self.max_requests), 256),)](
+                    ids,
+                    query_requests,
+                    self._seen_requests,
+                    self.epoch,
+                    self._pending_count,
+                    self.error,
+                    NUM_ROWS=n,
+                    ROWS_PER_QUERY=width,
+                    NUM_REQUESTS=requests,
+                    MAX_REQUESTS=self.max_requests,
+                    ANONYMOUS=anonymous,
+                    HBM_ROWS=self.hbm_rows,
+                    TOTAL_ROWS=self.mapping.numel(),
+                    TILE_SIZE=256,
+                )
+                eviction.match_requests[(requests,)](
+                    keys,
+                    self.generations,
+                    self._seen_requests,
+                    self._bound_keys,
+                    self._bound_generations,
+                    self._request_parts,
+                    self._first_requests,
+                    self._kept_partitions,
+                    self.active_rows,
+                    self.epoch,
+                    self.error,
+                    NUM_REQUESTS=requests,
+                    MAX_REQUESTS=self.max_requests,
+                    ROWS_PER_REQUEST=self.quota,
+                    KEY_STRIDE=key_stride,
+                    ROWS_PER_PAGE=self.storages[0].rows_per_page,
+                    ROWS_PER_BLOCK=self.block_rows,
+                    TOTAL_ROWS=self.mapping.numel(),
+                    DYNAMIC=self.dynamic,
+                    ANONYMOUS=anonymous,
+                    TILE_SIZE=256,
+                )
+                eviction.assign_requests[(1,)](
+                    keys,
+                    self.generations,
+                    self._bound_keys,
+                    self._bound_generations,
+                    self._request_parts,
+                    self._first_requests,
+                    self._kept_partitions,
+                    self._reset_partitions,
+                    self.active_rows,
+                    self.epoch,
+                    self.error,
+                    NUM_REQUESTS=requests,
+                    MAX_REQUESTS=self.max_requests,
+                    ROWS_PER_REQUEST=self.quota,
+                    KEY_STRIDE=key_stride,
+                    ROWS_PER_PAGE=self.storages[0].rows_per_page,
+                    ROWS_PER_BLOCK=self.block_rows,
+                    TOTAL_ROWS=self.mapping.numel(),
+                    DYNAMIC=self.dynamic,
+                    ANONYMOUS=anonymous,
+                    TILE_SIZE=triton.next_power_of_2(self.max_requests),
+                )
+                eviction.reset_partitions[(self.max_requests,)](
+                    self._reset_partitions,
+                    self.epoch,
+                    self.tags,
+                    self.mapping,
+                    self.versions,
+                    self.slot_epochs,
+                    self.protected,
+                    self.clock,
+                    self.error,
+                    ROWS_PER_REQUEST=self.quota,
+                    DYNAMIC=self.dynamic,
+                    TILE_SIZE=256,
+                )
                 _protect[grid](
                     ids,
                     indices,
@@ -405,33 +516,63 @@ class SparseOffloadRuntime:
                     self._miss_count,
                     self.generations,
                     self.versions,
-                    self.block_rows,
-                    n,
-                    256,
-                    self.hbm_rows,
-                    self.dynamic,
+                    self.error,
+                    TOTAL_ROWS=self.mapping.numel(),
+                    ROWS_PER_BLOCK=self.block_rows,
+                    NUM_ROWS=n,
+                    TILE_SIZE=256,
+                    HBM_ROWS=self.hbm_rows,
+                    DYNAMIC=self.dynamic,
                 )
-                _admit[grid](
+                # Reuse write scratch before any ready event is published;
+                # write() cannot consume it until admission/fetch has finished.
+                eviction.collect_misses[grid](
                     ids,
                     indices,
                     self.owners,
                     self.mapping,
-                    self.tags,
-                    self.protected,
-                    self.epoch,
-                    self.clock,
                     self._misses,
                     self._miss_count,
                     self.generations,
                     self.versions,
+                    query_requests,
+                    self._request_parts,
+                    self._first_requests,
+                    self._write_slots,
+                    self._pending_count,
+                    self.error,
+                    NUM_ROWS=n,
+                    ROWS_PER_QUERY=width,
+                    ROWS_PER_BLOCK=self.block_rows,
+                    ROWS_PER_REQUEST=self.quota,
+                    NUM_REQUESTS=requests,
+                    ANONYMOUS=anonymous,
+                    TILE_SIZE=256,
+                )
+                eviction.admit[(self.max_requests,)](
+                    ids,
+                    self._write_slots,
+                    self._pending_count,
+                    self.mapping,
+                    self.tags,
+                    self.versions,
                     self.slot_epochs,
                     self.hot_epoch,
-                    self.active_rows,
-                    self.block_rows,
-                    n,
-                    256,
-                    self.capacity,
-                    self.dynamic,
+                    self.protected,
+                    self.epoch,
+                    self.clock,
+                    self.generations,
+                    self.error,
+                    ROWS_PER_REQUEST=self.quota,
+                    ROWS_PER_BLOCK=self.block_rows,
+                    LRU=self.policy == "lru",
+                    DYNAMIC=self.dynamic,
+                    TILE_SIZE=(
+                        triton.next_power_of_2(self.quota)
+                        if self.policy == "lru"
+                        else 256
+                    ),
+                    num_warps=32 if self.policy == "lru" and self.quota >= 2048 else 4,
                 )
                 _finish_admission[grid](
                     ids,
@@ -439,19 +580,26 @@ class SparseOffloadRuntime:
                     self.mapping,
                     self.owners,
                     self.epoch,
-                    n,
-                    self.hbm_rows,
-                    256,
+                    self.error,
+                    NUM_ROWS=n,
+                    HBM_ROWS=self.hbm_rows,
+                    TILE_SIZE=256,
                 )
             else:
                 self._miss_count.zero_()
             for storage, ready in zip(self.storages, self.ready):
                 if n:
                     self.layout.fetch(
-                        storage, FetchRows(ids, indices, self._misses, self._miss_count)
+                        storage,
+                        FetchRows(
+                            ids, indices, self._misses, self._miss_count, self.error
+                        ),
                     )
                 ready.record(self.transfer_stream)
         ids.record_stream(self.transfer_stream)
+        if not anonymous:
+            keys.record_stream(self.transfer_stream)
+            query_requests.record_stream(self.transfer_stream)
         self._started = True
         self._capturing = torch.cuda.is_current_stream_capturing()
         self._indices = indices
@@ -490,11 +638,13 @@ class SparseOffloadRuntime:
                 self.slot_epochs,
                 self.hot_epoch,
                 self.active_rows,
-                self.block_rows,
-                self.hbm_rows,
-                stop - start,
-                256,
-                self.dynamic,
+                self.error,
+                TOTAL_ROWS=self.mapping.numel(),
+                ROWS_PER_BLOCK=self.block_rows,
+                HBM_ROWS=self.hbm_rows,
+                NUM_ROWS=stop - start,
+                TILE_SIZE=256,
+                DYNAMIC=self.dynamic,
             )
             self.layout.store(storage, chunk, slots)
 
@@ -514,6 +664,7 @@ class SparseOffloadRuntime:
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("reset must run outside graph capture")
         torch.cuda.current_stream(self.device).wait_stream(self.transfer_stream)
+        self.error.zero_()
         self.mapping.fill_(-1)
         self.owners.fill_(0x7FFFFFFF)
         self.tags.fill_(-1)
@@ -523,6 +674,12 @@ class SparseOffloadRuntime:
         self.protected.zero_()
         self.epoch.fill_(1)
         self.clock.zero_()
+        self._bound_keys.zero_()
+        self._bound_generations.fill_(-1)
+        self._seen_requests.zero_()
+        self._kept_partitions.zero_()
+        self._reset_partitions.zero_()
+        self._pending_count.zero_()
         self._miss_count.zero_()
         self._indices = None
         self._started = False

@@ -686,8 +686,9 @@ class PrefillCompletionRpcTest: public DeviceTestBase {};
 
 TEST_F(PrefillCompletionRpcTest, AdmissionRejectionDoesNotAllocateOrRetry) {
     auto engine = std::make_shared<AllocationErrorEngine>(ErrorInfo{});
-    engine->admission_error = ErrorInfo(ErrorCode::INVALID_PARAMS, "sparse KV offload only supports single-sequence requests");
-    const auto initial_free_blocks = engine->cache->freeBlocksNum();
+    engine->admission_error =
+        ErrorInfo(ErrorCode::INVALID_PARAMS, "sparse KV offload only supports single-sequence requests");
+    const auto      initial_free_blocks = engine->cache->freeBlocksNum();
     DecodeRpcServer server;
     server.engine_ = engine;
     DecodeRpcContext             rpc_context{nullptr};
@@ -1261,14 +1262,17 @@ protected:
     }
 };
 
-TEST_F(SparseOffloadPdTest, CompletedLoadUsesActualProjectionAndFailureDoesNotPublish) {
+TEST_F(SparseOffloadPdTest, FailedAndCompletedImportsInvalidatePotentiallyWrittenBlocks) {
     for (const bool hybrid : {false, true}) {
         KVCacheManager manager(pdCacheConfig(hybrid));
         ASSERT_NO_FATAL_FAILURE(allocate(manager));
         const auto                             context = loadContext(hybrid);
         const DecodeRpcServer::LoadCacheResult failed{ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "injected"), 0};
         DecodeRpcServer::markLoadedOffloadOverwrite(manager, context, failed);
-        EXPECT_EQ(manager.takeOffloadVersionUpdates().size(0), 0);
+        const auto failed_updates = manager.takeOffloadVersionUpdates();
+        EXPECT_EQ(failed_updates.size(0), hybrid ? 4 : 3);
+        EXPECT_EQ(failed.loaded_cache_block_count, 0);
+        manager.publishOffloadVersions(failed_updates, manager.cacheConfig().groupTags());
 
         DecodeRpcServer::markLoadedOffloadOverwrite(manager, context, {ErrorInfo(), 4});
         const auto updates = manager.takeOffloadVersionUpdates();
@@ -1277,9 +1281,9 @@ TEST_F(SparseOffloadPdTest, CompletedLoadUsesActualProjectionAndFailureDoesNotPu
         const auto& storages = manager.coordinator_manager_->groupBlockPools()[0]->allLayerOffloadStorage();
         for (const auto& storage : storages) {
             const auto generations = storage->generations.cpu();
-            EXPECT_EQ(generations[1].item<int64_t>(), hybrid ? 2 : 1);
+            EXPECT_EQ(generations[1].item<int64_t>(), hybrid ? 3 : 1);
             for (const int block : {2, 5, 6}) {
-                EXPECT_EQ(generations[block].item<int64_t>(), 2);
+                EXPECT_EQ(generations[block].item<int64_t>(), 3);
             }
             EXPECT_EQ(generations[7].item<int64_t>(), 1);
         }

@@ -932,6 +932,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs = outputs.cast<PyModelOutputs>();
         }
 
+        if (check_sparse_offload_errors_) {
+            py::gil_scoped_acquire gil;
+            // The Python model body is skipped on graph replay; validate the
+            // sticky device guards here before any logits/output is consumed.
+            py_model_.attr("check_sparse_kv_offload_errors")();
+        }
+
         if (capture_hidden_states) {
             // Capture consumes the Python output directly. CP restoration below
             // remains the sole distributed layout operation on this path, and

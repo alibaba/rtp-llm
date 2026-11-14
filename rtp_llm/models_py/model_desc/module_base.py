@@ -119,6 +119,10 @@ class GptModelBase(nn.Module):
         for runtime in runtimes:
             runtime.drain()
             runtime.transfer_stream.synchronize()
+        # Writes and writer staging run on the compute stream. Joining only
+        # the fetch stream is insufficient before freeing/replacing them.
+        for device in {runtime.device for runtime in runtimes}:
+            torch.cuda.current_stream(device).synchronize()
         self.release_model_offload_resources()
         self.offload_plans = {}
         self._offload_signature = None
@@ -155,6 +159,24 @@ class GptModelBase(nn.Module):
                     "sparse KV offload does not support ordinary context prefill; "
                     "only decode, target verify and draft extend are supported"
                 )
+
+    def check_sparse_kv_offload_errors(self) -> None:
+        """Check device guards after eager execution AND CUDA graph replay.
+
+        Keep this on the GPU: a healthy step must not acquire an extra CPU/GPU
+        barrier. This production assertion is independent of TRITON_DEBUG;
+        an internal cache invariant violation fails at the next CUDA boundary.
+        """
+        runtimes = {
+            plan.runtime for plan in getattr(self, "offload_plans", {}).values()
+        }
+        if runtimes:
+            for runtime in runtimes:
+                runtime.drain()
+            torch._assert_async(
+                torch.stack([runtime.error for runtime in runtimes]).eq(0).all(),
+                "sparse KV offload: invalid row/request identity or insufficient hot-cache capacity/quota",
+            )
 
     def prepare_fmha_impl(
         self,

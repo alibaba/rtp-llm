@@ -1123,31 +1123,24 @@ class DeepSeekV4Model(GptModelBase):
         return True
 
     def _initialize_sparse_offload(self) -> None:
-        from rtp_llm.models_py.modules.offload.plan import build_offload_plans
+        from rtp_llm.models_py.modules.offload.plan import (
+            build_offload_plans,
+            offload_plan_signature,
+        )
 
         if self.kv_cache is None:
             return
         descs = self.config.kv_cache_spec_descs
-        enabled = [
-            (i, d.tag)
-            for i, ds in enumerate(descs)
-            for d in ds
-            if d.offload is not None and d.offload.enabled
-        ]
+        max_write_rows = self._max_generate_batch_size * max(
+            1, self._gen_num_per_cycle + 1
+        )
+        storage_signature = offload_plan_signature(self.kv_cache, descs)
         # Multiple speculative wrappers initialize the same model. Keep
         # runtimes and staging addresses used by already captured graphs.
-        signature = tuple(
-            (
-                i,
-                tag,
-                self.kv_cache.get_offload_storage(i, tag).generations.data_ptr(),
-                self.kv_cache.get_offload_storage(i, tag).resident_planes[0].data_ptr(),
-            )
-            for i, tag in enabled
-        )
+        signature = (storage_signature, max_write_rows)
         if getattr(self, "_offload_signature", None) == signature:
             return
-        plans = build_offload_plans(self.kv_cache, descs) if enabled else {}
+        plans = build_offload_plans(self.kv_cache, descs) if storage_signature else {}
         for layer, layer_descs in zip(self.v4.layers, descs):
             layer.attn.framework_cache_tags = {desc.tag for desc in layer_descs}
         for (i, tag), plan in plans.items():
@@ -1155,7 +1148,7 @@ class DeepSeekV4Model(GptModelBase):
                 raise ValueError(f"V4 has no sparse offload adapter for {tag}")
             self.v4.layers[i].attn.configure_sparse_offload(
                 plan,
-                self._max_generate_batch_size * max(1, self._gen_num_per_cycle + 1),
+                max_write_rows,
             )
         self.offload_plans = plans
         self._offload_signature = signature

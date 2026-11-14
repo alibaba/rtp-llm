@@ -89,6 +89,18 @@ class GlmIndexShareTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported DSA"):
             build_dsa_indexer_groups(value, 4)
 
+    def test_frequency_without_explicit_sharing_semantics_is_rejected(self):
+        value = config()
+        value.index_skip_topk_offset = None
+        with self.assertRaisesRegex(ValueError, "requires explicit"):
+            build_dsa_indexer_groups(value, 78)
+        # An explicit offset preserves the old supported formula where intended.
+        value.index_skip_topk_offset = 2
+        self.assertEqual(list(build_dsa_indexer_groups(value, 8)), [0, 1, 5])
+        value.indexer_types = ["full", "shared", "full", "shared"]
+        value.index_skip_topk_offset = None
+        self.assertEqual(build_dsa_indexer_groups(value, 4), {0: (0, 1), 2: (2, 3)})
+
     def test_old_models_and_mtp_keep_per_layer_indexer(self):
         value = config()
         value.index_topk_freq = 1
@@ -109,14 +121,20 @@ class GlmIndexShareTest(unittest.TestCase):
             with self.subTest(field=field):
                 value = config()
                 setattr(value, field, pattern)
-                with self.assertRaisesRegex(ValueError, f"{field} does not cover layer 2"):
+                with self.assertRaisesRegex(
+                    ValueError, f"{field} does not cover layer 2"
+                ):
                     build_dsa_indexer_groups(value, 4)
 
     def test_hot_capacity_scales_with_requests_and_speculative_queries(self):
-        self.assertEqual(sparse_kv_offload_max_selected_rows(2048, 512, 150, 3), 150 * 4 * 2048)
+        self.assertEqual(
+            sparse_kv_offload_max_selected_rows(2048, 512, 150, 3), 150 * 4 * 2048
+        )
         self.assertEqual(sparse_kv_offload_max_selected_rows(4096, 2048, 2, 0), 8192)
         for rows in (0, -1, 1024):
-            with self.subTest(rows=rows), self.assertRaisesRegex(ValueError, "hot_rows"):
+            with self.subTest(rows=rows), self.assertRaisesRegex(
+                ValueError, "hot_rows"
+            ):
                 sparse_kv_offload_max_selected_rows(rows, 2048, 2, 3)
         with self.assertRaisesRegex(ValueError, "positive int32"):
             sparse_kv_offload_max_selected_rows(2**31, 2048, 1, 0)

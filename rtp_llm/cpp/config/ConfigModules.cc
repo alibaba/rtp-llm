@@ -145,6 +145,7 @@ std::string KVCacheConfig::to_string() const {
         << "sparse_kv_offload_host_mb: " << sparse_kv_offload_host_mb << "\n"
         << "sparse_kv_offload_hot_rows: " << sparse_kv_offload_hot_rows << "\n"
         << "sparse_kv_offload_hot_cache_mode: " << sparse_kv_offload_hot_cache_mode << "\n"
+        << "sparse_kv_offload_policy: " << sparse_kv_offload_policy << "\n"
         << "sparse_kv_offload_test_hbm_blocks: " << sparse_kv_offload_test_hbm_blocks << "\n"
         << "enable_device_cache: " << enable_device_cache << "\n"
         << "enable_memory_cache: " << enable_memory_cache << "\n"
@@ -552,7 +553,6 @@ void DashScGrpcConfig::from_json(const std::string& json_str) {
     server_config.clear();
     parse_grpc_client_server_maps_json(json_str, client_config, server_config);
 }
-
 
 // PDSepConfig
 std::string PDSepConfig::to_string() const {

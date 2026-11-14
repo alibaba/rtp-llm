@@ -19,6 +19,7 @@ class FetchRows:
     resident_ids: torch.Tensor
     positions: torch.Tensor
     count: torch.Tensor
+    error: torch.Tensor | None = None
 
 
 class LayoutOps(Protocol):
@@ -54,6 +55,7 @@ def _fetch_tiled(
     ResidentIds,
     Positions,
     Count,
+    Error,
     PAGE_ROWS: tl.constexpr,
     HBM_ROWS: tl.constexpr,
     SHAPE: tl.constexpr,
@@ -68,6 +70,8 @@ def _fetch_tiled(
     host = Host.to(pointer)
     resident = Resident.to(pointer)
     count = tl.load(Count)
+    if Error is not None:
+        count = tl.where(tl.load(Error) == 0, count, 0)
     for start in range(tl.program_id(0) * ROWS, count, tl.num_programs(0) * ROWS):
         entry = start + tl.arange(0, ROWS)
         valid = entry < count
@@ -94,6 +98,7 @@ def _fetch_fp8_tiled(
     ResidentIds,
     Positions,
     Count,
+    Error,
     PAGE_ROWS: tl.constexpr,
     HBM_ROWS: tl.constexpr,
     HOST_PAYLOAD: tl.constexpr,
@@ -111,6 +116,8 @@ def _fetch_fp8_tiled(
     gpu_payload = ResidentPayload.to(pointer)
     gpu_scales = ResidentScales.to(pointer)
     count = tl.load(Count)
+    if Error is not None:
+        count = tl.where(tl.load(Error) == 0, count, 0)
     for start in range(tl.program_id(0) * ROWS, count, tl.num_programs(0) * ROWS):
         entry = start + tl.arange(0, ROWS)
         valid = entry < count
@@ -144,6 +151,7 @@ def _write(
     Values,
     PAGE_ROWS: tl.constexpr,
     HBM_ROWS: tl.constexpr,
+    TOTAL_ROWS: tl.constexpr,
     SHAPE: tl.constexpr,
     HOST: tl.constexpr,
     GPU: tl.constexpr,
@@ -158,7 +166,7 @@ def _write(
     values = Values.to(pointer)
     i = tl.program_id(0).to(tl.int64)
     token = tl.load(Ids + i).to(tl.int64)
-    if token >= 0:
+    if (token >= 0) & (token < TOTAL_ROWS):
         x = tl.arange(0, B)
         source_x = _payload_offset(x, SHAPE, VALUE, 1)
         host_x = _payload_offset(x, SHAPE, HOST, 2)
@@ -222,6 +230,7 @@ class PagedRowLayout:
                 misses.resident_ids,
                 misses.positions,
                 misses.count,
+                misses.error,
                 storage.rows_per_page,
                 storage.hbm_blocks * storage.rows_per_block,
                 *(_copy_view(plane, 4)[1] for plane in (*hosts, *residents)),
@@ -239,6 +248,7 @@ class PagedRowLayout:
                 misses.resident_ids,
                 misses.positions,
                 misses.count,
+                misses.error,
                 storage.rows_per_page,
                 storage.hbm_blocks * storage.rows_per_block,
                 shape[2:],
@@ -268,6 +278,7 @@ class PagedRowLayout:
                 values,
                 storage.rows_per_page,
                 storage.hbm_blocks * storage.rows_per_block,
+                storage.total_blocks * storage.rows_per_block,
                 shape[2:],
                 host_strides,
                 gpu_strides,

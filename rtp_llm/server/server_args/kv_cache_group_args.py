@@ -252,6 +252,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="Hot KV cache allocation: static preallocates the concurrency limit; dynamic maps HBM for active requests and releases it when idle.",
     )
     kv_cache_group.add_argument(
+        "--sparse_kv_offload_policy",
+        env_name="SPARSE_KV_OFFLOAD_POLICY",
+        bind_to=(kv_cache_config, "sparse_kv_offload_policy"),
+        type=str,
+        choices=["rr", "lru"],
+        default="rr",
+        help="Request-local hot KV eviction policy: round-robin (default) or least recently used. Host reads remain deduplicated across the selection.",
+    )
+    kv_cache_group.add_argument(
         "--sparse_kv_offload_test_hbm_blocks",
         env_name="SPARSE_KV_OFFLOAD_TEST_HBM_BLOCKS",
         bind_to=(kv_cache_config, "sparse_kv_offload_test_hbm_blocks"),

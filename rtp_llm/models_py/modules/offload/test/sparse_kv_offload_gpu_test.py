@@ -2,6 +2,7 @@ import unittest
 import weakref
 from math import prod
 from types import MethodType, SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -70,6 +71,8 @@ class SparseOffloadRuntimeTest(_CudaStreamTestCase):
         block=16,
         page=8,
         head_major=False,
+        requests=0,
+        policy="rr",
     ):
         maximum = capacity
         capacity = (maximum + page - 1) // page * page
@@ -131,6 +134,8 @@ class SparseOffloadRuntimeTest(_CudaStreamTestCase):
                     rows_per_block=block,
                     rows_per_page=page,
                     max_selected_rows=maximum,
+                    max_requests=requests,
+                    eviction_policy=policy,
                     host_planes=tuple(hosts),
                     resident_planes=tuple(residents),
                     generations=generations,
@@ -192,6 +197,68 @@ class SparseOffloadRuntimeTest(_CudaStreamTestCase):
             self.assertTrue(
                 padding.contiguous().view(torch.uint8).eq(0xA5).all().item()
             )
+
+    def test_private_eviction_survives_request_reordering(self):
+        for policy in ("rr", "lru"):
+            with self.subTest(policy=policy):
+                runtime, refs, _ = self.make_runtime(
+                    capacity=8, requests=2, policy=policy
+                )
+                keys = torch.tensor([4, 8], dtype=torch.int32, device="cuda")
+                requests = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
+                ids = torch.tensor(
+                    [[32, 33, 34, 35], [64, 65, 66, 67]],
+                    dtype=torch.int32,
+                    device="cuda",
+                )
+                runtime.begin(ids, request_keys=keys, request_ids=requests)
+                self.assert_rows(runtime, refs, ids)
+                preserved = runtime.mapping[64:68].clone()
+                # B moves to batch position 0; only A replaces its four rows.
+                keys.copy_(torch.tensor([8, 4], dtype=torch.int32, device="cuda"))
+                ids.copy_(
+                    torch.tensor(
+                        [[64, 65, 66, 67], [36, 37, 38, 39]],
+                        dtype=torch.int32,
+                        device="cuda",
+                    )
+                )
+                runtime.begin(ids, request_keys=keys, request_ids=requests)
+                self.assert_rows(runtime, refs, ids)
+                self.assertTrue(torch.equal(runtime.mapping[64:68], preserved))
+                self.assertEqual(runtime._miss_count.item(), 4)
+
+    def test_private_policies_keep_global_io_deduplication(self):
+        for policy in ("rr", "lru"):
+            with self.subTest(policy=policy):
+                runtime, refs, _ = self.make_runtime(
+                    capacity=16, requests=2, policy=policy
+                )
+                keys = torch.tensor([4, 8], dtype=torch.int32, device="cuda")
+                # Two queries for A plus one for B, sharing a selected backing row.
+                requests = torch.tensor([0, 0, 1], dtype=torch.int32, device="cuda")
+                ids = torch.tensor(
+                    [[80, 80], [80, 81], [80, 82]], dtype=torch.int32, device="cuda"
+                )
+                runtime.begin(ids, request_keys=keys, request_ids=requests)
+                self.assert_rows(runtime, refs, ids)
+                self.assertEqual(runtime._miss_count.item(), 3)
+                self.assertEqual(
+                    runtime.acquire(0).indices[ids == 80].unique().numel(), 1
+                )
+                runtime.begin(ids, request_keys=keys, request_ids=requests)
+                self.assert_rows(runtime, refs, ids)
+                self.assertEqual(runtime._miss_count.item(), 0)
+
+    def test_lru_retains_the_more_recent_selection(self):
+        runtime, refs, _ = self.make_runtime(capacity=4, policy="lru")
+        for values in ([32, 33, 34, 35], [32], [36]):
+            ids = torch.tensor(values, dtype=torch.int32, device="cuda")
+            runtime.begin(ids)
+            self.assert_rows(runtime, refs, ids)
+        self.assertGreaterEqual(runtime.mapping[32].item(), 0)
+        self.assertGreaterEqual(runtime.mapping[36].item(), 0)
+        self.assertEqual((runtime.mapping[33:36] < 0).sum().item(), 1)
 
     def test_mixed_duplicates_padding_and_empty(self):
         runtime, refs, _ = self.make_runtime()
@@ -624,6 +691,89 @@ class SparseOffloadRuntimeTest(_CudaStreamTestCase):
         with self.assertRaisesRegex(ValueError, "declaration/storage mismatch"):
             build_offload_plans(cache, descs)
 
+    def test_invalid_row_ids_do_not_access_metadata_or_backing(self):
+        runtime, _, _ = self.make_runtime()
+        ids = torch.tensor(
+            [-2, runtime.mapping.numel(), 0x7FFFFFFF],
+            dtype=torch.int32,
+            device="cuda",
+        )
+        runtime.begin(ids)
+        view = runtime.acquire(0)
+        self.assertTrue(view.indices.eq(-1).all().item())
+        self.assertNotEqual(runtime.error.item() & 1, 0)
+        self.assertTrue(runtime.mapping.eq(-1).all().item())
+        runtime.reset()
+        storage = runtime.storages[0]
+        before_host = storage.host_planes[0].clone()
+        before_gpu = storage.resident_planes[0].clone()
+        runtime.write(
+            0, KVWrite(ids, (torch.zeros((3, 288), dtype=torch.uint8, device="cuda"),))
+        )
+        self.stream.synchronize()
+        self.assertNotEqual(runtime.error.item() & 1, 0)
+        self.assertTrue(torch.equal(before_host, storage.host_planes[0]))
+        self.assertTrue(torch.equal(before_gpu, storage.resident_planes[0]))
+
+    def test_invalid_request_identity_is_guarded(self):
+        runtime, _, _ = self.make_runtime(capacity=8, requests=2)
+        ids = torch.tensor([[32]], dtype=torch.int32, device="cuda")
+        for key, request, error_bit in ((0x7FFFFFFF, 0, 4), (4, -1, 2), (4, 1, 2)):
+            runtime.reset()
+            runtime.begin(
+                ids,
+                request_keys=torch.tensor([key], dtype=torch.int32, device="cuda"),
+                request_ids=torch.tensor([request], dtype=torch.int32, device="cuda"),
+            )
+            runtime.drain()
+            self.assertNotEqual(runtime.error.item() & error_bit, 0)
+            self.assertTrue(runtime.mapping.eq(-1).all().item())
+
+    def test_private_quota_and_zero_dynamic_capacity_are_guarded(self):
+        for policy in ("rr", "lru"):
+            template, _, _ = self.make_runtime(capacity=8, requests=2, policy=policy)
+            active = torch.tensor(0, dtype=torch.int32, device="cuda")
+            epochs = torch.ones(8, dtype=torch.int64, device="cuda")
+            for storage in template.storages:
+                storage.active_hot_rows = active
+                storage.hot_cache_epoch = epochs
+            runtime = SparseOffloadRuntime(template.storages, PagedRowLayout())
+            keys = torch.tensor([4, 6], dtype=torch.int32, device="cuda")
+            queries = torch.arange(2, dtype=torch.int32, device="cuda")
+            hbm = torch.tensor([[3]], dtype=torch.int32, device="cuda")
+            runtime.begin(hbm, request_keys=keys[:1], request_ids=queries[:1])
+            self.assertEqual(runtime.acquire(0).indices.item(), 3)
+            self.assertEqual(runtime.error.item(), 0)
+            host = torch.tensor([[32], [48]], dtype=torch.int32, device="cuda")
+            runtime.begin(host, request_keys=keys, request_ids=queries)
+            runtime.drain()
+            self.assertNotEqual(runtime.error.item() & 8, 0)
+            runtime.reset()
+            active.fill_(4)  # Only one request quota is physically available.
+            runtime.begin(host, request_keys=keys, request_ids=queries)
+            runtime.drain()
+            self.assertNotEqual(runtime.error.item() & 8, 0)
+            runtime.reset()
+            active.fill_(8)
+            over_quota = torch.arange(32, 37, dtype=torch.int32, device="cuda").view(
+                1, 5
+            )
+            runtime.begin(over_quota, request_keys=keys[:1], request_ids=queries[:1])
+            runtime.drain()
+            self.assertNotEqual(runtime.error.item() & 16, 0)
+            runtime.reset()
+            runtime.begin(host, request_keys=keys, request_ids=queries)
+            runtime.drain()
+            self.assertEqual(runtime.error.item(), 0)
+            runtime.reset()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=self.stream):
+                runtime.begin(host, request_keys=keys, request_ids=queries)
+                runtime.drain()
+            active.zero_()
+            graph.replay()
+            self.assertNotEqual(runtime.error.item() & 8, 0)
+
     def test_no_host_blocks(self):
         runtime, refs, _ = self.make_runtime(total=2)
         selection = torch.tensor([7, 17, 31, -1], dtype=torch.int32, device="cuda")
@@ -640,7 +790,7 @@ class DynamicHotCacheTest(_CudaStreamTestCase):
 
     def _check_dynamic_hot_cache(self, fp8):
         cache = make_offload_test_cache(
-            fp8, 65536, initial_hot_rows=0, dynamic_hot_cache=True
+            fp8, 65536, initial_hot_rows=0, dynamic_hot_cache=True, max_requests=512
         )
         storages = tuple(cache.get_offload_storage(i, "default") for i in range(2))
         runtime = SparseOffloadRuntime(storages, PagedRowLayout())
@@ -658,21 +808,34 @@ class DynamicHotCacheTest(_CudaStreamTestCase):
         storage.resize_hot_rows(128)
         ids = torch.full((128,), -1, dtype=torch.int32, device="cuda")
         ids[:64] = torch.arange(64, device="cuda", dtype=torch.int32) + runtime.hbm_rows
-        runtime.begin(ids)
+        # One active request occupies a 128-row quota within the 65536-row pool.
+        request_keys = torch.tensor(
+            [runtime.hbm_rows // storage.rows_per_page],
+            dtype=torch.int32,
+            device="cuda",
+        )
+        request_ids = torch.zeros((1,), dtype=torch.int32, device="cuda")
+        runtime.begin(
+            ids.view(1, -1), request_keys=request_keys, request_ids=request_ids
+        )
         runtime.drain()
         self.stream.synchronize()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=self.stream):
-            runtime.begin(ids)
+            runtime.begin(
+                ids.view(1, -1), request_keys=request_keys, request_ids=request_ids
+            )
             indices = runtime.acquire(0).indices.clone()
             observed = []
             for layer, s in enumerate(storages):
                 view = runtime.acquire(layer)
-                safe = view.indices.clamp_min(0).long()
-                observed.append(tuple(
-                    plane[safe // s.rows_per_page, safe % s.rows_per_page].clone()
-                    for plane in view.planes
-                ))
+                safe = view.indices.flatten().clamp_min(0).long()
+                observed.append(
+                    tuple(
+                        plane[safe // s.rows_per_page, safe % s.rows_per_page].clone()
+                        for plane in view.planes
+                    )
+                )
             runtime.drain()
 
         # Grow and shrink around the first 64 cached slots. Their
@@ -685,8 +848,13 @@ class DynamicHotCacheTest(_CudaStreamTestCase):
             for layer, planes in enumerate(observed):
                 for actual in planes:
                     self.assertTrue(actual[:64].eq(layer + 11).all().item())
-            self.assertEqual(addresses, tuple(p.data_ptr() for s in storages for p in s.resident_planes))
-            self.assertEqual(shapes, tuple(p.shape for s in storages for p in s.resident_planes))
+            self.assertEqual(
+                addresses,
+                tuple(p.data_ptr() for s in storages for p in s.resident_planes),
+            )
+            self.assertEqual(
+                shapes, tuple(p.shape for s in storages for p in s.resident_planes)
+            )
 
         # Empty padded graph batches must work with no hot HBM pages.
         storage.resize_hot_rows(0)
@@ -702,9 +870,13 @@ class DynamicHotCacheTest(_CudaStreamTestCase):
         for layer, s in enumerate(storages):
             for host in s.host_planes:
                 host.fill_(layer + 21)
-            write_ids = torch.tensor([runtime.hbm_rows], dtype=torch.int32, device="cuda")
-            values = tuple(torch.full((1, *p.shape[2:]), layer + 31,
-                                      dtype=p.dtype, device="cuda") for p in s.host_planes)
+            write_ids = torch.tensor(
+                [runtime.hbm_rows], dtype=torch.int32, device="cuda"
+            )
+            values = tuple(
+                torch.full((1, *p.shape[2:]), layer + 31, dtype=p.dtype, device="cuda")
+                for p in s.host_planes
+            )
             runtime.write(layer, KVWrite(write_ids, values))
         storage.resize_hot_rows(128)
         ids[:64] = torch.arange(64, device="cuda", dtype=torch.int32) + runtime.hbm_rows
@@ -755,10 +927,30 @@ class SparseMlaOffloadTest(_CudaStreamTestCase):
                     model.layers[0].self_attn.offload_writer._pack_staging
                 )
                 self.assertEqual(staging_ref().numel(), 128 * 576)
-                if model_type is Glm5MtpModel:
-                    model.initialize(SimpleNamespace(kv_cache=warmup))
-                    self.assertIs(
-                        model.offload_plans[0, "default"].runtime, runtime_ref()
+                model.initialize(SimpleNamespace(kv_cache=warmup))
+                self.assertIs(model.offload_plans[0, "default"].runtime, runtime_ref())
+                self.assertIs(
+                    model.layers[0].self_attn.offload_writer._pack_staging,
+                    staging_ref(),
+                )
+                if model_type is GenericMoeModel:
+                    replacement = make_offload_test_cache(False)
+
+                    def build_after_release(*args):
+                        # Check at allocation time, not just the final live
+                        # object count: two metadata generations must not overlap.
+                        self.assertIsNone(runtime_ref())
+                        self.assertIsNone(staging_ref())
+                        return build_offload_plans(*args)
+
+                    with patch(
+                        "rtp_llm.models_py.modules.offload.plan.build_offload_plans",
+                        side_effect=build_after_release,
+                    ):
+                        model.initialize(SimpleNamespace(kv_cache=replacement))
+                    runtime_ref = weakref.ref(model.offload_plans[0, "default"].runtime)
+                    staging_ref = weakref.ref(
+                        model.layers[0].self_attn.offload_writer._pack_staging
                     )
                 model.initialize(SimpleNamespace(kv_cache=None))
                 model.release_kv_cache()  # Teardown is idempotent.
@@ -786,7 +978,9 @@ class SparseMlaOffloadTest(_CudaStreamTestCase):
             self.assertFalse(plan.runtime.dynamic)
             self.assertIsNone(plan.storage.active_hot_rows)
             self.assertIsNone(plan.storage.hot_cache_epoch)
-            self.assertEqual(plan.runtime.slot_epochs.data_ptr(), plan.runtime.versions.data_ptr())
+            self.assertEqual(
+                plan.runtime.slot_epochs.data_ptr(), plan.runtime.versions.data_ptr()
+            )
             self.assertEqual(
                 (plan.storage_index, plan.begin, plan.drain),
                 (0, True, True),
@@ -887,7 +1081,9 @@ class SparseMlaOffloadTest(_CudaStreamTestCase):
         )
         op.plan(params, table)
         reference.plan(params, table)
-        topk = torch.randint(0, 1280, (tokens, 1, top_k), dtype=torch.int32, device="cuda")
+        topk = torch.randint(
+            0, 1280, (tokens, 1, top_k), dtype=torch.int32, device="cuda"
+        )
         topk[0, 0, 0] = 44
         topk[1, 0, 0] = 188
         topk[..., 1] = topk[..., 0]
@@ -1058,7 +1254,13 @@ class SparseMlaOffloadTest(_CudaStreamTestCase):
         events.clear()
         writes = []
 
-        def begin(selection):
+        def begin(selection, *, request_keys, request_ids):
+            torch.testing.assert_close(
+                request_keys, torch.tensor([2, 3, 4], dtype=torch.int32, device="cuda")
+            )
+            torch.testing.assert_close(
+                request_ids, torch.arange(3, dtype=torch.int32, device="cuda")
+            )
             expected_ids = torch.tensor(
                 [256, 384, 512], dtype=torch.int32, device="cuda"
             )

@@ -256,8 +256,9 @@ class GenerateConfigTest(TestCase):
                 setup_args([]).kv_cache_config.sparse_kv_offload_hot_rows, 4096
             )
             self.assertEqual(
-                setup_args(["--sparse_kv_offload_hot_rows", "8192"])
-                .kv_cache_config.sparse_kv_offload_hot_rows,
+                setup_args(
+                    ["--sparse_kv_offload_hot_rows", "8192"]
+                ).kv_cache_config.sparse_kv_offload_hot_rows,
                 8192,
             )
 
@@ -266,7 +267,9 @@ class GenerateConfigTest(TestCase):
         with patch.dict("os.environ", _jit_env(), clear=True):
             self.assertEqual(getattr(setup_args([]).kv_cache_config, field), "static")
         with patch.dict(
-            "os.environ", _jit_env(SPARSE_KV_OFFLOAD_HOT_CACHE_MODE="dynamic"), clear=True
+            "os.environ",
+            _jit_env(SPARSE_KV_OFFLOAD_HOT_CACHE_MODE="dynamic"),
+            clear=True,
         ):
             self.assertEqual(getattr(setup_args([]).kv_cache_config, field), "dynamic")
             self.assertEqual(
@@ -276,7 +279,29 @@ class GenerateConfigTest(TestCase):
             with self.assertRaises(SystemExit):
                 setup_args(["--" + field, "invalid"])
         with patch.dict(
-            "os.environ", _jit_env(SPARSE_KV_OFFLOAD_HOT_CACHE_MODE="invalid"), clear=True
+            "os.environ",
+            _jit_env(SPARSE_KV_OFFLOAD_HOT_CACHE_MODE="invalid"),
+            clear=True,
+        ):
+            with self.assertRaises((SystemExit, ValueError)):
+                setup_args([])
+
+    def test_sparse_offload_policy_default_env_and_cli(self):
+        field = "sparse_kv_offload_policy"
+        with patch.dict("os.environ", _jit_env(), clear=True):
+            self.assertEqual(getattr(setup_args([]).kv_cache_config, field), "rr")
+        with patch.dict(
+            "os.environ", _jit_env(SPARSE_KV_OFFLOAD_POLICY="lru"), clear=True
+        ):
+            self.assertEqual(getattr(setup_args([]).kv_cache_config, field), "lru")
+            self.assertEqual(
+                getattr(setup_args(["--" + field, "rr"]).kv_cache_config, field),
+                "rr",
+            )
+            with self.assertRaises(SystemExit):
+                setup_args(["--" + field, "invalid"])
+        with patch.dict(
+            "os.environ", _jit_env(SPARSE_KV_OFFLOAD_POLICY="invalid"), clear=True
         ):
             with self.assertRaises((SystemExit, ValueError)):
                 setup_args([])

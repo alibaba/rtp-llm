@@ -258,8 +258,14 @@ class MlaAttention(nn.Module):
                 prev_topk_indices,
             )
             if offload_plan.begin:
+                sparse_op = default_fmha_impl.fmha_impl
+                selection = sparse_op.translate_selection(topk_indices)
                 offload_plan.runtime.begin(
-                    default_fmha_impl.fmha_impl.translate_selection(topk_indices)
+                    selection,
+                    request_keys=sparse_op.block_table[:, 0],
+                    request_ids=sparse_op.mla_params.batch_indice_d[
+                        : selection.shape[0]
+                    ],
                 )
             if self.q_lora_rank > 0:
                 q = self.q_b_proj(q_c)

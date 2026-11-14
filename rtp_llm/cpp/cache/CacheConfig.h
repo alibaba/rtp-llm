@@ -27,11 +27,12 @@ namespace rtp_llm {
 inline constexpr size_t kOffloadAllocationChunkBytes = 2 * 1024 * 1024;
 
 struct TieredCacheConfig {
-    uint32_t total_blocks      = 0;
-    uint32_t hbm_blocks        = 0;
-    uint32_t max_selected_rows = 0;
-    uint32_t max_requests      = 0;
-    bool     dynamic_hot_cache = false;
+    uint32_t    total_blocks      = 0;
+    uint32_t    hbm_blocks        = 0;
+    uint32_t    max_selected_rows = 0;
+    uint32_t    max_requests      = 0;
+    bool        dynamic_hot_cache = false;
+    std::string eviction_policy   = "rr";
 
     uint64_t residentRows(uint32_t rows_per_page) const {
         return (static_cast<uint64_t>(max_selected_rows) + rows_per_page - 1) / rows_per_page * rows_per_page;
@@ -101,7 +102,7 @@ public:
     size_t seq_size_per_block = 1;  // tokens/base cache-key block; groups may cover multiple key blocks
 
     // Attention-specific configuration
-    int reuse_cache_tail_blocks = std::numeric_limits<int>::max();
+    int                                      reuse_cache_tail_blocks = std::numeric_limits<int>::max();
     std::map<std::string, TieredCacheConfig> tiered_cache_configs;
     std::map<std::string, size_t>            offload_runtime_counts;
 

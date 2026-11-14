@@ -19,8 +19,8 @@ class KVCacheConfigPickleTest(TestCase):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 77)
-                self.assertEqual(state[:2], ("KVCacheConfig", 12))
+                self.assertEqual(len(state), 78)
+                self.assertEqual(state[:2], ("KVCacheConfig", 13))
                 self.assertEqual(
                     state[64:69], tuple(KV_CACHE_EVENT_FIELD_VALUES.values())
                 )
@@ -157,6 +157,20 @@ class KVCacheConfigPickleTest(TestCase):
             self.assertEqual(getattr(restored, name), getattr(defaults, name))
         self.assertFalse(restored.enable_sparse_kv_offload)
 
+    def test_offload_policy_round_trip_and_version_twelve_default(self):
+        source = KVCacheConfig()
+        self.assertEqual(source.sparse_kv_offload_policy, "rr")
+        source.sparse_kv_offload_policy = "lru"
+        restored = pickle.loads(pickle.dumps(source))
+        self.assertEqual(restored.sparse_kv_offload_policy, "lru")
+        state = source.__getstate__()
+        previous = (state[0], 12, *state[2:77])
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(previous)
+        self.assertEqual(restored.sparse_kv_offload_policy, "rr")
+        with self.assertRaises(RuntimeError):
+            KVCacheConfig.__new__(KVCacheConfig).__setstate__((*state[:77], "invalid"))
+
     def test_hot_cache_mode_round_trip_and_version_eleven_default(self):
         source = KVCacheConfig()
         for mode in ("static", "dynamic"):
@@ -169,7 +183,7 @@ class KVCacheConfigPickleTest(TestCase):
         restored = KVCacheConfig.__new__(KVCacheConfig)
         restored.__setstate__(previous)
         self.assertEqual(restored.sparse_kv_offload_hot_cache_mode, "static")
-        invalid = (*state[:76], "invalid")
+        invalid = (*state[:76], "invalid", *state[77:])
         with self.assertRaises(RuntimeError):
             KVCacheConfig.__new__(KVCacheConfig).__setstate__(invalid)
 

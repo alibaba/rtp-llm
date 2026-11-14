@@ -532,8 +532,8 @@ void DeviceBlockPool::initializeOffloadStorage() {
     const auto& tiered = *cfg.offload;
     RTP_LLM_CHECK_WITH_INFO(!cfg.memory_layouts.empty() && !cfg.use_pinned_cpu_backing,
                             "offload requires native layouts with DEVICE placement");
-    const auto&  layout    = cfg.memory_layouts.front();
-    size_t       total_layers = 0;
+    const auto& layout       = cfg.memory_layouts.front();
+    size_t      total_layers = 0;
     for (const auto& module_layout : cfg.memory_layouts) {
         RTP_LLM_CHECK_WITH_INFO(module_layout.kv_block_stride_bytes == layout.kv_block_stride_bytes
                                     && module_layout.kv_scale_stride_bytes == layout.kv_scale_stride_bytes
@@ -572,7 +572,7 @@ void DeviceBlockPool::initializeOffloadStorage() {
     if (tiered.dynamic_hot_cache) {
         std::vector<OffloadDeviceSegment> segments;
         for (size_t layer = 0; layer < total_layers; ++layer) {
-            const size_t layer_offset = layer * gpu_pages * bytes_per_page;
+            const size_t layer_offset  = layer * gpu_pages * bytes_per_page;
             const size_t kv_page_bytes = layout.kv_block_stride_bytes / pages;
             segments.push_back({layer_offset, tiered.hbm_blocks * layout.kv_block_stride_bytes, kv_page_bytes});
             if (layout.kv_scale_stride_bytes) {
@@ -631,6 +631,8 @@ void DeviceBlockPool::initializeOffloadStorage() {
         storage->rows_per_block    = rows;
         storage->rows_per_page     = page_rows;
         storage->max_selected_rows = tiered.max_selected_rows;
+        storage->max_requests      = tiered.max_requests;
+        storage->eviction_policy   = tiered.eviction_policy;
         storage->generations       = generations;
         if (device_buffer) {
             storage->active_hot_rows = device_buffer->activeRows();
@@ -647,13 +649,16 @@ void DeviceBlockPool::initializeOffloadStorage() {
         offload_storages_.push_back(std::move(storage));
     }
     RTP_LLM_CHECK(gpu_offset == gpu_bytes && host_offset == host_bytes);
-    RTP_LLM_LOG_INFO("offload backing pool=%s H=%u P=%u device_bytes=%zu host_bytes=%zu logical_block_bytes=%zu hot_cache_mode=%s",
-                     cfg.pool_name.c_str(),
-                     tiered.hbm_blocks,
-                     tiered.total_blocks - tiered.hbm_blocks,
-                     offloadDeviceSizeBytes(),
-                     offloadHostSizeBytes(),
-                     blockSizeBytes(), tiered.dynamic_hot_cache ? "dynamic" : "static");
+    RTP_LLM_LOG_INFO(
+        "offload backing pool=%s H=%u P=%u device_bytes=%zu host_bytes=%zu logical_block_bytes=%zu hot_cache_mode=%s eviction_policy=%s",
+        cfg.pool_name.c_str(),
+        tiered.hbm_blocks,
+        tiered.total_blocks - tiered.hbm_blocks,
+        offloadDeviceSizeBytes(),
+        offloadHostSizeBytes(),
+        blockSizeBytes(),
+        tiered.dynamic_hot_cache ? "dynamic" : "static",
+        tiered.eviction_policy.c_str());
 #endif
 }
 
@@ -1074,8 +1079,8 @@ size_t DeviceBlockPool::offloadDeviceSizeBytes() const {
     if (!storage.hot_cache) {
         return cache_aligned_buffer_.nbytes() + storage.generations.nbytes();
     }
-    return storage.hot_cache->committedBytes() + storage.generations.nbytes()
-           + storage.active_hot_rows.nbytes() + storage.hot_cache_epoch.nbytes();
+    return storage.hot_cache->committedBytes() + storage.generations.nbytes() + storage.active_hot_rows.nbytes()
+           + storage.hot_cache_epoch.nbytes();
 }
 
 void DeviceBlockPool::resizeOffloadHotCache(size_t requests, bool grow_only) {
@@ -1083,11 +1088,14 @@ void DeviceBlockPool::resizeOffloadHotCache(size_t requests, bool grow_only) {
         return;
     }
     const auto& tiered = *config().offload;
-    RTP_LLM_CHECK_WITH_INFO(tiered.max_requests == 0 || (requests <= tiered.max_requests
-                                && tiered.max_selected_rows % tiered.max_requests == 0),
-                            "offload requests=%zu exceed configured maximum=%u", requests, tiered.max_requests);
+    RTP_LLM_CHECK_WITH_INFO(
+        tiered.max_requests == 0
+            || (requests <= tiered.max_requests && tiered.max_selected_rows % tiered.max_requests == 0),
+        "offload requests=%zu exceed configured maximum=%u",
+        requests,
+        tiered.max_requests);
     const uint32_t rows = tiered.max_requests == 0 ? (requests ? tiered.max_selected_rows : 0) :
-                            requests * (tiered.max_selected_rows / tiered.max_requests);
+                                                     requests * (tiered.max_selected_rows / tiered.max_requests);
     // grow_only is used by speculative sub-forwards; they must not release the
     // target batch's quota merely because rejection compacts the draft batch.
     offload_storages_.front()->hot_cache->resize(rows, grow_only);
