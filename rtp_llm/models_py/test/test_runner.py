@@ -3,7 +3,9 @@
 import importlib
 import os
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 
 def main():
@@ -26,6 +28,23 @@ def main():
                 raise RuntimeError(
                     f"{module_name}: wrong GPU architecture for declared pool"
                 )
+    if module_name.startswith(
+        (
+            "rtp_llm.models_py.kernels.cuda.qsa.test.",
+            "rtp_llm.models_py.modules.qwen4_exp.test.",
+        )
+    ):
+        # A killed Torch extension build can leave a lock in the shared cache.
+        with tempfile.TemporaryDirectory() as build_dir, patch.dict(
+            os.environ, {"TORCH_EXTENSIONS_DIR": build_dir}
+        ):
+            result = _run_suite(module_name, selectors)
+    else:
+        result = _run_suite(module_name, selectors)
+    sys.exit(0 if result.wasSuccessful() else 1)
+
+
+def _run_suite(module_name, selectors):
     module = importlib.import_module(module_name)
     loader = unittest.defaultTestLoader
     suite = (
@@ -35,5 +54,4 @@ def main():
     )
     if not suite.countTestCases():
         raise RuntimeError(f"{module_name}: no tests selected")
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
-    sys.exit(0 if result.wasSuccessful() else 1)
+    return unittest.TextTestRunner(verbosity=2).run(suite)
