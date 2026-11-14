@@ -163,6 +163,20 @@ class StreamStatus:
         self.output_ids = remove_stop_word_ids_func(
             self.output_ids_list, delta_output_ids, **stop_kwargs
         )
+        if len(self.output_ids) < len(self.output_ids_list):
+            self.finish_reason = self.finish_reason or FinisheReason.stop
+        elif self.finish_reason is None and not getattr(output, "finished", False):
+            # Keep an incomplete stop sequence and its probabilities unpublished.
+            pending_length = 0
+            for stop_ids in self.stop_words_list or []:
+                for length in range(
+                    min(len(stop_ids) - 1, len(self.output_ids)), pending_length, -1
+                ):
+                    if self.output_ids[-length:] == stop_ids[:length]:
+                        pending_length = length
+                        break
+            if pending_length:
+                self.output_ids = self.output_ids[:-pending_length]
 
     def update_result(self):
         self.last_token_length = len(self.output_ids) - len(self.last_output_ids)
@@ -836,6 +850,24 @@ class CustomChatRenderer:
 
         if should_buffer:
             return await self._create_empty_delta(output.aux_info)
+
+        visible_length = len(decoded_prev_token) + len(status.delta_output_string)
+        if visible_length < len(decoded_string):
+            # String stops can fall inside a context-dependent token. Keep only
+            # complete visible tokens; never relabel a hidden token's probability.
+            begin = len(status.last_output_ids)
+            end = len(status.output_ids)
+            while (
+                end > begin
+                and len(
+                    self.tokenizer.decode(
+                        status.prev_token_id + status.output_ids[begin:end]
+                    )
+                )
+                > visible_length
+            ):
+                end -= 1
+            status.output_ids = status.output_ids[:end]
 
         # Build delta output
         if len(status.delta_output_string) > 0:

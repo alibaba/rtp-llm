@@ -197,7 +197,7 @@ class KimiK3Grammar:
         if config.max_thinking_tokens < 0:
             config.max_thinking_tokens = INT32_MAX
         channel, offset = self.prompt_info or kimi_k3_prompt_channel(
-            tokenizer, input_ids
+            tokenizer, input_ids, allow_partial=True
         )
         if config.in_think_mode and channel == "response":
             raise FtRuntimeException(

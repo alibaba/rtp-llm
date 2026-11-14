@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -40,6 +41,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -221,6 +223,7 @@ struct MtpExecutorTestConfig {
     bool            enable_batch_record              = false;
     bool            draft_prefill_uses_request_lanes = false;
     double          record_decode_sample_rate        = 1.0;
+    std::optional<ReturnAllProbsMode> response_mode;
 };
 
 template<typename T>
@@ -885,6 +888,7 @@ struct MtpExecutorComponents {
 class MtpExecutorTest: public DeviceTestBase {
 public:
     void runMultiBatchDecode(bool use_mtp_hidden_buffer, bool request_lanes = false);
+    void runDSparkSpecLogitsWorkerScenario(bool previous_commit_pending);
 
     GenerateStreamPtr createContextStream(const ModelConfig&     model_config,
                                           const RuntimeConfig&   runtime_config,
@@ -3057,6 +3061,10 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
 
     GenerateStreamPtr stream1 = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info1);
+    if (config_override && config_override->response_mode) {
+        stream1->generateConfig()->return_all_probs = *config_override->response_mode;
+        stream1->setReturnAllProbs(*config_override->response_mode);
+    }
     GenerateStreamPtr prefill_only_stream;
     if (with_prefill_only) {
         prefill_only_stream = createContextStream(
@@ -3169,6 +3177,8 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
         SamplerOutput{torch::tensor({3, 2, 0, 0, 0}, torch::kInt32).reshape({(int64_t)batch_size * 5, 1})};
     sampler_output.all_probs = torch::tensor(target_sample_all_probs_data)
                                    .reshape({(int64_t)batch_size, (int64_t)(propose_step + 1), (int64_t)vocab_size});
+    // No filtering in this fixture: the original and sampled distributions agree.
+    sampler_output.original_all_probs = sampler_output.all_probs.clone();
     components.fake_sampler->setInputs({sampler_input});
     components.fake_sampler->setOutputs({sampler_output});
 
@@ -3261,6 +3271,11 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
     ASSERT_EQ(do_sample.scalar_type(), torch::kBool);
     ASSERT_EQ(do_sample.sizes().vec(), (std::vector<int64_t>{1}));
     EXPECT_FALSE(do_sample[0].item<bool>());
+    if (config_override && config_override->response_mode) {
+        EXPECT_EQ(fake_speculative_sampler->last_params.response_modes,
+                  (std::vector<ReturnAllProbsMode>{*config_override->response_mode}));
+        EXPECT_EQ(stream1->getReturnAllProbs(), ReturnAllProbsMode::DEFAULT);
+    }
     EXPECT_EQ(active_draft_model->forwardCount(), propose_step - 1);
     EXPECT_EQ(draft_prefill_fake_model->forwardCount(), 1u);
     if (with_prefill_only) {
@@ -3276,6 +3291,15 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
 
 TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     runSingleBatchDecodeScenario(/*with_prefill_only=*/false);
+}
+
+TEST_F(MtpExecutorTest, ReviewResponseModePreservesRequestThroughInternalSampling) {
+    for (const auto mode : {ReturnAllProbsMode::NONE, ReturnAllProbsMode::DEFAULT, ReturnAllProbsMode::ORIGINAL}) {
+        SCOPED_TRACE(static_cast<int>(mode));
+        MtpExecutorTestConfig config;
+        config.response_mode = mode;
+        runSingleBatchDecodeScenario(false, &config);
+    }
 }
 
 TEST_F(MtpExecutorTest, testPdfusionPrefillOnlyDoesNotSkipSingleBatchDecode) {
@@ -3448,7 +3472,36 @@ TEST_F(MtpExecutorTest, testDSparkDecodeKeepsProposalAndMarkovContract) {
     EXPECT_TRUE(components.executor->dspark_markov_w2_.defined());
 }
 
-TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
+namespace {
+
+class ObservedCommittedSpecProcessor final: public RejectDraftTokenSpecProcessor {
+public:
+    explicit ObservedCommittedSpecProcessor(int64_t accepted):
+        RejectDraftTokenSpecProcessor(3, accepted), accepted_(accepted) {}
+
+    std::optional<ErrorInfo> updateStatus(const torch::Tensor&, int32_t count) override {
+        accepted_.fetch_add(count);
+        return std::nullopt;
+    }
+
+    int64_t acceptedTokenLen() const override {
+        return accepted_.load();
+    }
+
+    ErrorResult<int> prepareSpeculative(const SpecLogitsProcessorRequest& request) override {
+        observed.set_value(acceptedTokenLen());
+        return RejectDraftTokenSpecProcessor::prepareSpeculative(request);
+    }
+
+    std::promise<int64_t> observed;
+
+private:
+    std::atomic<int64_t> accepted_;
+};
+
+}  // namespace
+
+void MtpExecutorTest::runDSparkSpecLogitsWorkerScenario(bool previous_commit_pending) {
     constexpr int32_t gamma      = 3;
     constexpr int32_t vocab_size = 4;
 
@@ -3477,7 +3530,11 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     EXPECT_TRUE(stream->getProposeToken().empty());
     EXPECT_FALSE(stream->getProposeTokensGpu().defined());
 
-    auto processor = std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen());
+    auto observed_processor =
+        previous_commit_pending ? std::make_shared<ObservedCommittedSpecProcessor>(stream->outputTokenLen()) : nullptr;
+    std::shared_ptr<RejectDraftTokenSpecProcessor> processor =
+        observed_processor ? std::static_pointer_cast<RejectDraftTokenSpecProcessor>(observed_processor) :
+                             std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen());
     stream->sampling_state_.logits_processors.push_back(processor);
     const auto main_thread_id = std::this_thread::get_id();
 
@@ -3499,6 +3556,43 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     components.fake_target_model->setMtpTargetHiddenStates(target_aux_features);
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
+
+    std::future<bool>           release_previous;
+    std::shared_future<int64_t> observed_length;
+    const auto                  expected_committed_length = stream->outputTokenLen() + 1;
+    if (previous_commit_pending) {
+        auto* executor = components.executor.get();
+        ASSERT_TRUE(executor->useStreamAsync());
+        ASSERT_TRUE(executor->useDropBroadSync());
+        components.fake_target_model->enableSpeculativeTargetCommit();
+        auto target_started = std::make_shared<std::promise<void>>();
+        auto target_ready   = target_started->get_future().share();
+        components.fake_target_model->setForwardObserver([target_started] { target_started->set_value(); });
+        auto allow_commit   = std::make_shared<std::promise<void>>();
+        auto commit_gate    = allow_commit->get_future().share();
+        auto worker_started = std::make_shared<std::promise<void>>();
+        auto worker_ready   = worker_started->get_future();
+        observed_length     = observed_processor->observed.get_future().share();
+        executor->spec_bookkeeping_runner_.launch("previous.processor.commit", [=] {
+            worker_started->set_value();
+            if (commit_gate.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
+                throw std::runtime_error("previous processor commit was never released");
+            }
+            observed_processor->updateStatus({}, 1);
+        });
+        ASSERT_EQ(worker_ready.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+        // Keep the previous commit pending while the target forward progresses.
+        // A correct verifier waits on that commit; an early read records stale
+        // state and wakes this controller immediately. Every wait is bounded.
+        release_previous = std::async(std::launch::async, [=] {
+            const bool target_overlapped = target_ready.wait_for(std::chrono::seconds(10)) == std::future_status::ready;
+            if (target_overlapped) {
+                observed_length.wait_for(std::chrono::seconds(5));
+            }
+            allow_commit->set_value();
+            return target_overlapped;
+        });
+    }
 
     auto sampler_input         = SamplerInputs{target_output.logits.clone()};
     sampler_input.logits[0][3] = BaseLogitsProcessor::neg_inf;
@@ -3559,6 +3653,69 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     EXPECT_NE(std::thread::id(), processor->invocationThreadId());
     EXPECT_NE(main_thread_id, processor->invocationThreadId());
     EXPECT_EQ((std::vector<int32_t>{2, 1, 3}), processor->observedDraftTokens());
+    if (previous_commit_pending) {
+        EXPECT_TRUE(release_previous.get()) << "target GPU work must retain its overlap with previous host commit";
+        ASSERT_EQ(observed_length.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+        EXPECT_EQ(observed_length.get(), expected_committed_length)
+            << "speculative masks must consume the preceding round's committed processor state";
+        components.executor->spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+    }
+}
+
+TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
+    runDSparkSpecLogitsWorkerScenario(false);
+}
+
+TEST_F(MtpExecutorTest, ReviewTransactionalSpecLogitsWaitsForPreviousCommit) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    if (!components.executor->useStreamAsync() || !components.executor->useDropBroadSync()) {
+        GTEST_SKIP() << "Run with RTP_LLM_STREAM_ASYNC=1 and RTP_LLM_DROP_BROAD_SYNC=1";
+    }
+    runDSparkSpecLogitsWorkerScenario(true);
+}
+
+TEST_F(MtpExecutorTest, ReviewDraftPrefillLayoutUsesTheWrappedPythonDraft) {
+    // No Python Torch import is needed: this exercises construction and the
+    // capability contract, not forward. Keep the real PyWrappedModel wrapper.
+    py::scoped_interpreter interpreter;
+    auto module = py::module_::import("types").attr("ModuleType")("mtp_draft_layout_test").cast<py::module_>();
+    py::class_<torch_ext::PyModelInitResources>(module, "PyModelInitResources");
+    py::exec(R"(
+class DraftModel:
+    def __init__(self):
+        self.initializations = 0
+    def initialize(self, resources):
+        self.initializations += 1
+        return True
+    def cuda_graph_draft_prefill_uses_request_lanes(self):
+        return True
+    def forward(self, inputs):
+        raise AssertionError("construction must not run a forward")
+    def close(self):
+        pass
+)",
+             module.attr("__dict__"));
+    auto          draft = module.attr("DraftModel")();
+    CustomConfig  config;
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params               = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    params.sp_config.type              = SP_TYPE_MTP;
+    params.sp_config.gen_num_per_cycle = 3;
+    params.hw_kernel_config.enable_cuda_graph = false;
+    params.py_model                           = py::none();
+    params.py_sp_model                        = draft;
+    auto modules                              = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+    modules->push_back(std::make_unique<EngineInitParams>(params));
+    auto propose = std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_MTP, 3, std::move(modules));
+    ASSERT_TRUE(propose->getEngineInitParams().py_model.is_none());
+    TestableMtpExecutor executor(params, propose, nullptr, 1, true);
+    ASSERT_NE(dynamic_cast<PyWrappedModel*>(executor.draft_model_.get()), nullptr);
+    EXPECT_EQ(draft.attr("initializations").cast<int>(), 1);
+    EXPECT_TRUE(executor.batch_stream_processor_->request_lanes_)
+        << "the batch layout must probe params.py_sp_model, which owns the real draft wrapper";
+    EXPECT_EQ(executor.batch_stream_processor_->draftInputLayout(), mtp::DraftInputLayout::FIXED_WIDTH);
 }
 
 TEST_F(MtpExecutorTest, testDSparkDraftUsesFlashInferSamplingAndReturnsExactQ) {

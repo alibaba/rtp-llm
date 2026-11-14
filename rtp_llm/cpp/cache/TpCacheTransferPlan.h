@@ -87,7 +87,31 @@ struct TpCacheTransferPlan {
         return {destination_bytes / peers * source_parts, destination_bytes, peers, peer, std::move(slices)};
     }
 
-    static TpCacheTransferPlan mha(size_t k_bytes, size_t v_bytes, size_t heads, size_t head, size_t kernel_pages = 1) {
+    static TpCacheTransferPlan mha(size_t k_bytes,
+                                   size_t v_bytes,
+                                   size_t heads,
+                                   size_t head,
+                                   size_t kernel_pages = 1,
+                                   size_t source_parts = 1,
+                                   size_t source_part  = 0) {
+        if (source_parts == 0 || source_part >= source_parts) {
+            throw std::invalid_argument("invalid MHA TP source partition");
+        }
+        if (source_parts > 1) {
+            if (heads != 1 || head != 0) {
+                throw std::invalid_argument("MHA TP source and destination partitions must be nested");
+            }
+            const auto max = std::numeric_limits<size_t>::max();
+            if (k_bytes > max / source_parts || v_bytes > max / source_parts) {
+                throw std::overflow_error("MHA TP source size overflow");
+            }
+            auto slices = mhaTpCacheSlices(
+                k_bytes * source_parts, v_bytes * source_parts, source_parts, source_part, kernel_pages);
+            for (auto& slice : slices) {
+                std::swap(slice.source_offset, slice.destination_offset);
+            }
+            return {(k_bytes + v_bytes) * source_parts, k_bytes + v_bytes, 1, 0, std::move(slices)};
+        }
         auto slices = mhaTpCacheSlices(k_bytes, v_bytes, heads, head, kernel_pages);
         return {(k_bytes + v_bytes) / heads, k_bytes + v_bytes, heads, head, std::move(slices)};
     }
@@ -134,6 +158,12 @@ struct TpCacheTransferLayout {
         if (typed) {
             result.selected   = tpCachePeerOwnsPayload(mode, local_heads, topology, peer);
             result.reassemble = result.selected && needsReassembly(local_heads);
+        }
+        if (mode == TpCacheTransferMode::REPLICATED) {
+            result.local_partition_count  = 1;
+            result.local_partition_id     = 0;
+            result.remote_partition_count = 1;
+            result.remote_partition_id    = 0;
         }
         return result;
     }

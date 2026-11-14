@@ -53,6 +53,8 @@ class K3HostMetadataReproTest(unittest.TestCase):
         model.prefill_query_cp = False
         model.config = NS(is_mtp=False, k3_runtime_config=NS(dsa=None))
         model._setup_dsa()
+        model.dsa_workspace = object()
+        model._prepare_dsa = lambda inputs, is_cuda_graph: {}
         model.layers = nn.ModuleList([_LinearMetadataProbe()])
         hidden = torch.ones((8, 128), device="cuda", dtype=torch.bfloat16)
         attn = PyAttentionInputs()
@@ -65,7 +67,7 @@ class K3HostMetadataReproTest(unittest.TestCase):
             [0, 3, 8], device="cuda", dtype=torch.int32
         )
         inputs = NS(input_ids=torch.zeros(8, device="cuda"), attention_inputs=attn)
-        actual = model._forward_layers(hidden, inputs, fmha_impl={})
+        actual = model._forward_layers(hidden, inputs, fmha_impl=None)
         torch.testing.assert_close(actual, hidden)
         self.assertEqual(attn.cu_seqlens.tolist(), [0, 3, 8])
         self.assertTrue(attn.cu_seqlens.is_pinned())

@@ -68,6 +68,10 @@ public:
     std::shared_ptr<LinearReplayLease>     linearReplayLease() const {
         return linear_replay_.lease;
     }
+    // Reserve decode capacity at admission, before Prefill or asynchronous loads.
+    bool reserveLinearReplaySlot(bool* newly_reserved = nullptr);
+    // Roll back only a new admission reservation that made no KV/load progress.
+    void                                   releaseUnusedLinearReplaySlot();
     std::shared_ptr<LinearReplayBlockHold> holdLinearReplayBlocks();
     void                        fakeInitKVBlock(size_t reserved_blocks = 0);
     int                         tryReleaseKVBlock(size_t nums);

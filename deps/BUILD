@@ -4,6 +4,20 @@ load("@rules_python//python:pip.bzl", "compile_pip_requirements")
 load(":pip.bzl", "PIP_EXTRA_ARGS")
 
 package(default_visibility = ["//visibility:public"])
+
+py_test(
+    name = "requirements_sources_test",
+    srcs = ["requirements_sources_test.py"],
+    data = [
+        "requirements_torch_gpu_cuda13.txt",
+        "requirements_cuda13_arm.txt",
+        "requirements_lock_torch_gpu_cuda13.txt",
+        "requirements_lock_cuda13_arm.txt",
+    ],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
 exports_files([
     "http.bzl",
     "requirements_base.txt",

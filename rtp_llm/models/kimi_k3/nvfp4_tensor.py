@@ -12,13 +12,30 @@ def nvfp4_global_scale(tensor):
     return tensor.abs().amax().float().clamp_min(1e-8).reshape(1) / (6.0 * 448.0)
 
 
-def quantize_nvfp4_weight(matrix):
+def quantize_nvfp4_weight(matrix, *, device=None):
     from flashinfer import fp4_quantize
 
     outer = nvfp4_global_scale(matrix)
     if not torch.isfinite(outer).all().item():
         raise ValueError("NVFP4 source weights must be finite")
-    codes, scales = fp4_quantize(matrix.contiguous(), outer.reciprocal())
+    if matrix.is_cuda:
+        codes, scales = fp4_quantize(matrix.contiguous(), outer.reciprocal())
+        return codes, scales, outer
+    # CPU conversion must not stage the complete dense weight on the GPU.
+    # Each 128-row scale tile is independent under one shared global scale.
+    rows, columns = matrix.shape
+    device = torch.device("cuda") if device is None else device
+    scale_columns = (columns // 16 + 3) // 4 * 4
+    codes = torch.empty((rows, columns // 2), dtype=torch.uint8)
+    scales = torch.empty(((rows + 127) // 128 * 128, scale_columns), dtype=torch.uint8)
+    inverse = outer.to(device=device).reciprocal()
+    for begin in range(0, rows, 1024):
+        end = min(begin + 1024, rows)
+        chunk = matrix[begin:end].to(device=device)
+        chunk_codes, chunk_scales = fp4_quantize(chunk, inverse)
+        codes[begin:end].copy_(chunk_codes)
+        scales[begin : begin + chunk_scales.shape[0]].copy_(chunk_scales)
+        del chunk, chunk_codes, chunk_scales
     return codes, scales, outer
 
 
@@ -116,9 +133,11 @@ class OnlineNvfp4Projection:
             raise ValueError(
                 f"{self.name}: online NVFP4 requires original BF16/FP16 weights"
             )
-        if not matrix.is_cuda or torch.cuda.get_device_capability(
-            matrix.device
-        ) not in ((10, 0), (10, 3)):
+        requested_device = torch.device(device)
+        quant_device = matrix.device if matrix.is_cuda else requested_device
+        if quant_device.type != "cuda":
+            quant_device = torch.device("cuda", torch.cuda.current_device())
+        if torch.cuda.get_device_capability(quant_device) not in ((10, 0), (10, 3)):
             raise ValueError("K3.1 NVFP4 requires CUDA SM100/SM103")
         if torch.version.cuda is None or int(torch.version.cuda.split(".")[0]) < 13:
             raise ValueError("K3.1 NVFP4 requires CUDA13")
@@ -134,12 +153,15 @@ class OnlineNvfp4Projection:
                     f"{self.name}: NVFP4 N must align to 32, got {logical_n}"
                 )
             matrix = torch.nn.functional.pad(matrix, (0, 0, 0, padding))
-        codes, scales, outer = quantize_nvfp4_weight(matrix)
-        return {
+        codes, scales, outer = quantize_nvfp4_weight(matrix, device=quant_device)
+        result = {
             self.name: codes,
             self.local_key: scales,
             self.global_key: outer,
             self.logical_n_key: torch.tensor(
                 logical_n, dtype=torch.int64, device=matrix.device
             ),
+        }
+        return {
+            name: value.to(device=requested_device) for name, value in result.items()
         }

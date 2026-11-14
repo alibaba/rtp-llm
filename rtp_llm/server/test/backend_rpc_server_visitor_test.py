@@ -9,7 +9,12 @@ from rtp_llm.config.exceptions import (
     ExceptionType,
     FtRuntimeException,
 )
-from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleAddr, RoleType
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    ReturnAllProbsMode,
+    RoleAddr,
+    RoleType,
+)
 from rtp_llm.ops import SpeculativeType
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
@@ -98,7 +103,7 @@ class BackendRPCServerVisitorSpeculativeTest(unittest.TestCase):
     def _check_request(self, sp_type, **request_options):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.sp_config = SimpleNamespace(model_type="draft", type=sp_type)
-        generate_config = SimpleNamespace(
+        generate_config = GenerateConfig(
             force_disable_sp_run=False,
             num_return_sequences=1,
             num_beams=1,

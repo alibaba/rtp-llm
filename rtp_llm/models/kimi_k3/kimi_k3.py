@@ -593,7 +593,7 @@ class KimiK3(BaseModel):
         ):
             requests = (
                 runtime.fifo_scheduler_config.max_context_batch_size
-                if runtime is not None
+                if runtime is not None and scheduler.prefill_chunk_size > 0
                 else self.max_generate_batch_size
             )
             padding = min(prefill, int(requests)) * (2 * tp - 1)

@@ -426,6 +426,10 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
         if (!evaluateRunningBatch(schedule_runtime, stream)) {
             continue;
         }
+        bool newly_reserved = false;
+        if (!stream->streamCacheResource().reserveLinearReplaySlot(&newly_reserved)) {
+            continue;
+        }
 
         const auto state                 = stream->getStatus();
         const bool load_initiated_before = stream->hasEvent(StreamEvents::LoadInitiated);
@@ -438,6 +442,9 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
         const bool load_initiated      = !load_initiated_before && stream->hasEvent(StreamEvents::LoadInitiated);
         const bool scheduling_progress = new_state == StreamState::RUNNING || new_state == StreamState::LOADING_CACHE
                                          || (new_state == StreamState::WAITING && (kv_initialized || load_initiated));
+        if (newly_reserved && !scheduling_progress) {
+            stream->streamCacheResource().releaseUnusedLinearReplaySlot();
+        }
 
         if (scheduling_progress) {
             // A failed KV allocation owns no work this round and must not pin its execution mode.
@@ -579,12 +586,24 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
         if (!evaluateRunningBatch(admitted_streams, stream)) {
             continue;
         }
+        bool newly_reserved = false;
+        if (!stream->streamCacheResource().reserveLinearReplaySlot(&newly_reserved)) {
+            continue;
+        }
 
+        const bool load_initiated_before = stream->hasEvent(StreamEvents::LoadInitiated);
         if (!stream->hasEvent(StreamEvents::CanRun)) {
             stream->reportEvent(StreamEvents::CanRun);
         }
-        const auto state = stream->moveToNext();
-        if (!already_inited_kv && stream->curBlocksNum() > 0) {
+        const auto state               = stream->moveToNext();
+        const bool kv_initialized      = !already_inited_kv && stream->curBlocksNum() > 0;
+        const bool load_initiated      = !load_initiated_before && stream->hasEvent(StreamEvents::LoadInitiated);
+        const bool scheduling_progress = state == StreamState::RUNNING || state == StreamState::LOADING_CACHE
+                                         || (state == StreamState::WAITING && (kv_initialized || load_initiated));
+        if (newly_reserved && !scheduling_progress) {
+            stream->streamCacheResource().releaseUnusedLinearReplaySlot();
+        }
+        if (kv_initialized) {
             ++newly_inited_kv_streams;
         }
         if (state == StreamState::FINISHED) {

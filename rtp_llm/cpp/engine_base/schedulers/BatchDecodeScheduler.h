@@ -207,7 +207,19 @@ public:
         // Refresh the drain state from the current queue. This batch may drain a mixed-mode tail,
         // but later homogeneous arrivals must go through the normal batch-size gate.
         draining_mixed_modes_ = has_other_mode;
+        for (const auto& stream : selected_streams) {
+            if (!stream->streamCacheResource().reserveLinearReplaySlot()) {
+                return;
+            }
+        }
         for (auto& stream : selected_streams) {
+            if (scheduler_type_ == SchedulerType::kBatchDecode && !isPrefillOnly(stream)
+                && cache_manager_->cacheConfig().linear_replay.enabled()) {
+                // Direct Decode starts from the prompt's final token, with its
+                // already-processed prefix initialized before the first grow.
+                stream->setPerfTest(true);
+                stream->setIsContextStream(false);
+            }
             stream->reportEvent(StreamEvents::CanRun);
             // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
             while (stream->getStatus() != StreamState::FINISHED && stream->moveToNext() != StreamState::RUNNING) {
@@ -215,16 +227,19 @@ public:
             }
         }
         for (const auto& stream : selected_streams) {
-            waiting_streams_.remove(stream);
-            if (stream->getStatus() == StreamState::RUNNING) {
+            const auto state = stream->getStatus();
+            if (state == StreamState::RUNNING) {
+                waiting_streams_.remove(stream);
                 running_streams_.push_back(stream);
+            } else if (state == StreamState::FINISHED) {
+                waiting_streams_.remove(stream);
             }
         }
     }
 
     void initRunningStreams() {
         // set kvcache block
-        for (auto it = running_streams_.begin(); it != running_streams_.end(); it++) {
+        for (auto it = running_streams_.begin(); it != running_streams_.end();) {
             (*it)->setPerfTest(true);
             // reset start time，to get more accurate avg token time
             (*it)->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
@@ -236,6 +251,11 @@ public:
                 (*it)->setIsContextStream(false);
                 // for linear attn, incrKVBlock to clear unused linear block
                 (*it)->moveToNext();
+            }
+            if ((*it)->getStatus() == StreamState::FINISHED) {
+                it = running_streams_.erase(it);
+            } else {
+                ++it;
             }
         }
         if (max_prefill_tokens_ <= 0) {

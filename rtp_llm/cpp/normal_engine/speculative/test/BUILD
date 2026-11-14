@@ -158,6 +158,22 @@ cc_test(
 )
 
 cc_test(
+    name = "mtp_review_regression_test",
+    srcs = ["MtpExecutorTest.cc"],
+    copts = test_copts,
+    deps = mtp_executor_test_deps,
+    args = ["--gtest_filter=MtpExecutorTest.Review*"],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+        "RTP_LLM_STREAM_ASYNC": "1",
+        "RTP_LLM_DEVICE_INPUT": "1",
+        "RTP_LLM_DROP_BROAD_SYNC": "1",
+    },
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
     name = "mtp_sampler_prepare_async_test",
     srcs = ["MtpExecutorTest.cc"],
     args = ["--gtest_filter=MtpExecutorTest.testSingleBatchDecode"],

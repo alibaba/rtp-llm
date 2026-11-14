@@ -162,6 +162,7 @@ private:
                                            size_t                  base_seq_size_per_block);
     static size_t
     fullBlockSourcePeer(size_t endpoint_key_index, size_t cache_keys_per_physical_block, size_t peer_count) {
+        RTP_LLM_CHECK_WITH_INFO(peer_count > 0, "FULL cache page routing requires source peers");
         // FULL blocks are published by logical block owner, including a clipped final endpoint key.
         const size_t logical_block = cache_keys_per_physical_block == 1 ?
                                          endpoint_key_index :

@@ -509,8 +509,8 @@ void CacheConfigCreator::configureLinearReplay(CacheConfig&                     
                                                const RuntimeConfig&                             runtime_config,
                                                const std::optional<SpeculativeExecutionConfig>& sp_config,
                                                bool                                             is_mtp) {
-    if (!runtime_config.enable_linear_replay || !is_mtp || parallelism_config.role_type == RoleType::PREFILL
-        || !sp_config || sp_config->gen_num_per_cycle <= 0
+    if (!runtime_config.enable_linear_replay || !is_mtp || parallelism_config.pp_size > 1
+        || parallelism_config.role_type == RoleType::PREFILL || !sp_config || sp_config->gen_num_per_cycle <= 0
         || (sp_config->type != SP_TYPE_MTP && sp_config->type != SP_TYPE_EAGLE && sp_config->type != SP_TYPE_EAGLE3)) {
         return;
     }
@@ -538,8 +538,12 @@ void CacheConfigCreator::configureLinearReplay(CacheConfig&                     
     // Replay kernels are CUDA-only; retain the normal LINEAR cache path elsewhere.
     return;
 #endif
-    RTP_LLM_CHECK_WITH_INFO(runtime_config.max_generate_batch_size > 0
-                                && runtime_config.max_generate_batch_size <= std::numeric_limits<int>::max(),
+    const int64_t slot_count =
+        runtime_config.use_batch_decode_scheduler ?
+            std::max(runtime_config.max_generate_batch_size,
+                     runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size) :
+            runtime_config.max_generate_batch_size;
+    RTP_LLM_CHECK_WITH_INFO(slot_count > 0 && slot_count <= std::numeric_limits<int>::max(),
                             "LINEAR replay requires a positive slot count fitting int");
     RTP_LLM_CHECK_WITH_INFO(sp_config->gen_num_per_cycle < std::numeric_limits<int>::max(),
                             "LINEAR replay verify width overflows int");
@@ -550,7 +554,7 @@ void CacheConfigCreator::configureLinearReplay(CacheConfig&                     
                             "LINEAR replay requires head counts divisible by attention TP");
     RTP_LLM_CHECK_WITH_INFO(linear.linear_conv_kernel_dim > 1, "LINEAR replay requires convolution history");
     config.linear_replay = LinearReplayPlan::create(std::move(group_ids),
-                                                    runtime_config.max_generate_batch_size,
+                                                    slot_count,
                                                     sp_config->gen_num_per_cycle + 1,
                                                     {linear.linear_num_key_heads / tp, linear.linear_key_head_dim},
                                                     {linear.linear_num_value_heads / tp, linear.linear_value_head_dim},

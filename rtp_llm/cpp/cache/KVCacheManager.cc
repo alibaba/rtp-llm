@@ -808,7 +808,16 @@ bool KVCacheManager::makeLinearReplayTailsPrivate(
                 if (source > 0 && pool->isExclusiveRequestBlock(source, owned_references)) {
                     continue;
                 }
-                const auto destination = pool->malloc();
+                auto destination = pool->malloc();
+                if (!destination) {
+                    coordinator_manager_->cacheGroups().at(static_cast<size_t>(group_id))->ensureFreeBlocks(1);
+                    // Evicting the tree's reference can make the existing tail
+                    // private even when it releases no physical block.
+                    if (source > 0 && pool->isExclusiveRequestBlock(source, owned_references)) {
+                        continue;
+                    }
+                    destination = pool->malloc();
+                }
                 if (!destination) {
                     RTP_LLM_LOG_WARNING("LINEAR replay tail copy failed tag=%s batch=%d position=%zu free=%zu "
                                         "total=%zu staged=%zu",

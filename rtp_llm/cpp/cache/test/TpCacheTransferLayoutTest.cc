@@ -91,7 +91,7 @@ TEST(TpCacheTransferRouteTest, ModesSharePeerSelectionAndExecutionPlanning) {
         EXPECT_EQ(direct.selected, mode == TpCacheTransferMode::LINEAR_QKV);
         EXPECT_EQ(direct.segmented, mode == TpCacheTransferMode::LINEAR_QKV);
         EXPECT_FALSE(direct.reassemble);
-        EXPECT_EQ(direct.local_partition_count, direct.segmented ? 1u : 2u);
+        EXPECT_EQ(direct.local_partition_count, direct.segmented || mode == TpCacheTransferMode::REPLICATED ? 1u : 2u);
         EXPECT_EQ(direct.remote_partition_count, direct.segmented ? 4u : 1u);
         EXPECT_EQ(direct.remote_partition_id, direct.segmented ? 2u : 0u);
         for (size_t peer = 0; peer < topology.peers; ++peer) {
@@ -105,9 +105,27 @@ TEST(TpCacheTransferRouteTest, ModesSharePeerSelectionAndExecutionPlanning) {
             EXPECT_EQ(typed.selected, owner);
             EXPECT_EQ(typed.reassemble, owner && mode != TpCacheTransferMode::REPLICATED);
             EXPECT_FALSE(typed.segmented);
-            EXPECT_EQ(typed.local_partition_count, fallback.local_partition_count);
-            EXPECT_EQ(typed.local_partition_id, fallback.local_partition_id);
+            EXPECT_EQ(typed.local_partition_count,
+                      mode == TpCacheTransferMode::REPLICATED ? 1u : fallback.local_partition_count);
+            EXPECT_EQ(typed.local_partition_id,
+                      mode == TpCacheTransferMode::REPLICATED ? 0u : fallback.local_partition_id);
         }
+    }
+}
+
+TEST(TpCacheTransferRouteTest, ReplicatedPayloadDoesNotInheritHeadPartitioning) {
+    TpCacheTransferLayout layout;
+    layout.mode = TpCacheTransferMode::REPLICATED;
+    const TpCacheTransferTopology topology{4, 2, 1, 1};
+    const TpCacheTransferRoute    fallback{true, 2, 1, 2, 1};
+    for (bool typed : {false, true}) {
+        const auto route = layout.route(0, topology, 0, typed, fallback, fallback);
+        EXPECT_TRUE(route.selected);
+        EXPECT_FALSE(route.reassemble);
+        EXPECT_EQ(route.local_partition_count, 1u);
+        EXPECT_EQ(route.local_partition_id, 0u);
+        EXPECT_EQ(route.remote_partition_count, 1u);
+        EXPECT_EQ(route.remote_partition_id, 0u);
     }
 }
 
@@ -325,6 +343,48 @@ TEST(MhaTpCacheLayoutTest, RejectsInvalidGeometryAndOverflow) {
     EXPECT_THROW(mhaTpPeerOwnsHead(3, 2, 0), std::invalid_argument);
     EXPECT_THROW(mhaTpPeerOwnsHead(4, 2, 4), std::invalid_argument);
     EXPECT_THROW(mhaTpPeerOwnsHead(0, 2, 0), std::invalid_argument);
+}
+
+TEST(MhaTpCacheLayoutTest, ExtractsPackedSourceHeadsAcrossKernelPagesAndScales) {
+    for (size_t pages : {1u, 2u, 4u}) {
+        for (size_t source_parts : {2u, 4u}) {
+            for (size_t k_size : {4u, 128u}) {
+                const size_t         v_size = k_size * 2;
+                std::vector<uint8_t> source;
+                for (size_t page = 0; page < pages; ++page) {
+                    for (size_t kind = 0; kind < 2; ++kind) {
+                        for (size_t head = 0; head < source_parts; ++head) {
+                            source.insert(source.end(),
+                                          kind == 0 ? k_size : v_size,
+                                          static_cast<uint8_t>(1 + page * 32 + kind * 8 + head));
+                        }
+                    }
+                }
+                for (size_t head = 0; head < source_parts; ++head) {
+                    auto plan =
+                        TpCacheTransferPlan::mha(k_size * pages, v_size * pages, 1, 0, pages, source_parts, head);
+                    ASSERT_EQ(plan.source_bytes, source.size());
+                    ASSERT_NO_THROW(plan.validateSlices());
+                    ASSERT_NO_THROW(validateCompleteTransfer({plan}));
+                    std::vector<uint8_t> actual(plan.destination_bytes, 0xff);
+                    for (const auto& slice : plan.slices) {
+                        std::copy_n(
+                            source.data() + slice.source_offset, slice.bytes, actual.data() + slice.destination_offset);
+                    }
+                    std::vector<uint8_t> expected;
+                    for (size_t page = 0; page < pages; ++page) {
+                        expected.insert(expected.end(), k_size, static_cast<uint8_t>(1 + page * 32 + head));
+                        expected.insert(expected.end(), v_size, static_cast<uint8_t>(1 + page * 32 + 8 + head));
+                    }
+                    EXPECT_EQ(actual, expected);
+                }
+            }
+        }
+    }
+    EXPECT_THROW(TpCacheTransferPlan::mha(64, 64, 1, 0, 1, 0), std::invalid_argument);
+    EXPECT_THROW(TpCacheTransferPlan::mha(64, 64, 1, 0, 1, 2, 2), std::invalid_argument);
+    EXPECT_THROW(TpCacheTransferPlan::mha(64, 64, 2, 0, 1, 2, 0), std::invalid_argument);
+    EXPECT_THROW(TpCacheTransferPlan::mha(std::numeric_limits<size_t>::max(), 64, 1, 0, 1, 2), std::overflow_error);
 }
 
 TEST(LinearTpCacheLayoutTest, RejectsInvalidGeometryBeforeTransfer) {
