@@ -84,6 +84,26 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
             )
         return result, underlying, config_type, client_type
 
+    def test_only_explicit_sdk_proof_marks_failed_transfer_quiescent(self):
+        client, *_ = self._create()
+        error = _ClientError(_ClientCode.SIZE_MISMATCH)
+        error.operation = "save"
+        self.assertFalse(client.is_transfer_quiescent(error))
+        error.data_transfer_may_be_inflight = False
+        self.assertTrue(client.is_transfer_quiescent(error))
+        error.operation = "load"
+        self.assertTrue(client.is_transfer_quiescent(error))
+        error.data_transfer_may_be_inflight = True
+        self.assertFalse(client.is_transfer_quiescent(error))
+        untyped = RuntimeError("not an SDK failure")
+        untyped.operation = "save"
+        untyped.data_transfer_may_be_inflight = False
+        self.assertFalse(client.is_transfer_quiescent(untyped))
+        error.operation = "remove"
+        error.data_transfer_may_be_inflight = False
+        self.assertFalse(client.is_transfer_quiescent(error))
+        client.close()
+
     def test_invalid_gpu_sequence_fails_before_loading_sdk(self):
         for value in ("", b"", None, iter(()), tuple(object() for _ in range(65))):
             with (

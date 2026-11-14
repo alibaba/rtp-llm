@@ -248,6 +248,23 @@ class MMRemoteEmbeddingCache:
         )
         return key
 
+    @staticmethod
+    def _error_context(error):
+        fields = {"error_type": type(error).__name__}
+        try:
+            code = getattr(error, "code", None)
+            name = getattr(code, "name", None)
+            if isinstance(name, str) and len(name) <= 80:
+                fields["error_code"] = name
+            elif type(code) is int:
+                fields["error_code"] = code
+            inflight = getattr(error, "data_transfer_may_be_inflight", None)
+            if type(inflight) is bool:
+                fields["data_transfer_may_be_inflight"] = inflight
+        except Exception:
+            pass  # Diagnostics must not turn cache fallback into request failure.
+        return fields
+
     def record(self, event, *, key=None, trace_id=None, **fields):
         with self._stats_lock:
             self._stats[event] += 1
@@ -630,7 +647,7 @@ class MMRemoteEmbeddingCache:
                 "write_error",
                 key=key,
                 trace_id=trace_id,
-                error_type=type(error).__name__,
+                **self._error_context(error),
             )
             self._report_operation("write", started, "error", plan.nbytes)
             done(None)
@@ -672,7 +689,7 @@ class MMRemoteEmbeddingCache:
                     "write_error",
                     key=key,
                     trace_id=trace_id,
-                    error_type=type(error).__name__,
+                    **self._error_context(error),
                 )
             finally:
                 self._report_operation("write", started, outcome, nbytes)
@@ -848,7 +865,7 @@ class MMRemoteEmbeddingCache:
                 "read_error",
                 key=key,
                 trace_id=trace_id,
-                error_type=type(error).__name__,
+                **self._error_context(error),
             )
             return None
         finally:

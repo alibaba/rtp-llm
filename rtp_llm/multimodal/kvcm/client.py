@@ -174,6 +174,14 @@ class RtpKvMetaObjectClient:
     def instance_group(self) -> str:
         return self._config.instance_group
 
+    def is_transfer_quiescent(self, error: BaseException) -> bool:
+        """True only when the SDK proves this failed save/load has no pending DMA."""
+        return (
+            isinstance(error, self._client_error_type)
+            and getattr(error, "operation", None) in ("save", "load")
+            and getattr(error, "data_transfer_may_be_inflight", True) is False
+        )
+
     def save(
         self,
         keys: Sequence[str],

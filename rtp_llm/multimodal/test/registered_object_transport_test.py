@@ -214,6 +214,37 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                 self.assertIs(transport._arena, arena)
                 self.assertIs(transport._pool, pool)
 
+    def test_proven_quiescent_sdk_failure_allows_the_next_operation(self):
+        for operation in ("save_one", "load_one"):
+            with self.subTest(operation=operation):
+                transport = self.transport()
+                native = getattr(transport._client, operation)
+                native.side_effect = RuntimeError(
+                    "metadata RPC failed without pending DMA"
+                )
+                transport._client.is_transfer_quiescent.return_value = True
+                buffer = torch.zeros(16, dtype=torch.uint8)
+                with self.assertRaisesRegex(RuntimeError, "metadata RPC failed"):
+                    getattr(transport, operation)("key", buffer)
+                self.assertFalse(transport._poisoned)
+                self.assertEqual(RegisteredObjectTransport._quarantined_transports, [])
+                native.side_effect = None
+                getattr(transport, operation)("key", buffer)
+                self.assertEqual(native.call_count, 2)
+                transport.close()
+                transport._client.close.assert_called_once()
+
+    def test_failed_safety_check_does_not_hide_the_original_error(self):
+        transport = self.transport()
+        transport._client.save_one.side_effect = TimeoutError(
+            "original transfer failure"
+        )
+        transport._client.is_transfer_quiescent.side_effect = RuntimeError("bad proof")
+        with self.assertLogs(level="ERROR"):
+            with self.assertRaisesRegex(TimeoutError, "original transfer failure"):
+                transport.save_one("key", torch.zeros(16, dtype=torch.uint8))
+        self.assertTrue(transport._poisoned)
+
     def test_local_validation_and_metadata_error_do_not_poison(self):
         transport = self.transport()
         with self.assertRaises(ValueError):

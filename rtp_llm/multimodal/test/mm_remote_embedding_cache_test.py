@@ -36,6 +36,29 @@ from rtp_llm.utils.grpc_util import trans_from_tensor
 
 
 class RemoteCacheTest(unittest.TestCase):
+    def test_error_diagnostics_preserve_code_and_dma_state_without_error_text(self):
+        error = RuntimeError("private provider detail must not be logged here")
+        error.code = SimpleNamespace(name="ER_INVALID_GRPCSTATUS")
+        error.data_transfer_may_be_inflight = False
+        self.assertEqual(
+            MMRemoteEmbeddingCache._error_context(error),
+            {
+                "error_type": "RuntimeError",
+                "error_code": "ER_INVALID_GRPCSTATUS",
+                "data_transfer_may_be_inflight": False,
+            },
+        )
+
+        class BrokenError(RuntimeError):
+            @property
+            def code(self):
+                raise RuntimeError("diagnostic attribute failed")
+
+        self.assertEqual(
+            MMRemoteEmbeddingCache._error_context(BrokenError()),
+            {"error_type": "BrokenError"},
+        )
+
     def remote(self, store, **kwargs):
         options = dict(
             max_object_bytes=65536,

@@ -93,7 +93,19 @@ class RegisteredObjectTransport:
             self._poisoned = True
             with self._quarantine_lock:
                 self._quarantined_transports.append(self)
-            logging.exception("GDR operation failed; arena quarantined until worker restart")
+            logging.exception(
+                "GDR operation failed; arena quarantined until worker restart"
+            )
+
+    def _handle_failure(self, error):
+        # Legacy SDKs and unclassified CUDA/native exceptions remain unsafe.
+        check = getattr(self._client, "is_transfer_quiescent", None)
+        try:
+            if callable(check) and check(error) is True:
+                return
+        except Exception:
+            pass
+        self._quarantine()
 
     def _view(self, tensor):
         self._check_available()
@@ -123,8 +135,8 @@ class RegisteredObjectTransport:
                 stream.synchronize()
                 self._client.save_one(key, transfer, **kwargs)
                 stream.synchronize()
-            except Exception:
-                self._quarantine()
+            except Exception as error:
+                self._handle_failure(error)
                 raise
 
     def load_one(self, key, buffer, **kwargs):
@@ -139,8 +151,8 @@ class RegisteredObjectTransport:
                 stream.synchronize()
                 buffer.copy_(host)
                 return buffer
-            except Exception:
-                self._quarantine()
+            except Exception as error:
+                self._handle_failure(error)
                 raise
 
     def close(self):
