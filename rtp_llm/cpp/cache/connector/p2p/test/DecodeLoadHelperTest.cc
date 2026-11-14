@@ -3,18 +3,57 @@
 #include <atomic>
 #include <future>
 #include <mutex>
+#include <stdexcept>
 #include <unordered_map>
 #include <gtest/gtest.h>
 #include "grpc++/grpc++.h"
+#include "grpc++/alarm.h"
 
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/DecodeLoadHelper.h"
 #include "rtp_llm/cpp/utils/Exception.h"
+#include "rtp_llm/cpp/utils/RpcCompletionQueue.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/TestRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 
 namespace rtp_llm {
+
+TEST(RpcCompletionQueueTest, ThrowingCallbackDoesNotStopLaterCompletion) {
+    RpcCompletionQueue queue;
+    auto first_alarm = std::make_shared<grpc::Alarm>();
+    auto first_seen = std::make_shared<std::promise<bool>>();
+    auto first_ready = first_seen->get_future();
+    ASSERT_TRUE(queue.submit(
+        nullptr,
+        [&](grpc::CompletionQueue* cq, void* tag) {
+            first_alarm->Set(cq, std::chrono::system_clock::now(), tag);
+            return true;
+        },
+        [first_alarm, first_seen](bool ok) {
+            (void)first_alarm;  // Keep the alarm alive until its completion is delivered.
+            first_seen->set_value(ok);
+            throw std::runtime_error("injected completion callback failure");
+        }));
+    ASSERT_EQ(first_ready.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    ASSERT_TRUE(first_ready.get());
+
+    auto second_alarm = std::make_shared<grpc::Alarm>();
+    auto second_seen = std::make_shared<std::promise<bool>>();
+    auto second_ready = second_seen->get_future();
+    ASSERT_TRUE(queue.submit(
+        nullptr,
+        [&](grpc::CompletionQueue* cq, void* tag) {
+            second_alarm->Set(cq, std::chrono::system_clock::now(), tag);
+            return true;
+        },
+        [second_alarm, second_seen](bool ok) {
+            (void)second_alarm;
+            second_seen->set_value(ok);
+        }));
+    ASSERT_EQ(second_ready.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_TRUE(second_ready.get());
+}
 
 class DecodeLoadHelperTest: public ::testing::Test {
 protected:

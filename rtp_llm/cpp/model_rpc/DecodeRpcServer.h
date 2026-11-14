@@ -42,7 +42,8 @@ private:
                                                        int64_t                         deadline_ms,
                                                        std::shared_ptr<GenerateInput>& input,
                                                        GenerateInputPB&                prefill_request,
-                                                       PrefillPeerInfo&                peer_info);
+                                                       PrefillPeerInfo&                peer_info,
+                                                       grpc::ServerContext*           server_context);
     static grpc::Status               parsePrefillDpAddr(const std::string& addr, std::string* ip, uint32_t* port);
     void updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) override;
 

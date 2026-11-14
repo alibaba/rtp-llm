@@ -89,6 +89,7 @@ public:
     };
 
 private:
+    void                                    reapFinishedStreams();
     void                                    trimLocked(int64_t now_ms);
     void                                    scheduleExpirationLocked(const Handle& handle, int64_t expires_at_ms);
     static constexpr int64_t                kRetentionMs = 10 * 60 * 1000;
@@ -108,6 +109,8 @@ private:
     static constexpr size_t                  kPendingBatchSize = 128;
     std::map<int64_t, Handle>                pending_cancels_;
     std::map<int64_t, Handle>                local_pending_cancels_;
+    std::map<int64_t, Handle>                pending_stream_releases_;
+    int64_t                                  stream_release_cursor_ = 0;
     int64_t                                  local_pending_cursor_ = 0;
     int64_t                                  retry_pending_cursor_ = 0;
     std::unordered_map<std::string, size_t> canceled_keys_;

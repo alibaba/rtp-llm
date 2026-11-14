@@ -117,6 +117,31 @@ TEST(PrefillRpcServerTest, BatchDuplicateIdsRejectEveryItemWithoutChangingExisti
     EXPECT_EQ(server.onflight_requests_.load(), 0u);
 }
 
+TEST(PrefillRpcServerTest, BatchRejectsFixedAndVariableBeamBeforeAdmission) {
+    PrefillRpcServer server;
+    EnqueueBatchRequestPB request;
+    auto* slot = request.add_dp_slots();
+    slot->set_dp_rank(0);
+    auto* fixed_beam = slot->add_requests()->mutable_input();
+    fixed_beam->set_request_id(1);
+    fixed_beam->mutable_generate_config()->set_num_beams(2);
+    auto* variable_beam = slot->add_requests()->mutable_input();
+    variable_beam->set_request_id(2);
+    variable_beam->mutable_generate_config()->add_variable_num_beams(2);
+
+    grpc::ServerContext context;
+    EnqueueBatchResponsePB response;
+    ASSERT_TRUE(server.EnqueueBatch(&context, &request, &response).ok());
+    EXPECT_EQ(response.successes_size(), 0);
+    ASSERT_EQ(response.errors_size(), 2);
+    for (int i = 0; i < response.errors_size(); ++i) {
+        EXPECT_EQ(response.errors(i).request_id(), slot->requests(i).input().request_id());
+        EXPECT_EQ(response.errors(i).error_info().error_code(), static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+        EXPECT_EQ(response.errors(i).error_info().error_message(), "EnqueueBatch does not support beam search");
+    }
+    EXPECT_TRUE(server.batch_entries_.empty());
+}
+
 TEST(PrefillRpcServerTest, BatchMissingInputAndWrongDpRankReturnPerItemErrorsBeforeEngineAccess) {
     PrefillRpcServer server;
     EnqueueBatchRequestPB request;
@@ -465,6 +490,56 @@ TEST(PDCancelRegistryTest, PriorityCancelLosingToStreamFailureDoesNotInstallPree
     EXPECT_FALSE(handle->canceled.load());
     EXPECT_TRUE(registry.pending().empty());
     EXPECT_EQ(stream->firstError().error.code(), ErrorCode::EXECUTION_EXCEPTION);
+}
+
+TEST(PDCancelRegistryTest, LatePriorityCancelPreservesPublishedCompletion) {
+    auto meta = std::make_shared<RpcServerRuntimeMeta>();
+    PDCancelRegistry registry(meta);
+    GenerateInputPB request;
+    request.set_request_id(119);
+    PDCancelRegistry::Handle handle;
+    ASSERT_TRUE(registry.admit(request, "already-published", "prefill:123", currentTimeMs() + 10000, handle).ok());
+    // The worker status can publish completion before the RPC cleanup guard runs.
+    meta->finishTask(request.request_id());
+
+    EXPECT_EQ(registry.cancel(request.request_id(), {ErrorCode::PRIORITY_PREEMPTED, "late"}).value(),
+              CANCEL_STATUS_NOT_FOUND);
+    EXPECT_FALSE(handle->canceled.load());
+    EXPECT_TRUE(registry.pending().empty());
+    const auto info = meta->getEngineScheduleInfo(-1);
+    ASSERT_EQ(info.finished_task_info_list.size(), 1u);
+    EXPECT_EQ(info.finished_task_info_list.front().request_id, request.request_id());
+    EXPECT_EQ(info.finished_task_info_list.front().error_code, 0);
+}
+
+TEST(PDCancelRegistryTest, CleanupTickDropsStreamAfterDeferredReleaseWithoutExpiringRecord) {
+    PDCancelRegistry registry(std::make_shared<RpcServerRuntimeMeta>());
+    GenerateInputPB request;
+    request.set_request_id(118);
+    PDCancelRegistry::Handle handle;
+    ASSERT_TRUE(registry.admit(request, "deferred-release", "", currentTimeMs() + 10000, handle).ok());
+    auto input = std::make_shared<GenerateInput>();
+    input->request_id = request.request_id();
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->input_ids = torch::tensor({1}, torch::kInt32);
+    ModelConfig model;
+    model.max_seq_len = 32;
+    model.vocab_size = 128;
+    auto stream = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+    ASSERT_TRUE(stream->finishWithoutGenerate());
+    stream->incPendingAsyncBookkeeping();
+    stream->markDeferredRelease();
+    registry.attach(handle, stream);
+
+    registry.finishLocal(handle);
+    EXPECT_TRUE(registry.pending().empty());
+    EXPECT_EQ(handle->stream, stream);
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+
+    EXPECT_TRUE(registry.pending().empty());
+    EXPECT_FALSE(handle->stream);
+    EXPECT_EQ(registry.find(request.request_id()), handle);
+    EXPECT_FALSE(handle->canceled.load());
 }
 
 TEST(PDCancelRegistryTest, RacingOrdinaryAndPriorityCancelAckMatchesPublishedTerminal) {

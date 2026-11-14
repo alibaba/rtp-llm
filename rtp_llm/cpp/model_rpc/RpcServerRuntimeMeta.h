@@ -111,11 +111,13 @@ public:
     // WorkerStatus control overlay while local/downstream cancellation completes. This does not
     // mutate running_streams_, so accepting Cancel cannot inflate engine load
     // or resource accounting.
-    void markCancellationPending(const TaskIdentity& identity, bool priority_preemption) {
+    bool markCancellationPending(const TaskIdentity& identity,
+                                 bool priority_preemption,
+                                 bool reject_finished = false) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         const auto                          request_id = identity.request_id;
         if (priority_preemption_overlays_.find(request_id) != priority_preemption_overlays_.end()) {
-            return;
+            return true;
         }
         auto task_info = makeTaskInfo(identity,
                                       /*prefix_length=*/0,
@@ -127,6 +129,9 @@ public:
         } else {
             for (auto it = finished_streams_.begin(); it != finished_streams_.end(); ++it) {
                 if (it->second.request_id == identity.request_id && it->second.batch_id == identity.batch_id) {
+                    if (reject_finished) {
+                        return false;
+                    }
                     task_info = it->second;
                     finished_streams_.erase(it);
                     break;
@@ -139,6 +144,7 @@ public:
         task_info.priority_preemption_progress =
             priority_preemption ? PriorityPreemptionProgress::CANCELING : PriorityPreemptionProgress::NONE;
         priority_preemption_overlays_.emplace(request_id, std::move(task_info));
+        return true;
     }
 
     // Publish one completion delta with the original cancellation or failure cause.

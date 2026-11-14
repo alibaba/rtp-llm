@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include <c10/core/Event.h>

@@ -403,13 +403,21 @@ void DecodeLoadHelper::Result::complete(bool ok) {
                 + server_addr + " request_id=" + std::to_string(request_id) + " key=" + unique_key
                 + " wire_code=" + std::to_string(static_cast<int>(response.error_code())) + "]";
         } else {
-            updateStreamFromResponse();
-            if (!side_channel_payload.has_first_token) {
+            try {
+                updateStreamFromResponse();
+            } catch (const std::exception& error) {
+                error_code = ErrorCode::EXECUTION_EXCEPTION;
+                error_message = std::string("StartLoad response processing failed: ") + error.what();
+            } catch (...) {
+                error_code = ErrorCode::EXECUTION_EXCEPTION;
+                error_message = "Unknown exception while processing StartLoad response";
+            }
+            if (error_code != ErrorCode::EXECUTION_EXCEPTION && !side_channel_payload.has_first_token) {
                 error_message =
                     "StartLoad response is missing the required first token [location=DecodeLoadHelper::complete "
                     "observer_role=DECODE peer="
                     + server_addr + " request_id=" + std::to_string(request_id) + " key=" + unique_key + "]";
-            } else {
+            } else if (error_code != ErrorCode::EXECUTION_EXCEPTION) {
                 success_   = true;
                 error_code = ErrorCode::NONE_ERROR;
             }

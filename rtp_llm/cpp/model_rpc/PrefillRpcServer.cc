@@ -652,6 +652,16 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                 continue;
             }
             const auto request_id = external_input.input().request_id();
+            if (external_input.input().multimodal_inputs_size() != 0 || external_input.input().has_v41_inputs()
+                || external_input.input().has_multimodal_token_layout()) {
+                addBatchError(response, request_id, ErrorCode::INVALID_PARAMS, "EnqueueBatch does not support multimodal inputs");
+                continue;
+            }
+            const auto& config = external_input.input().generate_config();
+            if (config.num_beams() > 1 || config.variable_num_beams_size() != 0) {
+                addBatchError(response, request_id, ErrorCode::INVALID_PARAMS, "EnqueueBatch does not support beam search");
+                continue;
+            }
             if (dp_slot.dp_rank() != local_dp_rank) {
                 addBatchError(response,
                               request_id,

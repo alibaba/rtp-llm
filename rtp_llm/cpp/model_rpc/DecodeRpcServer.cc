@@ -312,6 +312,9 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
     int64_t                     batch_deadline_ms = entry_ms;
     BatchGenerateInputPB        effective;
     for (const auto& item : request->inputs()) {
+        if (item.multimodal_inputs_size() != 0 || item.has_v41_inputs() || item.has_multimodal_token_layout()) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "PD batch does not support multimodal inputs");
+        }
         if (item.request_id() <= 0 || !request_ids.insert(item.request_id()).second)
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "batch requires distinct positive request_ids");
         if (prefillAddress(item) != address)
@@ -406,7 +409,7 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
             std::shared_ptr<GenerateInput> input;
             GenerateInputPB                prefill_input;
             PrefillPeerInfo                peer;
-            auto status = preparePDRequest(item, deadline_ms, input, prefill_input, peer);
+            auto status = preparePDRequest(item, deadline_ms, input, prefill_input, peer, context);
             if (!status.ok())
                 return guard.status = status;
             auto stream = engine_->makeStream(input);
@@ -501,12 +504,14 @@ grpc::Status DecodeRpcServer::preparePDRequest(const GenerateInputPB&          r
                                                int64_t                         deadline_ms,
                                                std::shared_ptr<GenerateInput>& input,
                                                GenerateInputPB&                prefill_request,
-                                               PrefillPeerInfo&                peer_info) {
+                                               PrefillPeerInfo&                peer_info,
+                                               grpc::ServerContext*           server_context) {
     input                      = QueryConverter::transQuery(&request);
     input->request_deadline_ms = deadline_ms;
     // Preserve the configured duration on the wire; D keeps its own deadline.
     input->generate_config->timeout_ms = request.generate_config().timeout_ms();
-    auto status                        = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle(), RoleType::DECODE, nullptr, {});
+    auto status = preprocessForPD(
+        input, mm_processor_.get(), engine_->isMTPEagle(), RoleType::DECODE, server_context, {});
     if (!status.ok())
         return serializeErrorMsg(std::to_string(request.request_id()), status);
     prefill_request.CopyFrom(request);
@@ -678,7 +683,7 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
         PrefillPeerInfo                peer_info;
         const auto                     prepare_start_us = currentTimeUs();
         auto                           prepare_status   = preparePDRequest(
-            *effective_request, request_entry_ms + normalized_timeout_ms, input, prefill_request, peer_info);
+            *effective_request, request_entry_ms + normalized_timeout_ms, input, prefill_request, peer_info, server_context);
         {
             RpcMetricsCollector collector;
             collector.min_response_done_time_us      = 0;

@@ -93,8 +93,8 @@ ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>& input,
     input->generate_config->pd_separation        = true;
     input->generate_config->force_disable_sp_run = !is_mtp_eagle;
     if (role == RoleType::DECODE) {
-        // Decode consumes the FE-expanded IDs. Only Prefill fetches embeddings;
-        // its handoff carries the position IDs needed by subsequent decode steps.
+        // Remote ViT uses the frontend layout. With LOCAL ViT, both engines
+        // expand the original request independently before using its KV keys.
         if (input->multimodal_token_layout) {
             const auto& ids   = input->input_ids;
             const auto& spans = input->multimodal_token_layout->spans;
@@ -119,6 +119,9 @@ ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>& input,
             }
             input->text_tokens_mask = std::move(mask);
             input->mm_locs          = std::move(locs);
+        } else if (processor && (input->v41_inputs
+                                 || (input->multimodal_inputs && !input->multimodal_inputs->empty()))) {
+            return updateMultimodalFeaturesWithTrace(*processor, input, span, server_context);
         } else if (input->multimodal_inputs && !input->multimodal_inputs->empty() && !input->v41_inputs) {
             return {ErrorCode::MM_WRONG_FORMAT_ERROR, "Decode requires frontend-expanded multimodal token IDs"};
         }

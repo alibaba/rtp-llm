@@ -441,6 +441,7 @@ class ModelRpcClientTest(TestCase):
             request_id=42,
             token_ids=torch.tensor([1], dtype=torch.int32),
             generate_config=GenerateConfig(max_new_tokens=1),
+            mm_inputs=[],
         )
         request.v41_inputs = SimpleNamespace(
             token_types=[1], image_mask=torch.tensor([True]), images=[image]
@@ -1964,6 +1965,7 @@ class ModelRpcClientTest(TestCase):
 
     def test_batch_accepts_explicit_decode_route_on_frontend(self):
         client = ModelRpcClient(["local:9000"], {}, role_type=RoleType.FRONTEND)
+        client._channel_pool = _FakeChannelPool()
         input_py = GenerateInput(
             token_ids=torch.tensor([1, 2]),
             generate_config=GenerateConfig(
@@ -1972,11 +1974,29 @@ class ModelRpcClientTest(TestCase):
             request_id=1,
             mm_inputs=[],
         )
-        async def channel(_):
-            return object()
-        client._channel_pool.get = channel
+        second_input = GenerateInput(
+            token_ids=torch.tensor([3, 4]),
+            generate_config=GenerateConfig(
+                role_addrs=[_decode_role_addr("decode", 9002)]
+            ),
+            request_id=2,
+            mm_inputs=[],
+        )
         with patch("rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", return_value=FakeBatchStub()):
-            self.assertEqual(len(asyncio.run(client.batch_enqueue([input_py]))), 1)
+            self.assertEqual(len(asyncio.run(client.batch_enqueue([input_py, second_input]))), 2)
+        self.assertEqual(client._channel_pool.targets, ["decode:9002"])
+
+    def test_batch_without_explicit_route_uses_local_pdfusion(self):
+        client = ModelRpcClient(["fusion:9000"], {}, role_type=RoleType.PDFUSION)
+        client._channel_pool = _FakeChannelPool()
+        input_py = self._make_generate_input(GenerateConfig())
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=FakeBatchStub(),
+        ):
+            outputs = asyncio.run(client.batch_enqueue([input_py]))
+        self.assertEqual(len(outputs), 1)
+        self.assertEqual(client._channel_pool.targets, ["fusion:9000"])
 
     def test_pd_batch_enqueue_preserves_master_admission(self):
         client = ModelRpcClient(["127.0.0.1:10101"], {}, 0, RoleType.DECODE)

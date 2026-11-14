@@ -159,12 +159,12 @@ TEST(PDRequestUtilsTest, TextPreprocessingPreservesRequestAndAppliesSameSpPolicy
     EXPECT_EQ(request.token_ids_size(), 3);
 }
 
-TEST(PDRequestUtilsTest, PrefillExpansionIsDeterministicAcrossWireRoundTrip) {
+TEST(PDRequestUtilsTest, DecodeAndPrefillLocalExpansionAgreeAcrossWireRoundTrip) {
     const auto              request = makeMMRequest();
     auto                    decode  = QueryConverter::transQuery(&request);
     TestMultimodalProcessor decode_processor;
     TestMultimodalProcessor prefill_processor;
-    ASSERT_TRUE(preprocessForPD(decode, &decode_processor, false, RoleType::PREFILL, nullptr, {}).ok());
+    ASSERT_TRUE(preprocessForPD(decode, &decode_processor, false, RoleType::DECODE, nullptr, {}).ok());
     GenerateInputPB handoff;
     ASSERT_TRUE(handoff.ParseFromString(request.SerializeAsString()));
     auto prefill = QueryConverter::transQuery(&handoff);

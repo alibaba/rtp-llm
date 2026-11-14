@@ -1309,6 +1309,57 @@ TEST(LocalRpcServerTest, PollCollectsOnlyNonStreamingDecodeHandoffBlocks) {
     }
 }
 
+TEST(LocalRpcServerTest, PollReturnsRequestedIntermediateLogitsForNonStreamingDecode) {
+    auto input                               = std::make_shared<GenerateInput>();
+    input->generate_config                   = std::make_shared<GenerateConfig>();
+    input->begin_time_us                     = autil::TimeUtility::currentTimeInMicroSeconds();
+    input->input_ids                         = torch::tensor({1, 2, 3}, torch::kInt32);
+    input->generate_config->pd_separation    = true;
+    input->generate_config->is_streaming     = false;
+    input->generate_config->max_new_tokens   = 3;
+    input->generate_config->ignore_eos       = true;
+    input->generate_config->return_logits    = true;
+    input->generate_config->logits_index     = 2;
+    input->generate_config->select_tokens_id = {3, 1};
+
+    ModelConfig model;
+    model.max_seq_len = 16;
+    model.vocab_size  = 16;
+    ResourceContext resources;
+    resources.role_type = RoleType::DECODE;
+    auto normal = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, resources, nullptr);
+    normal->generate_status_->status.store(StreamState::RUNNING);
+
+    const auto logits = torch::zeros({1, 16});
+    for (int step = 1; step <= 3; ++step) {
+        logits.copy_(torch::arange(16, logits.options()) + step * 10);
+        normal->step();
+        normal->update(StreamUpdateInfo{.new_tokens             = torch::tensor({{step + 6}}, torch::kInt32),
+                                        .num_new_tokens         = 1,
+                                        .logits                 = logits,
+                                        .update_remote_generate = step > 1});
+    }
+
+    ASSERT_TRUE(normal->hasEvent(StreamEvents::GenerateDone));
+    TestLocalRpcServer             server;
+    RecordingWriter                writer;
+    std::shared_ptr<GenerateStream> stream = normal;
+    ASSERT_TRUE(server.poll(&writer, stream).ok());
+    ASSERT_EQ(writer.outputs_.size(), 1u);
+    const auto& output = writer.outputs_.front().flatten_output();
+    ASSERT_EQ(output.finished_size(), 1);
+    EXPECT_TRUE(output.finished(0));
+    ASSERT_EQ(output.aux_info_size(), 1);
+    EXPECT_EQ(output.aux_info(0).output_len(), 3);
+    const auto expected_tokens = torch::tensor({7, 8, 9}, torch::kInt32);
+    EXPECT_EQ(output.output_ids().int32_data(),
+              std::string(static_cast<const char*>(expected_tokens.data_ptr()), expected_tokens.nbytes()));
+    ASSERT_TRUE(output.has_logits());
+    const auto expected_logits = torch::tensor({23.0f, 21.0f});
+    EXPECT_EQ(output.logits().fp32_data(),
+              std::string(static_cast<const char*>(expected_logits.data_ptr()), expected_logits.nbytes()));
+}
+
 TEST(LocalRpcServerTest, PollWritesFinalLocalOutputBeforeRemoteHandoff) {
     TestLocalRpcServer              server;
     RecordingWriter                 writer;

@@ -56,6 +56,7 @@ void PDCancelRegistry::trimLocked(int64_t now_ms) {
         }
         pending_cancels_.erase(request_id);
         local_pending_cancels_.erase(request_id);
+        pending_stream_releases_.erase(request_id);
         entries_.erase(it);
     }
     if (expired_remote_retries != 0) {
@@ -113,7 +114,10 @@ void PDCancelRegistry::finishLocal(const Handle& handle) {
         std::lock_guard<std::mutex> lock(mutex_);
         stream = handle->stream;
     }
-    if (stream && stream->getStatus() == StreamState::FINISHED && !stream->isDeferredReleasePending()) {
+    const bool can_release =
+        stream && stream->getStatus() == StreamState::FINISHED && !stream->isDeferredReleasePending()
+        && !stream->hasPendingAsyncBookkeeping();
+    if (can_release) {
         // A scheduler's FINISHED transition can precede its resource cleanup.
         // Complete the idempotent release before recording local completion.
         stream->releaseResource();
@@ -123,9 +127,20 @@ void PDCancelRegistry::finishLocal(const Handle& handle) {
     const auto now_ms = currentTimeMs();
     scheduleExpirationLocked(handle,
                              (handle->downstream_done ? now_ms : std::max(now_ms, handle->deadline_ms)) + kRetentionMs);
-    if (!handle->canceled.load() && stream && stream->getStatus() == StreamState::FINISHED
-        && !stream->isDeferredReleasePending() && !stream->hasPendingP2PResourceHold())
+    if (handle->canceled.load() || !stream || handle->stream != stream) {
+        return;
+    }
+    const auto request_id = handle->identity.request_id;
+    const auto it = entries_.find(request_id);
+    if (it == entries_.end() || it->second != handle) {
+        return;
+    }
+    if (can_release && !stream->hasPendingP2PResourceHold()) {
         handle->stream.reset();
+        pending_stream_releases_.erase(request_id);
+    } else {
+        pending_stream_releases_.emplace(request_id, handle);
+    }
 }
 
 absl::StatusOr<CancelStatusPB> PDCancelRegistry::cancel(int64_t request_id, const ErrorInfo& reason) {
@@ -162,13 +177,21 @@ absl::StatusOr<CancelStatusPB> PDCancelRegistry::cancel(int64_t request_id, cons
     if (e->local_done && e->downstream_done && !active_reads_.count(e->unique_key)
         && (!e->stream
             || (e->stream->getStatus() == StreamState::FINISHED && !e->stream->isDeferredReleasePending()
+                && !e->stream->hasPendingAsyncBookkeeping()
                 && !e->stream->hasPendingP2PResourceHold())))
         return CANCEL_STATUS_NOT_FOUND;
+    const bool priority_preemption = reason.code() == ErrorCode::PRIORITY_PREEMPTED;
+    // WorkerStatus may already have published completion while RPC cleanup is still running.
+    // Preserve that outcome for preemption while allowing ordinary resource cleanup.
+    if (!meta_->markCancellationPending(e->identity, priority_preemption, priority_preemption)) {
+        return CANCEL_STATUS_NOT_FOUND;
+    }
     e->cancel_reason = reason;
     // Preserve the first local failure if it preceded the cleanup request.
     if (prior_error.hasError())
         e->cancel_reason = prior_error;
     e->canceled.store(true);
+    pending_stream_releases_.erase(request_id);
     ++canceled_keys_[e->unique_key];
     pending_cancels_.emplace(request_id, e);
     local_pending_cancels_.emplace(request_id, e);
@@ -176,7 +199,6 @@ absl::StatusOr<CancelStatusPB> PDCancelRegistry::cancel(int64_t request_id, cons
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
             .count(),
         std::memory_order_release);
-    meta_->markCancellationPending(e->identity, e->cancel_reason.code() == ErrorCode::PRIORITY_PREEMPTED);
     if (e->stream)
         e->stream->reportError(e->cancel_reason.code(), e->cancel_reason.ToString());
     return CANCEL_STATUS_ACCEPTED;
@@ -187,7 +209,52 @@ bool PDCancelRegistry::isCanceled(const std::string& unique_key) {
     return canceled_keys_.count(unique_key) != 0;
 }
 
+void PDCancelRegistry::reapFinishedStreams() {
+    std::vector<Handle> candidates;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto count = std::min(pending_stream_releases_.size(), kPendingBatchSize);
+        candidates.reserve(count);
+        auto it = pending_stream_releases_.upper_bound(stream_release_cursor_);
+        for (size_t i = 0; i < count; ++i) {
+            if (it == pending_stream_releases_.end()) {
+                it = pending_stream_releases_.begin();
+            }
+            stream_release_cursor_ = it->first;
+            candidates.push_back(it++->second);
+        }
+    }
+    for (const auto& handle : candidates) {
+        const auto request_id = handle->identity.request_id;
+        GenerateStreamPtr stream;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto it = pending_stream_releases_.find(request_id);
+            if (it == pending_stream_releases_.end() || it->second != handle) {
+                continue;
+            }
+            stream = handle->stream;
+        }
+        if (!stream || stream->getStatus() != StreamState::FINISHED || stream->isDeferredReleasePending()
+            || stream->hasPendingAsyncBookkeeping()) {
+            continue;
+        }
+        stream->releaseResource();
+        if (stream->hasPendingP2PResourceHold()) {
+            continue;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = pending_stream_releases_.find(request_id);
+        if (it != pending_stream_releases_.end() && it->second == handle && handle->stream == stream) {
+            handle->stream.reset();
+            pending_stream_releases_.erase(it);
+        }
+    }
+}
+
 std::vector<PDCancelRegistry::Handle> PDCancelRegistry::pending() {
+    // Both RPC servers call pending() from their cleanup ticks.
+    reapFinishedStreams();
     std::lock_guard<std::mutex> lock(mutex_);
     trimLocked(currentTimeMs());
     std::vector<Handle> result;

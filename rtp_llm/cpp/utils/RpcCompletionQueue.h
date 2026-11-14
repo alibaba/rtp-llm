@@ -3,6 +3,7 @@
 #include <grpc++/grpc++.h>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -50,7 +51,13 @@ public:
                     tag = std::move(it->second);
                     state->tags.erase(it);
                 }
-                tag->complete(ok);
+                try {
+                    tag->complete(ok);
+                } catch (const std::exception& error) {
+                    std::fprintf(stderr, "RPC completion callback failed: %s\n", error.what());
+                } catch (...) {
+                    std::fputs("RPC completion callback failed with an unknown exception\n", stderr);
+                }
             }
             {
                 std::lock_guard<std::mutex> lock(state->mutex);
