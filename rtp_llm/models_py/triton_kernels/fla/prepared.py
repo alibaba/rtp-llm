@@ -18,7 +18,9 @@ class GdnPrefillPrepared:
     owner alive with its graph; release it only after outstanding replays finish.
     """
 
-    def __init__(self, token_capacity, batch_capacity, device):
+    def __init__(
+        self, token_capacity, batch_capacity, device, *, output_live_only=False
+    ):
         if not 64 <= token_capacity < 2**31 or not 0 < batch_capacity < 2**31:
             raise ValueError(
                 "prepared GDN requires token capacity >= 64 and positive batch capacity"
@@ -57,6 +59,8 @@ class GdnPrefillPrepared:
             batch_capacity + 1, device=device, dtype=torch.int64
         )
         self.workspace = {}
+        # Opt in only when the caller slices live rows before any consumer.
+        self.output_live_only = bool(output_live_only)
         self._prefix_alignment = None
         self._prefixes = ()
         self._host_lengths = ()

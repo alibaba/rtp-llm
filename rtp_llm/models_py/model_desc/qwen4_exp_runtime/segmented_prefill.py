@@ -336,7 +336,9 @@ class QwenPrefillContext:
     def __init__(self, owner, capacity, dummy):
         self.owner = owner
         self.capacity = capacity
-        self.prepared = GdnPrefillPrepared(capacity, owner.max_requests, owner.device)
+        self.prepared = GdnPrefillPrepared(
+            capacity, owner.max_requests, owner.device, output_live_only=True
+        )
         self.prepared.refresh([capacity], [0])
         self.tables = {}
         groups = get_attention_inputs_value(dummy)

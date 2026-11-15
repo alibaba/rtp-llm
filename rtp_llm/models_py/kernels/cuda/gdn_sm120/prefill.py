@@ -94,8 +94,10 @@ def sm120_prefill_prepared(
         output = prepared.get_workspace(
             "gdn_sm120_output", (q.shape[0], heads, 128), q.dtype, q.device
         )
-        # Only live rows are produced by the DSL; keep downstream padding inert.
-        output.zero_()
+        # The DSL writes every live row. Other callers retain zero padding;
+        # segmented Qwen slices live rows before exposing this output.
+        if not prepared.output_live_only:
+            output.zero_()
         max_seqlen = prepared.token_capacity
     initial_fp32 = initial.float().contiguous() if initial is not None else None
     from .delta_rule_cp_sm120 import cp_delta_rule_dsl_sm120

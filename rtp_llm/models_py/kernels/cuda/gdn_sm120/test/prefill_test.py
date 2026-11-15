@@ -14,6 +14,151 @@ from rtp_llm.models_py.triton_kernels.fla.utils import assert_close
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class GdnSm120PrefillTest(unittest.TestCase):
+    def test_segmented_conv_and_gdn_restore_long_prefix_and_all_cache_bytes(self):
+        from types import SimpleNamespace
+
+        from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextMetadata
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.segmented_prefill import (
+            QwenPrefillContext,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_adapter import (
+            Qwen4Sm120GdnPrefill,
+        )
+        from rtp_llm.models_py.triton_kernels.causal_conv1d.causal_conv1d import (
+            prepare_causal_conv1d_metadata,
+        )
+        from rtp_llm.ops import DataType
+        from rtp_llm.utils.model_weight import W
+
+        torch.manual_seed(8631)
+        device = torch.device("cuda", torch.cuda.current_device())
+        width, capacity, heads = 96, 8192, 4
+        module = Qwen4Sm120GdnPrefill(
+            SimpleNamespace(
+                linear_key_head_dim=128,
+                linear_value_head_dim=128,
+                linear_num_key_heads=2,
+                linear_num_value_heads=heads,
+                linear_conv_kernel_dim=4,
+                ssm_state_dtype=DataType.TYPE_FP32,
+                conv_state_dtype=DataType.TYPE_BF16,
+            ),
+            SimpleNamespace(get_attn_tp_size=lambda: 1),
+            {
+                W.linear_attn_conv1d_w: torch.randn(
+                    1024, 1, 4, device=device, dtype=torch.bfloat16
+                )
+                * 0.1,
+                W.linear_attn_dt_b: torch.randn(heads, device=device),
+                W.linear_attn_alog: torch.randn(heads, device=device),
+            },
+        )
+        storage = torch.zeros(
+            4 * width + 1,
+            module.linear_cache_converter.block_size_bytes,
+            device=device,
+            dtype=torch.int8,
+        )
+        module._get_ssm_states(storage).normal_(std=0.01)
+        module._get_conv_states(storage).normal_(std=0.01)
+        baseline = storage.clone()
+        cache = SimpleNamespace(kv_cache_base=storage, seq_size_per_block=128)
+
+        def inputs(lengths, prefixes):
+            cu = torch.tensor(
+                [0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32
+            )
+            table = torch.arange(
+                1, len(lengths) * width + 1, dtype=torch.int32
+            ).reshape(len(lengths), width)
+            return (
+                SimpleNamespace(
+                    is_prefill=True,
+                    is_cuda_graph=False,
+                    input_lengths=torch.tensor(lengths, dtype=torch.int32),
+                    prefix_lengths=torch.tensor(prefixes, dtype=torch.int32),
+                    prefix_lengths_device=torch.tensor(
+                        prefixes, dtype=torch.int32, device=device
+                    ),
+                    cu_seqlens_device=cu.to(device),
+                    kv_cache_kernel_block_id_device=table.to(device),
+                    cache_store_inputs=None,
+                    cache_store_writer=None,
+                ),
+                cu,
+            )
+
+        dummy, _ = inputs([capacity], [0])
+        owner = SimpleNamespace(
+            device=device,
+            max_requests=4,
+            linear_layers=[(0, None)],
+            recording=True,
+            model=SimpleNamespace(
+                config=SimpleNamespace(max_seq_len=12288),
+                _attention_tag=lambda _: "linear",
+                kv_cache=SimpleNamespace(get_kernel_seq_size_per_block=lambda _: 128),
+            ),
+            pool=torch.cuda.graph_pool_handle(),
+            capture_stream=torch.cuda.Stream(),
+        )
+        context = QwenPrefillContext(
+            owner, capacity, SimpleNamespace(attention_inputs={"linear": dummy})
+        )
+        context.gdn(
+            0,
+            module,
+            (
+                torch.randn(capacity, 1024, device=device, dtype=torch.bfloat16),
+                torch.randn(capacity, heads, device=device, dtype=torch.bfloat16),
+                torch.randn(capacity, heads, device=device, dtype=torch.bfloat16),
+            ),
+            cache,
+        )
+        owner.recording = False
+        for lengths, prefixes in (
+            ((2048, 2048), (6144, 7168)),
+            ((3072, 3072), (7168, 0)),
+            ((2048,), (0,)),
+            ((2048,), (7168,)),
+        ):
+            live, cu = inputs(lengths, prefixes)
+            table = live.kv_cache_kernel_block_id_device
+            table.copy_(
+                torch.randperm(4 * width, device=device, dtype=torch.int32)[
+                    : table.numel()
+                ].reshape_as(table)
+                + 1
+            )
+            for row, prefix in enumerate(prefixes):
+                if prefix:
+                    table[row, : (prefix - 1) // 128] = -1
+            arguments = (
+                torch.randn(sum(lengths), 1024, device=device, dtype=torch.bfloat16),
+                torch.randn(sum(lengths), heads, device=device, dtype=torch.bfloat16),
+                torch.randn(sum(lengths), heads, device=device, dtype=torch.bfloat16),
+            )
+            storage.copy_(baseline)
+            reference_cache = SimpleNamespace(
+                kv_cache_base=baseline.clone(), seq_size_per_block=128
+            )
+            context.refresh(SimpleNamespace(attention_inputs={"linear": live}), lengths)
+            actual = context.gdn(0, module, arguments, cache)
+            expected = module(
+                *arguments,
+                live,
+                reference_cache,
+                Qwen3NextMetadata(
+                    prefill_conv1d_meta=prepare_causal_conv1d_metadata(cu, device)
+                ),
+            )
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            torch.testing.assert_close(
+                storage, reference_cache.kv_cache_base, rtol=0, atol=0
+            )
+        for region in context.regions.values():
+            region.graph.reset()
+
     def test_prepared_graphs_keep_separate_capacity_workspaces(self):
         from rtp_llm.models_py.kernels.cuda.gdn_sm120.prefill import (
             sm120_prefill_prepared,
@@ -25,15 +170,17 @@ class GdnSm120PrefillTest(unittest.TestCase):
 
         self.assertEqual(torch.cuda.get_device_capability(), (12, 0))
         fixtures = []
-        for capacity, key_heads, heads, batch in (
-            (2048, 2, 4, 2),
-            (4096, 2, 4, 2),
-            (8192, 8, 24, 4),
-            (8192, 4, 12, 4),
-            (8192, 2, 6, 4),
+        for capacity, key_heads, heads, batch, live_output in (
+            (2048, 2, 4, 2, False),
+            (4096, 2, 4, 2, False),
+            (8192, 8, 24, 4, True),
+            (8192, 4, 12, 4, True),
+            (8192, 2, 6, 4, True),
         ):
             torch.manual_seed(837 + capacity)
-            prepared = GdnPrefillPrepared(capacity, batch, "cuda")
+            prepared = GdnPrefillPrepared(
+                capacity, batch, "cuda", output_live_only=live_output
+            )
             prepared.refresh((257, 129), (0, 128))
             prepared.require_prefix_alignment(128)
             q = torch.nn.functional.normalize(
@@ -46,7 +193,7 @@ class GdnSm120PrefillTest(unittest.TestCase):
             original = (q.clone(), k.clone(), v.clone())
             alpha = torch.exp(-torch.rand(capacity, heads, device="cuda") * 0.1)
             beta = torch.rand_like(alpha).bfloat16().float()
-            width = capacity // 128 + 1
+            width = (capacity + 7168) // 128 + 1
             table = torch.arange(
                 1, batch * width + 1, device="cuda", dtype=torch.int32
             ).view(batch, width)
@@ -123,15 +270,18 @@ class GdnSm120PrefillTest(unittest.TestCase):
         for index, pointer_set in enumerate(pointers):
             for other in pointers[index + 1 :]:
                 self.assertFalse(pointer_set & other)
-        for lengths in (
-            (257, 129),
-            (65, 0),
-            (0, 0),
-            (129, 257),
-            (8192,),
-            (4093, 2051, 2048),
-            (6141, 1025, 1026),
-            (4096, 4096),
+        for lengths, explicit_prefixes in (
+            ((257, 129), None),
+            ((65, 0), None),
+            ((0, 0), None),
+            ((129, 257), None),
+            ((8192,), None),
+            ((4093, 2051, 2048), None),
+            ((6141, 1025, 1026), None),
+            ((4096, 4096), None),
+            ((2048, 2048), (6144, 7168)),
+            ((3072, 3072), (7168, 6144)),
+            ((2048,), (0,)),
         ):
             for (
                 prepared,
@@ -153,26 +303,33 @@ class GdnSm120PrefillTest(unittest.TestCase):
                     or len(lengths) > prepared.batch_capacity
                 ):
                     continue
-                prefixes = tuple(
+                prefixes = explicit_prefixes or tuple(
                     128 if row == 1 and sum(lengths) < 2048 else 0
                     for row in range(len(lengths))
                 )
                 prepared.refresh(lengths, prefixes)
                 table.copy_(
-                    torch.arange(
-                        1, table.numel() + 1, device="cuda", dtype=torch.int32
-                    ).view_as(table)
+                    torch.arange(1, table.numel() + 1, device="cuda", dtype=torch.int32)
+                    .flip(0)
+                    .view_as(table)
                 )
                 for row, length in enumerate(lengths):
                     if length and not prefixes[row]:
                         table[row, : (length - 1) // 128] = -1
                 for current, source in zip(inputs, original):
+                    source.neg_()
                     current.copy_(source)
                     current[sum(lengths) :] = float("nan")
+                alpha.mul_(0.999)
+                beta.mul_(0.99)
+                base_pool.neg_()
                 pool.copy_(base_pool)
                 initial.fill_(float("nan"))
                 checkpoints.fill_(float("nan"))
                 final.fill_(float("nan"))
+                # Every replay must overwrite live output, including after a
+                # larger request left this shared bank populated.
+                output.fill_(float("nan"))
                 graph.replay()
                 for current, source in zip(inputs, original):
                     torch.testing.assert_close(
@@ -197,7 +354,9 @@ class GdnSm120PrefillTest(unittest.TestCase):
                     start_state = torch.zeros_like(initial[: len(lengths)])
                     for row, prefix in enumerate(prefixes):
                         if prefix and lengths[row]:
-                            start_state[row] = base_pool[int(table[row, 0])]
+                            start_state[row] = base_pool[
+                                int(table[row, (prefix - 1) // 128])
+                            ]
                     # Compare the entire live batch, retaining eager's original
                     # CP policy. Per-row calls can select a different CP length.
                     q, k, v = (tensor[: cu[-1]].contiguous() for tensor in inputs)
@@ -233,7 +392,15 @@ class GdnSm120PrefillTest(unittest.TestCase):
                             )
                             touched.add(slot)
                     checkpoint += length // 128
-                torch.testing.assert_close(output, expected_output, rtol=0, atol=0)
+                if prepared.output_live_only:
+                    torch.testing.assert_close(
+                        output[:, : cu[-1]],
+                        expected_output[:, : cu[-1]],
+                        rtol=0,
+                        atol=0,
+                    )
+                else:
+                    torch.testing.assert_close(output, expected_output, rtol=0, atol=0)
                 torch.testing.assert_close(pool, expected_pool, rtol=0, atol=0)
                 untouched = [
                     slot for slot in range(pool.shape[0]) if slot not in touched
