@@ -33,10 +33,16 @@ namespace rtp_llm {
 
 namespace {
 
-int64_t getStartupTimeoutMs() {
+int64_t getStartupTimeoutMs(int64_t health_check_timeout_s) {
     constexpr int64_t kDefaultStartupTimeoutMs = 600 * 1000;
     const auto        explicit_timeout_ms      = autil::EnvUtil::getEnv("RTP_LLM_STARTUP_TIMEOUT_MS", int64_t(0));
-    return explicit_timeout_ms > 0 ? explicit_timeout_ms : kDefaultStartupTimeoutMs;
+    if (explicit_timeout_ms > 0) {
+        return explicit_timeout_ms;
+    }
+    if (health_check_timeout_s == -1) {
+        return -1;
+    }
+    return health_check_timeout_s > 0 ? health_check_timeout_s * 1000 : kDefaultStartupTimeoutMs;
 }
 
 int64_t getGrpcStopTimeoutMs() {
@@ -240,6 +246,12 @@ void RtpLLMOp::startRPCServer() {
         return;
     }
     RTP_LLM_CHECK_WITH_INFO(deferred_init_params_ != nullptr, "deferred RPC init params are missing");
+    const auto& server_config = deferred_init_params_->server_config;
+    // The launcher supplies the total startup budget. Direct native callers
+    // may omit ServerConfig's health-check timeout and use the RPC default.
+    const auto health_timeout_s = py::hasattr(server_config, "startup_health_check_timeout") ?
+                                      server_config.attr("startup_health_check_timeout").cast<int64_t>() :
+                                      0;
     rpc_server_deferred_ = false;
 
     {
@@ -255,14 +267,15 @@ void RtpLLMOp::startRPCServer() {
                 setServerStartError("unknown exception while starting RPC server");
             }
         });
-        const int64_t startup_timeout_ms = getStartupTimeoutMs();
+        const int64_t startup_timeout_ms = getStartupTimeoutMs(health_timeout_s);
         const auto    begin_wait_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         while (!is_server_ready_) {
             if (server_start_failed_) {
                 std::lock_guard<std::mutex> lock(server_state_mutex_);
                 RTP_LLM_FAIL("deferred RPC server start failed: %s", server_start_error_.c_str());
             }
-            if (autil::TimeUtility::currentTimeInMicroSeconds() - begin_wait_us > startup_timeout_ms * 1000) {
+            if (startup_timeout_ms >= 0
+                && (autil::TimeUtility::currentTimeInMicroSeconds() - begin_wait_us) / 1000 > startup_timeout_ms) {
                 RTP_LLM_FAIL("deferred RPC server start timed out after %ld ms", startup_timeout_ms);
             }
             sleep(1);

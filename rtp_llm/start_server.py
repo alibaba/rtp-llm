@@ -79,9 +79,8 @@ STARTUP_REAL_WARMUP_TOKEN_ID = 100
 def _visible_device_count() -> int:
     """Count visible CUDA devices without initializing the driver.
 
-    The coordinator builds the participant manifest before any rank exists and
-    must stay driver-free so CRIU never captures an open NVIDIA device.  Read
-    the launcher's visibility instead of asking torch.
+    Manifest enumeration must work without another CUDA query. Earlier
+    platform setup may inspect device availability and GPU names.
     """
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     if visible is not None:
@@ -895,6 +894,10 @@ def start_server(py_env_configs: PyEnvConfigs):
     ):
         py_env_configs.parallelism_config.local_world_size = _scr_local_world_size(
             py_env_configs
+        )
+        # All spawned participants rederive local rank from this topology.
+        os.environ["LOCAL_WORLD_SIZE"] = str(
+            py_env_configs.parallelism_config.local_world_size
         )
     scr_manifest = _build_scr_participant_manifest(py_env_configs)
     # Impls register spawned processes right after start, so later failures still reach them in the finally cleanup.

@@ -8,6 +8,23 @@ from rtp_llm.utils.scr.restore_context import RestoreContext
 
 
 class RestoreContextTest(unittest.TestCase):
+    def test_single_pod_restore_does_not_read_unused_endpoint_manifest(self):
+        from rtp_llm.distribute.distributed_server import WorldInfo
+        from rtp_llm.distribute.worker_info import WorkerInfo
+
+        member = WorkerInfo("192.0.2.10", 0, 0, "seed", 9000, 9)
+        world = WorldInfo([member], member, member, 1, True)
+        pc = SimpleNamespace(world_size=1, local_world_size=1)
+        with patch.dict(
+            os.environ, {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "restore"}
+        ), patch("rtp_llm.utils.scr.endpoint.read_restore_manifest") as read:
+            restored = RestoreContext("seed", "192.0.2.20").resolve_world_info(
+                world, pc, GangInfoReader("/unused/annotations")
+            )
+        read.assert_not_called()
+        self.assertEqual(restored.self.ip, "127.0.0.1")
+        self.assertEqual(restored.self.rpc_server_port, world.self.rpc_server_port)
+
     def test_changed_local_listener_ports_fail_before_endpoint_publication(self):
         from rtp_llm.distribute.distributed_server import WorldInfo
         from rtp_llm.distribute.worker_info import WorkerInfo
@@ -27,14 +44,15 @@ class RestoreContextTest(unittest.TestCase):
                 }
             ],
         }
-        with patch.dict(os.environ, {"SCR_PHASE": "restore"}), patch(
+        # Exercise explicit manifest mode. Single-Pod SCR uses loopback.
+        with patch.dict(os.environ, {"SCR_PHASE": "restore", "RTPLLM_ENABLE_SCR": "0"}), patch(
             "rtp_llm.utils.scr.endpoint.read_restore_manifest",
             return_value=manifest,
         ):
             with self.assertRaisesRegex(RuntimeError, "local listener port layout"):
                 RestoreContext("seed", "192.0.2.20").resolve_world_info(
                     world,
-                    SimpleNamespace(world_size=1),
+                    SimpleNamespace(world_size=1, local_world_size=1),
                     GangInfoReader("/unused/annotations"),
                 )
         self.assertEqual(world.self.ip, "192.0.2.10")
@@ -53,14 +71,12 @@ class RestoreContextTest(unittest.TestCase):
 
     def test_absent_manifest_is_shared_without_a_second_provider_read(self):
         world = SimpleNamespace(num_nodes=1, members=[])
-        pc = SimpleNamespace(world_size=1)
-        with patch(
+        pc = SimpleNamespace(world_size=1, local_world_size=1)
+        with patch.dict(os.environ, {"RTPLLM_ENABLE_SCR": "0"}), patch(
             "rtp_llm.utils.scr.endpoint.read_restore_manifest",
             return_value=None,
         ) as reader, patch(
             "rtp_llm.utils.scr.endpoint.is_restore_phase", return_value=False
-        ), patch(
-            "rtp_llm.utils.scr.endpoint.local_comm_enabled", return_value=False
         ):
             context = RestoreContext("seed", "192.0.2.20")
             self.assertIs(

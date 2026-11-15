@@ -21,7 +21,11 @@ def _read_manifest() -> tuple[dict[str, Any] | None, bool]:
         return None, False
     # Inline manifests routinely exceed NAME_MAX.  Never stat JSON as a path.
     inline = value.startswith("{")
-    raw = value if inline else Path(value).read_text()
+    try:
+        raw = value if inline else Path(value).read_text()
+    except FileNotFoundError:
+        # Multi-node restore checks endpoint requirements once topology is known.
+        return None, False
     manifest = json.loads(raw)
     if not isinstance(manifest, dict):
         raise ValueError("SCR endpoint manifest must be a JSON object")
