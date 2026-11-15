@@ -26,7 +26,7 @@ public:
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
         const auto                                layout = coordinator_manager_->allLayerCacheBase();
         std::vector<std::pair<BlockInfo, size_t>> result;
-        using BufferKey = std::tuple<uintptr_t, size_t, bool, int32_t, int32_t>;
+        using BufferKey = std::tuple<uintptr_t, size_t, int32_t, int32_t, int32_t>;
         std::set<BufferKey> seen;
         auto                append_tensor = [&result, &seen](const torch::Tensor& t) {
             if (!t.defined() || t.numel() == 0) {
@@ -34,14 +34,15 @@ public:
             }
             BlockInfo info;
             info.is_cuda         = t.is_cuda();
-            info.device_index    = t.is_cuda() ? static_cast<int32_t>(t.get_device()) : 0;
+            info.device_index    = static_cast<int32_t>(t.device().index());
+            info.device_type     = static_cast<int32_t>(t.device().type());
             info.scalar_type     = static_cast<int32_t>(t.scalar_type());
             info.addr            = t.data_ptr();
             info.size_bytes      = static_cast<size_t>(t.nbytes());
             const size_t aligned = static_cast<size_t>(t.nbytes());
             if (!seen.emplace(reinterpret_cast<uintptr_t>(info.addr),
                               info.size_bytes,
-                              info.is_cuda,
+                              info.device_type,
                               info.device_index,
                               info.scalar_type)
                      .second) {

@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <cstddef>
+#include <cstdint>
 
 namespace rtp_llm {
 namespace transfer {
@@ -12,10 +13,16 @@ struct CopyTask {
     void*  src_ptr;  // 源地址
     size_t size;     // 拷贝大小
     char*  dst_ptr;  // 目标地址，必须由调用者预先分配
+    // Defaults preserve legacy direct CopyTask callers; cache-store callers
+    // must populate these fields from the originating BlockInfo.
+    bool    is_cuda      = true;
+    int32_t device_index = -1;
+    int32_t device_type  = -1;  // c10::DeviceType; -1 resolves via is_cuda
 };
 
 /// @brief GPU 拷贝工具类，封装批量拷贝逻辑
-/// 内部委托给 DeviceOps::noBlockCopy 实现，支持 CUDA、ROCm 及其他平台
+/// CPU buffers use host copies; CUDA/ROCm buffers use execNoBlockCopy.
+/// Other device kinds are rejected before any copy, never treated as host memory.
 class CudaCopyUtil {
 public:
     CudaCopyUtil()  = default;

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpKVCacheSender.h"
+#include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TransferValidation.h"
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -96,15 +97,22 @@ bool TcpKVCacheSender::setBlockBufferInfo(::tcp_transfer::TcpBlockBufferInfo* bl
                                           int64_t                             cache_key,
                                           const BlockInfo&                    block_info,
                                           std::vector<CopyTask>&              copy_tasks) {
+    if (!isRepresentableBlockSize(block_info.size_bytes)) {
+        RTP_LLM_LOG_WARNING("TCP block size exceeds uint32 wire length: %zu", block_info.size_bytes);
+        return false;
+    }
     block_buffer_info->set_len(static_cast<uint32_t>(block_info.size_bytes));
 
     auto* content = block_buffer_info->mutable_content();
     content->resize(block_info.size_bytes);
 
     CopyTask task;
-    task.src_ptr = block_info.addr;
-    task.size    = block_info.size_bytes;
-    task.dst_ptr = content->data();
+    task.src_ptr      = block_info.addr;
+    task.size         = block_info.size_bytes;
+    task.dst_ptr      = content->data();
+    task.is_cuda      = block_info.is_cuda;
+    task.device_index = block_info.device_index;
+    task.device_type  = block_info.device_type;
     copy_tasks.push_back(task);
     return true;
 }
@@ -123,12 +131,21 @@ TcpKVCacheSender::makeTransferRequest(const transfer::SendRequest&              
 
     std::vector<CopyTask> copy_tasks;
     for (const auto& [cache_key, kbi_ptr] : request.block_info) {
+        if (!kbi_ptr) {
+            RTP_LLM_LOG_WARNING("null cache block descriptor, unique_key: %s", request.unique_key.c_str());
+            return nullptr;
+        }
         auto cache_key_block_info = transfer_request->add_blocks();
         cache_key_block_info->set_key(cache_key);
 
         for (const auto& bi : kbi_ptr->blocks) {
+            // Preserve sub-block positions, including optional empty scale
+            // buffers. The receiver indexes using its local descriptor order.
+            auto block_buffer_info = cache_key_block_info->add_blocks();
+            if (bi.addr == nullptr && bi.size_bytes > 0) {
+                return nullptr;
+            }
             if (bi.addr != nullptr && bi.size_bytes > 0) {
-                auto block_buffer_info = cache_key_block_info->add_blocks();
                 if (!setBlockBufferInfo(block_buffer_info, cache_key, bi, copy_tasks)) {
                     return nullptr;
                 }
@@ -138,11 +155,13 @@ TcpKVCacheSender::makeTransferRequest(const transfer::SendRequest&              
         }
     }
 
-    if (!copy_tasks.empty()) {
-        if (!cuda_copy_util_->batchCopyToHost(copy_tasks)) {
-            RTP_LLM_LOG_WARNING("TcpKVCacheSender: batchCopyToHost failed, unique_key: %s", request.unique_key.c_str());
-            return nullptr;
-        }
+    if (copy_tasks.empty()) {
+        return nullptr;
+    }
+
+    if (!cuda_copy_util_->batchCopyToHost(copy_tasks)) {
+        RTP_LLM_LOG_WARNING("TcpKVCacheSender: batchCopyToHost failed, unique_key: %s", request.unique_key.c_str());
+        return nullptr;
     }
     return transfer_request;
 }
