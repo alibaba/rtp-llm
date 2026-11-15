@@ -21,12 +21,11 @@ from rtp_llm.models.glm53_prefill_parallel import (
     mla_cp_enabled,
     sequence_parallel_enabled,
 )
-from rtp_llm.models_py.distributed.collective_torch import (
-    Group,
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.distributed.glm53_collective_gemm import (
     all_gather_trim,
-    all_reduce,
+    reduce_scatter_glm53,
 )
-from rtp_llm.models_py.distributed.glm53_collective_gemm import reduce_scatter_glm53
 from rtp_llm.models_py.distributed.sequence_parallel import (
     TokenShardLayout,
     shard_tokens,
@@ -1772,7 +1771,14 @@ class Glm53FlashModel(GptModelBase):
             )
 
             configure_glm53_collective_gemm(
-                get_process_group(Group.TP), self.config.hidden_size
+                get_process_group(Group.TP),
+                self.config.hidden_size,
+                self.parallelism_config,
+                enable_cuda_graph=(
+                    self.py_hw_kernel_config.enable_cuda_graph
+                    if self.py_hw_kernel_config is not None
+                    else True
+                ),
             )
         return True
 

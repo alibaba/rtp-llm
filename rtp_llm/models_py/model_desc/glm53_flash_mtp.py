@@ -3,8 +3,11 @@
 from typing import Any, Optional
 
 import torch
+from torch import nn
+
 from rtp_llm.models.glm53_prefill_parallel import MlaCPParallelismView, mla_cp_enabled
-from rtp_llm.models_py.distributed.collective_torch import Group, all_gather_trim
+from rtp_llm.models_py.distributed.collective_torch import Group
+from rtp_llm.models_py.distributed.glm53_collective_gemm import all_gather_trim
 from rtp_llm.models_py.distributed.glm53_mla_cp import prepare_glm53_fmha
 from rtp_llm.models_py.distributed.sequence_parallel import shard_tokens
 from rtp_llm.models_py.model_desc.block_map import (
@@ -21,7 +24,6 @@ from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
 from rtp_llm.models_py.modules.dsv4.forward_metadata import scoped_forward_metadata
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 
 class Glm53FlashMtpModel(GptModelBase):

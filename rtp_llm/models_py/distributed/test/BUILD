@@ -1,4 +1,29 @@
 py_test(
+    name = "glm53_native_all_gather_integration_test",
+    srcs = ["glm53_native_all_gather_integration_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "moderate",
+    env = {"GPU_COUNT": "2", "TEST_USING_DEVICE": "CUDA"},
+    tags = ["manual", "open_skip", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "2"},
+)
+
+py_test(
+    name = "glm53_native_all_gather_test",
+    srcs = ["glm53_native_all_gather_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
+)
+
+py_test(
     name = "deepep_group_test",
     srcs = ["deepep_group_test.py"],
     deps = [

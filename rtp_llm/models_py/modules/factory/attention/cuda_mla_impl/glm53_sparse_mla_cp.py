@@ -25,7 +25,7 @@ except (ImportError, AttributeError, ValueError) as _e:
     logging.warning(f"flash_mla not available: {_e}. Requires CUDA >= 12.9")
 
 from rtp_llm.models_py.distributed.collective_torch import Group
-from rtp_llm.models_py.distributed.pynccl_cp import all_gather
+from rtp_llm.models_py.distributed.glm53_collective_gemm import all_gather
 from rtp_llm.models_py.distributed.pynccl_cp import enabled as cp_opt_enabled
 from rtp_llm.models_py.distributed.pynccl_cp import warmup as warmup_pynccl
 from rtp_llm.models_py.modules.dsv4.cp import (

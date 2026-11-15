@@ -32,7 +32,9 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
-from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+
+from rtp_llm.models_py.distributed.collective_torch import Group
+from rtp_llm.models_py.distributed.glm53_collective_gemm import all_gather
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
     build_kv_allgather_restore_indices,
