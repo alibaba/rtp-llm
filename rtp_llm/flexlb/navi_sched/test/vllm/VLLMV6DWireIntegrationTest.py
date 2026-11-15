@@ -82,7 +82,7 @@ class SnapshotChanges:
 
 
 class VLLMV6DWireIntegrationTest(unittest.TestCase):
-    def test_full_prefix_uses_local_objects_and_one_remote_peer(self):
+    def test_full_prefix_chains_ready_segments_across_peers(self):
         original_dir = os.getcwd()
         with tempfile.TemporaryDirectory(prefix="navi-v6d-prefix-") as directory:
             os.chdir(directory)
@@ -261,11 +261,19 @@ class VLLMV6DWireIntegrationTest(unittest.TestCase):
                         route_only=True,
                     )
 
-                # Each peer holds a different Full segment. No receiver can
-                # reach the sole Linear checkpoint with one remote Full read.
-                self.assertEqual(0, schedule(100).predicted_cache_hit_tokens)
+                # Native Full lookup repeats the missing suffix, retaining each
+                # segment's lease while another peer supplies the next segment.
+                self.assertEqual(96, schedule(100).predicted_cache_hit_tokens)
 
-                # Receiver A can combine its first segment with one supplier B.
+                # A missing Full block must still break the prefix, even when
+                # a later Full block and the Linear checkpoint are READY.
+                publish(1, [2], [])
+                notifications.wait(
+                    lambda text: resident_counts(text, [(2, 0), (1, 0), (2, 1)])
+                )
+                self.assertEqual(0, schedule(103).predicted_cache_hit_tokens)
+
+                # A complete suffix from one peer remains readable.
                 publish(1, [2, 3, 4, 5], [5])
                 notifications.wait(
                     lambda text: resident_counts(text, [(2, 0), (4, 1), (2, 1)])
@@ -273,7 +281,8 @@ class VLLMV6DWireIntegrationTest(unittest.TestCase):
                 decision = schedule(101)
                 self.assertEqual(96, decision.predicted_cache_hit_tokens)
                 self.assertIn(
-                    decision.target.address, ("127.0.0.1:17100", "127.0.0.1:17101")
+                    decision.target.address,
+                    tuple("127.0.0.1:" + str(17100 + index) for index in range(3)),
                 )
 
                 # Full and Linear groups may still come from different peers.
