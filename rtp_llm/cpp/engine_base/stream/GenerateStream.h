@@ -91,6 +91,10 @@ struct StreamSpecUpdateInfo {
     torch::Tensor top_logprob_token_ids;
     torch::Tensor top_logprobs;
     int32_t       logprobs_offset = 0;
+    // Opt-in target output for ordinary MTP prefill. These owned host rows
+    // are distinct from the draft features retained for the next round.
+    torch::Tensor target_logits{};
+    torch::Tensor target_hidden_states{};
 };
 
 struct SpeculativeExecutorStreamOutput {

@@ -1752,6 +1752,17 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         update.top_logprob_token_ids = std::move(compact.top_logprob_token_ids);
         update.top_logprobs          = std::move(compact.top_logprobs);
         update.logprobs_offset       = offset;
+        // NormalSamplerInputGatherer preserves raw model logits when any
+        // stream requests return_logits. Copy only the requested model rows
+        // before the executor releases/reuses the target forward buffers.
+        const auto& target_output = prefill_output.model_output;
+        if (stream->returnLogits() && target_output.logits.defined()) {
+            update.target_logits = target_output.logits.narrow(0, batch_idx_in, cur_batch_size).cpu().clone();
+        }
+        if (stream->generateConfig()->return_hidden_states && target_output.hidden_states.defined()) {
+            update.target_hidden_states =
+                target_output.hidden_states.narrow(0, batch_idx_in, cur_batch_size).cpu().clone();
+        }
         spec_update_infos.push_back(std::move(update));
         if (stream->generateConfig()->return_logprobs)
             target_row_offset += next_batch_size * count;
