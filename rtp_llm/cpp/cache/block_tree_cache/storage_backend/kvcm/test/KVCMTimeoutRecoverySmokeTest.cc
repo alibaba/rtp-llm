@@ -4,8 +4,11 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
 #include <cuda_runtime_api.h>
+#include <chrono>
 #include <cstring>
 #include <fcntl.h>
+#include <future>
+#include <memory>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
@@ -338,7 +341,7 @@ TEST_F(KVCMTimeoutRecoverySmokeTest, TaskDeadlineAfterNativeIoCompletesDoesNotFr
     worker.expectPayload(file, targets.get());
 }
 
-TEST_F(KVCMTimeoutRecoverySmokeTest, NaturalBackendQueuePressureExpiresBeforeIoAndRestoresReferences) {
+TEST_F(KVCMTimeoutRecoverySmokeTest, ControlledBackendQueueDeadlineExpiresBeforeIoAndRestoresReferences) {
     FilePayload file;
     NativeWorker worker;
     ASSERT_TRUE(worker.init(file));
@@ -349,33 +352,60 @@ TEST_F(KVCMTimeoutRecoverySmokeTest, NaturalBackendQueuePressureExpiresBeforeIoA
     size_t queue_peak = 0;
     size_t expired_before_io = 0;
     for (int budget : {1, 2, 5}) {
+        // Prefill dispatch releases the business worker before native SDK I/O.
+        // Hold that actual queue boundary; payload pressure alone cannot prove
+        // a read expired in the business queue rather than the payload queue.
+        auto entered = std::make_shared<std::promise<void>>();
+        auto running = entered->get_future();
+        std::promise<void> release;
+        auto released = release.get_future().share();
+        block_tree_cache_detail::ScopeRollback unblock([&] { release.set_value(); });
+        ASSERT_TRUE(worker.backend->executor_->submit([entered, released] {
+            entered->set_value();
+            released.wait();
+        }, BlockTreeTaskClass::LOAD));
+        ASSERT_EQ(running.wait_for(5s), std::future_status::ready);
+        const auto sdk_before = worker.observation->started.load();
+        const auto expired_before_batch = expired_before_io;
         std::vector<std::future<ErrorInfo>> futures;
         for (const auto block : targets.get()) {
             futures.push_back(worker.readAsync(meta, std::chrono::milliseconds(budget), {block}));
             queue_peak = std::max(queue_peak, worker.backend->executor_->queueSizes().load);
         }
+        // All request deadlines were constructed before this point. Waiting
+        // one real budget keeps every queued read past its own deadline.
+        std::this_thread::sleep_for(std::chrono::milliseconds(budget));
+        unblock.run();
         for (auto& future : futures) {
             ASSERT_EQ(future.wait_for(30s), std::future_status::ready);
             const auto result = future.get();
+            EXPECT_EQ(result.code(), ErrorCode::DEADLINE_EXCEEDED);
+            EXPECT_NE(result.ToString().find("storage read deadline exceeded before I/O"), std::string::npos);
             if (result.code() == ErrorCode::DEADLINE_EXCEEDED
                 && result.ToString().find("storage read deadline exceeded before I/O") != std::string::npos)
                 ++expired_before_io;
         }
         ASSERT_TRUE(waitForBackendOperationsForTest(*worker.backend));
+        EXPECT_EQ(expired_before_io - expired_before_batch, targets.get().size());
+        EXPECT_EQ(worker.observation->started.load(), sdk_before);
         if (expired_before_io && queue_peak)
             break;
     }
     RecordProperty("backend_queue_peak", static_cast<int>(queue_peak));
+    RecordProperty("backend_queue_controlled", 1);
     RecordProperty("backend_queue_expired_before_io", static_cast<int>(expired_before_io));
     RecordProperty("sdk_calls", static_cast<int>(worker.observation->started.load()));
     EXPECT_GT(queue_peak, 0u) << "no backend queue pressure was observed";
-    EXPECT_GT(expired_before_io, 0u) << "1/2/5ms budgets did not exercise backend queue expiry";
+    EXPECT_GT(expired_before_io, 0u) << "controlled business queue did not exercise before-I/O expiry";
     EXPECT_TRUE(worker.manager->frozenTasks().empty());
     for (const auto block : targets.get()) {
         EXPECT_FALSE(worker.environment.device_pool->isFrozen(block));
         EXPECT_EQ(worker.environment.device_pool->refCount(block), 1u);
     }
+    const auto sdk_before_control = worker.observation->started.load();
     EXPECT_TRUE(readResult(*worker.backend, worker.request(30s, one), meta).ok());
+    EXPECT_GT(worker.observation->started.load(), sdk_before_control);
+    RecordProperty("control_sdk_calls", static_cast<int>(worker.observation->started.load() - sdk_before_control));
     worker.expectPayload(file, one);
 }
 
