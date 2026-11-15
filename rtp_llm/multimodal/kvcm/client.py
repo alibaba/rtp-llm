@@ -17,7 +17,9 @@ _REQUIRED_KVCM_OBJECT_API_VERSION = 2
 _TensorT = TypeVar("_TensorT")
 
 
-def _load_kvcm_client_types() -> tuple[type[Any], type[Any], type[BaseException], Any]:
+def _load_kvcm_client_types(
+    *, require_address_update=False
+) -> tuple[type[Any], type[Any], type[BaseException], Any]:
     """Import the optional KVCM package only when a client is constructed."""
 
     try:
@@ -41,6 +43,15 @@ def _load_kvcm_client_types() -> tuple[type[Any], type[Any], type[BaseException]
         from kv_cache_manager.client.pybind import kvcm_py_client
     except ImportError as error:
         raise RuntimeError(_INCOMPATIBLE_WHEEL_MESSAGE) from error
+    if require_address_update and (
+        type(getattr(kvcm_py_client, "KV_META_OBJECT_ADDRESS_UPDATE_VERSION", None))
+        is not int
+        or kvcm_py_client.KV_META_OBJECT_ADDRESS_UPDATE_VERSION != 1
+        or not callable(getattr(KvMetaObjectClient, "update_addresses", None))
+    ):
+        raise RuntimeError(
+            "KVCM VipServer requires metadata address update API version 1"
+        )
     try:
         not_found_code = kvcm_py_client.ClientErrorCode.ER_SERVICE_NOT_FOUND
     except (AttributeError, TypeError):
@@ -97,7 +108,9 @@ class RtpKvMetaObjectClient:
             config_type,
             client_error_type,
             not_found_code,
-        ) = _load_kvcm_client_types()
+        ) = _load_kvcm_client_types(
+            require_address_update=bool(config.vipserver_domain)
+        )
         generic_config = config_type(
             addresses=config.addresses,
             instance_id=config.instance_id,
@@ -120,6 +133,8 @@ class RtpKvMetaObjectClient:
         self._not_found_code = not_found_code
         self._lookup = None
         self._lookup_lock = threading.Lock()
+        self._metadata_lock = threading.Lock()
+        self._metadata_addresses = tuple(config.addresses)
         self._closed = False
 
     @classmethod
@@ -175,12 +190,46 @@ class RtpKvMetaObjectClient:
         return self._config.instance_group
 
     def is_transfer_quiescent(self, error: BaseException) -> bool:
-        """True only when the SDK proves this failed save/load has no pending DMA."""
+        """True when this failed call is known not to leave pending DMA."""
+        from .lookup import KvMetaLookupError
+
+        if isinstance(error, KvMetaLookupError) and error.reason == "discovery":
+            return True  # Refresh failed before submitting save/load to the SDK.
         return (
             isinstance(error, self._client_error_type)
             and getattr(error, "operation", None) in ("save", "load")
             and getattr(error, "data_transfer_may_be_inflight", True) is False
         )
+
+    def _refresh_metadata_addresses(self):
+        # Serialize discovery publication with Close, not with payload IO. The
+        # SDK atomically swaps metadata channels and retains the same consumer.
+        with self._metadata_lock:
+            if self._closed:
+                raise RuntimeError("KVCM client is closed")
+            if not self._config.vipserver_domain:
+                return
+            from .lookup import (
+                KvMetaLookupError,
+                _cached_vipserver_resolver,
+                _resolve_vipserver_addresses,
+            )
+
+            try:
+                addresses = _resolve_vipserver_addresses(
+                    self._config.vipserver_domain, _cached_vipserver_resolver
+                )
+                if set(addresses) != set(self._metadata_addresses):
+                    self._client.update_addresses(addresses)
+                    self._metadata_addresses = tuple(addresses)
+            except Exception:
+                # No mutation or payload IO was submitted, and the SDK retains
+                # its old channel snapshot on failure. Never replay a mutation.
+                error = KvMetaLookupError(
+                    "KVMeta service discovery unavailable", reason="discovery"
+                )
+                error.data_transfer_may_be_inflight = False
+                raise error from None
 
     def save(
         self,
@@ -191,6 +240,7 @@ class RtpKvMetaObjectClient:
     ) -> None:
         """Save contiguous CPU/CUDA tensors under exact object keys."""
 
+        self._refresh_metadata_addresses()
         self._client.save(keys, tensors, trace_id=trace_id)
 
     def save_one(self, key: str, tensor: Any, *, trace_id: str | None = None) -> None:
@@ -213,6 +263,7 @@ class RtpKvMetaObjectClient:
         be discarded rather than consumed by inference.
         """
 
+        self._refresh_metadata_addresses()
         self._client.load(keys, tensors, trace_id=trace_id)
 
     def load_one(
@@ -308,6 +359,7 @@ class RtpKvMetaObjectClient:
     def remove(self, keys: Sequence[str], *, trace_id: str | None = None) -> None:
         """Remove exact object keys."""
 
+        self._refresh_metadata_addresses()
         self._client.remove(keys, trace_id=trace_id)
 
     def remove_one(self, key: str, *, trace_id: str | None = None) -> None:
@@ -318,10 +370,11 @@ class RtpKvMetaObjectClient:
     def close(self) -> None:
         """Release local KVCM resources; safe to call more than once."""
 
-        try:
-            self._client.close()
-        finally:
-            self._close_lookup()
+        with self._metadata_lock:
+            try:
+                self._client.close()
+            finally:
+                self._close_lookup()
 
     def _close_lookup(self):
         with self._lookup_lock:
@@ -342,7 +395,8 @@ class RtpKvMetaObjectClient:
     ) -> None:
         # Cleanup must never turn a body failure into apparent success, even if
         # a future optional client accidentally returns a truthy value here.
-        try:
-            self._client.__exit__(exc_type, exc_value, traceback)
-        finally:
-            self._close_lookup()
+        with self._metadata_lock:
+            try:
+                self._client.__exit__(exc_type, exc_value, traceback)
+            finally:
+                self._close_lookup()
