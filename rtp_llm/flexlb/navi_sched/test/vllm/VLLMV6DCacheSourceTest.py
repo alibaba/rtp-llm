@@ -118,6 +118,65 @@ class VLLMV6DCacheSourceTest(unittest.TestCase):
                 self.assertEqual(64 - expected_context, result.remaining_prefill_tokens)
                 self.assertEqual(77, result.batch_id)
 
+    def test_unscheduled_resolved_cache_lookup_refreshes_workload(self):
+        names = {"_make_workload_contribution", "_native_cache_lookup_complete",
+                 "_refresh_workload_contributions"}
+        methods = [copy.deepcopy(n) for n in self.observer_class.body
+                   if isinstance(n, ast.FunctionDef) and n.name in names]
+        module = ast.parse("from __future__ import annotations\nclass Observer: pass\n")
+        module.body[1].body = methods
+        namespace = {"_WorkloadContribution": SimpleNamespace}
+        exec(compile(ast.fix_missing_locations(module), str(SOURCE), "exec"), namespace)
+        for fields, resolve in [
+            (dict(prefill_stats=SimpleNamespace(num_prompt_tokens=0)),
+             lambda r: setattr(r.prefill_stats, "num_prompt_tokens", 64)),
+            (dict(num_cached_tokens=-1), lambda r: setattr(r, "num_cached_tokens", 0)),
+        ]:
+            with self.subTest(fields=fields):
+                observer = namespace["Observer"]()
+                observer._predicted_cache_hit_for_request = lambda r: 48
+                observer._forward_request_state = lambda rid: SimpleNamespace(batch_id=77)
+                observer._workload_contributions = {}
+                observer._pending_cache_lookup_request_ids = set()
+                remaining = 0
+
+                def apply(contribution, sign):
+                    nonlocal remaining
+                    remaining += sign * contribution.remaining_prefill_tokens
+
+                observer._workload_aggregate = SimpleNamespace(apply=apply)
+                request = SimpleNamespace(request_id="r", num_prompt_tokens=64,
+                                          num_computed_tokens=0, **fields)
+                scheduler = SimpleNamespace(requests={"r": request})
+                observer._refresh_workload_contributions(scheduler, {"r"}, {})
+                self.assertEqual(16, remaining)
+                observer._refresh_workload_contributions(scheduler, set(), {})
+                self.assertEqual(16, remaining)
+                resolve(request)
+                observer._refresh_workload_contributions(scheduler, set(), {})
+                self.assertEqual(64, remaining)
+                self.assertFalse(observer._pending_cache_lookup_request_ids)
+                request.num_computed_tokens = 24
+                observer._refresh_workload_contributions(scheduler, {"r"}, {"r": 8})
+                self.assertEqual(48, remaining)
+                scheduler.requests.clear()
+                observer._refresh_workload_contributions(scheduler, {"r"}, {})
+                self.assertEqual(0, remaining)
+                self.assertFalse(observer._workload_contributions)
+
+    def test_cancelled_pending_cache_lookup_is_removed_without_scheduled_output(self):
+        observer = SimpleNamespace(
+            _pending_cache_lookup_request_ids={"cancelled"},
+            _workload_contributions={"cancelled": SimpleNamespace(remaining_prefill_tokens=16)},
+            _workload_aggregate=SimpleNamespace(apply=mock.Mock()),
+        )
+        self.function("_refresh_workload_contributions")(
+            observer, SimpleNamespace(requests={}), set(), {}
+        )
+        self.assertFalse(observer._pending_cache_lookup_request_ids)
+        self.assertFalse(observer._workload_contributions)
+        self.assertEqual(-1, observer._workload_aggregate.apply.call_args.args[1])
+
     def test_native_v6d_presence_controls_capability_without_a_navisched_switch(self):
         class Connector:
             def __init__(self):

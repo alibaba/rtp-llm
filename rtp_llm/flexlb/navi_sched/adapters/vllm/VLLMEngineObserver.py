@@ -1667,6 +1667,7 @@ class VLLMEngineObserver:
         self._scheduled_work_by_output: dict[int, dict[str, int]] = {}
         self._workload_dirty_request_ids: set[str] = set()
         self._workload_contributions: dict[str, _WorkloadContribution] = {}
+        self._pending_cache_lookup_request_ids: set[str] = set()
         self._workload_aggregate = _WorkloadAggregate()
         self._current_workload: _ObservedWorkload | None = None
         self._running_prefill_started_ns: dict[str, int] = {}
@@ -3759,9 +3760,16 @@ class VLLMEngineObserver:
         self, scheduler, request_ids, inflight_scheduled_tokens
     ) -> None:
         request_ids = set(request_ids)
+        # Native can resolve a lookup without allocating a compute slot. Refresh
+        # those requests even when they are absent from the scheduled output.
+        for request_id in tuple(self._pending_cache_lookup_request_ids):
+            request = scheduler.requests.get(request_id)
+            if request is None or self._native_cache_lookup_complete(request):
+                request_ids.add(request_id)
         if not request_ids:
             return
         for request_id in request_ids:
+            self._pending_cache_lookup_request_ids.discard(request_id)
             previous = self._workload_contributions.pop(request_id, None)
             if previous is not None:
                 self._workload_aggregate.apply(previous, -1)
@@ -3772,6 +3780,8 @@ class VLLMEngineObserver:
                 request, inflight_scheduled_tokens.get(request_id, 0)
             )
             self._workload_contributions[request_id] = contribution
+            if not self._native_cache_lookup_complete(request):
+                self._pending_cache_lookup_request_ids.add(request_id)
             self._workload_aggregate.apply(contribution, 1)
 
     def _capture_execution_workload_state(self, request_ids):
@@ -6284,6 +6294,7 @@ class VLLMEngineObserver:
         self._forward_request_states.clear()
         with self._workload_lock:
             self._workload_contributions.clear()
+            self._pending_cache_lookup_request_ids.clear()
             self._workload_aggregate = _WorkloadAggregate()
             self._current_workload = None
             self._running_prefill_started_ns.clear()
