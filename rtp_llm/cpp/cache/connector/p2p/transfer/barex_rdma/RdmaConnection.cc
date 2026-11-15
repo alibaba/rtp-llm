@@ -72,13 +72,30 @@ void RdmaConnection::close() {
             return;
         }
         state_ = RdmaConnectionState::FAILED;
-        conn_to_close.swap(connection_);
+        if (active_dispatches_ == 0) {
+            conn_to_close.swap(connection_);
+        } else {
+            deferred_close_.swap(connection_);
+        }
     }
 
     auto to_fail = drainPendingRequests();
     failRequests(to_fail);
     RTP_LLM_LOG_WARNING("closing rdma connection to %s:%u", ip_.c_str(), port_);
     // Close can synchronously invoke onConnectFailed(), so it must run without conn_mutex_.
+    if (conn_to_close) {
+        conn_to_close->Close();
+    }
+}
+
+void RdmaConnection::finishDispatch() {
+    std::shared_ptr<::accl::barex::XConnection> conn_to_close;
+    {
+        std::lock_guard<std::mutex> conn_lock(conn_mutex_);
+        if (--active_dispatches_ == 0) {
+            conn_to_close.swap(deferred_close_);
+        }
+    }
     if (conn_to_close) {
         conn_to_close->Close();
     }
@@ -244,7 +261,7 @@ std::string RdmaConnection::readContext() const {
     return "RDMA READ peer=" + ip_ + ":" + std::to_string(port_) + " ";
 }
 
-uint32_t RdmaConnection::remoteRkeyOrAbort(const RemoteBuffer& remote, uint32_t nic_id) const {
+std::optional<uint32_t> RdmaConnection::findRemoteRkey(const RemoteBuffer& remote, uint32_t nic_id) const {
     if (!remote.nic_rkeys || remote.nic_rkeys->find(nic_id) == remote.nic_rkeys->end()) {
         RTP_LLM_LOG_ERROR("RDMA READ rkey lookup failed, partition_layer_key=%s stage=remote_rkey_lookup "
                           "peer=%s:%u remote_addr=%ld bytes=%u nic=%u",
@@ -254,7 +271,7 @@ uint32_t RdmaConnection::remoteRkeyOrAbort(const RemoteBuffer& remote, uint32_t 
                           remote.addr,
                           remote.len,
                           nic_id);
-        std::abort();
+        return std::nullopt;
     }
     return remote.nic_rkeys->at(nic_id);
 }
@@ -315,14 +332,22 @@ TransferErrorCode RdmaConnection::validateAndBuildRwMemps(
             std::abort();
         }
 
-        uint64_t r_addr = static_cast<uint64_t>(remote_buffer->addr);
-        uint32_t nic_id = conn->GetChannel()->GetPeerNicId();
-        const auto rkey = remoteRkeyOrAbort(*remote_buffer, nic_id);
+        auto* channel = conn ? conn->GetChannel() : nullptr;
+        if (!channel) {
+            error_message = readContext() + "channel is unavailable";
+            return TransferErrorCode::CONNECTION_FAILED;
+        }
+        const auto rkey = findRemoteRkey(*remote_buffer, channel->GetPeerNicId());
+        if (!rkey) {
+            error_message = readContext() + "missing remote rkey for " + remote_buffer->partition_layer_key;
+            return TransferErrorCode::RDMA_FAILED;
+        }
+        const auto r_addr = static_cast<uint64_t>(remote_buffer->addr);
 
         ::accl::barex::rw_memp_t rw_mem;
         rw_mem.data     = mem;
         rw_mem.r_addr   = r_addr;
-        rw_mem.r_key = rkey;
+        rw_mem.r_key    = *rkey;
         rw_mem.r_ttl_ms = deadline_ms;
         mems.push_back(rw_mem);
     }
@@ -338,10 +363,24 @@ void RdmaConnection::sendReadRequest(
     const std::shared_ptr<::accl::barex::XConnection>& conn) {
     collector->pending_done_time_us = currentTimeUs();
 
-    if (!conn) {
-        callback(TransferErrorCode::CONNECTION_FAILED, readContext() + "connection is null before READ dispatch");
+    bool admitted = false;
+    {
+        std::lock_guard<std::mutex> conn_lock(conn_mutex_);
+        if (conn && state_ == RdmaConnectionState::CONNECTED && conn == connection_) {
+            ++active_dispatches_;
+            admitted = true;
+        }
+    }
+    if (!admitted) {
+        callback(TransferErrorCode::CONNECTION_FAILED, readContext() + "connection is not open for READ dispatch");
         return;
     }
+    // Barex Close destroys its channel. Defer watchdog close until dispatch
+    // returns, without holding the connection lock across an inline callback.
+    struct DispatchGuard {
+        RdmaConnection& connection;
+        ~DispatchGuard() { connection.finishDispatch(); }
+    } guard{*this};
 
     std::vector<::accl::barex::rw_memp_t> mems;
     std::string error_message;
@@ -381,7 +420,14 @@ void RdmaConnection::sendReadRequest(
                       port_,
                       mems.size(),
                       deadline_ms);
-    const auto result = conn->GetChannel()->ReadBatch(mems, rdma_callback, false);
+    auto* channel = conn->GetChannel();
+    if (!channel) {
+        callback(TransferErrorCode::CONNECTION_FAILED, readContext() + "channel is unavailable");
+        return;
+    }
+    // The paired Barex backend returns synchronous errors before accepting
+    // work. Accepted batches report their result only through the drain callback.
+    const auto result = channel->ReadBatch(mems, rdma_callback, false);
     if (result != ::accl::barex::BAREX_SUCCESS) {
         callback(TransferErrorCode::RDMA_FAILED,
                  readContext() + "RDMA ReadBatch submission failed, error=" + std::to_string(result));

@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <mutex>
+#include <optional>
 #include <vector>
 #include <queue>
 #include <functional>
@@ -109,7 +110,8 @@ public:
         std::string& error_message);
 
 private:
-    uint32_t remoteRkeyOrAbort(const RemoteBuffer& remote, uint32_t nic_id) const;
+    std::optional<uint32_t> findRemoteRkey(const RemoteBuffer& remote, uint32_t nic_id) const;
+    void finishDispatch();
     std::string readContext() const;
     std::shared_ptr<IRdmaMemoryManager>         memory_manager_;
     std::string                                ip_;
@@ -120,6 +122,8 @@ private:
     mutable std::mutex                          conn_mutex_;
     RdmaConnectionState                         state_{RdmaConnectionState::CONNECTING};
     std::shared_ptr<::accl::barex::XConnection> connection_;
+    size_t                                      active_dispatches_ = 0;
+    std::shared_ptr<::accl::barex::XConnection> deferred_close_;
 
     std::mutex                     pending_mutex_;
     std::queue<PendingReadRequest> pending_requests_;

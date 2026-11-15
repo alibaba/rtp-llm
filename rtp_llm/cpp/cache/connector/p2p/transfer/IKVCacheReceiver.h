@@ -38,14 +38,15 @@ public:
     /// @brief 获取错误描述（done() == true 时有效）
     virtual std::string errorMessage() const = 0;
 
-    /// @brief 注册任务完成通知。回调在 done() 状态发布后调用，且只调用一次。
-    ///
-    /// Decode 侧用它推进写入 lease，避免为已返回的请求周期扫描所有接收任务。
+    /// @brief 安装任务完成回调，替换此前待执行的回调。若任务已结束则立即调用。
     virtual void setDoneCallback(std::function<void()> callback) = 0;
 };
 
 using IKVCacheRecvTaskPtr = std::shared_ptr<IKVCacheRecvTask>;
 
+// Invoked synchronously under the receive task lock. Return true once the
+// route's requested blocks are complete, or false to accept more batches.
+// Do not block, throw, or call back into the task or the receiver task store.
 using BatchCopiedCallback = std::function<bool(const std::vector<int64_t>&)>;
 
 /// @brief 注册一层 KV cache 接收任务的请求参数
