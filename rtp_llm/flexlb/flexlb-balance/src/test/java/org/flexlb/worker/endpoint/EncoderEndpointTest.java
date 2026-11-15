@@ -30,15 +30,21 @@ class EncoderEndpointTest {
     @Test
     void registrationChargesCapacityBeforeRouteConstructionAndReleasesExactRecord() {
         var endpoint = endpoint();
-        var first = endpoint.tryRegisterSelection("first", 1, 17L);
+        var first =
+                endpoint.tryRegisterSelection(
+                        "first", endpoint.selectionSnapshot(false), false, null, 1, 17L);
         assertEquals(WorkerEndpoint.RegistrationStatus.REGISTERED, first.status());
         assertEquals(1L, endpoint.selectionSnapshot().requestCount());
         assertEquals(17L, endpoint.selectionSnapshot().uncachedTokens());
         assertEquals(
                 WorkerEndpoint.RegistrationStatus.CAPACITY_FULL,
-                endpoint.tryRegisterSelection("second", 1, 20L).status());
+                endpoint.tryRegisterSelection(
+                                "second", endpoint.selectionSnapshot(false), false, null, 1, 20L)
+                        .status());
         assertTrue(endpoint.releaseRequest(first.value()));
-        var replacement = endpoint.tryRegisterSelection("first", 1, 20L);
+        var replacement =
+                endpoint.tryRegisterSelection(
+                        "first", endpoint.selectionSnapshot(false), false, null, 1, 20L);
         assertFalse(endpoint.releaseRequest(first.value()));
         assertEquals(20L, endpoint.selectionSnapshot().uncachedTokens());
         assertTrue(endpoint.releaseRequest(replacement.value()));
@@ -74,7 +80,7 @@ class EncoderEndpointTest {
                                 response.setRunningTaskInfo(java.util.Map.of(id, task));
                                 EndpointTestSupport.applyStatus(endpoint, response).run();
                             } else {
-                                endpoint.releaseRequest(original);
+                                endpoint.releaseRequest(original.encoderRegistration());
                                 assertTrue(
                                         EndpointTestSupport.commitEncoder(
                                                 endpoint, route(id, 20L), 1, 20L));
@@ -168,7 +174,7 @@ class EncoderEndpointTest {
             assertFalse(endpoint.getStatus().isAvailableForScheduling());
             assertFalse(endpoint.acceptsNewRequests());
             assertFalse(EndpointTestSupport.commitEncoder(endpoint, route("late", 20), 10, 20L));
-            endpoint.releaseRequest(prepared);
+            endpoint.releaseRequest(prepared.encoderRegistration());
             assertEquals(0L, endpoint.selectionSnapshot().requestCount());
         } finally {
             org.flexlb.worker.endpoint.EndpointTestSupport.closeAndWait(endpoint);
@@ -206,7 +212,7 @@ class EncoderEndpointTest {
             assertTrue(EndpointTestSupport.commitEncoder(endpoint, route("running", 10), 4, 10L));
             assertTrue(EndpointTestSupport.commitEncoder(endpoint, pending, 4, 20L));
             assertEquals(120L, endpoint.selectionSnapshot().uncachedTokens());
-            endpoint.releaseRequest(pending);
+            endpoint.releaseRequest(pending.encoderRegistration());
             assertEquals(100L, endpoint.selectionSnapshot().uncachedTokens());
         } finally {
             org.flexlb.worker.endpoint.EndpointTestSupport.closeAndWait(endpoint);
@@ -271,14 +277,14 @@ class EncoderEndpointTest {
             var selectedEndpoint = endpoint;
 
             assertTrue(EndpointTestSupport.commitEncoder(endpoint, original, 1, 10L));
-            endpoint.releaseRequest(original);
+            endpoint.releaseRequest(original.encoderRegistration());
             assertTrue(EndpointTestSupport.commitEncoder(endpoint, replacement, 1, 20L));
-            endpoint.releaseRequest(original);
+            endpoint.releaseRequest(original.encoderRegistration());
             verify(availability, times(1)).notifyChanged(endpoint);
             assertEquals(1, endpoint.selectionSnapshot().requestCount());
             assertEquals(20, endpoint.selectionSnapshot().uncachedTokens());
-            endpoint.releaseRequest(replacement);
-            endpoint.releaseRequest(replacement);
+            endpoint.releaseRequest(replacement.encoderRegistration());
+            endpoint.releaseRequest(replacement.encoderRegistration());
             verify(availability, times(2)).notifyChanged(endpoint);
         } finally {
             org.flexlb.worker.endpoint.EndpointTestSupport.closeAndWait(endpoint);

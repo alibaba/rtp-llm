@@ -22,6 +22,63 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Admission charges request slots and KV together; stale observations and repeated cleanup cannot oversubscribe them.
  */
 class DecodeEndpointAdmissionTest {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+        "10,false",
+        "50,false",
+        "90,false",
+        "10,true",
+        "50,true",
+        "90,true"
+    })
+    void admissionEvaluationClassifiesOccupancyWithoutCopyingEveryRequest(
+            int occupiedPriority, boolean confirmed) {
+        var endpoint = org.mockito.Mockito.spy(endpoint());
+        var limit = new AdmissionCapacity(1, 100);
+        assertEquals(
+                RegistrationStatus.REGISTERED,
+                endpoint.tryRegisterSelection(
+                                "1",
+                                endpoint.selectionSnapshot(),
+                                100,
+                                200,
+                                occupiedPriority,
+                                limit)
+                        .status());
+        if (confirmed) {
+            var task = new org.flexlb.worker.status.TaskInfo();
+            task.setRequestId("1");
+            task.setInputLength(100L);
+            task.setPhase(org.flexlb.worker.status.TaskPhase.RUNNING);
+            var response = new WorkerStatusResponse();
+            response.setTotalKvCacheTokens(10000L);
+            response.setAvailableKvCacheTokens(9900L);
+            response.setRunningTaskInfo(java.util.Map.of("1", task));
+            EndpointTestSupport.applyStatus(endpoint, response).run();
+        }
+        var evaluation =
+                endpoint.evaluateSelection(
+                        Request.builder().requestId("2").seqLen(100).maxNewTokens(100).build(),
+                        50,
+                        limit);
+        assertEquals(new Capacity(1, 0, 0), evaluation.deficit());
+        assertEquals(1L, evaluation.snapshot().usage().occupiedRequests());
+        assertEquals(confirmed ? 100L : 200L, evaluation.snapshot().usage().expectedKvUsed());
+        assertEquals(
+                (occupiedPriority < 50
+                                ? StrategyErrorType.RESOURCE_EXHAUSTED
+                                : StrategyErrorType.PRIORITY_ADMISSION_REJECTED)
+                        .getErrorCode(),
+                evaluation.failure().getCode());
+        if (occupiedPriority >= 50)
+            assertEquals(
+                    occupiedPriority == 50
+                            ? AdmissionRejectReason.SAME_PRIORITY_AHEAD
+                            : AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+                    evaluation.failure().getAdmissionRejectReason());
+        org.mockito.Mockito.verify(endpoint, org.mockito.Mockito.never()).resourceSnapshot();
+    }
+
     @Test
     void reservationImmediatelyConsumesRequestAndKvCapacity() {
         var endpoint = endpoint();
@@ -48,7 +105,7 @@ class DecodeEndpointAdmissionTest {
                 RegistrationStatus.REGISTERED, reserve(endpoint, "a", 100, 100, limit).status());
         assertEquals(
                 RegistrationStatus.VERSION_CONFLICT,
-                endpoint.tryRegisterSelection(before, "b", 100, 100, 50, limit).status());
+                endpoint.tryRegisterSelection("b", before, 100, 100, 50, limit).status());
         assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
     }
 
@@ -63,14 +120,14 @@ class DecodeEndpointAdmissionTest {
                             () -> {
                                 start.await(5, TimeUnit.SECONDS);
                                 return endpoint.tryRegisterSelection(
-                                        before, "a", 100, 100, 50, new AdmissionCapacity(1, 100));
+                                        "a", before, 100, 100, 50, new AdmissionCapacity(1, 100));
                             });
             var two =
                     workers.submit(
                             () -> {
                                 start.await(5, TimeUnit.SECONDS);
                                 return endpoint.tryRegisterSelection(
-                                        before, "b", 100, 100, 50, new AdmissionCapacity(1, 100));
+                                        "b", before, 100, 100, 50, new AdmissionCapacity(1, 100));
                             });
             var first = one.get(5, TimeUnit.SECONDS);
             var second = two.get(5, TimeUnit.SECONDS);
@@ -183,6 +240,6 @@ class DecodeEndpointAdmissionTest {
             long expected,
             AdmissionCapacity capacity) {
         return endpoint.tryRegisterSelection(
-                endpoint.selectionSnapshot(), id, hard, expected, 50, capacity);
+                id, endpoint.selectionSnapshot(), hard, expected, 50, capacity);
     }
 }

@@ -49,7 +49,7 @@ CHANNEL_OPTIONS = [
 # DashScope inner QoS header — the secondary Auto-TPM priority channel,
 # read by the master's GrpcQosHeaderInterceptor into the gRPC Context and
 # consumed by PriorityNormalizer when the proto ``priority`` field is unset
-# (mirror of flexlb-common PriorityNormalizer.QOS_HEADER_NAME).
+# (mirror of flexlb-util PriorityNormalizer.QOS_HEADER_NAME).
 QOS_LEVEL_HEADER = "x-dashscope-inner-qos-level"
 
 # Master management-port prometheus exposition: primary Spring Boot

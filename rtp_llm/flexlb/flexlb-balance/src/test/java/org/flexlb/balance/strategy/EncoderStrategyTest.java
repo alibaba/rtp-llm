@@ -38,6 +38,69 @@ class EncoderStrategyTest {
                     org.mockito.Mockito.mock(org.flexlb.worker.endpoint.EndpointRegistry.class));
 
     @ParameterizedTest
+    @ValueSource(strings = {"full", "count", "tokens", "refreshOthers"})
+    void changedRankingComparesCurrentWorkersBeforeRegistration(String change) {
+        var first = liveEndpoint("first");
+        var second = liveEndpoint("second");
+        boolean weighted = change.equals("tokens");
+        var firstOld =
+                weighted
+                        ? first.tryRegisterSelection(
+                                        "old", first.selectionSnapshot(false), false, null, 4, 10L)
+                                .value()
+                        : null;
+        var secondOld =
+                change.equals("refreshOthers") || weighted
+                        ? second.tryRegisterSelection(
+                                        "old", second.selectionSnapshot(false), false, null, 4, 20L)
+                                .value()
+                        : null;
+        var directory = mock(EndpointRegistry.class);
+        when(directory.<WorkerEndpoint>endpoints(RoleType.ENCODER, "group"))
+                .thenReturn(List.of(first, second));
+        when(directory.getEndpoint(RoleType.ENCODER, first.ipPort())).thenReturn(first);
+        when(directory.getEndpoint(RoleType.ENCODER, second.ipPort())).thenReturn(second);
+        var selection =
+                spy(new EncoderStrategy(configuration(change.equals("full") ? 1 : 4), directory));
+        var changed = new java.util.concurrent.atomic.AtomicBoolean();
+        doAnswer(
+                        call -> {
+                            var result = call.callRealMethod();
+                            if (changed.compareAndSet(false, true)) {
+                                if (firstOld != null) first.rollbackSelection(firstOld);
+                                first.tryRegisterSelection(
+                                        "competitor",
+                                        first.selectionSnapshot(false),
+                                        false,
+                                        null,
+                                        4,
+                                        100L);
+                                if (change.equals("refreshOthers"))
+                                    second.rollbackSelection(secondOld);
+                            }
+                            return result;
+                        })
+                .when(selection)
+                .select(anyList(), eq("group"), anyBoolean(), anyInt());
+        var context = new RequestContext(new org.flexlb.config.FlexlbConfig());
+        var request =
+                Request.builder()
+                        .requestId("incoming")
+                        .seqLen(100L)
+                        .encoderCacheHitLen(weighted ? 0L : null)
+                        .build();
+        context.setRequest(request);
+        try {
+            var result = selection.select(context, "group");
+            assertEquals(RoutingResult.Status.SUCCESS, result.status());
+            assertSame(second, result.value().endpoint());
+        } finally {
+            first.evictExpiredRequests(-1L, ignored -> false);
+            second.evictExpiredRequests(-1L, ignored -> false);
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void configuredLimitIsRecheckedAtRegistrationWithoutAScheduler(boolean capacityTaken) {
         var status =
@@ -63,7 +126,13 @@ class EncoderStrategyTest {
                             if (capacityTaken) {
                                 assertEquals(
                                         WorkerEndpoint.RegistrationStatus.REGISTERED,
-                                        endpoint.tryRegisterSelection("competitor", 1, 50L)
+                                        endpoint.tryRegisterSelection(
+                                                        "competitor",
+                                                        endpoint.selectionSnapshot(false),
+                                                        false,
+                                                        null,
+                                                        1,
+                                                        50L)
                                                 .status());
                             }
                             return result;
@@ -213,6 +282,19 @@ class EncoderStrategyTest {
         } finally {
             endpoint.evictExpiredRequests(-1L, ignored -> false);
         }
+    }
+
+    private static EncoderEndpoint liveEndpoint(String address) {
+        var status =
+                WorkerStatus.createDiscovered(
+                        RoleType.ENCODER, "group", address, 8001, 8002, "test");
+        status.lock.lock();
+        try {
+            status.recordSuccessfulPoll(true);
+        } finally {
+            status.lock.unlock();
+        }
+        return new EncoderEndpoint(status, mock(CapacityNotifier.class));
     }
 
     private static EncoderEndpoint.SelectionSnapshot candidate(

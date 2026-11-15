@@ -65,7 +65,7 @@ public class CostBasedPrefillStrategy
 
     public RoutingResult<RoleSelection, CapacityKey> select(
             RequestContext context, RoleType role, String group) {
-        var candidates = endpoints.<PrefillEndpoint>endpoints(role, group);
+        var candidates = endpoints.<PrefillEndpoint>endpoints(role, null);
         var request = context.getRequest();
         var matches =
                 candidates.isEmpty()
@@ -83,7 +83,7 @@ public class CostBasedPrefillStrategy
                 scope,
                 candidates,
                 current ->
-                        this.chooseBest(request, current, matches)
+                        this.chooseBest(request, group, current, matches)
                                 .map(
                                         selected ->
                                                 RoutingResult
@@ -102,15 +102,31 @@ public class CostBasedPrefillStrategy
     }
 
     public java.util.Optional<Selection> chooseBest(
-            Request request, List<PrefillEndpoint> inputs, CacheMatchResult matches) {
-        int offset =
-                inputs.isEmpty() ? 0 : Math.floorMod(nextWorker.getAndIncrement(), inputs.size());
+            Request request, String group, List<PrefillEndpoint> inputs, CacheMatchResult matches) {
+        int groupSize = inputs.size();
+        if (group != null) {
+            groupSize = 0;
+            for (var input : inputs) if (group.equals(input.getStatus().getGroup())) groupSize++;
+        }
+        if (groupSize == 0) return java.util.Optional.empty();
+        int offset = Math.floorMod(nextWorker.getAndIncrement(), groupSize);
+        if (group != null) {
+            int remaining = offset;
+            for (int index = 0; index < inputs.size(); index++) {
+                if (group.equals(inputs.get(index).getStatus().getGroup()) && remaining-- == 0) {
+                    offset = index;
+                    break;
+                }
+            }
+        }
         Candidate best = null;
         double bestCost = Double.POSITIVE_INFINITY;
         long bestCacheRank = -1L;
         long maximumRoutingHit = 0L;
+        boolean noCacheMatches = matches == null || matches.hostMatches().isEmpty();
         for (int index = 0; index < inputs.size(); index++) {
             var input = inputs.get((offset + index) % inputs.size());
+            if (group != null && !group.equals(input.getStatus().getGroup())) continue;
             var snapshot = input.selectionSnapshot();
             var match =
                     matches == null
@@ -153,6 +169,9 @@ public class CostBasedPrefillStrategy
                 bestCacheRank = cacheRank;
                 bestCost = cost;
             }
+            // With no cache hits, idle work reaches the lowest possible default score.
+            if (noCacheMatches && predictor.usesDefaultFormula() && snapshot.computeTokens() == 0L)
+                break;
         }
         if (best == null) return java.util.Optional.empty();
         var snapshot = best.snapshot();

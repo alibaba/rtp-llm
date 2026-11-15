@@ -253,18 +253,18 @@ classDiagram
     DeliveryExecution ..|> ExecutorStats
     EndpointRegistry ..|> EndpointStats
     DeliveryMetricsReporter --> ExecutorStats
-    EngineHealthReporter --> EndpointStats
+    ServiceMetricsReporter --> EndpointStats
     DeliveryMetricsReporter --> FlexMonitor
-    EngineHealthReporter --> FlexMonitor
+    ServiceMetricsReporter --> FlexMonitor
     FlexlbGrpcServer --> GrpcReporter : register sources
     EngineGrpcClient --> GrpcReporter : register sources
     GrpcReporter --> FlexMonitor
     MicrometerFlexMonitor ..|> FlexMonitor
 ```
 
-- 复用已有 GrpcReporter，承接 gRPC executor/Netty 采样和服务端指标注册。EngineHealthReporter 删除 EngineGrpcClient、LoopResources 和具体线程池转换，只消费 EndpointStats 及业务值。传输库相关采样集中在观测模块；不要求第三方 Netty 类实现自定义接口。
-- EndpointStats 嵌套在现有 EngineHealthReporter 中，暴露 Registry 已有的 discoveredCount/counts 读能力，Counts 值协议随接口归属调整；Registry 直接实现，不增一组重复 getter。
-- 现有 ExecutorStats 移至 common.metric 共享位置。DeliveryExecution、FlexlbGrpcServer 直接实现；初始化时绑定统计源，不增加每请求适配对象。EngineHealthReporter 只接收 EndpointStats 或线程池统计数值，传输资源采样归 GrpcReporter。
+- 复用已有 GrpcReporter，承接 gRPC executor/Netty 采样和服务端指标注册。ServiceMetricsReporter 删除 EngineGrpcClient、LoopResources 和具体线程池转换，只消费 EndpointStats 及业务值。传输库相关采样集中在观测模块；不要求第三方 Netty 类实现自定义接口。
+- EndpointStats 嵌套在现有 ServiceMetricsReporter 中，暴露 Registry 已有的 discoveredCount/counts 读能力，Counts 值协议随接口归属调整；Registry 直接实现，不增一组重复 getter。
+- 现有 ExecutorStats 移至 common.metric 共享位置。DeliveryExecution、FlexlbGrpcServer 直接实现；初始化时绑定统计源，不增加每请求适配对象。ServiceMetricsReporter 只接收 EndpointStats 或线程池统计数值，传输资源采样归 GrpcReporter。
 - FlexlbGrpcServer 删除 MeterRegistry/Gauge/FunctionCounter 业务类依赖，初始化时通过 GrpcReporter 绑定既有统计源。
 - FlexMonitor.observe 绑定实时 gauge 或累计 counter；Micrometer 细节归 MicrometerFlexMonitor，仍使用原指标名和类型。SafeFlexMonitor 做失败隔离，NoOpFlexMonitor 忽略绑定。装配层在 MeterRegistry 可用时独立绑定这些统计源，不受 KMonitor 业务后端选择影响，不能把累计 counter 改成每次定时 report 的增量值。
 - shortcut: 每服务生命周期内每个名称只绑定一次；不支持同名源替换或精确注销，需要服务内重建 owner 时再补绑定身份与注销契约。复用现有调度设施及采样周期，不加池或新配置。
@@ -282,7 +282,7 @@ classDiagram
 | RequestWorkerSelector                                                                                                  | 删除 BLOCKED 容量重解释与多节点容量错误汇总；保留读快照、精确 pin、路由交接 |
 | DecodeSelector                                                                                                         | 返回完整选择/容量拒绝结果；classifyCapacityFailure 变为内部实现             |
 | PlacementConfiguration、QueueExecutionSettings、PrefillState、PrefillQueueRunner、QueueSnapshot、RequestTimeEstimation | 接入统一装配/队列/组批契约，移除具体实现选择分支                            |
-| EngineHealthReporter、DeliveryMetricsReporter、GrpcReporter、FlexMonitor 及其实现、FlexlbGrpcServer                    | 收拢统计源采集与后端绑定，移除业务类直接注册后端的代码                      |
+| ServiceMetricsReporter、DeliveryMetricsReporter、GrpcReporter、FlexMonitor 及其实现、FlexlbGrpcServer                  | 收拢统计源采集与后端绑定，移除业务类直接注册后端的代码                      |
 
 新增文件主要是接口及原算法的默认实现；不能把搬移算成减量。实际净代码量在实现后统计，核心类显式方法不超过 30，变更方法不超过 100 行。
 

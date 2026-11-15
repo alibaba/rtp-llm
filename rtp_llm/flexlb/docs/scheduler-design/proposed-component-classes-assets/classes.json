@@ -694,7 +694,7 @@
     },
     {
       "group": "预测与观测",
-      "name": "EngineHealthReporter",
+      "name": "ServiceMetricsReporter",
       "budget": 300,
       "kind": "class",
       "role": "节点健康、发现、下线与停服观测",
@@ -833,7 +833,7 @@
         "- PollLease lease",
         "- WorkerStatusRpcClient client",
         "- EndpointRegistry registry",
-        "- EngineHealthReporter reporter"
+        "- ServiceMetricsReporter reporter"
       ],
       "methods": [
         "+ run(): void",
@@ -1141,7 +1141,7 @@
     ["FormulaPredictor", "PrefillTimePredictor", "impl", ""],
     ["LearningPredictor", "PrefillTimePredictor", "impl", ""],
     ["RequestTimeEstimation", "PrefillTimePredictor", "call", "冻结 evaluator"],
-    ["EngineHealthReporter", "EndpointStats", "call", "只读"],
+    ["ServiceMetricsReporter", "EndpointStats", "call", "只读"],
     [
       "DeliveryMetricsReporter",
       "DeliveryExecution",

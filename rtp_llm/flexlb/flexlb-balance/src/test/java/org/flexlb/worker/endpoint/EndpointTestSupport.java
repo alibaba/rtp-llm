@@ -200,6 +200,9 @@ public final class EndpointTestSupport {
                         view -> {
                             var endpoint = org.mockito.Mockito.mock(DecodeEndpoint.class);
                             org.mockito.Mockito.when(endpoint.selectionSnapshot()).thenReturn(view);
+                            org.mockito.Mockito.when(endpoint.ipPort()).thenReturn(view.address());
+                            org.mockito.Mockito.when(endpoint.acceptsNewRequests())
+                                    .thenReturn(true);
                             return endpoint;
                         })
                 .toList();
@@ -242,8 +245,8 @@ public final class EndpointTestSupport {
             DecodeEndpoint endpoint, long requestId, long hardKv, long expectedKv, int priority) {
         var acquired =
                 endpoint.tryRegisterSelection(
-                        endpoint.selectionSnapshot(),
                         String.valueOf(requestId),
+                        endpoint.selectionSnapshot(),
                         hardKv,
                         expectedKv,
                         priority,
@@ -341,7 +344,7 @@ public final class EndpointTestSupport {
     }
 
     public static boolean releaseRequest(PrefillEndpoint state, RequestResult exact) {
-        return state.releaseRequest(exact);
+        return state.releaseRequest(exact.prefillRegistration());
     }
 
     public static PreparationScope preparation(PrefillEndpoint.RequestRegistration reservation) {
@@ -355,6 +358,31 @@ public final class EndpointTestSupport {
     public static boolean isQueued(DecodeResources.ResourceSnapshot snapshot, String requestId) {
         var request = snapshot.requests().get(requestId);
         return request != null && request.phase().isMasterQueued();
+    }
+
+    public static WorkerStatus workerStatus(RoleType role, String ip, int port, int grpcPort) {
+        return WorkerStatus.createDiscovered(role, null, ip, port, grpcPort, null);
+    }
+
+    public static WorkerStatus workerStatus(
+            RoleType role, String group, String ip, int port, int grpcPort, String site) {
+        return WorkerStatus.createDiscovered(role, group, ip, port, grpcPort, site);
+    }
+
+    public static Runnable applyStatus(WorkerEndpoint endpoint, WorkerStatusResponse response) {
+        WorkerStatus status = endpoint.getStatus();
+        prepareResponse(status, response);
+        status.lock.lock();
+        try {
+            WorkerStatus.PreparedStatus prepared =
+                    status.prepareStatus(
+                            WorkerStatusTestSupport.freezeStatusResponse(status, response));
+            WorkerEndpoint.StatusChange projection = endpoint.applyWorkerStatus(status, prepared);
+            status.recordSuccessfulPoll(response.isAlive());
+            return () -> endpoint.publishStatus(projection);
+        } finally {
+            status.lock.unlock();
+        }
     }
 
     static DecodeEndpoint decodeEndpoint(WorkerStatus status) {
@@ -378,8 +406,8 @@ public final class EndpointTestSupport {
                     ? org.flexlb.balance.schedule.SelectionTestSupport.registerQueuedDecode(
                             endpoint, String.valueOf(id), hard, expected, priority)
                     : endpoint.tryRegisterSelection(
-                            endpoint.selectionSnapshot(),
                             String.valueOf(id),
+                            endpoint.selectionSnapshot(),
                             hard,
                             expected,
                             priority,
@@ -394,31 +422,6 @@ public final class EndpointTestSupport {
 
     static AbstractRequestScheduler noopEventSink() {
         return org.mockito.Mockito.mock(AbstractRequestScheduler.class);
-    }
-
-    static WorkerStatus workerStatus(RoleType role, String ip, int port, int grpcPort) {
-        return WorkerStatus.createDiscovered(role, null, ip, port, grpcPort, null);
-    }
-
-    static WorkerStatus workerStatus(
-            RoleType role, String group, String ip, int port, int grpcPort, String site) {
-        return WorkerStatus.createDiscovered(role, group, ip, port, grpcPort, site);
-    }
-
-    static Runnable applyStatus(WorkerEndpoint endpoint, WorkerStatusResponse response) {
-        WorkerStatus status = endpoint.getStatus();
-        prepareResponse(status, response);
-        status.lock.lock();
-        try {
-            WorkerStatus.PreparedStatus prepared =
-                    status.prepareStatus(
-                            WorkerStatusTestSupport.freezeStatusResponse(status, response));
-            WorkerEndpoint.StatusChange projection = endpoint.applyWorkerStatus(status, prepared);
-            status.recordSuccessfulPoll(response.isAlive());
-            return () -> endpoint.publishStatus(projection);
-        } finally {
-            status.lock.unlock();
-        }
     }
 
     static void publishStatus(WorkerStatus status, WorkerStatusResponse response) {
@@ -466,7 +469,14 @@ public final class EndpointTestSupport {
 
     static boolean commitEncoder(
             EncoderEndpoint endpoint, RequestResult route, int limit, long tokens) {
-        var registered = endpoint.tryRegisterSelection(route.requestId(), limit, tokens);
+        var registered =
+                endpoint.tryRegisterSelection(
+                        route.requestId(),
+                        endpoint.selectionSnapshot(false),
+                        false,
+                        null,
+                        limit,
+                        tokens);
         if (registered.status() != WorkerEndpoint.RegistrationStatus.REGISTERED) return false;
         org.mockito.Mockito.doReturn(registered.value()).when(route).encoderRegistration();
         return endpoint.commitSelection(route);

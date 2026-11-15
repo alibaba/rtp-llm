@@ -8,7 +8,6 @@ import org.flexlb.util.Logger;
 import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
-import org.flexlb.worker.endpoint.WorkerEndpoint;
 
 import java.util.Objects;
 
@@ -58,9 +57,6 @@ public class DirectRequestScheduler extends AbstractRequestScheduler {
     }
 
     @Override
-    public void onEndpointChanged(WorkerEndpoint endpoint) {}
-
-    @Override
     public void close() {
         stop();
         com.google.common.base.Preconditions.checkState(
@@ -97,7 +93,7 @@ public class DirectRequestScheduler extends AbstractRequestScheduler {
 
     public RequestResult selectAndPublish(
             RequestContext context, java.util.function.Supplier<RequestResult> selection) {
-        return planRoute(context, selection, false);
+        return planRoute(context, selection);
     }
 
     @Override

@@ -143,6 +143,10 @@ public final class RoleSelection {
         return true;
     }
 
+    public void rollbackSelection() {
+        if (registration != null) registrationOwner.rollbackSelection(registration);
+    }
+
     final String ip() {
         return status.getServerIp();
     }
@@ -153,9 +157,5 @@ public final class RoleSelection {
 
     final int grpcPort() {
         return status.getGrpcPort();
-    }
-
-    void rollbackSelection() {
-        if (registration != null) registrationOwner.rollbackSelection(registration);
     }
 }

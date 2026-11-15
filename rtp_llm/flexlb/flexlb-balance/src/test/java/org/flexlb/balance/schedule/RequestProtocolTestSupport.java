@@ -1,7 +1,5 @@
 package org.flexlb.balance.schedule;
 
-import org.flexlb.balance.queue.CapacityWaitQueue;
-import org.flexlb.balance.queue.GlobalQueueEntry;
 import org.flexlb.balance.queue.OrderedRequestQueue;
 import org.flexlb.balance.schedule.RequestContext.SelectionAttempt;
 import org.flexlb.balance.strategy.RequestRouteSelector;
@@ -20,7 +18,6 @@ import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
 import org.springframework.test.util.ReflectionTestUtils;
 
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -96,18 +93,6 @@ final class RequestProtocolTestSupport {
                 org.flexlb.worker.endpoint.StrategyErrorType.SCHEDULING_DEADLINE_EXCEEDED);
         if (context.currentSelectionAttempt() == null) context.beginRouteSelection();
         var operation = context.currentSelectionAttempt();
-        org.mockito.Mockito.doAnswer(
-                        call -> {
-                            if (context.currentSelectionAttempt() != null) {
-                                context.finishSelectionWithoutCommit(
-                                        operation, call.getArgument(1), System.currentTimeMillis());
-                            }
-                            return null;
-                        })
-                .when(scheduler)
-                .finishSelectionWithoutCommit(
-                        org.mockito.ArgumentMatchers.same(operation),
-                        org.mockito.ArgumentMatchers.nullable(Response.class));
         return operation;
     }
 
@@ -131,6 +116,12 @@ final class RequestProtocolTestSupport {
                 .when(scheduler)
                 .submit(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
         return scheduler;
+    }
+
+    static SelectionAttempt admissionForInvocation(org.mockito.invocation.InvocationOnMock call) {
+        RequestContext context = call.getArgument(0);
+        SchedulerTestSupport.bindOwner(context, (AbstractRequestScheduler) call.getMock());
+        return admissionHandle(context);
     }
 
     static AbstractRequestScheduler placementScheduler(SelectionAttempt operation) {
@@ -225,8 +216,8 @@ final class RequestProtocolTestSupport {
         org.mockito.Mockito.lenient()
                 .when(
                         endpoint.tryRegisterSelection(
-                                org.mockito.ArgumentMatchers.any(),
                                 org.mockito.ArgumentMatchers.anyString(),
+                                org.mockito.ArgumentMatchers.any(),
                                 org.mockito.ArgumentMatchers.anyLong(),
                                 org.mockito.ArgumentMatchers.anyLong(),
                                 org.mockito.ArgumentMatchers.anyInt(),
@@ -236,7 +227,7 @@ final class RequestProtocolTestSupport {
                             return new WorkerEndpoint.Registration<>(
                                     WorkerEndpoint.RegistrationStatus.REGISTERED,
                                     new DecodeEndpoint.RequestRegistration(
-                                            1L, call.getArgument(1)));
+                                            1L, call.getArgument(0)));
                         });
         return endpoint;
     }
@@ -368,7 +359,7 @@ final class RequestProtocolTestSupport {
             org.flexlb.config.ConfigService service,
             RequestRouteSelector router,
             org.flexlb.balance.metrics.DeliveryMetricsReporter reporter,
-            org.flexlb.balance.schedule.DecodePreemption eviction,
+            org.flexlb.balance.schedule.RequestPreemption eviction,
             CapacityNotifier availability) {
         var config = service.loadBalanceConfig();
         ReflectionTestUtils.setField(
@@ -377,12 +368,11 @@ final class RequestProtocolTestSupport {
                 router);
         if (org.flexlb.balance.schedule.SchedulerTestServices.scheduler(owner)
                 instanceof QueuedRequestScheduler queue) {
-            ReflectionTestUtils.setField(queue, "decodePreemption", eviction);
-            ReflectionTestUtils.setField(queue, "priorityOrdering", config.isPriorityOrdering());
+            ReflectionTestUtils.setField(queue, "preemption", eviction);
             ReflectionTestUtils.setField(
                     queue,
                     "plannerCount",
-                    Math.max(2, config.getInternalRuntime().getQueuePlannerThreads()));
+                    Math.max(1, config.getInternalRuntime().getQueuePlannerThreads()));
 
             var schedulingQueue = new OrderedRequestQueue(config.isPriorityOrdering());
             ReflectionTestUtils.setField(queue, "orderedQueue", schedulingQueue);
@@ -397,11 +387,8 @@ final class RequestProtocolTestSupport {
                             ReflectionTestUtils.getField(queue, "capacityListener");
             oldAvailability.removeListener(listener);
             ReflectionTestUtils.setField(queue, "capacityNotifier", availability);
-            ReflectionTestUtils.setField(
-                    queue,
-                    "waitingRequests",
-                    new CapacityWaitQueue(schedulingQueue.order(), availability));
             availability.addListener(listener);
+            eviction.setWakeup(() -> ReflectionTestUtils.invokeMethod(queue, "requestRun"));
             org.mockito.Mockito.doCallRealMethod()
                     .when(queue)
                     .removeRequest(org.mockito.ArgumentMatchers.any());
@@ -730,19 +717,7 @@ final class RequestProtocolTestSupport {
 
     static void awaitGlobalCapacityWaiters(RequestScheduler scheduler, int expected)
             throws InterruptedException {
-        var queue = (QueuedRequestScheduler) scheduler;
-        var lock = (ReentrantLock) ReflectionTestUtils.getField(queue, "lock");
-        var waiting = (CapacityWaitQueue) ReflectionTestUtils.getField(queue, "waitingRequests");
-        var membership = (Map<?, ?>) ReflectionTestUtils.getField(waiting, "membership");
-        awaitCondition(
-                () -> {
-                    lock.lock();
-                    try {
-                        return membership.size() == expected;
-                    } finally {
-                        lock.unlock();
-                    }
-                });
+        awaitCondition(() -> scheduler.blockedRequestCount() == expected);
     }
 
     static void awaitCondition(BooleanSupplier condition) throws InterruptedException {
@@ -758,28 +733,7 @@ final class RequestProtocolTestSupport {
 
     static void awaitGlobalCapacityWaiters(AbstractRequestScheduler scheduler, int expected)
             throws InterruptedException {
-        Object coordinator = org.flexlb.balance.schedule.SchedulerTestServices.scheduler(scheduler);
-        var lock = (ReentrantLock) ReflectionTestUtils.getField(coordinator, "lock");
-        var waitQueue =
-                (CapacityWaitQueue) ReflectionTestUtils.getField(coordinator, "waitingRequests");
-        var waiting = (Map<?, ?>) ReflectionTestUtils.getField(waitQueue, "membership");
-        // A route's close callback runs before park. Observe actual wait registration
-        // under the coordinator lock, rather than treating that callback as a barrier.
-        awaitCondition(
-                () -> {
-                    lock.lock();
-                    try {
-                        return waiting.keySet().stream()
-                                        .filter(
-                                                entry ->
-                                                        waitQueue.isWaiting(
-                                                                (GlobalQueueEntry) entry))
-                                        .count()
-                                == expected;
-                    } finally {
-                        lock.unlock();
-                    }
-                });
+        awaitCondition(() -> scheduler.blockedRequestCount() == expected);
     }
 
     static void await(CountDownLatch latch) {

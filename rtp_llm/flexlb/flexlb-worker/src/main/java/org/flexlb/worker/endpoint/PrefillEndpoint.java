@@ -45,6 +45,8 @@ public class PrefillEndpoint extends WorkerEndpoint
 
     private final CapacityNotifier capacityNotifier;
 
+    private SelectionSnapshot selectionSnapshotCache;
+
     PrefillEndpoint(WorkerStatus status, FlexlbConfig config, CapacityNotifier capacityNotifier) {
         super(status);
         this.capacityNotifier = Objects.requireNonNull(capacityNotifier);
@@ -54,11 +56,18 @@ public class PrefillEndpoint extends WorkerEndpoint
     public PrefillEndpoint.SelectionSnapshot selectionSnapshot() {
         stateLock().lock();
         try {
-            return new PrefillEndpoint.SelectionSnapshot(
-                    getStatus().getGenerationId(),
-                    resourceVersion,
-                    currentComputeTokensLocked(),
-                    maxComputeTokens);
+            long generationId = getStatus().getGenerationId();
+            if (selectionSnapshotCache == null
+                    || selectionSnapshotCache.generationId() != generationId
+                    || selectionSnapshotCache.resourceVersion() != resourceVersion) {
+                selectionSnapshotCache =
+                        new SelectionSnapshot(
+                                generationId,
+                                resourceVersion,
+                                currentComputeTokensLocked(),
+                                maxComputeTokens);
+            }
+            return selectionSnapshotCache;
         } finally {
             stateLock().unlock();
         }
@@ -73,14 +82,17 @@ public class PrefillEndpoint extends WorkerEndpoint
         try {
             if (!acceptsNewRequests())
                 return new Registration<>(WorkerEndpoint.RegistrationStatus.UNAVAILABLE, null);
-            if (getStatus().getGenerationId() != expected.generationId()
-                    || resourceVersion != expected.resourceVersion())
+            if (getStatus().getGenerationId() != expected.generationId())
                 return new Registration<>(WorkerEndpoint.RegistrationStatus.VERSION_CONFLICT, null);
+            long currentComputeTokens = currentComputeTokensLocked();
+            if (computeTokens > maxComputeTokens
+                    || currentComputeTokens > maxComputeTokens - computeTokens)
+                return new Registration<>(WorkerEndpoint.RegistrationStatus.CAPACITY_FULL, null);
+            // A registration followed by rollback can leave the ranking inputs unchanged.
+            if (currentComputeTokens != expected.computeTokens())
+                return Registration.rejected(RegistrationStatus.VERSION_CONFLICT);
             if (requests.containsKey(requestId))
                 return Registration.rejected(RegistrationStatus.ALREADY_REGISTERED);
-            if (computeTokens > maxComputeTokens
-                    || currentComputeTokensLocked() > maxComputeTokens - computeTokens)
-                return new Registration<>(WorkerEndpoint.RegistrationStatus.CAPACITY_FULL, null);
             var record = new RequestRegistration(this, requestId, RegistrationPhase.REGISTERED);
             record.computeTokens = computeTokens;
             requests.put(requestId, record);
@@ -99,8 +111,8 @@ public class PrefillEndpoint extends WorkerEndpoint
             if (!acceptsNewRequests()
                     || entry == null
                     || requests.get(route.requestId()) != entry
-                    || entry.route != route
                     || entry.phase != RegistrationPhase.REGISTERED) return false;
+            entry.route = route;
             entry.commit(clock.getAsLong());
             return true;
         } finally {
@@ -140,16 +152,15 @@ public class PrefillEndpoint extends WorkerEndpoint
         } finally {
             stateLock().unlock();
         }
-        notifyCapacityChanged();
         return true;
     }
 
-    public boolean releaseRequest(WorkerRoute route) {
-        Objects.requireNonNull(route, "route");
+    public boolean releaseRequest(RequestRegistration registration) {
+        Objects.requireNonNull(registration, "registration");
         stateLock().lock();
         try {
-            RequestRegistration entry = requests.get(route.requestId());
-            if (entry == null || entry.route != route) return false;
+            RequestRegistration entry = requests.get(registration.requestId());
+            if (entry != registration) return false;
 
             removeRequestRecordLocked(entry);
         } finally {
@@ -487,22 +498,6 @@ public class PrefillEndpoint extends WorkerEndpoint
         @Override
         public long endpointGenerationId() {
             return owner.getStatus().getGenerationId();
-        }
-
-        /**
-         * Associate the complete route with its exact selection record before publication.
-         */
-        public void bind(WorkerRoute completed) {
-            owner.stateLock().lock();
-            try {
-                checkArgument(
-                        requestId.equals(completed.requestId()),
-                        "Prefill registration belongs to another selection");
-                checkState(route == null || route == completed, "registration already bound");
-                route = completed;
-            } finally {
-                owner.stateLock().unlock();
-            }
         }
 
         private void commit(long nowMs) {

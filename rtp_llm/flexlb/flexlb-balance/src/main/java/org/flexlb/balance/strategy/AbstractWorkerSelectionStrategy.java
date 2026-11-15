@@ -37,6 +37,10 @@ public abstract class AbstractWorkerSelectionStrategy<I, C> {
             if (candidates.isEmpty() && candidates != initial)
                 return lastFull == null ? RoutingResult.retry() : lastFull;
             var choice = choose.apply(Collections.unmodifiableList(candidates));
+            // A full candidate can fit after capacity is released, even if the remaining ones
+            // cannot.
+            if (choice.status() == RoutingResult.Status.REJECTED && lastFull != null)
+                return lastFull;
             if (choice.status() != RoutingResult.Status.SUCCESS) return choice.asFailure();
             C selected = choice.value();
             I original = candidate(selected);
@@ -53,7 +57,6 @@ public abstract class AbstractWorkerSelectionStrategy<I, C> {
                 return RoutingResult.success(accepted.value());
             if (accepted.status() == WorkerEndpoint.RegistrationStatus.CAPACITY_FULL) {
                 lastFull = capacityFull(selected, scope);
-                if (!tryOtherWhenFull()) return lastFull;
             }
             if (candidates == initial) candidates = new ArrayList<>(initial);
             switch (accepted.status()) {
@@ -84,10 +87,6 @@ public abstract class AbstractWorkerSelectionStrategy<I, C> {
             C selected, CapacityKey scope) {
         return RoutingResult.blocked(
                 scope, Response.error(StrategyErrorType.RESOURCE_EXHAUSTED), null);
-    }
-
-    protected boolean tryOtherWhenFull() {
-        return true;
     }
 
     protected abstract I refresh(I candidate);

@@ -181,6 +181,8 @@ abstract class AbstractRoutePerformanceTest extends FlexLBMockTestBase {
         for (String n : List.of("pvLogger", "flexlbLogger", "syncLogger", "org.flexlb"))
             ((ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(n))
                     .setLevel(Level.WARN);
+        ((ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger("pvLogger"))
+                .setLevel(Level.OFF);
     }
 
     @BeforeEach
@@ -263,6 +265,7 @@ abstract class AbstractRoutePerformanceTest extends FlexLBMockTestBase {
     @ValueSource(ints = {3000, 10000})
     @Timeout(90)
     void routeRpcAt750PrefillAndDecode(int qps) throws Exception {
+        java.nio.file.Files.deleteIfExists(resultPath(qps));
         for (ManagedChannel channel : channels) {
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
             while (channel.getState(true) != ConnectivityState.READY) {
@@ -351,7 +354,7 @@ abstract class AbstractRoutePerformanceTest extends FlexLBMockTestBase {
                                         plannedRt[index] = now - due;
                                         lastCompletion.accumulateAndGet(now, Math::max);
                                         if (!response.getSuccess()
-                                                && expectedCapacityFailure(response.getCode())) {
+                                                && expectedCapacityFailure(response)) {
                                             rejected.incrementAndGet();
                                             rejectionCodes
                                                     .computeIfAbsent(
@@ -431,11 +434,7 @@ abstract class AbstractRoutePerformanceTest extends FlexLBMockTestBase {
                 result.put("selected_prefill_count", usedPrefill.size());
                 result.put("selected_decode_count", usedDecode.size());
                 result.put("resources", resourceSampler.summary());
-                java.nio.file.Path output =
-                        java.nio.file.Path.of(
-                                "target",
-                                "route-performance",
-                                mode() + "-" + scenario() + "-" + qps + ".json");
+                java.nio.file.Path output = resultPath(qps);
                 java.nio.file.Files.createDirectories(output.getParent());
                 mapper.writerWithDefaultPrettyPrinter().writeValue(output.toFile(), result);
                 System.out.println("E2E_RESULT " + mapper.writeValueAsString(result));
@@ -469,6 +468,7 @@ abstract class AbstractRoutePerformanceTest extends FlexLBMockTestBase {
                             "missing or nonpositive limit " + metric);
                 }
                 assertAll(
+                        () -> assertEquals(0, failures.get(), firstError.get()),
                         () ->
                                 assertTrue(
                                         (double) result.get("completed_qps")
@@ -478,17 +478,29 @@ abstract class AbstractRoutePerformanceTest extends FlexLBMockTestBase {
                                 assertTrue(
                                         (double) latency.get("p50")
                                                 <= limits.path("p50Ms").asDouble(),
-                                        "client p50 RT exceeds configured limit"),
+                                        "client p50 RT expected <= "
+                                                + limits.path("p50Ms").asDouble()
+                                                + " ms, actual "
+                                                + latency.get("p50")
+                                                + " ms"),
                         () ->
                                 assertTrue(
                                         (double) latency.get("avg")
                                                 <= limits.path("avgMs").asDouble(),
-                                        "client average RT exceeds configured limit"),
+                                        "client average RT expected <= "
+                                                + limits.path("avgMs").asDouble()
+                                                + " ms, actual "
+                                                + latency.get("avg")
+                                                + " ms"),
                         () ->
                                 assertTrue(
                                         (double) latency.get("p99")
                                                 <= limits.path("p99Ms").asDouble(),
-                                        "client p99 RT exceeds configured limit"),
+                                        "client p99 RT expected <= "
+                                                + limits.path("p99Ms").asDouble()
+                                                + " ms, actual "
+                                                + latency.get("p99")
+                                                + " ms"),
                         () -> assertEquals(750, usedPrefill.size(), "Prefill selection coverage"),
                         () -> assertEquals(750, usedDecode.size(), "Decode selection coverage"),
                         () ->
@@ -511,12 +523,18 @@ abstract class AbstractRoutePerformanceTest extends FlexLBMockTestBase {
                                     assertTrue(
                                             (double) result.get("successful_qps")
                                                     >= limits.path("minSuccessQps").asDouble(),
-                                            "overload made no useful progress"),
+                                            "successful QPS expected >= "
+                                                    + limits.path("minSuccessQps").asDouble()
+                                                    + ", actual "
+                                                    + result.get("successful_qps")),
                             () ->
                                     assertTrue(
                                             (double) result.get("successful_qps")
                                                     <= limits.path("maxSuccessQps").asDouble(),
-                                            "finite worker capacity was bypassed"),
+                                            "successful QPS expected <= "
+                                                    + limits.path("maxSuccessQps").asDouble()
+                                                    + ", actual "
+                                                    + result.get("successful_qps")),
                             () ->
                                     assertTrue(
                                             peakActiveRoutes.get() >= 675,
@@ -530,9 +548,16 @@ abstract class AbstractRoutePerformanceTest extends FlexLBMockTestBase {
         }
     }
 
-    private boolean expectedCapacityFailure(int code) {
+    private boolean expectedCapacityFailure(
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
+        int code = response.getCode();
         if (scenario() == Scenario.AVAILABLE) return false;
         if (mode().equals("QUEUE")) return code == StrategyErrorType.QUEUE_TIMEOUT.getErrorCode();
+        if (scenario() == Scenario.DECODE_LIMITED
+                && code == StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode()) {
+            return response.getAdmissionRejectReason()
+                    == FlexlbScheduleProtocol.ScheduleFailureReasonPB.SAME_PRIORITY_AHEAD;
+        }
         int roleError =
                 scenario() == Scenario.PREFILL_LIMITED
                         ? StrategyErrorType.NO_PREFILL_WORKER.getErrorCode()
@@ -619,6 +644,11 @@ abstract class AbstractRoutePerformanceTest extends FlexLBMockTestBase {
                 sorted[(int) Math.ceil(sorted.length * .99) - 1] / 1e6,
                 "max",
                 sorted[sorted.length - 1] / 1e6);
+    }
+
+    private java.nio.file.Path resultPath(int qps) {
+        return java.nio.file.Path.of(
+                "target", "route-performance", mode() + "-" + scenario() + "-" + qps + ".json");
     }
 
     private void awaitEmptyResourceLedgers() {

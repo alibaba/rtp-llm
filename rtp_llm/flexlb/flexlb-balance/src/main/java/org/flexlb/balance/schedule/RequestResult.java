@@ -56,11 +56,6 @@ public final class RequestResult implements org.flexlb.worker.endpoint.WorkerRou
     @com.fasterxml.jackson.annotation.JsonProperty("detail")
     private String detail = "";
 
-    private Runnable preemptionContinuation;
-    private DecodeEndpoint.RequestRegistration reservation;
-
-    private boolean controlFailure;
-
     private RequestContext ctx;
     private AbstractRequestScheduler owner;
 
@@ -89,8 +84,6 @@ public final class RequestResult implements org.flexlb.worker.endpoint.WorkerRou
         checkState(
                 seen.contains(RoleType.PREFILL) || seen.contains(RoleType.ENCODER),
                 "one Prefill or Encoder route required");
-        var prefill = prefillRegistration();
-        if (prefill != null) prefill.bind(this);
     }
 
     public RequestResult(
@@ -121,16 +114,6 @@ public final class RequestResult implements org.flexlb.worker.endpoint.WorkerRou
             AbstractRequestScheduler owner) {
         this(requestId, numericId, requestPhase, state, createdAtMs, updatedAtMs, detail);
         this.owner = owner;
-    }
-
-    public RequestResult(
-            DecodeEndpoint.RequestRegistration reservation, boolean controlFailure, String detail) {
-        com.google.common.base.Preconditions.checkArgument(
-                reservation == null || !controlFailure,
-                "committed preemption cannot be a control failure");
-        this.reservation = reservation;
-        this.controlFailure = controlFailure;
-        this.detail = Objects.requireNonNull(detail, "detail");
     }
 
     public RequestResult(
@@ -241,10 +224,6 @@ public final class RequestResult implements org.flexlb.worker.endpoint.WorkerRou
 
     public long responseAtMs() {
         return updatedAtMs;
-    }
-
-    public boolean committed() {
-        return reservation != null;
     }
 
     @Override
@@ -412,14 +391,6 @@ public final class RequestResult implements org.flexlb.worker.endpoint.WorkerRou
 
     CapacityKey capacityKey(RoleType role) {
         return role(role).capacityKey();
-    }
-
-    RequestResult waitingForPreemption(Runnable continuation) {
-        com.google.common.base.Preconditions.checkState(
-                status == RoutingResult.Status.BLOCKED, "preemption requires a capacity wait");
-        var pending = new RequestResult(status, failure, blocker, diagnostics);
-        pending.preemptionContinuation = Objects.requireNonNull(continuation);
-        return pending;
     }
 
     /**

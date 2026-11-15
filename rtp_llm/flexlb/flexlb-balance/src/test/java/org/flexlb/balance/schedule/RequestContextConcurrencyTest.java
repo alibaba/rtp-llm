@@ -343,7 +343,7 @@ class RequestContextConcurrencyTest {
                                             null);
                                 return true;
                             });
-            var submitted = scheduler.executeRouteSelection(attempt, () -> route, false);
+            var submitted = scheduler.executeRouteSelection(attempt, () -> route);
             org.mockito.Mockito.verify(context).registerSelectedRoute(attempt, route);
             assertEquals(
                     cancelBeforeCommit
@@ -354,13 +354,13 @@ class RequestContextConcurrencyTest {
             assertEquals(!cancelBeforeCommit, received.isSuccess());
             assertNull(context.currentSelectionAttempt());
             if (cancelBeforeCommit) {
-                org.mockito.Mockito.verify(prefill).releaseRequest(route);
+                org.mockito.Mockito.verify(prefill).releaseRequest(route.prefillRegistration());
                 assertNull(repository.findActive("commit-test"));
             } else {
                 assertSame(response, received);
                 assertSame(route, context.snapshot().committedRoute());
                 org.mockito.Mockito.verify(prefill, org.mockito.Mockito.never())
-                        .releaseRequest(route);
+                        .releaseRequest(route.prefillRegistration());
             }
         }
     }

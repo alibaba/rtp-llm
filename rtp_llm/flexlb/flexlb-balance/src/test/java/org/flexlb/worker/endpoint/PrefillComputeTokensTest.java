@@ -14,6 +14,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -36,6 +37,83 @@ class PrefillComputeTokensTest {
     @AfterEach
     void close() {
         EndpointTestSupport.closeAndWait(endpoint);
+    }
+
+    @Test
+    void commitAssociatesTheRouteWithoutAnEarlierBind() {
+        var registration =
+                endpoint.tryRegisterSelection("request", endpoint.selectionSnapshot(), 40L).value();
+        var route = org.mockito.Mockito.mock(WorkerRoute.class);
+        org.mockito.Mockito.when(route.requestId()).thenReturn("request");
+        org.mockito.Mockito.when(route.prefillRegistration()).thenReturn(registration);
+        assertTrue(endpoint.commitSelection(route));
+        assertFalse(endpoint.commitSelection(route));
+        assertFalse(endpoint.rollbackSelection(registration));
+        assertTrue(endpoint.releaseRequest(registration));
+        assertEquals(0L, endpoint.selectionSnapshot().computeTokens());
+    }
+
+    @Test
+    void unpublishedRouteCanReleaseItsRegistration() {
+        var registration =
+                endpoint.tryRegisterSelection("request", endpoint.selectionSnapshot(), 40L).value();
+        assertTrue(endpoint.releaseRequest(registration));
+        assertEquals(0L, endpoint.selectionSnapshot().computeTokens());
+        var replacement =
+                endpoint.tryRegisterSelection("request", endpoint.selectionSnapshot(), 60L).value();
+        assertFalse(endpoint.releaseRequest(registration));
+        assertEquals(60L, endpoint.selectionSnapshot().computeTokens());
+        assertTrue(endpoint.releaseRequest(replacement));
+        assertEquals(0L, endpoint.selectionSnapshot().computeTokens());
+    }
+
+    @Test
+    void unchangedRankingAfterRollbackDoesNotRejectSelection() {
+        var snapshot = endpoint.selectionSnapshot();
+        var other = endpoint.tryRegisterSelection("other", snapshot, 40L).value();
+        endpoint.rollbackSelection(other);
+        assertEquals(
+                WorkerEndpoint.RegistrationStatus.REGISTERED,
+                endpoint.tryRegisterSelection("request", snapshot, 40L).status());
+        assertEquals(40L, endpoint.selectionSnapshot().computeTokens());
+    }
+
+    @Test
+    void unchangedCapacityReusesSnapshotAndChangesRemainVisible() {
+        var empty = endpoint.selectionSnapshot();
+        assertSame(empty, endpoint.selectionSnapshot());
+        var registration = endpoint.tryRegisterSelection("request", empty, 40L).value();
+        var reserved = endpoint.selectionSnapshot();
+        assertEquals(0L, empty.computeTokens());
+        assertEquals(40L, reserved.computeTokens());
+        assertSame(reserved, endpoint.selectionSnapshot());
+        endpoint.rollbackSelection(registration);
+        var released = endpoint.selectionSnapshot();
+        assertEquals(0L, released.computeTokens());
+        assertTrue(released.resourceVersion() > reserved.resourceVersion());
+        var report = new WorkerStatusResponse();
+        report.setAlive(true);
+        report.setRunningQueryLen(1);
+        EndpointTestSupport.applyStatus(endpoint, report).run();
+        var unknown = endpoint.selectionSnapshot();
+        assertEquals(100L, unknown.computeTokens());
+        assertSame(unknown, endpoint.selectionSnapshot());
+        report.setRunningQueryLen(0);
+        EndpointTestSupport.applyStatus(endpoint, report).run();
+        assertEquals(0L, endpoint.selectionSnapshot().computeTokens());
+    }
+
+    @Test
+    void outdatedSnapshotReportsFullOnlyWhenCurrentCapacityIsInsufficient() {
+        var snapshot = endpoint.selectionSnapshot();
+        endpoint.tryRegisterSelection("existing", snapshot, 70L);
+        assertEquals(
+                WorkerEndpoint.RegistrationStatus.CAPACITY_FULL,
+                endpoint.tryRegisterSelection("full", snapshot, 40L).status());
+        assertEquals(
+                WorkerEndpoint.RegistrationStatus.VERSION_CONFLICT,
+                endpoint.tryRegisterSelection("fits", snapshot, 20L).status());
+        assertEquals(70L, endpoint.selectionSnapshot().computeTokens());
     }
 
     @Test
@@ -87,7 +165,7 @@ class PrefillComputeTokensTest {
             assertEquals(
                     1L,
                     statuses.stream()
-                            .filter(s -> s == WorkerEndpoint.RegistrationStatus.VERSION_CONFLICT)
+                            .filter(s -> s == WorkerEndpoint.RegistrationStatus.CAPACITY_FULL)
                             .count());
             assertEquals(60L, endpoint.selectionSnapshot().computeTokens());
             assertEquals(

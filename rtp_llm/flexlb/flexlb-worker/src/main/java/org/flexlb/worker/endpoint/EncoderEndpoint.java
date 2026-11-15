@@ -25,28 +25,41 @@ public final class EncoderEndpoint extends WorkerEndpoint implements SelectionRo
     }
 
     public SelectionSnapshot selectionSnapshot() {
-        return captureSelectionSnapshot(true);
+        return selectionSnapshot(true);
     }
 
     /**
      * Request-count selection does not need to scan token work when the request has no cache estimate.
      */
-    public SelectionSnapshot selectionSnapshot(org.flexlb.worker.endpoint.Request request) {
-        return captureSelectionSnapshot(request.getEncoderCacheHitLen() != null);
+    public SelectionSnapshot selectionSnapshot(boolean includeTokenWork) {
+        return captureSelectionSnapshot(includeTokenWork);
     }
 
     public Registration<RequestRegistration> tryRegisterSelection(
-            String requestId, int requestLimit, long uncachedTokens) {
+            String requestId,
+            SelectionSnapshot expected,
+            boolean includeTokenWork,
+            String group,
+            int requestLimit,
+            long uncachedTokens) {
         java.util.Objects.requireNonNull(requestId, "requestId");
         com.google.common.base.Preconditions.checkArgument(
                 uncachedTokens >= 0L, "uncached Encoder tokens must be nonnegative");
         stateLock().lock();
         try {
-            if (!acceptsNewRequests()) return Registration.rejected(RegistrationStatus.UNAVAILABLE);
+            if (expected.endpoint() != this || !acceptsNewRequests())
+                return Registration.rejected(RegistrationStatus.UNAVAILABLE);
+            // The outer lock keeps the captured ranking inputs current through registration.
+            var current = captureSelectionSnapshot(includeTokenWork);
+            if (group != null && !group.equals(current.group()))
+                return Registration.rejected(RegistrationStatus.UNAVAILABLE);
             if (requests.containsKey(requestId))
                 return Registration.rejected(RegistrationStatus.ALREADY_REGISTERED);
-            if (requestCountLocked() >= requestLimit)
+            if (current.requestCount() >= requestLimit)
                 return Registration.rejected(RegistrationStatus.CAPACITY_FULL);
+            if (current.requestCount() != expected.requestCount()
+                    || includeTokenWork && current.uncachedTokens() != expected.uncachedTokens())
+                return Registration.rejected(RegistrationStatus.VERSION_CONFLICT);
             var registration = new RequestRegistration(this, requestId, uncachedTokens);
             requests.put(
                     requestId, new Tracked(registration, null, false, System.currentTimeMillis()));
@@ -107,11 +120,6 @@ public final class EncoderEndpoint extends WorkerEndpoint implements SelectionRo
     @Override
     public boolean rollbackSelection(WorkerEndpoint.RequestRegistration registration) {
         return releaseRequest(registration, true);
-    }
-
-    public void releaseRequest(WorkerRoute route) {
-        var registration = route.encoderRegistration();
-        if (registration != null) releaseRequest(registration);
     }
 
     public boolean releaseRequest(RequestRegistration registration) {
@@ -232,7 +240,7 @@ public final class EncoderEndpoint extends WorkerEndpoint implements SelectionRo
         } finally {
             stateLock().unlock();
         }
-        if (removed) capacityNotifier.notifyChanged(this);
+        if (removed && !requireUncommitted) capacityNotifier.notifyChanged(this);
         return removed;
     }
 
@@ -273,15 +281,6 @@ public final class EncoderEndpoint extends WorkerEndpoint implements SelectionRo
                         com.google.common.math.LongMath.saturatedAdd(
                                 work, Math.max(0L, task.inputLength()));
         return new SelectionSnapshot(this, available, group, count, work);
-    }
-
-    private long requestCountLocked() {
-        var engine = getStatus().committedEngineObservation();
-        long pending = 0;
-        for (var request : requests.values()) if (!request.observed()) pending++;
-        return Math.max(0, engine.runningQueryLen())
-                + Math.max(0, engine.waitingQueryLen())
-                + pending;
     }
 
     /**

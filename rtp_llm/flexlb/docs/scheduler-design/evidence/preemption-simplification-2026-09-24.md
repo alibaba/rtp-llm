@@ -320,7 +320,7 @@ sync 生产 Java：**28,759 → 28,593，净减 166 行**。从初始 30,842 行
 
 ## 2026-09-25：缓存指标去除转发层
 
-- CostBasedPrefillStrategy 直接注入已有 CacheMetricsReporter，删除 EngineHealthReporter 的四个纯转发方法及依赖，并删除 strategy 内单行 affinity 转发；调用参数、顺序与异常边界保持。
+- CostBasedPrefillStrategy 直接注入已有 CacheMetricsReporter，删除 ServiceMetricsReporter 的四个纯转发方法及依赖，并删除 strategy 内单行 affinity 转发；调用参数、顺序与异常边界保持。
 - 所有 sync/API/mock-engine 显式构造调用已迁移，无兼容构造器；性能夹具 reporter 保留 stubOnly。生产 Java 27,847 → 27,817，净减 30。
 - 定向 reactor 测试 common 3、cache 7、sync 80，共 90 项通过；API 源码与测试编译通过，本次未执行 API 测试。日志 /tmp/flexlb-cache-metric-delegates-tests.log。
 - mock-engine test-compile 成功，71 个测试源编译；未执行测试。日志 /tmp/flexlb-cache-metric-delegates-mock-compile.log。

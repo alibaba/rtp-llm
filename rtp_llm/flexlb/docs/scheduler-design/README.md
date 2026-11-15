@@ -1,6 +1,10 @@
 # FlexLB 调度重构文档
 
-本轮实施依据是[目标类图、职责、成员与代码预算](proposed-component-classes.html)。它是用户确认的完整目标；不能用局部接口迁移替代整体改造，也不能将尚未完成的条目标为已落地。
+本次队列调度、容量通知与 P/D 抢占改造统一依据
+[QueuedRequestScheduler 开发实施方案](queued-request-scheduler-handoff.md)。
+该文档是一份完整的待实施方案，包含类职责、删除清单、成员、接口、伪代码、并发边界和验收步骤。
+
+此前一轮实施依据是[目标类图、职责、成员与代码预算](proposed-component-classes.html)。它是用户确认的完整目标；不能用局部接口迁移替代整体改造，也不能将尚未完成的条目标为已落地。
 
 当前实现阅读入口：[当前核心类图](../current-class-diagram.md)（2026-11-03 按工作区源码核对）。[组件边界改造设计](../component-boundary-repair-design.md)保留早期边界讨论；与本轮目标不一致时，以本轮目标类图为准。
 

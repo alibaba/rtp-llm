@@ -103,12 +103,12 @@
 <text text-anchor="start" x="56.5" y="-515.2" font-family="Arial" font-size="11.00">+ reportLatency(values): void</text>
 <text text-anchor="start" x="56.5" y="-503.2" font-family="Arial" font-size="11.00">+ reportPrediction(values): void</text>
 </g>
-<!-- EngineHealthReporter -->
+<!-- ServiceMetricsReporter -->
 <g id="node6" class="node">
-<title>EngineHealthReporter</title>
+<title>ServiceMetricsReporter</title>
 <polygon fill="#f3f0ff" stroke="transparent" points="47.5,-772 47.5,-810 219.5,-810 219.5,-772 47.5,-772"/>
 <polygon fill="none" stroke="#cbd5e1" points="47.5,-772 47.5,-810 219.5,-810 219.5,-772 47.5,-772"/>
-<text text-anchor="start" x="74.5" y="-794.2" font-family="Arial" font-weight="bold" font-size="11.00">EngineHealthReporter</text>
+<text text-anchor="start" x="74.5" y="-794.2" font-family="Arial" font-weight="bold" font-size="11.00">ServiceMetricsReporter</text>
 <text text-anchor="start" x="94.5" y="-783.2" font-family="Arial" font-size="11.00">class · 300 LOC</text>
 <polygon fill="none" stroke="#cbd5e1" points="47.5,-732 47.5,-772 219.5,-772 219.5,-732 47.5,-732"/>
 <text text-anchor="start" x="55.5" y="-755.2" font-family="Arial" font-size="11.00">&#45; FlexMonitor monitor</text>

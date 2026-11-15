@@ -153,8 +153,8 @@ class EndpointCleanupOwnershipTest {
                             if (confirmed) {
                                 var acquired =
                                         endpoint.tryRegisterSelection(
-                                                endpoint.selectionSnapshot(),
                                                 String.valueOf(id),
+                                                endpoint.selectionSnapshot(),
                                                 200L,
                                                 350L,
                                                 50,
@@ -167,10 +167,7 @@ class EndpointCleanupOwnershipTest {
                             return reserve(endpoint, id, 200L, 350L);
                         },
                         assertOldLedger);
-        assertEquals(
-                confirmed ? 0 : 1,
-                result.evicted(),
-                "the return value counts shadow evictions, not confirmed-record purges");
+        assertEquals(1, result.evicted(), "the return value counts every removed local record");
         var replacement = result.owner();
         org.junit.jupiter.api.Assertions.assertNotSame(oldReservation, replacement);
         assertDecodeLedger(endpoint, 1, 0, 200L, 350L);
@@ -286,7 +283,7 @@ class EndpointCleanupOwnershipTest {
                                                         .getRequestState(String.valueOf(id))),
                                 Long.MAX_VALUE));
         assertEquals(
-                0,
+                1,
                 endpoint.evictExpiredRequests(
                         -1L,
                         org.flexlb.balance.schedule.SchedulerTestSupport.repository(registry)

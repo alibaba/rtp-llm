@@ -204,7 +204,7 @@ class SelectionRegistrationTest {
                                     () -> {
                                         barrier.await();
                                         return endpoint.tryRegisterSelection(
-                                                        snapshot, id, 100, 100, 50, capacity)
+                                                        id, snapshot, 100, 100, 50, capacity)
                                                 .status();
                                     }));
                 }
@@ -305,7 +305,7 @@ class SelectionRegistrationTest {
     }
 
     private void release(RequestResult route) {
-        route.prefillEndpoint().releaseRequest(route);
+        route.prefillEndpoint().releaseRequest(route.prefillRegistration());
         route.decodeEndpoint().releaseRequest(route.decodeRegistration());
     }
 }

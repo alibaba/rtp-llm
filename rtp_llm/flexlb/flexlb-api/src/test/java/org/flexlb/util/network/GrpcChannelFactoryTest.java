@@ -10,8 +10,6 @@ import org.flexlb.api.config.ChannelConfiguration;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledOnOs;
-import org.junit.jupiter.api.condition.OS;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
@@ -37,25 +35,35 @@ class GrpcChannelFactoryTest {
     }
 
     @Test
-    @EnabledOnOs(OS.LINUX)
-    void createsChannelWithoutTcpUserTimeoutWarning() throws InterruptedException {
+    void createsChannelWithoutTcpUserTimeoutWarning() throws Exception {
         Logger bootstrapLogger = (Logger) LoggerFactory.getLogger(Bootstrap.class);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
         bootstrapLogger.addAppender(appender);
 
+        io.grpc.Server server = io.grpc.netty.NettyServerBuilder.forPort(0).build().start();
         try (AnnotationConfigApplicationContext context = createChannelContext()) {
             GrpcChannelFactory factory = context.getBean(GrpcChannelFactory.class);
-            ManagedChannel channel = factory.create(new GrpcTarget("127.0.0.1", 1));
+            ManagedChannel channel = factory.create(new GrpcTarget("127.0.0.1", server.getPort()));
             try {
-                CountDownLatch stateChanged = new CountDownLatch(1);
-                channel.notifyWhenStateChanged(ConnectivityState.IDLE, stateChanged::countDown);
-                channel.getState(true);
-                assertTrue(stateChanged.await(2, TimeUnit.SECONDS));
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (channel.getState(true) != ConnectivityState.READY) {
+                    ConnectivityState state = channel.getState(true);
+                    if (state == ConnectivityState.READY) break;
+                    CountDownLatch stateChanged = new CountDownLatch(1);
+                    channel.notifyWhenStateChanged(state, stateChanged::countDown);
+                    assertTrue(
+                            stateChanged.await(
+                                    Math.max(1L, deadline - System.nanoTime()),
+                                    TimeUnit.NANOSECONDS));
+                }
             } finally {
                 channel.shutdownNow();
+                assertTrue(channel.awaitTermination(5, TimeUnit.SECONDS));
             }
         } finally {
+            server.shutdownNow();
+            assertTrue(server.awaitTermination(5, TimeUnit.SECONDS));
             bootstrapLogger.detachAppender(appender);
             appender.stop();
         }

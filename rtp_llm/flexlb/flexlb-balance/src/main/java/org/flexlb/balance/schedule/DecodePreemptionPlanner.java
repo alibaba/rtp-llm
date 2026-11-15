@@ -1,8 +1,6 @@
 package org.flexlb.balance.schedule;
 
 import com.google.common.math.LongMath;
-import org.flexlb.balance.schedule.DecodePreemptionPolicy.DecodePreemptionPlan;
-import org.flexlb.balance.schedule.PriorityDecodePreemptionPolicy.PriorityHarmProfile;
 import org.flexlb.config.scheduler.PreemptionConfig;
 import org.flexlb.config.scheduler.PreemptionStage;
 import org.flexlb.util.PriorityNormalizer;
@@ -26,9 +24,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 /**
  * Selects lower-priority requests whose released capacity can admit the incoming request.
  */
-public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPolicy {
-    // ==================== Decode reserved-only preemption (design doc 11-13) ====================
-
+public final class DecodePreemptionPlanner {
     /**
      * Candidate preference for slot preemption (design doc 11.3, first = evicted
      * first): priority asc → stage asc (reserved before accepted) →
@@ -53,9 +49,8 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
                     .thenComparing(DecodeRequestView::requestId);
 
     /**
-     * Plan the cheapest single-ownership eviction for this snapshot's capacity deficit.
+     * Selects a low-cost cancellation plan for the snapshot's request and KV deficit.
      */
-    @Override
     public DecodePreemptionDecision planDecode(
             Request request,
             int incomingPriority,
@@ -70,24 +65,23 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
         }
         boolean engineCancelEnabled =
                 preemption != null && preemption.allows(PreemptionStage.DECODE_ENGINE_OWNED);
-        Selection engine =
+        Selection proposal =
                 engineCancelEnabled
-                        ? planDecodeOneOwnership(
+                        ? selectPlan(
                                 request,
                                 capacity,
                                 ep,
                                 deficit,
-                                candidates(ep, incomingPriority, PreemptionMethod.ENGINE_CANCEL),
+                                candidates(ep, incomingPriority),
                                 failures)
                         : null;
-        Selection proposal = engine;
         return new DecodePreemptionDecision(deficit, proposal == null ? null : proposal.result());
     }
 
     /**
      * Try slot and KV prefixes separately, then a disjoint combination if neither fits.
      */
-    private static Selection planDecodeOneOwnership(
+    private static Selection selectPlan(
             Request request,
             AdmissionCapacity capacity,
             ResourceSnapshot ep,
@@ -257,8 +251,7 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
                 null);
     }
 
-    private static List<DecodeRequestView> candidates(
-            ResourceSnapshot ep, int incomingPriority, PreemptionMethod ownership) {
+    private static List<DecodeRequestView> candidates(ResourceSnapshot ep, int incomingPriority) {
         List<DecodeRequestView> candidates = new ArrayList<>();
         for (var entry : ep.requests().values()) {
             boolean matches = entry.phase().requiresEngineCancel();
@@ -267,14 +260,6 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
                     && entry.priority() < incomingPriority) candidates.add(entry);
         }
         return candidates;
-    }
-
-    /**
-     * A decode plan never mixes Master-local removal with Engine Cancel.
-     */
-    private enum PreemptionMethod {
-        MASTER_LOCAL,
-        ENGINE_CANCEL
     }
 
     /**
@@ -538,6 +523,69 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
          */
         public static long kvBucket(long kvTokens) {
             return Math.ceilDiv(Math.max(0L, kvTokens), KV_TOKENS_PER_COST_BUCKET);
+        }
+    }
+
+    /**
+     * One snapshot's capacity decision and its optional single-ownership preemption.
+     */
+    public record DecodePreemptionDecision(Capacity deficit, DecodePreemptionPlan proposal) {
+        public String preemptionReason() {
+            if (deficit.requests() > 0L && deficit.hasKv()) {
+                return DecodePreemptionPlan.CASE_SLOT_AND_KV;
+            }
+            if (deficit.requests() > 0L) {
+                return DecodePreemptionPlan.CASE_SLOT;
+            }
+            return deficit.hasKv() ? DecodePreemptionPlan.CASE_KV : null;
+        }
+    }
+
+    /**
+     * Holds the lower-priority requests selected for preemption and the capacity shortage they address.
+     * Local route withdrawal and Engine Cancel use separate plans; cancelling an engine request
+     * does not itself establish that its resources have been released.
+     */
+    public record DecodePreemptionPlan(
+            String endpointId,
+            List<DecodeRequestView> requestsToPreempt,
+            String preemptionReason,
+            long freedKvTokens,
+            long diagnosticCost) {
+        /**
+         * Concurrency slots exhausted (design doc 11).
+         */
+        public static final String CASE_SLOT = "decode_slot_full";
+
+        /**
+         * Real KV available below the incoming hard demand (design doc 12).
+         */
+        public static final String CASE_KV = "decode_kv_full";
+
+        /**
+         * Both deficits at once (design doc 13).
+         */
+        public static final String CASE_SLOT_AND_KV = "decode_slot_and_kv_full";
+
+        public DecodePreemptionPlan {
+            requestsToPreempt = List.copyOf(requestsToPreempt);
+            boolean hasLocal =
+                    requestsToPreempt.stream()
+                            .anyMatch(
+                                    requestToPreempt -> requestToPreempt.phase().isMasterQueued());
+            boolean hasCancel =
+                    requestsToPreempt.stream()
+                            .anyMatch(
+                                    requestToPreempt ->
+                                            requestToPreempt.phase().requiresEngineCancel());
+            checkArgument(
+                    !hasLocal || !hasCancel,
+                    "decode proposal cannot mix Master-local and Engine-Cancel victims");
+        }
+
+        public boolean requiresEngineCancel() {
+            return !requestsToPreempt.isEmpty()
+                    && requestsToPreempt.get(0).phase().requiresEngineCancel();
         }
     }
 }

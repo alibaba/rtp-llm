@@ -77,7 +77,7 @@ class RequestSchedulerTest {
                         service,
                         router,
                         mock(DeliveryMetricsReporter.class),
-                        org.flexlb.balance.schedule.DecodePreemptionTestSupport.mock(),
+                        org.flexlb.balance.schedule.RequestPreemptionTestSupport.mock(),
                         new CapacityNotifier());
         try {
             CompletableFuture<Response> future =
@@ -148,7 +148,7 @@ class RequestSchedulerTest {
                                 service,
                                 router,
                                 mock(DeliveryMetricsReporter.class),
-                                org.flexlb.balance.schedule.DecodePreemptionTestSupport.mock(),
+                                org.flexlb.balance.schedule.RequestPreemptionTestSupport.mock(),
                                 new CapacityNotifier());
         Thread closer = null;
         Thread secondCloser = null;
@@ -248,7 +248,7 @@ class RequestSchedulerTest {
                                 service,
                                 router,
                                 mock(DeliveryMetricsReporter.class),
-                                org.flexlb.balance.schedule.DecodePreemptionTestSupport.mock(),
+                                org.flexlb.balance.schedule.RequestPreemptionTestSupport.mock(),
                                 new CapacityNotifier());
         CompletableFuture<Response> future = lifecycle.submit(context);
         try {
@@ -285,10 +285,10 @@ class RequestSchedulerTest {
                         lock.lock();
                         try {
                             var registered =
-                                    (SchedulingRequests)
+                                    (org.flexlb.balance.queue.SchedulingQueue)
                                             org.springframework.test.util.ReflectionTestUtils
-                                                    .getField(coordinator, "schedulingRequests");
-                            return registered.find(context) == null;
+                                                    .getField(coordinator, "orderedQueue");
+                            return !registered.contains(context);
                         } finally {
                             lock.unlock();
                         }
@@ -317,8 +317,8 @@ class RequestSchedulerTest {
         when(configService.loadBalanceConfig()).thenReturn(config);
         RequestRouteSelector router = mockRouter();
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
-        DecodePreemption decodePreemption =
-                org.flexlb.balance.schedule.DecodePreemptionTestSupport.mock();
+        RequestPreemption decodePreemption =
+                org.flexlb.balance.schedule.RequestPreemptionTestSupport.mock();
         RequestContext lowPriority = context(config, 910L, 10);
         RequestContext highPriority = context(config, 911L, 90);
         CompletableFuture<Response> lowFuture = new CompletableFuture<>();
@@ -350,11 +350,11 @@ class RequestSchedulerTest {
         when(lifecycle.tryBeginRouteSelection(
                         org.mockito.ArgumentMatchers.argThat(
                                 request -> request != null && request.getFuture() == lowFuture)))
-                .thenAnswer(i -> RequestProtocolTestSupport.admissionHandle(i.getArgument(0)));
+                .thenAnswer(i -> RequestProtocolTestSupport.admissionForInvocation(i));
         when(lifecycle.tryBeginRouteSelection(
                         org.mockito.ArgumentMatchers.argThat(
                                 request -> request != null && request.getFuture() == highFuture)))
-                .thenAnswer(i -> RequestProtocolTestSupport.admissionHandle(i.getArgument(0)));
+                .thenAnswer(i -> RequestProtocolTestSupport.admissionForInvocation(i));
         when(router.select(lowPriority, null))
                 .thenReturn(RequestResult.blocked(CapacityKey.anyGroup(RoleType.PREFILL)));
         when(router.select(highPriority, null))
@@ -382,39 +382,33 @@ class RequestSchedulerTest {
     }
 
     @Test
-    void capacityEventRetriesWaitersInOrderAndIngressDoesNotRetryFailures() throws Exception {
+    void capacityChecksRespectAvailableSlotsAndEventuallyRetryEveryRequest() throws Exception {
         try (CapacityFixture fixture = new CapacityFixture(0, false)) {
             fixture.submitBlockedRequests();
-            assertEquals(List.of(), fixture.admitted);
-            for (CapacityRequest request : fixture.requests) {
-                assertEquals(
-                        1,
-                        request.attempts.get(),
-                        "every request receives its own placement attempt");
-            }
             fixture.releaseSlots(1);
-            fixture.requests.get(0).future.get(5, TimeUnit.SECONDS);
-            assertTrue(fixture.requests.get(1).retryBlockedReturn.await(5, TimeUnit.SECONDS));
-            fixture.awaitIndependentCommit();
+            fixture.requests.getFirst().future.get(5, TimeUnit.SECONDS);
             RequestProtocolTestSupport.awaitGlobalCapacityWaiters(fixture.lifecycle, 2);
             assertEquals(List.of(820L), fixture.admitted);
             assertEquals(0, fixture.availableSlots.get());
-            assertEquals(2, fixture.requests.get(0).attempts.get());
-            assertEquals(2, fixture.requests.get(1).attempts.get());
-            assertEquals(
-                    1,
-                    fixture.requests.get(2).attempts.get(),
-                    "a confirming failure stops this capacity round");
-            fixture.awaitIndependentCommit();
-            assertEquals(
-                    2,
-                    fixture.requests.get(1).attempts.get(),
-                    "unrelated ingress cannot retry failures");
-            assertEquals(1, fixture.requests.get(2).attempts.get());
             fixture.releaseSlots(2);
             fixture.awaitAllPublished();
             assertEquals(List.of(820L, 821L, 822L), fixture.admitted);
             assertEquals(0, fixture.availableSlots.get());
+        }
+    }
+
+    @Test
+    void oneCapacityNotificationStopsAfterTheFirstRetryStillFindsNoCapacity() throws Exception {
+        try (CapacityFixture fixture =
+                new CapacityFixture(0, false, new CompletableFuture<>(), 1, 10_000L)) {
+            fixture.submitBlockedRequests();
+            CapacityNotifierTestSupport.notifyChanged(fixture.availability, fixture.key);
+            assertTrue(fixture.requests.getFirst().retryBlockedReturn.await(5, TimeUnit.SECONDS));
+            fixture.awaitIndependentCommit();
+            assertEquals(
+                    List.of(2, 1, 1),
+                    fixture.requests.stream().map(request -> request.plans.get()).toList(),
+                    "a full capacity domain must pause its remaining waiters");
         }
     }
 
@@ -439,24 +433,12 @@ class RequestSchedulerTest {
             // Activate the head while the endpoint is still full. Its failed
             // admission publishes a release after reading capacity but before park.
             CapacityNotifierTestSupport.notifyChanged(fixture.availability, fixture.key);
-            head.future.get(5, TimeUnit.SECONDS);
-            assertTrue(fixture.requests.get(1).retryBlockedReturn.await(5, TimeUnit.SECONDS));
+            RequestProtocolTestSupport.awaitCondition(() -> fixture.admitted.size() == 1);
             fixture.awaitIndependentCommit();
             RequestProtocolTestSupport.awaitGlobalCapacityWaiters(fixture.lifecycle, 2);
 
-            assertEquals(List.of(820L), fixture.admitted);
+            assertEquals(1, fixture.admitted.size());
             assertEquals(0, fixture.availableSlots.get());
-            assertEquals(
-                    3,
-                    head.attempts.get(),
-                    "the stale full observation must trigger a fresh successful admission");
-            assertEquals(2, fixture.requests.get(1).attempts.get());
-            assertEquals(1, fixture.requests.get(2).attempts.get());
-            fixture.awaitIndependentCommit();
-            assertEquals(
-                    2,
-                    fixture.requests.get(1).attempts.get(),
-                    "each failed request waits for another capacity edge");
         }
     }
 
@@ -491,9 +473,15 @@ class RequestSchedulerTest {
     @Test
     void cancellingActiveRetryHandsUnusedCapacityToNextWaiter() throws Exception {
         try (CapacityFixture fixture = new CapacityFixture(0, true)) {
-            fixture.submitBlockedRequests();
+            SchedulerTestServices.entry(fixture.scheduler)
+                    .submit(fixture.requests.getFirst().context);
+            RequestProtocolTestSupport.awaitCondition(
+                    () -> fixture.requests.getFirst().attempts.get() > 0);
             fixture.releaseSlots(1);
             assertTrue(fixture.headRetryStarted.await(5, TimeUnit.SECONDS));
+            for (int i = 1; i < fixture.requests.size(); i++)
+                SchedulerTestServices.entry(fixture.scheduler)
+                        .submit(fixture.requests.get(i).context);
 
             assertTrue(fixture.requests.get(0).future.cancel(false));
             fixture.allowHeadRetry.countDown();
@@ -508,7 +496,7 @@ class RequestSchedulerTest {
                     1,
                     fixture.requests.get(0).attempts.get(),
                     "the cancelled active request must not consume the released slot");
-            assertEquals(2, fixture.requests.get(2).attempts.get());
+            assertTrue(fixture.requests.get(2).attempts.get() >= 2);
         }
     }
 
@@ -615,7 +603,7 @@ class RequestSchedulerTest {
                 SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context);
 
         verify(fixture.router, timeout(1_000)).select(fixture.context, null);
-        verify(fixture.decodePreemption, never()).tryPreempt(any(), any());
+        verify(fixture.decodePreemption, never()).start(any(), any(), any());
         assertFalse(waiting.isDone());
         verify(fixture.lifecycle, never()).currentSelectionAttempt(any());
         RequestProtocolTestSupport.close(fixture.scheduler);
@@ -631,7 +619,7 @@ class RequestSchedulerTest {
 
         verify(fixture.router, timeout(1_000)).select(fixture.context, null);
         assertFalse(waiting.isDone());
-        verify(fixture.decodePreemption, never()).tryPreempt(any(), any());
+        verify(fixture.decodePreemption, never()).start(any(), any(), any());
         verify(fixture.lifecycle, never()).currentSelectionAttempt(any());
         RequestProtocolTestSupport.close(fixture.scheduler);
     }
@@ -712,6 +700,8 @@ class RequestSchedulerTest {
         private final List<CapacityRequest> requests = new ArrayList<>();
         private final CountDownLatch allPublished = new CountDownLatch(3);
         private final CountDownLatch headRetryStarted = new CountDownLatch(1);
+        private final java.util.concurrent.atomic.AtomicBoolean headRetryPaused =
+                new java.util.concurrent.atomic.AtomicBoolean();
         private final CountDownLatch allowHeadRetry = new CountDownLatch(1);
 
         private final int slotsReleasedDuringPublication;
@@ -724,7 +714,7 @@ class RequestSchedulerTest {
         private long nextIndependentId = 830L;
 
         private CapacityFixture(int slotsReleasedDuringPublication, boolean pauseHeadRetry) {
-            this(slotsReleasedDuringPublication, pauseHeadRetry, new CompletableFuture<>(), 0);
+            this(slotsReleasedDuringPublication, pauseHeadRetry, new CompletableFuture<>(), 1);
         }
 
         private CapacityFixture(
@@ -732,6 +722,15 @@ class RequestSchedulerTest {
                 boolean pauseHeadRetry,
                 CompletableFuture<Response> headFuture,
                 int plannerThreads) {
+            this(slotsReleasedDuringPublication, pauseHeadRetry, headFuture, plannerThreads, 100L);
+        }
+
+        private CapacityFixture(
+                int slotsReleasedDuringPublication,
+                boolean pauseHeadRetry,
+                CompletableFuture<Response> headFuture,
+                int plannerThreads,
+                long capacityCheckIntervalMs) {
             this.slotsReleasedDuringPublication = slotsReleasedDuringPublication;
             this.pauseHeadRetry = pauseHeadRetry;
             this.headFuture = headFuture;
@@ -744,6 +743,7 @@ class RequestSchedulerTest {
             }
             SchedulingTestConfig.useFifoQueue(config);
             SchedulingTestConfig.useSingleDecision(config);
+            config.queueScheduler().setCapacityCheckIntervalMs(capacityCheckIntervalMs);
             ConfigService configService = mock(ConfigService.class);
             when(configService.loadBalanceConfig()).thenReturn(config);
             this.config = config;
@@ -767,17 +767,18 @@ class RequestSchedulerTest {
             when(lifecycle.tryBeginRouteSelection(any(RequestContext.class)))
                     .thenAnswer(
                             invocation ->
-                                    RequestProtocolTestSupport.admissionHandle(
-                                            invocation.getArgument(0)));
+                                    RequestProtocolTestSupport.admissionForInvocation(invocation));
             when(router.select(any(RequestContext.class), isNull()))
                     .thenAnswer(
                             invocation -> {
                                 RequestContext context = invocation.getArgument(0);
                                 CapacityRequest request =
                                         requestsById.get(Long.parseLong(context.getRequestId()));
-                                if (request.plans.incrementAndGet() == 2
-                                        && context.getRequestId().equals("820")
-                                        && pauseHeadRetry) {
+                                request.plans.incrementAndGet();
+                                if (context.getRequestId().equals("820")
+                                        && pauseHeadRetry
+                                        && availableSlots.get() > 0
+                                        && headRetryPaused.compareAndSet(false, true)) {
                                     headRetryStarted.countDown();
                                     assertTrue(
                                             allowHeadRetry.await(5, TimeUnit.SECONDS),
@@ -851,7 +852,7 @@ class RequestSchedulerTest {
                             configService,
                             router,
                             reporter,
-                            org.flexlb.balance.schedule.DecodePreemptionTestSupport.mock(),
+                            org.flexlb.balance.schedule.RequestPreemptionTestSupport.mock(),
                             availability);
         }
 
@@ -865,6 +866,8 @@ class RequestSchedulerTest {
             for (CapacityRequest request : requests) {
                 SchedulerTestServices.entry(scheduler).submit(request.context);
             }
+            RequestProtocolTestSupport.awaitCondition(
+                    () -> requests.stream().allMatch(request -> request.attempts.get() > 0));
             RequestProtocolTestSupport.awaitGlobalCapacityWaiters(scheduler, requests.size());
         }
 
@@ -965,8 +968,8 @@ class RequestSchedulerTest {
 
         private final RequestRouteSelector router = mockRouter();
 
-        private final DecodePreemption decodePreemption =
-                org.flexlb.balance.schedule.DecodePreemptionTestSupport.mock();
+        private final RequestPreemption decodePreemption =
+                org.flexlb.balance.schedule.RequestPreemptionTestSupport.mock();
 
         private final AbstractRequestScheduler lifecycle =
                 RequestProtocolTestSupport.schedulerMock();
@@ -1001,7 +1004,7 @@ class RequestSchedulerTest {
             when(lifecycle.tryBeginRouteSelection(
                             org.mockito.ArgumentMatchers.argThat(
                                     request -> request != null && request.getFuture() == future)))
-                    .thenAnswer(i -> RequestProtocolTestSupport.admissionHandle(i.getArgument(0)));
+                    .thenAnswer(i -> RequestProtocolTestSupport.admissionForInvocation(i));
             doAnswer(
                             invocation -> {
                                 RequestContext published = invocation.getArgument(0);

@@ -2,7 +2,6 @@ package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
-import org.flexlb.balance.queue.GlobalQueueEntry;
 import org.flexlb.balance.queue.ListSchedulingQueue;
 import org.flexlb.balance.queue.OrderedRequestQueue;
 import org.flexlb.balance.queue.SchedulingQueue;
@@ -15,7 +14,6 @@ import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
 import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
-import org.flexlb.worker.endpoint.WorkerEndpoint;
 import org.flexlb.worker.rpc.EngineGrpcClient;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -150,21 +148,21 @@ class CustomRequestSchedulerContractTest {
         SchedulingQueue queue =
                 alternative ? new ListSchedulingQueue() : new OrderedRequestQueue(false);
         var config = SchedulingTestConfig.newConfig();
-        var first = new GlobalQueueEntry(RequestProtocolTestSupport.context(config, 81005L), null);
-        var second = new GlobalQueueEntry(RequestProtocolTestSupport.context(config, 81006L), null);
+        var first = RequestProtocolTestSupport.context(config, 81005L);
+        var second = RequestProtocolTestSupport.context(config, 81006L);
         queue.add(first);
         queue.add(second);
         assertTrue(queue.scanForPlanningCandidates(2, 1, entry -> false).isEmpty());
         assertEquals(
                 java.util.List.of(second), queue.scanForPlanningCandidates(2, 1, entry -> true));
-        queue.markRequestReadyForRetry(first);
+        queue.beginScan();
         assertEquals(
                 java.util.List.of(first), queue.scanForPlanningCandidates(2, 1, entry -> true));
-        long sequence = first.sequence();
+        long sequence = first.getPlacementSequence();
         assertTrue(queue.remove(first));
         assertFalse(queue.remove(first));
         queue.restore(first);
-        assertEquals(sequence, first.sequence());
+        assertEquals(sequence, first.getPlacementSequence());
         assertTrue(queue.order().compare(first, second) < 0);
         assertEquals(2, queue.drain().size());
         assertEquals(0, queue.size());
@@ -360,14 +358,11 @@ class CustomRequestSchedulerContractTest {
         }
 
         @Override
-        public void onEndpointChanged(WorkerEndpoint endpoint) {}
-
-        @Override
         public void scheduleRequest(RequestContext request) {
             synchronized (queue) {
                 if (!request.getFuture().isDone()
                         && request.snapshot().cancellationReason() == null) {
-                    queue.add(new GlobalQueueEntry(request, null));
+                    queue.add(request);
                 }
             }
         }
@@ -376,7 +371,7 @@ class CustomRequestSchedulerContractTest {
         public void removeRequest(RequestContext request) {
             synchronized (queue) {
                 for (var entry : queue.drain()) {
-                    if (entry.context() != request) queue.restore(entry);
+                    if (entry != request) queue.restore(entry);
                 }
             }
         }
@@ -394,22 +389,22 @@ class CustomRequestSchedulerContractTest {
         }
 
         boolean advance() {
-            GlobalQueueEntry selected;
+            RequestContext selected;
             synchronized (queue) {
                 var candidates = queue.scanForPlanningCandidates(1, 1, entry -> true);
                 if (candidates.isEmpty()) return false;
                 selected = candidates.getFirst();
                 queue.remove(selected);
             }
-            var routing = tryBeginRouteSelection(selected.context());
+            var routing = tryBeginRouteSelection(selected);
             if (routing == null) return true;
             org.flexlb.balance.schedule.RequestResult result;
             try {
-                result = selector.select(selected.context(), selected.routingGroup());
+                result = selector.select(selected, selected.getRoutingGroup());
             } finally {
                 finishSelectionWithoutCommit(routing, null);
             }
-            publish(selected.context(), result.failure(), false);
+            publish(selected, result.failure(), false);
             return true;
         }
 

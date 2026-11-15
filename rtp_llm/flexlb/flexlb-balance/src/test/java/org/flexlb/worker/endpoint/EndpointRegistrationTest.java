@@ -41,16 +41,14 @@ class EndpointRegistrationTest {
         var repository =
                 org.flexlb.balance.schedule.SchedulerTestSupport.repository(
                         EndpointTestSupport.noopEventSink());
+        var notifications = org.mockito.Mockito.mock(CapacityNotifier.class);
         WorkerEndpoint endpoint;
         java.util.function.Function<String, WorkerEndpoint.RequestRegistration> register;
         switch (role) {
             case PREFILL -> {
                 var prefill =
                         new PrefillEndpoint(
-                                status,
-                                new org.flexlb.config.FlexlbConfig(),
-                                org.mockito.Mockito.mock(
-                                        org.flexlb.worker.endpoint.CapacityNotifier.class));
+                                status, new org.flexlb.config.FlexlbConfig(), notifications);
                 endpoint = prefill;
                 register =
                         id ->
@@ -58,13 +56,13 @@ class EndpointRegistrationTest {
                                         .value();
             }
             case DECODE -> {
-                var decode = EndpointTestSupport.decode(status, repository);
+                var decode = new DecodeEndpoint(status, repository, notifications);
                 endpoint = decode;
                 register =
                         id ->
                                 decode.tryRegisterSelection(
-                                                decode.selectionSnapshot(),
                                                 id,
+                                                decode.selectionSnapshot(),
                                                 10,
                                                 10,
                                                 50,
@@ -72,13 +70,18 @@ class EndpointRegistrationTest {
                                         .value();
             }
             case ENCODER -> {
-                var encoder =
-                        new EncoderEndpoint(
-                                status,
-                                org.mockito.Mockito.mock(
-                                        org.flexlb.worker.endpoint.CapacityNotifier.class));
+                var encoder = new EncoderEndpoint(status, notifications);
                 endpoint = encoder;
-                register = id -> encoder.tryRegisterSelection(id, 4, 10).value();
+                register =
+                        id ->
+                                encoder.tryRegisterSelection(
+                                                id,
+                                                encoder.selectionSnapshot(false),
+                                                false,
+                                                null,
+                                                4,
+                                                10)
+                                        .value();
             }
             default -> throw new AssertionError(role);
         }
@@ -94,6 +97,7 @@ class EndpointRegistrationTest {
             org.junit.jupiter.api.Assertions.assertNotNull(replacement);
             org.junit.jupiter.api.Assertions.assertFalse(rollback.rollbackSelection(original));
             org.junit.jupiter.api.Assertions.assertTrue(rollback.rollbackSelection(replacement));
+            org.mockito.Mockito.verifyNoInteractions(notifications);
         } finally {
             EndpointTestSupport.closeAndWait(endpoint);
         }

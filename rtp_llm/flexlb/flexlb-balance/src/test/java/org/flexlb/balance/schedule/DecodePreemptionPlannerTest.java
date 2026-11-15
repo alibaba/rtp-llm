@@ -1,7 +1,7 @@
 package org.flexlb.balance.schedule;
 
-import org.flexlb.balance.schedule.DecodePreemptionPolicy.DecodePreemptionPlan;
-import org.flexlb.balance.schedule.PriorityDecodePreemptionPolicy.PriorityHarmProfile;
+import org.flexlb.balance.schedule.DecodePreemptionPlanner.DecodePreemptionPlan;
+import org.flexlb.balance.schedule.DecodePreemptionPlanner.PriorityHarmProfile;
 import org.flexlb.config.scheduler.PreemptionConfig;
 import org.flexlb.config.scheduler.PreemptionStage;
 import org.flexlb.worker.endpoint.DecodeEndpoint;
@@ -30,7 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Exact-value contracts for {@link PriorityDecodePreemptionPolicy#planDecode}: the frozen
+ * Exact-value contracts for {@link DecodePreemptionPlanner#planDecode}: the frozen
  * decode admission recompute of {@code current − requests selected for preemption + incoming} for
  * slot and KV capacity.
  *
@@ -44,8 +44,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>Cost = h × f(priority) × g(phase) [× lengthWaste for KV], with exact numeric values.</li>
  * </ul>
  */
-@DisplayName("PriorityDecodePreemptionPolicy.planDecode recompute contracts")
-class PriorityDecodePreemptionPolicyTest {
+@DisplayName("DecodePreemptionPlanner.planDecode recompute contracts")
+class DecodePreemptionPlannerTest {
     private static final long H_SLOT = 4L;
     private static final long H_KV = 8L;
 
@@ -205,7 +205,7 @@ class PriorityDecodePreemptionPolicyTest {
             DecodeResources.ResourceSnapshot snapshot,
             PreemptionConfig policy,
             Map<String, String> failures) {
-        return new PriorityDecodePreemptionPolicy()
+        return new DecodePreemptionPlanner()
                 .planDecode(request, priority, capacity, snapshot, policy, failures)
                 .proposal();
     }
@@ -241,7 +241,7 @@ class PriorityDecodePreemptionPolicyTest {
             Map<String, String> f = new HashMap<>();
             var ep = endpoint(500L, 1000L, 2, 4L, List.of());
             var decision =
-                    new PriorityDecodePreemptionPolicy()
+                    new DecodePreemptionPlanner()
                             .planDecode(
                                     Request.builder()
                                             .requestId("99")
@@ -287,7 +287,7 @@ class PriorityDecodePreemptionPolicyTest {
             Map<String, String> f = new HashMap<>();
             var ep = endpoint(1000L, 0L, 1, 1L, List.of(accepted(1L, 70, 128L)));
             var decision =
-                    new PriorityDecodePreemptionPolicy()
+                    new DecodePreemptionPlanner()
                             .planDecode(
                                     Request.builder()
                                             .requestId("99")
@@ -309,7 +309,7 @@ class PriorityDecodePreemptionPolicyTest {
         void slotEvictionCanAlsoSatisfyKvDeficit() {
             var ep = endpoint(100L, 1000L, 1, 1L, List.of(accepted(1L, 30, 512L)));
             var decision =
-                    new PriorityDecodePreemptionPolicy()
+                    new DecodePreemptionPlanner()
                             .planDecode(
                                     Request.builder()
                                             .requestId("99")

@@ -18,12 +18,12 @@ import java.util.Objects;
 
 /**
  * Selects and registers the least uncached Encoder work, breaking ties by concurrent requests.
- * Candidate selection and resource registration use the same configured request limit in every scheduling mode.
+ * Each retry compares fresh candidate loads; registration rechecks capacity and the inputs used for ranking.
  */
 @Component
 public class EncoderStrategy
         extends AbstractWorkerSelectionStrategy<
-                EncoderEndpoint.SelectionSnapshot, EncoderEndpoint.SelectionSnapshot> {
+                EncoderEndpoint, EncoderEndpoint.SelectionSnapshot> {
     private final EndpointRegistry endpoints;
     private final int maxRequests;
 
@@ -57,37 +57,42 @@ public class EncoderStrategy
     }
 
     public RoutingResult<RoleSelection, CapacityKey> select(RequestContext context, String group) {
-        var candidates = new ArrayList<EncoderEndpoint.SelectionSnapshot>();
-        for (var endpoint : endpoints.<EncoderEndpoint>endpoints(RoleType.ENCODER, group))
-            candidates.add(((EncoderEndpoint) endpoint).selectionSnapshot(context.getRequest()));
+        var candidates = endpoints.<EncoderEndpoint>endpoints(RoleType.ENCODER, group);
         var scope = new CapacityKey(RoleType.ENCODER, group, null);
         var request = context.getRequest();
         return selectCandidates(
                 context,
                 scope,
                 candidates,
-                current ->
-                        this.select(
-                                        current,
-                                        group,
-                                        request.getEncoderCacheHitLen() != null,
-                                        maxRequests)
-                                .map(
-                                        candidate ->
-                                                RoutingResult
-                                                        .<org.flexlb.worker.endpoint.EncoderEndpoint
-                                                                        .SelectionSnapshot,
-                                                                CapacityKey>
-                                                                success(candidate))
-                                .orElseGet(
-                                        () ->
-                                                RoutingResult.blocked(
-                                                        scope,
-                                                        Response.error(
-                                                                org.flexlb.worker.endpoint
-                                                                        .StrategyErrorType.forRole(
-                                                                        RoleType.ENCODER)),
-                                                        null)));
+                current -> {
+                    var snapshots =
+                            new ArrayList<EncoderEndpoint.SelectionSnapshot>(current.size());
+                    for (var endpoint : current)
+                        snapshots.add(
+                                endpoint.selectionSnapshot(
+                                        request.getEncoderCacheHitLen() != null));
+                    return this.select(
+                                    snapshots,
+                                    group,
+                                    request.getEncoderCacheHitLen() != null,
+                                    maxRequests)
+                            .map(
+                                    candidate ->
+                                            RoutingResult
+                                                    .<org.flexlb.worker.endpoint.EncoderEndpoint
+                                                                    .SelectionSnapshot,
+                                                            CapacityKey>
+                                                            success(candidate))
+                            .orElseGet(
+                                    () ->
+                                            RoutingResult.blocked(
+                                                    scope,
+                                                    Response.error(
+                                                            org.flexlb.worker.endpoint
+                                                                    .StrategyErrorType.forRole(
+                                                                    RoleType.ENCODER)),
+                                                    null));
+                });
     }
 
     @Override
@@ -109,6 +114,9 @@ public class EncoderStrategy
         var accepted =
                 endpoint.tryRegisterSelection(
                         request.getRequestId(),
+                        selected,
+                        request.getEncoderCacheHitLen() != null,
+                        group,
                         maxRequests,
                         Math.max(0L, request.getSeqLen() - hit));
         if (accepted.status() != WorkerEndpoint.RegistrationStatus.REGISTERED)
@@ -134,9 +142,8 @@ public class EncoderStrategy
     }
 
     @Override
-    protected EncoderEndpoint.SelectionSnapshot refresh(
-            EncoderEndpoint.SelectionSnapshot candidate) {
-        return candidate.endpoint().selectionSnapshot();
+    protected EncoderEndpoint refresh(EncoderEndpoint candidate) {
+        return candidate;
     }
 
     @Override
@@ -147,13 +154,7 @@ public class EncoderStrategy
     }
 
     @Override
-    protected EncoderEndpoint.SelectionSnapshot candidate(
-            EncoderEndpoint.SelectionSnapshot selected) {
-        return selected;
-    }
-
-    @Override
-    protected boolean tryOtherWhenFull() {
-        return false;
+    protected EncoderEndpoint candidate(EncoderEndpoint.SelectionSnapshot selected) {
+        return selected.endpoint();
     }
 }

@@ -72,6 +72,7 @@ class EngineGrpcClientCancellationAuditTest {
     @Test
     void retryKeepsTheOriginalDeadlineInsteadOfRenewingItsBudget() throws Exception {
         try (Fixture f = new Fixture(true, false, false, 600)) {
+            f.connect();
             var result = f.call(1000);
             assertTrue(f.secondReceived.await(5, TimeUnit.SECONDS));
             assertTrue(
@@ -485,6 +486,24 @@ class EngineGrpcClientCancellationAuditTest {
             server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
             clientLoop.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
             serverLoop.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
+        }
+
+        void connect() throws Exception {
+            String key =
+                    AbstractGrpcClient.createKey(
+                            "127.0.0.1",
+                            server.getPort(),
+                            AbstractGrpcClient.ServiceType.WORKER_STATUS);
+            ManagedChannel channel = client.createChannel(key);
+            client.putInvokerIfAbsent(key, channel);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (channel.getState(true) != io.grpc.ConnectivityState.READY) {
+                var state = channel.getState(true);
+                if (state == io.grpc.ConnectivityState.READY) break;
+                var changed = new CompletableFuture<Void>();
+                channel.notifyWhenStateChanged(state, () -> changed.complete(null));
+                changed.get(Math.max(1L, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+            }
         }
 
         String resultDiagnostic() {

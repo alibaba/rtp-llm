@@ -164,7 +164,7 @@ class DirectAdmissionContractTest {
             assertEquals(RoutingResult.Status.SUCCESS, selected.status());
             var route = selected;
             assertNotNull(EndpointTestSupport.decodeRegistration(fixture.decode, 9100L));
-            assertTrue(fixture.prefill.releaseRequest(route));
+            assertTrue(fixture.prefill.releaseRequest(route.prefillRegistration()));
             assertTrue(fixture.prefill.acceptsNewRequests());
             var publication =
                     SchedulerTestSupport.selectAndPublish(fixture.scheduler, routing, () -> route);
@@ -357,6 +357,7 @@ class DirectAdmissionContractTest {
             verify(fixture.prefillStrategy, times(2))
                     .chooseBest(
                             any(),
+                            org.mockito.ArgumentMatchers.any(),
                             org.mockito.ArgumentMatchers.anyList(),
                             org.mockito.ArgumentMatchers.any());
         }
@@ -421,8 +422,8 @@ class DirectAdmissionContractTest {
                     doAnswer(retireDuringAdmission)
                             .when(fixture.decode)
                             .tryRegisterSelection(
-                                    any(),
                                     org.mockito.ArgumentMatchers.anyString(),
+                                    any(),
                                     org.mockito.ArgumentMatchers.anyLong(),
                                     org.mockito.ArgumentMatchers.anyLong(),
                                     org.mockito.ArgumentMatchers.anyInt(),
@@ -450,6 +451,7 @@ class DirectAdmissionContractTest {
                 verify(fixture.prefillStrategy, times(2))
                         .chooseBest(
                                 any(),
+                                org.mockito.ArgumentMatchers.any(),
                                 org.mockito.ArgumentMatchers.anyList(),
                                 org.mockito.ArgumentMatchers.any());
             } finally {
@@ -505,6 +507,7 @@ class DirectAdmissionContractTest {
             verify(fixture.prefillStrategy)
                     .chooseBest(
                             any(),
+                            org.mockito.ArgumentMatchers.any(),
                             org.mockito.ArgumentMatchers.anyList(),
                             org.mockito.ArgumentMatchers.any());
         }
@@ -558,6 +561,7 @@ class DirectAdmissionContractTest {
                                             .when(fixture.prefillStrategy)
                                             .chooseBest(
                                                     any(),
+                                                    org.mockito.ArgumentMatchers.any(),
                                                     org.mockito.ArgumentMatchers.anyList(),
                                                     org.mockito.ArgumentMatchers.any());
                                 } else {
@@ -831,8 +835,8 @@ class DirectAdmissionContractTest {
                             })
                     .when(fixture.decode)
                     .tryRegisterSelection(
-                            any(),
                             org.mockito.ArgumentMatchers.anyString(),
+                            any(),
                             org.mockito.ArgumentMatchers.anyLong(),
                             org.mockito.ArgumentMatchers.anyLong(),
                             org.mockito.ArgumentMatchers.anyInt(),
@@ -932,6 +936,7 @@ class DirectAdmissionContractTest {
                     .when(fixture.prefillStrategy)
                     .chooseBest(
                             eq(context.getRequest()),
+                            org.mockito.ArgumentMatchers.any(),
                             org.mockito.ArgumentMatchers.anyList(),
                             org.mockito.ArgumentMatchers.any());
             assertFalse(
@@ -1057,7 +1062,7 @@ class DirectAdmissionContractTest {
                             reporter,
                             mock(TheoryCacheHitReporter.class),
                             router,
-                            mock(DecodePreemption.class),
+                            org.flexlb.balance.schedule.RequestPreemptionTestSupport.mock(),
                             placement);
             scheduler =
                     (AbstractRequestScheduler)
@@ -1093,6 +1098,7 @@ class DirectAdmissionContractTest {
                     .when(prefillStrategy)
                     .chooseBest(
                             any(),
+                            org.mockito.ArgumentMatchers.any(),
                             org.mockito.ArgumentMatchers.anyList(),
                             org.mockito.ArgumentMatchers.any());
             org.mockito.Mockito.doAnswer(
@@ -1162,6 +1168,7 @@ class DirectAdmissionContractTest {
                     .when(prefillStrategy)
                     .chooseBest(
                             any(),
+                            org.mockito.ArgumentMatchers.any(),
                             org.mockito.ArgumentMatchers.anyList(),
                             org.mockito.ArgumentMatchers.any());
             return replacement;

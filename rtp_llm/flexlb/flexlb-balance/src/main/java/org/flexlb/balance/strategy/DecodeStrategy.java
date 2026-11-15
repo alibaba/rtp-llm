@@ -31,8 +31,7 @@ import static com.google.common.base.Preconditions.checkState;
  * Conflicts use the shared bounded retry loop; capacity failures retain their waiting and preemption target.
  */
 public class DecodeStrategy
-        extends AbstractWorkerSelectionStrategy<
-                DecodeEndpoint.SelectionSnapshot, DecodeEndpoint.SelectionSnapshot> {
+        extends AbstractWorkerSelectionStrategy<DecodeEndpoint, DecodeStrategy.Selection> {
     private static final ThreadLocal<DecodeInputs> DECODE_INPUTS =
             ThreadLocal.withInitial(DecodeInputs::new);
 
@@ -114,17 +113,12 @@ public class DecodeStrategy
         DecodeInputs inputs = cached.inUse ? new DecodeInputs() : cached;
         inputs.inUse = true;
         try {
-            for (var endpoint : endpoints.<DecodeEndpoint>endpoints(RoleType.DECODE, group)) {
-                var snapshot = ((DecodeEndpoint) endpoint).selectionSnapshot();
-                if (group == null || group.equals(snapshot.topology().group()))
-                    inputs.decode.add(snapshot);
-            }
             var scope = new CapacityKey(RoleType.DECODE, group, null);
             return selectCandidates(
                     context,
                     scope,
-                    inputs.decode,
-                    candidates -> chooseDecode(context, group, candidates, inputs.eligible));
+                    endpoints.<DecodeEndpoint>endpoints(RoleType.DECODE, null),
+                    candidates -> chooseDecode(context, group, candidates, inputs));
         } finally {
             int captured = inputs.decode.size();
             inputs.decode.clear();
@@ -135,48 +129,45 @@ public class DecodeStrategy
     }
 
     @Override
-    protected DecodeEndpoint.SelectionSnapshot candidate(
-            DecodeEndpoint.SelectionSnapshot selected) {
-        return selected;
+    protected DecodeEndpoint candidate(Selection selected) {
+        return selected.endpoint();
     }
 
     @Override
     protected WorkerEndpoint.Registration<RoleSelection> register(
-            RequestContext context,
-            RoleType role,
-            String group,
-            DecodeEndpoint.SelectionSnapshot selected) {
-        return registerDecode(context.getRequest(), context.getSchedulingMetadata(), selected);
+            RequestContext context, RoleType role, String group, Selection selected) {
+        return registerDecode(
+                context.getRequest(), context.getSchedulingMetadata(), selected.snapshot());
     }
 
     @Override
-    protected DecodeEndpoint.SelectionSnapshot refresh(DecodeEndpoint.SelectionSnapshot candidate) {
-        var endpoint = currentEndpoint(candidate);
-        return endpoint == null ? null : endpoint.selectionSnapshot();
-    }
-
-    @Override
-    protected boolean tryOtherWhenFull() {
-        return false;
+    protected DecodeEndpoint refresh(DecodeEndpoint candidate) {
+        return candidate;
     }
 
     @Override
     protected RoutingResult<RoleSelection, CapacityKey> capacityFull(
-            DecodeEndpoint.SelectionSnapshot selected, CapacityKey scope) {
-        return decodeRegistrationBlocked(selected);
+            Selection selected, CapacityKey scope) {
+        return decodeCapacityBlocked(selected.snapshot());
     }
 
-    private RoutingResult<DecodeEndpoint.SelectionSnapshot, CapacityKey> chooseDecode(
+    private RoutingResult<Selection, CapacityKey> chooseDecode(
             RequestContext context,
             String group,
-            List<DecodeEndpoint.SelectionSnapshot> candidates,
-            ArrayList<DecodeEndpoint.SelectionSnapshot> eligible) {
+            List<DecodeEndpoint> workers,
+            DecodeInputs inputs) {
+        var candidates = inputs.decode;
+        var eligible = inputs.eligible;
+        candidates.clear();
         eligible.clear();
         var request = context.getRequest();
         int possible = 0;
         long maximumBudget = 0L;
-        for (var candidate : candidates) {
-            if (candidate == null) continue;
+        for (var endpoint : workers) {
+            if (!endpoint.acceptsNewRequests()) continue;
+            var candidate = endpoint.selectionSnapshot();
+            if (group != null && !group.equals(candidate.topology().group())) continue;
+            candidates.add(candidate);
             long budget = admissionCapacity.kvBudget(candidate.totalKv());
             maximumBudget = Math.max(maximumBudget, budget);
             if (candidate.totalKv() > 0L && request.getExpectedKvTokens() > budget) continue;
@@ -198,8 +189,9 @@ public class DecodeStrategy
                                     + request.getExpectedKvTokens()
                                     + " exceeds every worker KV admission budget; maximum="
                                     + maximumBudget));
-        if (eligible.isEmpty() && possible > 0) {
-            if (direct) return decodeCapacityFailure(context, group, candidates);
+        boolean capacityFull = eligible.isEmpty() && possible > 0;
+        if (capacityFull) {
+            if (direct) return decodeCapacityFailure(context, group, candidates).asFailure();
             for (var candidate : candidates)
                 if (candidate != null
                         && (candidate.totalKv() == 0L
@@ -207,18 +199,18 @@ public class DecodeStrategy
                                         <= admissionCapacity.kvBudget(candidate.totalKv())))
                     eligible.add(candidate);
         }
-        return this.chooseBest(group, java.util.Collections.unmodifiableList(eligible))
-                .map(
-                        selected ->
-                                RoutingResult
-                                        .<DecodeEndpoint.SelectionSnapshot, CapacityKey>success(
-                                                selected))
-                .orElseGet(
-                        () ->
-                                RoutingResult.blocked(
-                                        new CapacityKey(RoleType.DECODE, group, null),
-                                        Response.error(StrategyErrorType.NO_DECODE_WORKER),
-                                        null));
+        var selected = chooseBest(group, java.util.Collections.unmodifiableList(eligible));
+        if (selected.isEmpty())
+            return RoutingResult.blocked(
+                    new CapacityKey(RoleType.DECODE, group, null),
+                    Response.error(StrategyErrorType.NO_DECODE_WORKER),
+                    null);
+        if (capacityFull) return decodeCapacityBlocked(selected.get()).asFailure();
+        var snapshot = selected.get();
+        for (var endpoint : workers)
+            if (endpoint.ipPort().equals(snapshot.address()))
+                return RoutingResult.success(new Selection(endpoint, snapshot));
+        throw new IllegalStateException("selected Decode worker is not a candidate");
     }
 
     private RoutingResult<DecodeEndpoint.SelectionSnapshot, CapacityKey> decodeCapacityFailure(
@@ -227,39 +219,53 @@ public class DecodeStrategy
             List<DecodeEndpoint.SelectionSnapshot> candidates) {
         Response failure = null;
         boolean uniform = true;
-        var evidence = new ArrayList<Map<String, Object>>();
+        Map<String, Object> firstRejection = null;
         for (var candidate : candidates) {
-            if (candidate == null) continue;
             var endpoint = currentEndpoint(candidate);
+            var snapshot = candidate;
+            DecodeResources.Capacity deficit = null;
             Response reason;
             if (endpoint == null) {
                 reason = Response.error(StrategyErrorType.NO_DECODE_WORKER);
-                evidence.add(
-                        Map.of("endpoint", candidate.address(), "reason", "CANDIDATE_CHANGED"));
             } else {
                 var evaluation =
                         endpoint.evaluateSelection(
                                 context.getRequest(), context.getPriority(), admissionCapacity);
-                if (evaluation.deficit().isZero())
-                    return RoutingResult.retry(
-                            Response.error(StrategyErrorType.SCHEDULER_PLAN_CONFLICT));
+                snapshot = evaluation.snapshot();
+                deficit = evaluation.deficit();
                 reason = evaluation.failure();
-                reason.setErrorMessage(
-                        reason.getErrorMessage()
-                                + "; endpoint="
-                                + candidate.address()
-                                + "; deficit="
-                                + evaluation.deficit());
-                evidence.add(
+                if (deficit.isZero()) {
+                    snapshot = candidate;
+                    deficit =
+                            admissionCapacity.evaluate(
+                                    candidate.usage(),
+                                    context.getRequest().getHardKvTokens(),
+                                    context.getRequest().getExpectedKvTokens(),
+                                    DecodeResources.Capacity.NONE);
+                    reason =
+                            Response.buildErrorResponse(
+                                    StrategyErrorType.NO_DECODE_WORKER,
+                                    "No Decode capacity was available in the selection snapshot");
+                }
+            }
+            if (firstRejection == null) {
+                if (deficit == null)
+                    deficit =
+                            admissionCapacity.evaluate(
+                                    snapshot.usage(),
+                                    context.getRequest().getHardKvTokens(),
+                                    context.getRequest().getExpectedKvTokens(),
+                                    DecodeResources.Capacity.NONE);
+                firstRejection =
                         Map.of(
                                 "endpoint",
                                 candidate.address(),
                                 "version",
-                                evaluation.snapshot().admissionVersion(),
+                                snapshot.admissionVersion(),
                                 "deficit",
-                                evaluation.deficit(),
+                                deficit,
                                 "reason",
-                                reason.getErrorMessage()));
+                                reason.getErrorMessage());
             }
             if (failure == null) failure = reason;
             else if (failure.getCode() != reason.getCode()
@@ -272,8 +278,7 @@ public class DecodeStrategy
             failure =
                     Response.buildErrorResponse(
                             StrategyErrorType.NO_DECODE_WORKER,
-                            "No allowed Decode endpoint admitted this request; candidate rejection reasons differ: "
-                                    + evidence);
+                            "No allowed Decode endpoint admitted this request; candidate rejection reasons differ");
         return RoutingResult.blocked(
                 new CapacityKey(RoleType.DECODE, group, null),
                 failure,
@@ -282,8 +287,10 @@ public class DecodeStrategy
                         failure.getErrorMessage(),
                         "capturedAtMs",
                         System.currentTimeMillis(),
-                        "decode",
-                        List.copyOf(evidence)));
+                        "candidateCount",
+                        candidates.size(),
+                        "firstRejection",
+                        firstRejection));
     }
 
     private DecodeEndpoint currentEndpoint(DecodeEndpoint.SelectionSnapshot expected) {
@@ -293,6 +300,20 @@ public class DecodeStrategy
                         && decode.getStatus().getGenerationId() == expected.generationId()
                 ? decode
                 : null;
+    }
+
+    private RoutingResult<RoleSelection, CapacityKey> decodeCapacityBlocked(
+            DecodeEndpoint.SelectionSnapshot selected) {
+        return RoutingResult.blocked(
+                CapacityKey.exact(RoleType.DECODE, selected.topology().group(), selected.address()),
+                Response.error(StrategyErrorType.RESOURCE_EXHAUSTED),
+                Map.of(
+                        "cause",
+                        "Decode capacity is insufficient",
+                        "decodeCandidate",
+                        selected,
+                        "capturedAtMs",
+                        System.currentTimeMillis()));
     }
 
     private WorkerEndpoint.Registration<RoleSelection> registerDecode(
@@ -305,8 +326,8 @@ public class DecodeStrategy
                     WorkerEndpoint.RegistrationStatus.UNAVAILABLE);
         var accepted =
                 endpoint.tryRegisterSelection(
-                        selected,
                         request.getRequestId(),
+                        selected,
                         request.getHardKvTokens(),
                         request.getExpectedKvTokens(),
                         metadata.priority(),
@@ -332,19 +353,10 @@ public class DecodeStrategy
         }
     }
 
-    private RoutingResult<RoleSelection, CapacityKey> decodeRegistrationBlocked(
-            DecodeEndpoint.SelectionSnapshot selected) {
-        return RoutingResult.blocked(
-                CapacityKey.exact(RoleType.DECODE, selected.topology().group(), selected.address()),
-                Response.error(StrategyErrorType.RESOURCE_EXHAUSTED),
-                Map.of(
-                        "cause",
-                        "Decode capacity rejected registration",
-                        "decodeCandidate",
-                        selected,
-                        "capturedAtMs",
-                        System.currentTimeMillis()));
-    }
+    /**
+     * Keeps the chosen endpoint and the capacity values compared during this selection round.
+     */
+    record Selection(DecodeEndpoint endpoint, DecodeEndpoint.SelectionSnapshot snapshot) {}
 
     /**
      * Reuses scoring arrays within one Decode selection call; inUse protects nested calls on the same thread.

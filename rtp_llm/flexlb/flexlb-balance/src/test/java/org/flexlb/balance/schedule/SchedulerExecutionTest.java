@@ -2,7 +2,6 @@ package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
-import org.flexlb.balance.queue.GlobalQueueEntry;
 import org.flexlb.balance.queue.OrderedRequestQueue;
 import org.flexlb.balance.queue.SchedulingQueue;
 import org.flexlb.balance.requestlog.TheoryCacheHitReporter;
@@ -48,10 +47,7 @@ class SchedulerExecutionTest {
             assertEquals(2, queue.size());
             assertEquals(originalSequence, first.getPlacementSequence());
             assertEquals(
-                    List.of(first, second),
-                    queue.scanForPlanningCandidates(2, 2, entry -> true).stream()
-                            .map(GlobalQueueEntry::context)
-                            .toList());
+                    List.of(first, second), queue.scanForPlanningCandidates(2, 2, entry -> true));
         } finally {
             SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(lifecycle));
         }
@@ -75,7 +71,10 @@ class SchedulerExecutionTest {
                         call -> {
                             runningThread.set(Thread.currentThread());
                             if (checks.incrementAndGet() == 1)
-                                scheduler.onEndpointChanged(endpoint);
+                                ((org.flexlb.worker.endpoint.CapacityNotifier)
+                                                ReflectionTestUtils.getField(
+                                                        scheduler, "capacityNotifier"))
+                                        .notifyChanged(endpoint);
                             else resumed.countDown();
                             return false;
                         });
@@ -112,7 +111,9 @@ class SchedulerExecutionTest {
             scheduler.stop();
             assertTrue(scheduler.awaitStopped(System.nanoTime() + TimeUnit.SECONDS.toNanos(2)));
             int completed = calls.get();
-            scheduler.onEndpointChanged(endpoint());
+            ((org.flexlb.worker.endpoint.CapacityNotifier)
+                            ReflectionTestUtils.getField(scheduler, "capacityNotifier"))
+                    .notifyChanged(endpoint());
             scheduler.start();
             assertEquals(completed, calls.get());
         } finally {

@@ -174,6 +174,7 @@ public final class FlexlbConfigValidator {
 
     private static void validateQueue(SchedulerConfig queue) {
         positive(queue.getQueueTimeoutMs(), "scheduler.queueTimeoutMs");
+        positive(queue.getCapacityCheckIntervalMs(), "scheduler.capacityCheckIntervalMs");
         require(
                 Double.isFinite(queue.getScanBudgetMultiplier())
                         && queue.getScanBudgetMultiplier() >= 1.0,

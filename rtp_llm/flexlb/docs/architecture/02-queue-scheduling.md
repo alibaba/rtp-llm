@@ -16,10 +16,16 @@ AbstractRequestScheduler 负责注册、期限、取消、响应及资源清理�
 
 SINGLE 是固定行为，无须配置决策策略或交付模式。
 自定义调度器、排序与选址策略仍通过各自入口扩展。
-SchedulingRequests 统一管理排队登记与未结束任务，同一请求的决策和抢占结果共用一份执行记录。
-等待数从排队登记中排除仍有任务的请求；决策和抢占重叠时只扣一次，已取消任务不扣减新登记。
-取消或恢复排队只改变登记，旧任务的名额和关闭等待仍保留到回调返回。
-CapacityWaitQueue 与抢占名额等待集合只负责唤醒，不再用于拼接等待请求统计。
+SchedulingQueue 直接保存 RequestContext；OrderedRequestQueue 的节点、成员索引与扫描游标不对外暴露。
+Scheduler 用 executing 记录尚未结束的任务，队列成员和任务各有一个负责位置。
+取消移除队列成员，但执行记录保留到选址或抢占结果清理结束，期间不会重复选路。
+容量不足的请求由 CapacityWaitQueue 按角色/分组暂停，每个等待域同时只允许一个请求重试。
+容量广播只开放等待域的一次检查并唤醒调度线程，不把扫描游标重置到队头；重试成功或取消后
+继续下一个，仍然容量不足则再次暂停。实际接纳数量由 Endpoint 决定，线程空位不代表资源容量。
+没有通知时每隔 capacityCheckIntervalMs 检查一次，默认 100ms；周期扫描仍排除未获重试机会的等待请求。
+规划任务完成只继续未扫描部分或已经允许的容量重试。
+抢占结果回调只交回待执行动作；恢复选路与普通选路共用 plannerCount 个执行名额。
+关闭先停止接纳并结束排队请求，保留规划线程处理晚到结果，待任务清理完成后关闭线程池。
 
 ## 选址与路由响应
 
@@ -104,7 +110,7 @@ scheduleRequestCleanup 统一安排执行顺序：Endpoint 关闭先发布响应
 
 ## Decode 抢占与取消
 
-Decode 抢占由 policy 选择请求，执行普通请求取消并等待 Endpoint 的容量变化。
+Decode 抢占由具体 DecodePreemptionPlanner 选择请求，DefaultRequestPreemption 执行普通取消并等待 Endpoint 的容量变化。
 RequestContext 不保留独立抢占事务、取消阶段或恢复交付协议。
 RPC 模式由 EngineCancellation 向原引擎发送单请求 Cancel，并处理有界重试和晚到回复；
 RETURN 模式将取消指令交给调用方透传。
@@ -113,7 +119,10 @@ EngineCancellation 通过 Scheduler.onEngineCancelReply 回报结果，由 Sched
 转换清理事件并推进资源释放；Context 校验具体路由。已归档请求的晚到回复被忽略，
 取消任务持有的 Context 引用不依赖请求仍在活跃索引中。
 取消确认和资源释放使用精确路由、预留及请求身份。
-请求级 RequestResult 同时携带抢占完成状态或释放规划线程后订阅抢占结果的后续动作，不再使用 RoutingPlan。
+RequestResult 不携带抢占资源或 continuation。RequestContext.currentResourceWait 指向当前精确等待，
+DecodeEndpoint 保存同一对象；取消、结束或选路退出清除 Context 引用后，残留索引立即失去优先级约束作用。
+多个等待者取有效等待中的最高优先级；更高优先级请求仍可接纳。
+等待的 Future 只在 Endpoint 锁外完成，晚到登记由结果接收方精确回滚；等待本身不占规划线程。
 
 ## 关闭
 

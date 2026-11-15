@@ -111,7 +111,7 @@ public final class SchedulingTestConfig {
         return service;
     }
 
-    public static org.flexlb.balance.schedule.DecodePreemptionPolicy.DecodePreemptionDecision
+    public static org.flexlb.balance.schedule.DecodePreemptionPlanner.DecodePreemptionDecision
             planDecode(
                     org.flexlb.worker.endpoint.Request request,
                     int priority,
@@ -119,7 +119,7 @@ public final class SchedulingTestConfig {
                     org.flexlb.worker.endpoint.DecodeResources.ResourceSnapshot snapshot,
                     PreemptionConfig preemption,
                     java.util.Map<String, String> failures) {
-        return new org.flexlb.balance.schedule.PriorityDecodePreemptionPolicy()
+        return new org.flexlb.balance.schedule.DecodePreemptionPlanner()
                 .planDecode(request, priority, capacity, snapshot, preemption, failures);
     }
 

@@ -235,7 +235,7 @@
       "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/grpc/EngineGrpcService.java": "feb09b7bfa2d439b7373d245f0f6d071ed112ac3888d1ac9146e078f15390bda",
       "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/grpc/EngineStatusConverter.java": "040eebe9d74e1df9160763e9718c5701b48603964f7812e35807139a10d2cae2",
       "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/monitor/BatchSchedulerReporter.java": "2f66cba2fbb7063f83660cc93c4f3d0c4c921ee53af37bae8a22b45b56995d69",
-      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/monitor/EngineHealthReporter.java": "7772142d80eb2920b925fd8f0dcae507cb78cf64fcf31bb1a4247abca572cfef",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/monitor/ServiceMetricsReporter.java": "7772142d80eb2920b925fd8f0dcae507cb78cf64fcf31bb1a4247abca572cfef",
       "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/monitor/RequestSchedulerReporter.java": "75625e05fa5b0322cf6cd8149c8823809d8bc5ca35232f752bcc3be58a1d1319",
       "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/monitor/SyncSchedulerConfig.java": "fd07d59429350d17deddc222b5affee8ae1153cc290d0df4146de97a56b19394",
       "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/sync/runner/EngineSyncRunner.java": "1dd395977b92fde3d75afc15864cd8c8484a7a65fd03514c8caee742447cb718",

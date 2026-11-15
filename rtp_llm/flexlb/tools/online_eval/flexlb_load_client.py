@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("trace", help="query/trace JSONL")
     parser.add_argument("--flexlb-http-addr", default="127.0.0.1:7001")
-    parser.add_argument("--flexlb-grpc-target", help="override flexlb gRPC target")
+    parser.add_argument("--flexlb-worker-target", help="override flexlb gRPC target")
     parser.add_argument(
         "--output-dir", default="rtp_llm/flexlb/tools/online_eval/run/load_client"
     )

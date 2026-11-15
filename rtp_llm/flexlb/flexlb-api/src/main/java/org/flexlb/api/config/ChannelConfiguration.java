@@ -3,6 +3,8 @@ package org.flexlb.api.config;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import io.netty.channel.DefaultSelectStrategyFactory;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.epoll.Epoll;
+import io.netty.channel.epoll.EpollEventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.util.concurrent.DefaultEventExecutorChooserFactory;
 import io.netty.util.concurrent.DefaultThreadFactory;
@@ -74,6 +76,15 @@ public class ChannelConfiguration {
         // permanently wedge flush scheduling for the channel (writes and
         // cancels queue forever), which is a strictly worse retention mode
         // than the default unbounded MPSC queue.
+        if (Epoll.isAvailable()) {
+            return new EpollEventLoopGroup(
+                    config.getInternalRuntime().getGrpcClientEventLoopThreads(),
+                    null,
+                    DefaultEventExecutorChooserFactory.INSTANCE,
+                    DefaultSelectStrategyFactory.INSTANCE,
+                    RejectedExecutionHandlers.reject(),
+                    PlatformDependent::newMpscQueue);
+        }
         return new NioEventLoopGroup(
                 config.getInternalRuntime().getGrpcClientEventLoopThreads(),
                 null,

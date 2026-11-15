@@ -16,8 +16,8 @@ public final class SchedulerTestSupport {
             DecodeEndpoint endpoint, long requestId, long hardKv, long expectedKv, int priority) {
         var acquired =
                 endpoint.tryRegisterSelection(
-                        endpoint.selectionSnapshot(),
                         String.valueOf(requestId),
+                        endpoint.selectionSnapshot(),
                         hardKv,
                         expectedKv,
                         priority,

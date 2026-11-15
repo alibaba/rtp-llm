@@ -47,11 +47,6 @@ class AbstractWorkerSelectionStrategyTest {
                                 assertSame(stale, candidate);
                                 return fresh;
                             }
-
-                            @Override
-                            protected boolean tryOtherWhenFull() {
-                                return false;
-                            }
                         })
                         .selectCandidates(
                                 null,
@@ -123,11 +118,6 @@ class AbstractWorkerSelectionStrategyTest {
                             public Object refresh(Object original) {
                                 return original;
                             }
-
-                            @Override
-                            protected boolean tryOtherWhenFull() {
-                                return false;
-                            }
                         })
                         .selectCandidates(
                                 null,
@@ -158,11 +148,6 @@ class AbstractWorkerSelectionStrategyTest {
 
                             public Object refresh(Object original) {
                                 throw new AssertionError();
-                            }
-
-                            @Override
-                            protected boolean tryOtherWhenFull() {
-                                return false;
                             }
                         })
                         .selectCandidates(

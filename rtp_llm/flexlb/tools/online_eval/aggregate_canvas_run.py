@@ -102,7 +102,7 @@ def is_ok(d):
 
 
 # ---- err_other 细分：具名子桶匹配规则（先具名、后残渣） ----
-# 真实错误文本依据（20260827 本地 per_request.jsonl 实测 + flexlb-sync
+# 真实错误文本依据（20260827 本地 per_request.jsonl 实测 + flexlb-balance
 # StrategyErrorType/AdmissionFailure/RequestLifecycleCoordinator 源码）：
 #   * gRPC 传输层（load client e.toString()）：
 #       "io.grpc.StatusRuntimeException: UNAVAILABLE: io exception"（实测大头）、

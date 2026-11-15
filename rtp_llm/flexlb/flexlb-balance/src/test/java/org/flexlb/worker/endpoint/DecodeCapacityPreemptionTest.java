@@ -1,14 +1,10 @@
 package org.flexlb.worker.endpoint;
 
 import org.flexlb.balance.schedule.AbstractRequestScheduler;
-import org.flexlb.balance.schedule.CancelReason;
-import org.flexlb.balance.schedule.DecodePreemptionPolicy.DecodePreemptionPlan;
-import org.flexlb.balance.schedule.DefaultDecodePreemption;
-import org.flexlb.balance.schedule.PriorityDecodePreemptionPolicy;
+import org.flexlb.balance.schedule.DecodePreemptionPlanner.DecodePreemptionPlan;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.balance.schedule.RequestRepository;
 import org.flexlb.balance.schedule.RequestResult;
-import org.flexlb.balance.schedule.SchedulingMetadata;
 import org.flexlb.balance.schedule.SchedulingTestConfig;
 import org.flexlb.config.scheduler.PreemptionConfig;
 import org.flexlb.config.scheduler.PreemptionStage;
@@ -18,7 +14,6 @@ import org.flexlb.worker.status.WorkerStatusResponse;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -26,8 +21,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -47,7 +40,7 @@ class DecodeCapacityPreemptionTest {
         var capacity = new DecodeResources.AdmissionCapacity(1, 100);
         var first =
                 endpoint.tryRegisterSelection(
-                                endpoint.selectionSnapshot(), "first", 100, 100, 10, capacity)
+                                "first", endpoint.selectionSnapshot(), 100, 100, 10, capacity)
                         .value();
         assertNotNull(first);
         var notifications = new java.util.concurrent.atomic.AtomicInteger();
@@ -61,8 +54,8 @@ class DecodeCapacityPreemptionTest {
                     underLock.set(endpoint.stateLock().isHeldByCurrentThread());
                     admitted.set(
                             endpoint.tryRegisterSelection(
-                                            endpoint.selectionSnapshot(),
                                             "competitor",
+                                            endpoint.selectionSnapshot(),
                                             100,
                                             100,
                                             20,
@@ -79,94 +72,6 @@ class DecodeCapacityPreemptionTest {
             assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
         } finally {
             notifier.removeListener(listener);
-            EndpointTestSupport.closeAndWait(endpoint);
-        }
-    }
-
-    @org.junit.jupiter.api.Test
-    void incomingMustNotCancelAnotherRequestAfterItsFreedSlotWasTaken() {
-        var endpoint = endpoint(1000L);
-        var capacity = new DecodeResources.AdmissionCapacity(1, 100);
-        var repository = mock(RequestRepository.class);
-        var victimScheduler = mock(AbstractRequestScheduler.class);
-        var incomingScheduler = mock(AbstractRequestScheduler.class);
-        var incoming = mock(RequestContext.class);
-        when(incoming.getRequest())
-                .thenReturn(Request.builder().requestId("incoming").seqLen(100L).build());
-        when(incoming.getRequestId()).thenReturn("incoming");
-        when(incoming.getPriority()).thenReturn(90);
-        when(incoming.getSchedulingMetadata())
-                .thenReturn(SchedulingMetadata.explicit(90, Long.MAX_VALUE));
-        when(incoming.getRequestExpiresAtMs()).thenReturn(Long.MAX_VALUE);
-        when(incoming.getFuture()).thenReturn(new CompletableFuture<>());
-        when(incoming.getRequestScheduler()).thenReturn(incomingScheduler);
-        when(incomingScheduler.isAdmissionOpen(incoming)).thenReturn(true);
-        var config = SchedulingTestConfig.newConfig();
-        SchedulingTestConfig.usePriorityQueue(config);
-        var settings = new PreemptionConfig();
-        settings.setAllowedPreemptionStages(EnumSet.of(PreemptionStage.DECODE_ENGINE_OWNED));
-        config.priorityOrdering().setPreemption(settings);
-        var preemption =
-                new DefaultDecodePreemption(
-                        repository,
-                        mock(org.flexlb.balance.metrics.RequestSchedulerReporter.class),
-                        SchedulingTestConfig.configService(config),
-                        capacity,
-                        new PriorityDecodePreemptionPolicy());
-        try {
-            var first =
-                    endpoint.tryRegisterSelection(
-                                    endpoint.selectionSnapshot(), "first", 100, 100, 10, capacity)
-                            .value();
-            assertNotNull(first);
-            reportRunning(endpoint, "first", 900);
-            var firstContext = bindRequest(repository, victimScheduler, endpoint, first);
-            assertEquals(
-                    org.flexlb.balance.strategy.RoutingResult.Status.BLOCKED,
-                    preemption.tryPreempt(incoming, endpoint).join().status());
-            verify(victimScheduler).cancel(firstContext, CancelReason.PRIORITY_PREEMPTED);
-            assertEquals(
-                    WorkerEndpoint.RegistrationStatus.CAPACITY_FULL,
-                    endpoint.tryRegisterSelection(
-                                    endpoint.selectionSnapshot(),
-                                    "incoming",
-                                    100,
-                                    100,
-                                    90,
-                                    capacity)
-                            .status());
-
-            // Confirmed cleanup frees the slot; a competing request reaches admission before the
-            // waiter.
-            assertTrue(endpoint.releaseRequest(first));
-            var competitor =
-                    endpoint.tryRegisterSelection(
-                                    endpoint.selectionSnapshot(),
-                                    "competitor",
-                                    100,
-                                    100,
-                                    20,
-                                    capacity)
-                            .value();
-            assertNotNull(competitor);
-            reportRunning(endpoint, "competitor", 900);
-            var competitorContext = bindRequest(repository, victimScheduler, endpoint, competitor);
-            assertEquals(
-                    WorkerEndpoint.RegistrationStatus.CAPACITY_FULL,
-                    endpoint.tryRegisterSelection(
-                                    endpoint.selectionSnapshot(),
-                                    "incoming",
-                                    100,
-                                    100,
-                                    90,
-                                    capacity)
-                            .status());
-
-            preemption.tryPreempt(incoming, endpoint).join();
-            verify(victimScheduler, never())
-                    .cancel(competitorContext, CancelReason.PRIORITY_PREEMPTED);
-        } finally {
-            preemption.close();
             EndpointTestSupport.closeAndWait(endpoint);
         }
     }
@@ -195,8 +100,8 @@ class DecodeCapacityPreemptionTest {
         try {
             var first =
                     endpoint.tryRegisterSelection(
-                                    endpoint.selectionSnapshot(),
                                     "first",
+                                    endpoint.selectionSnapshot(),
                                     firstHard,
                                     firstExpected,
                                     10,
@@ -206,8 +111,8 @@ class DecodeCapacityPreemptionTest {
             var before = endpoint.selectionSnapshot().usage();
             var result =
                     endpoint.tryRegisterSelection(
-                            endpoint.selectionSnapshot(),
                             "next",
+                            endpoint.selectionSnapshot(),
                             nextHard,
                             nextExpected,
                             20,
@@ -238,7 +143,7 @@ class DecodeCapacityPreemptionTest {
         try {
             var first =
                     endpoint.tryRegisterSelection(
-                                    endpoint.selectionSnapshot(), "same", 100, 200, 10, capacity)
+                                    "same", endpoint.selectionSnapshot(), 100, 200, 10, capacity)
                             .value();
             assertNotNull(first);
             assertFalse(
@@ -249,7 +154,7 @@ class DecodeCapacityPreemptionTest {
             assertFalse(endpoint.releaseRequest(first));
             var replacement =
                     endpoint.tryRegisterSelection(
-                                    endpoint.selectionSnapshot(), "same", 200, 300, 10, capacity)
+                                    "same", endpoint.selectionSnapshot(), 200, 300, 10, capacity)
                             .value();
             assertNotNull(replacement);
             var before = endpoint.selectionSnapshot();
@@ -269,7 +174,7 @@ class DecodeCapacityPreemptionTest {
         try {
             var local =
                     endpoint.tryRegisterSelection(
-                                    endpoint.selectionSnapshot(), "local", 100, 200, 10, capacity)
+                                    "local", endpoint.selectionSnapshot(), 100, 200, 10, capacity)
                             .value();
             assertNotNull(local);
             reportRunning(endpoint, "local", 900);
@@ -299,7 +204,7 @@ class DecodeCapacityPreemptionTest {
         var policy = new DecodeResources.AdmissionCapacity(1L, 100L);
         var a =
                 endpoint.tryRegisterSelection(
-                                endpoint.selectionSnapshot(), "1", 100, 100, 30, policy)
+                                "1", endpoint.selectionSnapshot(), 100, 100, 30, policy)
                         .value();
         assertNotNull(a);
         var task = new org.flexlb.worker.status.TaskInfo();
@@ -318,13 +223,13 @@ class DecodeCapacityPreemptionTest {
         assertEquals(
                 WorkerEndpoint.RegistrationStatus.CAPACITY_FULL,
                 endpoint.tryRegisterSelection(
-                                endpoint.selectionSnapshot(), "b", 100, 100, 70, policy)
+                                "b", endpoint.selectionSnapshot(), 100, 100, 70, policy)
                         .status());
         assertTrue(endpoint.releaseRequest(a));
         assertEquals(
                 WorkerEndpoint.RegistrationStatus.CAPACITY_FULL,
                 endpoint.tryRegisterSelection(
-                                endpoint.selectionSnapshot(), "c", 100, 100, 60, policy)
+                                "c", endpoint.selectionSnapshot(), 100, 100, 60, policy)
                         .status());
         updateCapacity(endpoint, 1000L);
         // The released slot belongs to ordinary admission, regardless of which request requested
@@ -332,12 +237,12 @@ class DecodeCapacityPreemptionTest {
         assertEquals(
                 WorkerEndpoint.RegistrationStatus.REGISTERED,
                 endpoint.tryRegisterSelection(
-                                endpoint.selectionSnapshot(), "c", 100, 100, 60, policy)
+                                "c", endpoint.selectionSnapshot(), 100, 100, 60, policy)
                         .status());
         assertEquals(
                 WorkerEndpoint.RegistrationStatus.CAPACITY_FULL,
                 endpoint.tryRegisterSelection(
-                                endpoint.selectionSnapshot(), "b", 100, 100, 70, policy)
+                                "b", endpoint.selectionSnapshot(), 100, 100, 70, policy)
                         .status());
     }
 

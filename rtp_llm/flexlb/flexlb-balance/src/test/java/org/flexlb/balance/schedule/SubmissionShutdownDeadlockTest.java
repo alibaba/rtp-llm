@@ -236,7 +236,7 @@ class SubmissionShutdownDeadlockTest {
                                                     .class)),
                             config,
                             router,
-                            mock(DecodePreemption.class),
+                            org.flexlb.balance.schedule.RequestPreemptionTestSupport.mock(),
                             new CapacityNotifier(),
                             new OrderedRequestQueue(config.isPriorityOrdering()));
             runtime.registerScheduler(scheduler);

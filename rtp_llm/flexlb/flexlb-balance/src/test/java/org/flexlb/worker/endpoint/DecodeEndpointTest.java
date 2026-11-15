@@ -345,8 +345,8 @@ class DecodeEndpointTest {
         reserve(1L, 100, 100);
         var duplicate =
                 endpoint.tryRegisterSelection(
-                        endpoint.selectionSnapshot(),
                         "1",
+                        endpoint.selectionSnapshot(),
                         100L,
                         100L,
                         50,

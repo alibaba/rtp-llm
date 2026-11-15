@@ -2315,8 +2315,8 @@
         "changes": []
       },
       {
-        "file": "flexlb-sync/src/main/java/org/flexlb/service/monitor/EngineHealthReporter.java",
-        "top_level_type": "EngineHealthReporter",
+        "file": "flexlb-sync/src/main/java/org/flexlb/service/monitor/ServiceMetricsReporter.java",
+        "top_level_type": "ServiceMetricsReporter",
         "action": "retained_production_reference_or_protocol",
         "lexical_type_mentions_in_other_production_files": 28,
         "annotations": ["Autowired", "Component", "PostConstruct", "Scheduled"],

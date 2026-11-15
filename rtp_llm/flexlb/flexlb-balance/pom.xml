@@ -136,6 +136,35 @@
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>default-test</id>
+            <configuration>
+              <excludes>
+                <exclude>**/SelectionPerformanceTest.java</exclude>
+              </excludes>
+            </configuration>
+          </execution>
+          <execution>
+            <id>selection-performance</id>
+            <phase>test</phase>
+            <goals>
+              <goal>test</goal>
+            </goals>
+            <configuration>
+              <includes>
+                <include>**/SelectionPerformanceTest.java</include>
+              </includes>
+              <reuseForks>false</reuseForks>
+              <reportsDirectory
+              >${project.build.directory}/surefire-reports/selection-performance</reportsDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
         <configuration>
           <source>21</source>

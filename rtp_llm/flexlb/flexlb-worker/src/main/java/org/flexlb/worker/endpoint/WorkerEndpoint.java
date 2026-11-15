@@ -295,9 +295,6 @@ public class WorkerEndpoint {
         }
     }
 
-    /**
-     * Identifies one request's exact resource registration within a worker generation.
-     */
     public interface RequestRegistration {
         String requestId();
 

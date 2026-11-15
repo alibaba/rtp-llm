@@ -14,8 +14,13 @@ group 为 null 时包含全部分组；后者只查当前地址映射。角色�
 监控直接遍历同一列表，不再构造统计专用的节点 Map。
 
 PrefillEndpoint.SelectionSnapshot 只包含 generationId、resourceVersion、computeTokens 和 maxComputeTokens。
-策略读取快照比较工作量，tryRegisterSelection 在 Endpoint 状态锁内检查代际、版本和剩余容量，
+快照按现有资源版本和代际复用，资源未变时不重复创建。策略读取快照比较工作量，
+tryRegisterSelection 在 Endpoint 状态锁内检查代际、当前工作量和剩余容量，
 登记后立即计入工作量。冲突时重新选择，容量不足时尝试其他候选；没有候选则等待容量变化。
+
+Decode 拒绝原因在 Endpoint 锁内直接按请求优先级统计，不为解释拒绝复制完整请求账本。
+请求拒绝诊断记录候选数量和首个拒绝示例，错误分类仍检查全部候选，不逐节点构造诊断列表。
+抢占需要逐个检查请求及资源登记时，才读取完整 ResourceSnapshot。
 
 选择过程中取得的各角色资源由同一次尝试负责。完整路由提交前仍需检查取消和节点可用性；
 失败时回滚全部已取得资源。完整路由与返回状态一起提交，不保留等待派发的路由。
@@ -25,7 +30,7 @@ P/D/E 共用 WorkerEndpoint 的 RegistrationStatus、Registration<T> 和 Request
 各角色保留自己的具体登记与 SelectionSnapshot。P/E 共用本地 REGISTERED/COMMITTED 阶段；
 Decode 的 UNCONFIRMED/CONFIRMED 表示 Worker 是否已确认执行，与本地提交阶段不同。
 RoleSelection 通过 SelectionRollback 调用统一的 rollbackSelection，各 Endpoint 自行核对身份和阶段，
-旧登记或重复回滚不能影响同 ID 的新记录。正常完成或远端清理后的释放使用 releaseRequest。
+旧登记或重复回滚不能影响同 ID 的新记录。正常完成或远端清理后的释放使用 releaseRequest，各角色均接收精确登记对象；重复释放不能影响同 ID 的新登记。
 
 ## 状态更新和关闭
 
@@ -34,7 +39,7 @@ WorkerEndpoint 统一检查代际、加锁和发布状态；角色实现 updateS
 请求事件、容量通知和网络操作在锁外执行。
 
 Registry 对所有已登记 Endpoint 调用统一的 `evictExpiredRequests`，不按角色分派或转换类型。
-Prefill、Decode 和 Encoder 各自负责其本地记录的 TTL 与精确身份复核；没有请求登记的 VIT 默认不做清理。
+Prefill、Decode 和 Encoder 各自负责其本地记录的 TTL 与精确身份复核，统一返回实际删除的记录数；Decode 删除已确认记录不扣除 Worker 上报占用。没有请求登记的 VIT 默认不做清理。
 EncoderStrategy 直接读取 router.roles.encoder.maxRequests，筛选候选和 Endpoint 登记使用同一上限。
 DIRECT 和 QUEUE 都遵守此上限；Scheduler 只根据容量不足结果决定拒绝或等待，不持有 Encoder 容量参数。
 只有调度器已不再保留的记录才可清理：先在锁内捕获候选，锁外查询保留状态，再持锁复核后移除。
@@ -49,14 +54,16 @@ Registry 等待精确代际关闭后清理注册与缓存。已有请求的状�
 等待节点接纳锁和执行清理时不持有 Registry 全局锁，其他节点仍可发现、发布和接纳请求。
 定期扫描先关闭不可用节点的接纳，再启动清理；状态锁或接纳锁忙碌的节点留待后续扫描，
 不阻塞同一轮对其他节点的处理。
-整体关闭仍分别等待正在发布的节点和已登记的下线任务；清理失败通过完成结果及整体关闭报告。
+整体关闭通过发布读写锁等待已接纳的发布/撤出事务退出，再停止所有节点接纳并等待关闭 Future。
+下线任务的 Future 是其完成依据，不再维护发布计数、清理计数及手工加减协议。
+失败任务保留在目录中，清理失败通过任务 Future 及整体关闭报告。
 Decode 关闭先清除本地请求记录，再逐个通知请求和容量变化。普通通知异常记录日志并继续，
 不阻止 Registry 收尾；本地资源清理失败仍通过关闭 Future 报告，Registry 不将其视为清理完成。
 
 ## Prefill
 
 PrefillEndpoint.RequestRegistration 保存 requestId、computeTokens、绑定的完整路由和 REGISTERED/COMMITTED 状态。
-登记时预留 compute tokens，完整路由绑定后提交；完成、回滚或清理时移除精确记录并扣减工作量。
+登记时预留 compute tokens，commitSelection 同时绑定完整路由并提交；完成、回滚或清理时移除精确记录并扣减工作量。
 本地请求按登记值计数，不根据经过时间衰减，也不学习执行耗时。
 
 上报的未知运行请求按 inputLength 减有效 prefixLength 统计 compute tokens。

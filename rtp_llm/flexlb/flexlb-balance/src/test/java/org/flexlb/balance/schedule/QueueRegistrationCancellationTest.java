@@ -334,7 +334,7 @@ class QueueRegistrationCancellationTest {
                                                             .TheoryCacheHitReporter.class)),
                                     config,
                                     router,
-                                    mock(DecodePreemption.class),
+                                    org.flexlb.balance.schedule.RequestPreemptionTestSupport.mock(),
                                     new CapacityNotifier(),
                                     schedulingQueue);
             runtime.registerScheduler(queue);

@@ -120,21 +120,15 @@ public class SchedulerConfiguration {
     }
 
     @Bean
-    @ConditionalOnMissingBean(DecodePreemptionPolicy.class)
-    public DecodePreemptionPolicy decodePreemptionPolicy() {
-        return new PriorityDecodePreemptionPolicy();
-    }
-
-    @Bean
-    @ConditionalOnMissingBean(DecodePreemption.class)
+    @ConditionalOnMissingBean(RequestPreemption.class)
     @Lazy
-    public DecodePreemption decodePreemption(
+    public RequestPreemption requestPreemption(
             RequestRepository requests,
             RequestSchedulerReporter reporter,
             ConfigService configService,
-            AdmissionCapacity capacity,
-            DecodePreemptionPolicy policy) {
-        return new DefaultDecodePreemption(requests, reporter, configService, capacity, policy);
+            AdmissionCapacity capacity) {
+        return new DefaultRequestPreemption(
+                requests, reporter, configService, capacity, new DecodePreemptionPlanner());
     }
 
     @Bean
@@ -157,7 +151,7 @@ public class SchedulerConfiguration {
     @ConditionalOnMissingBean(RequestScheduler.class)
     public AbstractRequestScheduler requestScheduler(
             @Lazy RequestRouteSelector router,
-            @Lazy DecodePreemption decodePreemption,
+            @Lazy RequestPreemption preemption,
             CapacityNotifier availability,
             RequestRepository requests,
             RequestTaskPool tasks,
@@ -174,7 +168,7 @@ public class SchedulerConfiguration {
             return new QueuedRequestScheduler(
                     config,
                     router,
-                    decodePreemption,
+                    preemption,
                     requests,
                     tasks,
                     deadlines,

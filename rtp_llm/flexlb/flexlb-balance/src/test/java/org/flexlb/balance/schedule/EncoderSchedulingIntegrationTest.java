@@ -469,7 +469,7 @@ class EncoderSchedulingIntegrationTest {
                         mock(RequestSchedulerReporter.class),
                         mock(TheoryCacheHitReporter.class),
                         selector,
-                        mock(DecodePreemption.class),
+                        org.flexlb.balance.schedule.RequestPreemptionTestSupport.mock(),
                         availability,
                         start);
         requests = SchedulerTestSupport.repository(lifecycle);

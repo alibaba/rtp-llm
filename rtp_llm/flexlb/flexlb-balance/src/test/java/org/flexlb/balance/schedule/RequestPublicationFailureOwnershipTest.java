@@ -178,7 +178,7 @@ class RequestPublicationFailureOwnershipTest {
                             })
                     .when(timer)
                     .update(eq(context), any());
-            when(endpoint.releaseRequest(route))
+            when(endpoint.releaseRequest(route.prefillRegistration()))
                     .thenAnswer(
                             call -> {
                                 released.countDown();
@@ -215,7 +215,7 @@ class RequestPublicationFailureOwnershipTest {
                         f.runtime, "timer", originalTimer);
             }
             assertEquals(Phase.CLOSED, context.snapshot().phase());
-            verify(endpoint, times(1)).releaseRequest(route);
+            verify(endpoint, times(1)).releaseRequest(route.prefillRegistration());
         }
     }
 
@@ -262,7 +262,7 @@ class RequestPublicationFailureOwnershipTest {
             assertEquals(Phase.CLOSED, context.snapshot().phase());
             assertEquals(0, f.runtime.requests().liveRequestCount());
             assertTrue(future.isCancelled());
-            verify(endpoint).releaseRequest(route);
+            verify(endpoint).releaseRequest(route.prefillRegistration());
         }
     }
 
@@ -336,7 +336,7 @@ class RequestPublicationFailureOwnershipTest {
                     assertTrue(future.get(5, TimeUnit.SECONDS).isSuccess());
                     assertEquals(0, registrations(f.runtime));
                     assertFalse(context.snapshot().notificationsDone());
-                    verify(endpoint, never()).releaseRequest(route);
+                    verify(endpoint, never()).releaseRequest(route.prefillRegistration());
                     finish.countDown();
                 } else {
                     assertTrue(future.get(5, TimeUnit.SECONDS).isSuccess());
@@ -345,7 +345,7 @@ class RequestPublicationFailureOwnershipTest {
                     assertEquals(Phase.ENDING, context.snapshot().phase());
                     assertSame(route, context.snapshot().route());
                     assertTrue(f.runtime.requests().isCurrent(context));
-                    verify(endpoint, never()).releaseRequest(route);
+                    verify(endpoint, never()).releaseRequest(route.prefillRegistration());
                     ReflectionTestUtils.setField(f.runtime.tasks, "requestWorkers", workers);
                     f.owner.closeRequest(context, null);
                 }
@@ -357,7 +357,7 @@ class RequestPublicationFailureOwnershipTest {
                 assertEquals(EndKind.INACTIVITY, context.snapshot().requestEndResult().endKind());
                 assertEquals(Phase.CLOSED, context.snapshot().phase());
                 assertEquals(0, f.runtime.requests().liveRequestCount());
-                verify(endpoint, times(1)).releaseRequest(route);
+                verify(endpoint, times(1)).releaseRequest(route.prefillRegistration());
                 if (startedBeforeFailure) {
                     assertDoesNotThrow(
                             () -> SchedulerTestServices.throwIfFailed(f.runtime.tasks),
@@ -408,8 +408,8 @@ class RequestPublicationFailureOwnershipTest {
         }
 
         @Override
-        public void close() {
-            // A failed mutant must report its leaked obligation without hanging fixture shutdown.
+        public void close() throws InterruptedException {
+            RequestProtocolTestSupport.awaitCondition(() -> registrations(runtime) == 0);
             assertEquals(
                     0,
                     registrations(runtime),

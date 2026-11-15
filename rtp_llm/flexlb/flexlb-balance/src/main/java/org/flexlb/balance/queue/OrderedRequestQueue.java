@@ -1,13 +1,14 @@
 package org.flexlb.balance.queue;
 
+import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.util.PriorityNormalizer;
 
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.List;
-import java.util.NavigableSet;
-import java.util.TreeSet;
+import java.util.Map;
 import java.util.function.Predicate;
 
 import static com.google.common.base.Preconditions.checkState;
@@ -15,38 +16,39 @@ import static com.google.common.base.Preconditions.checkState;
 /**
  * FIFO or fixed-range PRIORITY index for the model queue.
  *
- * <p>The QueuedRequestScheduler lock is the sole synchronization boundary. Entries are
- * intrusive nodes, so completion and cancellation unlink an arbitrary request
- * in O(1) without leaving a removed entry behind a blocked head. Ready retries use
- * a separate ordered index and share the scan budget with forward progress.</p>
+ * <p>The QueuedRequestScheduler lock is the sole synchronization boundary. Private
+ * nodes let completion and cancellation unlink an arbitrary request
+ * in O(1) without leaving a removed entry behind a blocked head. Each scan keeps
+ * its cursor until every request has been examined.</p>
  */
 public final class OrderedRequestQueue implements SchedulingQueue {
     private static final int PRIORITY_LEVELS = PriorityNormalizer.MAX_PRIORITY + 1;
 
     private final boolean priorityOrdering;
 
-    private final Comparator<GlobalQueueEntry> order;
-    private final NavigableSet<GlobalQueueEntry> readyRetries;
+    private final Comparator<RequestContext> order;
     private final Bucket[] buckets;
     private final BitSet pendingPriorities = new BitSet(PRIORITY_LEVELS);
     private final int[] priorityCounts = new int[PRIORITY_LEVELS];
+    private final Map<RequestContext, Node> members = new IdentityHashMap<>();
 
-    private int size;
     private long nextSequence;
 
     public OrderedRequestQueue(boolean priorityOrdering) {
         this.priorityOrdering = priorityOrdering;
         this.order =
                 priorityOrdering
-                        ? GlobalQueueEntry.PRIORITY_ORDER
-                        : GlobalQueueEntry.SEQUENCE_ORDER;
-        this.readyRetries = new TreeSet<>(order);
+                        ? Comparator.comparingInt(SchedulingQueue::priority)
+                                .reversed()
+                                .thenComparingLong(RequestContext::getPlacementSequence)
+                        : Comparator.comparingLong(RequestContext::getPlacementSequence);
         this.buckets = new Bucket[priorityOrdering ? PRIORITY_LEVELS : 1];
     }
 
-    public void add(GlobalQueueEntry entry) {
-        entry.sequence = ++nextSequence;
-        insert(entry, false);
+    public void add(RequestContext request) {
+        checkState(!members.containsKey(request), "request is already queued");
+        request.setPlacementSequence(++nextSequence);
+        insert(request, false);
     }
 
     public int[] priorityCounts() {
@@ -54,116 +56,117 @@ public final class OrderedRequestQueue implements SchedulingQueue {
     }
 
     public int size() {
-        return size;
+        return members.size();
     }
 
     /**
      * Rare route withdrawal: restore the original position without issuing a new sequence.
      */
-    public void restore(GlobalQueueEntry entry) {
-        checkState(entry.sequence > 0L, "only a previously removed entry can be restored");
-        insert(entry, true);
+    public void restore(RequestContext request) {
+        checkState(
+                request.getPlacementSequence() > 0L,
+                "only a previously queued request can be restored");
+        insert(request, true);
     }
 
     /**
      * Continue an ordered scan, counting every examined entry against the budget.
      * Eligibility may remove entries, but must not requeue an already selected entry.
      */
-    public List<GlobalQueueEntry> scanForPlanningCandidates(
-            int candidateLimit, int scanBudget, Predicate<GlobalQueueEntry> eligible) {
+    public List<RequestContext> scanForPlanningCandidates(
+            int candidateLimit, int scanBudget, Predicate<RequestContext> eligible) {
         if (candidateLimit <= 0 || scanBudget <= 0) {
             return List.of();
         }
-        List<GlobalQueueEntry> result = new ArrayList<>(Math.min(candidateLimit, size));
+        List<RequestContext> result = new ArrayList<>(Math.min(candidateLimit, members.size()));
         for (int checked = 0; checked < scanBudget && result.size() < candidateLimit; checked++) {
             int index = pendingPriorities.previousSetBit(buckets.length - 1);
-            GlobalQueueEntry forward = index < 0 ? null : buckets[index].nextToScan;
-            GlobalQueueEntry retry = readyRetries.isEmpty() ? null : readyRetries.first();
-            GlobalQueueEntry entry =
-                    retry == null || forward != null && order.compare(forward, retry) <= 0
-                            ? forward
-                            : retry;
-            if (entry == null) {
-                break;
-            }
-            if (entry == forward) {
-                buckets[index].nextToScan = entry.next;
-                if (entry.next == null) {
-                    pendingPriorities.clear(index);
-                }
-            }
-            readyRetries.remove(entry);
-            if (eligible.test(entry)) {
-                result.add(entry);
+            if (index < 0) break;
+            Node entry = buckets[index].nextToScan;
+            buckets[index].nextToScan = entry.next;
+            if (entry.next == null) pendingPriorities.clear(index);
+            if (eligible.test(entry.request)) {
+                result.add(entry.request);
             }
         }
         result.sort(order);
         return result;
     }
 
-    public boolean hasUnscannedRequests() {
-        return !pendingPriorities.isEmpty() || !readyRetries.isEmpty();
-    }
-
-    /**
-     * Make an awakened request directly available to the next bounded scan.
-     */
-    public void markRequestReadyForRetry(GlobalQueueEntry entry) {
-        if (entry.removed) {
-            return;
+    public void beginScan() {
+        for (int index = 0; index < buckets.length; index++) {
+            var bucket = buckets[index];
+            if (bucket == null) continue;
+            bucket.nextToScan = bucket.head;
+            pendingPriorities.set(index, bucket.head != null);
         }
-        readyRetries.add(entry);
     }
 
-    public List<GlobalQueueEntry> drain() {
-        List<GlobalQueueEntry> entries = new ArrayList<>(size);
+    public void retry(RequestContext request) {
+        var entry = members.get(request);
+        if (entry == null) return;
+        int index = bucketIndex(request);
+        var bucket = buckets[index];
+        if (bucket.nextToScan == null
+                || request.getPlacementSequence()
+                        < bucket.nextToScan.request.getPlacementSequence()) {
+            bucket.nextToScan = entry;
+        }
+        pendingPriorities.set(index);
+    }
+
+    public boolean hasUnscannedRequests() {
+        return !pendingPriorities.isEmpty();
+    }
+
+    public List<RequestContext> drain() {
+        List<RequestContext> entries = new ArrayList<>(members.size());
         for (Bucket bucket : buckets) {
             if (bucket == null) {
                 continue;
             }
             while (bucket.head != null) {
-                GlobalQueueEntry entry = bucket.head;
-                remove(entry);
-                entries.add(entry);
+                Node entry = bucket.head;
+                remove(entry.request);
+                entries.add(entry.request);
             }
         }
-        checkState(size == 0, "ordered queue drain left active entries");
+        checkState(members.isEmpty(), "ordered queue drain left active entries");
         return entries;
     }
 
-    public boolean remove(GlobalQueueEntry entry) {
-        if (entry.removed) {
-            return false;
-        }
-        checkState(size > 0, "ordered queue size underflow");
-        int index = bucketIndex(entry);
+    public boolean remove(RequestContext request) {
+        Node entry = members.remove(request);
+        if (entry == null) return false;
+        int index = bucketIndex(request);
         Bucket bucket = buckets[index];
-        checkState(bucket != null, "ordered queue bucket is missing");
-        readyRetries.remove(entry);
         bucket.remove(entry);
-        if (bucket.nextToScan == null) {
-            pendingPriorities.clear(index);
-        }
-        size--;
-        priorityCounts[entry.priority()]--;
+        if (bucket.nextToScan == null) pendingPriorities.clear(index);
+        priorityCounts[SchedulingQueue.priority(request)]--;
         return true;
     }
 
+    public boolean contains(RequestContext request) {
+        return members.containsKey(request);
+    }
+
     @Override
-    public Comparator<GlobalQueueEntry> order() {
+    public Comparator<RequestContext> order() {
         return order;
     }
 
-    private void insert(GlobalQueueEntry entry, boolean restoring) {
-        int index = bucketIndex(entry);
+    private void insert(RequestContext request, boolean restoring) {
+        checkState(!members.containsKey(request), "request is already queued");
+        Node entry = new Node(request);
+        int index = bucketIndex(request);
         Bucket bucket = buckets[index];
-        if (bucket == null) {
-            buckets[index] = bucket = new Bucket();
-        }
+        if (bucket == null) buckets[index] = bucket = new Bucket();
         bucket.insert(entry, restoring);
-        size++;
-        priorityCounts[entry.priority()]++;
-        if (bucket.nextToScan == null || entry.sequence < bucket.nextToScan.sequence) {
+        members.put(request, entry);
+        priorityCounts[SchedulingQueue.priority(request)]++;
+        if (bucket.nextToScan == null
+                || request.getPlacementSequence()
+                        < bucket.nextToScan.request.getPlacementSequence()) {
             bucket.nextToScan = entry;
         }
         pendingPriorities.set(index);
@@ -172,27 +175,39 @@ public final class OrderedRequestQueue implements SchedulingQueue {
     /**
      * FIFO uses bucket zero; PRIORITY uses the request's priority as its bucket.
      */
-    private int bucketIndex(GlobalQueueEntry entry) {
-        return priorityOrdering ? entry.priority() : 0;
+    private int bucketIndex(RequestContext request) {
+        return priorityOrdering ? SchedulingQueue.priority(request) : 0;
     }
 
     /**
-     * Links ordered queue entries and retains the next entry to scan within one priority.
+     * Links one queued request to its neighbors so removal preserves FIFO order.
+     */
+    private static final class Node {
+        private final RequestContext request;
+        private Node previous;
+        private Node next;
+
+        private Node(RequestContext request) {
+            this.request = request;
+        }
+    }
+
+    /**
+     * Retains FIFO links and the next request to inspect at one priority.
      */
     private static final class Bucket {
-        private GlobalQueueEntry head;
-        private GlobalQueueEntry tail;
-        private GlobalQueueEntry nextToScan;
+        private Node head;
+        private Node tail;
+        private Node nextToScan;
 
-        void insert(GlobalQueueEntry entry, boolean restoring) {
-            checkState(
-                    entry.removed && entry.previous == null && entry.next == null,
-                    "ordered queue entry is already linked");
-            GlobalQueueEntry before = restoring ? head : null;
-            while (before != null && before.sequence < entry.sequence) {
+        void insert(Node entry, boolean restoring) {
+            Node before = restoring ? head : null;
+            while (before != null
+                    && before.request.getPlacementSequence()
+                            < entry.request.getPlacementSequence()) {
                 before = before.next;
             }
-            GlobalQueueEntry previous = before == null ? tail : before.previous;
+            Node previous = before == null ? tail : before.previous;
             entry.previous = previous;
             entry.next = before;
             if (previous == null) {
@@ -205,12 +220,11 @@ public final class OrderedRequestQueue implements SchedulingQueue {
             } else {
                 before.previous = entry;
             }
-            entry.removed = false;
         }
 
-        void remove(GlobalQueueEntry entry) {
-            GlobalQueueEntry previous = entry.previous;
-            GlobalQueueEntry next = entry.next;
+        void remove(Node entry) {
+            Node previous = entry.previous;
+            Node next = entry.next;
             if (nextToScan == entry) {
                 nextToScan = next;
             }
@@ -228,7 +242,6 @@ public final class OrderedRequestQueue implements SchedulingQueue {
             }
             entry.previous = null;
             entry.next = null;
-            entry.removed = true;
         }
     }
 }

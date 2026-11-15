@@ -462,7 +462,7 @@ EngineDispatchPermit 删除未使用的 requestId 字段、构造参数及 gette
 
 ## 15. Cache 指标复用本次上报的不可变标签
 
-EngineHealthReporter.reportCacheStatusCheckerSuccess 将重复构造的节点标签与角色标签
+ServiceMetricsReporter.reportCacheStatusCheckerSuccess 将重复构造的节点标签与角色标签
 各固定为一次局部分配；标签维度、指标值、条件和上报顺序保持，两个缓存数值仍在首次
 缓存指标上报前读取。没有新增字段、类、全局缓存或执行层。
 生产 26,527 → 26,512，净减 15 行。新增 populated/empty 两分支完整 schema 断言。
@@ -679,7 +679,7 @@ RequestScheduler 执行阶段变化；没有增加管理层或第二份请求状
 | ---------------------------------- | -------------------------------------------------- | --------------------------------------------------- |
 | 选中 Worker                        | 拥有 pin，后续取得 Decode reservation              | 尚未绑定请求                                        |
 | 创建 RequestRoute                  | 仍负责失败回滚                                     | 只有精确身份，尚未拥有容量                          |
-| QUEUE enqueueRoute 成功             | 交出 Decode reservation 的回滚责任                 | 队列接收精确 route，Scheduler 推进 READY_TO_DELIVER |
+| QUEUE enqueueRoute 成功            | 交出 Decode reservation 的回滚责任                 | 队列接收精确 route，Scheduler 推进 READY_TO_DELIVER |
 | DIRECT commit + claimDelivery 成功 | 交出 Decode reservation 的回滚责任                 | Endpoint/发送 claim 接收容量及发送责任              |
 | 选路作用域退出                     | try-with-resources 关闭 pin；仅未交接时回滚 Decode | 已交接容量依据后续精确证据清理                      |
 
@@ -1679,7 +1679,7 @@ GCPhasePause 时间对齐（墙钟换算约毫秒精度）。测量窗口中 7 �
 | ProvisionalRoute.reserveDecode        | 123.51ms | 113.26ms |
 | createRequestRoute                    |  15.50ms |  16.12ms |
 | 绑定请求 item 的第一次上下文临界区    |  24.99ms |  12.93ms |
-| ProvisionalRoute.tryEnqueueRoute          | 173.13ms | 194.60ms |
+| ProvisionalRoute.tryEnqueueRoute      | 173.13ms | 194.60ms |
 | READY_TO_DELIVER 状态转换临界区       |   5.14ms |   4.21ms |
 | signalRouteReady                      |  58.01ms |  28.24ms |
 | route 观测及 submitRoute 返回剩余部分 |  21.86ms |  47.02ms |
@@ -5020,7 +5020,7 @@ analysis.txt,prepare.py,verify.py}.
 The preceding turn made production progress by removing a duplicate projection
 traversal. New JFR evidence also identified fixture contention, so this turn replaces
 the two stubOnly metrics reporters in MasterBatchEndToEndPerformanceTest.createRouter
-with real CacheMetricsReporter and EngineHealthReporter implementations backed by
+with real CacheMetricsReporter and ServiceMetricsReporter implementations backed by
 the existing NoOpFlexMonitor sink. ReflectionTestUtils injects the cache reporter's
 monitor; the engine reporter reuses the existing helper and existing event-loop/client
 references. No production source, request load, transport, correctness assertion or
@@ -10584,7 +10584,7 @@ files (-1),537 above target; original P99 goal still unmet. Evidence:
 ## Round223: distinguish current-time load metrics from cached planning snapshots
 
 Audited PrefillState.committedSnapshot and its actual production consumer,
-PrefillEndpoint.getLoadMetric. The latter is called by EngineHealthReporter and
+PrefillEndpoint.getLoadMetric. The latter is called by ServiceMetricsReporter and
 EngineSyncRunner, not by the per-request route-selection path. committedSnapshot
 capturesCurrentWorkUnderLock(clock.now) and returns totalRemainingWorkMs at that
 capture time. The separate captureWorkUnderLock cache used by projection/commit may
@@ -12249,7 +12249,7 @@ Runtime、Binding 与 Scheduler 共用一次捕获的 SchedulerSettings，删除
 | 修复无效计算   | GrpcWorkerStatusRunner.logWorkerStatusUpdate，297                                              | DEBUG 关闭仍求值参数并 stream 遍历全部任务。先判断日志级别，开启时保留现有字段和计时。                                                                                                  |
 | 修复观测一致性 | PvLogData 构造器，46–47                                                                        | seqLen 从可变 Request 读取，与注册时冻结的 RequestRequirements 可能不一致；已有注册测试证明原 Request 可改而调度输入不变。已注册读取冻结值，注册前拒绝仍需原输入回退。                  |
 | 修复故障传播   | EndpointRegistry.evictExpiredOrphans，736；MasterEngineSynchronizer.reportExecutorMetrics，104 | 前者一个 endpoint 的指标异常终止其余 TTL 清理；后者第一 executor 上报失败跳过第二个。只隔离观察者故障，账本结算异常继续报告。                                                           |
-| 小型删除       | ProvisionalRoute.tryEnqueueRoute，112                                                              | 全仓零生产调用、仅一处测试，重复 QueuePublication.publish 的发布及资源转移。测试可改用真实生产入口，删除旧函数。                                                                        |
+| 小型删除       | ProvisionalRoute.tryEnqueueRoute，112                                                          | 全仓零生产调用、仅一处测试，重复 QueuePublication.publish 的发布及资源转移。测试可改用真实生产入口，删除旧函数。                                                                        |
 | 小型删除       | AbstractRequestScheduler.reporter，58/69；QueuedRequestScheduler.drainOnClose，703/713         | 前者字段初始化后无读取；后者首次 List.copyOf(all) 被后续赋值覆盖，造成无效分配。                                                                                                        |
 | 小型合并       | PrefillState.appendRetirementInvariant，1530                                                   | 重复既有 Failures.append 的首因及 suppressed 处理，可删除私有 helper，沿用现有错误聚合。                                                                                                |
 | 无效补偿       | EvictionManager.replaceQueuedDecodeReservations，279–284                                       | claimed 按 victims.size 预分配；add 周围 catch 调未结束 AdmissionHandle.close，而 close 仅校验显式结束、不执行补偿。保持外层 finally 的真实 completeWithdrawal 责任，清理这段无效处理。 |
@@ -12261,7 +12261,7 @@ Runtime、Binding 与 Scheduler 共用一次捕获的 SchedulerSettings，删除
 | 类或类组                                                  | 目前职责                                                | 审查判断                                                                                                                                                                                                                                                                                                                                        |
 | --------------------------------------------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | BalanceContext / AbstractRequestScheduler                 | 请求状态决策 / 原 owner 的外部动作及排空                | 边界尚未完全收敛。Context 的 settleAdmissionLocked(1787)、processRequestEndLocked(1872)、acknowledgeDeliveryLocked(1944) 返回执行 Runnable 并反向调用 Scheduler 的 effect 工厂；Scheduler 的 acceptDeliveryResult(804)、applyPrefillStatusLocked(894)、cancelRequest(1013) 仍组装细粒度请求判断。应该按完整请求事件聚合判断，再收窄细粒度入口。 |
-| DefaultRouter / ProvisionalRoute / RequestRoute           | 一次多角色选择 / 未转交资源及 pin 的作用域 / 已选路身份 | 分工有实际所有权依据；tryEnqueueRoute 是残留重复接口，其余不是同一请求输入的重复捕获。                                                                                                                                                                                                                                                              |
+| DefaultRouter / ProvisionalRoute / RequestRoute           | 一次多角色选择 / 未转交资源及 pin 的作用域 / 已选路身份 | 分工有实际所有权依据；tryEnqueueRoute 是残留重复接口，其余不是同一请求输入的重复捕获。                                                                                                                                                                                                                                                          |
 | PrefillState / DecodeState                                | 唯一端点资源账本、复验、提交、Worker 事实归并           | 多索引和状态反映独立事实。Route 与 Batch 的提交校验和容量边界不同，合并成带布尔参数的统一流程会增加耦合。没有证明可安全大块删除。                                                                                                                                                                                                               |
 | WorkerBatcher / DeliveryStrategy / DefaultBatchDispatcher | 等待唤醒与成组 / 资源交接 / 提交额度及 RPC ACK          | PREPARED 与 SUBMITTED 的额度归还不同；两次身份检查跨越准备副作用；同步 ACK 屏障也有实际作用。保留。                                                                                                                                                                                                                                             |
 | GroupPlanner / RouteTimelineProjector                     | 纯成组规则 / 冻结队列与工作量预测                       | 职责清晰。可复用游标和缓存有性能依据；按代码形状合并单请求和批量预测会改变模型。                                                                                                                                                                                                                                                                |

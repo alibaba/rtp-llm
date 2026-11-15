@@ -60,6 +60,10 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
 
     @Getter @Setter private volatile long placementSequence;
 
+    @Getter(lombok.AccessLevel.PACKAGE)
+    @Setter(lombok.AccessLevel.PACKAGE)
+    private volatile String routingGroup;
+
     @Getter @Setter private volatile Map<String, Object> schedulingDiagnostics;
     @Getter @Setter private Long requestMessageBytes;
     private String cacheSource;
@@ -73,14 +77,15 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
             new EnumMap<>(RoleType.class);
     private final EnumMap<RoleType, Integer> routingAttempts = new EnumMap<>(RoleType.class);
 
-    // Set by lifecycle changes; cleared after updating the last-change timestamp.
-    private boolean stateChanged;
     private long updatedAtMs;
 
     private String registeredRequestId;
     private RequestResult route;
 
     private long activeSelectionId;
+
+    private volatile DecodeEndpoint.ResourceWait currentResourceWait;
+
     // Negative until the selected route and its resources are committed.
     private long routeCommittedAtMs = -1L;
     private boolean prefillWorkerReleaseConfirmed;
@@ -282,155 +287,142 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
                 routingAttempts);
     }
 
-    /**
-     * Returns the current selection identity without storing another request context.
-     */
     public synchronized SelectionAttempt currentSelectionAttempt() {
-        return activeSelectionId == 0L ? null : new SelectionAttempt(this, activeSelectionId);
+        return activeSelectionId == 0 ? null : new SelectionAttempt(this, activeSelectionId);
+    }
+
+    @Override
+    public DecodeEndpoint.ResourceWait currentResourceWait() {
+        return currentResourceWait;
+    }
+
+    @Override
+    public boolean isResponseDone() {
+        return future != null && future.isDone();
     }
 
     /**
-     * Starts worker selection for a request that has no route and no other routing work in progress.
+     * Starts selection only while this registered request is still waiting for its first route.
      */
     synchronized SelectionAttempt beginRouteSelection() {
         if (registeredRequestId == null
                 || requestEndResult != null
                 || cancellationReason != null
                 || pendingEndEvent != null
-                || activeSelectionId != 0L
-                || route != null) {
-            return null;
-        }
-        long selectionId = SELECTION_IDS.incrementAndGet();
-        checkState(selectionId > 0L, "selection id exhausted");
-        stateChanged = true;
-        activeSelectionId = selectionId;
-        this.setSchedulingDiagnostics(null);
-        refreshState(updatedAtMs);
-        return new SelectionAttempt(this, activeSelectionId);
+                || activeSelectionId != 0
+                || route != null) return null;
+        long id = SELECTION_IDS.incrementAndGet();
+        checkState(id > 0, "selection id exhausted");
+        activeSelectionId = id;
+        schedulingDiagnostics = null;
+        return new SelectionAttempt(this, id);
+    }
+
+    synchronized boolean bindResourceWait(
+            SelectionAttempt exact, DecodeEndpoint.ResourceWait wait) {
+        if (!canPublishRoute(exact) || isResponseDone() || currentResourceWait != null)
+            return false;
+        checkState(
+                wait.request() == this && wait.selectionId() == exact.id(),
+                "foreign resource wait");
+        currentResourceWait = wait;
+        return true;
+    }
+
+    synchronized boolean canPublishRoute(SelectionAttempt exact) {
+        return registeredRequestId != null
+                && requestEndResult == null
+                && cancellationReason == null
+                && pendingEndEvent == null
+                && routeCommittedAtMs < 0
+                && matchesSelection(exact);
+    }
+
+    synchronized boolean clearResourceWait(DecodeEndpoint.ResourceWait exact) {
+        if (currentResourceWait != exact) return false;
+        currentResourceWait = null;
+        return true;
     }
 
     /**
-     * Ends an uncommitted selection after rollback and applies any cancellation or failure received
-     * while selecting.
+     * Ends selection after rollback. An endpoint disappearing before publication permits a retry;
+     * cancellation and worker failures remain request endings.
      */
     synchronized Snapshot finishSelectionWithoutCommit(
             SelectionAttempt exact, Response failure, long nowMs) {
-        if (!matchesSelection(exact)) {
-            return null;
+        if (!matchesSelection(exact)) return null;
+        activeSelectionId = 0;
+        currentResourceWait = null;
+        if (pendingEndEvent != null) {
+            boolean rolledBackBeforePublication =
+                    route == null
+                            && prefillCleanupCompleted
+                            && decodeCleanupCompleted
+                            && routeCommittedAtMs < 0
+                            && !decodeAccepted;
+            boolean failedAdmission =
+                    failure != null && requestEndResult == null && cancellationReason == null;
+            if (rolledBackBeforePublication && pendingEndEvent.kind() == EndKind.ENDPOINT_CLOSED
+                    || failedAdmission && pendingEndEvent.kind() == EndKind.SHUTDOWN)
+                pendingEndEvent = null;
         }
-        stateChanged = true;
-        activeSelectionId = 0L;
-        boolean rolledBack = route == null && prefillCleanupCompleted && decodeCleanupCompleted;
-        boolean admissionFailure =
-                failure != null && requestEndResult == null && cancellationReason == null;
-        if (admissionFailure
-                && pendingEndEvent != null
-                && pendingEndEvent.kind() == EndKind.SHUTDOWN) {
-            stateChanged |= !Objects.equals(pendingEndEvent, null);
-            pendingEndEvent = null;
-        }
-        // WorkerCleanup of a rolled-back preparation must not end the request: no route
-        // was delivered, so the scheduler can select another endpoint. Keep all other endings.
-        boolean unpublishedRollback = rolledBack && routeCommittedAtMs < 0L && !decodeAccepted;
-        if (unpublishedRollback
-                && pendingEndEvent != null
-                && pendingEndEvent.kind() == EndKind.ENDPOINT_CLOSED) {
-            stateChanged |= !Objects.equals(pendingEndEvent, null);
-            pendingEndEvent = null;
-        }
-        if (failure != null
-                && (pendingEndEvent == null
-                        || pendingEndEvent.kind() == EndKind.SHUTDOWN
-                                && cancellationReason == null)) {
+        if (failure != null && pendingEndEvent == null)
             retainEnd(RequestEndEvent.publicationFailure(route, failure));
-        } else if (pendingEndEvent != null) {
-            retainEnd(pendingEndEvent);
-        }
-        return commitSnapshot(nowMs);
+        else if (pendingEndEvent != null) retainEnd(pendingEndEvent);
+        refreshState(nowMs);
+        return snapshot();
     }
 
     /**
-     * Records a route event under the request lock. Returns whether the scheduler must update
-     * timers or advance cleanup.
+     * Accepts only events for the current route and exact role registration. Worker activity updates
+     * timeouts; completion records resource release and, for the final role or a failure, request end.
      */
     synchronized boolean recordEvent(RequestEvent event) {
-        boolean remoteCleanup =
-                event.type() == RequestEventType.REMOTE_CLEANED
-                        || event.type() == RequestEventType.REMOTE_FENCED;
-        if (requestRecordForArchive != null) return false;
-        boolean endpointClosed = event.type() == RequestEventType.ENDPOINT_CLOSED;
-        if (remoteCleanup) {
-            if (routeCommittedAtMs < 0L || route != event.route()) return false;
-        } else {
-            var role = event.role();
-            if (route == null
-                    || route != event.route()
-                    || role == null
-                    || role != RoleType.DECODE
-                            && role != RoleType.ENCODER
-                            && !role.supportsPrefill()
-                    || role == RoleType.DECODE
-                            && !Objects.equals(route.decodeRegistration(), event.reservation())) {
-                return false;
-            }
-            if (endpointClosed) {
-                WorkerEndpoint source =
-                        switch (role) {
-                            case DECODE -> route.decodeEndpoint();
-                            case ENCODER -> route.encoderEndpoint();
-                            case PREFILL, PDFUSION -> route.prefillEndpoint();
-                            default -> null;
-                        };
-                if (source == null || source != event.endpoint()) return false;
-            }
-        }
+        if (!matchesEvent(event)) return false;
         var previousDeadlines = deadlines;
-        if (remoteCleanup) {
-            recordWorkerReleaseConfirmed(true, event.type() == RequestEventType.REMOTE_CLEANED);
-        } else if (endpointClosed) {
-            recordEndpointClose(event);
-        } else {
-            boolean accepted = decodeAccepted || event.role() == RoleType.DECODE;
-            long completed = prefillCompletedAtMs;
-            if (event.role() != RoleType.DECODE
-                    && event.type() == RequestEventType.COMPLETED
-                    && completed == 0L) {
-                completed = event.nowMs();
+        boolean changed;
+        switch (event.type()) {
+            case REMOTE_CLEANED, REMOTE_FENCED -> {
+                changed =
+                        confirmWorkerRelease(true, event.type() == RequestEventType.REMOTE_CLEANED);
             }
-            long visibility = visibilityAtMs;
-            if (accepted) {
-                visibility = 0L;
-            } else if (completed > 0L && route.decodeEndpoint() != null) {
-                visibility = saturatedAdd(completed, 10_000L);
-            }
-            if (accepted != decodeAccepted
-                    || completed != prefillCompletedAtMs
-                    || visibility != visibilityAtMs) {
-                decodeAccepted = accepted;
-                prefillCompletedAtMs = completed;
-                visibilityAtMs = visibility;
-                visibilityOverdue = false;
-                stateChanged = true;
-            }
-            long latestActivity = Math.max(lastWorkerAtMs, event.nowMs());
-            stateChanged |= lastWorkerAtMs != latestActivity;
-            lastWorkerAtMs = latestActivity;
-            if (event.terminal()) {
-                recordWorkerResourceRelease(event.role());
+            case ENDPOINT_CLOSED -> {
+                changed = recordWorkerResourceRelease(event.role());
+                boolean decode = event.role() == RoleType.DECODE;
                 boolean ending =
-                        event.role() == RoleType.DECODE
+                        decode
                                 || event.role() == RoleType.PDFUSION
                                 || event.role() == RoleType.ENCODER
-                                || event.type() == RequestEventType.FAILED
-                                || event.type() == RequestEventType.PRIORITY_CANCELLED;
-                if (requestEndResult == null && ending) retainEnd(event.end());
+                                || routeCommittedAtMs < 0 && !decodeAccepted;
+                if (ending && requestEndResult == null) {
+                    if (activeSelectionId != 0
+                            && (!decode || routeCommittedAtMs < 0 && !decodeAccepted)) {
+                        if (pendingEndEvent == null) {
+                            pendingEndEvent = event.end();
+                            changed = true;
+                        }
+                    } else {
+                        changed |= retainEnd(event.end());
+                    }
+                }
+            }
+            default -> {
+                changed = recordWorkerActivity(event);
+                if (event.terminal()) {
+                    changed |= recordWorkerResourceRelease(event.role());
+                    boolean ending =
+                            event.role() == RoleType.DECODE
+                                    || event.role() == RoleType.PDFUSION
+                                    || event.role() == RoleType.ENCODER
+                                    || event.type() == RequestEventType.FAILED
+                                    || event.type() == RequestEventType.PRIORITY_CANCELLED;
+                    if (ending && requestEndResult == null) changed |= retainEnd(event.end());
+                }
             }
         }
-        boolean changed = stateChanged;
-        refreshState(event.nowMs());
-        boolean timersChanged = previousDeadlines != deadlines;
-        return timersChanged || changed && (pendingEndEvent != null || requestEndResult != null);
+        if (changed) refreshState(event.nowMs());
+        return previousDeadlines != deadlines
+                || changed && (pendingEndEvent != null || requestEndResult != null);
     }
 
     synchronized boolean requestCancel(
@@ -440,25 +432,15 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
             StrategyErrorType errorType,
             String detail,
             RequestResult responseCandidate) {
-        if (registeredRequestId == null) {
-            return false;
-        }
         Objects.requireNonNull(reason);
-        if (requestEndResult != null) {
+        if (registeredRequestId == null || requestEndResult != null || cancellationReason != null)
             return false;
-        }
-        if (cancellationReason != null) {
-            return false;
-        }
-        if (reason == CancelReason.DEADLINE_EXCEEDED && routeCommittedAtMs >= 0L) {
-            return false;
-        }
-        boolean beforeSend = routeCommittedAtMs < 0L;
-        if (frontend && (responseForFuture != null || !beforeSend)) {
-            return false;
-        }
-        StrategyErrorType error = Objects.requireNonNull(errorType, "cancellation error required");
-        recordCancellation(reason, error, detail == null ? reason.getMessage() : detail);
+        if (reason == CancelReason.DEADLINE_EXCEEDED && routeCommittedAtMs >= 0) return false;
+        if (frontend && (responseForFuture != null || routeCommittedAtMs >= 0)) return false;
+        recordCancellation(
+                reason,
+                Objects.requireNonNull(errorType),
+                detail == null ? reason.getMessage() : detail);
         retainEnd(
                 RequestEndEvent.failure(
                         route, EndKind.FRONTEND, cancellationError, cancellationDetail));
@@ -471,122 +453,94 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
             ExpirationTimer.Token exact, long nowMs, String diagnosis) {
         if (exact.owner() != this
                 || deadlines.token(exact.kind()) != exact
-                || requestRecordForArchive != null) {
-            return null;
-        }
+                || requestRecordForArchive != null) return null;
+        deadlines = deadlines.without(exact.kind());
         if (nowMs < exact.atMs()) {
-            var nextDeadlines = deadlines.without(exact.kind());
-            stateChanged |= !Objects.equals(deadlines, nextDeadlines);
-            deadlines = nextDeadlines;
-            return commitSnapshot(nowMs);
+            refreshState(nowMs);
+            return snapshot();
         }
         if (exact.kind() == ExpirationTimer.Kind.VISIBILITY) {
-            stateChanged |= visibilityAtMs != 0L;
-            visibilityAtMs = 0L;
-            stateChanged |= visibilityOverdue != true;
+            visibilityAtMs = 0;
             visibilityOverdue = true;
-            return commitSnapshot(nowMs);
-        }
-        boolean inactive = exact.kind() == ExpirationTimer.Kind.INACTIVITY;
-        if (inactive) {
-            var nextDeadlines = deadlines.without(exact.kind());
-            stateChanged |= !Objects.equals(deadlines, nextDeadlines);
-            deadlines = nextDeadlines;
-            long activity = Math.max(lastWorkerAtMs, Math.max(0L, routeCommittedAtMs));
-            if (nowMs - activity < inactivityTimeoutMs) return commitSnapshot(nowMs);
-            stateChanged |= expired != true;
-            expired = true;
         } else {
-            stateChanged |= requestDeadlineConsumed != true;
-            requestDeadlineConsumed = true;
-            if (requestEndResult != null || routeCommittedAtMs >= 0L && activeSelectionId == 0L)
-                return commitSnapshot(nowMs);
+            boolean inactive = exact.kind() == ExpirationTimer.Kind.INACTIVITY;
+            if (inactive && nowMs < inactivityExpiresAtMs()) {
+                refreshState(nowMs);
+                return snapshot();
+            }
+            if (inactive) expired = true;
+            else requestDeadlineConsumed = true;
+            boolean requestAlreadyCommitted =
+                    !inactive
+                            && (requestEndResult != null
+                                    || routeCommittedAtMs >= 0 && activeSelectionId == 0);
+            if (!requestAlreadyCommitted) {
+                String detail =
+                        inactive ? "request inactive" : "request scheduling deadline exceeded";
+                if (cancellationReason == null && requestEndResult == null)
+                    recordCancellation(
+                            CancelReason.DEADLINE_EXCEEDED,
+                            timeoutError,
+                            diagnosis == null ? detail : diagnosis);
+                if (inactive || activeSelectionId != 0 || routeCommittedAtMs < 0 && !decodeAccepted)
+                    retainEnd(
+                            RequestEndEvent.failure(
+                                    route, EndKind.INACTIVITY, timeoutError, detail));
+            }
         }
-        String detail = inactive ? "request inactive" : "request scheduling deadline exceeded";
-        if (cancellationReason == null && requestEndResult == null) {
-            recordCancellation(
-                    CancelReason.DEADLINE_EXCEEDED,
-                    timeoutError,
-                    diagnosis == null ? detail : diagnosis);
-        }
-        if (inactive || activeSelectionId != 0L || routeCommittedAtMs < 0L && !decodeAccepted) {
-            retainEnd(RequestEndEvent.failure(route, EndKind.INACTIVITY, timeoutError, detail));
-        }
-        return commitSnapshot(nowMs);
+        refreshState(nowMs);
+        return snapshot();
     }
 
-    /**
-     * Records an ending and selects its reserved response together; a missing candidate leaves
-     * response publication pending.
-     */
     synchronized Snapshot endRequest(
             RequestEndEvent evidence, long nowMs, RequestResult responseCandidate) {
         if (registeredRequestId == null
                 || requestRecordForArchive != null
-                || evidence != null && evidence.route() != null && evidence.route() != route) {
+                || evidence != null && evidence.route() != null && evidence.route() != route)
             return snapshot();
-        }
-        if (evidence != null) {
-            retainEnd(evidence);
-        }
+        if (evidence != null) retainEnd(evidence);
         selectResponse(responseCandidate);
-        return commitSnapshot(nowMs);
+        refreshState(nowMs);
+        return snapshot();
     }
 
     synchronized WorkerEndpoint.ReleaseReason releaseReason() {
-        if (requestEndResult == null
-                || requestRecordForArchive != null
-                || activeSelectionId != 0L) {
+        if (requestEndResult == null || requestRecordForArchive != null || activeSelectionId != 0)
             return null;
-        }
-        return routeCommittedAtMs >= 0L
-                        && prefillWorkerReleaseConfirmed
-                        && decodeWorkerReleaseConfirmed
-                ? WorkerEndpoint.ReleaseReason.REMOTE_CLEANUP
-                : expired
-                        ? WorkerEndpoint.ReleaseReason.EXPIRED
-                        : WorkerEndpoint.ReleaseReason.COUNTERPART_FINISHED;
+        if (routeCommittedAtMs >= 0
+                && prefillWorkerReleaseConfirmed
+                && decodeWorkerReleaseConfirmed) return WorkerEndpoint.ReleaseReason.REMOTE_CLEANUP;
+        return expired
+                ? WorkerEndpoint.ReleaseReason.EXPIRED
+                : WorkerEndpoint.ReleaseReason.COUNTERPART_FINISHED;
     }
 
     synchronized void recordRouteCommitStart(long startedNanos) {
         timing = timing.withRouteCommitStartedNanos(startedNanos);
     }
 
-    /**
-     * Associates acquired resources with this attempt before submission or rollback.
-     * Cancellation waits for the active attempt to return its resources.
-     */
-    synchronized void registerSelectedRoute(SelectionAttempt attempt, RequestResult acquired) {
-        checkState(matchesSelection(attempt), "route requires its current selection");
+    synchronized void registerSelectedRoute(SelectionAttempt exact, RequestResult acquired) {
+        checkState(matchesSelection(exact), "route requires its current selection");
         checkState(
                 acquired.ctx() == this
                         && Objects.equals(acquired.requestId(), registeredRequestId)
                         && (route == null || route == acquired),
                 "foreign route");
         if (route == acquired) return;
-        stateChanged = true;
         route = acquired;
-        var nextPrefillCleanupCompleted =
+        prefillCleanupCompleted =
                 acquired.prefillEndpoint() == null && acquired.encoderEndpoint() == null;
-        stateChanged |= prefillCleanupCompleted != nextPrefillCleanupCompleted;
-        prefillCleanupCompleted = nextPrefillCleanupCompleted;
-        var nextDecodeCleanupCompleted = acquired.decodeRegistration() == null;
-        stateChanged |= decodeCleanupCompleted != nextDecodeCleanupCompleted;
-        decodeCleanupCompleted = nextDecodeCleanupCompleted;
-        refreshState(updatedAtMs);
+        decodeCleanupCompleted = acquired.decodeRegistration() == null;
     }
 
     /**
-     * Commits the route and selects its success response once, under the request monitor.
-     * Scheduler has checked endpoint capacity and reserved response execution before this call.
+     * Commits the route and its reserved response together; expiration still wins before commit.
      */
     synchronized boolean tryCommitRoute(
-            SelectionAttempt attempt, RequestResult acquired, RequestResult response, long nowMs) {
-        if (!canPublishRoute(attempt) || route != acquired || responseForFuture != null)
-            return false;
-        long schedulingDeadlineAtMs = getRequestExpiresAtMs();
-        if (schedulingDeadlineAtMs > 0L && nowMs >= schedulingDeadlineAtMs
-                || nowMs - lastWorkerAtMs >= inactivityTimeoutMs) {
+            SelectionAttempt exact, RequestResult acquired, RequestResult response, long nowMs) {
+        if (!canPublishRoute(exact) || route != acquired || responseForFuture != null) return false;
+        if (getRequestExpiresAtMs() > 0 && nowMs >= getRequestExpiresAtMs()
+                || nowMs >= inactivityExpiresAtMs()) {
             recordCancellation(
                     CancelReason.DEADLINE_EXCEEDED,
                     timeoutError,
@@ -597,30 +551,15 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
             refreshState(nowMs);
             return false;
         }
-        stateChanged = true;
         routeCommittedAtMs = nowMs;
-        activeSelectionId = 0L;
+        activeSelectionId = 0;
+        currentResourceWait = null;
         responseForFuture = response;
-        var nextDecodeWorkerReleaseConfirmed = acquired.decodeRegistration() == null;
-        stateChanged |= decodeWorkerReleaseConfirmed != nextDecodeWorkerReleaseConfirmed;
-        decodeWorkerReleaseConfirmed = nextDecodeWorkerReleaseConfirmed;
+        decodeWorkerReleaseConfirmed = acquired.decodeRegistration() == null;
         refreshState(nowMs);
         return true;
     }
 
-    synchronized boolean canPublishRoute(SelectionAttempt exact) {
-        return registeredRequestId != null
-                && requestEndResult == null
-                && cancellationReason == null
-                && pendingEndEvent == null
-                && routeCommittedAtMs < 0L
-                && matchesSelection(exact);
-    }
-
-    /**
-     * Records one cleanup pass, including partial resource release and submitted cancellation notifications.
-     * Only the exact route may advance cleanup; archiving is checked once after recording all progress.
-     */
     synchronized void recordCleanupProgress(
             RequestResult exact,
             boolean prefillReleased,
@@ -628,31 +567,20 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
             boolean notificationsSubmitted,
             long nowMs) {
         if (route != exact || requestRecordForArchive != null) return;
-        recordCleanupCompleted(prefillReleased, decodeReleased);
-        if (requestEndResult != null) {
-            stateChanged |= notificationsSubmitted && !notificationsDone;
-            notificationsDone |= notificationsSubmitted;
-        } else {
-            if (routeCommittedAtMs < 0L && prefillCleanupCompleted && decodeCleanupCompleted) {
-                stateChanged |= !Objects.equals(route, null);
-                route = null;
-            }
-        }
+        prefillCleanupCompleted |= prefillReleased;
+        decodeCleanupCompleted |= decodeReleased;
+        if (requestEndResult != null) notificationsDone |= notificationsSubmitted;
+        else if (routeCommittedAtMs < 0 && prefillCleanupCompleted && decodeCleanupCompleted)
+            route = null;
         refreshState(nowMs);
     }
 
     synchronized void recordRoutingDiagnostics(
-            SelectionAttempt exact, java.util.Map<String, Object> diagnostics) {
-        if (matchesSelection(exact) && cancellationReason == null) {
-            this.setSchedulingDiagnostics(
-                    diagnostics == null ? null : java.util.Map.copyOf(diagnostics));
-        }
+            SelectionAttempt exact, Map<String, Object> diagnostics) {
+        if (matchesSelection(exact) && cancellationReason == null)
+            schedulingDiagnostics = diagnostics == null ? null : Map.copyOf(diagnostics);
     }
 
-    /**
-     * Binds the scheduler and response, then initializes request deadlines under the Repository ->
-     * Context lock.
-     */
     synchronized void register(
             AbstractRequestScheduler owner,
             RequestFuture response,
@@ -661,127 +589,149 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
             StrategyErrorType timeoutError) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(schedulingMetadata, "scheduling metadata required");
-        if (inactivityTimeoutMs <= 0L) {
+        if (inactivityTimeoutMs <= 0)
             throw new IllegalArgumentException("positive inactivity timeout required");
-        }
-        String requestId = Objects.requireNonNull(getRequestId(), "requestId");
+        String id = Objects.requireNonNull(getRequestId(), "requestId");
         Objects.requireNonNull(timeoutError, "timeout error required");
         checkState(registeredRequestId == null, "request already registered");
         requestScheduler = owner;
         future = response;
-        registeredRequestId = requestId;
+        registeredRequestId = id;
         this.timeoutError = timeoutError;
         timing = timing.withRegisteredAtMs(nowMs);
         lastWorkerAtMs = nowMs;
         this.inactivityTimeoutMs = inactivityTimeoutMs;
-        stateChanged = true;
         refreshState(nowMs);
     }
 
-    /**
-     * Release scheduling inputs after the route response is completed.
-     */
     synchronized void releaseSchedulingInput() {
         if (request != null
                 && (!request.getBlockCacheKeys().isEmpty()
-                        || !request.getCacheAffinityKeys().isEmpty())) {
+                        || !request.getCacheAffinityKeys().isEmpty()))
             request =
                     request.toBuilder()
                             .blockCacheKeys(java.util.List.of())
                             .cacheAffinityKeys(java.util.List.of())
                             .build();
+    }
+
+    private boolean matchesSelection(SelectionAttempt exact) {
+        return exact != null
+                && exact.requestContext() == this
+                && activeSelectionId != 0
+                && activeSelectionId == exact.id();
+    }
+
+    private boolean matchesEvent(RequestEvent event) {
+        if (requestRecordForArchive != null || route == null || route != event.route())
+            return false;
+        if (event.type() == RequestEventType.REMOTE_CLEANED
+                || event.type() == RequestEventType.REMOTE_FENCED) return routeCommittedAtMs >= 0;
+        var role = event.role();
+        if (role == null
+                || role != RoleType.DECODE && role != RoleType.ENCODER && !role.supportsPrefill())
+            return false;
+        if (role == RoleType.DECODE
+                && !Objects.equals(route.decodeRegistration(), event.reservation())) return false;
+        if (event.type() != RequestEventType.ENDPOINT_CLOSED) return true;
+        WorkerEndpoint source =
+                switch (role) {
+                    case DECODE -> route.decodeEndpoint();
+                    case ENCODER -> route.encoderEndpoint();
+                    case PREFILL, PDFUSION -> route.prefillEndpoint();
+                    default -> null;
+                };
+        return source != null && source == event.endpoint();
+    }
+
+    private boolean recordWorkerActivity(RequestEvent event) {
+        boolean changed = false;
+        if (!decodeAccepted && event.role() == RoleType.DECODE) {
+            decodeAccepted = true;
+            visibilityAtMs = 0;
+            visibilityOverdue = false;
+            changed = true;
         }
+        if (event.role() != RoleType.DECODE
+                && event.type() == RequestEventType.COMPLETED
+                && prefillCompletedAtMs == 0) {
+            prefillCompletedAtMs = event.nowMs();
+            if (!decodeAccepted && route.decodeEndpoint() != null)
+                visibilityAtMs = saturatedAdd(prefillCompletedAtMs, 10_000L);
+            visibilityOverdue = false;
+            changed = true;
+        }
+        if (event.nowMs() > lastWorkerAtMs) {
+            lastWorkerAtMs = event.nowMs();
+            changed = true;
+        }
+        return changed;
+    }
+
+    private boolean recordWorkerResourceRelease(RoleType role) {
+        boolean decode = role == RoleType.DECODE;
+        boolean changed = decode ? !decodeCleanupCompleted : !prefillCleanupCompleted;
+        if (routeCommittedAtMs >= 0) changed |= confirmWorkerRelease(!decode, decode);
+        if (decode) decodeCleanupCompleted = true;
+        else prefillCleanupCompleted = true;
+        return changed;
+    }
+
+    private boolean confirmWorkerRelease(boolean prefillReleased, boolean decodeReleased) {
+        boolean changed =
+                prefillReleased && !prefillWorkerReleaseConfirmed
+                        || decodeReleased && !decodeWorkerReleaseConfirmed;
+        prefillWorkerReleaseConfirmed |= prefillReleased;
+        decodeWorkerReleaseConfirmed |= decodeReleased;
+        return changed;
     }
 
     private void selectResponse(RequestResult candidate) {
         if (candidate == null || candidate.ctx() != this || responseForFuture != null) return;
-        if (candidate.responseKind() == ResponseKind.ACK) {
-            return;
-        } else if (candidate.responseKind() == ResponseKind.TERMINAL && requestEndResult == null
+        if (candidate.responseKind() == ResponseKind.ACK
+                || candidate.responseKind() == ResponseKind.TERMINAL && requestEndResult == null
                 || candidate.responseKind() == ResponseKind.CANCELLATION
-                        && cancellationReason == null) {
-            return;
-        }
-        stateChanged = true;
+                        && cancellationReason == null) return;
         responseForFuture = candidate;
     }
 
-    private void recordEndpointClose(RequestContext.RequestEvent endpointClosed) {
-        boolean isDecode = endpointClosed.role() == RoleType.DECODE;
-        recordWorkerResourceRelease(endpointClosed.role());
-        boolean ending =
-                isDecode
-                        || endpointClosed.role() == RoleType.PDFUSION
-                        || endpointClosed.role() == RoleType.ENCODER
-                        || routeCommittedAtMs < 0L && !decodeAccepted;
-        if (activeSelectionId != 0L
-                && ending
-                && (!isDecode || routeCommittedAtMs < 0L && !decodeAccepted)) {
-            // An unsent route can still roll back and retry. Keep cleanup as the
-            // pending end, below any other end already accepted for this routing work.
-            if (requestEndResult == null && pendingEndEvent == null) {
-                var nextPendingEndEvent = endpointClosed.end();
-                stateChanged |= !Objects.equals(pendingEndEvent, nextPendingEndEvent);
-                pendingEndEvent = nextPendingEndEvent;
-            }
-            return;
-        }
-        if (requestEndResult == null && ending) retainEnd(endpointClosed.end());
+    private void recordCancellation(CancelReason reason, StrategyErrorType error, String detail) {
+        currentResourceWait = null;
+        cancellationReason = reason;
+        cancellationError = error;
+        cancellationDetail = detail;
     }
 
-    private void recordWorkerResourceRelease(RoleType role) {
-        boolean isDecode = role == RoleType.DECODE;
-        if (routeCommittedAtMs >= 0L) {
-            recordWorkerReleaseConfirmed(!isDecode, isDecode);
-        }
-        recordCleanupCompleted(!isDecode, isDecode);
-    }
-
-    private void recordWorkerReleaseConfirmed(boolean prefillReleased, boolean decodeReleased) {
-        var nextPrefillWorkerReleaseConfirmed = prefillWorkerReleaseConfirmed || prefillReleased;
-        stateChanged |= prefillWorkerReleaseConfirmed != nextPrefillWorkerReleaseConfirmed;
-        prefillWorkerReleaseConfirmed = nextPrefillWorkerReleaseConfirmed;
-        var nextDecodeWorkerReleaseConfirmed = decodeWorkerReleaseConfirmed || decodeReleased;
-        stateChanged |= decodeWorkerReleaseConfirmed != nextDecodeWorkerReleaseConfirmed;
-        decodeWorkerReleaseConfirmed = nextDecodeWorkerReleaseConfirmed;
-    }
-
-    private void recordCleanupCompleted(boolean prefillReleased, boolean decodeReleased) {
-        var nextPrefillCleanupCompleted = prefillCleanupCompleted || prefillReleased;
-        stateChanged |= prefillCleanupCompleted != nextPrefillCleanupCompleted;
-        prefillCleanupCompleted = nextPrefillCleanupCompleted;
-        var nextDecodeCleanupCompleted = decodeCleanupCompleted || decodeReleased;
-        stateChanged |= decodeCleanupCompleted != nextDecodeCleanupCompleted;
-        decodeCleanupCompleted = nextDecodeCleanupCompleted;
-    }
-
-    private void retainEnd(RequestEndEvent evidence) {
+    /**
+     * Worker endings take precedence while selection is running. Once selection exits, the accepted
+     * ending becomes the request result; resource cleanup remains a separate step.
+     */
+    private boolean retainEnd(RequestEndEvent evidence) {
+        currentResourceWait = null;
         if (requestEndResult != null) {
-            var nextExpired = expired || evidence.kind() == EndKind.INACTIVITY;
-            stateChanged |= expired != nextExpired;
-            expired = nextExpired;
-            return;
+            boolean newlyExpired = !expired && evidence.kind() == EndKind.INACTIVITY;
+            expired |= newlyExpired;
+            return newlyExpired;
         }
-        if (activeSelectionId != 0L) {
+        if (activeSelectionId != 0) {
             if (pendingEndEvent == null
                     || pendingEndEvent.kind() == EndKind.ENDPOINT_CLOSED
                     || evidence.kind() == EndKind.WORKER && pendingEndEvent.kind() != EndKind.WORKER
                     || evidence.kind() == EndKind.ENDPOINT_CLOSED
                             && pendingEndEvent.kind() != EndKind.WORKER) {
-                stateChanged |= !Objects.equals(pendingEndEvent, evidence);
+                boolean changed = !Objects.equals(pendingEndEvent, evidence);
                 pendingEndEvent = evidence;
+                return changed;
             }
-            return;
+            return false;
         }
         if (pendingEndEvent == null
-                || evidence.kind() == EndKind.WORKER && pendingEndEvent.kind() != EndKind.WORKER) {
+                || evidence.kind() == EndKind.WORKER && pendingEndEvent.kind() != EndKind.WORKER)
             pendingEndEvent = evidence;
-        }
-        // An end result moves OPEN to ENDING; resource cleanup and notifications gate CLOSED.
         requestEndResult = buildResult(pendingEndEvent);
         expired |= pendingEndEvent.kind() == EndKind.INACTIVITY;
         pendingEndEvent = null;
-        stateChanged = true;
+        return true;
     }
 
     private RequestResult buildResult(RequestEndEvent evidence) {
@@ -842,14 +792,9 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
         return new RequestResult(evidence.kind(), state, error, detail);
     }
 
-    private Snapshot commitSnapshot(long nowMs) {
-        refreshState(nowMs);
-        return snapshot();
-    }
-
     /**
-     * Archives a finished request when cleanup and response selection allow it, then updates timers
-     * and change time.
+     * Archives only after selection, local cleanup, cancellation submission and response selection finish.
+     * Deadline tokens are replaced only when their scheduled time changes.
      */
     private void refreshState(long nowMs) {
         if (requestEndResult != null
@@ -858,8 +803,8 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
                 && decodeCleanupCompleted
                 && notificationsDone
                 && (responseForFuture != null || future.isDone())
-                && activeSelectionId == 0L) {
-            var nextRequestRecordForArchive =
+                && activeSelectionId == 0) {
+            requestRecordForArchive =
                     new RequestResult(
                             registeredRequestId,
                             originalNumericRequestId,
@@ -868,44 +813,25 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
                             timing.registeredAtMs(),
                             nowMs,
                             requestEndResult.detail(),
-                            getRequestScheduler());
-            stateChanged = true;
-            requestRecordForArchive = nextRequestRecordForArchive;
+                            requestScheduler);
             route = null;
         }
-        long inactivityAtMs =
-                saturatedAdd(
-                        Math.max(lastWorkerAtMs, Math.max(0L, routeCommittedAtMs)),
-                        inactivityTimeoutMs);
         if (registeredRequestId != null) {
             long requestAt =
-                    requestEndResult == null && !requestDeadlineConsumed && routeCommittedAtMs < 0L
+                    requestEndResult == null && !requestDeadlineConsumed && routeCommittedAtMs < 0
                             ? getRequestExpiresAtMs()
-                            : 0L;
-            long visibilityAt = requestEndResult == null ? visibilityAtMs : 0L;
-            long inactivityAt = requestRecordForArchive != null || expired ? 0L : inactivityAtMs;
-            var nextDeadlines = deadlines.schedule(this, requestAt, visibilityAt, inactivityAt);
-            stateChanged |= !Objects.equals(deadlines, nextDeadlines);
-            deadlines = nextDeadlines;
+                            : 0;
+            long visibilityAt = requestEndResult == null ? visibilityAtMs : 0;
+            long inactivityAt =
+                    requestRecordForArchive != null || expired ? 0 : inactivityExpiresAtMs();
+            deadlines = deadlines.schedule(this, requestAt, visibilityAt, inactivityAt);
         }
-        if (stateChanged) {
-            updatedAtMs = Math.max(updatedAtMs, nowMs);
-            stateChanged = false;
-        }
+        updatedAtMs = Math.max(updatedAtMs, nowMs);
     }
 
-    private boolean matchesSelection(SelectionAttempt attempt) {
-        return attempt != null
-                && attempt.requestContext() == this
-                && activeSelectionId != 0L
-                && activeSelectionId == attempt.id();
-    }
-
-    private void recordCancellation(CancelReason reason, StrategyErrorType error, String detail) {
-        stateChanged = true;
-        cancellationReason = reason;
-        cancellationError = error;
-        cancellationDetail = detail;
+    private long inactivityExpiresAtMs() {
+        return saturatedAdd(
+                Math.max(lastWorkerAtMs, Math.max(0L, routeCommittedAtMs)), inactivityTimeoutMs);
     }
 
     /**

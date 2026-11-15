@@ -78,6 +78,20 @@ class DecodeRequestExpirationTest {
     }
 
     @Test
+    void orphanSweepCountsEveryRemovedRecordWithoutReleasingWorkerCapacity() {
+        reserve(1L, 500, 700, 0);
+        updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
+        reserve(2L, 200, 300, 0);
+        assertEquals(2, endpoint.evictExpiredRequests(-1L, requestId -> false));
+        assertTrue(endpoint.resourceSnapshot().requests().isEmpty());
+        assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
+        assertEquals(9_500, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(0, endpoint.selectionSnapshot().usage().hardReservedKvTokens());
+        assertEquals(500, endpoint.selectionSnapshot().realKvUsed());
+        assertEquals(0, endpoint.evictExpiredRequests(-1L, requestId -> false));
+    }
+
+    @Test
     void staleEndpointAndReservationIdentityCannotExpireNewRequest() {
         DecodeEndpoint.RequestRegistration original = reserve(1L, 500, 700, 0);
         assertEquals(

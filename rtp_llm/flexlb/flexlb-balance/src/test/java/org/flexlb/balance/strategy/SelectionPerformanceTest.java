@@ -24,8 +24,6 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /**
  * Production selection only: no RPC, Mockito invocation or asynchronous work in the measured loop.
@@ -93,7 +91,7 @@ class SelectionPerformanceTest {
                                             result.role(RoleType.PREFILL))
                                     .computeTokens();
                     var route = result;
-                    route.prefillEndpoint().releaseRequest(route);
+                    route.prefillEndpoint().releaseRequest(route.prefillRegistration());
                     if (route.decodeRegistration() != null)
                         route.decodeEndpoint().releaseRequest(route.decodeRegistration());
                 }
@@ -138,16 +136,28 @@ class SelectionPerformanceTest {
                     }
 
                     public void removeEngineBlockCache(String address) {}
+
+                    @Override
+                    public void trackRoutingPrediction(
+                            String requestId,
+                            RoleType role,
+                            String group,
+                            WorkerStatus worker,
+                            long inputTokens,
+                            long predictedHitTokens,
+                            org.flexlb.cache.CacheMatchResult result) {}
                 };
-        var model = mock(ModelMetaConfig.class);
-        when(model.requiredRoles()).thenReturn(ROLES);
+        var model = new ModelMetaConfig();
+        var group = new org.flexlb.config.service.GroupRoleEndPoint();
+        group.setPrefillEndpoint(new org.flexlb.util.discovery.DiscoveryEndpoint());
+        group.setDecodeEndpoint(new org.flexlb.util.discovery.DiscoveryEndpoint());
+        var route = new org.flexlb.config.service.ServiceRoute();
+        route.setServiceId("test");
+        route.setRoleEndpoints(List.of(group));
+        model.putServiceRoute("test", route);
         return new RequestRouteSelector(
                 registry,
-                new CostBasedPrefillStrategy(
-                        service,
-                        registry,
-                        org.mockito.Mockito.mock(org.flexlb.cache.match.CacheAwareService.class),
-                        metrics),
+                new CostBasedPrefillStrategy(service, registry, cache, metrics),
                 new DecodeStrategy(service, new AdmissionCapacity(1000, 100), registry),
                 new VitStrategy(
                         org.mockito.Mockito.mock(org.flexlb.cache.VitCacheDirectory.class),

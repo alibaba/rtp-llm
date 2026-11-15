@@ -450,7 +450,7 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 ## Checked routing performance
 
 The normal Maven `test` phase runs the 750P/750D Schedule RPC performance matrix
-in `flexlb-api`, with separate 8 GiB JVMs for DIRECT and QUEUE. After channel readiness and 64 low-rate priming requests, independent cases run
+in `flexlb-api`, with a separate 8 GiB JVM for each mode/capacity combination. After channel readiness and 64 low-rate priming requests, independent cases run
 3,000 and 10,000 QPS, with 10 seconds of warmup and 10 seconds of measurement per
 rate. The fixture uses 1,024 input tokens, eight configured output tokens,
 real loopback gRPC and production routing, with simulated worker completion.
@@ -475,13 +475,17 @@ per role. Prefill pressure limits each worker to 1,024 compute tokens for 1,024-
 requests. Decode pressure limits each worker to one admitted request. Simulated
 completion is delayed by 1,000 ms, producing a nominal bottleneck of 750 requests/s.
 The other role retains its ordinary capacity. QUEUE has a 250 ms scheduling timeout.
+The fixture allows 8,192 receiving RPCs so Worker pressure can be exercised through
+the ingress guard during client bursts.
 
 Pressure limits live under `pressure` in the limits JSON. DIRECT retains the normal
 RT limits. QUEUE checks p50/average RT at 275 ms and p99 at 500 ms. Both require at
 least 90% of offered QPS to receive a response, at least 50% expected capacity
 rejections/timeouts, and 450–950 successful requests/s. CPU average limits are 600%
 at 3k and 1,500% at 10k, with peak limits twice those values and the same 7 GiB RSS
-limit. Unexpected protocol/transport errors fail the test.
+limit. DIRECT accepts the constrained role's capacity failure and Decode
+same-priority rejection only when its typed reason is SAME_PRIORITY_AHEAD. QUEUE
+accepts scheduling timeouts. Unexpected protocol/transport errors fail the test.
 
 The cases also check actual worker registration bounds, occupancy of the finite
 role, empty P/D resource ledgers after completion, and admission of a fresh low-rate

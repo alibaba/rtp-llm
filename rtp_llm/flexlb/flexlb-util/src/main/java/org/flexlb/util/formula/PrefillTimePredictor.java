@@ -25,6 +25,10 @@ public final class PrefillTimePredictor {
         return input - Math.clamp(cacheHitTokens, 0L, input);
     }
 
+    public boolean usesDefaultFormula() {
+        return formula == null;
+    }
+
     public double score(long computeTokens) {
         double score =
                 formula == null

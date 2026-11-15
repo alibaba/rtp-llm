@@ -512,7 +512,7 @@ class SchedulerTestServicesTest {
                     reporter,
                     mock(TheoryCacheHitReporter.class),
                     mock(RequestRouteSelector.class),
-                    mock(org.flexlb.balance.schedule.DecodePreemption.class),
+                    org.flexlb.balance.schedule.RequestPreemptionTestSupport.mock(),
                     new CapacityNotifier());
         }
 

@@ -45,7 +45,7 @@ public final class SelectionTestSupport {
             org.mockito.invocation.InvocationOnMock call, RoutingResult<T, CapacityKey> selected) {
         if (selected.status() != RoutingResult.Status.SUCCESS) return java.util.Optional.empty();
         if (selected.value() instanceof CostBasedPrefillStrategy.Selection value) {
-            java.util.List<PrefillEndpoint> inputs = call.getArgument(1);
+            java.util.List<PrefillEndpoint> inputs = call.getArgument(2);
             var input =
                     inputs.stream()
                             .filter(
@@ -83,8 +83,8 @@ public final class SelectionTestSupport {
                     long expectedKv,
                     int priority) {
         return endpoint.tryRegisterSelection(
-                endpoint.selectionSnapshot(),
                 id,
+                endpoint.selectionSnapshot(),
                 hardKv,
                 expectedKv,
                 priority,
@@ -97,7 +97,6 @@ public final class SelectionTestSupport {
                 endpoint.tryRegisterSelection(
                         route.requestId(), endpoint.selectionSnapshot(), computeTokens);
         if (registered.status() == WorkerEndpoint.RegistrationStatus.REGISTERED) {
-            registered.value().bind(route);
             org.mockito.Mockito.doReturn(registered.value()).when(route).prefillRegistration();
         }
         return registered;

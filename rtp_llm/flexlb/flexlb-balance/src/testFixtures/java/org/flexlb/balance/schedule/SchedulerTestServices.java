@@ -150,8 +150,8 @@ public final class SchedulerTestServices {
                     var request = data.getRequest();
                     var acquired =
                             endpoint.tryRegisterSelection(
-                                    endpoint.selectionSnapshot(),
                                     data.getRequestId(),
+                                    endpoint.selectionSnapshot(),
                                     request.getHardKvTokens(),
                                     request.getExpectedKvTokens(),
                                     data.getPriority(),
@@ -198,29 +198,6 @@ public final class SchedulerTestServices {
         return tasks;
     }
 
-    public static SchedulerTestServices forOwner(Object value) {
-        var owner =
-                value instanceof AbstractRequestScheduler r
-                        ? r
-                        : lifecycle((RequestScheduler) value);
-        synchronized (owners) {
-            var found = owners.get(owner);
-            if (found != null) return found;
-            for (var entry : owners.entrySet()) {
-                if (owner.taskPool != null && owner.taskPool == entry.getKey().taskPool) {
-                    found = entry.getValue();
-                    break;
-                }
-            }
-            if (found != null) owners.put(owner, found);
-            return found;
-        }
-    }
-
-    public static AbstractRequestScheduler lifecycle(RequestScheduler scheduler) {
-        return (AbstractRequestScheduler) scheduler;
-    }
-
     /**
      * Count accepted requests before delivery handoff, including direct requests.
      */
@@ -248,7 +225,7 @@ public final class SchedulerTestServices {
                     default -> name;
                 };
         if (!java.util.Set.of(
-                        "tasks", "dispatcher", "responseCompletions", "deliveryReporter", "timer")
+                        "tasks", "dispatcher", "responseCompletions", "timer")
                 .contains(name)) return;
         synchronized (owners) {
             for (var entry : owners.entrySet()) {
@@ -280,7 +257,7 @@ public final class SchedulerTestServices {
         }
         owners.put(owner, runtime);
         for (String name :
-                new String[] {"tasks", "dispatcher", "responseCompletions", "deliveryReporter"}) {
+                new String[] {"tasks", "dispatcher", "responseCompletions"}) {
             try {
                 var source = SchedulerTestServices.class.getDeclaredField(name);
                 source.setAccessible(true);
@@ -408,7 +385,7 @@ public final class SchedulerTestServices {
             AbstractRequestScheduler dependencies,
             org.flexlb.config.FlexlbConfig config,
             RequestRouteSelector router,
-            org.flexlb.balance.schedule.DecodePreemption preemption,
+            org.flexlb.balance.schedule.RequestPreemption preemption,
             CapacityNotifier availability,
             SchedulingQueue queue) {
         return config.isQueue()
@@ -419,7 +396,7 @@ public final class SchedulerTestServices {
     public static QueuedRequestScheduler queued(
             org.flexlb.config.FlexlbConfig config,
             RequestRouteSelector router,
-            org.flexlb.balance.schedule.DecodePreemption preemption,
+            org.flexlb.balance.schedule.RequestPreemption preemption,
             AbstractRequestScheduler dependencies,
             CapacityNotifier availability,
             SchedulingQueue queue) {
@@ -432,11 +409,34 @@ public final class SchedulerTestServices {
                 dependency(dependencies, "expirationTimer"),
                 dependency(dependencies, "engineCancellation"),
                 dependency(dependencies, "responseCompletions"),
-                dependency(dependencies, "deliveryReporter"),
+                forOwner(dependencies).deliveryReporter,
                 dependency(dependencies, "cacheTrace"),
                 availability,
                 queue,
                 dependency(dependencies, "endpoints"));
+    }
+
+    public static SchedulerTestServices forOwner(Object value) {
+        var owner =
+                value instanceof AbstractRequestScheduler r
+                        ? r
+                        : lifecycle((RequestScheduler) value);
+        synchronized (owners) {
+            var found = owners.get(owner);
+            if (found != null) return found;
+            for (var entry : owners.entrySet()) {
+                if (owner.taskPool != null && owner.taskPool == entry.getKey().taskPool) {
+                    found = entry.getValue();
+                    break;
+                }
+            }
+            if (found != null) owners.put(owner, found);
+            return found;
+        }
+    }
+
+    public static AbstractRequestScheduler lifecycle(RequestScheduler scheduler) {
+        return (AbstractRequestScheduler) scheduler;
     }
 
     public static DirectRequestScheduler direct(
@@ -448,7 +448,7 @@ public final class SchedulerTestServices {
                 dependency(dependencies, "expirationTimer"),
                 dependency(dependencies, "engineCancellation"),
                 dependency(dependencies, "responseCompletions"),
-                dependency(dependencies, "deliveryReporter"),
+                forOwner(dependencies).deliveryReporter,
                 dependency(dependencies, "cacheTrace"),
                 dependency(dependencies, "endpoints"));
     }
@@ -462,7 +462,7 @@ public final class SchedulerTestServices {
             dependency(d, "expirationTimer"),
             dependency(d, "engineCancellation"),
             dependency(d, "responseCompletions"),
-            dependency(d, "deliveryReporter"),
+            forOwner(d).deliveryReporter,
             dependency(d, "cacheTrace"),
             dependency(d, "endpoints")
         };
@@ -471,7 +471,7 @@ public final class SchedulerTestServices {
     public static Object[] constructorArguments(
             org.flexlb.config.FlexlbConfig config,
             RequestRouteSelector router,
-            org.flexlb.balance.schedule.DecodePreemption preemption,
+            org.flexlb.balance.schedule.RequestPreemption preemption,
             AbstractRequestScheduler d,
             CapacityNotifier availability,
             SchedulingQueue queue) {
@@ -484,7 +484,7 @@ public final class SchedulerTestServices {
             dependency(d, "expirationTimer"),
             dependency(d, "engineCancellation"),
             dependency(d, "responseCompletions"),
-            dependency(d, "deliveryReporter"),
+            forOwner(d).deliveryReporter,
             dependency(d, "cacheTrace"),
             availability,
             queue,

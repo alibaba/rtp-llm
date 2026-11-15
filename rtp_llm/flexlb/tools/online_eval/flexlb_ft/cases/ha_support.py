@@ -111,7 +111,7 @@ def tier3_dual_spec(ctx) -> EnvSpec:
     """Tier-3: same port group on distinct loopback IPs + ZK helper.
 
     FLEXLB_ADVERTISED_IP and FLEXLB_CONFIG.consistency are injected
-    per the cross-agent contract (flexlb-sync owner); both instances share
+    per the cross-agent contract (flexlb-balance owner); both instances share
     one BIZ_NAME:DEPLOYMENT_NAME:ZONE_NAME identity for the shared ZK election path.
     """
     return EnvSpec(

@@ -21,16 +21,17 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
-import java.util.function.UnaryOperator;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
 /**
- * Owns discovered workers, publishes routing endpoints and runs each worker retirement to completion.
- * Admission closes before routing withdrawal; endpoint and cache cleanup run outside worker locks.
+ * Publishes endpoints after their first worker report and withdraws them before resource cleanup.
+ * Discovery retains each worker identity until its endpoint and cache cleanup finish; shutdown fences
+ * publication, stops every worker, and waits for the accepted cleanup futures outside worker locks.
  */
 @Component
 public class EndpointRegistry
@@ -41,32 +42,21 @@ public class EndpointRegistry
     private final EnumMap<RoleType, ConcurrentHashMap<String, WorkerStatus>> statusesByRole =
             roleMaps(RoleType.values());
     private final EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>> endpointsByRole =
-            roleMaps(
-                    RoleType.PREFILL,
-                    RoleType.DECODE,
-                    RoleType.PDFUSION,
-                    RoleType.ENCODER,
-                    RoleType.VIT);
-
-    // Immutable, address-sorted lists are published together after each endpoint map change.
-    private volatile Map<RoleType, List<WorkerEndpoint>> routingDirectories = Map.of();
-
+            roleMaps(RoleType.values());
+    private final ConcurrentHashMap<WorkerStatus, WorkerCleanup> workerCleanups =
+            new ConcurrentHashMap<>();
     private final ConfigService configService;
     private final WorkerRequests requests;
     private final EndpointMetrics reporter;
     private final CapacityNotifier capacityNotifier;
     private final WorkerCaches cacheAwareService;
-    private final ConcurrentHashMap<WorkerStatus, WorkerCleanup> workerCleanups =
-            new ConcurrentHashMap<>();
-    private final Object lifecycleGate = new Object();
+    // Read-side operations may hold a worker lock. Shutdown releases the write lock before taking
+    // one.
+    private final ReentrantReadWriteLock publications = new ReentrantReadWriteLock();
+    private final Object directoryLock = new Object();
 
-    /**
-     * Null while open; every closing caller observes the same completed cleanup result.
-     */
+    private volatile Map<RoleType, List<WorkerEndpoint>> routingDirectories = Map.of();
     private volatile CompletableFuture<Throwable> closeCompletion;
-
-    private int inflightPublications;
-    private int pendingWorkerCleanups;
 
     private final long closeTimeoutMs =
             Long.getLong("flexlb.endpoint.retirement.timeout.ms", 30_000L);
@@ -78,13 +68,12 @@ public class EndpointRegistry
             EndpointMetrics reporter,
             CapacityNotifier capacityNotifier,
             @org.springframework.context.annotation.Lazy WorkerCaches cacheAwareService) {
-        this.cacheAwareService = Objects.requireNonNull(cacheAwareService, "cacheAwareService");
-        checkArgument(closeTimeoutMs > 0L, "endpoint retirement timeout must be positive");
-        this.configService = java.util.Objects.requireNonNull(configService, "configService");
-        this.requests = java.util.Objects.requireNonNull(requests, "requests");
-        this.reporter = java.util.Objects.requireNonNull(reporter, "reporter");
-        this.capacityNotifier =
-                java.util.Objects.requireNonNull(capacityNotifier, "capacityNotifier");
+        this.configService = Objects.requireNonNull(configService);
+        this.requests = Objects.requireNonNull(requests);
+        this.reporter = Objects.requireNonNull(reporter);
+        this.capacityNotifier = Objects.requireNonNull(capacityNotifier);
+        this.cacheAwareService = Objects.requireNonNull(cacheAwareService);
+        checkArgument(closeTimeoutMs > 0, "endpoint retirement timeout must be positive");
     }
 
     @org.springframework.scheduling.annotation.Scheduled(fixedRate = 60_000L)
@@ -92,26 +81,19 @@ public class EndpointRegistry
         if (!requests.isClosed()) evictExpiredOrphans(10_000L, requests::retainsIdentity);
     }
 
-    /**
-     * Ask every registered endpoint to remove expired requests no longer retained by the scheduler.
-     *
-     * @param ttlMs max age before eviction
-     * @param retainForSchedulerCleanup current directory lookup, called outside endpoint locks;
-     *                                  candidates are revalidated in an DiscoveryEndpoint lock before eviction
-     */
     public void evictExpiredOrphans(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
-        for (var roleEntry : endpointsByRole.entrySet()) {
-            var role = roleEntry.getKey();
-            for (var endpointEntry : roleEntry.getValue().entrySet()) {
-                var endpoint = endpointEntry.getValue();
-                int evicted = endpoint.evictExpiredRequests(ttlMs, retainForSchedulerCleanup);
+        for (var endpoints : endpointsByRole.entrySet()) {
+            for (var entry : endpoints.getValue().entrySet()) {
+                int evicted =
+                        entry.getValue().evictExpiredRequests(ttlMs, retainForSchedulerCleanup);
                 if (evicted <= 0) continue;
-                var address = endpointEntry.getKey();
-                reporter.reportEndpointInflightTtlExpired(role.name(), address, "ttl", evicted);
+                var role = endpoints.getKey();
+                reporter.reportEndpointInflightTtlExpired(
+                        role.name(), entry.getKey(), "ttl", evicted);
                 Logger.info(
                         "event=endpoint_inflight_ttl_eviction role={} endpoint={} evicted={} ttl_ms={}",
                         role,
-                        address,
+                        entry.getKey(),
                         evicted,
                         ttlMs);
             }
@@ -119,94 +101,106 @@ public class EndpointRegistry
     }
 
     /**
-     * Finds or creates the DiscoveryEndpoint, applies the report, then registers a new DiscoveryEndpoint for routing.
-     * Failed candidates are closed; notifications from the update are published by the caller after unlocking.
+     * Applies a report under its worker lock. A new endpoint becomes routable only after applying it.
      */
     public EndpointUpdate updateEndpoint(
             String address, WorkerStatus status, WorkerStatus.PreparedStatus prepared) {
         status.requireActiveGeneration();
-        var existing = getEndpoint(status.getRole(), address);
-        if (existing != null && existing.getStatus() != status) existing = null;
-        if (existing == null) beginCandidatePublication();
-        WorkerEndpoint candidate = existing;
-        boolean publicationAttempted = false;
-        Throwable failure = null;
+        var observation = prepared.observation();
+        checkArgument(
+                observation.owner() == status && observation.role() == status.getRole(),
+                "staged status belongs to another worker generation");
+        Objects.requireNonNull(address, "address");
+        publications.readLock().lock();
         try {
-            WorkerStatus.StatusObservation observation = prepared.observation();
-            checkArgument(
-                    observation.owner() == status,
-                    "staged status belongs to another worker generation");
-            RoleType role = observation.role();
-            checkArgument(
-                    role == status.getRole(),
-                    "staged status role does not match its worker generation");
-            java.util.Objects.requireNonNull(address, "address");
-            if (candidate == null) {
-                checkState(
-                        status.appliedStatusCursor().statusVersion() < 0L,
-                        "Committed WorkerStatus has no exact endpoint generation: %s",
-                        address);
-                candidate = createEndpoint(status, observation.engine());
+            checkState(closeCompletion == null, "EndpointRegistry is closing");
+            var current = getEndpoint(status.getRole(), address);
+            if (current != null && current.getStatus() == status) {
+                return new EndpointUpdate(current, current.applyWorkerStatus(status, prepared));
             }
-            var change = candidate.applyWorkerStatus(status, prepared);
-            if (existing != null) return new EndpointUpdate(candidate, change);
-            status.trace().record(Stage.ENDPOINT_PUBLISHED);
-            WorkerEndpoint exact = candidate;
-            publicationAttempted = true;
-            mutateEndpointMap(
-                    role,
-                    address,
-                    current -> {
-                        checkState(
-                                current == null,
-                                "Existing endpoint generation must be withdrawn before publication for %s",
-                                address);
-                        return exact;
-                    });
-            capacityNotifier.notifyChanged(exact);
-            return new EndpointUpdate(candidate, change);
-        } catch (Throwable publicationFailure) {
-            failure = publicationFailure;
-            throw Failures.propagate(failure, "DiscoveryEndpoint update failed for " + address);
-        } finally {
+            checkState(
+                    current == null,
+                    "Existing endpoint generation must be withdrawn before publication for %s",
+                    address);
+            checkState(
+                    status.appliedStatusCursor().statusVersion() < 0,
+                    "Committed WorkerStatus has no exact endpoint generation: %s",
+                    address);
+            var endpoint = createEndpoint(status, observation.engine());
             try {
-                if (failure != null && candidate != null && existing == null) {
-                    WorkerEndpoint exact = candidate;
-                    try {
-                        if (publicationAttempted) {
-                            RoleType role = status.getRole();
-                            mutateEndpointMap(
-                                    role, address, current -> current == exact ? null : current);
-                        }
-                    } catch (Throwable withdrawalFailure) {
-                        Failures.append(failure, withdrawalFailure);
-                    } finally {
-                        Failures.run(failure, exact::closeAsync);
-                    }
-                }
-            } finally {
-                if (existing == null) endCandidatePublication();
+                var change = endpoint.applyWorkerStatus(status, prepared);
+                setEndpoint(status.getRole(), address, endpoint);
+                status.trace().record(Stage.ENDPOINT_PUBLISHED);
+                capacityNotifier.notifyChanged(endpoint);
+                return new EndpointUpdate(endpoint, change);
+            } catch (Throwable failure) {
+                removeEndpoint(endpoint);
+                Failures.run(failure, endpoint::closeAsync);
+                throw Failures.propagate(failure, "Endpoint update failed for " + address);
             }
+        } finally {
+            publications.readLock().unlock();
         }
     }
 
-    public WorkerEndpoint getEndpoint(RoleType roleType, String ipPort) {
-        Map<String, WorkerEndpoint> endpoints = endpointsByRole.get(roleType);
-        return endpoints == null ? null : endpoints.get(ipPort);
+    public WorkerEndpoint getEndpoint(RoleType role, String address) {
+        var endpoints = endpointsByRole.get(role);
+        return endpoints == null ? null : endpoints.get(address);
+    }
+
+    public WorkerStatus currentOrDiscover(
+            RoleType role, String address, Supplier<WorkerStatus> factory) {
+        Objects.requireNonNull(role);
+        Objects.requireNonNull(address);
+        Objects.requireNonNull(factory);
+        checkState(closeCompletion == null, "EndpointRegistry is closing");
+        var statuses = statusesByRole.get(role);
+        var current = statuses.get(address);
+        if (current != null) return current;
+        var discovered = Objects.requireNonNull(factory.get(), "discovered status");
+        checkArgument(
+                discovered.getRole() == role && address.equals(discovered.getLogicalIpPort()),
+                "Discovered WorkerStatus identity does not match directory key");
+        publications.readLock().lock();
+        try {
+            checkState(closeCompletion == null, "EndpointRegistry is closing");
+            var raced = statuses.putIfAbsent(address, discovered);
+            return raced == null ? discovered : raced;
+        } finally {
+            publications.readLock().unlock();
+        }
+    }
+
+    public void closeUnavailableWorkers() {
+        Throwable failure = null;
+        for (var role : statusesByRole.entrySet()) {
+            for (var entry : role.getValue().entrySet()) {
+                try {
+                    var status = entry.getValue();
+                    if (closeUnavailableWorker(role.getKey(), entry.getKey(), status) != null) {
+                        logger.warn(
+                                "Retiring unavailable worker: {}, role: {}, generation={}, trace={}",
+                                status.getIpPort(),
+                                status.getRole(),
+                                status.getGenerationId(),
+                                status.trace().snapshot().compact());
+                    }
+                } catch (Throwable problem) {
+                    failure = Failures.append(failure, problem);
+                }
+            }
+        }
+        Failures.rethrow(failure, "Worker retirement scan failed");
     }
 
     /**
-     * Starts retirement for an unavailable worker without waiting for status or admission locks.
+     * Busy workers are retried by the next scan without delaying other workers.
      */
     public java.util.concurrent.CompletionStage<Void> closeUnavailableWorker(
             RoleType role, String address, WorkerStatus status) {
         if (status.closeReason() == null || !status.lock.tryLock()) return null;
         try {
-            var currentEndpoint = getEndpoint(role, address);
-            var endpoint =
-                    currentEndpoint != null && currentEndpoint.getStatus() == status
-                            ? currentEndpoint
-                            : null;
+            var endpoint = getEndpoint(role, address);
             if (endpoint != null && !endpoint.stateLock().tryLock()) return null;
             try {
                 return closeWorker(role, address, status);
@@ -219,31 +213,47 @@ public class EndpointRegistry
     }
 
     /**
-     * Stops admission and withdraws an exact worker, then automatically runs asynchronous cleanup.
-     * Repeated calls share completion; callers never wait for cleanup while holding worker locks.
+     * Removes one exact worker from routing before starting its asynchronous endpoint and cache cleanup.
      */
     public java.util.concurrent.CompletionStage<Void> closeWorker(
             RoleType role, String address, WorkerStatus status) {
-        Objects.requireNonNull(role, "role");
-        Objects.requireNonNull(address, "address");
-        Objects.requireNonNull(status, "status");
+        Objects.requireNonNull(role);
+        Objects.requireNonNull(address);
+        Objects.requireNonNull(status);
         WorkerCleanup cleanup;
         status.lock.lock();
         try {
             var previous = workerCleanups.get(status);
             if (previous != null) return previous.result;
-            cleanup = prepareWorkerClose(role, address, status);
+            publications.readLock().lock();
+            try {
+                if (!isCurrentStatus(role, address, status))
+                    return CompletableFuture.completedFuture(null);
+                var endpoint = getEndpoint(role, address);
+                cleanup = new WorkerCleanup(status, endpoint);
+                workerCleanups.put(status, cleanup);
+                try {
+                    stopWorker(status, endpoint);
+                    if (endpoint != null) removeEndpoint(endpoint);
+                } catch (Throwable failure) {
+                    cleanup.completion.completeExceptionally(failure);
+                }
+            } finally {
+                publications.readLock().unlock();
+            }
         } finally {
             status.lock.unlock();
         }
-        if (cleanup == null) return CompletableFuture.completedFuture(null);
-        startWorkerCleanup(cleanup);
+        if (!cleanup.completion.isDone()) {
+            try {
+                Thread.ofVirtual().name("worker-retirement").start(cleanup);
+            } catch (Throwable failure) {
+                cleanup.completion.completeExceptionally(failure);
+            }
+        }
         return cleanup.result;
     }
 
-    /**
-     * Accept updates only for an exact current generation while this registry is open.
-     */
     public boolean isCurrentStatus(RoleType role, String address, WorkerStatus expected) {
         return closeCompletion == null
                 && expected != null
@@ -252,108 +262,48 @@ public class EndpointRegistry
                 && statusesByRole.get(role).get(address) == expected;
     }
 
-    /**
-     * Withdraws unavailable workers before starting their cleanup notifications.
-     * Busy status transactions or admission locks are left for the next scan.
-     */
-    public void closeUnavailableWorkers() {
-        List<WorkerCleanup> cleanups = new ArrayList<>();
-        Throwable failure = null;
-        try {
-            for (var roleStatuses : statusesByRole.entrySet()) {
-                for (var item : roleStatuses.getValue().entrySet()) {
-                    var status = item.getValue();
-                    if (status.closeReason() == null || !status.lock.tryLock()) continue;
-                    try {
-                        var endpoint = getEndpoint(roleStatuses.getKey(), item.getKey());
-                        // A busy admission must not delay retirement of other workers in this scan.
-                        if (endpoint != null && !endpoint.stateLock().tryLock()) continue;
-                        try {
-                            var cleanup =
-                                    prepareWorkerClose(
-                                            roleStatuses.getKey(), item.getKey(), status);
-                            if (cleanup != null) cleanups.add(cleanup);
-                        } finally {
-                            if (endpoint != null) endpoint.stateLock().unlock();
-                        }
-                    } catch (Throwable problem) {
-                        failure = Failures.append(failure, problem);
-                    } finally {
-                        status.lock.unlock();
-                    }
-                }
-            }
-        } finally {
-            for (var cleanup : cleanups) {
-                try {
-                    startWorkerCleanup(cleanup);
-                    var status = cleanup.status;
-                    logger.warn(
-                            "Retiring unavailable worker: {}, role: {}, generation={}, trace={}",
-                            status.getIpPort(),
-                            status.getRole(),
-                            status.getGenerationId(),
-                            status.trace().snapshot().compact());
-                } catch (Throwable problem) {
-                    failure = Failures.append(failure, problem);
-                }
-            }
-        }
-        Failures.rethrow(failure, "Worker retirement scan failed");
-    }
-
     public void close() {
-        boolean closeOwner;
         CompletableFuture<Throwable> completion;
-        synchronized (lifecycleGate) {
-            closeOwner = closeCompletion == null;
-            if (closeOwner) {
+        synchronized (directoryLock) {
+            completion = closeCompletion;
+            if (completion == null) {
                 closeCompletion = new CompletableFuture<>();
                 routingDirectories = Map.of();
             }
-            completion = closeCompletion;
         }
-        if (!closeOwner) {
-            // Join outside the gate; concurrent closers retain their interruption status.
+        if (completion != null) {
             Failures.rethrow(completion.join(), "EndpointRegistry close failed");
             return;
         }
-
-        boolean interrupted = false;
-        synchronized (lifecycleGate) {
-            while (inflightPublications != 0) {
-                try {
-                    lifecycleGate.wait();
-                } catch (InterruptedException interruption) {
-                    interrupted = true;
+        // Wait for admitted publication and withdrawal transactions, without holding a worker lock.
+        publications.writeLock().lock();
+        publications.writeLock().unlock();
+        Throwable failure = null;
+        try {
+            Set<WorkerEndpoint> endpoints = Collections.newSetFromMap(new IdentityHashMap<>());
+            for (var directory : endpointsByRole.values()) endpoints.addAll(directory.values());
+            Set<WorkerStatus> stopped = Collections.newSetFromMap(new IdentityHashMap<>());
+            for (var endpoint : endpoints) {
+                failure = Failures.run(failure, endpoint::stopAcceptingRequests);
+                stopped.add(endpoint.getStatus());
+            }
+            for (var statuses : statusesByRole.values()) {
+                for (var status : statuses.values()) {
+                    if (!stopped.contains(status))
+                        failure = Failures.run(failure, () -> stopWorker(status, null));
                 }
             }
-        }
-
-        Throwable failure;
-        try {
-            failure = closeEndpointGenerations();
-        } catch (RuntimeException | Error unexpectedFailure) {
-            failure = unexpectedFailure;
-        }
-        try {
-            awaitWorkerCleanups();
-        } catch (RuntimeException | Error detachedBarrierFailure) {
-            failure = Failures.append(failure, detachedBarrierFailure);
+            var completions = new ArrayList<java.util.concurrent.CompletionStage<Void>>();
+            for (var endpoint : endpoints)
+                failure = Failures.run(failure, () -> completions.add(endpoint.closeAsync()));
+            for (var cleanup : workerCleanups.values()) completions.add(cleanup.result);
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(closeTimeoutMs);
+            for (var result : completions)
+                failure = Failures.run(failure, () -> awaitCleanup(result, deadline));
+        } catch (Throwable problem) {
+            failure = Failures.append(failure, problem);
         } finally {
-            for (var cleanup : workerCleanups.values()) {
-                if (cleanup.completion.isCompletedExceptionally()) {
-                    try {
-                        cleanup.completion.join();
-                    } catch (java.util.concurrent.CompletionException problem) {
-                        failure = Failures.append(failure, problem.getCause());
-                    }
-                }
-            }
-            completion.complete(failure);
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
+            closeCompletion.complete(failure);
         }
         Failures.rethrow(failure, "EndpointRegistry close failed");
     }
@@ -367,9 +317,6 @@ public class EndpointRegistry
         return 0L;
     }
 
-    /**
-     * Returns available discovered workers matching the requested role and group.
-     */
     @Override
     public java.util.Collection<WorkerStatus> getWorkerStatuses(RoleType role, String group) {
         if (role == null) return List.of();
@@ -381,64 +328,21 @@ public class EndpointRegistry
                 .toList();
     }
 
-    /**
-     * Cheap role counts; no endpoint or request snapshots are constructed.
-     */
     public Counts counts(RoleType role) {
-        Objects.requireNonNull(role, "role");
-        Map<String, WorkerEndpoint> endpoints = endpointsByRole.get(role);
-        return new Counts(
-                statusesByRole.get(role).size(), endpoints == null ? 0 : endpoints.size());
+        Objects.requireNonNull(role);
+        return new Counts(statusesByRole.get(role).size(), endpointsByRole.get(role).size());
     }
 
-    /**
-     * Immutable point-in-time view of discovered generations for one role.
-     */
     public Map<String, WorkerStatus> statusSnapshot(RoleType role) {
-        if (role == null) {
-            return Map.of();
-        }
-        return Map.copyOf(statusesByRole.get(role));
-    }
-
-    public WorkerStatus currentOrDiscover(
-            RoleType role, String address, Supplier<WorkerStatus> discoveredFactory) {
-        Objects.requireNonNull(role, "role");
-        Objects.requireNonNull(address, "address");
-        Objects.requireNonNull(discoveredFactory, "discoveredFactory");
-        checkState(closeCompletion == null, "EndpointRegistry is closing");
-        ConcurrentHashMap<String, WorkerStatus> statuses = statusesByRole.get(role);
-        WorkerStatus current = statuses.get(address);
-        if (current != null) {
-            return current;
-        }
-        // Construct private discovery state outside the gate: factories must not
-        // introduce a lifecycle-gate -> generation-lock edge.
-        WorkerStatus discovered =
-                Objects.requireNonNull(discoveredFactory.get(), "discovered status");
-        checkArgument(
-                discovered.getRole() == role && address.equals(discovered.getLogicalIpPort()),
-                "Discovered WorkerStatus identity does not match directory key");
-        synchronized (lifecycleGate) {
-            checkState(closeCompletion == null, "EndpointRegistry is closing");
-            WorkerStatus raced = statuses.putIfAbsent(address, discovered);
-            return raced == null ? discovered : raced;
-        }
+        return role == null ? Map.of() : Map.copyOf(statusesByRole.get(role));
     }
 
     public int discoveredCount() {
-        int total = 0;
-        for (Map<String, WorkerStatus> statuses : statusesByRole.values()) {
-            total += statuses.size();
-        }
-        return total;
+        return statusesByRole.values().stream().mapToInt(Map::size).sum();
     }
 
     /**
-     * Returns immutable endpoints for a role, optionally filtered by group; null includes all groups.
-     * The type parameter must match the role: PrefillEndpoint for PREFILL/PDFUSION,
-     * DecodeEndpoint for DECODE, EncoderEndpoint for ENCODER and WorkerEndpoint for VIT.
-     * DiscoveryEndpoint creation fixes these types before publishing each directory.
+     * The requested type must match the role's endpoint implementation.
      */
     @SuppressWarnings("unchecked")
     public <T extends WorkerEndpoint> List<T> endpoints(RoleType role, String group) {
@@ -450,90 +354,53 @@ public class EndpointRegistry
                         .toList();
     }
 
-    /**
-     * Registers cleanup before withdrawing a worker so shutdown can see all accepted retirements.
-     * The caller holds only this worker's status lock; endpoint lock waits stay outside lifecycleGate.
-     */
-    private WorkerCleanup prepareWorkerClose(RoleType role, String address, WorkerStatus status) {
-        if (!isCurrentStatus(role, address, status) || workerCleanups.containsKey(status))
-            return null;
-        var currentEndpoint = getEndpoint(role, address);
-        var endpoint =
-                currentEndpoint != null && currentEndpoint.getStatus() == status
-                        ? currentEndpoint
-                        : null;
-        var cleanup = new WorkerCleanup(status, endpoint);
-        synchronized (lifecycleGate) {
-            checkState(closeCompletion == null, "EndpointRegistry is closing");
-            workerCleanups.put(status, cleanup);
-            pendingWorkerCleanups++;
+    private void setEndpoint(RoleType role, String address, WorkerEndpoint endpoint) {
+        synchronized (directoryLock) {
+            endpointsByRole.get(role).put(address, endpoint);
+            publishDirectory(role);
         }
+    }
+
+    private void publishDirectory(RoleType role) {
+        if (closeCompletion != null) return;
+        var directories = new EnumMap<RoleType, List<WorkerEndpoint>>(RoleType.class);
+        directories.putAll(routingDirectories);
+        directories.put(
+                role,
+                endpointsByRole.get(role).values().stream()
+                        .sorted(java.util.Comparator.comparing(WorkerEndpoint::ipPort))
+                        .toList());
+        routingDirectories = Map.copyOf(directories);
+    }
+
+    private void removeEndpoint(WorkerEndpoint endpoint) {
+        synchronized (directoryLock) {
+            var role = endpoint.getStatus().getRole();
+            if (endpointsByRole.get(role).remove(endpoint.ipPort(), endpoint))
+                publishDirectory(role);
+        }
+    }
+
+    private static void stopWorker(WorkerStatus status, WorkerEndpoint endpoint) {
+        if (endpoint != null) endpoint.stopAcceptingRequests();
+        else {
+            status.lock.lock();
+            try {
+                status.stopUpdatesAfterAdmissionClosed();
+            } finally {
+                status.lock.unlock();
+            }
+        }
+    }
+
+    private static void awaitCleanup(
+            java.util.concurrent.CompletionStage<Void> result, long deadline) {
         try {
-            if (endpoint != null) endpoint.stopAcceptingRequests();
-            else status.stopUpdatesAfterAdmissionClosed();
-            if (endpoint != null) {
-                mutateEndpointMap(role, address, current -> current == endpoint ? null : current);
-            }
-        } catch (Throwable failure) {
-            cleanup.fail(failure);
-        }
-        return cleanup;
-    }
-
-    /**
-     * Changes one endpoint mapping and publishes its address-sorted role directory under the lifecycle lock.
-     */
-    private void mutateEndpointMap(
-            RoleType role, String address, UnaryOperator<WorkerEndpoint> mutation) {
-        synchronized (lifecycleGate) {
-            var endpoints = endpointsByRole.get(role);
-            WorkerEndpoint current = endpoints.get(address);
-            WorkerEndpoint next = mutation.apply(current);
-            if (next == current) return;
-            var directory =
-                    directoryAfterMutation(
-                            routingDirectories.getOrDefault(role, List.of()), address, next);
-            if (next == null) endpoints.remove(address);
-            else endpoints.put(address, next);
-            var directories = new EnumMap<RoleType, List<WorkerEndpoint>>(RoleType.class);
-            directories.putAll(routingDirectories);
-            directories.put(role, directory);
-            routingDirectories = Map.copyOf(directories);
-        }
-    }
-
-    /**
-     * Keep the immutable directory in address order; request routing then needs no full sort.
-     */
-    private List<WorkerEndpoint> directoryAfterMutation(
-            List<WorkerEndpoint> previous, String address, WorkerEndpoint next) {
-        if (closeCompletion != null) {
-            return List.of();
-        }
-        List<WorkerEndpoint> updated = new ArrayList<>(previous.size() + (next == null ? 0 : 1));
-        boolean inserted = next == null;
-        for (WorkerEndpoint entry : previous) {
-            String currentAddress = entry.ipPort();
-            if (!inserted && address.compareTo(currentAddress) <= 0) {
-                updated.add(next);
-                inserted = true;
-            }
-            if (!address.equals(currentAddress)) {
-                updated.add(entry);
-            }
-        }
-        if (!inserted) {
-            updated.add(next);
-        }
-        return List.copyOf(updated);
-    }
-
-    private void startWorkerCleanup(WorkerCleanup cleanup) {
-        if (cleanup.completion.isDone()) return;
-        try {
-            Thread.ofVirtual().name("worker-retirement").start(cleanup);
-        } catch (Throwable failure) {
-            cleanup.fail(failure);
+            result.toCompletableFuture()
+                    .orTimeout(Math.max(1L, deadline - System.nanoTime()), TimeUnit.NANOSECONDS)
+                    .join();
+        } catch (java.util.concurrent.CompletionException failure) {
+            throw Failures.propagate(failure.getCause(), "Worker cleanup timed out or failed");
         }
     }
 
@@ -543,36 +410,6 @@ public class EndpointRegistry
             maps.put(role, new ConcurrentHashMap<>());
         }
         return maps;
-    }
-
-    private void beginCandidatePublication() {
-        synchronized (lifecycleGate) {
-            checkState(closeCompletion == null, "EndpointRegistry is closing");
-            inflightPublications++;
-        }
-    }
-
-    private void endCandidatePublication() {
-        synchronized (lifecycleGate) {
-            checkState(inflightPublications > 0, "EndpointRegistry publication count underflow");
-            inflightPublications--;
-            if (inflightPublications == 0) {
-                lifecycleGate.notifyAll();
-            }
-        }
-    }
-
-    /**
-     * Ends bookkeeping for a worker retirement after success or a reported failure.
-     */
-    private void decrementPendingWorkerCleanups() {
-        synchronized (lifecycleGate) {
-            checkState(pendingWorkerCleanups > 0, "Detached retirement count underflow");
-            pendingWorkerCleanups--;
-            if (pendingWorkerCleanups == 0) {
-                lifecycleGate.notifyAll();
-            }
-        }
     }
 
     private WorkerEndpoint createEndpoint(
@@ -597,109 +434,6 @@ public class EndpointRegistry
             case VIT -> new WorkerEndpoint(status);
             case FRONTEND -> throw new AssertionError("validated above");
         };
-    }
-
-    /**
-     * Wait for every worker retirement registered before shutdown.
-     */
-    private void awaitWorkerCleanups() {
-        boolean interrupted = false;
-        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(closeTimeoutMs);
-        try {
-            synchronized (lifecycleGate) {
-                while (pendingWorkerCleanups != 0) {
-                    long remaining = deadlineNanos - System.nanoTime();
-                    checkState(
-                            remaining > 0L,
-                            "Detached worker retirement timed out after %sms: pending=%s",
-                            closeTimeoutMs,
-                            pendingWorkerCleanups);
-                    try {
-                        TimeUnit.NANOSECONDS.timedWait(lifecycleGate, remaining);
-                    } catch (InterruptedException interruption) {
-                        interrupted = true;
-                    }
-                }
-            }
-        } finally {
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
-        }
-    }
-
-    private Throwable closeEndpointGenerations() {
-        Set<WorkerEndpoint> seen = Collections.newSetFromMap(new IdentityHashMap<>());
-        List<WorkerEndpoint> endpoints = new ArrayList<>();
-        Throwable failure = null;
-        for (Map<String, WorkerEndpoint> roleEndpoints : endpointsByRole.values()) {
-            try {
-                for (WorkerEndpoint endpoint : roleEndpoints.values()) {
-                    if (seen.add(endpoint)) {
-                        endpoints.add(endpoint);
-                    }
-                }
-            } catch (RuntimeException | Error snapshotFailure) {
-                failure = Failures.append(failure, snapshotFailure);
-            }
-        }
-        Set<WorkerStatus> stoppedStatuses = Collections.newSetFromMap(new IdentityHashMap<>());
-        // Stop every generation before any cleanup can notify scheduling listeners.
-        for (WorkerEndpoint endpoint : endpoints) {
-            failure =
-                    Failures.run(
-                            failure,
-                            () -> {
-                                endpoint.stopAcceptingRequests();
-                                stoppedStatuses.add(endpoint.getStatus());
-                            });
-        }
-        // Discovered generations may have an in-flight cache poll before their
-        // first endpoint is published. Fence these callbacks under the same lock.
-        for (Map<String, WorkerStatus> statuses : statusesByRole.values()) {
-            for (WorkerStatus status : statuses.values()) {
-                if (stoppedStatuses.contains(status)) continue;
-                failure =
-                        Failures.run(
-                                failure,
-                                () -> {
-                                    status.lock.lock();
-                                    try {
-                                        status.stopUpdatesAfterAdmissionClosed();
-                                    } finally {
-                                        status.lock.unlock();
-                                    }
-                                });
-            }
-        }
-        List<java.util.concurrent.CompletionStage<Void>> completions = new ArrayList<>();
-        for (WorkerEndpoint endpoint : endpoints) {
-            failure = Failures.run(failure, () -> completions.add(endpoint.closeAsync()));
-        }
-        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(closeTimeoutMs);
-        for (var completion : completions) {
-            failure =
-                    Failures.run(
-                            failure,
-                            () ->
-                                    awaitCloseCompletion(
-                                            completion,
-                                            Math.max(
-                                                    1L,
-                                                    TimeUnit.NANOSECONDS.toMillis(
-                                                            deadlineNanos - System.nanoTime()))));
-        }
-        return failure;
-    }
-
-    private static void awaitCloseCompletion(
-            java.util.concurrent.CompletionStage<Void> closing, long timeoutMs) {
-        try {
-            closing.toCompletableFuture().orTimeout(timeoutMs, TimeUnit.MILLISECONDS).join();
-        } catch (java.util.concurrent.CompletionException failure) {
-            throw Failures.propagate(
-                    failure.getCause(), "DiscoveryEndpoint close timed out or failed");
-        }
     }
 
     private boolean finishWorkerCleanup(WorkerStatus status) {
@@ -735,7 +469,6 @@ public class EndpointRegistry
                 return false;
             }
             status.trace().record(Stage.RETIREMENT_CLEANUP_END);
-            capacityNotifier.removeClosedWorker(status);
             if (!statuses.remove(address, status)) {
                 logger.error(
                         "Exact status removal failed while its cache lock was held for {}#{}",
@@ -757,13 +490,11 @@ public class EndpointRegistry
         }
     }
 
-    /**
-     * Notifications belong to the returned DiscoveryEndpoint and must be published after releasing the WorkerStatus lock.
-     */
     public record EndpointUpdate(WorkerEndpoint endpoint, WorkerEndpoint.StatusChange change) {}
 
     /**
-     * Drains one withdrawn worker and retries cache cleanup before removing its exact status.
+     * Retains the discovered identity until resource and cache cleanup finish. Failed futures remain
+     * in the registry so every shutdown caller observes the failure.
      */
     private final class WorkerCleanup implements Runnable {
         private final WorkerStatus status;
@@ -779,8 +510,7 @@ public class EndpointRegistry
 
         @Override
         public void run() {
-            var address = status.getLogicalIpPort();
-            // The caller may have entered closeWorker inside a larger status transaction.
+            // closeWorker may be called inside an outer worker-status transaction.
             status.lock.lock();
             status.lock.unlock();
             status.trace().record(Stage.RETIREMENT_CLEANUP_BEGIN);
@@ -790,30 +520,26 @@ public class EndpointRegistry
                         capacityNotifier.notifyChanged(endpoint);
                     } catch (Throwable failure) {
                         logger.error(
-                                "Worker withdrawal notification failed for {}", address, failure);
+                                "Worker withdrawal notification failed for {}",
+                                status.getLogicalIpPort(),
+                                failure);
                     }
                     endpoint.closeAsync().toCompletableFuture().join();
                 }
                 while (!finishWorkerCleanup(status)) {
-                    if (closeCompletion != null) {
-                        throw new IllegalStateException(
-                                "Worker cache cleanup failed during shutdown: " + address);
-                    }
-                    TimeUnit.SECONDS.sleep(1L);
+                    checkState(
+                            closeCompletion == null,
+                            "Worker cache cleanup failed during shutdown: %s",
+                            status.getLogicalIpPort());
+                    TimeUnit.SECONDS.sleep(1);
                 }
-                decrementPendingWorkerCleanups();
                 completion.complete(null);
                 workerCleanups.remove(status, this);
             } catch (Throwable failure) {
                 if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
-                fail(failure);
+                completion.completeExceptionally(failure);
+                logger.error("Worker retirement failed for {}", status.getLogicalIpPort(), failure);
             }
-        }
-
-        private void fail(Throwable failure) {
-            completion.completeExceptionally(failure);
-            decrementPendingWorkerCleanups();
-            logger.error("Worker retirement failed for {}", status.getLogicalIpPort(), failure);
         }
     }
 }

@@ -72,7 +72,7 @@ class DirectRequestLifetimeRaceTest {
                         mock(RequestSchedulerReporter.class),
                         mock(TheoryCacheHitReporter.class),
                         router,
-                        mock(org.flexlb.balance.schedule.DecodePreemption.class),
+                        org.flexlb.balance.schedule.RequestPreemptionTestSupport.mock(),
                         new CapacityNotifier());
         try {
             var context = RequestProtocolTestSupport.context(config, 101L);
@@ -121,6 +121,7 @@ class DirectRequestLifetimeRaceTest {
                     .when(prefillStrategy)
                     .chooseBest(
                             org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                            org.mockito.ArgumentMatchers.any(),
                             org.mockito.ArgumentMatchers.anyList(),
                             org.mockito.ArgumentMatchers.any());
             var state = prefill;

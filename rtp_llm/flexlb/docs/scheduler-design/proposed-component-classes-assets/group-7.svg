@@ -130,7 +130,7 @@
 <text text-anchor="start" x="586" y="-1039.2" font-family="Arial" font-size="11.00">&#45; PollLease lease</text>
 <text text-anchor="start" x="586" y="-1027.2" font-family="Arial" font-size="11.00">&#45; WorkerStatusRpcClient client</text>
 <text text-anchor="start" x="586" y="-1015.2" font-family="Arial" font-size="11.00">&#45; EndpointRegistry registry</text>
-<text text-anchor="start" x="586" y="-1003.2" font-family="Arial" font-size="11.00">&#45; EngineHealthReporter reporter</text>
+<text text-anchor="start" x="586" y="-1003.2" font-family="Arial" font-size="11.00">&#45; ServiceMetricsReporter reporter</text>
 <polygon fill="none" stroke="#cbd5e1" points="578,-928 578,-992 753,-992 753,-928 578,-928"/>
 <text text-anchor="start" x="586" y="-975.2" font-family="Arial" font-size="11.00">+ run(): void</text>
 <text text-anchor="start" x="586" y="-963.2" font-family="Arial" font-size="11.00">&#45; onResponse(reply, failure): void</text>

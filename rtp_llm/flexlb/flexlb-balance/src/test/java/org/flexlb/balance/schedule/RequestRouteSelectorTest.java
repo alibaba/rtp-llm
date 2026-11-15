@@ -198,6 +198,7 @@ class RequestRouteSelectorTest {
                 .when(prefillStrategy)
                 .chooseBest(
                         org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
         org.mockito.Mockito.doAnswer(
@@ -210,8 +211,8 @@ class RequestRouteSelectorTest {
 
         when(((DecodeEndpoint) decode.endpoint)
                         .tryRegisterSelection(
-                                org.mockito.ArgumentMatchers.any(),
                                 eq("7"),
+                                org.mockito.ArgumentMatchers.any(),
                                 eq(32L),
                                 eq(48L),
                                 eq(50),
@@ -233,7 +234,7 @@ class RequestRouteSelectorTest {
         assertTrue(response.isSuccess());
         assertEquals(List.of(prefill.status, decode.status), response.getServerStatus());
         verify((PrefillEndpoint) prefill.endpoint, never())
-                .releaseRequest(any(RequestResult.class));
+                .releaseRequest(any(PrefillEndpoint.RequestRegistration.class));
         assertTrue(response.isSuccess());
         verify((DecodeEndpoint) decode.endpoint, never()).releaseRequest(reservation);
         org.flexlb.worker.endpoint.EndpointTestSupport.closeAsync(
@@ -256,6 +257,7 @@ class RequestRouteSelectorTest {
                 .when(prefillStrategy)
                 .chooseBest(
                         org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
         org.mockito.Mockito.doAnswer(
@@ -267,8 +269,8 @@ class RequestRouteSelectorTest {
         stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
         when(((DecodeEndpoint) decode.endpoint)
                         .tryRegisterSelection(
-                                org.mockito.ArgumentMatchers.any(),
                                 eq("8"),
+                                org.mockito.ArgumentMatchers.any(),
                                 eq(32L),
                                 eq(48L),
                                 eq(50),
@@ -292,6 +294,7 @@ class RequestRouteSelectorTest {
         verify(prefillStrategy)
                 .chooseBest(
                         org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
         verify((DecodeEndpoint) decode.endpoint, never()).releaseRequest(reservation);
@@ -324,6 +327,7 @@ class RequestRouteSelectorTest {
                     .when(prefillStrategy)
                     .chooseBest(
                             org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                            org.mockito.ArgumentMatchers.any(),
                             org.mockito.ArgumentMatchers.anyList(),
                             org.mockito.ArgumentMatchers.any());
             org.mockito.Mockito.doAnswer(
@@ -338,8 +342,8 @@ class RequestRouteSelectorTest {
 
             when(((DecodeEndpoint) decode.endpoint)
                             .tryRegisterSelection(
-                                    org.mockito.ArgumentMatchers.any(),
                                     eq("9"),
+                                    org.mockito.ArgumentMatchers.any(),
                                     eq(32L),
                                     eq(48L),
                                     eq(50),
@@ -380,7 +384,8 @@ class RequestRouteSelectorTest {
                     SchedulerTestSupport.repository(requests).getRequestState("9").state());
             assertEquals(0, SchedulerTestSupport.repository(requests).liveRequestCount());
             verify((DecodeEndpoint) decode.endpoint).releaseRequest(reservation);
-            verify((PrefillEndpoint) prefill.endpoint).releaseRequest(any(RequestResult.class));
+            verify((PrefillEndpoint) prefill.endpoint)
+                    .releaseRequest(any(PrefillEndpoint.RequestRegistration.class));
         } finally {
             RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(requests);
             requests.closeOutstandingAndTerminalize();
@@ -410,6 +415,7 @@ class RequestRouteSelectorTest {
                             : new IllegalStateException("selection failed");
             when(prefillStrategy.chooseBest(
                             org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                            org.mockito.ArgumentMatchers.any(),
                             org.mockito.ArgumentMatchers.anyList(),
                             org.mockito.ArgumentMatchers.any()))
                     .thenThrow(failure);
@@ -472,7 +478,9 @@ class RequestRouteSelectorTest {
         var adoptionFailure = new IllegalStateException("adoption failed");
         var cleanupFailure = new IllegalStateException("cleanup failed");
         if (adoptionThrows) {
-            when(decode.registrationState(reservation)).thenThrow(adoptionFailure);
+            doThrow(adoptionFailure).when(decode).acceptsNewRequests();
+        } else {
+            org.mockito.Mockito.doReturn(false).when(decode).acceptsNewRequests();
         }
         doThrow(cleanupFailure).when(decode).rollbackSelection(reservation);
 
@@ -480,7 +488,14 @@ class RequestRouteSelectorTest {
         var actual =
                 assertThrows(
                         IllegalStateException.class,
-                        () -> router().select(context, null, decode, reservation));
+                        () ->
+                                router().select(
+                                                context,
+                                                null,
+                                                RoleSelection.decode(
+                                                        decode,
+                                                        selectedDecode.status(),
+                                                        reservation)));
         assertSame(adoptionThrows ? adoptionFailure : cleanupFailure, actual);
         assertEquals(
                 adoptionThrows ? List.of(cleanupFailure) : List.of(),
@@ -522,8 +537,8 @@ class RequestRouteSelectorTest {
         var endpoint = (DecodeEndpoint) decode.endpoint();
         var reservation = new DecodeEndpoint.RequestRegistration(1L, String.valueOf(703L));
         when(endpoint.tryRegisterSelection(
-                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.any(),
                         anyLong(),
                         anyLong(),
                         anyInt(),
@@ -545,7 +560,11 @@ class RequestRouteSelectorTest {
                                     SelectionTestSupport.selectionResult(
                                             call, selected(call, prefill)))
                     .when(prefillStrategy)
-                    .chooseBest(any(), any(), org.mockito.ArgumentMatchers.any());
+                    .chooseBest(
+                            any(),
+                            org.mockito.ArgumentMatchers.any(),
+                            any(),
+                            org.mockito.ArgumentMatchers.any());
             org.mockito.Mockito.doAnswer(
                             call ->
                                     SelectionTestSupport.selectionResult(
@@ -600,7 +619,11 @@ class RequestRouteSelectorTest {
         stubQueueSelection(
                 context, RoleType.PREFILL, "g1", RoutingResult.blocked(RoleType.PREFILL));
 
-        var result = router().select(context, null, endpoint, reservation);
+        var result =
+                router().select(
+                                context,
+                                null,
+                                RoleSelection.decode(endpoint, decode.status(), reservation));
 
         assertEquals(RoutingResult.Status.BLOCKED, result.status());
         verify(endpoint).rollbackSelection(reservation);
@@ -662,6 +685,7 @@ class RequestRouteSelectorTest {
                 .when(prefillStrategy)
                 .chooseBest(
                         any(),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
         var chosen = role.supportsPrefill() ? prefill : selection(role, 113L, "other", 8002, "g1");
@@ -696,8 +720,7 @@ class RequestRouteSelectorTest {
         RequestProtocolTestSupport.submitForManualPlacement(requests, context);
         var attempt = RequestProtocolTestSupport.beginAdmission(requests, context);
         var router = router();
-        var result =
-                requests.executeRouteSelection(attempt, () -> router.select(context, null), false);
+        var result = requests.executeRouteSelection(attempt, () -> router.select(context, null));
         assertEquals(RoutingResult.Status.RETRY, result.status());
         if (!role.supportsPrefill()) assertNull(result.blocker());
         org.flexlb.worker.endpoint.EndpointTestSupport.closeAsync(
@@ -798,6 +821,7 @@ class RequestRouteSelectorTest {
                 .when(prefillStrategy)
                 .chooseBest(
                         org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
 
@@ -818,6 +842,7 @@ class RequestRouteSelectorTest {
                 .when(prefillStrategy)
                 .chooseBest(
                         org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
         var decode = selection(RoleType.DECODE, 12L, "d", 8002, "g1");
@@ -867,6 +892,7 @@ class RequestRouteSelectorTest {
                 .when(prefillStrategy)
                 .chooseBest(
                         org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
         org.mockito.Mockito.doAnswer(
@@ -919,6 +945,7 @@ class RequestRouteSelectorTest {
                 .when(prefillStrategy)
                 .chooseBest(
                         org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
 
@@ -950,6 +977,7 @@ class RequestRouteSelectorTest {
                 .when(prefillStrategy)
                 .chooseBest(
                         same(inputs),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
 
@@ -964,6 +992,7 @@ class RequestRouteSelectorTest {
         verify(prefillStrategy)
                 .chooseBest(
                         same(inputs),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
     }
@@ -980,6 +1009,7 @@ class RequestRouteSelectorTest {
                 .when(prefillStrategy)
                 .chooseBest(
                         org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
         when(vitStrategy.select(org.mockito.ArgumentMatchers.anyList()))
@@ -994,6 +1024,7 @@ class RequestRouteSelectorTest {
         verify(prefillStrategy)
                 .chooseBest(
                         org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
         verify(vitStrategy).select(org.mockito.ArgumentMatchers.anyList());
@@ -1022,6 +1053,7 @@ class RequestRouteSelectorTest {
                 .when(prefillStrategy)
                 .chooseBest(
                         org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
         when(vitStrategy.select(org.mockito.ArgumentMatchers.anyList()))
@@ -1036,6 +1068,7 @@ class RequestRouteSelectorTest {
         verify(prefillStrategy)
                 .chooseBest(
                         org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
         verify(vitStrategy).select(org.mockito.ArgumentMatchers.anyList());
@@ -1056,6 +1089,7 @@ class RequestRouteSelectorTest {
                 .when(prefillStrategy)
                 .chooseBest(
                         org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
         when(vitStrategy.select(org.mockito.ArgumentMatchers.anyList()))
@@ -1083,6 +1117,7 @@ class RequestRouteSelectorTest {
                 .when(prefillStrategy)
                 .chooseBest(
                         org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
         org.mockito.Mockito.doAnswer(
@@ -1133,6 +1168,7 @@ class RequestRouteSelectorTest {
                 .when(prefillStrategy)
                 .chooseBest(
                         org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
 
@@ -1149,7 +1185,7 @@ class RequestRouteSelectorTest {
         var prefill = selection(RoleType.PREFILL, 62L, "p", 8001, "g1");
         org.mockito.Mockito.doReturn(java.util.Optional.empty())
                 .when(prefillStrategy)
-                .chooseBest(any(), any(), any());
+                .chooseBest(any(), org.mockito.ArgumentMatchers.any(), any(), any());
         var router = router();
         var result = router.select(context, null);
         assertEquals(RoutingResult.Status.BLOCKED, result.status());
@@ -1199,6 +1235,7 @@ class RequestRouteSelectorTest {
                 .when(prefillStrategy)
                 .chooseBest(
                         org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
 
@@ -1208,6 +1245,7 @@ class RequestRouteSelectorTest {
         verify(prefillStrategy)
                 .chooseBest(
                         org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                        org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
     }
@@ -1245,7 +1283,7 @@ class RequestRouteSelectorTest {
                 configService,
                 router,
                 mock(org.flexlb.balance.metrics.DeliveryMetricsReporter.class),
-                mock(org.flexlb.balance.schedule.DecodePreemption.class),
+                org.flexlb.balance.schedule.RequestPreemptionTestSupport.mock(),
                 new CapacityNotifier());
     }
 
@@ -1284,6 +1322,7 @@ class RequestRouteSelectorTest {
                             .when(prefillStrategy)
                             .chooseBest(
                                     org.mockito.ArgumentMatchers.eq(context.getRequest()),
+                                    org.mockito.ArgumentMatchers.any(),
                                     org.mockito.ArgumentMatchers.anyList(),
                                     org.mockito.ArgumentMatchers.any());
             case DECODE ->
@@ -1461,7 +1500,7 @@ class RequestRouteSelectorTest {
                             0L,
                             0L,
                             null,
-                            ((java.util.List<PrefillEndpoint>) call.getArgument(1))
+                            ((java.util.List<PrefillEndpoint>) call.getArgument(2))
                                     .stream()
                                             .filter(input -> input.ipPort().equals(address))
                                             .findFirst()
@@ -1510,8 +1549,8 @@ class RequestRouteSelectorTest {
         var request = context.getRequest();
         var acquired =
                 endpoint.tryRegisterSelection(
-                        endpoint.selectionSnapshot(),
                         request.getRequestId(),
+                        endpoint.selectionSnapshot(),
                         request.getHardKvTokens(),
                         request.getExpectedKvTokens(),
                         context.getPriority(),

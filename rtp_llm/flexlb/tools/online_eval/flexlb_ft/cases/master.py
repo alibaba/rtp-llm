@@ -394,7 +394,7 @@ def coldstart_burst(ctx: CaseContext):
 # master_forward_matrix (four-state forwarding matrix) is NOT implemented
 # here: Tier-2 JUnit territory — the four-state matrix lives in flexlb-api
 # src/test (ScheduleForwardMatrixTest), the embedded-ZK election layer in
-# flexlb-sync src/test (ZkLeaderElectionTest).  This harness only
+# flexlb-balance src/test (ZkLeaderElectionTest).  This harness only
 # orchestrates processes;
 # the four states (LOCAL_MASTER / stale-forward-8511 / MASTER_NULL
 # LOCAL_FALLBACK / transparent-forward) need deterministic election

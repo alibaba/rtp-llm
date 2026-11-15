@@ -19,6 +19,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 
@@ -27,11 +28,13 @@ import static com.google.common.base.Preconditions.checkState;
 import static org.flexlb.worker.endpoint.DecodeResources.Capacity.saturatedAddNonNegative;
 
 /**
- * Reserves Decode capacity and reconciles each local request with worker reports.
+ * Reserves Decode capacity, tracks priority resource waits and reconciles local requests with worker reports.
  * Confirmed cleanup removes the exact reservation and wakes scheduling outside the state lock.
  */
 public class DecodeEndpoint extends WorkerEndpoint
         implements EndpointStats.Decode, SelectionRollback {
+    private final java.util.Set<ResourceWait> resourceWaits =
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
     private final WorkerRequests requests;
     private final CapacityNotifier capacityNotifier;
     private final Map<String, RequestRecord> registeredRequests = new ConcurrentHashMap<>();
@@ -53,93 +56,55 @@ public class DecodeEndpoint extends WorkerEndpoint
                 java.util.Objects.requireNonNull(capacityNotifier, "capacityNotifier");
     }
 
-    @Override
-    public void publishStatus(StatusChange change) {
-        if (change instanceof StatusChange.None) {
-            return;
-        }
-        var effects = (StatusChange.Decode) change;
-        if (effects.capacityChanged()) capacityNotifier.notifyChanged(this);
-        for (var observed : effects.requests()) {
-            var reservation = observed.reservation();
-            var context = requests.findActive(reservation.requestId());
-            if (context == null) continue;
-            var route = context.snapshot().route();
-            if (route == null || route.decodeEndpoint() != this) continue;
-            publishWorkerRequest(
-                    route,
-                    reservation,
-                    RoleType.DECODE,
-                    workerEventType(observed),
-                    observed.errorCode(),
-                    "");
-        }
-    }
-
-    /**
-     * Removes an exact selection registration only while the worker has not confirmed execution.
-     */
-    @Override
-    public boolean rollbackSelection(WorkerEndpoint.RequestRegistration exact) {
-        return releaseRequest(exact, true);
-    }
-
-    /**
-     * Releases an exact registration after confirming it was not sent or remote cleanup completed.
-     * Sending a cancellation alone is not sufficient.
-     */
-    public boolean releaseRequest(RequestRegistration exact) {
-        return releaseRequest(exact, false);
-    }
-
-    /**
-     * Removes registrations no longer retained by the scheduler after their last observation exceeds TTL.
-     * Both confirmed and unconfirmed requests expire; the return value counts only unconfirmed reservations.
-     */
-    @Override
-    public int evictExpiredRequests(long ttlMs, Predicate<String> schedulerRetainsRequest) {
-        List<RequestRecord> expiredRequests = new ArrayList<>();
+    public final boolean registerResourceWait(ResourceWait wait) {
+        checkArgument(wait.endpoint == this, "resource wait belongs to another endpoint");
         stateLock().lock();
         try {
-            long nowMs = System.currentTimeMillis();
-            for (var request : registeredRequests.values()) {
-                if (nowMs - request.observedAtMs > ttlMs) expiredRequests.add(request);
-            }
+            return wait.isEffective(System.currentTimeMillis()) && resourceWaits.add(wait);
         } finally {
             stateLock().unlock();
         }
-        expiredRequests.removeIf(request -> schedulerRetainsRequest.test(request.requestId));
-        int expiredUnconfirmedReservations = 0;
-        boolean removedAnyRequest = false;
+    }
+
+    public final void removeResourceWait(ResourceWait wait) {
         stateLock().lock();
         try {
-            long nowMs = System.currentTimeMillis();
-            for (var request : expiredRequests) {
-                if (registeredRequests.get(request.requestId) == request
-                        && nowMs - request.observedAtMs > ttlMs) {
-                    removeRequestLocked(request);
-                    if (!request.confirmed) {
-                        expiredUnconfirmedReservations++;
-                    }
-                    removedAnyRequest = true;
-                }
-            }
-            if (removedAnyRequest) {
-                admissionVersion++;
-            }
+            resourceWaits.remove(wait);
         } finally {
             stateLock().unlock();
         }
-        if (removedAnyRequest) capacityNotifier.notifyChanged(this);
-        return expiredUnconfirmedReservations;
+        wait.complete(null);
+    }
+
+    public final void tryAcquire(ResourceWait wait) {
+        RequestRegistration registration = null;
+        boolean ended;
+        stateLock().lock();
+        try {
+            ended = !resourceWaits.contains(wait) || !wait.isEffective(System.currentTimeMillis());
+            if (!ended)
+                registration =
+                        tryRegisterSelection(
+                                        wait.request.getRequestId(),
+                                        selectionSnapshot(),
+                                        wait.hardKv,
+                                        wait.expectedKv,
+                                        wait.priority,
+                                        wait.capacity)
+                                .value();
+            if (ended || registration != null) resourceWaits.remove(wait);
+        } finally {
+            stateLock().unlock();
+        }
+        if (ended || registration != null) wait.complete(registration);
     }
 
     /**
      * Register against the exact view used for ranking. No remote capacity is promised.
      */
     public WorkerEndpoint.Registration<RequestRegistration> tryRegisterSelection(
-            DecodeEndpoint.SelectionSnapshot expected,
             String requestId,
+            DecodeEndpoint.SelectionSnapshot expected,
             long hardKv,
             long expectedKv,
             int priority,
@@ -149,12 +114,14 @@ public class DecodeEndpoint extends WorkerEndpoint
             if (!acceptsNewRequests() || expected.generationId() != getStatus().getGenerationId())
                 return WorkerEndpoint.Registration.rejected(RegistrationStatus.UNAVAILABLE);
             var current = selectionSnapshot();
+            if (!priorityAllowedLocked(priority))
+                return WorkerEndpoint.Registration.rejected(RegistrationStatus.CAPACITY_FULL);
+            if (!capacity.evaluate(current.usage(), hardKv, expectedKv, Capacity.NONE).isZero())
+                return WorkerEndpoint.Registration.rejected(RegistrationStatus.CAPACITY_FULL);
             if (current.admissionVersion() != expected.admissionVersion()
                     || current.workerStatus() != expected.workerStatus()
                     || current.topology() != expected.topology())
                 return WorkerEndpoint.Registration.rejected(RegistrationStatus.VERSION_CONFLICT);
-            if (!capacity.evaluate(current.usage(), hardKv, expectedKv, Capacity.NONE).isZero())
-                return WorkerEndpoint.Registration.rejected(RegistrationStatus.CAPACITY_FULL);
             if (!requestIdAvailable(requestId))
                 return WorkerEndpoint.Registration.rejected(RegistrationStatus.ALREADY_REGISTERED);
             return new WorkerEndpoint.Registration<>(
@@ -198,6 +165,95 @@ public class DecodeEndpoint extends WorkerEndpoint
         }
     }
 
+    @Override
+    public void publishStatus(StatusChange change) {
+        if (change instanceof StatusChange.None) {
+            return;
+        }
+        var effects = (StatusChange.Decode) change;
+        if (effects.capacityChanged()) capacityNotifier.notifyChanged(this);
+        for (var observed : effects.requests()) {
+            var reservation = observed.reservation();
+            var context = requests.findActive(reservation.requestId());
+            if (context == null) continue;
+            var route = context.snapshot().route();
+            if (route == null || route.decodeEndpoint() != this) continue;
+            publishWorkerRequest(
+                    route,
+                    reservation,
+                    RoleType.DECODE,
+                    workerEventType(observed),
+                    observed.errorCode(),
+                    "");
+        }
+    }
+
+    /**
+     * Removes registrations no longer retained by the scheduler after their last observation exceeds TTL.
+     * Returns the number of removed records; confirmed Worker capacity remains governed by Worker reports.
+     */
+    @Override
+    public int evictExpiredRequests(long ttlMs, Predicate<String> schedulerRetainsRequest) {
+        List<RequestRecord> expiredRequests = new ArrayList<>();
+        stateLock().lock();
+        try {
+            long nowMs = System.currentTimeMillis();
+            for (var request : registeredRequests.values()) {
+                if (nowMs - request.observedAtMs > ttlMs) expiredRequests.add(request);
+            }
+        } finally {
+            stateLock().unlock();
+        }
+        expiredRequests.removeIf(request -> schedulerRetainsRequest.test(request.requestId));
+        int removedRequests = 0;
+        stateLock().lock();
+        try {
+            long nowMs = System.currentTimeMillis();
+            for (var request : expiredRequests) {
+                if (registeredRequests.get(request.requestId) == request
+                        && nowMs - request.observedAtMs > ttlMs) {
+                    removeRequestLocked(request);
+                    removedRequests++;
+                }
+            }
+            if (removedRequests > 0) {
+                admissionVersion++;
+            }
+        } finally {
+            stateLock().unlock();
+        }
+        if (removedRequests > 0) capacityNotifier.notifyChanged(this);
+        return removedRequests;
+    }
+
+    public ResourceWait createResourceWait(
+            WorkerRequest request,
+            long selectionId,
+            int priority,
+            long deadlineMs,
+            long hardKv,
+            long expectedKv,
+            AdmissionCapacity capacity) {
+        return new ResourceWait(
+                this, request, selectionId, priority, deadlineMs, hardKv, expectedKv, capacity);
+    }
+
+    /**
+     * Removes an exact selection registration only while the worker has not confirmed execution.
+     */
+    @Override
+    public boolean rollbackSelection(WorkerEndpoint.RequestRegistration exact) {
+        return releaseRequest(exact, true);
+    }
+
+    /**
+     * Releases an exact registration after confirming it was not sent or remote cleanup completed.
+     * Sending a cancellation alone is not sufficient.
+     */
+    public boolean releaseRequest(RequestRegistration exact) {
+        return releaseRequest(exact, false);
+    }
+
     /**
      * Exact resource obligation; absence also covers closed or replaced reservation identities.
      */
@@ -232,19 +288,24 @@ public class DecodeEndpoint extends WorkerEndpoint
 
     public AdmissionEvaluation evaluateSelection(
             org.flexlb.worker.endpoint.Request request, int priority, AdmissionCapacity capacity) {
-        var snapshot = resourceSnapshot();
-        var deficit =
-                capacity.evaluate(
-                        snapshot.selection().usage(),
-                        request.getHardKvTokens(),
-                        request.getExpectedKvTokens(),
-                        Capacity.NONE);
-        return new AdmissionEvaluation(
-                snapshot.selection(),
-                deficit,
-                deficit.isZero()
-                        ? null
-                        : classifyCapacityFailure(request, priority, snapshot, capacity));
+        stateLock().lock();
+        try {
+            var snapshot = selectionSnapshot();
+            var deficit =
+                    capacity.evaluate(
+                            snapshot.usage(),
+                            request.getHardKvTokens(),
+                            request.getExpectedKvTokens(),
+                            Capacity.NONE);
+            return new AdmissionEvaluation(
+                    snapshot,
+                    deficit,
+                    deficit.isZero()
+                            ? null
+                            : classifyCapacityFailure(request, priority, snapshot, capacity));
+        } finally {
+            stateLock().unlock();
+        }
     }
 
     public ResourceSnapshot resourceSnapshot() {
@@ -356,6 +417,7 @@ public class DecodeEndpoint extends WorkerEndpoint
 
     @Override
     protected void closeEndpoint() {
+        closeResourceWaits();
         var removedReservations = removeRequestsOnClose();
         // Records are already cleared; notification failures must not block registry cleanup.
         for (var reservation : removedReservations) {
@@ -377,6 +439,26 @@ public class DecodeEndpoint extends WorkerEndpoint
         }
     }
 
+    private boolean priorityAllowedLocked(int priority) {
+        long now = System.currentTimeMillis();
+        for (var wait : resourceWaits) {
+            if (wait.priority > priority && wait.isEffective(now)) return false;
+        }
+        return true;
+    }
+
+    private void closeResourceWaits() {
+        java.util.List<ResourceWait> waits;
+        stateLock().lock();
+        try {
+            waits = java.util.List.copyOf(resourceWaits);
+            resourceWaits.clear();
+        } finally {
+            stateLock().unlock();
+        }
+        for (var wait : waits) wait.complete(null);
+    }
+
     private boolean releaseRequest(
             WorkerEndpoint.RequestRegistration exact, boolean requireUnconfirmed) {
         if (exact == null || exact.endpointGenerationId() != getStatus().getGenerationId())
@@ -394,7 +476,7 @@ public class DecodeEndpoint extends WorkerEndpoint
         } finally {
             stateLock().unlock();
         }
-        if (released) capacityNotifier.notifyChanged(this);
+        if (released && !requireUnconfirmed) capacityNotifier.notifyChanged(this);
         return released;
     }
 
@@ -495,12 +577,8 @@ public class DecodeEndpoint extends WorkerEndpoint
      * Classify only the dimensions that prevent this request from fitting.
      */
     private Response classifyCapacityFailure(
-            Request request,
-            int priority,
-            DecodeResources.ResourceSnapshot snapshot,
-            AdmissionCapacity capacity) {
-        var routing = snapshot.selection();
-        var usage = routing.usage();
+            Request request, int priority, SelectionSnapshot snapshot, AdmissionCapacity capacity) {
+        var usage = snapshot.usage();
         if (usage.totalKvTokens() > 0
                 && request.getExpectedKvTokens() > capacity.kvBudget(usage.totalKvTokens())) {
             return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
@@ -508,12 +586,12 @@ public class DecodeEndpoint extends WorkerEndpoint
         Capacity lower = Capacity.NONE;
         Capacity higher = Capacity.NONE;
         Capacity same = Capacity.NONE;
-        for (var entry : snapshot.requests().values()) {
-            int occupiedPriority = entry.priority();
+        for (var entry : registeredRequests.values()) {
+            int occupiedPriority = entry.priority;
             if (!PriorityNormalizer.hasPriority(occupiedPriority)) {
                 continue;
             }
-            Capacity occupied = entry.placementRelease();
+            Capacity occupied = new Capacity(1L, entry.kvTokens, entry.expectedKvTokens);
             if (occupiedPriority < priority) {
                 lower = lower.plus(occupied);
             } else if (occupiedPriority == priority) {
@@ -632,6 +710,76 @@ public class DecodeEndpoint extends WorkerEndpoint
 
         boolean matches(WorkerEndpoint.RequestRegistration exact) {
             return exact == registration;
+        }
+    }
+
+    /**
+     * Waits for Decode capacity for one exact request selection; cancellation or endpoint closure ends the wait.
+     */
+    public static final class ResourceWait {
+        private final DecodeEndpoint endpoint;
+        private final WorkerRequest request;
+        private final long selectionId;
+        private final WorkerStatus.TopologySnapshot topology;
+        private final int priority;
+        private final long deadlineMs;
+        private final long hardKv;
+        private final long expectedKv;
+        private final AdmissionCapacity capacity;
+        private final CompletableFuture<RequestRegistration> result = new CompletableFuture<>();
+
+        private ResourceWait(
+                DecodeEndpoint endpoint,
+                WorkerRequest request,
+                long selectionId,
+                int priority,
+                long deadlineMs,
+                long hardKv,
+                long expectedKv,
+                AdmissionCapacity capacity) {
+            this.endpoint = endpoint;
+            this.request = request;
+            this.selectionId = selectionId;
+            this.topology = endpoint.getStatus().topologySnapshot();
+            this.priority = priority;
+            this.deadlineMs = deadlineMs;
+            this.hardKv = hardKv;
+            this.expectedKv = expectedKv;
+            this.capacity = capacity;
+        }
+
+        public final DecodeEndpoint endpoint() {
+            return endpoint;
+        }
+
+        public final WorkerRequest request() {
+            return request;
+        }
+
+        public final long selectionId() {
+            return selectionId;
+        }
+
+        public final java.util.concurrent.CompletionStage<RequestRegistration> result() {
+            return result.minimalCompletionStage();
+        }
+
+        public final boolean isDone() {
+            return result.isDone();
+        }
+
+        public final boolean isEffective(long nowMs) {
+            return request.currentResourceWait() == this
+                    && !request.isResponseDone()
+                    && !result.isDone()
+                    && nowMs < deadlineMs
+                    && endpoint.acceptsNewRequests()
+                    && endpoint.getStatus().topologySnapshot() == topology;
+        }
+
+        private void complete(RequestRegistration registration) {
+            if (!result.complete(registration) && registration != null)
+                endpoint.rollbackSelection(registration);
         }
     }
 }

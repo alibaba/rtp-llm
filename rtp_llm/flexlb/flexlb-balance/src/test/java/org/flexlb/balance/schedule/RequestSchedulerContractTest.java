@@ -265,7 +265,7 @@ class RequestSchedulerContractTest {
 
     @Test
     void staleTimerCannotReopenADrainedGeneration() throws Exception {
-        try (Fixture f = new Fixture(false)) {
+        try (Fixture f = new Fixture(false, false)) {
             var request = f.context(901);
             var future = f.requests.submit(request, () -> {});
             org.flexlb.balance.schedule.SchedulerTestSupport.runtime(f.requests)
@@ -728,7 +728,7 @@ class RequestSchedulerContractTest {
                                 RequestProtocolTestSupport.publication(() -> true)));
             }
             var failure = new IllegalStateException("endpoint release failed");
-            doThrow(failure).when(endpoint).releaseRequest(route);
+            doThrow(failure).when(endpoint).releaseRequest(route.prefillRegistration());
             SchedulerTestSupport.runtime(api).requests().stopAccepting();
             assertTrue(future.join().isSuccess());
             assertSame(
@@ -747,14 +747,16 @@ class RequestSchedulerContractTest {
                     "cleanup failure must not revoke the selected response");
             assertEquals(
                     SchedulerTestSupport.Stage.FINALIZING, SchedulerTestSupport.stage(request));
-            verify(endpoint, times(3)).releaseRequest(route);
-            org.mockito.Mockito.doReturn(true).when(endpoint).releaseRequest(route);
+            verify(endpoint, times(3)).releaseRequest(route.prefillRegistration());
+            org.mockito.Mockito.doReturn(true)
+                    .when(endpoint)
+                    .releaseRequest(route.prefillRegistration());
             f.requests.closeRequest(request, null);
             RequestProtocolTestSupport.awaitCondition(
                     () -> !f.requests.repository.isCurrent(request));
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.schedule.SchedulerTestSupport.runtime(f.requests));
-            verify(endpoint, times(4)).releaseRequest(route);
+            verify(endpoint, times(4)).releaseRequest(route.prefillRegistration());
             assertSame(failure, SchedulerTestSupport.failure(api));
             assertSame(
                     failure,
@@ -847,7 +849,7 @@ class RequestSchedulerContractTest {
                             mock(RequestSchedulerReporter.class),
                             mock(TheoryCacheHitReporter.class),
                             router,
-                            mock(DecodePreemption.class),
+                            org.flexlb.balance.schedule.RequestPreemptionTestSupport.mock(),
                             new CapacityNotifier(),
                             startPlacement);
             scheduler =

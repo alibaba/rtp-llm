@@ -108,7 +108,7 @@ class RequestLifecycleSubmissionTest {
                 mock(RequestSchedulerReporter.class),
                 trace,
                 router,
-                mock(org.flexlb.balance.schedule.DecodePreemption.class),
+                org.flexlb.balance.schedule.RequestPreemptionTestSupport.mock(),
                 new CapacityNotifier());
     }
 

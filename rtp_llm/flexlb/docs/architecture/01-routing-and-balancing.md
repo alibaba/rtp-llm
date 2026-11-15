@@ -18,10 +18,16 @@ P/D/V/E 策略继承 `AbstractWorkerSelectionStrategy`，共用有界登记重�
    Decode 读取引擎观测与本地登记，Encoder 读取并发和未命中工作量。
    每个角色策略提供完整选址入口，评分方法返回候选；登记及元数据构造失败时由该策略回滚本次登记。
 3. `AbstractWorkerSelectionStrategy` 调用评分方法，再调用子类的登记和刷新方法访问 Endpoint。
-   P/D/E 的 `tryRegisterSelection` 在状态锁内检查接纳条件、记录身份和容量；P/D 还核对快照版本。
+   P/D/E 的 `tryRegisterSelection` 在状态锁内检查接纳条件、记录身份和容量；Encoder 同时复核请求 group。
+   Prefill 核对排序使用的工作量，Decode 核对排序快照的版本；Encoder 核对请求数，以及本次评分需要的 token 工作量。
    成功登记返回实际的 `RoleSelection`，公共循环只在登记成功后返回。
-4. 共同循环只刷新版本冲突的候选，最多处理 8 次冲突；容量不足不消耗冲突次数。
-   Prefill 和普通 VIT 可尝试其他候选；Decode 和 Encoder 的容量不足返回当前阻塞条件。
+4. 共同循环最多处理 8 次排序冲突；容量不足不消耗冲突次数。
+   Prefill、Decode、Encoder 和普通 VIT 排除本轮容量不足的候选并比较其他机器。
+   P/D/E 登记先检查当前容量；仍有容量但排序依据变化时，重新读取候选并比较。
+   P/D/E 每轮评分读取当前 Endpoint 快照，在同一次遍历中过滤 group，不先复制分组列表。
+   Prefill 登记后又回滚、工作量恢复原值时，不因记账版本变化而要求重排。
+   Prefill 在默认公式且整次查询无缓存命中时，找到空闲候选即可结束比较；自定义公式及有缓存匹配时仍完整评分。
+   Decode 全部候选已满时不调用登记；QUEUE 返回带抢占目标的阻塞结果，DIRECT 返回容量不足。
    不可用候选被排除，本轮候选全部失效时返回重试，由下一轮重新捕获目录。
    Prefill 刷新时复用本轮 cache 查询；Decode 的评分缓冲区在单次策略调用的 finally 中释放。
 5. 某角色失败或请求已取消时，`RequestRouteSelector` 在返回前通过 `SelectionRollback.rollbackSelection`
@@ -55,7 +61,7 @@ Selector 用方法内的角色列表收集已登记结果，失败时撤销其�
 角色循环统一检查成功选择恰好新增一个对应角色；每个角色的成功结果直接加入列表，角色事实只从已登记列表读取。
 评分版本只在 Strategy/Endpoint 登记时校验，不保存在已完成的角色结果中。
 Prefill 登记保存不可变的排队输入和本次工作量，可以立即参与其他请求的投影，无需读取半成品路由。
-`RequestResult` 构造时角色组合完整，并绑定已取得的 Prefill 登记；没有 attachReservation 入口，也不再创建另一个执行包装对象。
+`RequestResult` 构造时角色组合完整，不修改 Endpoint 登记；Prefill 在 `commitSelection` 的同一次持锁操作中关联完整路由并提交登记；没有 attachReservation 入口，也不再创建另一个执行包装对象。
 规划直接使用 Prefill 登记中的不可变输入，不再另建规划缓存、加锁初始化或重复构造输入。
 RequestContext 同时持有请求输入、遥测和生命周期事实，不再有 RequestData 或 ContextResult 容器。
 选址开始时分配递增编号，回调同时核对请求对象和编号；完成后清除活动编号，旧回调不能完成下一次选址。
@@ -118,17 +124,15 @@ Direct/Encoder 的路由与投递在同一个 Context 快照中接收；投递�
 P/D 均只有选择登记入口；提交缺少精确登记时拒绝发布，不补建记录。
 策略只返回候选；共同 Selector 确认登记成功后才返回 P/D 选择结果，没有策略调用登记器的反向回调。
 
-QUEUE 容量失败在角色/group 域等待，资源变化触发重选，不只订阅上次失败节点；等待登记使用 availability sequence 防止丢失唤醒。
+QUEUE 容量不足时保留普通队列成员，Endpoint 通知或固定周期触发下一轮检查；
+没有 role/group 等待域、逐请求重试索引或通知版本号。
 DIRECT 对版本冲突或未交付代际失效使用有限重试，不进入长期等待队列。
-抢占由 QueuedRequestScheduler 发起，策略和执行器统一位于 `balance.preemption`：
-`DecodePreemptionPlan` 保存 `requestsToPreempt`，执行器通过 `tryPreempt` 发起抢占，
-其中 `DefaultDecodePreemption.beginRoutePreemption` 校验排队路由的优先级、资源身份和可抢占状态，
-再由 `RequestContext` 在请求锁内登记状态；scheduler 只通过 `allowsRoutePreemption` 声明是否允许抢占。
-需要取消引擎请求时，`DefaultDecodePreemption.tryRegisterPreemption` 查找请求及取消目标，
-由 `RequestContext` 登记抢占编号和精确资源预留，防止同一请求被并发重复抢占。
-按请求所处阶段撤回本地路由或取消引擎请求，再处理资源释放和请求重新排队；
-成功取得的 incoming Decode 登记交给 Selector 继续完成其他角色，不重复登记。
+QueuedRequestScheduler 对可抢占的 Decode 容量阻塞调用 RequestPreemption。
+DefaultRequestPreemption 使用具体 DecodePreemptionPlanner 计算低优先级请求组合，先登记资源等待，再执行普通取消。
+DecodeEndpoint.ResourceWait 的 Future 完成后，结果处理与普通选路共用有界规划线程池。
+RequestRouteSelector 接收已取得的 RoleSelection，继续选择其余角色，失败时回滚全部登记。
+未提交 P/D 选择的抢占及角色策略生成计划仍是实施方案中的待完成项，当前默认执行器只处理已交付 Decode。
 取消、超时及发送结果未知的资源规则见 [队列调度](02-queue-scheduling.md) 和 [资源管理](03-resource-management.md)。
 
-请求状态查询、结束原因、响应选择与抢占完成使用 RequestResult 的对应字段，不再建立单独状态或结果包装。
+请求状态查询、结束原因和响应选择使用 RequestResult 的对应字段，不再建立单独状态或结果包装。
 RoleSelection 用角色字段区分 Prefill、Decode 和辅助角色，资源登记与 compute tokens 直接保存在同一个对象中。

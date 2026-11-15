@@ -373,7 +373,8 @@ class CacheHitFeedbackFlowTest {
         var selected = selector.select(context, "group");
         assertEquals(RoutingResult.Status.SUCCESS, selected.status());
         var route = selected;
-        if (route.prefillEndpoint() != null) route.prefillEndpoint().releaseRequest(route);
+        if (route.prefillEndpoint() != null)
+            route.prefillEndpoint().releaseRequest(route.prefillRegistration());
         if (route.decodeEndpoint() != null)
             route.decodeEndpoint().releaseRequest(route.decodeRegistration());
     }

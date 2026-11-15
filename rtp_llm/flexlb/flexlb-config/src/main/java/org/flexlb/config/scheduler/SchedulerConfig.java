@@ -27,6 +27,11 @@ public final class SchedulerConfig {
      */
     private double scanBudgetMultiplier = 2.0;
 
+    /**
+     * Maximum delay before checking capacity when no notification arrives.
+     */
+    private long capacityCheckIntervalMs = 100L;
+
     private QueueOrderingConfig ordering = new QueueOrderingConfig();
 
     public long resolveExpiresAtMs(long admissionTimeMs) {

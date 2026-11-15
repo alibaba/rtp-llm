@@ -789,10 +789,15 @@ class EndpointRegistryCloseTest {
     }
 
     private static int pendingWorkerCleanups(EndpointRegistry registry) {
-        Object gate = ReflectionTestUtils.getField(registry, "lifecycleGate");
-        synchronized (gate) {
-            return (int) ReflectionTestUtils.getField(registry, "pendingWorkerCleanups");
-        }
+        var cleanups = (Map<?, ?>) ReflectionTestUtils.getField(registry, "workerCleanups");
+        return (int)
+                cleanups.values().stream()
+                        .map(
+                                cleanup ->
+                                        (CompletableFuture<?>)
+                                                ReflectionTestUtils.getField(cleanup, "completion"))
+                        .filter(completion -> !completion.isDone())
+                        .count();
     }
 
     private static EndpointRegistry registry() {

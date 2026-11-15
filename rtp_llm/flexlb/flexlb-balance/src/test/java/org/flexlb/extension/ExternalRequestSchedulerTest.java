@@ -1,7 +1,6 @@
 package org.flexlb.extension;
 
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
-import org.flexlb.balance.queue.GlobalQueueEntry;
 import org.flexlb.balance.queue.OrderedRequestQueue;
 import org.flexlb.balance.queue.SchedulingQueue;
 import org.flexlb.balance.requestlog.TheoryCacheHitReporter;
@@ -89,17 +88,17 @@ class ExternalRequestSchedulerTest {
         private final SchedulingQueue queue = new OrderedRequestQueue(false);
 
         synchronized void add(RequestContext context) {
-            queue.add(new GlobalQueueEntry(context, null));
+            queue.add(context);
         }
 
         synchronized void remove(RequestContext context) {
-            for (var entry : queue.drain()) if (entry.context() != context) queue.restore(entry);
+            for (var entry : queue.drain()) if (entry != context) queue.restore(entry);
         }
 
         synchronized void schedule(java.util.function.Consumer<RequestContext> publish) {
             for (var entry : queue.scanForPlanningCandidates(1, 1, candidate -> true)) {
                 queue.remove(entry);
-                publish.accept(entry.context());
+                publish.accept(entry);
             }
         }
     }
@@ -144,7 +143,7 @@ class ExternalRequestSchedulerTest {
                     context ->
                             assertEquals(
                                     RoutingResult.Status.SUCCESS,
-                                    planRoute(context, () -> selector.select(context, null), false)
+                                    planRoute(context, () -> selector.select(context, null))
                                             .status()));
         }
     }
@@ -161,7 +160,7 @@ class ExternalRequestSchedulerTest {
             super(
                     fixture.config,
                     fixture.selector,
-                    mock(org.flexlb.balance.schedule.DecodePreemption.class),
+                    org.flexlb.balance.schedule.RequestPreemptionTestSupport.mock(),
                     fixture.requests,
                     fixture.tasks,
                     fixture.expiration,
@@ -193,8 +192,7 @@ class ExternalRequestSchedulerTest {
                     context -> {
                         assertEquals(
                                 RoutingResult.Status.SUCCESS,
-                                planRoute(context, () -> selector.select(context, null), false)
-                                        .status());
+                                planRoute(context, () -> selector.select(context, null)).status());
                         assertNull(
                                 context.currentSelectionAttempt(),
                                 "routing must finish before returning to the extension");

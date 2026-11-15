@@ -10,7 +10,6 @@ import org.flexlb.config.service.RoleType;
 import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 import org.flexlb.worker.endpoint.CapacityKey;
-import org.flexlb.worker.endpoint.DecodeEndpoint;
 import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.endpoint.Response;
@@ -56,23 +55,15 @@ public class RequestRouteSelector {
     }
 
     public RequestResult select(RequestContext context, String policyGroup) {
-        return select(context, policyGroup, null, null);
+        return select(context, policyGroup, null);
     }
 
     public RequestResult select(
-            RequestContext context,
-            String policyGroup,
-            DecodeEndpoint reclaimedEndpoint,
-            DecodeEndpoint.RequestRegistration reclaimedReservation) {
+            RequestContext context, String policyGroup, RoleSelection reclaimed) {
         Request request = context == null ? null : context.getRequest();
         SchedulingMetadata metadata = context == null ? null : context.getSchedulingMetadata();
         if (request == null || metadata == null) {
-            if (reclaimedReservation != null)
-                RoleSelection.releaseDecode(
-                        reclaimedEndpoint,
-                        reclaimedReservation,
-                        WorkerEndpoint.ReleaseReason.LOCAL_ROLLBACK);
-            Logger.error("request has no scheduling inputs");
+            if (reclaimed != null) reclaimed.rollbackSelection();
             return RequestResult.rejected(Response.error(StrategyErrorType.INVALID_REQUEST));
         }
         if (StringUtils.isNotBlank(policyGroup)) {
@@ -87,21 +78,9 @@ public class RequestRouteSelector {
         Throwable selectionFailure = null;
         try {
             String group = policyGroup;
-            if (reclaimedReservation != null) {
-                var reclaimed =
-                        addDecode(
-                                selections,
-                                reclaimedEndpoint,
-                                reclaimedReservation,
-                                () -> {
-                                    var view = reclaimedEndpoint.selectionSnapshot();
-                                    return ServerStatus.forWorker(
-                                            RoleType.DECODE,
-                                            request.getRequestId(),
-                                            view.topology(),
-                                            view.workerStatus().fields());
-                                });
-                if (!reclaimedEndpoint.registrationState(reclaimedReservation).registered()
+            if (reclaimed != null) {
+                selections.add(reclaimed);
+                if (!reclaimed.endpoint().acceptsNewRequests()
                         || StringUtils.isNotBlank(policyGroup)
                                 && !policyGroup.equals(reclaimed.group()))
                     return RequestResult.retry();
@@ -135,7 +114,7 @@ public class RequestRouteSelector {
                 if (context.getFuture() != null && context.getFuture().isDone()
                         || context.snapshot().cancellationReason() != null)
                     return RequestResult.closed();
-                if (role == RoleType.DECODE && reclaimedReservation != null) continue;
+                if (reclaimed != null && role == reclaimed.role()) continue;
                 if (role == RoleType.VIT && request.getSelectedVit() != null) {
                     continue;
                 }
@@ -230,29 +209,6 @@ public class RequestRouteSelector {
         return key == null || key.endpoint() == null
                 ? null
                 : endpoints.getEndpoint(key.role(), key.endpoint());
-    }
-
-    private static RoleSelection addDecode(
-            List<RoleSelection> selections,
-            DecodeEndpoint endpoint,
-            DecodeEndpoint.RequestRegistration registration,
-            java.util.function.Supplier<ServerStatus> metadata) {
-        try {
-            var selected = RoleSelection.decode(endpoint, metadata.get(), registration);
-            selections.add(selected);
-            return selected;
-        } catch (RuntimeException | Error failure) {
-            Failures.append(
-                    failure,
-                    Failures.run(
-                            null,
-                            () ->
-                                    RoleSelection.releaseDecode(
-                                            endpoint,
-                                            registration,
-                                            WorkerEndpoint.ReleaseReason.LOCAL_ROLLBACK)));
-            throw failure;
-        }
     }
 
     private static void rollback(List<RoleSelection> selections) {

@@ -14,7 +14,6 @@ import org.flexlb.config.service.ModelMetaConfig;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.CapacityNotifier;
-import org.flexlb.worker.endpoint.DecodeEndpoint;
 import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
@@ -72,12 +71,12 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         engineClient);
         this.runtime = assembledRuntime;
         var eviction =
-                new DefaultDecodePreemption(
+                new DefaultRequestPreemption(
                         requests,
                         requestReporter,
                         configService,
                         capacity,
-                        new PriorityDecodePreemptionPolicy());
+                        new DecodePreemptionPlanner());
         this.scheduler =
                 SchedulerTestServices.create(
                         runtime.newLifecycle(
@@ -283,9 +282,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         public RequestResult select(
                 RequestContext context,
                 String group,
-                DecodeEndpoint endpoint,
-                DecodeEndpoint.RequestRegistration reservation) {
-            return requireBound().select(context, group, endpoint, reservation);
+                org.flexlb.balance.strategy.RoleSelection acquired) {
+            return requireBound().select(context, group, acquired);
         }
 
         private synchronized void bind(RequestRouteSelector exactRouter) {

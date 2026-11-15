@@ -41,7 +41,7 @@ public final class SchedulerTestSupport {
             AbstractRequestScheduler lifecycle,
             org.flexlb.config.FlexlbConfig config,
             RequestRouteSelector router,
-            org.flexlb.balance.schedule.DecodePreemption preemption,
+            org.flexlb.balance.schedule.RequestPreemption preemption,
             CapacityNotifier availability,
             SchedulingQueue queue) {
         var scheduler =
@@ -161,18 +161,18 @@ public final class SchedulerTestSupport {
                 ReflectionTestUtils.getField(runtime, "cleanupTimerExecutor");
     }
 
-    public static org.flexlb.balance.schedule.DefaultDecodePreemption routePreemption(
+    public static org.flexlb.balance.schedule.DefaultRequestPreemption routePreemption(
             AbstractRequestScheduler owner) {
         var config = mock(ConfigService.class);
         when(config.loadBalanceConfig()).thenReturn(SchedulingTestConfig.newConfig());
-        return new org.flexlb.balance.schedule.DefaultDecodePreemption(
+        return new org.flexlb.balance.schedule.DefaultRequestPreemption(
                 repository(owner),
                 mock(RequestSchedulerReporter.class),
                 config,
                 (org.flexlb.worker.endpoint.DecodeResources.AdmissionCapacity)
                         org.flexlb.balance.schedule.DeliveryTestSupport.getField(
                                 runtime(owner).dispatcher, "decodeAdmissionCapacity"),
-                new org.flexlb.balance.schedule.PriorityDecodePreemptionPolicy());
+                new org.flexlb.balance.schedule.DecodePreemptionPlanner());
     }
 
     public static synchronized RequestRepository repository(AbstractRequestScheduler owner) {
@@ -210,7 +210,7 @@ public final class SchedulerTestSupport {
                 requests,
                 trace,
                 mock(RequestRouteSelector.class),
-                mock(DecodePreemption.class),
+                org.flexlb.balance.schedule.RequestPreemptionTestSupport.mock(),
                 new CapacityNotifier(),
                 false);
     }
@@ -224,7 +224,7 @@ public final class SchedulerTestSupport {
             RequestSchedulerReporter requests,
             TheoryCacheHitReporter trace,
             RequestRouteSelector router,
-            DecodePreemption eviction,
+            RequestPreemption eviction,
             CapacityNotifier availability) {
         return create(config, batches, requests, trace, router, eviction, availability, true);
     }
@@ -235,7 +235,7 @@ public final class SchedulerTestSupport {
             DeliveryMetricsReporter batches,
             TheoryCacheHitReporter trace,
             RequestRouteSelector router,
-            DecodePreemption eviction,
+            RequestPreemption eviction,
             CapacityNotifier availability) {
         return create(runtime, config, batches, trace, router, eviction, availability, true);
     }
@@ -279,14 +279,14 @@ public final class SchedulerTestSupport {
             AbstractRequestScheduler scheduler,
             RequestContext context,
             java.util.function.Supplier<RequestResult> selection) {
-        return scheduler.planRoute(context, selection, false);
+        return scheduler.planRoute(context, selection);
     }
 
     static RequestResult selectAndPublish(
             AbstractRequestScheduler scheduler,
             SelectionAttempt routing,
             java.util.function.Supplier<RequestResult> selection) {
-        return scheduler.executeRouteSelection(routing, selection, false);
+        return scheduler.executeRouteSelection(routing, selection);
     }
 
     static void startScheduling(RequestScheduler scheduler) {
@@ -401,7 +401,7 @@ public final class SchedulerTestSupport {
             RequestSchedulerReporter requests,
             TheoryCacheHitReporter trace,
             RequestRouteSelector router,
-            DecodePreemption eviction,
+            RequestPreemption eviction,
             CapacityNotifier availability,
             boolean startPlacement) {
         var runtime =
@@ -446,7 +446,7 @@ public final class SchedulerTestSupport {
             DeliveryMetricsReporter batches,
             TheoryCacheHitReporter trace,
             RequestRouteSelector router,
-            DecodePreemption eviction,
+            RequestPreemption eviction,
             CapacityNotifier availability,
             boolean startPlacement) {
         var snapshot = config.loadBalanceConfig();

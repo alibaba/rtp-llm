@@ -1,5 +1,8 @@
 package org.flexlb.balance.queue;
 
+import org.flexlb.balance.schedule.RequestContext;
+import org.flexlb.util.PriorityNormalizer;
+
 import java.util.Comparator;
 import java.util.List;
 import java.util.function.Predicate;
@@ -9,20 +12,30 @@ import java.util.function.Predicate;
  * Scans count every examined entry against the budget; eligibility may remove an entry
  * but cannot restore a selected entry during the scan. Removal never settles a request.
  * Restore preserves its sequence and reopens the ordered scan from that position.
- * Implementations must maintain exact entry membership
- * and the entry's removed flag, including during drain.
+ * Membership is keyed by request identity; queue nodes are private implementation details.
  */
 public interface SchedulingQueue {
-    void add(GlobalQueueEntry entry);
+    void add(RequestContext entry);
 
-    void restore(GlobalQueueEntry entry);
+    boolean contains(RequestContext request);
 
-    boolean remove(GlobalQueueEntry entry);
+    static int priority(RequestContext request) {
+        int priority = request.getPriority();
+        return PriorityNormalizer.isValid(priority)
+                ? priority
+                : PriorityNormalizer.DEFAULT_PRIORITY;
+    }
 
-    List<GlobalQueueEntry> scanForPlanningCandidates(
-            int candidateLimit, int scanBudget, Predicate<GlobalQueueEntry> eligible);
+    void restore(RequestContext entry);
 
-    void markRequestReadyForRetry(GlobalQueueEntry entry);
+    boolean remove(RequestContext entry);
+
+    List<RequestContext> scanForPlanningCandidates(
+            int candidateLimit, int scanBudget, Predicate<RequestContext> eligible);
+
+    void beginScan();
+
+    void retry(RequestContext request);
 
     boolean hasUnscannedRequests();
 
@@ -30,7 +43,7 @@ public interface SchedulingQueue {
 
     int[] priorityCounts();
 
-    List<GlobalQueueEntry> drain();
+    List<RequestContext> drain();
 
-    Comparator<GlobalQueueEntry> order();
+    Comparator<RequestContext> order();
 }

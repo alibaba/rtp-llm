@@ -25,6 +25,69 @@ import static org.mockito.Mockito.when;
  */
 class CostBasedPrefillStrategyBlockerTest {
     @Test
+    void rotatesWithinRequestedGroupRatherThanWholeDirectory() {
+        var fixture = strategy(new FlexlbConfig(), Map.of());
+        var inputs =
+                List.of(
+                        input("a", 0, 1000, "g1"),
+                        input("b", 0, 1000, "g1"),
+                        input("c", 0, 1000, "g2"),
+                        input("d", 0, 1000, "g2"));
+        for (String address : List.of("a", "b", "a", "b")) {
+            assertEquals(
+                    address,
+                    fixture.strategy()
+                            .chooseBest(request(), "g1", inputs, fixture.matches())
+                            .orElseThrow()
+                            .address());
+        }
+    }
+
+    @Test
+    void emptyCacheStopsAtFirstIdleWorkerAndKeepsRotating() {
+        var fixture = strategy(new FlexlbConfig(), Map.of());
+        var first = input("first", 0, 1000);
+        var second = input("second", 0, 1000);
+        var inputs = List.of(first, second);
+        assertEquals("first", select(fixture, inputs).orElseThrow().address());
+        org.mockito.Mockito.verify(second, org.mockito.Mockito.never()).selectionSnapshot();
+        assertEquals("second", select(fixture, inputs).orElseThrow().address());
+        assertEquals("first", select(fixture, inputs).orElseThrow().address());
+    }
+
+    @Test
+    void laterCacheHitStillBeatsAnIdleWorkerWithoutHits() {
+        var fixture = strategy(new FlexlbConfig(), Map.of("cached", 80));
+        var selected =
+                select(fixture, List.of(input("idle", 0, 1000), input("cached", 10, 1000)))
+                        .orElseThrow();
+        assertEquals("cached", selected.address());
+        assertEquals(80L, selected.maximumRoutingCacheMatchTokens());
+    }
+
+    @Test
+    void emptyCacheStillHonorsCacheFirstCap() {
+        var config = new FlexlbConfig();
+        var affinity = new RoutingConfig.CacheAffinityConfig();
+        affinity.setMaxComputeTokens(99L);
+        config.getRouter().getRoles().getPrefill().setCacheAffinity(affinity);
+        assertEquals(
+                java.util.Optional.empty(),
+                select(strategy(config, Map.of()), List.of(input("idle", 0, 1000))));
+    }
+
+    @Test
+    void idleWorkerFromAnotherGroupIsNotSelected() {
+        var fixture = strategy(new FlexlbConfig(), Map.of());
+        var other = input("other", 0, 1000);
+        var selected =
+                fixture.strategy()
+                        .chooseBest(request(), "required", List.of(other), fixture.matches());
+        assertEquals(java.util.Optional.empty(), selected);
+        org.mockito.Mockito.verify(other, org.mockito.Mockito.never()).selectionSnapshot();
+    }
+
+    @Test
     void customFormulaRanksEligibleWorkersWithoutChangingTokenCapacity() {
         var config = new FlexlbConfig();
         config.getRouter().getRoles().getPrefill().setCostExpression("1000 - computeTokens");
@@ -155,11 +218,15 @@ class CostBasedPrefillStrategyBlockerTest {
     }
 
     private static PrefillEndpoint input(String address, long work, long cap) {
+        return input(address, work, cap, null);
+    }
+
+    private static PrefillEndpoint input(String address, long work, long cap, String group) {
         var endpoint = mock(PrefillEndpoint.class);
         when(endpoint.ipPort()).thenReturn(address);
         var status =
                 org.flexlb.worker.status.WorkerStatus.createDiscovered(
-                        RoleType.PREFILL, null, address, 1, 2, null);
+                        RoleType.PREFILL, group, address, 1, 2, null);
         when(endpoint.getStatus()).thenReturn(status);
         when(endpoint.selectionSnapshot())
                 .thenReturn(
@@ -170,7 +237,7 @@ class CostBasedPrefillStrategyBlockerTest {
 
     private static java.util.Optional<CostBasedPrefillStrategy.Selection> select(
             Fixture fixture, List<PrefillEndpoint> inputs) {
-        return fixture.strategy().chooseBest(request(), inputs, fixture.matches());
+        return fixture.strategy().chooseBest(request(), null, inputs, fixture.matches());
     }
 
     private static Request request() {

@@ -1,7 +1,5 @@
 package org.flexlb.balance.schedule;
 
-import org.flexlb.worker.endpoint.WorkerEndpoint;
-
 /**
  * Defines replaceable scheduling decisions and triggers.
  */
@@ -16,8 +14,6 @@ public interface RequestScheduler extends AutoCloseable {
      * The implementation decides when to run it and preserves its original ordering on retry.
      */
     void scheduleRequest(RequestContext request);
-
-    void onEndpointChanged(WorkerEndpoint endpoint);
 
     /**
      * Number of queued requests not yet handed to delivery; immediate schedulers report zero.

@@ -105,7 +105,7 @@ class RequestResourceAccountingTest {
                         System.currentTimeMillis());
         when(decode.releaseRequest(reservation)).thenReturn(true);
         var releaseFailure = new IllegalStateException("Prefill release failed");
-        when(prefill.releaseRequest(item)).thenThrow(releaseFailure);
+        when(prefill.releaseRequest(item.prefillRegistration())).thenThrow(releaseFailure);
         RequestProtocolTestSupport.closing(item);
         var firstFailure =
                 AbstractRequestScheduler.releaseRouteResources(
@@ -115,7 +115,7 @@ class RequestResourceAccountingTest {
         assertSame(releaseFailure, firstFailure);
         org.mockito.Mockito.verify(decode).releaseRequest(reservation);
 
-        org.mockito.Mockito.doReturn(true).when(prefill).releaseRequest(item);
+        org.mockito.Mockito.doReturn(true).when(prefill).releaseRequest(item.prefillRegistration());
         assertNull(
                 AbstractRequestScheduler.releaseRouteResources(
                         item, WorkerEndpoint.ReleaseReason.NOT_SENT, false));
@@ -345,8 +345,8 @@ class RequestResourceAccountingTest {
 
                 reservation =
                         decode.tryRegisterSelection(
-                                        decode.selectionSnapshot(),
                                         String.valueOf(ID),
+                                        decode.selectionSnapshot(),
                                         HARD_KV,
                                         EXPECTED_KV,
                                         50,
@@ -426,8 +426,8 @@ class RequestResourceAccountingTest {
 
                 var next =
                         decode.tryRegisterSelection(
-                                        decode.selectionSnapshot(),
                                         String.valueOf(999L),
+                                        decode.selectionSnapshot(),
                                         HARD_KV,
                                         EXPECTED_KV,
                                         50,

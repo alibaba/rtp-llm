@@ -45,7 +45,6 @@ public abstract class AbstractRequestScheduler
     private final ExpirationTimer expirationTimer;
     private final EngineCancellation engineCancellation;
     private final ResponseCompletionExecutor responseCompletions;
-    private final DeliveryMetricsReporter deliveryReporter;
     private final TheoryCacheHitReporter cacheTrace;
     private final EndpointRegistry endpoints;
     private final Object shutdownLock = new Object();
@@ -68,7 +67,6 @@ public abstract class AbstractRequestScheduler
 
         this.engineCancellation = Objects.requireNonNull(engineCancellation);
         this.responseCompletions = Objects.requireNonNull(responseCompletions);
-        this.deliveryReporter = Objects.requireNonNull(deliveryReporter);
         this.cacheTrace = Objects.requireNonNull(cacheTrace);
         this.endpoints = Objects.requireNonNull(endpoints);
     }
@@ -119,101 +117,76 @@ public abstract class AbstractRequestScheduler
         return submit(context, () -> {});
     }
 
-    public CompletableFuture<Response> submit(RequestContext ctx, Runnable onRegistered) {
+    public CompletableFuture<Response> submit(RequestContext request, Runnable onRegistered) {
         Objects.requireNonNull(onRegistered, "onRegistered");
         try {
-            if (ctx == null || ctx.getRequest() == null) {
-                return CompletableFuture.completedFuture(
-                        Response.error(StrategyErrorType.INVALID_REQUEST));
-            }
-            var data = ctx;
-            var config = data.getConfig();
-            if (repository.isStopping() || repository.isClosed()) {
-                return CompletableFuture.completedFuture(
-                        Response.buildErrorResponse(
-                                StrategyErrorType.SCHEDULER_UNAVAILABLE,
-                                "request scheduler is shutting down and no longer accepts new requests"));
-            }
-            if (data.getRequestScheduler() != null) {
-                return CompletableFuture.completedFuture(
-                        Response.buildErrorResponse(
-                                StrategyErrorType.INVALID_REQUEST,
-                                "request context is already registered"));
-            }
-            if (data.getSchedulingMetadata() == null) {
-                return CompletableFuture.completedFuture(
-                        Response.buildErrorResponse(
-                                StrategyErrorType.INVALID_REQUEST, "missing scheduling metadata"));
-            }
-            long expires = data.getRequestExpiresAtMs();
-            if (expires <= 0L || System.currentTimeMillis() >= expires) {
-                var rejected =
+            Response rejection = admissionRejection(request);
+            if (rejection != null) return CompletableFuture.completedFuture(rejection);
+            if (request.getRequestExpiresAtMs() <= 0
+                    || System.currentTimeMillis() >= request.getRequestExpiresAtMs()) {
+                var expired =
                         CompletableFuture.completedFuture(
                                 Response.buildErrorResponse(
                                         schedulingTimeoutError(),
-                                        "request scheduling deadline has expired before placement"));
-                data.setFuture(rejected);
-                return rejected;
+                                        "request scheduling deadline has expired before selection"));
+                request.setFuture(expired);
+                return expired;
             }
+            var config = request.getConfig();
             var future =
                     new RequestFuture(
-                            (completion, response, failure) ->
+                            (kind, response, failure) ->
                                     tryCompleteFromExternal(
-                                            ctx, completion, response, failure, true));
-            var result =
+                                            request, kind, response, failure, true));
+            var registration =
                     repository.register(
-                            ctx,
+                            request,
                             this,
                             future,
                             config.getRequestLifecycle().getRequest().getTimeoutMs(),
                             schedulingTimeoutError());
-            if (result == RequestRepository.RegistrationResult.CLOSED) {
+            if (registration != RequestRepository.RegistrationResult.REGISTERED) {
+                var error =
+                        registration == RequestRepository.RegistrationResult.CLOSED
+                                ? StrategyErrorType.SCHEDULER_UNAVAILABLE
+                                : StrategyErrorType.INVALID_REQUEST;
+                String detail =
+                        registration == RequestRepository.RegistrationResult.DUPLICATE_ID
+                                ? "duplicate request_id: " + request.getRequestId()
+                                : "request registration rejected: " + registration;
                 return CompletableFuture.completedFuture(
-                        Response.buildErrorResponse(
-                                StrategyErrorType.SCHEDULER_UNAVAILABLE,
-                                "request scheduler is shutting down and no longer accepts new requests"));
-            }
-            if (result != RequestRepository.RegistrationResult.REGISTERED) {
-                return CompletableFuture.completedFuture(
-                        Response.buildErrorResponse(
-                                StrategyErrorType.INVALID_REQUEST,
-                                result == RequestRepository.RegistrationResult.DUPLICATE_ID
-                                        ? "duplicate request_id: " + data.getRequestId()
-                                        : "request registration rejected: " + result));
+                        Response.buildErrorResponse(error, detail));
             }
             FlexlbTrace.setScheduleAttribute(
-                    data.getTraceContext(),
+                    request.getTraceContext(),
                     FlexlbTrace.SCHEDULE_MODE,
                     config.getScheduler().getType().name());
             future.whenComplete(
                     (response, failure) -> {
                         try {
-                            if (failure == null && response != null && response.isSuccess()) {
-                                cacheTrace.report(ctx);
-                            }
+                            if (failure == null && response != null && response.isSuccess())
+                                cacheTrace.report(request);
                         } catch (RuntimeException error) {
                             Logger.warn("Route tracing failed", error);
                         } finally {
-                            ctx.releaseSchedulingInput();
+                            request.releaseSchedulingInput();
                         }
                     });
-            expirationTimer.update(ctx, ctx.snapshot().deadlines());
+            expirationTimer.update(request, request.snapshot().deadlines());
             onRegistered.run();
-            if (repository.isClosed()) {
-                cancel(ctx, CancelReason.SHUTDOWN);
-            } else if (System.currentTimeMillis() >= expires) {
-                cancel(ctx, CancelReason.DEADLINE_EXCEEDED);
-            }
-            if (!future.isDone()) scheduleRequest(ctx);
-            else closeRequest(ctx, null);
+            if (repository.isClosed()) cancel(request, CancelReason.SHUTDOWN);
+            else if (System.currentTimeMillis() >= request.getRequestExpiresAtMs())
+                cancel(request, CancelReason.DEADLINE_EXCEEDED);
+            if (future.isDone()) closeRequest(request, null);
+            else scheduleRequest(request);
             return future;
         } catch (RuntimeException failure) {
-            Response response =
+            var response =
                     Response.buildErrorResponse(
                             StrategyErrorType.DISPATCH_FAILED, failure.getMessage());
-            if (ctx != null && ctx.getRequestScheduler() == this) {
-                publish(ctx, response, false);
-                return ctx.getFuture();
+            if (request != null && request.getRequestScheduler() == this) {
+                publish(request, response, false);
+                return request.getFuture();
             }
             return CompletableFuture.completedFuture(response);
         }
@@ -241,90 +214,41 @@ public abstract class AbstractRequestScheduler
     }
 
     /**
-     * Records the first cancellation cause and submits cleanup without waiting for the engine reply.
+     * Records cancellation on the request. Response selection and resource cleanup use the same
+     * closing path as worker completion; an executing selection finishes its own rollback first.
      */
     public RequestResult cancel(RequestContext ctx, CancelReason reason) {
-        if (ctx == null || ctx.getRequestScheduler() != this || !repository.isCurrent(ctx)) {
-            return null;
-        }
-
-        boolean changed;
-        Registration publication = null;
-        Throwable failure = null;
-        Throwable responsePreparationFailure = null;
+        Objects.requireNonNull(reason);
+        if (ctx == null || !isCurrentRequest(ctx)) return null;
         synchronized (ctx) {
-            var state = ctx.snapshot();
-            if (state.phase() == Phase.CLOSED) {
-                return state.requestRecordForArchive();
-            }
-            String message = reason.getMessage();
-            Map<String, Object> evidence = describeWait(ctx, reason, message);
+            if (ctx.snapshot().phase() == Phase.CLOSED)
+                return ctx.snapshot().requestRecordForArchive();
+            var diagnostics = describeWait(ctx, reason, reason.getMessage());
             var error =
-                    reason == CancelReason.DEADLINE_EXCEEDED
-                            ? schedulingTimeoutError()
-                            : reason == CancelReason.PRIORITY_PREEMPTED
-                                    ? StrategyErrorType.PRIORITY_PREEMPTED
-                                    : StrategyErrorType.REQUEST_CANCELLED;
-            RequestResult candidate = null;
-            if (state.selectionId() == 0L
-                    && state.responseForFuture() == null
-                    && !ctx.getFuture().isDone()) {
-                candidate =
-                        new RequestResult(ctx, ResponseKind.TERMINAL, System.currentTimeMillis());
-                try {
-                    publication = reserveResponse(ctx, candidate);
-                } catch (RuntimeException | Error rejected) {
-                    failure = rejected;
-                    candidate = null;
-                }
-            }
-            changed =
+                    switch (reason) {
+                        case DEADLINE_EXCEEDED -> schedulingTimeoutError();
+                        case PRIORITY_PREEMPTED -> StrategyErrorType.PRIORITY_PREEMPTED;
+                        default -> StrategyErrorType.REQUEST_CANCELLED;
+                    };
+            boolean changed =
                     ctx.requestCancel(
                             reason,
                             false,
                             System.currentTimeMillis(),
                             error,
-                            evidence == null ? message : String.valueOf(evidence.get("cause")),
-                            candidate);
-            if (changed && evidence != null) {
-                ctx.setSchedulingDiagnostics(evidence);
-            }
-            if (publication != null) {
-                var after = ctx.snapshot();
-                if (after.responseForFuture() == candidate) {
-                    try {
-                        publication.prepare(
-                                RESPONSE, response(after.requestEndResult(), after.route()), null);
-                    } catch (RuntimeException | Error rejected) {
-                        responsePreparationFailure = rejected;
-                        failure = Failures.append(failure, rejected);
-                    }
-                } else {
-                    publication.close();
-                    publication = null;
-                }
-            }
+                            diagnostics == null
+                                    ? reason.getMessage()
+                                    : String.valueOf(diagnostics.get("cause")),
+                            null);
+            if (changed && diagnostics != null) ctx.setSchedulingDiagnostics(diagnostics);
         }
-        if (responsePreparationFailure != null) {
-            var rejectedPublication = publication;
-            var rejected = responsePreparationFailure;
-            failure = Failures.run(failure, () -> rejectedPublication.failIfUnsubmitted(rejected));
-            publication = null;
-        }
-        if (changed && ctx.snapshot().requestEndResult() != null) {
-            var responsePublication = publication;
-            failure = Failures.run(failure, () -> scheduleRequestCleanup(ctx, responsePublication));
-        }
-        var deadlines = ctx.snapshot().deadlines();
-        if (ctx.snapshot().phase() == Phase.OPEN) {
-            failure = Failures.run(failure, () -> expirationTimer.update(ctx, deadlines));
-        }
-        if (failure != null) {
+        try {
+            processPendingRequestActions(ctx);
+        } catch (RuntimeException | Error failure) {
             recordRequestFailure(failure);
+            throw failure;
         }
-        Failures.rethrow(failure, "cancellation effects failed");
-        var state = RequestResult.from(ctx.snapshot());
-        return state;
+        return RequestResult.from(ctx.snapshot());
     }
 
     /**
@@ -468,107 +392,116 @@ public abstract class AbstractRequestScheduler
     }
 
     /**
-     * Starts one selection attempt; publication and rollback share the same completion path.
+     * Direct scheduling owns one selection through its final result; queued scheduling may retain
+     * a blocked selection while preemption waits for resources.
      */
     protected final RequestResult planRoute(
-            RequestContext context,
-            java.util.function.Supplier<RequestResult> selection,
-            boolean allowDecodePreemption) {
-        var operation = tryBeginRouteSelection(context);
-        return operation == null
-                ? RequestResult.closed()
-                : executeRouteSelection(operation, selection, allowDecodePreemption);
+            RequestContext request, java.util.function.Supplier<RequestResult> select) {
+        var exact = tryBeginRouteSelection(request);
+        if (exact == null) return RequestResult.closed();
+        var result = executeRouteSelection(exact, select);
+        if (Objects.equals(request.currentSelectionAttempt(), exact))
+            finishSelectionWithoutCommit(exact, null);
+        return result;
     }
 
-    protected SelectionAttempt tryBeginRouteSelection(RequestContext ctx) {
-        if (repository.isClosed() || ctx == null || ctx.getRequestScheduler() != this) {
+    protected SelectionAttempt tryBeginRouteSelection(RequestContext request) {
+        if (repository.isClosed() || request == null || request.getRequestScheduler() != this)
             return null;
-        }
-        synchronized (ctx) {
-            if (!repository.isCurrent(ctx)) {
-                return null;
-            }
-            return ctx.beginRouteSelection();
+        synchronized (request) {
+            return repository.isCurrent(request) ? request.beginRouteSelection() : null;
         }
     }
 
     /**
-     * Executes or resumes selection. A started preemption keeps the attempt until its continuation resumes.
+     * Associates acquired registrations with the request before publishing. Failed publication rolls
+     * them back; a pure capacity miss leaves the selection available to the queue's preemption path.
      */
     protected final RequestResult executeRouteSelection(
-            SelectionAttempt routingContext,
-            java.util.function.Supplier<RequestResult> selection,
-            boolean allowDecodePreemption) {
-        var request = routingContext.requestContext();
+            SelectionAttempt exact, java.util.function.Supplier<RequestResult> select) {
+        var request = exact.requestContext();
         checkState(
-                java.util.Objects.equals(request.currentSelectionAttempt(), routingContext),
-                "routing requires its exact active admission");
-        RequestResult route = null;
+                Objects.equals(request.currentSelectionAttempt(), exact),
+                "routing requires its current selection");
+        RequestResult acquired = null;
         RequestResult result = null;
         Throwable failure = null;
-        boolean routeAccepted = false;
-        Runnable continuation = null;
+        boolean committed = false;
         try {
-            result = Objects.requireNonNull(selection.get(), "routing result");
-            checkState(
-                    result.status() != RoutingResult.Status.SUCCESS || result.ctx() == request,
-                    "route belongs to another request");
-            route = result.status() == RoutingResult.Status.SUCCESS ? result : null;
-            if (route != null)
-                routingContext.requestContext().registerSelectedRoute(routingContext, route);
-            request.recordRoutingDiagnostics(routingContext, result.diagnostics());
-            if (request.getFuture().isDone()
-                    || !request.canPublishRoute(routingContext)
-                    || routeSelectionStopped()) {
-                result = RequestResult.closed();
-            } else if (result.status() == RoutingResult.Status.BLOCKED && allowDecodePreemption) {
-                continuation = startOrWaitForDecodePreemption(routingContext, result.blocker());
-            }
+            result = Objects.requireNonNull(select.get(), "routing result");
             if (result.status() == RoutingResult.Status.SUCCESS) {
-                result = route.validateEndpoints(result);
+                checkState(result.ctx() == request, "route belongs to another request");
+                acquired = result;
+                request.registerSelectedRoute(exact, acquired);
             }
-            if (result.status() == RoutingResult.Status.SUCCESS) {
-                var publication = publishSelectedRoute(route);
-                result = publication;
-                routeAccepted = result.status() == RoutingResult.Status.SUCCESS;
+            request.recordRoutingDiagnostics(exact, result.diagnostics());
+            if (request.isResponseDone()
+                    || !request.canPublishRoute(exact)
+                    || routeSelectionStopped()) result = RequestResult.closed();
+            else if (acquired != null) {
+                result = acquired.validateEndpoints(acquired);
+                if (result.status() == RoutingResult.Status.SUCCESS)
+                    result = publishSelectedRoute(acquired);
+                committed = result.status() == RoutingResult.Status.SUCCESS;
             }
+            return acquired == null ? result : selectedRouteResult(result);
         } catch (RuntimeException | Error problem) {
             failure = problem;
             throw problem;
         } finally {
-            if (continuation == null && !routeAccepted) {
-                Throwable cleanup = finishUnpublishedRoute(route, routingContext);
+            if (!committed) {
+                boolean waitingForCapacity =
+                        result != null && result.status() == RoutingResult.Status.BLOCKED;
+                Throwable cleanup;
+                if (waitingForCapacity && acquired != null) {
+                    cleanup =
+                            releaseRouteResources(
+                                    acquired, WorkerEndpoint.ReleaseReason.LOCAL_ROLLBACK, false);
+                    if (cleanup != null) {
+                        var rollbackError =
+                                Response.buildErrorResponse(
+                                        StrategyErrorType.DISPATCH_FAILED,
+                                        "selection rollback failed");
+                        cleanup =
+                                Failures.run(
+                                        cleanup,
+                                        () -> finishSelectionWithoutCommit(exact, rollbackError));
+                    }
+                } else {
+                    cleanup = waitingForCapacity ? null : finishUnpublishedRoute(acquired, exact);
+                }
                 if (cleanup != null) recordRequestFailure(cleanup);
                 if (failure != null) Failures.append(failure, cleanup);
-                else Failures.rethrow(cleanup, "placement cleanup failed");
+                else Failures.rethrow(cleanup, "selection rollback failed");
             }
         }
-        if (continuation != null) return result.waitingForPreemption(continuation);
-        return route == null ? result : selectedRouteResult(result);
     }
 
     protected boolean routeSelectionStopped() {
         return false;
     }
 
-    protected Runnable startOrWaitForDecodePreemption(
-            SelectionAttempt operation, CapacityKey blocker) {
-        return null;
-    }
-
     protected RequestResult publishSelectedRoute(RequestResult route) {
-        route.ctx().recordRouteCommitStart(System.nanoTime());
-        if (route.encoderEndpoint() != null) return commitEncoderRoute(route);
-        var selecting = currentSelectionAttempt(route);
-        if (selecting == null) return route.validateEndpoints(RequestResult.closed());
-        if (!route.prefillEndpoint().commitSelection(route))
+        var request = route.ctx();
+        request.recordRouteCommitStart(System.nanoTime());
+        var exact = currentSelectionAttempt(route);
+        if (exact == null) return route.validateEndpoints(RequestResult.closed());
+        if (route.encoderEndpoint() != null) {
+            if (!route.encoderEndpoint().commitSelection(route))
+                return route.validateEndpoints(
+                        RequestResult.blocked(
+                                new CapacityKey(
+                                        RoleType.ENCODER,
+                                        route.encoderEndpoint().getStatus().getGroup(),
+                                        route.encoderEndpoint().ipPort())));
+        } else if (!route.prefillEndpoint().commitSelection(route)) {
             return route.validateEndpoints(
                     RequestResult.rejected(
                             Response.buildErrorResponse(
                                     StrategyErrorType.DISPATCH_FAILED,
                                     "Selected Prefill registration was not valid for commit")));
-        if (!commitRoute(route, selecting)) return route.validateEndpoints(RequestResult.closed());
-        return route;
+        }
+        return commitRoute(route, exact) ? route : route.validateEndpoints(RequestResult.closed());
     }
 
     protected RequestResult selectedRouteResult(RequestResult result) {
@@ -594,25 +527,17 @@ public abstract class AbstractRequestScheduler
     protected abstract void removeRequest(RequestContext request);
 
     /**
-     * Select one effect owner after recording facts; that owner also handles its failures.
+     * Open requests retain their timers; ending requests use the single response-and-cleanup path.
      */
-    protected void processPendingRequestActions(RequestContext ctx) {
-        var state = ctx.snapshot();
-        Throwable failure = null;
-        try {
-            if (state.phase() != Phase.OPEN) {
-                closeRequest(ctx, null);
-            }
-            var current = ctx.snapshot();
-            if (current.phase() == Phase.OPEN) {
-                recover(
-                        this::recordRequestFailure,
-                        () -> expirationTimer.update(ctx, current.deadlines()));
-            }
-        } catch (RuntimeException | Error failed) {
-            failure = Failures.append(failure, failed);
+    protected void processPendingRequestActions(RequestContext request) {
+        var state = request.snapshot();
+        if (state.phase() == Phase.OPEN) {
+            recover(
+                    this::recordRequestFailure,
+                    () -> expirationTimer.update(request, state.deadlines()));
+        } else {
+            closeRequest(request, null);
         }
-        Failures.rethrow(failure, "request continuation failed");
     }
 
     void onRequestStateChanged(RequestContext ctx) {
@@ -697,10 +622,18 @@ public abstract class AbstractRequestScheduler
         if (!prefillAndEncoderReleased) {
             if (route.encoderEndpoint() != null)
                 failure =
-                        Failures.run(failure, () -> route.encoderEndpoint().releaseRequest(route));
+                        Failures.run(
+                                failure,
+                                () ->
+                                        route.encoderEndpoint()
+                                                .releaseRequest(route.encoderRegistration()));
             if (route.prefillEndpoint() != null)
                 failure =
-                        Failures.run(failure, () -> route.prefillEndpoint().releaseRequest(route));
+                        Failures.run(
+                                failure,
+                                () ->
+                                        route.prefillEndpoint()
+                                                .releaseRequest(route.prefillRegistration()));
             prefillAndEncoderReleased = failure == null;
         }
         try {
@@ -796,58 +729,54 @@ public abstract class AbstractRequestScheduler
     }
 
     /**
-     * Own closing through completion or a recorded wait, including recovery after an effect fails.
+     * Chooses one ending response under the request lock, then submits response and resource cleanup
+     * outside it. A selection still in progress keeps the ending pending until rollback completes.
      */
-    void closeRequest(RequestContext ctx, RequestEndEvent evidence) {
-        if (Thread.holdsLock(ctx)) {
-            throw new IllegalStateException(
-                    "request closing requires the Context lock to be released");
-        }
-        if (ctx.getRequestScheduler() != this || !repository.isCurrent(ctx)) {
-            return;
-        }
+    void closeRequest(RequestContext request, RequestEndEvent ending) {
+        checkState(
+                !Thread.holdsLock(request),
+                "request closing requires the Context lock to be released");
+        if (!isCurrentRequest(request)) return;
         Registration publication = null;
         try {
-            synchronized (ctx) {
-                RequestResult candidate = null;
-                var before = ctx.snapshot();
-                if (evidence == null && before.phase() == Phase.OPEN
-                        || evidence != null
-                                && evidence.route() != null
-                                && before.route() != evidence.route()) {
-                    return;
-                }
-                if (before.selectionId() == 0L
+            synchronized (request) {
+                var before = request.snapshot();
+                if (ending == null && before.phase() == Phase.OPEN
+                        || ending != null
+                                && ending.route() != null
+                                && ending.route() != before.route()) return;
+                RequestResult responseCandidate = null;
+                if (before.selectionId() == 0
                         && before.responseForFuture() == null
-                        && !ctx.getFuture().isDone()) {
-                    candidate =
+                        && !request.isResponseDone()) {
+                    responseCandidate =
                             new RequestResult(
-                                    ctx, ResponseKind.TERMINAL, System.currentTimeMillis());
-                    publication = reserveResponse(ctx, candidate);
+                                    request, ResponseKind.TERMINAL, System.currentTimeMillis());
+                    publication = reserveResponse(request, responseCandidate);
                 }
-                var after = ctx.endRequest(evidence, System.currentTimeMillis(), candidate);
+                var after =
+                        request.endRequest(ending, System.currentTimeMillis(), responseCandidate);
                 if (after.requestEndResult() == null) {
                     if (publication != null) publication.close();
                     return;
                 }
                 if (publication != null) {
-                    if (after.responseForFuture() != candidate) {
+                    if (after.responseForFuture() == responseCandidate) {
+                        publication.prepare(
+                                RESPONSE, response(after.requestEndResult(), before.route()), null);
+                    } else {
                         publication.close();
                         publication = null;
-                    } else {
-                        var requestEndResult = after.requestEndResult();
-                        publication.prepare(
-                                RESPONSE, response(requestEndResult, before.route()), null);
                     }
                 }
             }
-        } catch (RuntimeException | Error failed) {
-            ctx.endRequest(evidence, System.currentTimeMillis(), null);
-            if (publication != null) publication.failIfUnsubmitted(failed);
-            Failures.run(failed, () -> scheduleRequestCleanup(ctx, null));
-            throw failed;
+        } catch (RuntimeException | Error failure) {
+            request.endRequest(ending, System.currentTimeMillis(), null);
+            if (publication != null) publication.failIfUnsubmitted(failure);
+            Failures.run(failure, () -> scheduleRequestCleanup(request, null));
+            throw failure;
         }
-        scheduleRequestCleanup(ctx, publication);
+        scheduleRequestCleanup(request, publication);
     }
 
     void closeOutstandingAndTerminalize() {
@@ -938,38 +867,20 @@ public abstract class AbstractRequestScheduler
             RequestContext request, CancelReason reason, String message) {
         if (reason != CancelReason.DEADLINE_EXCEEDED) return null;
         var state = request.snapshot();
-        String stage =
-                state.committedRoute() != null
-                        ? "DELIVERY"
-                        : state.selectionId() != 0L
-                                ? "PLACEMENT"
-                                : state.route() == null
-                                        ? "WAITING_FOR_PLACEMENT"
-                                        : "BEFORE_DELIVERY";
-        return completeWaitDiagnostics(message, describeWaitAtStage(request, state, stage));
-    }
-
-    private final Map<String, Object> completeWaitDiagnostics(
-            String message, Map<String, Object> details) {
-        details.put("cause", message + "; " + details);
-        return java.util.Collections.unmodifiableMap(details);
-    }
-
-    private final Map<String, Object> describeWaitAtStage(
-            RequestContext request, Snapshot state, String stage) {
         Map<String, Object> details = new java.util.LinkedHashMap<>();
+        String stage;
+        if (state.committedRoute() != null) stage = "DELIVERY";
+        else if (state.selectionId() != 0) stage = "PLACEMENT";
+        else stage = state.route() == null ? "WAITING_FOR_PLACEMENT" : "BEFORE_DELIVERY";
         details.put("stage", stage);
         details.put("capturedAtMs", System.currentTimeMillis());
-        if (state.selectionId() != 0L) {
-            details.put("routingPhase", state.routingPhase().name());
-        }
-        if (state.committedRoute() == null && state.route() == null) {
-            var observation = request.getSchedulingDiagnostics();
-            if (observation != null) {
-                details.put("lastPlacementObservation", observation);
-            }
-        }
-        return details;
+        if (state.selectionId() != 0) details.put("routingPhase", state.routingPhase().name());
+        if (state.committedRoute() == null
+                && state.route() == null
+                && request.getSchedulingDiagnostics() != null)
+            details.put("lastPlacementObservation", request.getSchedulingDiagnostics());
+        details.put("cause", message + "; " + details);
+        return java.util.Collections.unmodifiableMap(details);
     }
 
     /**
@@ -1086,25 +997,6 @@ public abstract class AbstractRequestScheduler
                         requestEndResult.errorType(), requestEndResult.detail());
     }
 
-    private RequestResult commitEncoderRoute(RequestResult route) {
-        var context = route.ctx();
-
-        var routingContext = route.ctx().getRequestScheduler().currentSelectionAttempt(route);
-        if (routingContext == null) return RequestResult.closed();
-        if (!route.encoderEndpoint().commitSelection(route))
-            return route.validateEndpoints(
-                    RequestResult.blocked(
-                            new CapacityKey(
-                                    RoleType.ENCODER,
-                                    route.encoderEndpoint().getStatus().getGroup(),
-                                    route.encoderEndpoint().ipPort())));
-        if (!route.selectedEndpointsAvailable())
-            return route.validateEndpoints(RequestResult.closed());
-        var claim = commitRoute(route, routingContext);
-        if (!claim) return RequestResult.closed();
-        return route;
-    }
-
     /**
      * Reserves response execution, commits once, then invokes the response outside the request lock.
      */
@@ -1164,5 +1056,21 @@ public abstract class AbstractRequestScheduler
                 () -> {
                     return ctx.snapshot().responseForFuture() == candidate;
                 });
+    }
+
+    private Response admissionRejection(RequestContext request) {
+        if (request == null || request.getRequest() == null)
+            return Response.error(StrategyErrorType.INVALID_REQUEST);
+        if (repository.isStopping() || repository.isClosed())
+            return Response.buildErrorResponse(
+                    StrategyErrorType.SCHEDULER_UNAVAILABLE,
+                    "request scheduler is shutting down and no longer accepts new requests");
+        if (request.getRequestScheduler() != null)
+            return Response.buildErrorResponse(
+                    StrategyErrorType.INVALID_REQUEST, "request context is already registered");
+        if (request.getSchedulingMetadata() == null)
+            return Response.buildErrorResponse(
+                    StrategyErrorType.INVALID_REQUEST, "missing scheduling metadata");
+        return null;
     }
 }

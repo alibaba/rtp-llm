@@ -12,7 +12,7 @@
     {
       "original_commit": "595f08951cb21ce94d1746a7029afbd2f6d5896f",
       "subject": "refactor(flexlb): remove unused health metric",
-      "change_and_validation_details": "refactor(flexlb): remove unused status failure latency reporting\n\nRemove the uncalled failure-latency reporter, metric registration and\nconstant. Keep the existing failure counters and their tags unchanged.\n\nValidation: isolated EngineHealthReporterTest, 42 tests passed; full-reactor\nSpotless passed. An independent perf run for this commit is pending.\nBATCH end-to-end perf failures also occur on the baseline; this commit\nis explicitly authorized without claiming that perf acceptance passed.",
+      "change_and_validation_details": "refactor(flexlb): remove unused status failure latency reporting\n\nRemove the uncalled failure-latency reporter, metric registration and\nconstant. Keep the existing failure counters and their tags unchanged.\n\nValidation: isolated ServiceMetricsReporterTest, 42 tests passed; full-reactor\nSpotless passed. An independent perf run for this commit is pending.\nBATCH end-to-end perf failures also occur on the baseline; this commit\nis explicitly authorized without claiming that perf acceptance passed.",
       "performance": {
         "recorded_at_utc": "2026-11-06T07:27:58.311145+00:00",
         "test": "MasterBatchEndToEndPerformanceTest#masterMeetsRateSloAcrossEngineScaleMatrix",
@@ -22,10 +22,7 @@
           "heap_gb": 8,
           "extra_jvm_args": "",
           "topology": "750P/750D",
-          "offered_qps": [
-            3000,
-            10000
-          ],
+          "offered_qps": [3000, 10000],
           "warmup_ms": 10000,
           "measurement_ms": 10000,
           "client_p99_limit_ms": 50,
@@ -852,10 +849,7 @@
           "heap_gb": 8,
           "extra_jvm_args": "",
           "topology": "750P/750D",
-          "offered_qps": [
-            3000,
-            10000
-          ],
+          "offered_qps": [3000, 10000],
           "warmup_ms": 10000,
           "measurement_ms": 10000,
           "client_p99_limit_ms": 50,
@@ -1850,10 +1844,7 @@
           "heap_gb": 8,
           "extra_jvm_args": "",
           "topology": "750P/750D",
-          "offered_qps": [
-            3000,
-            10000
-          ],
+          "offered_qps": [3000, 10000],
           "warmup_ms": 10000,
           "measurement_ms": 10000,
           "client_p99_limit_ms": 50,

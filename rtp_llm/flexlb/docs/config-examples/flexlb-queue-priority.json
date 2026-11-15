@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 4,
+  "scheduler": {
+    "type": "QUEUE",
+    "queueTimeoutMs": 3600000,
+    "ordering": {
+      "type": "PRIORITY",
+      "defaultPriority": 50,
+      "preemption": {
+        "allowedVictimStages": ["DECODE_ENGINE_OWNED"],
+        "timeoutMs": 1000
+      }
+    }
+  },
+  "router": {
+    "roles": {
+      "prefill": {
+        "cacheAffinity": {
+          "maxComputeTokens": 262144,
+          "minPrefixHitPercent": 5
+        },
+        "maxComputeTokens": 1048576
+      },
+      "decode": {
+        "availability": {
+          "maxKvUsagePercent": 90,
+          "maxEngineRequests": 256
+        }
+      }
+    }
+  },
+  "workerRegistry": {
+    "health": {
+      "statusPollIntervalMs": 20,
+      "statusRpcTimeoutMs": 5000,
+      "cleanupIntervalMs": 3000
+    },
+    "cacheStatus": {
+      "targetDiffSize": 30,
+      "minRefreshIntervalMs": 50,
+      "maxRefreshIntervalMs": 3000,
+      "fullSnapshotDebugMode": false
+    }
+  },
+  "observability": {
+    "cacheHit": {
+      "recentKeyWindow": {
+        "writeEnabled": true,
+        "durationMs": 1800000,
+        "maxKeyOccurrences": 80000000
+      },
+      "metricsEnabled": true,
+      "requestTraceLogEnabled": false
+    }
+  },
+  "requestLifecycle": {
+    "request": {
+      "timeoutMs": 3600000
+    }
+  }
+}

@@ -43,8 +43,8 @@ class WorkerEndpointCloseTest {
         for (var id : java.util.List.of("first", "second")) {
             assertNotNull(
                     endpoint.tryRegisterSelection(
-                                    endpoint.selectionSnapshot(),
                                     id,
+                                    endpoint.selectionSnapshot(),
                                     10,
                                     10,
                                     1,

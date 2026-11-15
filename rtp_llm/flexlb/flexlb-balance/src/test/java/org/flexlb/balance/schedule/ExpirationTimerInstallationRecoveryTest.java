@@ -250,7 +250,7 @@ class ExpirationTimerInstallationRecoveryTest {
                     org.flexlb.worker.endpoint.StrategyErrorType.SCHEDULING_DEADLINE_EXCEEDED);
             ReflectionTestUtils.setField(context, "prefillCompletedAtMs", 1001L);
             ReflectionTestUtils.setField(context, "visibilityAtMs", 3000L);
-            ReflectionTestUtils.invokeMethod(context, "commitSnapshot", 1002L);
+            ReflectionTestUtils.invokeMethod(context, "refreshState", 1002L);
             var repository = mock(RequestRepository.class);
             when(repository.isCurrent(context)).thenReturn(true);
             timer =

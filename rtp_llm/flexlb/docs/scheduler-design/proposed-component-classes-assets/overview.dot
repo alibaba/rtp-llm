@@ -27,7 +27,7 @@ edge [fontname="Arial", fontsize=10, color="#64748b"];
 "PrefillTimePredictor" [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#cbd5e1"><TR><TD BGCOLOR="#e6f2ff"><B>PrefillTimePredictor</B><BR/>interface · 200 LOC</TD></TR></TABLE>>];
 "RequestTimeEstimation" [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#cbd5e1"><TR><TD BGCOLOR="#f3f0ff"><B>RequestTimeEstimation</B><BR/>class · 550 LOC</TD></TR></TABLE>>];
 "DeliveryMetricsReporter" [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#cbd5e1"><TR><TD BGCOLOR="#f3f0ff"><B>DeliveryMetricsReporter</B><BR/>class · 300 LOC</TD></TR></TABLE>>];
-"EngineHealthReporter" [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#cbd5e1"><TR><TD BGCOLOR="#f3f0ff"><B>EngineHealthReporter</B><BR/>class · 300 LOC</TD></TR></TABLE>>];
+"ServiceMetricsReporter" [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" COLOR="#cbd5e1"><TR><TD BGCOLOR="#f3f0ff"><B>ServiceMetricsReporter</B><BR/>class · 300 LOC</TD></TR></TABLE>>];
 "RequestLifecycle" -> "RequestContext" [style=dashed, arrowhead=vee, label="状态转换"];
 "RequestLifecycle" -> "RequestScheduler" [style=dashed, arrowhead=vee, label="通知"];
 "RequestLifecycle" -> "DeliveryDispatcher" [style=dashed, arrowhead=vee, label="取消与清理"];
@@ -60,6 +60,6 @@ edge [fontname="Arial", fontsize=10, color="#64748b"];
 "DefaultDecodePreemption" -> "DeliveryDispatcher" [style=dashed, arrowhead=vee, label="远端取消"];
 "QueuedRequestScheduler" -> "DecodePreemption" [style=dashed, arrowhead=vee, label="资源回收"];
 "RequestTimeEstimation" -> "PrefillTimePredictor" [style=dashed, arrowhead=vee, label="冻结 evaluator"];
-"EngineHealthReporter" -> "EndpointStats" [style=dashed, arrowhead=vee, label="只读"];
+"ServiceMetricsReporter" -> "EndpointStats" [style=dashed, arrowhead=vee, label="只读"];
 "DeliveryMetricsReporter" -> "DeliveryExecution" [style=dashed, arrowhead=vee, label="仅 ExecutorStats"];
 }

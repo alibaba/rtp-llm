@@ -2,7 +2,6 @@ package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
-import org.flexlb.balance.queue.GlobalQueueEntry;
 import org.flexlb.balance.queue.OrderedRequestQueue;
 import org.flexlb.balance.requestlog.TheoryCacheHitReporter;
 import org.flexlb.balance.schedule.RequestContext.SelectionAttempt;
@@ -208,7 +207,7 @@ class RequestContextLifecycleTest {
         RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         assertEquals(priority, context.getSchedulingMetadata().priority());
         int queuePriority = priority >= 1 && priority <= 100 ? priority : 50;
-        var entry = new GlobalQueueEntry(context, null);
+        var entry = context;
         for (boolean priorityOrdering : new boolean[] {false, true}) {
             var queue = new OrderedRequestQueue(priorityOrdering);
             queue.add(entry);
@@ -218,14 +217,14 @@ class RequestContextLifecycleTest {
                             context.setRequest(
                                     context.getRequest().toBuilder().rawPriority(99).build()));
             assertEquals(priority, context.getPriority());
-            assertEquals(queuePriority, entry.priority());
+            assertEquals(queuePriority, org.flexlb.balance.queue.SchedulingQueue.priority(entry));
             assertEquals(1, queue.priorityCounts()[queuePriority]);
             queue.remove(entry);
             queue.restore(entry);
-            assertEquals(queuePriority, entry.priority());
+            assertEquals(queuePriority, org.flexlb.balance.queue.SchedulingQueue.priority(entry));
             queue.remove(entry);
         }
-        assertEquals(queuePriority, new GlobalQueueEntry(context, null).priority());
+        assertEquals(queuePriority, org.flexlb.balance.queue.SchedulingQueue.priority(context));
     }
 
     @Test
@@ -669,7 +668,7 @@ class RequestContextLifecycleTest {
                             lifecycle, item, RequestProtocolTestSupport.publication(() -> true)));
         }
         AtomicReference<Thread> cleanupThread = new AtomicReference<>();
-        when(prefill.releaseRequest(item))
+        when(prefill.releaseRequest(item.prefillRegistration()))
                 .thenAnswer(
                         invocation -> {
                             assertFalse(Thread.holdsLock(context));
@@ -686,7 +685,7 @@ class RequestContextLifecycleTest {
                 org.flexlb.balance.schedule.SchedulerTestSupport.runtime(lifecycle));
         assertNotNull(cleanupThread.get());
         assertNotEquals(Thread.currentThread(), cleanupThread.get());
-        verify(prefill).releaseRequest(item);
+        verify(prefill).releaseRequest(item.prefillRegistration());
         assertEquals(
                 RequestResult.State.TIMED_OUT,
                 RequestResult.from(requestContext.snapshot()).state());
@@ -906,7 +905,8 @@ class RequestContextLifecycleTest {
         assertEquals(RequestResult.State.FAILED, RequestResult.from(context.snapshot()).state());
         assertEquals(0, SchedulerTestSupport.repository(lifecycle).liveRequestCount());
         verify(route.decodeEndpoint()).releaseRequest(route.decodeRegistration());
-        org.mockito.Mockito.verify(prefill, org.mockito.Mockito.never()).releaseRequest(route);
+        org.mockito.Mockito.verify(prefill, org.mockito.Mockito.never())
+                .releaseRequest(route.prefillRegistration());
     }
 
     @Test

@@ -251,8 +251,8 @@ class DecodeResourceTest {
     private static RequestRegistration reserve(DecodeEndpoint endpoint, String id) {
         var result =
                 endpoint.tryRegisterSelection(
-                        endpoint.selectionSnapshot(),
                         id,
+                        endpoint.selectionSnapshot(),
                         100,
                         200,
                         50,

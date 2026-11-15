@@ -54,6 +54,244 @@ class DecodeStrategyTest {
     }
 
     @Test
+    void fullCapacityTakesPrecedenceOverAnOutdatedRankingSnapshot() {
+        registerWorker("127.0.0.1", 1_000L, 1_000L);
+        var registry = decodeRegistry();
+        try {
+            var endpoint = decodeEndpoint(registry, "127.0.0.1:8080@0");
+            var snapshot = endpoint.selectionSnapshot();
+            reserveQueued(endpoint, 1L, 0L, 800L, 0);
+            var result =
+                    endpoint.tryRegisterSelection(
+                            "new",
+                            snapshot,
+                            0L,
+                            200L,
+                            0,
+                            SchedulingTestConfig.capacity(configService.loadBalanceConfig()));
+            Assertions.assertEquals(
+                    WorkerEndpoint.RegistrationStatus.CAPACITY_FULL, result.status());
+            Assertions.assertFalse(endpoint.resourceSnapshot().requests().containsKey("new"));
+        } finally {
+            registry.close();
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"100,127.0.0.1", "600,127.0.0.2", "850,127.0.0.2"})
+    void changedCapacityIsComparedWithTheOtherWorker(long addedKv, String expectedIp) {
+        configureCost("kvcache_used");
+        registerWorker("127.0.0.1", 1_000L, 1_000L);
+        registerWorker("127.0.0.2", 1_000L, 500L);
+        var registry = decodeRegistry();
+        try {
+            var first = decodeEndpoint(registry, "127.0.0.1:8080@0");
+            var second = decodeEndpoint(registry, "127.0.0.2:8080@0");
+            var directory = Mockito.mock(EndpointRegistry.class);
+            Mockito.when(directory.<WorkerEndpoint>endpoints(RoleType.DECODE, null))
+                    .thenReturn(List.of(first, second));
+            var changed = new java.util.concurrent.atomic.AtomicBoolean();
+            Mockito.when(directory.getEndpoint(RoleType.DECODE, first.ipPort()))
+                    .thenAnswer(
+                            call -> {
+                                if (changed.compareAndSet(false, true))
+                                    reserveQueued(first, 1L, addedKv, addedKv, 0);
+                                return first;
+                            });
+            Mockito.when(directory.getEndpoint(RoleType.DECODE, second.ipPort()))
+                    .thenReturn(second);
+            var result =
+                    StrategyTestSupport.select(
+                            availableStrategy(directory), request(100L, 99L), SCHEDULING, null);
+            Assertions.assertEquals(RoutingResult.Status.SUCCESS, result.status());
+            try (var selected = result.value()) {
+                Assertions.assertEquals(expectedIp, selected.decode().getServerIp());
+            }
+        } finally {
+            registry.close();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void allFullWorkersReturnWithoutRegistration(boolean direct) {
+        if (direct) configService.loadBalanceConfig().setScheduler(ConfigTestSupport.direct());
+        registerWorker("127.0.0.1", 1_000L, 100L);
+        registerWorker("127.0.0.2", 1_000L, 100L);
+        var registry = decodeRegistry();
+        try {
+            var first = Mockito.spy(decodeEndpoint(registry, "127.0.0.1:8080@0"));
+            var second = Mockito.spy(decodeEndpoint(registry, "127.0.0.2:8080@0"));
+            var directory = Mockito.mock(EndpointRegistry.class);
+            Mockito.when(directory.<WorkerEndpoint>endpoints(RoleType.DECODE, null))
+                    .thenReturn(List.of(first, second));
+            Mockito.when(directory.getEndpoint(RoleType.DECODE, first.ipPort())).thenReturn(first);
+            Mockito.when(directory.getEndpoint(RoleType.DECODE, second.ipPort()))
+                    .thenReturn(second);
+            var result =
+                    StrategyTestSupport.select(
+                            availableStrategy(directory), request(100L, 99L), SCHEDULING, null);
+            Assertions.assertEquals(RoutingResult.Status.BLOCKED, result.status());
+            if (!direct)
+                Assertions.assertInstanceOf(
+                        DecodeEndpoint.SelectionSnapshot.class,
+                        result.diagnostics().get("decodeCandidate"));
+            for (var endpoint : List.of(first, second)) {
+                Mockito.verify(endpoint, Mockito.never())
+                        .tryRegisterSelection(
+                                Mockito.anyString(),
+                                Mockito.any(),
+                                Mockito.anyLong(),
+                                Mockito.anyLong(),
+                                Mockito.anyInt(),
+                                Mockito.any());
+                Assertions.assertTrue(endpoint.resourceSnapshot().requests().isEmpty());
+            }
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void refreshesRemainingWorkersAfterCapturedCapacityBecomesFull() {
+        configService
+                .loadBalanceConfig()
+                .getRouter()
+                .getRoles()
+                .getDecode()
+                .getAvailability()
+                .setMaxEngineRequests(1L);
+        for (int i = 1; i <= 12; i++) registerWorker("127.0.0." + i, 1_000L, 1_000L);
+        var registry = decodeRegistry();
+        try {
+            var workers = new java.util.ArrayList<DecodeEndpoint>();
+            for (int i = 1; i <= 12; i++)
+                workers.add(Mockito.spy(decodeEndpoint(registry, "127.0.0." + i + ":8080@0")));
+            var directory = Mockito.mock(EndpointRegistry.class);
+            Mockito.when(directory.<WorkerEndpoint>endpoints(RoleType.DECODE, null))
+                    .thenReturn(new java.util.ArrayList<WorkerEndpoint>(workers));
+            var changed = new java.util.concurrent.atomic.AtomicBoolean();
+            Mockito.when(directory.getEndpoint(Mockito.eq(RoleType.DECODE), Mockito.anyString()))
+                    .thenAnswer(
+                            call -> {
+                                if (changed.compareAndSet(false, true)) {
+                                    for (int i = 0; i < workers.size(); i++)
+                                        reserveQueued(workers.get(i), 100L + i, 0L, 0L, 0);
+                                    for (var worker : workers) Mockito.clearInvocations(worker);
+                                }
+                                return workers.stream()
+                                        .filter(
+                                                worker ->
+                                                        worker.ipPort().equals(call.getArgument(1)))
+                                        .findFirst()
+                                        .orElse(null);
+                            });
+            var result =
+                    StrategyTestSupport.select(
+                            availableStrategy(directory), request(100L, 99L), SCHEDULING, null);
+            Assertions.assertEquals(RoutingResult.Status.BLOCKED, result.status());
+            long registrations =
+                    workers.stream()
+                            .flatMap(
+                                    worker ->
+                                            Mockito.mockingDetails(worker)
+                                                    .getInvocations()
+                                                    .stream())
+                            .filter(
+                                    call ->
+                                            call.getMethod()
+                                                    .getName()
+                                                    .equals("tryRegisterSelection"))
+                            .count();
+            Assertions.assertEquals(
+                    1L,
+                    registrations,
+                    "after one stale capacity failure, refresh the remaining workers before ranking again");
+            for (var worker : workers)
+                Assertions.assertFalse(worker.resourceSnapshot().requests().containsKey("99"));
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void fullFeasibleWorkerRemainsAWaitTargetWhenOtherWorkerIsTooSmall() {
+        registerWorker("127.0.0.1", 1_000L, 1_000L);
+        registerWorker("127.0.0.2", 50L, 50L);
+        var registry = decodeRegistry();
+        try {
+            var first = decodeEndpoint(registry, "127.0.0.1:8080@0");
+            var second = decodeEndpoint(registry, "127.0.0.2:8080@0");
+            var directory = Mockito.mock(EndpointRegistry.class);
+            Mockito.when(directory.<WorkerEndpoint>endpoints(RoleType.DECODE, null))
+                    .thenReturn(List.of(first, second));
+            var changed = new java.util.concurrent.atomic.AtomicBoolean();
+            Mockito.when(directory.getEndpoint(RoleType.DECODE, first.ipPort()))
+                    .thenAnswer(
+                            call -> {
+                                if (changed.compareAndSet(false, true))
+                                    reserveQueued(first, 1L, 850L, 850L, 0);
+                                return first;
+                            });
+            Mockito.when(directory.getEndpoint(RoleType.DECODE, second.ipPort()))
+                    .thenReturn(second);
+            var result =
+                    StrategyTestSupport.select(
+                            availableStrategy(directory), request(100L, 99L), SCHEDULING, null);
+            Assertions.assertEquals(RoutingResult.Status.BLOCKED, result.status());
+            Assertions.assertEquals(
+                    first.ipPort(),
+                    ((DecodeEndpoint.SelectionSnapshot) result.diagnostics().get("decodeCandidate"))
+                            .address());
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void workersBecomingFullDoNotExhaustVersionConflictRetries() {
+        configureCost("kvcache_used");
+        configService
+                .loadBalanceConfig()
+                .getRouter()
+                .getRoles()
+                .getDecode()
+                .getAvailability()
+                .setMaxEngineRequests(1L);
+        for (int i = 1; i <= 10; i++) registerWorker("127.0.0." + i, 10_000L, 10_000L - i * 10L);
+        var registry = decodeRegistry();
+        try {
+            var workers = new java.util.ArrayList<WorkerEndpoint>();
+            var directory = Mockito.mock(EndpointRegistry.class);
+            for (int i = 1; i <= 10; i++) {
+                var endpoint = decodeEndpoint(registry, "127.0.0." + i + ":8080@0");
+                workers.add(endpoint);
+                boolean fillsBeforeRegistration = i < 10;
+                var changed = new java.util.concurrent.atomic.AtomicBoolean();
+                Mockito.when(directory.getEndpoint(RoleType.DECODE, endpoint.ipPort()))
+                        .thenAnswer(
+                                call -> {
+                                    if (fillsBeforeRegistration
+                                            && changed.compareAndSet(false, true))
+                                        reserveQueued(endpoint, 1L, 0L, 0L, 0);
+                                    return endpoint;
+                                });
+            }
+            Mockito.when(directory.<WorkerEndpoint>endpoints(RoleType.DECODE, null))
+                    .thenReturn(workers);
+            var result =
+                    StrategyTestSupport.select(
+                            availableStrategy(directory), request(100L, 99L), SCHEDULING, null);
+            Assertions.assertEquals(RoutingResult.Status.SUCCESS, result.status());
+            try (var selected = result.value()) {
+                Assertions.assertEquals("127.0.0.10", selected.decode().getServerIp());
+            }
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
     void resourceSnapshotPreservesCapturedReservations() {
         registerWorker("127.0.0.1", 10_000L, 10_000L);
         EndpointRegistry registry = decodeRegistry();
@@ -66,8 +304,8 @@ class DecodeStrategyTest {
 
                 var reservation =
                         endpoint.tryRegisterSelection(
-                                        endpoint.selectionSnapshot(),
                                         String.valueOf(42L),
+                                        endpoint.selectionSnapshot(),
                                         128L,
                                         256L,
                                         70,
@@ -116,32 +354,19 @@ class DecodeStrategyTest {
         registerWorker("127.0.0.2", 10_000, 9_000);
         EndpointRegistry registry = decodeRegistry();
         EndpointRegistry actual = registry;
-        Map<String, DecodeEndpoint.SelectionSnapshot> views = new HashMap<>();
-        for (DecodeEndpoint.SelectionSnapshot view : decodeRoutingSnapshot(actual, null)) {
-            views.put(view.address(), view);
-        }
-        DecodeEndpoint.SelectionSnapshot stale = views.get("127.0.0.1:8080@0");
-        DecodeEndpoint.SelectionSnapshot replacement = views.get("127.0.0.2:8080@0");
-        WorkerEndpoint replacementWorker =
-                Mockito.spy(decodeEndpoint(registry, replacement.address()));
+        var staleWorker = decodeEndpoint(actual, "127.0.0.1:8080@0");
+        var replacementWorker = Mockito.spy(decodeEndpoint(actual, "127.0.0.2:8080@0"));
+        var stale = staleWorker.selectionSnapshot();
+        var replacement = replacementWorker.selectionSnapshot();
         EndpointRegistry racing = Mockito.mock(EndpointRegistry.class);
         var captures = new java.util.concurrent.atomic.AtomicInteger();
-        Mockito.doAnswer(
-                        call -> {
-                            var capturedViews =
-                                    new java.util.ArrayList<
-                                            org.flexlb.worker.endpoint.DecodeEndpoint
-                                                    .SelectionSnapshot>();
-
-                            List<DecodeEndpoint.SelectionSnapshot> target = capturedViews;
-                            target.add(captures.getAndIncrement() == 0 ? stale : replacement);
-                            return org.flexlb.worker.endpoint.EndpointTestSupport.decodeCandidates(
-                                    capturedViews);
-                        })
-                .when(racing)
-                .endpoints(
-                        org.mockito.ArgumentMatchers.eq(org.flexlb.config.service.RoleType.DECODE),
-                        org.mockito.ArgumentMatchers.any());
+        Mockito.when(racing.<DecodeEndpoint>endpoints(Mockito.eq(RoleType.DECODE), Mockito.any()))
+                .thenAnswer(
+                        call ->
+                                List.of(
+                                        captures.getAndIncrement() == 0
+                                                ? staleWorker
+                                                : replacementWorker));
         Mockito.when(racing.getEndpoint(org.flexlb.config.service.RoleType.DECODE, stale.address()))
                 .thenReturn(null);
         Mockito.when(
@@ -187,36 +412,22 @@ class DecodeStrategyTest {
         EndpointRegistry registry = Mockito.spy(decodeRegistry());
         try {
             StrategyTestSupport.DecodeRoutingFixture selector = availableStrategy(registry);
+            var nested = new java.util.concurrent.atomic.AtomicBoolean();
             Mockito.doAnswer(
                             call -> {
-                                var capturedViews =
-                                        new java.util.ArrayList<
-                                                org.flexlb.worker.endpoint.DecodeEndpoint
-                                                        .SelectionSnapshot>();
-
-                                capturedViews.addAll(
-                                        ((java.util.List<org.flexlb.worker.endpoint.DecodeEndpoint>)
-                                                        call.callRealMethod())
-                                                .stream()
-                                                        .map(
-                                                                org.flexlb.worker.endpoint
-                                                                                .DecodeEndpoint
-                                                                        ::selectionSnapshot)
-                                                        .toList());
-                                var outerScratch = scratchCache().get();
-                                Assertions.assertEquals(
-                                        "127.0.0.2",
-                                        selectStatus(selector, request(1L, 2L), "inner")
-                                                .getServerIp());
-                                Assertions.assertSame(outerScratch, scratchCache().get());
-                                return org.flexlb.worker.endpoint.EndpointTestSupport
-                                        .decodeCandidates(capturedViews);
+                                var capturedWorkers = call.callRealMethod();
+                                if (nested.compareAndSet(false, true)) {
+                                    var outerScratch = scratchCache().get();
+                                    Assertions.assertEquals(
+                                            "127.0.0.2",
+                                            selectStatus(selector, request(1L, 2L), "inner")
+                                                    .getServerIp());
+                                    Assertions.assertSame(outerScratch, scratchCache().get());
+                                }
+                                return capturedWorkers;
                             })
                     .when(registry)
-                    .endpoints(
-                            org.mockito.ArgumentMatchers.eq(
-                                    org.flexlb.config.service.RoleType.DECODE),
-                            org.mockito.ArgumentMatchers.eq("outer"));
+                    .endpoints(Mockito.eq(RoleType.DECODE), Mockito.isNull());
             Assertions.assertEquals(
                     "127.0.0.1", selectStatus(selector, request(1L, 1L), "outer").getServerIp());
             assertScratchReleased(scratchCache().get());
@@ -275,19 +486,8 @@ class DecodeStrategyTest {
         registerWorker("127.0.0.1", 10_000L, 10_000L);
         EndpointRegistry registry = Mockito.spy(decodeRegistry());
         try {
-            var view = decodeRoutingSnapshot(registry, null).getFirst();
-            Mockito.doAnswer(
-                            call -> {
-                                var capturedViews =
-                                        new java.util.ArrayList<
-                                                org.flexlb.worker.endpoint.DecodeEndpoint
-                                                        .SelectionSnapshot>();
-
-                                List<DecodeEndpoint.SelectionSnapshot> target = capturedViews;
-                                target.addAll(java.util.Collections.nCopies(4097, view));
-                                return org.flexlb.worker.endpoint.EndpointTestSupport
-                                        .decodeCandidates(capturedViews);
-                            })
+            var endpoint = decodeEndpoint(registry, "127.0.0.1:8080@0");
+            Mockito.doReturn(java.util.Collections.nCopies(4097, endpoint))
                     .when(registry)
                     .endpoints(
                             org.mockito.ArgumentMatchers.eq(
@@ -755,6 +955,54 @@ class DecodeStrategyTest {
     }
 
     @Test
+    void capacityRecoveryWhileExplainingRejectionDoesNotRestartSelection() {
+        configService.loadBalanceConfig().setScheduler(ConfigTestSupport.direct());
+        configService
+                .loadBalanceConfig()
+                .getRouter()
+                .getRoles()
+                .getDecode()
+                .getAvailability()
+                .setMaxEngineRequests(1L);
+        registerWorker("127.0.0.1", 10_000L, 10_000L);
+        var registry = decodeRegistry();
+        try {
+            var endpoint = decodeEndpoint(registry, "127.0.0.1:8080@0");
+            var reservation =
+                    org.flexlb.balance.schedule.SelectionTestSupport.registerQueuedDecode(
+                                    endpoint, "occupied", 0L, 0L, 50)
+                            .value();
+            Assertions.assertNotNull(reservation);
+            var observed = endpoint.selectionSnapshot();
+            var directory = Mockito.mock(EndpointRegistry.class);
+            Mockito.when(directory.<WorkerEndpoint>endpoints(RoleType.DECODE, null))
+                    .thenReturn(List.of(endpoint));
+            Mockito.when(directory.getEndpoint(RoleType.DECODE, endpoint.ipPort()))
+                    .thenAnswer(
+                            call -> {
+                                endpoint.rollbackSelection(reservation);
+                                return endpoint;
+                            });
+
+            var result =
+                    StrategyTestSupport.select(
+                            availableStrategy(directory), request(100L, 1001L), SCHEDULING, null);
+
+            Assertions.assertEquals(RoutingResult.Status.BLOCKED, result.status());
+            Assertions.assertEquals(0L, endpoint.selectionSnapshot().usage().occupiedRequests());
+            var evidence = (Map<String, Object>) result.diagnostics().get("firstRejection");
+            Assertions.assertEquals(observed.admissionVersion(), evidence.get("version"));
+            Assertions.assertEquals(
+                    new DecodeResources.Capacity(1L, 0L, 0L), evidence.get("deficit"));
+            Assertions.assertEquals(
+                    org.flexlb.worker.endpoint.StrategyErrorType.NO_DECODE_WORKER.getErrorCode(),
+                    result.failure().getCode());
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
     void directReportsCapacityBlockWhenEveryWorkerIsTemporarilyBusy() {
         configureCost("running_size");
         configService.loadBalanceConfig().setScheduler(ConfigTestSupport.direct());
@@ -785,22 +1033,70 @@ class DecodeStrategyTest {
                     result.failure().getAdmissionRejectReason());
             Assertions.assertEquals(
                     result.failure().getErrorMessage(), result.diagnostics().get("cause"));
-            var evidence = (List<Map<String, Object>>) result.diagnostics().get("decode");
+            Assertions.assertEquals(2, result.diagnostics().get("candidateCount"));
+            var evidence = (Map<String, Object>) result.diagnostics().get("firstRejection");
+            Assertions.assertTrue(
+                    java.util.Set.of("127.0.0.1:8080@0", "127.0.0.2:8080@0")
+                            .contains(evidence.get("endpoint")));
             Assertions.assertEquals(
-                    java.util.Set.of("127.0.0.1:8080@0", "127.0.0.2:8080@0"),
-                    evidence.stream()
-                            .map(detail -> detail.get("endpoint"))
-                            .collect(java.util.stream.Collectors.toSet()));
-            for (var detail : evidence) {
-                var deficit = new DecodeResources.Capacity(1L, 0L, 0L);
-                Assertions.assertEquals(deficit, detail.get("deficit"));
-                Assertions.assertEquals(
-                        "higher-priority requests are ahead; endpoint="
-                                + detail.get("endpoint")
-                                + "; deficit="
-                                + deficit,
-                        detail.get("reason"));
+                    new DecodeResources.Capacity(1L, 0L, 0L), evidence.get("deficit"));
+            Assertions.assertEquals("higher-priority requests are ahead", evidence.get("reason"));
+
+        } finally {
+            registry.close();
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"2,false", "32,false", "750,false", "2,true", "32,true", "750,true"})
+    void rejectionSummaryRetainsOneExampleAndPreservesUniformOrMixedReasons(
+            int workerCount, boolean mixed) {
+        configService.loadBalanceConfig().setScheduler(ConfigTestSupport.direct());
+        configService
+                .loadBalanceConfig()
+                .getRouter()
+                .getRoles()
+                .getDecode()
+                .getAvailability()
+                .setMaxEngineRequests(1L);
+        for (int i = 0; i < workerCount; i++)
+            registerWorker("10.0." + (i / 250) + "." + (i % 250 + 1), 10_000L, 10_000L);
+        var registry = decodeRegistry();
+        try {
+            int index = 0;
+            for (DecodeEndpoint endpoint :
+                    registry.<DecodeEndpoint>endpoints(RoleType.DECODE, null)) {
+                reserveQueued(endpoint, 10_000L + index, 0L, 0L, mixed && index == 0 ? 90 : 50);
+                index++;
             }
+            var result =
+                    StrategyTestSupport.select(
+                            availableStrategy(registry),
+                            request(100L, 1001L),
+                            SchedulingMetadata.explicit(50, Long.MAX_VALUE),
+                            null);
+            Assertions.assertEquals(RoutingResult.Status.BLOCKED, result.status());
+            Assertions.assertEquals(
+                    (mixed
+                                    ? org.flexlb.worker.endpoint.StrategyErrorType.NO_DECODE_WORKER
+                                    : org.flexlb.worker.endpoint.StrategyErrorType
+                                            .PRIORITY_ADMISSION_REJECTED)
+                            .getErrorCode(),
+                    result.failure().getCode());
+            Assertions.assertEquals(
+                    mixed
+                            ? org.flexlb.worker.endpoint.AdmissionRejectReason.UNSPECIFIED
+                            : org.flexlb.worker.endpoint.AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+                    result.failure().getAdmissionRejectReason());
+            Assertions.assertEquals(workerCount, result.diagnostics().get("candidateCount"));
+            Assertions.assertEquals(
+                    java.util.Set.of("cause", "capturedAtMs", "candidateCount", "firstRejection"),
+                    result.diagnostics().keySet());
+            var example = (Map<?, ?>) result.diagnostics().get("firstRejection");
+            Assertions.assertEquals(
+                    java.util.Set.of("endpoint", "version", "deficit", "reason"), example.keySet());
+            Assertions.assertEquals(
+                    new DecodeResources.Capacity(1L, 0L, 0L), example.get("deficit"));
         } finally {
             registry.close();
         }
