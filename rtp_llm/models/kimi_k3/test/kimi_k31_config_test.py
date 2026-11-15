@@ -13,6 +13,7 @@ from rtp_llm.model_factory_register import (
     _hf_architecture_2_ft,
     get_lazy_model_module_path,
 )
+from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
 from rtp_llm.ops import (
     CPRotateMethod,
     DataType,
@@ -137,6 +138,10 @@ class KimiK31ConfigTest(unittest.TestCase):
             _hf_architecture_2_ft["KimiK31ForConditionalGeneration"], "kimi_k31"
         )
         self.assertEqual(_hf_architecture_2_ft["KimiK31MTPModel"], "kimi_k31_mtp")
+        self.assertIs(
+            get_multimodal_mixin_cls("kimi_k31"),
+            get_multimodal_mixin_cls("kimi_k3"),
+        )
 
     def test_fp8_cache_retains_bf16_sfa_and_independent_indexer_descriptor(self):
         for fp8_cache in (False, True):

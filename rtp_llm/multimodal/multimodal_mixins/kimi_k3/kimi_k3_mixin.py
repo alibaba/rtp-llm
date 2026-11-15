@@ -65,4 +65,4 @@ class KimiK3Mixin(BaseMultiModalMixin):
         )
 
 
-register_multimodal_mixin(["kimi_k3"], KimiK3Mixin)
+register_multimodal_mixin(["kimi_k3", "kimi_k31"], KimiK3Mixin)
