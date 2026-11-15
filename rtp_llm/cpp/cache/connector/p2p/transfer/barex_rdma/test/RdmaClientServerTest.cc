@@ -555,15 +555,15 @@ TEST_F(RdmaClientServerTest, F1_ConcurrentReads_NoCrash) {
 }  // namespace rtp_llm
 
 namespace rtp_llm::transfer::barex_rdma {
-TEST(RdmaReadErrorTest, MissingRemoteRkeyAborts) {
+TEST(RdmaReadErrorTest, MissingRemoteRkeyIsRejected) {
     RdmaConnection conn(nullptr, "127.0.0.1", kTestPort, nullptr);
     RemoteBuffer remote(0x1000, 64, nullptr);
-    EXPECT_EXIT(conn.remoteRkeyOrAbort(remote, 7), ::testing::KilledBySignal(SIGABRT), "");
+    EXPECT_FALSE(conn.findRemoteRkey(remote, 7));
     remote.nic_rkeys = std::make_shared<std::map<uint32_t, uint32_t>>();
-    EXPECT_EXIT(conn.remoteRkeyOrAbort(remote, 7), ::testing::KilledBySignal(SIGABRT), "");
+    EXPECT_FALSE(conn.findRemoteRkey(remote, 7));
     (*remote.nic_rkeys)[3] = 123;
-    EXPECT_EXIT(conn.remoteRkeyOrAbort(remote, 7), ::testing::KilledBySignal(SIGABRT), "");
-    EXPECT_EQ(conn.remoteRkeyOrAbort(remote, 3), 123u);
+    EXPECT_FALSE(conn.findRemoteRkey(remote, 7));
+    EXPECT_EQ(conn.findRemoteRkey(remote, 3), 123u);
 }
 
 TEST(RdmaReadErrorTest, ConnectFailureAndPendingExpiryHaveDistinctCauses) {

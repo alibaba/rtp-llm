@@ -83,6 +83,22 @@ TEST_F(TransferTaskTest, UpperLayerCanCompleteReceptionInOneBatch) {
     EXPECT_TRUE(task.success());
 }
 
+TEST_F(TransferTaskTest, ThrowingBatchCallbackWaitsForOtherPhysicalTransfers) {
+    TransferTask task({}, currentTimeMs() + 5000, [](const auto&) -> bool {
+        throw std::runtime_error("batch callback failed");
+    });
+    ASSERT_TRUE(task.startTransfer());
+    ASSERT_TRUE(task.startTransfer());
+
+    EXPECT_NO_THROW(task.notifyBatchDone({101}));
+    EXPECT_EQ(task.errorCode(), TransferErrorCode::COPY_FAILED);
+    EXPECT_FALSE(task.done());
+
+    task.notifyBatchDone({102});
+    EXPECT_TRUE(task.done());
+    EXPECT_FALSE(task.success());
+}
+
 TEST_F(TransferTaskTest, CancelAfterUpperLayerKeepsReceptionOpen) {
     TransferTask task({}, currentTimeMs() + 5000, [](const auto&) { return false; });
     int completions = 0;

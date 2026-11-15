@@ -137,7 +137,7 @@ RdmaTaskContext::RdmaTaskContext(::google::protobuf::RpcController* controller,
     collector_(std::make_shared<TransferServerMetricsCollector>()),
     start_time_us_(currentTimeUs()),
     deadline_ms_(request->timeout_ms() > 0 && request->timeout_ms() <= std::numeric_limits<int32_t>::max() ?
-                     start_time_us_ / 1000 + request->timeout_ms() :
+                     currentTimeMs() + request->timeout_ms() :
                      0) {}
 
 RdmaTaskContext::~RdmaTaskContext() {
@@ -270,7 +270,6 @@ RdmaTaskContext::buildRdmaBlockPairs(const std::shared_ptr<RdmaStagingBufferPool
                     "rdma block validation failed: Prefill did not offer Decode cache key="
                         + std::to_string(cache_key)};
         }
-        batch_keys_.push_back(cache_key);
         const auto& offered_kbi = *offered_it->second;
         if (offered_kbi.blocks_size() < static_cast<int>(expected_kbi->blocks.size())) {
             return {false,

@@ -4,7 +4,8 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "aios/network/arpc/arpc/ANetRPCController.h"
 #include "autil/NetUtil.h"
-#include <cstdlib>
+#include <algorithm>
+#include <limits>
 #include <memory>
 
 namespace rtp_llm {
@@ -139,20 +140,17 @@ bool RdmaKVCacheSender::regMem(const BlockInfo& block_info, uint64_t aligned_siz
     return rdma_memory_manager_->regUserMr(block_info, aligned_size);
 }
 
-void RdmaKVCacheSender::setBlockBufferInfo(::rdma_transfer::RdmaBlockBufferInfo* block_buffer_info,
+bool RdmaKVCacheSender::setBlockBufferInfo(::rdma_transfer::RdmaBlockBufferInfo* block_buffer_info,
                                            int64_t cache_key,
                                            const BlockInfo& block_info) {
     auto remote_buffer = rdma_memory_manager_->findMemoryMr(block_info);
-    // RDMA MR 通常在进程初始化时统一注册管理。发送范围找不到 MR，可能是越界访问，
-    // 很可能伴随脏读、脏写，此时服务已不可用；直接 abort 暴露问题，禁止拷贝注册后继续发送。
-    // 入表时保证 rkey 集合非空；发送时发现该约束被破坏也必须立即终止。
     if (!remote_buffer || !remote_buffer->nic_rkeys || remote_buffer->nic_rkeys->empty()) {
         RTP_LLM_LOG_ERROR("RDMA send MR/rkey lookup failed, cache_key=%ld addr=%p size=%lu cuda=%d",
                           cache_key,
                           block_info.addr,
                           block_info.size_bytes,
                           block_info.is_cuda);
-        std::abort();
+        return false;
     }
 
     block_buffer_info->set_len(static_cast<uint32_t>(block_info.size_bytes));
@@ -163,6 +161,7 @@ void RdmaKVCacheSender::setBlockBufferInfo(::rdma_transfer::RdmaBlockBufferInfo*
         nic_rkey->set_nicid(nicid);
         nic_rkey->set_rkey(rkey);
     }
+    return true;
 }
 
 std::shared_ptr<::rdma_transfer::RdmaLayerBlockTransferRequest>
@@ -170,7 +169,6 @@ RdmaKVCacheSender::makeTransferRequest(const transfer::SendRequest&             
                                        const std::shared_ptr<TransferClientMetricsCollector>& collector) {
     auto transfer_request = std::make_shared<::rdma_transfer::RdmaLayerBlockTransferRequest>();
     transfer_request->set_unique_key(request.unique_key);
-    transfer_request->set_timeout_ms(request.timeout_ms);
 
     transfer_request->set_server_rdma_ip(autil::NetUtil::getBindIp());
     transfer_request->set_server_rdma_port(rdma_server_->getListenPort());
@@ -192,7 +190,9 @@ RdmaKVCacheSender::makeTransferRequest(const transfer::SendRequest&             
                 continue;
             }
             auto block_buffer_info = cache_key_block_info->add_blocks();
-            setBlockBufferInfo(block_buffer_info, kbi.cache_key, block);
+            if (!setBlockBufferInfo(block_buffer_info, kbi.cache_key, block)) {
+                return nullptr;
+            }
             collector->block_count++;
             collector->total_block_size += block.size_bytes;
         }
@@ -211,16 +211,26 @@ void RdmaKVCacheSender::loadToRemote(
         return;
     }
 
+    if (deadline_ms <= currentTimeMs()) {
+        callback(TransferErrorCode::TIMEOUT, "transfer deadline expired before RDMA submission");
+        return;
+    }
     auto channel = tcp_client_->getChannel(ip, port);
     if (!channel) {
         callback(TransferErrorCode::CONNECTION_FAILED, "get channel failed");
         return;
     }
 
+    const auto remaining_ms = deadline_ms - currentTimeMs();
+    if (remaining_ms <= 0) {
+        callback(TransferErrorCode::TIMEOUT, "transfer deadline expired during RDMA preparation");
+        return;
+    }
+    const auto timeout_ms = std::min<int64_t>(remaining_ms, std::numeric_limits<int32_t>::max());
+    transfer_request->set_timeout_ms(timeout_ms);
     auto transfer_response = std::make_shared<::rdma_transfer::RdmaLayerBlockTransferResponse>();
     auto controller        = new arpc::ANetRPCController();
-    auto timeout_ms        = deadline_ms - currentTimeMs();
-    controller->SetExpireTime(timeout_ms > 0 ? timeout_ms : 1);
+    controller->SetExpireTime(timeout_ms);
 
     auto closure = new RdmaTransferClosure(
         ip, port, transfer_request, transfer_response, controller, callback);

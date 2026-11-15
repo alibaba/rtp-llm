@@ -15,10 +15,8 @@ namespace rtp_llm {
 /// 因此编码是「有方向的」：encodeForPrefill 写 src_*，encodeForDecode 写 dst_*。
 class RouteCodec {
 public:
-    /// @brief 编码给 prefill worker：它需要 route_id（命名 key）、目的端点下标、以及自己的
-    ///        src_partition / src_slice。不需要键规则 —— 在所有被允许的 CP 形态下，
-    ///        (src_rank, dst_rank, tag) 唯一确定一条 route，而 prefill worker 的本地投影
-    ///        恰好等于该 route 的键集（详见设计文档 Step 3 的 CP 白名单）。
+    /// @brief 编码给 Prefill worker 的端点和分片参数。键由调用方按 route 的
+    ///        src_keys 和对应 cache group 的投影规则选取，COMPACT 布局不能沿用 FULL 的轮询下标。
     static void encodeForPrefill(const TransferRoute& route, int peer_index, TransferRoutePB* pb) {
         pb->set_route_id(route.route_id);
         pb->set_cache_tag(route.cache_tag);
@@ -31,8 +29,7 @@ public:
     }
 
     /// @brief 编码给 decode worker：它需要 route_id、自己的 dst_partition / dst_slice，
-    ///        以及本 route 覆盖的具体 (cache_key, block_id)。键规则由 rank0 自己解析完，
-    ///        decode worker 因此是纯执行器、不重新推导键集。
+    ///        具体的 (cache_key, block_id) 由编排端解析并填入 layer_blocks。
     static void encodeForDecode(const TransferRoute& route, TransferRoutePB* pb) {
         pb->set_route_id(route.route_id);
         pb->set_cache_tag(route.cache_tag);

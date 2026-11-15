@@ -877,8 +877,8 @@ message TransferRoutePB {
 
     // Decode direction: the concrete (cache_key, block_id) pairs this route covers, per
     // layer. rank0 resolves the key rule itself, so decode workers stay pure executors and
-    // never re-derive a key set. Empty in the prefill direction, where each worker's own
-    // local projection already equals its route's key set.
+    // never re-derive a key set. Empty in the Prefill direction: the caller must
+    // select the route's keys using its cache group's projection rules.
     repeated LayerCacheBlockPB layer_blocks = 9;
 }
 

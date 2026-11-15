@@ -42,7 +42,7 @@ private:
     makeTransferRequest(const SendRequest&                                                  request,
                         const std::shared_ptr<TransferClientMetricsCollector>& collector);
 
-    void setBlockBufferInfo(::rdma_transfer::RdmaBlockBufferInfo* block_buffer_info,
+    bool setBlockBufferInfo(::rdma_transfer::RdmaBlockBufferInfo* block_buffer_info,
                             int64_t cache_key,
                             const BlockInfo& block_info);
 

@@ -329,52 +329,40 @@ TEST(PlannerGroupA, A6_MlaNp1dElectsOneSenderPerDst) {
     expectAllRouteBytesMatch(result.plan);
 }
 
-// 用例 A7a: PREFILL_CP + CP 分片，MLA group（§3.3 回归）
-TEST(PlannerGroupA, A7a_PrefillCpWithMlaGroup) {
+TEST(PlannerGroupA, A7a_PrefillCpModeKeepsMlaKeysReplicated) {
     const auto src = mlaLayout(8, CPRotateMethod::PREFILL_CP, /*sharded=*/true);
     const auto dst = mlaLayout(8);
-
-    // PREFILL_CP 被 is_enabled() 排除，故 attention TP 大小不会被压成 1
     EXPECT_EQ(src.pc.get_attn_tp_size(), 8);
-    // 但 head 分片数是 spec 类型的属性：MLA latent 复制，与 attention TP 无关
     EXPECT_EQ(src.headShardCount(kFullTag), 1);
-    EXPECT_EQ(src.cpSize(), 8);
+    EXPECT_EQ(src.cpSize(), 1);
 
     const auto result = KVCacheTransferPlanner::plan(src, dst, {kFullTag});
     ASSERT_TRUE(result.ok()) << result.error.ToString();
-
-    // decode 侧 8 个 rank 各需全量序列，prefill 侧 8 个 rank 各持 1/8 -> 必须 8x8
-    EXPECT_EQ(result.plan.routes.size(), 64u);
-    for (int d = 0; d < 8; ++d) {
-        const auto routes = result.plan.forDecodeRank(d);
-        ASSERT_EQ(routes.size(), 8u);
-        std::set<int> residues;
-        for (const auto* r : routes) {
-            EXPECT_EQ(r->src_keys.modulus, 8);
-            residues.insert(r->src_keys.residue);
-        }
-        EXPECT_EQ(residues.size(), 8u) << "dst rank " << d << " must cover every residue class";
+    EXPECT_EQ(result.plan.routes.size(), 8u);
+    for (int rank = 0; rank < 8; ++rank) {
+        const auto routes = result.plan.forDecodeRank(rank);
+        ASSERT_EQ(routes.size(), 1u);
+        EXPECT_EQ(routes.front()->src_keys.modulus, 1);
     }
     expectNoHeadPartitioning(result.plan);
     expectAllRouteBytesMatch(result.plan);
 }
 
-// 用例 A7b: PREFILL_CP + CP 分片，MHA group —— 单侧不完备，必须拒绝
-TEST(PlannerGroupA, A7b_PrefillCpWithMhaGroupIsRejected) {
+TEST(PlannerGroupA, A7b_PrefillCpModeKeepsMhaHeadOwnership) {
     const auto src = mhaLayout(8, CPRotateMethod::PREFILL_CP, /*sharded=*/true);
     const auto dst = mhaLayout(8);
-
-    // MHA spec 会按 attention TP 切 head，而 PREFILL_CP 下 attention TP 仍是 tp_size
     EXPECT_EQ(src.headShardCount(kFullTag), 8);
-    EXPECT_EQ(src.cpSize(), 8);
-    // 字节维度校验通不住这个错误：两侧还原出的全局块大小相等
+    EXPECT_EQ(src.cpSize(), 1);
     EXPECT_EQ(src.effectiveGlobalBlockBytes(kFullTag), dst.effectiveGlobalBlockBytes(kFullTag));
 
     const auto result = KVCacheTransferPlanner::plan(src, dst, {kFullTag});
-
-    ASSERT_FALSE(result.ok());
-    EXPECT_NE(result.error.ToString().find("double-sharded"), std::string::npos) << result.error.ToString();
-    EXPECT_TRUE(result.plan.routes.empty());
+    ASSERT_TRUE(result.ok()) << result.error.ToString();
+    EXPECT_EQ(result.plan.routes.size(), 8u);
+    for (const auto& route : result.plan.routes) {
+        EXPECT_EQ(route.src_rank, route.dst_rank);
+        EXPECT_EQ(route.src_keys.modulus, 1);
+    }
+    expectAllRouteBytesMatch(result.plan);
 }
 
 // 用例 A8: hybrid 下 RR 与非 RR group 共存

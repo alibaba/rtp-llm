@@ -607,6 +607,21 @@ TEST_F(RdmaTransferServiceTest, B5_BlockedStagingH2d_KeepsTaskInflightAfterDeadl
     ASSERT_TRUE(gate.init());
     std::promise<cudaError_t> stream_primed;
     auto stream_primed_future = stream_primed.get_future();
+    constexpr size_t size = 64;
+    char src[size];
+    torch::Tensor dst;
+    ::rdma_transfer::RdmaLayerBlockTransferRequest req;
+    ::rdma_transfer::RdmaLayerBlockTransferResponse resp;
+    std::unique_ptr<BlockingClosure> closure;
+    struct Cleanup {
+        CudaEventGate& gate;
+        std::shared_ptr<RdmaTransferService>& service;
+        ~Cleanup() {
+            gate.release();
+            service.reset();
+        }
+    } cleanup{gate, service_};
+
     ASSERT_EQ(service_->worker_thread_pool_->pushTask([&]() {
         auto copy_stream = getNoBlockCopyStream(0).stream();
         stream_primed.set_value(cudaStreamWaitEvent(copy_stream, gate.event(), 0));
@@ -615,19 +630,16 @@ TEST_F(RdmaTransferServiceTest, B5_BlockedStagingH2d_KeepsTaskInflightAfterDeadl
     ASSERT_EQ(stream_primed_future.wait_for(kWait), std::future_status::ready);
     ASSERT_EQ(stream_primed_future.get(), cudaSuccess);
 
-    constexpr size_t size = 64;
-    char src[size];
     std::memset(src, 'J', size);
-    auto dst =
+    dst =
         torch::zeros({static_cast<int64_t>(size)}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
     const int64_t deadline_ms = currentTimeMs() + 100;
     auto task = task_store_->addTask("k_b5", makeCudaKvBlocks(1, dst), deadline_ms);
     ASSERT_NE(task, nullptr);
 
-    auto req = makeRequest("k_b5", deadline_ms);
+    req = makeRequest("k_b5", deadline_ms);
     addRdmaBlock(req, 1, src, size);
-    ::rdma_transfer::RdmaLayerBlockTransferResponse resp;
-    auto closure = issueTransfer(&req, &resp);
+    closure = issueTransfer(&req, &resp);
 
     ASSERT_TRUE(closure->waitFor(kWait));
     EXPECT_EQ(resp.error_code(), ::rdma_transfer::RDMA_TRANSFER_CONTEXT_TIMEOUT);

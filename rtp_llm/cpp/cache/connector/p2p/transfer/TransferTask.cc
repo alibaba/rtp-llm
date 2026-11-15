@@ -149,8 +149,15 @@ void TransferTask::completeTransfer(TransferErrorCode           error_code,
             error_msg_  = "TransferTask timed out";
         }
         if (!completion_requested_) {
-            completion_requested_ =
-                error_code_ != TransferErrorCode::OK || !batch_keys || on_batch_copied_(*batch_keys);
+            completion_requested_ = true;
+            if (error_code_ == TransferErrorCode::OK && batch_keys && on_batch_copied_) {
+                try {
+                    completion_requested_ = on_batch_copied_(*batch_keys);
+                } catch (...) {
+                    error_code_ = TransferErrorCode::COPY_FAILED;
+                    error_msg_  = "receive batch callback failed";
+                }
+            }
         }
         // A duplicate receive can still own the destination after the logical
         // result is known. Publish completion only after all holders finish.

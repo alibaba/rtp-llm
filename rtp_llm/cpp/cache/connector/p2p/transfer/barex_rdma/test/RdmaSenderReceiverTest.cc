@@ -297,7 +297,6 @@ TEST_F(RdmaSenderReceiverTest, IncrementalBatchesCompleteOnlyTheDecodeWindow) {
     send.port = test_port_;
     send.unique_key = receive.unique_key;
     send.deadline_ms = deadline_ms;
-    send.timeout_ms = 5000;
 
     send.block_info = makeBlocks(100, first_source.data_ptr(), size, true);
     ASSERT_TRUE(regAllMem(*sender_, send.block_info));
