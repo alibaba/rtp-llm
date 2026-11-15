@@ -160,7 +160,7 @@ cc_test_wrapper(
         "//:using_remote_kv_cache": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    deps = kvcm_backend_test_deps + [
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + kvcm_backend_test_deps + [
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/block_tree_cache:transfer_task_registry",
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:sdk_buffer_safety",

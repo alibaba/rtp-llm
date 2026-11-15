@@ -389,6 +389,24 @@ TEST_F(KVCMSubmissionBoundaryTest, ProjectedOneSdkHandoffAndOnePreflightExpiryRe
     projectedCase(true);
 }
 
+TEST_F(KVCMSubmissionBoundaryTest, TargetProtectionPreservesExceptionalSdkUnknownType) {
+    const auto failure = std::make_exception_ptr(StorageOperationPayloadExceptionUnknown(
+        "exceptional SDK completion", StorageQuarantineReason::RPC_ERROR));
+    for (const auto protection : {StorageLocalTargetProtection::LEGACY,
+                                  StorageLocalTargetProtection::TARGETS_HELD,
+                                  StorageLocalTargetProtection::NO_LOCAL_TARGETS}) {
+        try {
+            std::rethrow_exception(KVCMStorageBackend::Impl::withTargetProtection(failure, protection));
+        } catch (const StorageOperationPayloadExceptionUnknown& error) {
+            EXPECT_STREQ(error.what(), "exceptional SDK completion");
+            EXPECT_EQ(error.reason(), StorageQuarantineReason::RPC_ERROR);
+            EXPECT_EQ(error.localTargetProtection(), protection);
+        } catch (...) {
+            FAIL() << "target ownership must not erase exceptional SDK UNKNOWN";
+        }
+    }
+}
+
 TEST_F(KVCMSubmissionBoundaryTest, LocalPeerLatchWaitsForDriverAfterEveryInlineTerminal) {
     // Actual production latch: peers can finish inline, but cannot notify until
     // the driver drops +1. No copy of the old window/proof model is tested here.
