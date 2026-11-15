@@ -2,6 +2,7 @@
 #include "aios/navi_sched/resource/testdata/main_projection/MainProjectionReference.h"
 #include "aios/navi_sched/resource/testdata/legacy_v76/LegacyV76NonLinearPrefillModelR.h"
 #include "unittest/unittest.h"
+#include "navi/tester/NaviResourceHelper.h"
 #include <cmath>
 #include <cstdlib>
 using namespace navi_sched;
@@ -11,7 +12,13 @@ TEST_F(LegacyV76FitParityTest,
        testChronologicalPredictionsAndEveryAdamUpdateMatchMainProjection)
 {
     current_projection_reference::MainProjectionReference archived;
-    NonLinearPrefillModelR adapted;
+    navi::NaviResourceHelper helper;
+    ASSERT_TRUE(helper.config(
+        NonLinearPrefillModelR::RESOURCE_ID,
+        R"({"pd_separated":true,"execution_geometry_enabled":true,"projected_execution_geometry_enabled":true})"));
+    auto adaptedPtr = helper.getOrCreateResPtr<NonLinearPrefillModelR>();
+    ASSERT_TRUE(adaptedPtr);
+    auto &adapted = *adaptedPtr;
     archived._pdSeparated = adapted._pdSeparated = true;
     archived._useCapacitySplitFeature = adapted._useCapacitySplitFeature = false;
     archived.setExecutionGeometryEnabled(true);
@@ -19,7 +26,9 @@ TEST_F(LegacyV76FitParityTest,
     archived.setProjectedExecutionGeometryEnabled(true);
     adapted.setProjectedExecutionGeometryEnabled(true);
     // Offline mutation hook: never used by serving code.
-    adapted._errorClipMs = std::getenv("NAVI_TEST_LEGACY_ORACLE_FORCE_CLIP") ? 5000 : 0;
+    if (std::getenv("NAVI_TEST_LEGACY_ORACLE_FORCE_CLIP")) {
+        adapted._errorClipMs = 5000;
+    }
     auto oldWeights = archived.getInitialParameters();
     auto newWeights = adapted.getInitialParameters();
     ASSERT_EQ(oldWeights, newWeights);

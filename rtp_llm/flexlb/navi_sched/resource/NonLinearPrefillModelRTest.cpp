@@ -2057,3 +2057,30 @@ TEST_F(NonLinearPrefillModelRTest, stepReplayInvalidFitNeverChangesNativeOptimiz
     EXPECT_FALSE(otherVersion.fitStepCompositionForReplay({sample}, {{first, first}},
                                                           parameters, result));
 }
+
+TEST_F(NonLinearPrefillModelRTest, testProjectedLegacyClippingUsesConfiguredDefaults)
+{
+    struct Case {
+        const char *config;
+        int64_t version;
+        double errorClipMs;
+    };
+    for (const auto &item : {
+             Case{R"({"pd_separated":true,"execution_geometry_enabled":true,"projected_execution_geometry_enabled":true})",
+                  33, 0.0},
+             Case{R"({"pd_separated":true,"execution_geometry_enabled":true,"projected_execution_geometry_enabled":true,"execution_cache_source_enabled":true})",
+                  34, 5000.0},
+             Case{R"({"pd_separated":true,"execution_geometry_enabled":true,"execution_cache_source_enabled":true})",
+                  35, 5000.0},
+             Case{R"({"pd_separated":true,"execution_geometry_enabled":true,"projected_execution_geometry_enabled":true,"error_clip_ms":125})",
+                  33, 125.0},
+             Case{R"({"pd_separated":true,"execution_geometry_enabled":true,"projected_execution_geometry_enabled":true,"use_capacity_split_feature":true})",
+                  24, 5000.0}}) {
+        navi::NaviResourceHelper helper;
+        ASSERT_TRUE(helper.config(NonLinearPrefillModelR::RESOURCE_ID, item.config));
+        auto model = helper.getOrCreateResPtr<NonLinearPrefillModelR>();
+        ASSERT_TRUE(model);
+        EXPECT_EQ(item.version, model->getBinaryVersion());
+        EXPECT_DOUBLE_EQ(item.errorClipMs, model->_errorClipMs);
+    }
+}

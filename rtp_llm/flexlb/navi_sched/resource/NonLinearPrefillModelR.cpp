@@ -102,7 +102,6 @@ bool NonLinearPrefillModelR::config(navi::ResourceConfigContext &ctx)
     NAVI_JSONIZE(ctx, "execution_cache_source_enabled", _executionCacheSourceEnabled,
                  _executionCacheSourceEnabled);
     NAVI_JSONIZE(ctx, "learning_rate", _learningRate, _learningRate);
-    NAVI_JSONIZE(ctx, "error_clip_ms", _errorClipMs, _errorClipMs);
     NAVI_JSONIZE(ctx, "nonlinear_scale", _nonlinearScale, _nonlinearScale);
     NAVI_JSONIZE(ctx, "zero_anchor_max_ms", _zeroAnchorMaxMs, _zeroAnchorMaxMs);
     NAVI_JSONIZE(ctx, "check_gradient", _checkGradient, _checkGradient);
@@ -110,6 +109,10 @@ bool NonLinearPrefillModelR::config(navi::ResourceConfigContext &ctx)
                  _useBatchCountFeature);
     NAVI_JSONIZE(ctx, "use_capacity_split_feature", _useCapacitySplitFeature,
                  _useCapacitySplitFeature);
+    // Preserve the uncapped projected-model updates; V6D profiles retain clipping.
+    const double defaultErrorClipMs =
+        usesProjectedExecutionGeometry() && !usesExecutionCacheSource() ? 0.0 : 5000.0;
+    NAVI_JSONIZE(ctx, "error_clip_ms", _errorClipMs, defaultErrorClipMs);
     return (!_executionCacheSourceEnabled || usesExecutionGeometry()) &&
            std::isfinite(_learningRate) && _learningRate > 0.0 &&
            std::isfinite(_nonlinearScale) && _nonlinearScale > 0.0 &&
