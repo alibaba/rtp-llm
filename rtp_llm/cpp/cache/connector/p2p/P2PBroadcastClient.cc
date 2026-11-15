@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <future>
 #include <limits>
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
@@ -181,7 +182,11 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
         requests.push_back(std::move(request));
     }
 
-    int64_t timeout_ms = cancel_broadcast_timeout_ms_;
+    const int64_t timeout_ms = cancel_broadcast_timeout_ms_;
+    if (timeout_ms <= 0) {
+        RTP_LLM_LOG_WARNING("P2P cancel requires a positive broadcast timeout, unique_key: %s", unique_key.c_str());
+        return nullptr;
+    }
 
     // Define the RPC call lambda for ExecuteFunction
     auto rpc_call = [](std::shared_ptr<RpcService::Stub>&    stub,
@@ -193,7 +198,7 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
 
     auto result = tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
         std::move(requests),
-        static_cast<int>(timeout_ms),
+        static_cast<int>(std::min<int64_t>(timeout_ms, std::numeric_limits<int>::max())),
         rpc_call,
         request_id,
         type == P2PConnectorBroadcastType::CANCEL_READ ? "CANCEL_PEER2D" : "CANCEL_D2PEER");

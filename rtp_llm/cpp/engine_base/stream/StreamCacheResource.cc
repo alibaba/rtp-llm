@@ -111,7 +111,7 @@ namespace {
 
 torch::Tensor buildFirstTokenUpdateTokens(GenerateStream* stream, int32_t first_token_id) {
     const auto next_batch_size = static_cast<int64_t>(stream->nextBatchSize());
-    if (!stream->hasNumBeams()) {
+    if (!stream->usesBeamSearchTokenLayoutForCurrentStep()) {
         auto tokens = torch::empty({next_batch_size, 1}, torch::kInt32);
         std::fill(tokens.data_ptr<int32_t>(), tokens.data_ptr<int32_t>() + next_batch_size, first_token_id);
         return tokens;
@@ -914,7 +914,13 @@ bool StreamCacheResource::loadCacheDone() {
         }
         if (p2p_load_context_->success()) {
             if (const auto* payload = p2pSideChannel(p2p_load_context_)) {
-                applyP2PSideChannel(*payload, stream_, reuseBlockTokens());
+                try {
+                    applyP2PSideChannel(*payload, stream_, reuseBlockTokens());
+                } catch (const std::exception& error) {
+                    stream_->reportEventWithoutLock(StreamEvents::Error,
+                                                    ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
+                                                    std::string("invalid P2P side-channel payload: ") + error.what());
+                }
             }
             p2p_load_context_.reset();
         } else {
@@ -924,6 +930,8 @@ bool StreamCacheResource::loadCacheDone() {
             // resources, and Prefill registration itself. None of these
             // failures is a benign cache miss.
             const auto error = p2p_load_context_->errorInfo();
+            // Cancellation still needs to observe the target lease after logical failure.
+            released_p2p_load_context_ = p2p_load_context_;
             p2p_load_context_.reset();
             RTP_LLM_LOG_WARNING(
                 "P2P cache load failed, stream=%ld error=%s", stream_->streamId(), error.ToString().c_str());

@@ -71,6 +71,23 @@ TEST_F(P2PConnectorResourceStoreTest, CancellationCallbackCanRegisterRequestWith
     EXPECT_TRUE(called);
 }
 
+TEST_F(P2PConnectorResourceStoreTest, ReleaseCallbackCanReplaceItselfWithoutDeadlock) {
+    const auto deadline = getDeadlineMs();
+    int first_calls = 0;
+    int replacement_calls = 0;
+    stream_store_->setOnRequestReleased([&](int64_t, int64_t) {
+        ++first_calls;
+        stream_store_->setOnRequestReleased([&](int64_t, int64_t) { ++replacement_calls; });
+    });
+    for (int i = 0; i < 2; ++i) {
+        const auto key = "callback-snapshot-" + std::to_string(i);
+        ASSERT_TRUE(stream_store_->addResource(createMockMeta(key, 1000 + i, deadline), createMockKVCacheResource()));
+        stream_store_->markTerminal(key, deadline, P2PConnectorResourceStore::TerminalReason::COMPLETED);
+    }
+    EXPECT_EQ(first_calls, 1);
+    EXPECT_EQ(replacement_calls, 1);
+}
+
 TEST_F(P2PConnectorResourceStoreTest, AddAndStealResource_Success) {
     std::string unique_key  = "test_key_1";
     int64_t     request_id  = 1001;

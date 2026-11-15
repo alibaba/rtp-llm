@@ -199,10 +199,11 @@ bool P2PConnectorAsyncReadContext::expireTransferDeadlineIfNeeded() {
 void P2PConnectorAsyncReadContext::checkDone() {
     DoneNotifier                done_notifier{*this};
     std::lock_guard<std::mutex> check_lock(check_mutex_);
-    if (done()) {
+    // An unconfirmed kickoff publishes its terminal state before calls_ready_.
+    if (!calls_ready_.load(std::memory_order_acquire)) {
         return;
     }
-    if (!calls_ready_.load(std::memory_order_acquire)) {
+    if (done()) {
         return;
     }
     tp_sync_result_->checkDone();  // Non-blocking metric snapshot.

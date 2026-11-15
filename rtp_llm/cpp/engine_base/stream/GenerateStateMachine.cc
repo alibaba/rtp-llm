@@ -65,9 +65,10 @@ void GenerateStateMachine::handleWaiting() {
         auto result = stream_cache_resource_->initKVBlock();
         if (!result.ok()) {
             const auto role_type              = stream_cache_resource_->resourceContext().role_type;
-            const bool retryable_prefill_init = (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL)
-                                                && stream_cache_resource_->isContextStream();
-            if (absl::IsUnavailable(result) && retryable_prefill_init) {
+            const bool retryable_context_init = (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL
+                                                  || role_type == RoleType::DECODE)
+                                                 && stream_cache_resource_->isContextStream();
+            if (absl::IsUnavailable(result) && retryable_context_init) {
                 stream_cache_resource_->reportMallocRetry();
                 return;
             }
