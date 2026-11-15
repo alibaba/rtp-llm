@@ -1,8 +1,10 @@
+import concurrent.futures
 import importlib.util
 import inspect
 import json
 import os
 import sys
+import threading
 import unittest
 from enum import IntEnum
 from pathlib import Path
@@ -103,6 +105,124 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
         error.data_transfer_may_be_inflight = False
         self.assertFalse(client.is_transfer_quiescent(error))
         client.close()
+
+    def test_vip_changes_refresh_only_metadata_without_recreating_the_client(self):
+        client, native, _, factory = self._create(
+            _client_config(vipserver_domain="emb.vipserver")
+        )
+        with patch(
+            "rtp_llm.multimodal.kvcm.lookup._cached_vipserver_resolver",
+            return_value=[SimpleNamespace(ip="10.0.0.9", port=19001)],
+        ):
+            client.save_one("key", object())
+            client.load_one("key", object())
+            client.remove_one("key")
+        native.update_addresses.assert_called_once_with(("10.0.0.9:19001",))
+        factory.assert_called_once()
+        native.save.assert_called_once()
+        native.load.assert_called_once()
+        native.remove.assert_called_once()
+        native.close.assert_not_called()
+        client.close()
+
+    def test_static_addresses_never_resolve_or_refresh(self):
+        client, native, *_ = self._create()
+        with patch(
+            "rtp_llm.multimodal.kvcm.lookup._cached_vipserver_resolver"
+        ) as resolver:
+            client.save_one("key", object())
+            client.load_one("key", object())
+            client.remove_one("key")
+        resolver.assert_not_called()
+        native.update_addresses.assert_not_called()
+        client.close()
+
+    def test_discovery_or_publication_failure_keeps_old_client_and_submits_nothing(
+        self,
+    ):
+        from rtp_llm.multimodal.kvcm.lookup import KvMetaLookupError
+
+        for method in ("save", "load", "remove"):
+            for publish_failure in (False, True):
+                with self.subTest(method=method, publish_failure=publish_failure):
+                    client, native, *_ = self._create(
+                        _client_config(vipserver_domain="emb.vipserver")
+                    )
+                    before = client._metadata_addresses
+                    if publish_failure:
+                        native.update_addresses.side_effect = RuntimeError(
+                            "private publication detail"
+                        )
+                    with patch(
+                        "rtp_llm.multimodal.kvcm.lookup._cached_vipserver_resolver",
+                        return_value=[SimpleNamespace(ip="10.0.0.9", port=19001)],
+                        side_effect=(
+                            None
+                            if publish_failure
+                            else RuntimeError("private discovery detail")
+                        ),
+                    ):
+                        args = (
+                            (["key"],) if method == "remove" else (["key"], [object()])
+                        )
+                        with self.assertRaises(KvMetaLookupError) as caught:
+                            getattr(client, method)(*args)
+                    self.assertEqual(caught.exception.reason, "discovery")
+                    self.assertTrue(client.is_transfer_quiescent(caught.exception))
+                    self.assertNotIn("private", str(caught.exception))
+                    self.assertEqual(client._metadata_addresses, before)
+                    getattr(native, method).assert_not_called()
+                    native.close.assert_not_called()
+                    client.close()
+
+    def test_mutation_failure_is_not_replayed_after_refresh(self):
+        client, native, *_ = self._create(
+            _client_config(vipserver_domain="emb.vipserver")
+        )
+        native.save.side_effect = RuntimeError("mutation outcome unknown")
+        with patch(
+            "rtp_llm.multimodal.kvcm.lookup._cached_vipserver_resolver",
+            return_value=[SimpleNamespace(ip="10.0.0.9", port=19001)],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "outcome unknown"):
+                client.save_one("key", object())
+        native.save.assert_called_once()
+        native.update_addresses.assert_called_once()
+        client.close()
+
+    def test_close_waits_for_address_publication_then_blocks_new_refresh(self):
+        client, native, *_ = self._create(
+            _client_config(vipserver_domain="emb.vipserver")
+        )
+        entered, release, closed = (
+            threading.Event(),
+            threading.Event(),
+            threading.Event(),
+        )
+
+        def updating(addresses):
+            entered.set()
+            self.assertTrue(release.wait(2))
+
+        native.update_addresses.side_effect = updating
+        with patch(
+            "rtp_llm.multimodal.kvcm.lookup._cached_vipserver_resolver",
+            return_value=[SimpleNamespace(ip="10.0.0.9", port=19001)],
+        ) as resolver:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                refresh = pool.submit(client._refresh_metadata_addresses)
+                self.assertTrue(entered.wait(2))
+                closer = pool.submit(lambda: (client.close(), closed.set()))
+                self.assertFalse(closed.wait(0.02))
+                release.set()
+                refresh.result(timeout=2)
+                closer.result(timeout=2)
+                self.assertTrue(closed.is_set())
+            with self.assertRaisesRegex(RuntimeError, "closed"):
+                client.save_one("key", object())
+            resolver.assert_called_once()
+        native.close.assert_called_once()
+        native.save.assert_not_called()
 
     def test_invalid_gpu_sequence_fails_before_loading_sdk(self):
         for value in ("", b"", None, iter(()), tuple(object() for _ in range(65))):
@@ -424,6 +544,45 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
 
                 client_module.KvMetaObjectClient.assert_not_called()
                 client_module.KvMetaObjectClientConfig.assert_not_called()
+
+    def test_vip_address_update_capability_is_required_before_registration(self):
+        client_module = ModuleType("kv_cache_manager.client")
+        client_module.KV_META_OBJECT_API_VERSION = 2
+        client_module.KvMetaObjectClient = MagicMock()
+        client_module.KvMetaObjectClientConfig = MagicMock()
+        client_module.KvMetaObjectClientError = _ClientError
+        pybind_module = ModuleType("kv_cache_manager.client.pybind")
+        native = SimpleNamespace(
+            ClientErrorCode=SimpleNamespace(ER_SERVICE_NOT_FOUND=_ClientCode.NOT_FOUND)
+        )
+        pybind_module.kvcm_py_client = native
+        package = ModuleType("kv_cache_manager")
+        package.__path__ = []
+        package.client = client_module
+        with patch.dict(
+            sys.modules,
+            {
+                "kv_cache_manager": package,
+                "kv_cache_manager.client": client_module,
+                "kv_cache_manager.client.pybind": pybind_module,
+            },
+        ):
+            for capability in (None, 0, True, "1"):
+                native.KV_META_OBJECT_ADDRESS_UPDATE_VERSION = capability
+                with (
+                    self.subTest(capability=capability),
+                    self.assertRaisesRegex(RuntimeError, "address update"),
+                ):
+                    kvcm_client._load_kvcm_client_types(require_address_update=True)
+            native.KV_META_OBJECT_ADDRESS_UPDATE_VERSION = 1
+            self.assertEqual(
+                kvcm_client._load_kvcm_client_types(require_address_update=True)[0],
+                client_module.KvMetaObjectClient,
+            )
+            client_module.KvMetaObjectClient.update_addresses = None
+            with self.assertRaisesRegex(RuntimeError, "address update"):
+                kvcm_client._load_kvcm_client_types(require_address_update=True)
+        client_module.KvMetaObjectClient.assert_not_called()
 
     def test_invalid_endpoint_fails_before_loading_optional_wheel(self):
         environment = {
