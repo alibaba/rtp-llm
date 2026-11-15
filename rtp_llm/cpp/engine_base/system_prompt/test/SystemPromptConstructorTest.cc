@@ -1,4 +1,6 @@
 
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
+#include "autil/EnvUtil.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
@@ -135,6 +137,60 @@ TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
     ASSERT_EQ(item2.prompt_tokens.size(), 4);
     ASSERT_FALSE(item2.group_block_ids.at("full").empty());
     ASSERT_EQ(item2.prompt_tokens, prompt_2);
+}
+
+TEST_F(SystemPromptConstructorTest, NativeDecodeKeepsResidentSystemPromptInsertion) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    test::withDecodePublicationStartup([&] {
+        CustomConfig config;
+        config.reuse_cache = true;
+        config.role_type = RoleType::DECODE;
+        config.tokens_per_block = 256;
+        ModelConfig model;
+        RuntimeConfig runtime;
+        KVCacheConfig settings;
+        auto params = createEngineInitParams(config, model, runtime, settings);
+        params.model_config_.max_seq_len = 600;
+        params.parallelism_config.role_type = RoleType::DECODE;
+        KVCacheSpecDesc opaque{"full", KVCacheSpecType::OpaqueKV};
+        opaque.dtype = DataType::TYPE_UINT8;
+        opaque.entry_dtype = DataType::TYPE_UINT8;
+        opaque.entry_elems = 288;
+        opaque.entry_count_mode = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+        opaque.compression_ratio = 1;
+        opaque.block_stride_bytes_alignment = 4608;
+        params.model_config_.kv_cache_spec_descs.assign(params.model_config_.num_layers, {opaque});
+        NormalExecutor::test_model_factory = [vocab = model.vocab_size](const GptModelInitParams&) {
+            return std::unique_ptr<ModelBase>(new MockModel(vocab));
+        };
+        auto engine = std::make_shared<NormalEngine>(params, nullptr);
+        NormalExecutor::test_model_factory = nullptr;
+        auto manager = engine->resourceContext().cache_manager;
+        // Exercise real opaque policy construction with the existing mock
+        // forward; this is not a DSV4.1 kernel/content test.
+        ASSERT_TRUE(manager->cacheConfig().use_opaque_kv_cache_store);
+        ASSERT_TRUE(manager->cacheConfig().disable_decode_first_malloc_device_reuse);
+        ASSERT_EQ(manager->coordinator_manager_->role_type_, RoleType::DECODE);
+        auto input = std::make_shared<GenerateInput>();
+        input->input_ids = torch::ones({511}, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        input->generate_config->max_new_tokens = 1;
+        auto prepared = engine->preRun(input, preRunMode::build_system_prompt);
+        ASSERT_TRUE(prepared.ok()) << prepared.status();
+        auto stream = prepared.value();
+        ASSERT_EQ(stream->seqLength(), 512);
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+        ASSERT_EQ(stream->kvCache().cacheKeys(0).size(), 2u);
+        stream->releaseResource(); // Non-resident path skips the unused tree.
+        EXPECT_TRUE(manager->blockTreeCache()->getKeySnapshot().keys.empty());
+        KVCacheConfig prompts;
+        prompts.multi_task_prompt_tokens = {{"aligned", std::vector<int>(511, 1)}};
+        const auto result = SystemPromptConstructor::construct(prompts, engine.get(), manager.get(), true);
+        ASSERT_TRUE(result.ok()) << result.status();
+        EXPECT_EQ(result->at("aligned").prompt_tokens.size(), 511u);
+        EXPECT_FALSE(result->at("aligned").group_block_ids.at("full").empty());
+        EXPECT_EQ(manager->blockTreeCache()->getKeySnapshot().keys.size(), 2u);
+    }, [&] { NormalExecutor::test_model_factory = nullptr; TearDown(); });
 }
 
 TEST_F(SystemPromptConstructorTest, testMultiGroupPromptPreservesEveryTaggedRow) {

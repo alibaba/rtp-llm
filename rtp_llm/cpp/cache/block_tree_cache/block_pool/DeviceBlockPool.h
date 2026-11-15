@@ -12,6 +12,7 @@
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutConfig.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
@@ -55,11 +56,14 @@ public:
     void decRef(BlockIdxType block, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
     void decRef(const BlockIdList& blocks, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
 
-    // Storage I/O. Allocate the release closure and reserve free-list
-    // capacity before acquiring the connector reference. The caller must keep
-    // this pool alive and invoke the returned closure exactly once. Its release
-    // performs no allocation and isolates capacity-notification exceptions.
-    std::function<void()> pinForRemotePublication(BlockIdxType block);
+    // Storage I/O. Snapshot the callback and reserve free-list capacity before
+    // acquiring the connector reference. Keep the pool alive until the token is
+    // reset/destroyed. Release performs no allocation and isolates notification
+    // exceptions.
+    RemotePublicationPin pinForRemotePublication(BlockIdxType block);
+    // Atomically test allocation and pin; empty for invalid/unallocated pages.
+    // Allocation/callback failures still propagate before acquiring a reference.
+    RemotePublicationPin tryPinForRemotePublication(BlockIdxType block);
 
     struct RequestReferenceUpdate {
         BlockIdxType block;
@@ -175,6 +179,7 @@ private:
 
 private:
     static constexpr size_t                          kRefTypeCount = static_cast<size_t>(DeviceBlockRefType::COUNT);
+    RemotePublicationPin pinForRemotePublicationNoLock(BlockIdxType block);
     std::vector<uint32_t> refcounts_;
     std::array<std::vector<uint32_t>, kRefTypeCount> refcounts_by_type_;
     std::array<size_t, kRefTypeCount>                referenced_block_counts_{};

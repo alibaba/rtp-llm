@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/LegacyTransferEngine.h"
 #include <gtest/gtest.h>
 
@@ -934,51 +935,14 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitDeviceHostRoundTripPreservesLayout)
     releasePoolBlock(*host_pool_, host_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, PhysicalOriginsFollowSuccessfulDeviceHostTransfersOnlyWhenEnabled) {
-    ASSERT_TRUE(device_pool_->enableDecodeOriginTracking());
-    auto source = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".4.0.8.8.9");
-    ASSERT_TRUE(source);
-    const auto  origin = std::make_shared<const DecodeCacheOrigin>(*source);
-    const auto& tag    = group_set_->groupTags().front();
-    for (const bool enabled : {false, true}) {
-        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
-        auto            engine            = makeEngine({group_set_});
-        const auto      device_generation = device_pool_->decodeOriginIncarnation(device_block_);
-        ASSERT_TRUE(device_pool_->bindDecodeOrigin(device_block_, device_generation, tag, origin));
-        const auto host_block = poolMalloc(*host_pool_);
-        ASSERT_NE(host_block, NULL_BLOCK_IDX);
-        ASSERT_TRUE(executeSucceeded(engine, makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block)));
-        const auto host_origin = host_pool_->decodeOrigin(host_block, tag);
-        EXPECT_EQ(host_origin, enabled ? origin : PhysicalDecodeOrigins::Origin{});
-        if (enabled) {
-            // Metadata settlement is visible before waitDone reports completion.
-            ASSERT_TRUE(device_pool_->bindDecodeOrigin(device_block_, device_generation, tag, nullptr));
-            ASSERT_TRUE(executeSucceeded(engine, makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, host_block)));
-            EXPECT_EQ(device_pool_->decodeOrigin(device_block_, tag), origin);
-            // An ordinary/unknown source overwrite clears just this region.
-            ASSERT_TRUE(host_pool_->bindDecodeOrigin(
-                host_block, host_pool_->decodeOriginIncarnation(host_block), tag, nullptr));
-            ASSERT_TRUE(executeSucceeded(engine, makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, host_block)));
-            EXPECT_FALSE(device_pool_->decodeOrigin(device_block_, tag));
-        }
-        releasePoolBlock(*host_pool_, host_block);
-    }
-}
-
-TEST_F(LegacyPerRankBlockTransferEngineTest, FailedTransferCannotRebindAValidatedSource) {
+TEST_F(LegacyPerRankBlockTransferEngineTest, FailedTransferReportsFailureWithoutLosingCallerReferences) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     auto            engine = makeEngine({group_set_});
-    ASSERT_TRUE(device_pool_->enableDecodeOriginTracking());
-    ASSERT_TRUE(host_pool_->enableDecodeOriginTracking());
     const auto host_block = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    auto source = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".4.0.8.8.9");
-    ASSERT_TRUE(source);
-    const auto  origin = std::make_shared<const DecodeCacheOrigin>(*source);
-    const auto& tag    = group_set_->groupTags().front();
-    ASSERT_TRUE(host_pool_->bindDecodeOrigin(host_block, host_pool_->decodeOriginIncarnation(host_block), tag, origin));
-    ASSERT_TRUE(device_pool_->bindDecodeOrigin(
-        device_block_, device_pool_->decodeOriginIncarnation(device_block_), tag, origin));
+    const auto device_refs = device_pool_->refCount(device_block_);
+    const auto host_refs = host_pool_->treeRefCount(host_block);
     engine->legacy_->device_host_executor_->strategies_.clear();
     engine->legacy_->device_host_executor_->strategies_.push_back(std::make_unique<FailingStrategy>());
     auto context =
@@ -986,8 +950,12 @@ TEST_F(LegacyPerRankBlockTransferEngineTest, FailedTransferCannotRebindAValidate
     ASSERT_NE(context, nullptr);
     context->waitDone();
     EXPECT_FALSE(context->success());
-    EXPECT_FALSE(device_pool_->decodeOrigin(device_block_, tag));
+    EXPECT_TRUE(device_pool_->isAllocated(device_block_));
+    EXPECT_TRUE(host_pool_->isAllocated(host_block));
+    EXPECT_EQ(device_pool_->refCount(device_block_), device_refs);
+    EXPECT_EQ(host_pool_->treeRefCount(host_block), host_refs);
     releasePoolBlock(*host_pool_, host_block);
+    }, [&] { TearDown(); per_rank_transfer_engine_.reset(); group_set_.reset(); host_pool_.reset(); device_pool_.reset(); });
 }
 
 TEST_F(LegacyPerRankBlockTransferEngineTest, ExecutorDerivesDirectionFromDescriptorTargetTier) {

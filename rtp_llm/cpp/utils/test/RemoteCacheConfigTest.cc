@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 
 #include <cstdlib>
 #include <limits>
@@ -30,12 +31,49 @@ protected:
     static constexpr size_t MiB = 1024 * 1024, GiB = 1024 * MiB;
 };
 
+TEST_F(DecodeBudgetConfigTest, PublicationSettingIsStrictAndReadOncePerProcess) {
+    constexpr const char* key = "RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH";
+    UnsetOverride restore(key);
+    for (const char* initial : {static_cast<const char*>(nullptr), "0", "1", "", "true", " 1", "2"}) {
+        SCOPED_TRACE(initial ? initial : "unset");
+        if (initial) setenv(key, initial, 1);
+        else unsetenv(key);
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
+            const bool valid = !initial || std::string(initial) == "0" || std::string(initial) == "1";
+            const bool enabled = initial && std::string(initial) == "1";
+            // Exercise both getter orders; they must share one cached setting.
+            if (enabled) {
+                EXPECT_TRUE(remoteCacheDecodePublicationEnabled());
+            }
+            EXPECT_EQ(remoteCacheDecodePublicationConfigValid(), valid);
+            EXPECT_EQ(remoteCacheDecodePublicationEnabled(), enabled);
+            for (const char* later : {"0", "1", "invalid"}) {
+                setenv(key, later, 1);
+                EXPECT_EQ(remoteCacheDecodePublicationEnabled(), enabled);
+                EXPECT_EQ(remoteCacheDecodePublicationConfigValid(), valid);
+            }
+            unsetenv(key);
+            EXPECT_EQ(remoteCacheDecodePublicationEnabled(), enabled);
+            EXPECT_EQ(remoteCacheDecodePublicationConfigValid(), valid);
+        });
+    }
+}
+
 TEST_F(DecodeBudgetConfigTest, UsesNativeCapacityWithoutRoundingSmallPoolsUp) {
+    EXPECT_EQ(DecodePublicationLimits{}.bytes, 512 * MiB);
+    EXPECT_EQ(DecodePublicationLimits{}.jobs, 4u);
+    const auto defaults = remoteCacheDecodePublicationLimits();
+    ASSERT_TRUE(defaults);
+    EXPECT_EQ(defaults->bytes, 512 * MiB);
+    EXPECT_EQ(defaults->jobs, 4u);
     EXPECT_FALSE(remoteCacheDecodePublicationLimits(0));
     for (auto [capacity, expected] : {std::pair<size_t, size_t>{4 * GiB, 512 * MiB},
                                       {8 * GiB, GiB},
                                       {24 * GiB, 3 * GiB},
                                       {48 * GiB, 4 * GiB},
+                                      {64 * GiB, 4 * GiB},
+                                      {8, 1},
+                                      {8192, 1024},
                                       {1024, 128},
                                       {std::numeric_limits<size_t>::max(), 4 * GiB}}) {
         const auto limits = remoteCacheDecodePublicationLimits(capacity);

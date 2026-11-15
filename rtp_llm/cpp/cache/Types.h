@@ -11,7 +11,6 @@
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/CacheTier.h"
-#include "rtp_llm/cpp/cache/DecodeReuseSources.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 
@@ -117,7 +116,6 @@ struct MallocResult {
     MallocStatus status             = MallocStatus::INTERNAL_ERROR;
 
     std::shared_ptr<AsyncContext> async_context = nullptr;
-    DecodeReuseSourcesPtr         decode_sources;
 
     // Lower-tier reuse is published only after async_context completes.
 

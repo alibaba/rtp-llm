@@ -54,12 +54,12 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:block_info",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:memory_layout_strategy",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:physical_decode_origins",
     ] + torch_deps() + select({
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
@@ -314,4 +314,12 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
+)
+
+cc_test(
+    name = "decode_completion_reservation_test",
+    srcs = ["//rtp_llm/cpp/cache/block_tree_cache/storage_backend/test:ReservedCompletionLaneHostTest.cc"],
+    copts = ["-std=c++17", "-UNDEBUG", "-pthread"],
+    linkopts = ["-pthread"],
+    deps = [":block_tree_task_pool"],
 )

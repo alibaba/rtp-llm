@@ -16,7 +16,6 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
-#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 
 namespace rtp_llm {
 
@@ -49,61 +48,7 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
             abortLoadLocked(
                 context.loadDescs(), context.joinedLoads(), 0, context.contextId(), /*release_transferred_refs=*/false);
         },
-        [task_pool](std::function<void()> cleanup) { return task_pool->submitCompletion(std::move(cleanup)); })),
-    track_decode_origins_(remoteCacheDecodePublicationEnabled()) {}
-
-DecodeReuseSourcesPtr BlockTreeLoader::snapshotDecodeSources(const std::vector<TreeNode*>& path, size_t prefix) const {
-    if (!track_decode_origins_ || prefix == 0 || prefix > path.size() || tree_->groupSets().empty())
-        return {};
-    try {
-        auto         sources = std::make_shared<DecodeReuseSources>();
-        const auto&  first   = tree_->groupSets().front();
-        const size_t unit    = first->group(first->groupTags().front()).cacheKeyTokenStride();
-        if (unit == 0 || prefix > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / unit)
-            return {};
-        for (size_t key = 0; key < prefix; ++key) {
-            PhysicalDecodeOrigins::Origin agreed;
-            bool                          known       = true;
-            Tier                          source_tier = Tier::DEVICE;
-            for (size_t group_id = 0; group_id < tree_->groupSets().size() && known; ++group_id) {
-                const auto& group = tree_->groupSets()[group_id];
-                if (prefix - key > group->computeReuseBlockCount(prefix))
-                    continue;
-                const auto& value = path[key]->group_set_resources[group_id];
-                const auto  tier  = value.getTopTier();
-                source_tier       = std::max(source_tier, tier);
-                for (size_t member = 0; member < group->groupTags().size(); ++member) {
-                    std::shared_ptr<IBlockPool> pool;
-                    BlockIdxType                block = NULL_BLOCK_IDX;
-                    if (tier == Tier::DEVICE && member < value.device_blocks.size()) {
-                        pool  = group->devicePools()[member];
-                        block = value.device_blocks[member];
-                    } else if (tier == Tier::HOST) {
-                        pool  = group->hostPool();
-                        block = value.host_block;
-                    } else if (tier == Tier::DISK) {
-                        pool  = group->diskPool();
-                        block = value.disk_block;
-                    }
-                    const auto source = pool && !isNullBlockIdx(block) ?
-                                            pool->decodeOrigin(block, group->groupTags()[member]) :
-                                            PhysicalDecodeOrigins::Origin{};
-                    if (!source || source->begin != static_cast<int64_t>(key * unit)
-                        || source->end != static_cast<int64_t>((key + 1) * unit) || (agreed && !(*agreed == *source))) {
-                        known = false;
-                        break;
-                    }
-                    agreed = source;
-                }
-            }
-            if (known && agreed && source_tier != Tier::NONE)
-                sources->push_back({std::move(agreed), source_tier});
-        }
-        return sources->empty() ? DecodeReuseSourcesPtr{} : std::move(sources);
-    } catch (const std::bad_alloc&) {
-        return {};  // Optional provenance cannot reject generic cache reuse.
-    }
-}
+        [task_pool](std::function<void()> cleanup) { return task_pool->submitCompletion(std::move(cleanup)); })) {}
 
 BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&               cache_keys,
                                                   const std::function<bool(size_t)>& valid_prefix,
@@ -327,22 +272,9 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
             }
         }
     }
-    result.matched_device_decode_sources = snapshotDecodeSources(path, result.matched_device_blocks);
     if (result.async_context) {
         result.async_context->setLocalMatchLengths(result.matched_device_blocks, result.matched_device_host_blocks);
         result.async_context->setValidPrefix(valid_prefix);
-        auto local_sources = path.size() == result.matched_device_blocks ? result.matched_device_decode_sources :
-                                                                           snapshotDecodeSources(path, path.size());
-        DecodeReuseSourcesPtr device_host_sources;
-        if (result.matched_device_host_blocks == result.matched_device_blocks) {
-            device_host_sources = result.matched_device_decode_sources;
-        } else if (result.matched_device_host_blocks == path.size()) {
-            device_host_sources = local_sources;
-        } else {
-            device_host_sources = snapshotDecodeSources(path, result.matched_device_host_blocks);
-        }
-        result.async_context->setLocalDecodeSources(
-            std::move(local_sources), result.matched_device_decode_sources, std::move(device_host_sources));
     }
     return result;
 }

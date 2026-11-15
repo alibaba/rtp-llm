@@ -207,6 +207,17 @@ TEST(KVCMInternalTest, Dsv41CompactGroupsPreserveSpecsAndWriteSelection) {
             expected.insert({{"F0", {"F0_TP0"}}, {"F1", {"F1_TP0"}}, {"F2", {"F2_TP0"}}});
         }
         EXPECT_EQ(location_groups, expected);
+        ASSERT_EQ(policy.spec_info_map().size(), merge_full ? 3u : 5u);
+        if (merge_full) {
+            std::vector<std::string> members;
+            for (const auto id : policy.spec_info_map().at("F_TP0").group_ids)
+                members.push_back(policy.groups().at(id).tag);
+            EXPECT_EQ(members, (std::vector<std::string>{"csa_kv", "hca_kv", "indexer_kv"}));
+        } else {
+            const auto& info = policy.spec_info_map().at("F0_TP0");
+            EXPECT_EQ(policy.groups().at(info.group_id).tag, "hca_kv");
+            EXPECT_EQ(info.group_ids, (std::vector<int32_t>{info.group_id}));
+        }
         std::vector<std::string> selected;
         ASSERT_TRUE(policy.getNeedWriteGroups(makeStorageRequest({full_handles, all_handles}), 2, selected));
         EXPECT_EQ(selected, (std::vector<std::string>{"F", "FL"}));

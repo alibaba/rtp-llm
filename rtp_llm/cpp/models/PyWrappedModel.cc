@@ -1,5 +1,4 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
-#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/cuda_graph/prepared_attention_inputs_guard.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -1145,15 +1144,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         expert_balancer_.step(inputs.warmup, has_context_request && !inputs.is_target_verify);
         return outputs;
     };
-    const auto with_context_kv_dependency = [&](GptModelOutputs outputs) {
-        // The synchronous consumer must finish this stream before reporting
-        // readiness. Microbatch/speculative exits deliberately do not acquire
-        // this proof from merely returning a Python forward. Captured hidden
-        // states acquire it only after their explicit CP restoration below.
-        outputs.context_kv_has_rank_completion_dependency =
-            remoteCacheDecodePublicationEnabled() && has_context_request && !inputs.warmup && !inputs.is_target_verify;
-        return outputs;
-    };
 
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
@@ -1471,25 +1461,19 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                                                token_ids.device());
             auto outputs            = attach_mtp_target_hidden_states(
                 callForwardPostLayers(last_hidden_states, inputs, true, last_hidden_states.size(0)));
-            if (device_props_.enable_prefill_cp || device_props_.tp_size == 1) {
-                outputs = with_context_kv_dependency(std::move(outputs));
-            }
             return finalize_outputs(std::move(outputs));
         }
         if (device_props_.enable_prefill_cp && has_context_request) {
             if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
-                return finalize_outputs(with_context_kv_dependency(
-                    attach_mtp_target_hidden_states(forwardPostLayersLastHidden(hidden_states, inputs))));
+                return finalize_outputs(
+                    attach_mtp_target_hidden_states(forwardPostLayersLastHidden(hidden_states, inputs)));
             }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            return finalize_outputs(with_context_kv_dependency(
-                attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens))));
+            return finalize_outputs(
+                attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens)));
         }
         auto outputs = attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true));
-        if (device_props_.tp_size == 1) {
-            outputs = with_context_kv_dependency(std::move(outputs));
-        }
         return finalize_outputs(std::move(outputs));
 
     } catch (const py::error_already_set& e) {

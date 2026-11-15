@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -15,7 +16,6 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
-#include "rtp_llm/cpp/utils/RemoteRestoreLifecycle.h"
 
 namespace rtp_llm {
 
@@ -102,12 +102,6 @@ public:
     bool deadlineExceeded() const {
         return backend_deadline_state_.load() == State::FAILED;
     }
-    std::optional<RemoteRestoreTiming> remoteRestoreTiming() const;
-    void                               setLocalDecodeSources(DecodeReuseSourcesPtr sources,
-                                                             DecodeReuseSourcesPtr device_sources      = {},
-                                                             DecodeReuseSourcesPtr device_host_sources = {});
-    // Local-only sources are validated against the actual ready prefix's group windows.
-    DecodeReuseSourcesPtr decodeSources(bool local_only = false) const;
     bool                  settle(bool success, bool host_success = false);
     bool                  onTaskFail();
     void                  waitDone() override;
@@ -125,7 +119,7 @@ private:
     void markAborted();
     void rebuildMatchedBlocksByTier();
     void onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success);
-    void onBackendRead(ErrorInfo error, DecodeReuseSourcesPtr sources = {});
+    void onBackendRead(ErrorInfo error);
     void failBeforeCommit();
     void failCommit();
     void finishIfReadyLocked(bool& notify, SettlementReadyCallback& settlement_ready_callback);
@@ -175,13 +169,6 @@ private:
     ErrorInfo                                             backend_error_{ErrorInfo::OkStatus()};
     ErrorInfo                                             error_info_{ErrorInfo::OkStatus()};
     bool                                                  settlement_ready_{false};
-    const bool                                            track_remote_restore_{false};
-    std::optional<RemoteRestoreTiming::Clock::time_point> remote_read_started_at_;
-    std::optional<RemoteRestoreTiming::Clock::time_point> remote_gpu_ready_at_;
-    DecodeReuseSourcesPtr                                 local_decode_sources_;
-    DecodeReuseSourcesPtr                                 device_decode_sources_;
-    DecodeReuseSourcesPtr                                 device_host_decode_sources_;
-    DecodeReuseSourcesPtr                                 remote_decode_sources_;
     SettlementReadyCallback                               settlement_ready_callback_;
     std::vector<DoneCallback>                             callbacks_;
 

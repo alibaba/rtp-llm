@@ -96,10 +96,14 @@ cc_test(
 
 cc_test(
     name = "i_block_pool_test",
+    testonly = True,
     exec_properties = {"gpu": "L20_CU13"},
     srcs = ["IBlockPoolTest.cc"],
     copts = pool_test_copts,
-    deps = pool_test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],
+    deps = pool_test_deps + [
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
+    ],
     env = {},
     tags = ["L20_CU13"],
 )

@@ -1370,23 +1370,6 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
-class RtpLLMRemoteRestoreLatencyMetricsCollector final {
-public:
-    const char* mode{"checkpoint_gpu_ready"};
-    int64_t     latency_us{0};
-};
-
-class RtpLLMRemoteRestoreLatencyMetrics: public kmonitor::MetricsGroup {
-public:
-    bool                     init(kmonitor::MetricsGroupManager* manager) override;
-    void                     report(const kmonitor::MetricsTags*, RtpLLMRemoteRestoreLatencyMetricsCollector*);
-    kmonitor::MutableMetric* latency_bucket_qps_metric{nullptr};
-    kmonitor::MutableMetric* latency_sum_us_qps_metric{nullptr};
-
-private:
-    AUTIL_LOG_DECLARE();
-};
-
 class RtpLLMRemoteCacheControlMetricsCollector final {
 public:
     bool enabled{true};
@@ -1406,23 +1389,6 @@ class RtpLLMRemoteCacheOutcomeMetricsCollector final {
 public:
     const char* stage{"lookup"};
     const char* outcome{"failed"};
-};
-
-class RtpLLMDecodeCacheTokenMetricsCollector final {
-public:
-    const char* stage{"restored"};
-    const char* tier{"REMOTE"};
-    int64_t     logical_tokens{0};
-};
-
-class RtpLLMDecodeCacheTokenMetrics: public kmonitor::MetricsGroup {
-public:
-    bool                     init(kmonitor::MetricsGroupManager* manager) override;
-    void                     report(const kmonitor::MetricsTags*, RtpLLMDecodeCacheTokenMetricsCollector*);
-    kmonitor::MutableMetric* logical_tokens_qps_metric{nullptr};
-
-private:
-    AUTIL_LOG_DECLARE();
 };
 
 class RtpLLMRemoteCacheOutcomeMetrics: public kmonitor::MetricsGroup {

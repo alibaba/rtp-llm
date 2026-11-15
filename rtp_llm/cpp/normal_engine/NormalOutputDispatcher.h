@@ -47,8 +47,7 @@ private:
                          int                                                   logprobs_batch_idx,
                          const torch::Tensor&                                  token_logprobs_cpu,
                          const torch::Tensor&                                  top_logprob_token_ids_cpu,
-                         const torch::Tensor&                                  top_logprobs_cpu,
-                         std::optional<RemoteRestoreTiming::Clock::time_point> context_kv_all_rank_gpu_ready_at) const;
+                         const torch::Tensor&                                  top_logprobs_cpu) const;
 
 private:
     std::vector<int64_t>                       output_vocab_ids_;
