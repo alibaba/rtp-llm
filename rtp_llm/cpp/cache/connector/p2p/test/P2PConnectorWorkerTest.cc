@@ -1492,8 +1492,8 @@ TEST_F(P2PConnectorWorkerTest, SendCallbacksUseLoadDeadlineWithoutIndependentCap
     EXPECT_TRUE(result.ok());
 }
 
-TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_RdmaTransferWaitTimeout) {
-    std::string unique_key = "test_rdma_transfer_wait_timeout_read";
+TEST_F(P2PConnectorWorkerTest, Read_ReturnsTransferNotDoneAtDeadline) {
+    std::string unique_key = "test_read_transfer_not_done_at_deadline";
     int64_t     request_id = 4002;
     int64_t deadline_ms = currentTimeMs() + 200;
 

@@ -2139,7 +2139,7 @@ class BatchRecordArgsTest(TestCase):
                 self.assertEqual(config.record_decode_sample_rate, float(good))
 
 
-class P2PKvLeakThresholdArgumentsTest(TestCase):
+class CacheStoreArgumentsTest(TestCase):
     def parse_config(self, args, env):
         from rtp_llm.ops import CacheStoreConfig
         from rtp_llm.server.server_args.cache_store_group_args import (
@@ -2175,6 +2175,22 @@ class P2PKvLeakThresholdArgumentsTest(TestCase):
                 with self.subTest(value=value, env=env), patch("sys.stderr", io.StringIO()):
                     with self.assertRaises(SystemExit):
                         self.parse_config(args, env)
+
+    def test_removed_rdma_transfer_wait_timeout_cli_is_rejected(self):
+        flag = "--cache_store_rdma_transfer_wait_timeout_ms"
+        for args in ([flag, "180000"], [f"{flag}=180000"]):
+            with self.subTest(args=args), patch("sys.stderr", io.StringIO()) as stderr:
+                with self.assertRaises(SystemExit) as raised:
+                    self.parse_config(args, {})
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn(f"unrecognized arguments: {flag}", stderr.getvalue())
+
+    def test_removed_rdma_transfer_wait_timeout_environment_is_ignored(self):
+        config = self.parse_config(
+            [],
+            {"CACHE_STORE_RDMA_TRANSFER_WAIT_TIMEOUT_MS": "invalid"},
+        )
+        self.assertEqual(config.p2p_transfer_not_done_resource_hold_ms, 10000)
 
 
 if __name__ == "__main__":
