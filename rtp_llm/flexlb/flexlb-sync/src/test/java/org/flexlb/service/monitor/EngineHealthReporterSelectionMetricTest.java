@@ -114,6 +114,27 @@ class EngineHealthReporterSelectionMetricTest {
     }
 
     @Test
+    void decodeStatusReportsFreshKvCapacityWithoutCacheMetadata() {
+        WorkerStatus worker = mock(WorkerStatus.class);
+        var topology = mock(WorkerStatus.TopologySnapshot.class);
+        var observation = mock(WorkerStatus.EngineObservation.class);
+        when(worker.topologySnapshot()).thenReturn(topology);
+        when(worker.committedEngineObservation()).thenReturn(observation);
+        when(worker.pollHealth()).thenReturn(mock(WorkerStatus.PollHealth.class));
+        when(topology.ip()).thenReturn("10.0.0.1");
+        when(observation.role()).thenReturn(RoleType.DECODE);
+        when(observation.totalKvCacheTokens()).thenReturn(100L);
+        when(observation.availableKvCacheTokens()).thenReturn(40L, 20L);
+        reporter.reportStatusCheckerSuccess("model", worker, null, 1, 0);
+        reporter.reportStatusCheckerSuccess("model", worker, null, 2, 1);
+        var tags = FlexMetricTags.of("model", "model", "engineIp", "10.0.0.1", "role", "DECODE");
+        verify(monitor).report(CACHE_AVAILABLE_KV_CACHE_TOKENS, tags, 40.0);
+        verify(monitor).report(CACHE_AVAILABLE_KV_CACHE_TOKENS, tags, 20.0);
+        verify(monitor).report(CACHE_USED_KV_CACHE_RATIO, tags, 60.0);
+        verify(monitor).report(CACHE_USED_KV_CACHE_RATIO, tags, 80.0);
+    }
+
+    @Test
     void registersSelectedPrefillEstimateMetricsAsGauges() {
         reporter.init();
 

@@ -2,7 +2,11 @@ package org.flexlb.balance.scheduler;
 
 import org.junit.jupiter.api.Test;
 
+import java.math.BigInteger;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -56,6 +60,59 @@ class PrefillCostOrderTest {
         assertEquals(List.of("first", "second"), PrefillCostOrder.first(List.of(
                 c("second", 50, 2, 1000, 0), c("first", 50, 1, 1000, 0),
                 c("cold", 50, 0, 10, 10)), List.of(), false, 8));
+    }
+
+    @Test
+    void boundedSelectionMatchesStableFullOrderingAcrossBacklogs() {
+        var random = new Random(20261114L);
+        for (int round = 0; round < 300; round++) {
+            var ready = new ArrayList<PrefillCostOrder.Candidate<Integer>>();
+            var running = new ArrayList<PrefillCostOrder.Candidate<Integer>>();
+            int size = 1 + random.nextInt(400);
+            for (int i = 0; i < size; i++) {
+                long input = round % 7 == 0 ? Long.MAX_VALUE - random.nextInt(100) : 1000L * (1 + random.nextInt(10));
+                Long compute = round % 3 == 0 ? input : round % 3 == 1 ? 0L : input / (1 + random.nextInt(10));
+                if (round % 11 == 0 && i == 0) { compute = null; }
+                var candidate = new PrefillCostOrder.Candidate<>(i, random.nextInt(3), random.nextInt(20), input, compute);
+                ready.add(candidate);
+                if (round % 5 == 0 && i < 2) { running.add(candidate); }
+            }
+            for (boolean priority : new boolean[]{false, true}) {
+                for (int limit : new int[]{0, 1, 8, 512}) {
+                    assertEquals(referenceFirst(ready, running, priority, limit),
+                            PrefillCostOrder.first(ready, running, priority, limit),
+                            "round=" + round + ", priority=" + priority + ", limit=" + limit);
+                }
+            }
+        }
+    }
+
+    private static List<Integer> referenceFirst(List<PrefillCostOrder.Candidate<Integer>> ready,
+            List<PrefillCostOrder.Candidate<Integer>> running, boolean priority, int limit) {
+        if (limit <= 0 || ready.isEmpty()) { return List.of(); }
+        Comparator<PrefillCostOrder.Candidate<Integer>> byPriority =
+                Comparator.comparingInt(candidate -> priority ? -candidate.priority() : 0);
+        var all = new ArrayList<>(ready);
+        all.addAll(running);
+        if (all.stream().anyMatch(candidate -> candidate.inputTokens() <= 0 || candidate.computeTokens() == null
+                || candidate.computeTokens() < 0 || candidate.computeTokens() > candidate.inputTokens())) {
+            return ready.stream().sorted(byPriority.thenComparingLong(PrefillCostOrder.Candidate::sequence))
+                    .limit(limit).map(PrefillCostOrder.Candidate::value).toList();
+        }
+        Comparator<PrefillCostOrder.Candidate<Integer>> byRatio = (left, right) ->
+                BigInteger.valueOf(left.computeTokens()).multiply(BigInteger.valueOf(right.inputTokens()))
+                        .compareTo(BigInteger.valueOf(right.computeTokens()).multiply(BigInteger.valueOf(left.inputTokens())));
+        var sorted = ready.stream().sorted(byPriority.thenComparing(byRatio)
+                .thenComparingLong(PrefillCostOrder.Candidate::computeTokens)
+                .thenComparingLong(PrefillCostOrder.Candidate::inputTokens)
+                .thenComparingLong(PrefillCostOrder.Candidate::sequence)).toList();
+        var best = sorted.getFirst();
+        for (var active : running) {
+            if (priority && active.priority() < best.priority()) { continue; }
+            if (priority && active.priority() > best.priority() || byRatio.compare(active, best) < 0) { return List.of(); }
+        }
+        return sorted.stream().filter(candidate -> (!priority || candidate.priority() == best.priority())
+                && byRatio.compare(candidate, best) == 0).limit(limit).map(PrefillCostOrder.Candidate::value).toList();
     }
 
 }

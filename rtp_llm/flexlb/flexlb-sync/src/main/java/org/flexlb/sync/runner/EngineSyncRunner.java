@@ -164,7 +164,7 @@ public class EngineSyncRunner implements Runnable {
                         new GrpcCacheStatusCheckRunner(modelName, workerStatus, lease, endpointRegistry,
                                 engineHealthReporter, workerStatusRpcClient, cacheAwareService,
                                 cacheIntervalService, syncRequestTimeoutMs, syncCount,
-                                syncEngineStatusInterval, cacheFullSnapshotDebugMode, statusCheckExecutor), workerStatus.tryBeginCachePoll());
+                                syncEngineStatusInterval, cacheFullSnapshotDebugMode, statusCheckExecutor).whenDue(), workerStatus.tryBeginCachePoll());
             }
             logger.debug("Finished submitting status check tasks for model: {}, role: {}, worker count: {}", modelName,
                     roleType, latestEngineWorkerList.size());
@@ -190,8 +190,11 @@ public class EngineSyncRunner implements Runnable {
         }
         boolean handedOff = false;
         try {
-            statusCheckExecutor.submit(createRunner.apply(lease));
-            handedOff = true;
+            Runnable task = createRunner.apply(lease);
+            if (task != null) {
+                statusCheckExecutor.submit(task);
+                handedOff = true;
+            }
         } catch (RejectedExecutionException rejected) {
             logger.debug("Worker poll rejected for model: {}, role: {}", modelName, roleType);
         } finally {

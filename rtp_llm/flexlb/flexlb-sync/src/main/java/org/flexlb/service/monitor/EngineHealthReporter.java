@@ -249,6 +249,10 @@ public class EngineHealthReporter {
                             ENGINE_RUNNING_QUEUE_TIME, metricTags, value));
         }
 
+        if (status.role() == RoleType.DECODE) {
+            reportKvCapacity(status, metricTags, FlexMetricTags.of("model", modelName, "role", status.role().name()));
+        }
+
         monitor.report(ENGINE_FINISHED_TASK_LIST_SIZE, metricTags, finishedTaskListSize);
         monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, metricTags, runningTaskInfoSize);
     }
@@ -278,6 +282,11 @@ public class EngineHealthReporter {
             monitor.report(CACHE_KEY_SIZE, engineTags, cacheKeySize);
         }
 
+        reportKvCapacity(status, engineTags, roleTags);
+    }
+
+    private void reportKvCapacity(WorkerStatus.EngineObservation status, FlexMetricTags engineTags,
+                                  FlexMetricTags roleTags) {
         long totalKvCacheTokens = status.totalKvCacheTokens();
         long availableKvCacheTokens = status.availableKvCacheTokens();
         long usedKvCacheTokens = totalKvCacheTokens - availableKvCacheTokens;

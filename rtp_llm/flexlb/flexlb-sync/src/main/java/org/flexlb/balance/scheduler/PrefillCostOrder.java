@@ -3,6 +3,8 @@ package org.flexlb.balance.scheduler;
 import java.math.BigInteger;
 import java.util.Comparator;
 import java.util.List;
+import java.util.PriorityQueue;
+import java.util.function.Predicate;
 
 /** Input-token benefit per unit of new Prefill computation, within business priority. */
 final class PrefillCostOrder {
@@ -15,8 +17,7 @@ final class PrefillCostOrder {
                 candidate -> priorityOrdering ? -candidate.priority() : 0);
         if (ready.stream().anyMatch(PrefillCostOrder::unknownCost)
                 || running.stream().anyMatch(PrefillCostOrder::unknownCost)) {
-            return ready.stream().sorted(priority.thenComparingLong(Candidate::sequence))
-                    .limit(limit).map(Candidate::value).toList();
+            return firstMatching(ready, priority.thenComparingLong(Candidate::sequence), candidate -> true, limit);
         }
         Comparator<Candidate<T>> order = priority.thenComparing(PrefillCostOrder::compareUnitCost)
                 .thenComparingLong(Candidate::computeTokens)
@@ -29,9 +30,33 @@ final class PrefillCostOrder {
         }
         // Equal benefit density stays parallel, including different request lengths.
         // Spare slots must not let low-benefit cold work race higher-benefit admission.
-        return ready.stream().filter(candidate -> (!priorityOrdering || candidate.priority() == best.priority())
-                        && compareUnitCost(candidate, best) == 0)
-                .sorted(order).limit(limit).map(Candidate::value).toList();
+        return firstMatching(ready, order,
+                candidate -> (!priorityOrdering || candidate.priority() == best.priority())
+                        && compareUnitCost(candidate, best) == 0, limit);
+    }
+
+    private record Selected<T>(Candidate<T> candidate, int position) { }
+
+    private static <T> List<T> firstMatching(List<Candidate<T>> ready, Comparator<Candidate<T>> order,
+            Predicate<Candidate<T>> eligible, int limit) {
+        Comparator<Selected<T>> stableOrder = (left, right) -> {
+            int compared = order.compare(left.candidate(), right.candidate());
+            return compared != 0 ? compared : Integer.compare(left.position(), right.position());
+        };
+        // Retain only the next dispatch batch; avoid sorting the entire backlog.
+        var selected = new PriorityQueue<Selected<T>>(Math.min(limit, ready.size()), stableOrder.reversed());
+        int position = 0;
+        for (var candidate : ready) {
+            int currentPosition = position++;
+            if (!eligible.test(candidate)) { continue; }
+            if (selected.size() < limit) {
+                selected.add(new Selected<>(candidate, currentPosition));
+            } else if (order.compare(candidate, selected.peek().candidate()) < 0) {
+                selected.poll();
+                selected.add(new Selected<>(candidate, currentPosition));
+            }
+        }
+        return selected.stream().sorted(stableOrder).map(entry -> entry.candidate().value()).toList();
     }
 
     private static boolean unknownCost(Candidate<?> candidate) {
