@@ -5,10 +5,13 @@ from types import SimpleNamespace as NS
 from unittest.mock import patch
 
 import torch
+from torch import nn
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory import ModelFactory
+from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3Model
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
     SparseMlaImpl,
 )
@@ -43,11 +46,89 @@ def query_cp_parallel(rank=0):
 
 
 class KimiK3StartupIntegrationTest(unittest.TestCase):
+    def test_query_cp_model_retains_decode_padding_capability(self):
+        def base_init(instance, config, *args):
+            nn.Module.__init__(instance)
+            instance.config, instance.layer_num = config, 0
+
+        parallel = query_cp_parallel()
+        parallel.ep_size = 2
+        config = NS(
+            hidden_size=8,
+            is_mtp=False,
+            layernorm_eps=1e-6,
+            k3_runtime_config=NS(dsa=object(), attn_res_block_size=0),
+        )
+        weights = NS(weights=[], get_global_weight=lambda _: torch.ones(8))
+        with (
+            patch.object(GptModelBase, "__init__", base_init),
+            patch.object(KimiK3Model, "_setup_dsa"),
+            patch(
+                "rtp_llm.models_py.model_desc.kimi_k3.Embedding",
+                return_value=nn.Identity(),
+            ),
+        ):
+            model = KimiK3Model(config, parallel, weights, 2, max_moe_tokens=16)
+        self.assertTrue(model.prefill_query_cp)
+        self.assertTrue(model.requires_sequence_parallel_padding)
+
+    def test_device_input_prefix_warmup_runs_shared_kda_forward(self):
+        config = NS(
+            linear_key_head_dim=128,
+            linear_value_head_dim=128,
+            linear_num_key_heads=1,
+            linear_num_value_heads=1,
+            linear_conv_kernel_dim=4,
+            ssm_state_dtype="fp32",
+            conv_state_dtype="bf16",
+        )
+        weights = {
+            W.linear_attn_conv1d_w: torch.ones(
+                (384, 1, 4), dtype=torch.bfloat16, device="cuda"
+            ),
+            W.linear_attn_dt_b_kda: torch.zeros(128, device="cuda"),
+            W.linear_attn_alog: torch.zeros(1, device="cuda"),
+        }
+        prefill = KdaPrefill(config, ParallelismConfig(), weights)
+        inputs = PyAttentionInputs()
+        inputs.is_prefill = inputs.is_warmup = True
+        inputs.input_lengths = inputs.input_lengths_device = torch.tensor(
+            [64], dtype=torch.int32, device="cuda"
+        )
+        inputs.prefix_lengths = inputs.prefix_lengths_device = torch.tensor(
+            [64], dtype=torch.int32, device="cuda"
+        )
+        inputs.cu_seqlens = torch.empty(0, dtype=torch.int32)
+        inputs.cu_seqlens_device = torch.tensor(
+            [0, 64], dtype=torch.int32, device="cuda"
+        )
+        inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id_device = (
+            torch.zeros((1, 2), dtype=torch.int32, device="cuda")
+        )
+        backing = torch.ones(
+            (2, prefill.linear_cache_converter.block_size_bytes // 2),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        output = prefill(
+            torch.zeros((64, 384), dtype=torch.bfloat16, device="cuda"),
+            torch.zeros((64, 128), dtype=torch.bfloat16, device="cuda"),
+            torch.zeros((64, 1), dtype=torch.bfloat16, device="cuda"),
+            inputs,
+            NS(kv_cache_base=backing, seq_size_per_block=64),
+            KdaMetadata(),
+        )
+        self.assertEqual(output.shape, (64, 1, 128))
+        self.assertTrue(torch.isfinite(output).all().item())
+        self.assertTrue(torch.all(backing == 1).item())
+
     def test_noncausal_chunk_configuration_fails_before_engine_construction(self):
         engine = EngineConfig.create(PyEnvConfigs())
         engine.runtime_config.fifo_scheduler_config.prefill_chunk_size = 128
         model = NS(
-            num_layers=1, max_seq_len=4096, model_name="noncausal",
+            num_layers=1,
+            max_seq_len=4096,
+            model_name="noncausal",
             attn_config=NS(tokens_per_block=64, is_causal=False),
         )
         with self.assertRaisesRegex(ValueError, "[Nn]on.causal|is_causal"):
@@ -74,15 +155,21 @@ class KimiK3StartupIntegrationTest(unittest.TestCase):
                 )
                 metadata = prepare_paged_short_conv_metadata(inputs.cu_seqlens, "cuda")
                 args = (
-                    view.prefix_lengths.cuda(), inputs.cu_seqlens.cuda(), 64, metadata
+                    view.prefix_lengths.cuda(),
+                    inputs.cu_seqlens.cuda(),
+                    64,
+                    metadata,
                 )
                 actual = paged_short_conv_prefill(
-                    values, weights, states, view.kv_cache_kernel_block_id_device,
-                    *args, current_conv_state=source, continuation_mask=mask
+                    values,
+                    weights,
+                    states,
+                    view.kv_cache_kernel_block_id_device,
+                    *args,
+                    current_conv_state=source,
+                    continuation_mask=mask
                 )
-                expected = paged_short_conv_prefill(
-                    values, weights, None, None, *args
-                )
+                expected = paged_short_conv_prefill(values, weights, None, None, *args)
                 for got, want in zip(actual[:3], expected[:3]):
                     torch.testing.assert_close(got, want, rtol=0, atol=0)
                 torch.testing.assert_close(original, torch.ones_like(original))
@@ -102,8 +189,10 @@ class KimiK3StartupIntegrationTest(unittest.TestCase):
         config = NS(
             max_seq_len=4096,
             getAttentionConfigs=lambda tp: NS(
-                head_num=8 // tp, mla_fp8_compute=False,
-                tokens_per_block=4096, kernel_tokens_per_block=128
+                head_num=8 // tp,
+                mla_fp8_compute=False,
+                tokens_per_block=4096,
+                kernel_tokens_per_block=128,
             ),
         )
         owner = NS(prefill_query_cp=True, sfa_use_fp8=False)
@@ -117,24 +206,34 @@ class KimiK3StartupIntegrationTest(unittest.TestCase):
 
         with patch.object(SparseMlaImpl, "__init__", backend_init):
             SparseMlaPageRRImpl(
-                config, query_cp_parallel(), NS(weights=[]),
-                NS(is_prefill=False), None, False, workspace_owner=owner
+                config,
+                query_cp_parallel(),
+                NS(weights=[]),
+                NS(is_prefill=False),
+                None,
+                False,
+                workspace_owner=owner,
             )
         self.assertEqual(observed, [8])
 
     def test_real_dsa_constructor_initializes_output_row_owner(self):
         config = NS(
             attn_config=NS(
-                head_num=4, q_lora_rank=8, kv_lora_rank=8,
-                rope_head_dim=8, nope_head_dim=8, v_head_dim=8
+                head_num=4,
+                q_lora_rank=8,
+                kv_lora_rank=8,
+                rope_head_dim=8,
+                nope_head_dim=8,
+                v_head_dim=8,
             ),
             layernorm_eps=1e-6,
             hidden_size=8,
             is_mtp=True,
             indexer_projection_quant_config=object(),
             k3_runtime_config=NS(
-                mla_use_nope=True, mla_use_output_gate=True,
-                dsa=NS(indexer_use_fp8=True)
+                mla_use_nope=True,
+                mla_use_output_gate=True,
+                dsa=NS(indexer_use_fp8=True),
             ),
         )
         weights = {
@@ -147,7 +246,9 @@ class KimiK3StartupIntegrationTest(unittest.TestCase):
         with (
             patch(
                 "rtp_llm.models_py.modules.kimi_k3.attention.create_kimi_projection",
-                side_effect=lambda config, weights, name, *args: CudaF16Linear(weights[name]),
+                side_effect=lambda config, weights, name, *args: CudaF16Linear(
+                    weights[name]
+                ),
             ),
             patch("rtp_llm.models_py.modules.kimi_k3.dsa.Indexer"),
             patch("rtp_llm.models_py.modules.base.cuda.fp8_indexer_op.Fp8IndexerOp"),
