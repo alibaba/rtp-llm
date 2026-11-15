@@ -164,16 +164,16 @@ def _qk_norm_rope_cache(
                 tl.store(cache_row + PAIRS + r, rot_high, valid_page & (r < PAIRS))
             else:
                 tl.store(cache_row + d, value, valid_page & (d < D))
-                # TRTLLM's P@V reads invalid V slots: keep 0*NaN out of valid output.
-                if FP8_CACHE:
-                    tail = (physical + 1) % TPB
-                    if valid_page & (token == end - 1) & (tail != 0):
-                        flat = tl.arange(0, 1024)
-                        for chunk in range(tl.cdiv(TPB * D, 1024)):
-                            i = chunk * 1024 + flat
-                            tail_row = i // D
-                            address = CACHE + offset * (KH * TPB * D) + kh * TPB * D + i
-                            tl.store(address, 0.0, (i < TPB * D) & (tail_row >= tail))
+                # TRTLLM's P@V reads masked V slots. A recycled BF16 page can
+                # also contain NaNs, e.g. bytes from a previous FP32 SSM state.
+                tail = (physical + 1) % TPB
+                if valid_page & (token == end - 1) & (tail != 0):
+                    flat = tl.arange(0, 1024)
+                    for chunk in range(tl.cdiv(TPB * D, 1024)):
+                        i = chunk * 1024 + flat
+                        tail_row = i // D
+                        address = CACHE + offset * (KH * TPB * D) + kh * TPB * D + i
+                        tl.store(address, 0.0, (i < TPB * D) & (tail_row >= tail))
             if HAS_SCALES:
                 tl.store(
                     SCALES + offset * (KH * TPB) + kh * TPB + slot, 1.0, valid_page

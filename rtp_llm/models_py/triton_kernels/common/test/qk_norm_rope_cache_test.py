@@ -120,7 +120,7 @@ class QKNormRopeCacheTest(unittest.TestCase):
                 expected[page, kind, :, slot] = value
                 if expected_scales is not None:
                     expected_scales[page, kind, :, slot] = 1
-            if c.cache.dtype == torch.float8_e4m3fn and (physical + 1) % c.page:
+            if (physical + 1) % c.page:
                 expected[page, 1, :, (physical + 1) % c.page :] = 0
         if c.args["fp8_query"]:
             query = query.float().clamp(-448, 448).to(torch.float8_e4m3fn)
@@ -250,16 +250,18 @@ class QKNormRopeCacheTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not alias"):
             self.run_fused(c, out=out)
 
-    def test_fp8_recycled_value_tail_nan_is_cleared(self):
-        c = self.make_case(True, True)
-        for row, physical in enumerate(c.prefix.cpu().tolist()):
-            page = int(c.pages[row, physical // c.page])
-            tail = (physical + 1) % c.page
-            if tail:
-                c.cache[page, 1, :, tail:] = float("nan")
-        eq, ec, es = self.reference(c)
-        self.assert_bytes(self.run_fused(c), eq)
-        self.assert_bytes(c.cache, ec)
+    def test_recycled_value_tail_nan_is_cleared(self):
+        for fp8 in (False, True):
+            with self.subTest(fp8=fp8):
+                c = self.make_case(fp8, fp8)
+                for row, physical in enumerate(c.prefix.cpu().tolist()):
+                    page = int(c.pages[row, physical // c.page])
+                    tail = (physical + 1) % c.page
+                    if tail:
+                        c.cache[page, 1, :, tail:] = float("nan")
+                eq, ec, _ = self.reference(c)
+                self.assert_bytes(self.run_fused(c), eq)
+                self.assert_bytes(c.cache, ec)
 
     def test_disabled_dispatch_does_not_touch_inputs(self):
         c = self.make_case()
