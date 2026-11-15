@@ -12,7 +12,23 @@ from safetensors.torch import save_file
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models_py.model_loader import NewModelLoader
 from rtp_llm.models_py.module_base import collect_loaded_tensor_ids
-from rtp_llm.ops import TaskType
+from rtp_llm.ops import CPRotateMethod, ParallelismConfig, TaskType
+
+
+def tp2_parallelism(rank, ep_size):
+    # Use the native topology and getters, including the server's resolved
+    # default ep_size=tp_size, rather than constant-1 fake TP getters.
+    parallel = ParallelismConfig()
+    parallel.tp_size = 2
+    parallel.tp_rank = rank
+    parallel.world_size = 2
+    parallel.world_rank = rank
+    parallel.dp_size = 1
+    parallel.ep_size = ep_size
+    parallel.ep_rank = rank if ep_size == 2 else 0
+    parallel.ffn_tp_size = 2
+    parallel.ffn_tp_rank = rank
+    return parallel
 
 
 def service(model_type="qwen_2", *, use_new_loader=True, require_weight_update=None):
@@ -197,6 +213,13 @@ class DenseProductionLoadTest(unittest.TestCase):
                         self.assertFalse(model._use_new_loader())
 
     def test_fst_cpu_loading_and_unregistered_model_are_not_auto_enabled(self):
+        self.assertFalse(
+            service(
+                "qwen_2-mtp", use_new_loader=None, require_weight_update=False
+            )._use_new_loader()
+        )
+        with self.assertRaisesRegex(ValueError, "not registered"):
+            service("qwen_2-mtp")._use_new_loader()
         for override in (
             {"load_method": "fastsafetensors"},
             {"force_cpu_load_weights": True},
@@ -215,6 +238,105 @@ class DenseProductionLoadTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "not registered"):
             service("not_registered")._use_new_loader()
+
+    def test_tp2_load_with_default_and_explicit_ep_topology(self):
+        for model_type in ("qwen_2", "qwen_3", "llama"):
+            for ep_size in (1, 2):
+                for rank in (0, 1):
+                    with self.subTest(
+                        model=model_type, ep=ep_size, rank=rank
+                    ), tempfile.TemporaryDirectory() as directory:
+                        model = service(
+                            model_type, use_new_loader=None, require_weight_update=False
+                        )
+                        model.parallelism_config = tp2_parallelism(rank, ep_size)
+                        model.model_config.ckpt_path = directory
+                        weights = checkpoint(model_type)
+                        save_file(weights, directory + "/model.safetensors")
+                        with open(directory + "/config.json", "w") as handle:
+                            json.dump(
+                                {
+                                    "model_type": (
+                                        "llama" if model_type == "llama" else model_type
+                                    ),
+                                    "num_hidden_layers": 1,
+                                },
+                                handle,
+                            )
+                        self.assertTrue(model._use_new_loader())
+                        model.model_config.use_new_loader = True
+                        with patch.object(
+                            model, "_init_custom_module", return_value=None
+                        ), patch.object(model, "_get_device_str", return_value="cpu"):
+                            model.load()
+                        self.assertTrue(model.uses_new_loader)
+                        torch.testing.assert_close(
+                            model.py_model.embed_tokens.weight,
+                            weights["model.embed_tokens.weight"][
+                                rank * 4 : (rank + 1) * 4
+                            ],
+                        )
+                        torch.testing.assert_close(
+                            model.py_model.lm_head.weight,
+                            weights["lm_head.weight"][rank * 4 : (rank + 1) * 4],
+                        )
+                        self.assertIsInstance(
+                            model.model_weights_loader, NewModelLoader
+                        )
+                        self.assertEqual(
+                            model.model_weights_loader.load_config.ep_size, ep_size
+                        )
+                        self.assertEqual(
+                            model.model_weights_loader.load_config.ep_rank,
+                            rank if ep_size == 2 else 0,
+                        )
+                        self.assertIsNone(model.model_weights_loader._expert_filter())
+
+    def test_cp_modes_fallback_or_fail_before_checkpoint_loading(self):
+        for method in (CPRotateMethod.PREFILL_CP, CPRotateMethod.ALLTOALL):
+            for model_type in ("qwen_2", "qwen_3", "llama"):
+                with self.subTest(method=method, model=model_type):
+                    model = service(
+                        model_type, use_new_loader=None, require_weight_update=False
+                    )
+                    model.parallelism_config = tp2_parallelism(0, 2)
+                    model.parallelism_config.prefill_cp_config.method = method
+                    with patch.object(
+                        model, "_init_custom_module", return_value=None
+                    ), patch.object(NewModelLoader, "load") as load:
+                        self.assertFalse(model._use_new_loader())
+                        model.model_config.use_new_loader = True
+                        with self.assertRaisesRegex(ValueError, "Context Parallelism"):
+                            model.load()
+                        load.assert_not_called()
+
+    def test_layer_count_override_fallback_or_fail_before_loading(self):
+        for model_type in ("qwen_2", "qwen_3", "llama"):
+            with self.subTest(
+                model=model_type
+            ), tempfile.TemporaryDirectory() as directory:
+                model = service(
+                    model_type, use_new_loader=None, require_weight_update=False
+                )
+                model.model_config.ckpt_path = directory
+                with open(directory + "/config.json", "w") as handle:
+                    json.dump(
+                        {
+                            "model_type": (
+                                "llama" if model_type == "llama" else model_type
+                            ),
+                            "num_hidden_layers": 2,
+                        },
+                        handle,
+                    )
+                with patch.object(
+                    model, "_init_custom_module", return_value=None
+                ), patch.object(NewModelLoader, "load") as load:
+                    self.assertFalse(model._use_new_loader())
+                    model.model_config.use_new_loader = True
+                    with self.assertRaisesRegex(ValueError, "hack_layer_num"):
+                        model.load()
+                    load.assert_not_called()
 
 
 if __name__ == "__main__":

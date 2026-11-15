@@ -1,7 +1,8 @@
 # NewLoader core
 
-This foundation introduces checkpoint loading into registered `torch.nn.Module`
-parameters and buffers without enabling a replacement serving path.
+NewLoader loads checkpoints into registered `torch.nn.Module` parameters and
+buffers. The foundation and shared-layer commits are followed by the opt-in
+dense serving integration described below.
 
 ## Scope
 
@@ -13,10 +14,23 @@ parameters and buffers without enabling a replacement serving path.
   path validation, filtering and deterministic name mapping.
 - Registry primitives and dependency-light quantization exclusion matching.
 
-There are deliberately **no built-in model registrations** in this batch. Model
-implementations, their registrations and smoke tests will arrive together in
-later changes. Existing serving code and loader defaults are unchanged. This
-does not implement fastsafetensors/FST loading or enable online weight updates.
+The foundation commit deliberately has no built-in model registrations. The
+dense serving batch now registers unquantized `qwen_2`, `qwen_3` and standard HF
+`llama`, together with their load tests and smoke targets. Loader defaults remain
+legacy; automatic NewLoader routing requires `--require_weight_update false`,
+and `--use_new_loader true` explicitly requests it.
+
+Dense TP supports both explicit `ep_size=1` and the server's default resolved
+`ep_size=tp_size` with `dp_size=1`; neither implies expert sharding for a dense
+model. CP (including `PREFILL_CP`) and layer-count overrides such as
+`--hack_layer_num` are not supported in this batch: automatic selection falls
+back to legacy, while explicit NewLoader selection fails before reading weights.
+Layer-count overrides are detected by comparing the runtime layer count against
+`num_hidden_layers` in the checkpoint's HF `config.json`.
+
+Eagle/MTP registration and tests belong to a later batch and are not included
+in the dense test targets. This batch does not implement fastsafetensors/FST
+loading or enable online weight updates.
 
 ## Shared-layer batch
 

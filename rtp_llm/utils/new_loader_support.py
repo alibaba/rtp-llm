@@ -10,7 +10,7 @@ def new_loader_unsupported_reason(
     parallelism_config,
     force_cpu_load_weights=False,
     skip_python_model=False,
-    load_method=None
+    load_method=None,
 ):
     if skip_python_model:
         return "NewLoader requires the Python model runtime"
@@ -46,17 +46,36 @@ def new_loader_unsupported_reason(
     parallel = parallelism_config
     if parallel.pp_size != 1:
         return "pipeline parallelism is not supported by this NewLoader batch"
-    if parallel.dp_size != 1 or parallel.ep_size != 1:
+    # Server setup derives ep_size=tp_size*dp_size when it was left at 0.
+    # Dense models have no experts: with DP=1 this is still ordinary TP.
+    if parallel.dp_size != 1 or parallel.ep_size not in (1, parallel.tp_size):
         return "independent DP/EP is not supported by this dense-text batch"
     physical_tp = (parallel.tp_size, parallel.tp_rank)
     attn_tp = (parallel.get_attn_tp_size(), parallel.get_attn_tp_rank())
     ffn_tp = (parallel.get_ffn_tp_size(), parallel.get_ffn_tp_rank())
-    if parallel.prefill_cp_config.is_enabled() or attn_tp != physical_tp:
+    if (
+        parallel.prefill_cp_config.is_enabled()
+        or parallel.prefill_cp_config.is_prefill_enabled()
+        or attn_tp != physical_tp
+    ):
         return "Context Parallelism / independent attention TP is not supported by this NewLoader batch"
     if ffn_tp != attn_tp:
         return "independent FFN TP / sequence parallelism is not supported by this NewLoader batch"
     if config.vocab_size % parallel.tp_size:
         return "vocabulary padding for non-divisible TP vocabularies is not supported by this NewLoader batch"
+    # build_model_config applies --hack_layer_num before this route is chosen.
+    # The dense runtimes currently consume all checkpoint layers. Compare with
+    # the original HF config so automatic routing can fall back before loading.
+    config_path = os.path.join(config.ckpt_path, "config.json")
+    if os.path.isfile(config_path):
+        with open(config_path, encoding="utf-8") as handle:
+            checkpoint_config = json.load(handle)
+        checkpoint_layers = checkpoint_config.get("num_hidden_layers")
+        if checkpoint_layers is not None and checkpoint_layers != config.num_layers:
+            return (
+                "layer-count override (--hack_layer_num) is not supported by this "
+                f"NewLoader batch: runtime={config.num_layers}, checkpoint={checkpoint_layers}"
+            )
     index_path = os.path.join(config.ckpt_path, "model.safetensors.index.json")
     if os.path.isfile(index_path):
         with open(index_path, encoding="utf-8") as handle:

@@ -557,6 +557,11 @@ class BaseModel(object):
             load_config=NewLoaderConfig(
                 tp_size=parallelism.tp_size,
                 tp_rank=parallelism.tp_rank,
+                # Preserve the resolved topology, including the default EP=TP
+                # for dense models. The loader skips expert filtering when the
+                # model has no experts, but validates topology consistency.
+                ep_size=parallelism.ep_size,
+                ep_rank=parallelism.ep_rank,
                 compute_dtype=self.model_config.compute_dtype,
                 device=self.device,
                 load_method=NewModelLoader.resolve_requested_load_method(
