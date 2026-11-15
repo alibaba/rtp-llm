@@ -234,7 +234,7 @@ P2PBroadcastClient::LeaseStatusResult P2PBroadcastClient::queryLeaseStatus(const
     auto tp_result = tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
         std::move(requests), static_cast<int>(poll_timeout_ms), rpc_call);
     if (!tp_result) {
-        RTP_LLM_LOG_WARNING("queryLeaseStatus: broadcast failed to create result, unique_key=%s", unique_key.c_str());
+        result.failure = "could not start lease query broadcast";
         return result;
     }
 
@@ -244,7 +244,10 @@ P2PBroadcastClient::LeaseStatusResult P2PBroadcastClient::queryLeaseStatus(const
     tp_result->onDone([completed]() { completed->set_value(); });
     const bool all_done = completion.wait_for(std::chrono::milliseconds(poll_timeout_ms)) == std::future_status::ready;
     if (!all_done || !tp_result->success()) {
-        RTP_LLM_LOG_WARNING("queryLeaseStatus: broadcast timed out or failed, unique_key=%s", unique_key.c_str());
+        const auto error = tp_result->firstError().error;
+        result.failure   = error.hasError() ?
+                               error.ToString() :
+                               (all_done ? "lease query broadcast failed" : "lease query deadline exceeded");
         return result;
     }
 
@@ -261,13 +264,15 @@ P2PBroadcastClient::LeaseStatusResult P2PBroadcastClient::queryLeaseStatus(const
             rs.started_ops = ls.started_ops();
             rs.finished_ops = ls.finished_ops();
             rs.stopped     = ls.stopped();
-        } else {
-            RTP_LLM_LOG_WARNING("queryLeaseStatus: rank %zu missing valid lease_status, unique_key=%s",
-                                rank, unique_key.c_str());
+        } else if (result.failure.empty()) {
+            result.failure = "missing valid lease status from rank " + std::to_string(rank);
         }
         result.ranks.push_back(rs);
     }
-    result.success = true;
+    result.success = result.failure.empty() && result.ranks.size() == worker_num && worker_num > 0;
+    if (!result.success && result.failure.empty()) {
+        result.failure = "incomplete lease query response set";
+    }
     return result;
 }
 

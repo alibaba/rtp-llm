@@ -116,6 +116,7 @@ public:
             bool stopped{false};
         };
         std::vector<RankStatus> ranks;
+        std::string             failure;
 
         bool allStopped() const {
             if (ranks.empty()) {

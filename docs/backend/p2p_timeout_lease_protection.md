@@ -24,6 +24,8 @@ Prefill 向 Decode 的各个 worker 发起 P2P KV 数据传输。TCP 和 RDMA �
 
 ## 状态观测
 
+`P2P retained KV` 日志区分仍在等待取消确认、尚未收到租约查询结果、最近一次查询失败，以及已收到租约状态但仍在等待停写的上下文。取消或查询失败日志会携带首个已知错误。若收到了 worker 错误，日志会包含对应 rank。
+
 新增 Gauge 指标使用前缀 `rtp_llm_p2p_connector_decode_scheduler_`：
 
 - `retained_kv_bytes`：滞留 KV 字节数。

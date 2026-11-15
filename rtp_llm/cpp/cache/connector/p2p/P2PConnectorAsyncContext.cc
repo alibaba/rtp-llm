@@ -152,6 +152,7 @@ void P2PConnectorAsyncReadContext::beginLeaseHold() {
     lease_poll_interval_ms_.store(kLeasePollInitialIntervalMs, std::memory_order_relaxed);
     lease_poll_next_ms_.store(now_ms + kLeasePollInitialIntervalMs, std::memory_order_relaxed);
     lease_poll_retry_count_.store(0, std::memory_order_relaxed);
+    lease_query_state_.store(LeaseQueryState::Pending, std::memory_order_relaxed);
     lease_hold_start_us_.store(P2PNotification::nowUs(), std::memory_order_relaxed);
     lease_hold_pending_.store(true, std::memory_order_release);
 }
@@ -443,8 +444,10 @@ void P2PConnectorAsyncReadContext::checkCancelDone() {
         return;
     }
 
-    RTP_LLM_LOG_WARNING("CANCEL_READ broadcast failed; retrying while lease is held, unique_key=%s",
-                        uniqueKey().c_str());
+    const auto error = cancel_result->firstError().error;
+    RTP_LLM_LOG_WARNING("CANCEL_READ broadcast failed; retrying while lease is held, unique_key=%s reason=%s",
+                        uniqueKey().c_str(),
+                        error.ToString().c_str());
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (cancel_result_ == cancel_result) {
@@ -485,9 +488,11 @@ void P2PConnectorAsyncReadContext::pollLeaseIfNeeded(const std::shared_ptr<P2PBr
     }
     const int64_t after_poll_ms     = P2PNotification::nowMs();
     if (!result.success) {
-        RTP_LLM_LOG_WARNING("pollLeaseIfNeeded: QUERY_LEASE_STATUS broadcast failed, unique_key=%s retry=%d",
+        lease_query_state_.store(LeaseQueryState::Failed, std::memory_order_relaxed);
+        RTP_LLM_LOG_WARNING("pollLeaseIfNeeded: QUERY_LEASE_STATUS failed, unique_key=%s retry=%d reason=%s",
                             unique_key.c_str(),
-                            retry);
+                            retry,
+                            result.failure.c_str());
         // Backoff: double interval up to max.
         const int64_t interval =
             std::min(lease_poll_interval_ms_.load(std::memory_order_relaxed) * 2, kLeasePollMaxIntervalMs);
@@ -513,6 +518,7 @@ void P2PConnectorAsyncReadContext::pollLeaseIfNeeded(const std::shared_ptr<P2PBr
     }
 
     // Not yet stopped — continue polling with backoff.
+    lease_query_state_.store(LeaseQueryState::WaitingForStop, std::memory_order_relaxed);
     const int64_t interval =
         std::min(lease_poll_interval_ms_.load(std::memory_order_relaxed) * 2, kLeasePollMaxIntervalMs);
     lease_poll_interval_ms_.store(interval, std::memory_order_relaxed);
@@ -730,6 +736,10 @@ void P2PConnectorAsyncReadContextChecker::checkRetainedResources(
     // Groups can have different block sizes and layer counts, so compare bytes.
     std::map<std::string, std::set<BlockIdxType>> held_blocks;
     size_t                              held_contexts  = 0;
+    size_t                                        awaiting_cancel = 0;
+    size_t                                        pending_query   = 0;
+    size_t                                        failed_query    = 0;
+    size_t                                        awaiting_stop   = 0;
     int64_t                             oldest_hold_ms = 0;
     const int64_t                       now_us         = P2PNotification::nowUs();
     for (const auto& context : contexts) {
@@ -738,6 +748,21 @@ void P2PConnectorAsyncReadContextChecker::checkRetainedResources(
             continue;
         }
         ++held_contexts;
+        if (!context->cancel_confirmed_.load(std::memory_order_acquire)) {
+            ++awaiting_cancel;
+        } else {
+            switch (context->lease_query_state_.load(std::memory_order_relaxed)) {
+                case P2PConnectorAsyncReadContext::LeaseQueryState::Pending:
+                    ++pending_query;
+                    break;
+                case P2PConnectorAsyncReadContext::LeaseQueryState::Failed:
+                    ++failed_query;
+                    break;
+                case P2PConnectorAsyncReadContext::LeaseQueryState::WaitingForStop:
+                    ++awaiting_stop;
+                    break;
+            }
+        }
         const auto hold_start_us = context->lease_hold_start_us_.load();
         if (hold_start_us > 0) {
             oldest_hold_ms = std::max(oldest_hold_ms, (now_us - hold_start_us) / 1000);
@@ -768,13 +793,18 @@ void P2PConnectorAsyncReadContextChecker::checkRetainedResources(
     const int64_t now_ms = now_us / 1000;
     if (held_contexts > 0 && (last_leak_log_ms_ == 0 || now_ms - last_leak_log_ms_ >= 30 * 1000)) {
         RTP_LLM_LOG_WARNING("P2P retained KV: contexts=%zu held_bytes=%zu total_bytes=%zu held_percent=%.2f "
-                            "exit_threshold_percent=%d oldest_hold_ms=%ld",
+                            "exit_threshold_percent=%d oldest_hold_ms=%ld awaiting_cancel=%zu pending_query=%zu "
+                            "failed_query=%zu awaiting_stop=%zu",
                             held_contexts,
                             held_bytes,
                             total_kv_bytes_,
                             held_percent,
                             kv_leak_exit_threshold_percent_,
-                            oldest_hold_ms);
+                            oldest_hold_ms,
+                            awaiting_cancel,
+                            pending_query,
+                            failed_query,
+                            awaiting_stop);
         last_leak_log_ms_ = now_ms;
     } else if (held_contexts == 0 && last_leak_log_ms_ != 0) {
         RTP_LLM_LOG_INFO("P2P retained KV: all held resources released after physical stop confirmation");

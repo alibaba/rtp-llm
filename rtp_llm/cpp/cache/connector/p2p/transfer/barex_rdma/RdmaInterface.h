@@ -39,7 +39,10 @@ using RdmaReadCallback = std::function<void(TransferErrorCode, const std::string
 class IRdmaConnection {
 public:
     virtual ~IRdmaConnection() = default;
+    // Close requests transport shutdown. It does not confirm posted DMA has stopped.
     virtual void close() = 0;
+    // A completion callback delivers the physical outcome for this batch.
+    // Timeout or close does not guarantee a callback for an already posted read.
     virtual void read(const std::vector<std::pair<torch::Tensor, std::shared_ptr<RemoteBuffer>>>& local_remote_buffers,
                       RdmaReadCallback callback,
                       uint64_t deadline_ms) = 0;

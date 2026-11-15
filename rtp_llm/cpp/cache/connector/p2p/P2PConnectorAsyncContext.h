@@ -220,6 +220,12 @@ private:
     std::atomic<int64_t> lease_poll_next_ms_{0};           // steady-clock earliest next poll
     std::atomic<int64_t> lease_poll_interval_ms_{10};      // backoff interval, starts 10ms, max 100ms
     std::atomic<int>     lease_poll_retry_count_{0};
+    enum class LeaseQueryState {
+        Pending,
+        Failed,
+        WaitingForStop
+    };
+    std::atomic<LeaseQueryState>     lease_query_state_{LeaseQueryState::Pending};
     std::atomic<bool>    calls_ready_{false};
     std::atomic<bool>    cancel_requested_{false};
     KickoffState         kickoff_state_{KickoffState::QUEUED};  // guarded by state_mutex_
