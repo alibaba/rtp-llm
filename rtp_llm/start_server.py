@@ -94,10 +94,9 @@ def _visible_device_count() -> int:
 def _scr_local_world_size(py_env_configs: PyEnvConfigs) -> int:
     """Resolve the process count used by the SCR manifest and rank launcher.
 
-    An explicit launcher value is authoritative.  Without it, use the number
-    of visible CUDA devices (or one CPU process), capped by the configured
-    world size.  This keeps the frozen participant manifest aligned with the
-    ranks actually started on a partially visible host.
+    An explicit launcher value is authoritative. Backend ranks are bounded by
+    both the resolved local topology and the visible CUDA devices. A
+    frontend-only process uses the resolved topology of the backend it serves.
     """
 
     raw = os.environ.get("LOCAL_WORLD_SIZE", "")
@@ -110,17 +109,22 @@ def _scr_local_world_size(py_env_configs: PyEnvConfigs) -> int:
     if value > 0:
         return value
 
-    world_size = max(1, int(py_env_configs.parallelism_config.world_size))
+    pc = py_env_configs.parallelism_config
+    local_world_size = max(1, min(pc.local_world_size, pc.world_size))
+    if py_env_configs.role_config.role_type == RoleType.FRONTEND:
+        return local_world_size
     device_count = _visible_device_count()
-    if device_count <= 0:
-        return 1
-    return max(1, min(device_count, world_size))
+    return max(1, min(device_count, local_world_size))
 
 
 def _build_scr_participant_manifest(
     py_env_configs: PyEnvConfigs,
 ) -> ScrParticipantManifest | None:
-    """Freeze one Epsilon quorum for the complete RTP-LLM process tree."""
+    """Freeze the Epsilon quorum for all participating processes in this Pod.
+
+    Worker IDs are Pod-local. The controller must scope each rendezvous to a
+    single Pod, including when a deployment has multiple Pods.
+    """
 
     # A feature-enabled normal serving process must not enter a template
     # rendezvous or advertise participants before the controller selects a

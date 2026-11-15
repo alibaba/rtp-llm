@@ -165,6 +165,12 @@ class RemoteCacheTest(unittest.TestCase):
 
 class EngineRemoteCacheTest(unittest.TestCase):
     def engine(self, store):
+        with patch(
+            "rtp_llm.multimodal.kvcm.RtpKvMetaObjectClient.from_env", return_value=store
+        ):
+            return self.make_engine()
+
+    def make_engine(self, *, defer_remote_cache=False):
         config = VitConfig()
         config.use_local_preprocess = True
         config.mm_cache_gpu_max_bytes = 0
@@ -175,14 +181,35 @@ class EngineRemoteCacheTest(unittest.TestCase):
         model = ModelConfig()
         model.mm_related_params.preprocess_batch_size = 1
         interface = FakeEmbeddingLengthInterface()
-        with patch(
-            "rtp_llm.multimodal.kvcm.RtpKvMetaObjectClient.from_env", return_value=store
-        ):
-            engine = MMProcessEngine(
-                interface, model, config, ProfilingDebugLoggingConfig()
-            )
+        engine = MMProcessEngine(
+            interface,
+            model,
+            config,
+            ProfilingDebugLoggingConfig(),
+            defer_remote_cache=defer_remote_cache,
+        )
         self.addCleanup(engine.stop)
         return engine
+
+    def test_deferred_remote_cache_connects_when_service_starts(self):
+        with patch(
+            "rtp_llm.multimodal.kvcm.RtpKvMetaObjectClient.from_env",
+            return_value=Store(),
+        ) as create:
+            engine = self.make_engine(defer_remote_cache=True)
+            create.assert_not_called()
+            self.assertIsNone(engine._remote_embedding_cache)
+
+            engine.start_remote_embedding_cache()
+            engine.start_remote_embedding_cache()
+            create.assert_called_once()
+            self.assertIsNotNone(engine._remote_embedding_cache)
+            with patch.object(
+                engine._remote_embedding_cache, "submit_eviction"
+            ) as submit:
+                entry = SimpleNamespace()
+                engine._embedding_cache._on_cpu_evict("key", entry)
+                submit.assert_called_once_with("key", entry)
 
     def test_sync_hit_preserves_extras_and_skips_preprocess_and_forward(self):
         mm_input = MultimodalInput(

@@ -731,6 +731,8 @@ class MMProcessEngine:
         is_proxy_mode: bool = False,
         device: str = "cuda:0",
         kv_cache_config: Optional[Any] = None,
+        *,
+        defer_remote_cache: bool = False,
     ):
         """
         Initialize the multimodal process engine.
@@ -762,12 +764,8 @@ class MMProcessEngine:
         self.mm_part = mm_part
 
         self._remote_embedding_cache = None
+        self._remote_cache_init = None
         if vit_config.mm_remote_cache_enable:
-            from rtp_llm.multimodal.kvcm import RtpKvMetaObjectClient
-            from rtp_llm.multimodal.mm_remote_embedding_cache import (
-                MMRemoteEmbeddingCache,
-            )
-
             if vit_config.mm_cache_cpu_max_bytes <= 0:
                 raise ValueError(
                     "MM_REMOTE_CACHE_ENABLE requires a nonzero CPU embedding cache"
@@ -780,32 +778,15 @@ class MMProcessEngine:
             )
             if min(limits) <= 0:
                 raise ValueError("remote embedding cache limits must be positive")
-            client = (
-                RtpKvMetaObjectClient.from_kv_cache_config(
-                    kv_cache_config, max_object_bytes=limits[0]
-                )
-                if kv_cache_config is not None
-                else RtpKvMetaObjectClient.from_env(max_object_bytes=limits[0])
+            cuda_device = (
+                torch.device("cuda", torch.cuda.current_device())
+                if torch.cuda.is_available()
+                else None
             )
-            self._remote_embedding_cache = MMRemoteEmbeddingCache(
-                client,
-                max_object_bytes=limits[0],
-                max_inflight_bytes=limits[1],
-                max_pending=limits[2],
-                read_timeout_ms=limits[3],
-                cuda_device=(
-                    torch.device("cuda", torch.cuda.current_device())
-                    if torch.cuda.is_available()
-                    else None
-                ),
-            )
-            logging.info(
-                "ViT shared remote cache enabled: instance=%s group=%s limits=%s; "
-                "local eviction never removes shared objects",
-                client.instance_id,
-                client.instance_group,
-                limits,
-            )
+
+            self._remote_cache_init = (kv_cache_config, limits, cuda_device)
+            if not defer_remote_cache:
+                self.start_remote_embedding_cache()
 
         # threading.Lock: protects gRPC-handler-thread access within this
         # process. multiprocessing.Lock would round-trip through an OS
@@ -904,8 +885,8 @@ class MMProcessEngine:
             cpu_max_bytes=self.vit_config.mm_cache_cpu_max_bytes,
             report_metrics=True,
             on_cpu_evict=(
-                self._remote_embedding_cache.submit_eviction
-                if self._remote_embedding_cache is not None
+                self._submit_remote_eviction
+                if vit_config.mm_remote_cache_enable
                 else None
             ),
         )
@@ -2331,6 +2312,44 @@ class MMProcessEngine:
             self._fail_async_compute(cache_key, entry, e)
         finally:
             self._cancel_greennet(handle)
+
+    def start_remote_embedding_cache(self) -> None:
+        """Start the optional KVCM client and its service discovery."""
+        if self._remote_cache_init is None:
+            return
+        from rtp_llm.multimodal.kvcm import RtpKvMetaObjectClient
+        from rtp_llm.multimodal.mm_remote_embedding_cache import MMRemoteEmbeddingCache
+
+        kv_cache_config, limits, cuda_device = self._remote_cache_init
+        max_object_bytes, max_inflight_bytes, max_pending, read_timeout_ms = limits
+        client = (
+            RtpKvMetaObjectClient.from_kv_cache_config(
+                kv_cache_config, max_object_bytes=max_object_bytes
+            )
+            if kv_cache_config is not None
+            else RtpKvMetaObjectClient.from_env(max_object_bytes=max_object_bytes)
+        )
+        self._remote_embedding_cache = MMRemoteEmbeddingCache(
+            client,
+            max_object_bytes=max_object_bytes,
+            max_inflight_bytes=max_inflight_bytes,
+            max_pending=max_pending,
+            read_timeout_ms=read_timeout_ms,
+            cuda_device=cuda_device,
+        )
+        self._remote_cache_init = None
+        logging.info(
+            "ViT shared remote cache enabled: instance=%s group=%s limits=%s; "
+            "local eviction never removes shared objects",
+            client.instance_id,
+            client.instance_group,
+            limits,
+        )
+
+    def _submit_remote_eviction(self, key: str, entry: MMEmbeddingCacheEntry) -> None:
+        remote_cache = self._remote_embedding_cache
+        if remote_cache is not None:
+            remote_cache.submit_eviction(key, entry)
 
     def stop(self) -> None:
         """Shutdown asynchronous work, the scheduler and preprocessing workers."""

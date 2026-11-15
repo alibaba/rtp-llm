@@ -186,5 +186,6 @@ cc_test(
         "@havenask//aios/autil:zlib",
     ] + cuda13_torch_link_deps,
     env = {"TEST_USING_DEVICE": "CUDA"},
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "H20_CU13"},
+    tags = ["H20_CU13"],
 )

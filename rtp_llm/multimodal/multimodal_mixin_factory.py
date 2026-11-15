@@ -41,6 +41,7 @@ class MultimodalMixinFactory:
         device: str = "cuda:0",
         server_id: int = 0,
         is_proxy_mode: bool = False,
+        defer_remote_cache: bool = False,
     ) -> MMProcessEngine:
         mm_mixin = MultimodalMixinFactory._create_multimodal_mixin(
             model_config=model_config,
@@ -57,4 +58,5 @@ class MultimodalMixinFactory:
             is_proxy_mode,
             device=device,
             kv_cache_config=engine_config.kv_cache_config,
+            defer_remote_cache=defer_remote_cache,
         )

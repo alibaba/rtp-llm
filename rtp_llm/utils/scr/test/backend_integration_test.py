@@ -493,6 +493,22 @@ class BackendScrIntegrationTest(unittest.TestCase):
         self.assertNotIn("frontend:1:0", manifest.participant_ids)
         self.assertNotIn("dash_sc:1:0", manifest.participant_ids)
 
+    def test_scr_topology_respects_configured_local_ranks(self):
+        config = self._launcher_config(world_size=4)
+        config.parallelism_config.local_world_size = 2
+        with mock.patch.dict(os.environ, clear=True), mock.patch.object(
+            launcher, "_visible_device_count", return_value=4
+        ):
+            self.assertEqual(launcher._scr_local_world_size(config), 2)
+
+    def test_frontend_topology_does_not_depend_on_visible_devices(self):
+        config = self._launcher_config(role_type=RoleType.FRONTEND, world_size=4)
+        config.parallelism_config.local_world_size = 2
+        with mock.patch.dict(os.environ, clear=True), mock.patch.object(
+            launcher, "_visible_device_count", return_value=0
+        ):
+            self.assertEqual(launcher._scr_local_world_size(config), 2)
+
     def test_manifest_keeps_explicit_local_world_size_in_sync_with_rank_dispatch(self):
         config = self._launcher_config(world_size=4)
         with mock.patch.dict(
