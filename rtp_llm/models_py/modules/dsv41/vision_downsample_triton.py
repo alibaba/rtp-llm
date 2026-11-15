@@ -3,7 +3,8 @@
 DeepInfer's batch-downsample approach removes per-image pad/unfold launches.
 Here each image still produces a contiguous [C * ratio**2, output_patches]
 column matrix, so the existing per-image W1 sees exactly its original strides.
-Only homogeneous BF16 SM10x inference batches use this specialization.
+Only homogeneous BF16 SM10x or explicitly identified PPU inference batches use
+this specialization.
 """
 
 import torch
@@ -59,6 +60,14 @@ if triton is not None:
                 )
 
 
+def _supported_device(device):
+    if torch.cuda.get_device_capability(device)[0] == 10:
+        return True
+    from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
+
+    return is_ppu()
+
+
 def is_supported(x, grids, ratio):
     """Return false for unsupported device, geometry, dtype or autograd."""
     if not (
@@ -81,7 +90,7 @@ def is_supported(x, grids, ratio):
         and width > 0
         and all(grid == grids[0] for grid in grids)
         and x.shape[0] == len(grids) * height * width
-        and torch.cuda.get_device_capability(x.device)[0] == 10
+        and _supported_device(x.device)
     )
 
 

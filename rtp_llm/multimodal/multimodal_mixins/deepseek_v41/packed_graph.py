@@ -8,7 +8,7 @@ This is not permission to capture concurrently with uncoordinated CUDA producers
 
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 
 import torch
@@ -34,6 +34,7 @@ class PackedVisionGraph:
         *,
         max_entries=4,
         max_bytes=8 * 1024**3,
+        observation_window=None,
     ):
         # Positional arguments are admission ceilings, NOT exact/full shape
         # requirements. Mixed grids and tails have their own cache keys.
@@ -43,6 +44,8 @@ class PackedVisionGraph:
             raise ValueError("graph patch budget must be positive")
         if max_entries < 0 or max_bytes < 0:
             raise ValueError("graph cache budgets must be nonnegative")
+        if observation_window is not None and observation_window < 1:
+            raise ValueError("graph observation window must be positive")
         self.max_batch_images = max_batch_images
         self.max_patches = max_patches
         self.max_entries, self.max_bytes = max_entries, max_bytes
@@ -54,12 +57,18 @@ class PackedVisionGraph:
         # bounded reuse history so one-off tails cannot displace hot full
         # batches, without retaining request tensors or arbitrary metadata.
         self._observations = OrderedDict()
-        self._observation_limit = max(16, max_entries * 8)
+        self._observation_limit = max(16, max_entries * 8, observation_window or 0)
+        self._recent_observations = (
+            deque(maxlen=observation_window) if observation_window is not None else None
+        )
         self._generation = 0
         self._failed = False
         self.captures = self.replays = self.eager = 0
         self.evictions = self.deferred = self.budget_skips = 0
+        self.expired_pending = 0
         self.capture_seconds = 0.0
+        self.online_attempts = self.online_captures = 0
+        self.online_capture_seconds = 0.0
 
     def stats(self):
         with self._lock:
@@ -72,13 +81,22 @@ class PackedVisionGraph:
                 "evictions": self.evictions,
                 "deferred": self.deferred,
                 "budget_skips": self.budget_skips,
+                "expired_pending": self.expired_pending,
                 "charged_bytes": sum(e.charged_bytes for e in self._entries.values()),
                 "max_bytes": self.max_bytes,
                 "max_entries": self.max_entries,
                 "capture_seconds": self.capture_seconds,
+                "online_attempts": self.online_attempts,
+                "online_captures": self.online_captures,
+                "online_capture_seconds": self.online_capture_seconds,
                 "failed": self._failed,
                 "cached_grids": [key[2] for key in self._entries],
                 "observed_shapes": len(self._observations),
+                "observation_window": (
+                    self._recent_observations.maxlen
+                    if self._recent_observations is not None
+                    else None
+                ),
                 "cached_observations": [
                     self._observations.get(key, 0) for key in self._entries
                 ],
@@ -137,6 +155,24 @@ class PackedVisionGraph:
             self._observations.pop(removable)
 
     def _observe(self, key):
+        recent = self._recent_observations
+        if recent is not None:
+            # A previous workload phase must not accumulate permanent
+            # admission priority. Count a bounded window of native forwards,
+            # retaining frequency protection against one-off tail shapes.
+            if len(recent) == recent.maxlen:
+                expired = recent.popleft()
+                remaining = self._observations.get(expired, 0) - 1
+                if remaining > 0:
+                    self._observations[expired] = remaining
+                else:
+                    self._observations.pop(expired, None)
+                    # Pending metadata is only useful while a real request is
+                    # still represented in the recent-use window. Otherwise
+                    # idle work could capture an obsolete shape with no count.
+                    if self._pending.pop(expired, None) is not None:
+                        self.expired_pending += 1
+            recent.append(key)
         count = self._observations.pop(key, 0) + 1
         self._observations[key] = count
         self._trim_observations()
@@ -249,31 +285,70 @@ class PackedVisionGraph:
             self._pending.clear()
             self._rejected.clear()
             self._observations.clear()
+            if self._recent_observations is not None:
+                self._recent_observations.clear()
             self._generation += 1
 
     @torch.inference_mode()
-    def build_one(self, forward, *, context=(), prepare_forward=None):
-        """Try one job on a standalone, currently idle GPU lane.
+    def build_one(
+        self,
+        forward,
+        *,
+        context=(),
+        prepare_forward=None,
+        min_observations=1,
+        priority=False,
+    ):
+        """Build at most one real observed shape on a standalone GPU owner.
 
-        try_capture does not enqueue a priority writer; busy foreground work
-        wins. Once capture starts, later arrivals wait until it completes.
+        The default idle policy never queues a writer ahead of foreground work.
+        An opted-in online owner may request priority after a CPU-only hot-shape
+        and admission check. Waiting for the gate never holds the cache mutex.
         """
+        if (
+            not isinstance(min_observations, int)
+            or isinstance(min_observations, bool)
+            or min_observations < 1
+        ):
+            raise ValueError("minimum graph observations must be a positive integer")
         with self._lock:
             if not self._pending or self._failed:
                 return False
-        with cuda_graph_gate.try_capture() as acquired:
-            if not acquired:
+            generation = self._generation
+            if priority:
+                key = self._pending_candidate(
+                    context, min_observations, require_admission=True
+                )
+                if key is None:
+                    return False
+        capture_scope = (
+            cuda_graph_gate.capture if priority else cuda_graph_gate.try_capture
+        )
+        with capture_scope() as acquired:
+            # capture() yields None; only try_capture() returns an acquired flag.
+            if not priority and not acquired:
                 with self._lock:
                     self.deferred += 1
                 return False
             with self._lock:
+                if priority and generation != self._generation:
+                    return False
                 for stale in list(self._pending):
-                    if stale[1] != context:
+                    expired = (
+                        self._recent_observations is not None
+                        and self._observations.get(stale, 0) == 0
+                    )
+                    if stale[0] != self._generation or stale[1] != context or expired:
                         self._pending.pop(stale)
+                        self.expired_pending += int(expired)
                 self._trim_observations()
                 if not self._pending or self._failed:
                     return False
-                key = max(self._pending, key=self._priority)
+                key = self._pending_candidate(
+                    context, min_observations, require_admission=priority
+                )
+                if key is None:
+                    return False
                 estimate = self._pending[key]
                 victims = self._select_victims(key, estimate)
                 if victims is None:
@@ -304,6 +379,8 @@ class PackedVisionGraph:
                     return False
                 self._pending.pop(key)
                 started = time.monotonic()
+                if priority:
+                    self.online_attempts += 1
                 try:
                     entry = self._capture(key, estimate, forward, prepare_forward)
                 except Exception:
@@ -312,7 +389,10 @@ class PackedVisionGraph:
                     self._pending.clear()
                     raise
                 finally:
-                    self.capture_seconds += time.monotonic() - started
+                    elapsed = time.monotonic() - started
+                    self.capture_seconds += elapsed
+                    if priority:
+                        self.online_capture_seconds += elapsed
                 if entry.charged_bytes > self.max_bytes:
                     entry.done.synchronize()
                     self._reject(key)
@@ -326,10 +406,31 @@ class PackedVisionGraph:
                 for victim in victims:
                     self._evict(victim)
                 self._entries[key] = entry
-                self._observations.move_to_end(key)
+                if key in self._observations:
+                    self._observations.move_to_end(key)
                 self._trim_observations()
                 self.captures += 1
+                if priority:
+                    self.online_captures += 1
                 return True
+
+    def _pending_candidate(self, context, min_observations, *, require_admission=False):
+        """Read only metadata; the caller owns the cache mutex."""
+        return max(
+            (
+                key
+                for key in self._pending
+                if key[0] == self._generation
+                and key[1] == context
+                and self._observations.get(key, 0) >= min_observations
+                and (
+                    not require_admission
+                    or self._select_victims(key, self._pending[key]) is not None
+                )
+            ),
+            key=self._priority,
+            default=None,
+        )
 
     def _capture(self, key, estimate, forward, prepare_forward):
         grids, specs = key[2], key[3]

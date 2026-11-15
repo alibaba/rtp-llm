@@ -57,13 +57,29 @@ def _packed_rotary(attention, q, k, cos, sin):
 def _packed_attention(
     q, k, v, grids, lengths, *, qk_bhsd=None, backend="sdpa", cu_seqlens=None
 ):
+    if backend == "fa2":
+        if qk_bhsd is not None:
+            raise ValueError("FA2 consumes native BSHD rotary output, not BHSD")
+        from rtp_llm.models_py.modules.dsv41.vision_attention import (
+            apply_vision_fa2, apply_vision_fa2_varlen,
+        )
+
+        if all(tuple(grid) == tuple(grids[0]) for grid in grids):
+            tensors = [t.view(len(lengths), lengths[0], *t.shape[1:]) for t in (q, k, v)]
+            result = apply_vision_fa2(*tensors)
+        else:
+            if cu_seqlens is None:
+                cu_seqlens = prepare_fa4_cu_seqlens(grids, q.device)
+            result = apply_vision_fa2_varlen(q, k, v, cu_seqlens, max(lengths))
+        if result is not None:
+            return result.reshape(q.shape[0], -1)
     if backend == "fa4":
         if qk_bhsd is not None:
             raise ValueError("FA4 consumes native BSHD rotary output, not BHSD")
         result = _packed_fa4_attention(q, k, v, grids, lengths, cu_seqlens=cu_seqlens)
         if result is not None:
             return result
-    elif backend != "sdpa":
+    elif backend not in ("sdpa", "fa2"):
         raise ValueError("unknown packed vision attention backend")
     # Group by full geometry, not just token count: rotary positions already
     # differ per image, and this makes the intended attention topology explicit.
@@ -157,7 +173,7 @@ def forward_packed(
         if vision.blocks
         else "sdpa"
     )
-    if backend == "fa4" and cu_seqlens is None:
+    if backend in ("fa2", "fa4") and cu_seqlens is None:
         cu_seqlens = prepare_fa4_cu_seqlens(grids, patches[0].device)
     use_bhsd = (
         backend == "sdpa"

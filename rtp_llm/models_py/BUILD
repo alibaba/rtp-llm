@@ -501,7 +501,19 @@ py_library(
 # PPU-native JIT sources retain their frozen relative include layout.
 filegroup(
     name = "ppu_jit_sources",
-    srcs = glob(["kernels/ppu/**/*.cuh", "kernels/ppu/**/*.h", "kernels/ppu/**/*.json", "kernels/ppu/**/*.patch", "kernels/ppu/**/NOTICE*"]),
+    srcs = glob(["kernels/ppu/**/*.cuh", "kernels/ppu/**/*.h", "kernels/ppu/**/*.json", "kernels/ppu/**/*.patch", "kernels/ppu/**/NOTICE*", "kernels/ppu/**/LICENSE*"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "ppu_vision_test_sources",
+    srcs = [
+        "modules/dsv41/_vision_rope_triton.py",
+        "modules/dsv41/vision_residual_add.py",
+        "modules/dsv41/vision_downsample_triton.py",
+        "modules/dsv41/vision_ppu.py",
+        "kernels/ppu/jit/sglang_jit.py",
+    ] + glob(["kernels/ppu/jit/dsv4_ppu/vision_activation/**"]),
     visibility = ["//visibility:public"],
 )
 

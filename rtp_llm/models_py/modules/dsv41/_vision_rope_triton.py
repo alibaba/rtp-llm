@@ -64,6 +64,14 @@ def _vision_qk_rotary_kernel(QK, COS, SIN, OUT, N, ROW_STRIDE: tl.constexpr):
     tl.store(OUT + out_offsets + 32, out1, valid)
 
 
+def _supported_device(device):
+    if torch.cuda.get_device_capability(device)[0] == 10:
+        return True
+    from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
+
+    return is_ppu()
+
+
 def _enabled_or_supported(q, k, cos, sin):
     return (
         not torch.is_grad_enabled()
@@ -83,7 +91,7 @@ def _enabled_or_supported(q, k, cos, sin):
         and cos.is_contiguous()
         and sin.is_contiguous()
         and q.device == k.device == cos.device == sin.device
-        and torch.cuda.get_device_capability(q.device)[0] == 10
+        and _supported_device(q.device)
         and q.untyped_storage().data_ptr() == k.untyped_storage().data_ptr()
         and k.data_ptr() == q.data_ptr() + 1024 * q.element_size()
     )

@@ -270,6 +270,49 @@ class DeepSeekV41PPUModel(DeepSeekV41Model):
         if self._graph_receipt is not None:
             self._graph_receipt.observe()
 
+    def _global_image_rows(self, total, locs, lengths, device):
+        """Clip cached-prefix spans while retaining their source row offsets."""
+        if locs.numel() != len(lengths):
+            raise ValueError("visual feature locations and tensors disagree")
+        rows = torch.full((total,), -1, dtype=torch.int64, device=device)
+        offset = 0
+        for location, length in zip(locs.reshape(-1).tolist(), lengths):
+            location = int(location)
+            start, end = max(location, 0), min(location + length, total)
+            if start < end:
+                rows[start:end] = torch.arange(
+                    offset + start - location, offset + end - location, device=device
+                )
+            offset += length
+        return rows
+
+    def _engram_input_ids(self, input_ids, image_rows=None):
+        """Compare scheduler history using semantic IDs without changing routing."""
+        if getattr(self, "_image_plan", None) is None:
+            return input_ids
+        if image_rows is None:
+            image_rows = (
+                self._image_row_indices(input_ids.numel(), input_ids.device) >= 0
+            )
+        if image_rows.dtype != torch.bool or image_rows.numel() != input_ids.numel():
+            raise ValueError("Engram visual row mask disagrees with input tokens")
+        image_id = int(self.shared_weight_views.geometry.image_token_id)
+        return torch.where(image_rows.reshape(input_ids.shape), image_id, input_ids)
+
+    def _embed_image_rows(self, input_ids, weight):
+        """Gather text safely before injecting the actual rank-local image rows."""
+        rows = self._image_row_indices(int(input_ids.numel()), weight.device)
+        image_rows = rows >= 0
+        safe_ids = torch.where(image_rows.view(input_ids.shape), 0, input_ids)
+        hidden = torch.nn.functional.embedding(safe_ids, weight)
+        values = self._image_plan[0]
+        hidden.view(input_ids.numel(), -1)[image_rows] = values[
+            rows[image_rows].to(device=values.device)
+        ].to(device=hidden.device, dtype=hidden.dtype)
+        # Public Prefill propagates this marker through CP and compact query IDs.
+        self.v4._image_token_mask = image_rows
+        return hidden
+
     @torch.inference_mode()
     def forward(self, inputs, fmha_impl=None):
         from rtp_llm.models_py.model_desc.deepseek_v41_base_model import DeepSeekV4Model
@@ -281,6 +324,7 @@ class DeepSeekV41PPUModel(DeepSeekV41Model):
             return DeepSeekV4Model.forward(self, inputs, fmha_impl)
         finally:
             self._image_plan = None
+            self.v4._image_token_mask = None
 
     def _forward_impl(self, inputs, fmha_impl=None):
         if fmha_impl is not None:

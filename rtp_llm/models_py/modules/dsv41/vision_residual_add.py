@@ -47,6 +47,14 @@ if triton is not None:
         tl.store(Y + offsets, normalized.to(tl.bfloat16), mask=mask)
 
 
+def _supported_device(device):
+    if torch.cuda.get_device_capability(device)[0] == 10:
+        return True
+    from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
+
+    return is_ppu()
+
+
 def apply_vision_residual_rmsnorm(x, residual, weight, eps):
     """Return ``(sum, norm)`` or ``None`` for unsupported inputs."""
     if not (
@@ -66,7 +74,7 @@ def apply_vision_residual_rmsnorm(x, residual, weight, eps):
         and x.is_contiguous()
         and residual.is_contiguous()
         and weight.is_contiguous()
-        and torch.cuda.get_device_capability(x.device)[0] == 10
+        and _supported_device(x.device)
     ):
         return None
     if triton is None:

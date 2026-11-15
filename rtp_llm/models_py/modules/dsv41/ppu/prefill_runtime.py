@@ -1036,7 +1036,16 @@ class SharedForwardState:
             return hidden, ids, positions, cu
         if layer == 0 and hasattr(self, "window_current_tokens"):
             real = self.context.local_is_real if self.context is not None else torch.ones_like(ids, dtype=torch.bool)
-            if not torch.equal(self.window_current_tokens[real].long(), ids[real].long()):
+            comparison_ids = ids
+            image_rows = getattr(self.v4, "_image_token_mask", None)
+            if (
+                image_rows is not None
+                and getattr(self.runtime.model, "_image_plan", None) is not None
+            ):
+                comparison_ids = self.runtime.model._engram_input_ids(ids, image_rows)
+            if not torch.equal(
+                self.window_current_tokens[real].long(), comparison_ids[real].long()
+            ):
                 raise ValueError("real CP Engram windows disagree with input tokens")
         if layer == 19:
             self.prepare_plan()

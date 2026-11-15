@@ -293,6 +293,273 @@ class MMSchedulerTest(TestCase):
         finally:
             sched.close()
 
+    def test_online_maintenance_publishes_before_running_with_backlog(self):
+        for prefetch in (0, 1):
+            with self.subTest(prefetch=prefetch):
+                forward_release = threading.Event()
+                maintenance_entered = threading.Event()
+                maintenance_release = threading.Event()
+                last_maintenance = threading.Event()
+                fake = _FakeMMPart(block_until=forward_release)
+                fake.supports_embedding_online_work = True
+                fake.prepare_embedding_batch = lambda *args: None
+                calls = []
+
+                def maintain():
+                    calls.append(len(fake.calls))
+                    if len(calls) == 1:
+                        self.assertTrue(first.future.done())
+                        self.assertIsNotNone(item.embedding_result)
+                        self.assertFalse(sched._waiting.empty())
+                        maintenance_entered.set()
+                        self.assertTrue(maintenance_release.wait(5))
+                    if len(calls) == 2:
+                        last_maintenance.set()
+
+                fake.run_embedding_online_work = maintain
+                sched = MMScheduler(
+                    fake,
+                    batch_wait_ms=0,
+                    max_batch_size=1,
+                    prefetch_batches=prefetch,
+                    allow_idle_work=True,
+                )
+                item = _FakeWorkItem()
+                try:
+                    first = sched.submit([item])
+                    self.assertTrue(fake.forward_entered.wait(5))
+                    second = sched.submit([_FakeWorkItem()])
+                    third = sched.submit([_FakeWorkItem()])
+                    forward_release.set()
+                    self.assertTrue(maintenance_entered.wait(5))
+                    # The owner is still in maintenance; the completed request
+                    # has already been delivered independently of that work.
+                    self.assertIsNone(first.future.result(1))
+                    self.assertFalse(second.future.done())
+                    maintenance_release.set()
+                    second.future.result(5)
+                    third.future.result(5)
+                    self.assertTrue(last_maintenance.wait(5))
+                    self.assertEqual(calls, [1, 2])
+                finally:
+                    forward_release.set()
+                    maintenance_release.set()
+                    self.assertTrue(sched.close())
+
+    def test_online_capture_cannot_extend_the_next_prefetched_batch(self):
+        forward_release = threading.Event()
+        maintenance_entered = threading.Event()
+        maintenance_release = threading.Event()
+        prepared_bc = threading.Event()
+        fake = _FakeMMPart(block_until=forward_release)
+        fake.supports_embedding_online_work = True
+        preparations = []
+
+        def prepare(data_list, mm_types):
+            values = [float(data.reshape(-1)[0]) for data in data_list]
+            preparations.append(values)
+            if values == [2.0, 3.0]:
+                prepared_bc.set()
+            return None
+
+        def maintain():
+            if len(fake.calls) == 1:
+                self.assertTrue(first.future.done())
+                self.assertTrue(second.future.running())
+                self.assertTrue(third.future.running())
+                self.assertTrue(prepared_bc.is_set())
+                self.assertGreaterEqual(sched.batching_stats()["collected_batches"], 2)
+                self.assertEqual(preparations, [[1.0], [2.0, 3.0]])
+                maintenance_entered.set()
+                self.assertTrue(maintenance_release.wait(5))
+
+        fake.prepare_embedding_batch = prepare
+        fake.run_embedding_online_work = maintain
+        sched = MMScheduler(
+            fake,
+            batch_wait_ms=0,
+            max_batch_size=8,
+            prefetch_batches=1,
+            prefetch_fill_batch=True,
+            allow_idle_work=True,
+        )
+
+        def item(value):
+            return _FakeWorkItem(preprocess_result=torch.tensor([float(value)]))
+
+        try:
+            first = sched.submit([item(1)])
+            self.assertTrue(fake.forward_entered.wait(5))
+            second = sched.submit([item(2)])
+            third = sched.submit([item(3)])
+            forward_release.set()
+            self.assertTrue(maintenance_entered.wait(5))
+            fourth = sched.submit([item(4)])
+            # No next lookahead is running while maintenance owns the lane.
+            # D must wait behind the already sealed [B, C] envelope.
+            self.assertEqual(preparations, [[1.0], [2.0, 3.0]])
+            self.assertEqual(sched._waiting.qsize(), 1)
+            maintenance_release.set()
+            for request in (first, second, third, fourth):
+                request.future.result(5)
+            self.assertEqual(fake.call_values, [[1.0], [2.0, 3.0], [4.0]])
+        finally:
+            forward_release.set()
+            maintenance_release.set()
+            self.assertTrue(sched.close())
+
+    def test_staging_failure_preserves_due_work_for_next_valid_batch(self):
+        forward_release = threading.Event()
+        fake = _FakeMMPart(block_until=forward_release)
+        fake.supports_embedding_online_work = True
+        fake.run_embedding_online_work = mock.Mock()
+
+        def prepare(data_list, mm_types):
+            if float(data_list[0].reshape(-1)[0]) == 2.0:
+                raise RuntimeError("staging failed")
+            return None
+
+        fake.prepare_embedding_batch = prepare
+        sched = MMScheduler(
+            fake,
+            batch_wait_ms=0,
+            max_batch_size=1,
+            prefetch_batches=1,
+            allow_idle_work=True,
+        )
+        try:
+            first = sched.submit([_FakeWorkItem(preprocess_result=torch.tensor([1.0]))])
+            self.assertTrue(fake.forward_entered.wait(5))
+            second = sched.submit(
+                [_FakeWorkItem(preprocess_result=torch.tensor([2.0]))]
+            )
+            forward_release.set()
+            first.future.result(5)
+            with self.assertRaises(MMSchedulerExecutionError):
+                second.future.result(5)
+            fake.run_embedding_online_work.assert_not_called()
+            sched.submit_and_wait(
+                [_FakeWorkItem(preprocess_result=torch.tensor([3.0]))]
+            )
+            fake.run_embedding_online_work.assert_called_once()
+            self.assertEqual(fake.call_values, [[1.0], [3.0]])
+        finally:
+            forward_release.set()
+            self.assertTrue(sched.close())
+
+    def test_cancelled_empty_batch_preserves_due_work_without_maintenance(self):
+        forward_release = threading.Event()
+        preparing_second = threading.Event()
+        release_second = threading.Event()
+        preparing_third = threading.Event()
+        release_third = threading.Event()
+        fake = _FakeMMPart(block_until=forward_release)
+        fake.supports_embedding_online_work = True
+        fake.run_embedding_online_work = mock.Mock()
+
+        def prepare(data_list, mm_types):
+            value = float(data_list[0].reshape(-1)[0])
+            if value == 2.0:
+                preparing_second.set()
+                self.assertTrue(release_second.wait(5))
+            if value == 3.0:
+                preparing_third.set()
+                self.assertTrue(release_third.wait(5))
+            return None
+
+        fake.prepare_embedding_batch = prepare
+        sched = MMScheduler(
+            fake,
+            batch_wait_ms=0,
+            max_batch_size=1,
+            prefetch_batches=1,
+            allow_idle_work=True,
+        )
+        try:
+            first = sched.submit([_FakeWorkItem(preprocess_result=torch.tensor([1.0]))])
+            self.assertTrue(fake.forward_entered.wait(5))
+            second = sched.submit(
+                [_FakeWorkItem(preprocess_result=torch.tensor([2.0]))]
+            )
+            self.assertTrue(preparing_second.wait(5))
+            sched.cancel(second)
+            release_second.set()
+            forward_release.set()
+            first.future.result(5)
+            third = sched.submit([_FakeWorkItem(preprocess_result=torch.tensor([3.0]))])
+            self.assertTrue(preparing_third.wait(5))
+            fake.run_embedding_online_work.assert_not_called()
+            self.assertTrue(second.future.cancelled())
+            release_third.set()
+            third.future.result(5)
+            fake.run_embedding_online_work.assert_called_once()
+            self.assertEqual(fake.call_values, [[1.0], [3.0]])
+        finally:
+            forward_release.set()
+            release_second.set()
+            release_third.set()
+            self.assertTrue(sched.close())
+
+    def test_online_maintenance_requires_dedicated_permission_and_capability(self):
+        for permission, capability in ((False, True), (True, False), (True, None)):
+            with self.subTest(permission=permission, capability=capability):
+                fake = _FakeMMPart()
+                if capability is not None:
+                    fake.supports_embedding_online_work = capability
+                fake.run_embedding_online_work = mock.Mock()
+                sched = MMScheduler(
+                    fake,
+                    batch_wait_ms=0,
+                    max_batch_size=1,
+                    allow_idle_work=permission,
+                )
+                try:
+                    for _ in range(2):
+                        sched.submit_and_wait([_FakeWorkItem()])
+                    self.assertTrue(sched.close())
+                    fake.run_embedding_online_work.assert_not_called()
+                finally:
+                    sched.close()
+
+    def test_online_capture_failure_stops_and_resolves_all_queued_requests(self):
+        for prefetch in (0, 1):
+            with self.subTest(prefetch=prefetch):
+                forward_release = threading.Event()
+                fake = _FakeMMPart(block_until=forward_release)
+                fake.supports_embedding_online_work = True
+                fake.prepare_embedding_batch = lambda *args: None
+                fake.run_embedding_online_work = mock.Mock(
+                    side_effect=torch.cuda.OutOfMemoryError("online capture failed")
+                )
+                sched = MMScheduler(
+                    fake,
+                    batch_wait_ms=0,
+                    max_batch_size=1,
+                    prefetch_batches=prefetch,
+                    allow_idle_work=True,
+                )
+                try:
+                    with mock.patch("torch.cuda.empty_cache") as recover:
+                        first = sched.submit([_FakeWorkItem()])
+                        self.assertTrue(fake.forward_entered.wait(5))
+                        second = sched.submit([_FakeWorkItem()])
+                        third = sched.submit([_FakeWorkItem()])
+                        forward_release.set()
+                        self.assertIsNone(first.future.result(5))
+                        for request in (second, third):
+                            with self.assertRaises(MMSchedulerExecutionError):
+                                request.future.result(5)
+                        self.assertTrue(sched.close())
+                        recover.assert_not_called()
+                    self.assertTrue(sched._stopped.is_set())
+                    with self.assertRaisesRegex(RuntimeError, "closed"):
+                        sched.submit([_FakeWorkItem()])
+                    self.assertEqual(len(fake.calls), 1)
+                    fake.run_embedding_online_work.assert_called_once()
+                finally:
+                    forward_release.set()
+                    self.assertTrue(sched.close())
+
     def test_strict_work_budget_rejects_oversized_indivisible_item(self):
         fake = _FakeMMPart(work_budget=MMWorkEstimate(input_patches=10))
         fake.strict_work_budget = True

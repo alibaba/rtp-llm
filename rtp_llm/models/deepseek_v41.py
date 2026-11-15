@@ -106,7 +106,7 @@ class DeepSeekV41(DeepSeekV4):
         config.activation_type = "SiGLU"
         DeepSeekV4._from_hf(config, ckpt_path, config_json=text)
         config.is_deepseek_v41 = True
-        config.mm_model_config.is_multimodal = v41_backend_for_config() == "cuda"
+        config.mm_model_config.is_multimodal = v41_backend_for_config() in ("cuda", "ppu")
         if config.mm_model_config.is_multimodal:
             image_token_id = int(raw["image_token_id"])
             config.mm_model_config.mm_sep_tokens = [[image_token_id]]

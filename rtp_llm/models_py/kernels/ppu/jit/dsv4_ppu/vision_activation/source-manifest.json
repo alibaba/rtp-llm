@@ -1,0 +1,84 @@
+{
+  "schema_version": 2,
+  "upstream": {
+    "repository": "https://github.com/sgl-project/sglang",
+    "fork": "sglang-for-sail",
+    "commit": "3bc4f87d5f9bb6f04b724540fb12a3acdc62d2fa"
+  },
+  "originals": {
+    "csrc/elementwise/activation.cuh": {
+      "upstream_path": "python/sglang/kernels/jit/csrc/elementwise/activation.cuh",
+      "sha256": "5edefadf32826add22bfcbfa09af07d9a2a9c731c555f921b450614f15af9ac5",
+      "adaptation": "None; exact pinned upstream source."
+    },
+    "compat/sgl_kernel/utils.h": {
+      "upstream_path": "python/sglang/kernels/jit/include/sgl_kernel/utils.h",
+      "upstream_sha256": "68cd3ec640f9ceaf66f46be99b1e025c2a70dde32ea95ce462a1558af78d3515",
+      "upstream_block_sha256": "27899c5aa54f05aee383082bb72267205a1318720ed650c822235d7b5988e134",
+      "runtime_path": "compat/sgl_kernel/utils.h",
+      "adaptation": "Exact Error/CHECK_HOST block included after existing RTP support; surrounding namespace uses the older global host, guarded by #ifndef CHECK_HOST. No device source changes."
+    }
+  },
+  "license": {
+    "name": "Apache-2.0",
+    "path": "LICENSE",
+    "upstream_path": "LICENSE",
+    "sha256": "1495e1e757ef4d0925a2350563cf5754bb23c51701a8ec4fb3c5cdcbedae6747"
+  },
+  "support_headers": {
+    "source_bundle": "../fp4_indexer",
+    "policy": "Exact copies of existing RTP PPU toolchain-compatible support headers; see NOTICE.",
+    "files": {
+      "compat/sgl_kernel/tensor.h": {
+        "source_path": "compat/sgl_kernel/tensor.h",
+        "sha256": "f971fbc9e6740f4d066764e8c88a4d8bacada5a4c607dc1170bc847517f1fcb0"
+      },
+      "include/sgl_kernel/runtime.cuh": {
+        "source_path": "include/sgl_kernel/runtime.cuh",
+        "sha256": "7ed0f8ae9cac6a125d1e435e3ab628115a7f3179c64f308536c38db37a418542"
+      },
+      "include/sgl_kernel/source_location.h": {
+        "source_path": "include/sgl_kernel/source_location.h",
+        "sha256": "cd43da52aa20deafdffb0973bed1b101f634c728362aeef06959f0f5700f4973"
+      },
+      "include/sgl_kernel/type.cuh": {
+        "source_path": "include/sgl_kernel/type.cuh",
+        "sha256": "f70277be81e61c2737875067a0d91f7ca2c7e2f806be1353319273c55a93e6a5"
+      },
+      "include/sgl_kernel/utils.cuh": {
+        "source_path": "include/sgl_kernel/utils.cuh",
+        "sha256": "5c7614629188d9033df55210a8ffa1e1530ece797e5db5f79a3f528423cd4945"
+      },
+      "include/sgl_kernel/utils.h": {
+        "source_path": "include/sgl_kernel/utils.h",
+        "sha256": "d0e4bf235e004b2cc61924b377f57e876ae6988bfadc61c6f0422306f4f17aac"
+      },
+      "include/sgl_kernel/vec.cuh": {
+        "source_path": "include/sgl_kernel/vec.cuh",
+        "sha256": "eba7c4cc8ca2e778fcaf37edb309682b46be3f99a3a4933abf848fad9ad1c880"
+      }
+    }
+  },
+  "entrypoint": {
+    "symbol": "sglang::ActivationKernel<bf16_t,false>::run_activation_with_rounding",
+    "operation": "silu",
+    "clamp_limit": 0.0,
+    "fast_math": false,
+    "pdl": false,
+    "activation_rounding": "BF16 before multiplication",
+    "input_mutated": false
+  },
+  "sources": {
+    "LICENSE": "1495e1e757ef4d0925a2350563cf5754bb23c51701a8ec4fb3c5cdcbedae6747",
+    "NOTICE": "9ff274b757c7b85b1c65c85b16d97bc7b973d90b6ae64b5c625fec4f7fca4dbd",
+    "compat/sgl_kernel/tensor.h": "f971fbc9e6740f4d066764e8c88a4d8bacada5a4c607dc1170bc847517f1fcb0",
+    "compat/sgl_kernel/utils.h": "2e4c1b23933b9e26131f4dcd73ce20980312cdf6d00e5f1826e9cfdd3af11479",
+    "csrc/elementwise/activation.cuh": "5edefadf32826add22bfcbfa09af07d9a2a9c731c555f921b450614f15af9ac5",
+    "include/sgl_kernel/runtime.cuh": "7ed0f8ae9cac6a125d1e435e3ab628115a7f3179c64f308536c38db37a418542",
+    "include/sgl_kernel/source_location.h": "cd43da52aa20deafdffb0973bed1b101f634c728362aeef06959f0f5700f4973",
+    "include/sgl_kernel/type.cuh": "f70277be81e61c2737875067a0d91f7ca2c7e2f806be1353319273c55a93e6a5",
+    "include/sgl_kernel/utils.cuh": "5c7614629188d9033df55210a8ffa1e1530ece797e5db5f79a3f528423cd4945",
+    "include/sgl_kernel/utils.h": "d0e4bf235e004b2cc61924b377f57e876ae6988bfadc61c6f0422306f4f17aac",
+    "include/sgl_kernel/vec.cuh": "eba7c4cc8ca2e778fcaf37edb309682b46be3f99a3a4933abf848fad9ad1c880"
+  }
+}

@@ -241,9 +241,10 @@ class PPUSharedEmbedding(EmbeddingTorch):
         self._owner_ref = weakref.ref(owner)
 
     def forward(self, input):
-        hidden = super().forward(input)
         owner = self._owner_ref() if hasattr(self, "_owner_ref") else None
-        return owner._inject_image_rows(hidden, input) if owner is not None else hidden
+        if owner is not None and getattr(owner, "_image_plan", None) is not None:
+            return owner._embed_image_rows(input, self.weight)
+        return super().forward(input)
 
 
 class PPUSharedRMSNorm(BaseNorm):
@@ -599,15 +600,22 @@ class PPUSharedGate(nn.Module):
         super().__init__()
         self.weight = views.tensor(layer_id, W.v4_router_w)
         self.bias = views.tensor(layer_id, W.v4_router_bias)
+        try:
+            self.bias_vl = views.tensor(layer_id, W.v4_router_bias_vl)
+        except KeyError:
+            self.bias_vl = None
+        self.vocab_size = views.geometry.vocab_size
         self.top_k = views.geometry.n_activated_experts
         self.route_scale = views.geometry.routed_scaling_factor
 
-    def forward(self, hidden, *, graph_routes=None, allow_top3_graph_routes=False):
+    def forward(self, hidden, *, image_rows=None, graph_routes=None, allow_top3_graph_routes=False):
         return sqrtsoftplus_gate(
             hidden, self.weight, self.bias,
             top_k=self.top_k, routed_scaling_factor=self.route_scale,
             graph_routes=graph_routes,
             allow_top3_graph_routes=allow_top3_graph_routes,
+            image_rows=image_rows,
+            router_bias_vl=self.bias_vl,
         )
 
 
@@ -668,6 +676,14 @@ class PPUSharedMoE(nn.Module):
         flat = hidden.reshape(-1, shape[-1])
         runtime = getattr(self, "runtime", None)
         state = runtime.current if runtime is not None else None
+        image_rows = None
+        owner = getattr(runtime, "model", None)
+        if (
+            input_ids is not None and getattr(self.gate, "bias_vl", None) is not None
+            and getattr(owner, "_image_plan", None) is not None
+        ):
+            # Public Prefill carries visual sentinels through CP/L20 compaction.
+            image_rows = input_ids.reshape(-1) >= self.gate.vocab_size
         if getattr(state, "is_graph", False):
             real = state.metadata.valid_mask
             routed_rows = state.routed_rows_device[self.layer_id]
@@ -747,11 +763,13 @@ class PPUSharedMoE(nn.Module):
         direct_routes = direct_routes or direct_real is not None
         if direct_routes:
             routed_rows = torch.empty((), dtype=torch.int64, device=flat.device)
-            ids, weights = self.gate(flat, graph_routes=(direct_real, routed_rows))
+            ids, weights = self.gate(
+                flat, image_rows=image_rows, graph_routes=(direct_real, routed_rows)
+            )
             if os.environ.get("RTP_V41_SHARED_EVIDENCE_DIR"):
                 state.routed_rows[self.layer_id] = int(routed_rows)
         else:
-            ids, weights = pad_topk_for_dispatch(*self.gate(flat))
+            ids, weights = pad_topk_for_dispatch(*self.gate(flat, image_rows=image_rows))
         if state is not None and not direct_routes:
             if state.idle:
                 real = torch.zeros(flat.shape[0], dtype=torch.bool, device=flat.device)

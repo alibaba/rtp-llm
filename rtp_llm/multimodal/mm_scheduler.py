@@ -8,8 +8,9 @@ import threading
 import time
 import traceback
 from collections import Counter
-from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor, wait
+from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from concurrent.futures import wait
 from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Callable, List, Optional
 
@@ -248,6 +249,7 @@ class MMScheduler:
 
         self._mm_part = mm_part
         self._allow_idle_work = allow_idle_work
+        self._online_work_due = False
         self._collector_idle = threading.Event()
         if prefetch_batches not in (0, 1):
             raise ValueError("prefetch_batches must be 0 or 1")
@@ -758,6 +760,8 @@ class MMScheduler:
                         self._reject_batch(batch)
                         break
                     batch = claimed_batch
+                    if batch:
+                        self._run_online_work()
                     self._execute_batch(batch)
                     claimed_batch = None
                     batch = None
@@ -768,7 +772,7 @@ class MMScheduler:
                     )
                     self._clear_exception_references(e)
                     e = None
-                    if is_oom:
+                    if is_oom and not self._stopped.is_set():
                         gc.collect()
                         torch.cuda.empty_cache()
                     # Something unexpected escaped _execute_batch/_collect_batch
@@ -855,6 +859,11 @@ class MMScheduler:
                     if claimed is None:
                         self._reject_batch(current.chunks)
                         break
+                    if claimed and current.failure is None:
+                        # Seal and claim this batch before maintenance. Do not
+                        # submit its lookahead until capture finishes, otherwise
+                        # the pause itself can change the next batch's shape.
+                        self._run_online_work()
                     # Collection/H2D of B may overlap GPU compute/completion of A.
                     # Keep its envelope even if the producer fails after dequeue.
                     lookahead = PrefetchedMMBatch([])
@@ -935,6 +944,38 @@ class MMScheduler:
             # silently retry eager on this owner or accept more requests.
             logging.exception("MMScheduler: idle GPU maintenance failed; stopping")
             self._stopped.set()
+            self._collect_wakeup.set()
+            raise
+
+    def _run_online_work(self):
+        """Consume one preceding publication's maintenance opportunity.
+
+        The current batch is already sealed/claimed and its lookahead has not
+        started. Unlike idle work, this does not require an empty request queue.
+        Other models and CUDA V4.1 retain their existing idle-only capture policy.
+        """
+        if not self._online_work_due:
+            return
+        self._online_work_due = False
+        if (
+            not self._allow_idle_work
+            or self._stopped.is_set()
+            or not getattr(self._mm_part, "supports_embedding_online_work", False)
+        ):
+            return
+        hook = getattr(self._mm_part, "run_embedding_online_work", None)
+        if not callable(hook):
+            return
+        try:
+            with torch.inference_mode():
+                hook()
+        except Exception:
+            # Capture failures are terminal, even though the preceding batch's
+            # results have already been published. Wake the collector and let
+            # the owner unwind and resolve every queued/prefetched request.
+            logging.exception("MMScheduler: online GPU maintenance failed; stopping")
+            with self._lock:
+                self._stopped.set()
             self._collect_wakeup.set()
             raise
 
@@ -1132,6 +1173,10 @@ class MMScheduler:
 
         for chunk in batch:
             self._complete_chunk(chunk)
+
+        # Maintenance belongs before the next sealed batch, not while an open
+        # lookahead can keep collecting arrivals during a capture pause.
+        self._online_work_due = True
 
     def _complete_chunk(self, chunk: _EmbeddingChunk) -> None:
         req = chunk.request

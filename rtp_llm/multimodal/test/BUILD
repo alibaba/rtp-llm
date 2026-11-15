@@ -1,6 +1,66 @@
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 
 py_test(
+    name = "deepseek_v41_ppu_integration_test",
+    srcs = ["deepseek_v41_ppu_integration_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
+    tags = ["manual", "cpu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "deepseek_v41_ppu_attention_device_test",
+    srcs = ["deepseek_v41_ppu_integration_test.py"],
+    main = "deepseek_v41_ppu_integration_test.py",
+    deps = ["//rtp_llm:testlib"],
+    env = {"RTP_V41_TEST_VISION_PPU_DEVICE": "1", "GPU_COUNT": "1"},
+    tags = ["manual", "PPU-ZW890P"],
+    exec_properties = {"gpu": "PPU-ZW890P", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "deepseek_v41_ppu_pipeline_device_test",
+    srcs = ["deepseek_v41_ppu_pipeline_test.py"],
+    main = "deepseek_v41_ppu_pipeline_test.py",
+    deps = ["//rtp_llm:testlib"],
+    data = [":testdata"],
+    env = {"RTP_V41_TEST_VISION_PPU_DEVICE": "1", "GPU_COUNT": "1"},
+    tags = ["manual", "PPU-ZW890P"],
+    exec_properties = {"gpu": "PPU-ZW890P", "gpu_count": "1"},
+    timeout = "long",
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+[
+    py_test(
+        name = "deepseek_v41_ppu_kernel_" + mode + "_test",
+        srcs = ["deepseek_v41_ppu_kernel_test.py"],
+        main = "deepseek_v41_ppu_kernel_test.py",
+        data = ["//rtp_llm/models_py:ppu_vision_test_sources"],
+        deps = ["//rtp_llm:testlib"] if gpus else ["//rtp_llm:torch", "//rtp_llm:triton"],
+        env = {"RTP_V41_TEST_VISION_PPU_DEVICE": str(gpus), "GPU_COUNT": str(gpus)},
+        tags = ["manual", "PPU-ZW890P"] if gpus else ["manual", "cpu"],
+        exec_properties = {"gpu": "PPU-ZW890P", "gpu_count": "1"} if gpus else {},
+        target_compatible_with = select({
+            "@//:using_ppu": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+    for mode, gpus in [("contracts", 0), ("device", 1)]
+]
+
+py_test(
     name = "deepseek_v41_preprocess_shape_test",
     srcs = ["deepseek_v41_preprocess_shape_test.py"],
     deps = ["//rtp_llm:testlib"],

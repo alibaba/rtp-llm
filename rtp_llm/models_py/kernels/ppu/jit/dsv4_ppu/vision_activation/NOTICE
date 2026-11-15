@@ -1,0 +1,30 @@
+PPU vision BF16 rounded SiLU-and-multiply source bundle.
+
+Upstream: https://github.com/sgl-project/sglang (PPU fork sglang-for-sail)
+Pinned revision: 3bc4f87d5f9bb6f04b724540fb12a3acdc62d2fa
+Original kernel: python/sglang/kernels/jit/csrc/elementwise/activation.cuh
+Copyright SGLang contributors. Licensed under Apache License, Version 2.0;
+see the complete LICENSE included in this directory.
+
+csrc/elementwise/activation.cuh is an exact copy of the pinned upstream file.
+The runtime selects ActivationKernel<bf16_t,false>::run_activation_with_rounding
+with operation silu, clamp_limit 0 and fast math disabled. Device arithmetic
+is unchanged: BF16 SiLU rounding precedes the BF16 multiply; no clipping,
+FP8 quantization, filtering, PDL or in-place output is selected.
+
+compat/sgl_kernel/tensor.h and include/sgl_kernel/* are exact copies of the
+existing RTP fp4_indexer frozen bundle's PPU toolchain-compatible headers.
+That bundle's host device-name lookup, source-location and CUDA architecture
+compatibility fixes are retained; these are support code, not a claim that
+those headers originated at the activation kernel's pinned revision.
+source-manifest.json identifies and hashes every copied runtime file and the
+attribution files. The existing RTP JIT loader never imports SGLang Python.
+
+compat/sgl_kernel/utils.h includes the unchanged qualified support header and
+adds the exact Error/CHECK_HOST block from the pinned upstream
+python/sglang/kernels/jit/include/sgl_kernel/utils.h. Only its surrounding
+namespace is adapted from sglang::host to the older support's global host;
+an include guard avoids redefining an existing CHECK_HOST. This preserves
+the original lazy stream-message construction and PanicError exception on
+failed host checks. It resolves parsing of the generic routed entry points
+without changing the selected rounded SiLU kernel or its device arithmetic.

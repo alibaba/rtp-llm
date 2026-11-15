@@ -14,11 +14,13 @@ import torch
 from PIL import Image
 from torch import nn
 
+from rtp_llm.device.device_type import is_ppu
 from rtp_llm.metrics import GaugeMetrics
 from rtp_llm.models_py.modules.dsv41.vision_preprocess_tables import (
     ResizeTables,
     prepare_resize_tables,
 )
+from rtp_llm.multimodal.mm_preprocess_result import MMPreprocessResult
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
     _METRIC_TAGS,
     V41ImageProcessorConfig,
@@ -45,7 +47,6 @@ from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
 )
 from rtp_llm.multimodal.vit_metrics import vit_preprocess_timer
-from rtp_llm.multimodal.mm_preprocess_result import MMPreprocessResult
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
@@ -66,14 +67,39 @@ class _RuntimeImage:
     n_vit_w: int
 
 
+def _stable_grid_permutation(grids):
+    """Return stable (height, width) ordering and its caller-order inverse."""
+    order = sorted(
+        range(len(grids)), key=lambda index: (grids[index][0], grids[index][1])
+    )
+    inverse = [0] * len(order)
+    for sorted_index, original_index in enumerate(order):
+        inverse[original_index] = sorted_index
+    return order, inverse
+
+
 class V41VisionAttention(Attention):
     def __init__(self, config):
         super().__init__(config)
-        self._attention_backend = os.environ.get("V41_VISION_ATTN_BACKEND", "fa4")
-        if self._attention_backend not in ("sdpa", "fa4"):
-            raise ValueError("V41_VISION_ATTN_BACKEND must be sdpa or fa4")
+        self._attention_backend = os.environ.get(
+            "V41_VISION_ATTN_BACKEND", "fa2" if is_ppu() else "fa4"
+        )
+        if self._attention_backend not in ("sdpa", "fa2", "fa4"):
+            raise ValueError("V41_VISION_ATTN_BACKEND must be sdpa, fa2 or fa4")
+        if self._attention_backend == "fa4" and is_ppu():
+            raise ValueError(
+                "V41_VISION_ATTN_BACKEND=fa4 requires NVIDIA; use fa2 on PPU"
+            )
 
     def _attention(self, q, k, v):
+        if self._attention_backend == "fa2":
+            from rtp_llm.models_py.modules.dsv41.vision_attention import (
+                apply_vision_fa2,
+            )
+
+            result = apply_vision_fa2(q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0))
+            if result is not None:
+                return result.squeeze(0)
         if self._attention_backend == "fa4":
             from rtp_llm.models_py.modules.dsv41.vision_attention import (
                 apply_vision_fa4,
@@ -157,6 +183,7 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
             self._packed_max_images,
             max_entries=graph_max_entries,
             max_bytes=graph_max_bytes,
+            observation_window=max(16, graph_max_entries * 8) if is_ppu() else None,
         )
         self.vision = ViT(config.vision_parameters(), attention_cls=V41VisionAttention)
         self.aligner = Aligner(config.vision_parameters())
@@ -203,9 +230,8 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         )
         from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
-        if (
-            not self.vision.blocks
-            or torch.cuda.get_device_capability(self._device)[0] != 10
+        if not self.vision.blocks or (
+            not is_ppu() and torch.cuda.get_device_capability(self._device)[0] != 10
         ):
             return
         block = self.vision.blocks[0]
@@ -219,6 +245,19 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
             apply_vision_qk_rope(q, k, cos, sin)
             x = torch.zeros(8, 1024, device=self._device, dtype=torch.bfloat16)
             apply_vision_residual_rmsnorm(x, x, block.norm1.weight, block.norm1.eps)
+            if is_ppu():
+                from rtp_llm.models_py.modules.dsv41.vision_ppu import (
+                    apply_vision_silu_mul,
+                )
+
+                gateup = torch.zeros(8, 5632, device=self._device, dtype=torch.bfloat16)
+                apply_vision_silu_mul(gateup)
+            if block.attn._attention_backend == "fa2":
+                from rtp_llm.models_py.modules.dsv41.vision_attention import (
+                    warmup_vision_fa2,
+                )
+
+                warmup_vision_fa2(self._device)
             if block.attn._attention_backend == "fa4":
                 from rtp_llm.models_py.modules.dsv41.vision_attention import (
                     warmup_vision_fa4_varlen,
@@ -276,7 +315,11 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         return tuple(
             getattr(block.attn, "_attention_backend", "sdpa")
             for block in self.vision.blocks
-        ) + (self.training, "residual_rmsnorm_r4_bf16", "quack_concat")
+        ) + (
+            self.training,
+            "residual_rmsnorm_r4_bf16",
+            "ppu_rounded_silu" if is_ppu() else "quack_concat",
+        )
 
     def _forward_packed(self, patches, grids, *, rotary=None, cu_seqlens=None):
         from .packed_vision import forward_packed
@@ -302,9 +345,9 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         from .packed_vision import prepare_fa4_cu_seqlens
 
         cu_seqlens = None
-        if (
-            self.vision.blocks
-            and self.vision.blocks[0].attn._attention_backend == "fa4"
+        if self.vision.blocks and self.vision.blocks[0].attn._attention_backend in (
+            "fa2",
+            "fa4",
         ):
             cu_seqlens = prepare_fa4_cu_seqlens(grids, self._device)
         forward = partial(self._forward_packed, rotary=rotary, cu_seqlens=cu_seqlens)
@@ -323,6 +366,29 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
             self._forward_packed,
             context=self._graph_context(),
             prepare_forward=self._prepare_graph_forward,
+        )
+
+    @property
+    def supports_embedding_online_work(self):
+        return (
+            is_ppu()
+            and not self.training
+            and self._device.type == "cuda"
+            and self._packed_graph is not None
+            and self._packed_graph.max_entries > 0
+            and self._packed_graph.max_bytes > 0
+        )
+
+    def run_embedding_online_work(self):
+        """Capture one reused shape; dedicated-owner permission is scheduler-owned."""
+        if not self.supports_embedding_online_work:
+            return False
+        return self._packed_graph.build_one(
+            self._forward_packed,
+            context=self._graph_context(),
+            prepare_forward=self._prepare_graph_forward,
+            min_observations=4,
+            priority=True,
         )
 
     @property
@@ -490,7 +556,8 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
 
         The caller owns stream dependencies for CUDA patches and completion.
         Each bounded chunk uses the production packed ViT/aligner path and owns
-        independent assembled outputs for its callers.
+        independent assembled outputs for its callers. PPU Graph-enabled chunks
+        use stable grid ordering internally and restore the caller's span order.
         """
         from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
@@ -513,14 +580,27 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
                 end += 1
             chunk = images[offset:end]
             grids = [(image.n_vit_h, image.n_vit_w) for image in chunk]
+            inverse = None
+            if self.supports_embedding_online_work:
+                # Select chunk members and account their work before sorting.
+                # Reorder real inputs, not just the graph signature: packed
+                # rotary/attention metadata must describe the actual patch rows.
+                order, inverse = _stable_grid_permutation(grids)
+                chunk = [chunk[index] for index in order]
+                grids = [grids[index] for index in order]
 
             def consume(aligned):
                 if len(aligned) != len(chunk):
                     raise RuntimeError("Packed V4.1 aligner output count mismatch")
-                return [
+                spans = [
                     self._assemble_image_span(value, image)
                     for value, image in zip(aligned, chunk)
                 ]
+                return (
+                    [spans[index] for index in inverse]
+                    if inverse is not None
+                    else spans
+                )
 
             with cuda_graph_gate.operation():
                 patches = [

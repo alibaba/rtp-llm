@@ -232,6 +232,7 @@ def sqrtsoftplus_gate(
     top_k: int = DEFAULT_TOP_K,
     routed_scaling_factor: float = ROUTED_SCALING_FACTOR,
     image_rows: Optional[torch.Tensor] = None,
+    router_bias_vl: Optional[torch.Tensor] = None,
     graph_routes: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     allow_top3_graph_routes: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -250,10 +251,9 @@ def sqrtsoftplus_gate(
          uniform ``routed_scaling_factor / top_k`` so NaN/Inf never reach the
          dispatch kernels.
 
-    ``image_rows`` is an optional boolean ``[T]`` mask. rtp ``gate.py`` only
-    diverges for image tokens when a separate ``bias_vl`` exists; with no VL
-    bias supplied here, image rows use the same router bias as text rows (the
-    argument is a forward-compatibility hook and currently has no effect).
+    ``image_rows`` selects the optional visual ranking bias. Route weights
+    always come from the un-biased scores. Without a VL bias the original
+    text-only routing contract remains in effect.
 
     Returns:
         ``(ids int64 [T, top_k], weights float32 [T, top_k])``. Empty ``T``
@@ -268,6 +268,14 @@ def sqrtsoftplus_gate(
     """
     t = hidden.size(0)
     device = hidden.device
+    has_visual_bias = image_rows is not None and router_bias_vl is not None
+    if has_visual_bias and (
+        image_rows.shape != (t,) or image_rows.dtype != torch.bool
+        or image_rows.device != device
+        or router_bias_vl.shape != (router_weight.shape[0],)
+        or router_bias_vl.device != device
+    ):
+        raise ValueError("visual router bias requires a matching boolean row mask and expert vector")
     if t == 0:
         slots = top_k
         if graph_routes is not None:
@@ -291,7 +299,7 @@ def sqrtsoftplus_gate(
         logits = F.linear(x_bf16.float(), w_bf16.float())
     if (
         router_bias is not None
-        and image_rows is None
+        and not has_visual_bias
         and _fused_gate_available(logits, router_bias)
     ):
         direct_routes = (
@@ -317,6 +325,14 @@ def sqrtsoftplus_gate(
             original + router_bias.to(torch.float32)
             if router_bias is not None else original
         )
+        if has_visual_bias:
+            text_bias = (
+                router_bias.to(torch.float32) if router_bias is not None
+                else torch.zeros_like(router_bias_vl, dtype=torch.float32)
+            )
+            ranking = original + torch.where(
+                image_rows[:, None], router_bias_vl.to(torch.float32), text_bias
+            )
         weights, ids = _select_routes_with_nonfinite_fallback(
             original, ranking, top_k, float(routed_scaling_factor)
         )

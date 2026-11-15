@@ -428,7 +428,7 @@ class DefaultOptimizationsTest(unittest.TestCase):
 
     def test_invalid_attention_selector_is_rejected(self):
         with patch.dict(os.environ, V41_VISION_ATTN_BACKEND="unknown"):
-            with self.assertRaisesRegex(ValueError, "must be sdpa or fa4"):
+            with self.assertRaisesRegex(ValueError, "must be sdpa, fa2 or fa4"):
                 DeepSeekV41VisionEmbedding(tiny_config(), device="cpu")
 
 

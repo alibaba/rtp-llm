@@ -10,6 +10,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from rtp_llm.device.device_type import is_ppu
+
 from rtp_llm.models_py.modules.dsv41.vision_residual_add import (
     apply_vision_residual_rmsnorm,
 )
@@ -50,6 +52,10 @@ class RMSNorm(nn.Module):
         return x.is_cuda and not self.training and not torch.is_grad_enabled()
 
     def _flashinfer_rmsnorm(self, x):
+        if is_ppu():
+            from rtp_llm.models_py.modules.dsv41.ppu.rmsnorm import rms_norm
+
+            return rms_norm(x, self.weight, self.eps)
         from flashinfer.norm import rmsnorm
 
         if x.dtype != torch.bfloat16 or self.weight.dtype != torch.bfloat16:
@@ -151,7 +157,16 @@ class MLP(nn.Module):
 
         # Unsupported device/shape/dtype and autograd retain the old path.
         # Supported Quack dependency/launch errors propagate from the helper.
-        gate, up = self.w1(x).chunk(2, dim=-1)
+        gateup = self.w1(x)
+        if not self.training and is_ppu():
+            from rtp_llm.models_py.modules.dsv41.vision_ppu import (
+                apply_vision_silu_mul as apply_ppu_vision_silu_mul,
+            )
+
+            intermediate = apply_ppu_vision_silu_mul(gateup)
+            if intermediate is not None:
+                return self.w2(intermediate)
+        gate, up = gateup.chunk(2, dim=-1)
         intermediate = apply_vision_silu_mul(gate, up)
         if intermediate is not None:
             return self.w2(intermediate)

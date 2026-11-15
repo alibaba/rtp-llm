@@ -1,13 +1,14 @@
-"""V4.1 FA4 forward with native BSHD producer/consumer layout.
+"""V4.1 noncausal FA2/FA4 with native BSHD producer/consumer layout.
 
 No package-path mutation, automatic installation, or silent retry after a
-supported launch fails. FA4 is the model default and requires its Python package
-to be importable. The attention selector can explicitly choose SDPA instead.
+supported launch fails. PPU selects its installed FA2 provider; NVIDIA retains
+FA4. The attention selector can explicitly choose SDPA instead.
 """
 
 from functools import lru_cache
 
 import torch
+from rtp_llm.device.device_type import is_ppu
 
 
 def _supported(q, k, v):
@@ -17,6 +18,7 @@ def _supported(q, k, v):
             isinstance(t, torch.Tensor) and t.layout == torch.strided for t in (q, k, v)
         )
         and q.device.type == "cuda"
+        and not is_ppu()
         and q.dtype == torch.bfloat16
         and q.ndim == 4
         and q.shape[0] > 0
@@ -40,6 +42,83 @@ def _fa4_forward():
     from flash_attn.cute import flash_attn_func
 
     return flash_attn_func
+
+
+def _fa2_supported(q, k, v):
+    return (
+        not torch.is_grad_enabled()
+        and all(
+            isinstance(t, torch.Tensor) and t.layout == torch.strided for t in (q, k, v)
+        )
+        and q.is_cuda
+        and q.dtype == torch.bfloat16
+        and q.ndim in (3, 4)
+        and all(size > 0 for size in q.shape[:-2])
+        and q.shape[-2:] == (16, 64)
+        and all(
+            t.shape == q.shape
+            and t.device == q.device
+            and t.dtype == q.dtype
+            and t.stride(-1) == 1
+            for t in (q, k, v)
+        )
+    )
+
+
+@lru_cache(maxsize=1)
+def _fa2_functions():
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
+
+    return flash_attn_func, flash_attn_varlen_func
+
+
+def apply_vision_fa2(q, k, v):
+    """Noncausal BSHD attention using the installed FA2 device provider."""
+    if q.ndim != 4 or not _fa2_supported(q, k, v):
+        return None
+    with torch.cuda.device(q.device):
+        return _fa2_functions()[0](
+            q, k, v, dropout_p=0.0, softmax_scale=0.125, causal=False
+        )
+
+
+def apply_vision_fa2_varlen(q, k, v, cu_seqlens, max_seqlen):
+    """THD attention with exact, independently isolated image boundaries."""
+    if q.ndim != 3 or not _fa2_supported(q, k, v):
+        return None
+    if (
+        cu_seqlens.device != q.device
+        or cu_seqlens.dtype != torch.int32
+        or cu_seqlens.ndim != 1
+        or not cu_seqlens.is_contiguous()
+        or cu_seqlens.numel() < 2
+        or max_seqlen <= 0
+    ):
+        raise ValueError("invalid packed vision attention boundaries")
+    with torch.cuda.device(q.device):
+        return _fa2_functions()[1](
+            q,
+            k,
+            v,
+            cu_seqlens,
+            cu_seqlens,
+            max_seqlen,
+            max_seqlen,
+            dropout_p=0.0,
+            softmax_scale=0.125,
+            causal=False,
+        )
+
+
+@torch.inference_mode()
+def warmup_vision_fa2(device):
+    with torch.cuda.device(device):
+        for length in (8, 512):
+            qkv = torch.zeros(2 * length, 3072, device=device, dtype=torch.bfloat16)
+            q, k, v = [part.view(2 * length, 16, 64) for part in qkv.chunk(3, -1)]
+            cu = torch.tensor([0, length, 2 * length], device=device, dtype=torch.int32)
+            apply_vision_fa2_varlen(q, k, v, cu, length)
+            apply_vision_fa2(*(t.view(2, length, 16, 64) for t in (q, k, v)))
 
 
 def apply_vision_fa4(q, k, v):

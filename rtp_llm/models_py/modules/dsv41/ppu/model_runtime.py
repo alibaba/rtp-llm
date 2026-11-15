@@ -219,11 +219,16 @@ class SharedNativeRuntime:
             raise ValueError("shared execution requires every scheduler Engram token window")
         windows = windows.to(self.device)
         self.current.window_current_tokens = windows[:, 0]
-        if not idle and not torch.equal(windows[:, 0].long(), inputs.input_ids.reshape(-1).long()):
+        comparison_ids = inputs.input_ids.reshape(-1)
+        if getattr(self.model, "_image_plan", None) is not None:
+            comparison_ids = self.model._engram_input_ids(comparison_ids)
+        if not idle and not torch.equal(
+            windows[:, 0].long(), comparison_ids.long()
+        ):
             # CP padding may carry a clamped token; real rows still agree.
             cp = getattr(self.current.attn, "context_parallel_info", None)
             real = windows[:, 0] >= 0 if self.current.prefill and cp is not None else torch.ones_like(windows[:, 0], dtype=torch.bool)
-            if not torch.equal(windows[real, 0].long(), inputs.input_ids.reshape(-1)[real].long()):
+            if not torch.equal(windows[real, 0].long(), comparison_ids[real].long()):
                 raise ValueError("Engram current tokens disagree with actual model input")
         dead = windows == self.geometry.image_token_id
         hashes = compute_engram_hash_ids(windows, self.hash_params, dead_mask=dead)
