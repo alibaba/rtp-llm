@@ -398,8 +398,9 @@ class QsaCubTopkTest(unittest.TestCase):
             scores = torch.randn(rows, 2048, device="cuda")
             lengths = self._selection_lengths(rows)
             # Warm the fallback graph operations without initializing CUB.
-            with patch.object(cub, "_BUILD_FAILED", True), patch.object(
-                cub, "_MODULE", None
+            with (
+                patch.object(cub, "_BUILD_FAILED", True),
+                patch.object(cub, "_MODULE", None),
             ):
                 for _ in range(3):
                     try_select_qsa_tokens(

@@ -216,9 +216,8 @@ def resolve_qwen4_parallelism(config, parallelism):
     # ParallelismConfig's pickle state omits local_rank. Preserve the selected
     # device when making a model-owned copy instead of restoring rank zero.
     resolved.local_rank = parallelism.local_rank
-    if not is_qwen4_precision_recipe(
-        getattr(config, "quant_config", None)
-    ) and not getattr(config, "_qwen4_nvfp4_source", False):
+    recipe = is_qwen4_precision_recipe(getattr(config, "quant_config", None))
+    if not recipe and not getattr(config, "_qwen4_nvfp4_source", False):
         return resolved
     cp = resolved.prefill_cp_config
     if (
@@ -229,7 +228,9 @@ def resolve_qwen4_parallelism(config, parallelism):
         or cp.is_prefill_enabled()
     ):
         raise ValueError("Qwen4 NVFP4 requires pure TP or pure EP without DP/PP/CP")
-    if resolved.ep_size == 1 and resolved.tp_size in (1, 2):
+    if resolved.ep_size == 1 and (
+        resolved.tp_size in (1, 2) or (recipe and resolved.tp_size in (4, 8))
+    ):
         resolved.ffn_tp_size = resolved.tp_size
         resolved.ffn_tp_rank = resolved.tp_rank
     elif resolved.ep_size == resolved.tp_size and resolved.tp_size in (2, 8):
@@ -237,7 +238,7 @@ def resolve_qwen4_parallelism(config, parallelism):
         resolved.ffn_tp_size = 1
         resolved.ffn_tp_rank = 0
     else:
-        raise ValueError("Qwen4 NVFP4 supports TP1, TP2/EP1, and pure EP2/EP8")
+        raise ValueError("Qwen4 NVFP4 supports TP1/2/4/8 with EP1, and pure EP2/EP8")
     return resolved
 
 

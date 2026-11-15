@@ -71,6 +71,7 @@ from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
     mark_projection_for_restart,
     prepare_compute_weights,
 )
+from rtp_llm.models_py.utils.arch import is_sm12x
 from rtp_llm.ops import (
     AttentionConfigs,
     HWKernelConfig,
@@ -530,6 +531,18 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             enable_cuda_graph,
             hw_kernel_config,
         )
+        if (
+            getattr(config, "_qwen4_full_fp8_nvfp4", False)
+            and parallelism_config.tp_size == 8
+            and is_sm12x()
+        ):
+            from rtp_llm.models_py.modules.qwen4_exp.sm120_fp8_linear import (
+                install_tp8_fp8_linears,
+            )
+
+            install_tp8_fp8_linears(
+                self, config, parallelism_config, max_generate_batch_size
+            )
         if self.layer_type == HybridAttentionType.LINEAR:
             from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_adapter import (
                 Qwen4Sm120GdnPrefill,
