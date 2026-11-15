@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 
 #include <stdexcept>
 #include <thread>
@@ -16,7 +17,8 @@ using SdkCode = kv_cache_manager::ClientErrorCode;
 
 BackendHandle makeRegistryBackend(const BackendEnvironment& environment,
                                   const std::shared_ptr<MockClientWrapper>& client,
-                                  ParallelismConfig parallel = singleRankConfig()) {
+                                  ParallelismConfig parallel = singleRankConfig(),
+                                  RoleType role = RoleType::PREFILL) {
     KVCacheConfig config;
     config.kvcm_server_address = "unused-test-address";
     config.kvcm_instance_id_salt = "worker-registry";
@@ -25,7 +27,7 @@ BackendHandle makeRegistryBackend(const BackendEnvironment& environment,
     config.kvcm_storage_thread_num = 1;
     config.kvcm_asyncwrapper_thread_num = 1;
     config.kvcm_asyncwrapper_queue_size = 1;
-    parallel.role_type = RoleType::PREFILL;
+    parallel.role_type = role;
     parallel.prefill_cp_config.prefill_cp_size = 1;
     RuntimeConfig runtime;
     runtime.model_name = "kvcm_test_model";
@@ -71,14 +73,17 @@ TEST(KVCMWorkerRegistryTest, RpcReadUsesExplicitCompletionProofAndRejectsDuplica
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
     for (const bool protected_payload : {false, true}) {
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", protected_payload ? "1" : "0");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         for (const auto code : completionCodes<SdkCode>()) {
             SCOPED_TRACE(::testing::PrintToString(std::make_pair(protected_payload, code)));
             auto environment = makeBackendEnvironment("kvcm_registry_rpc");
             auto client = std::make_shared<MockClientWrapper>();
             EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
             EXPECT_CALL(*client, shutdown()).Times(1);
-            auto backend = makeRegistryBackend(environment, client);
+            auto backend = makeRegistryBackend(environment, client, singleRankConfig(),
+                protected_payload ? RoleType::DECODE : RoleType::PREFILL);
             ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+            ASSERT_EQ(backend->protectUnknownCompletion(), protected_payload);
             client->load_status = code;
             EXPECT_CALL(*client, loadKvCachesForTag(_, _, _, _)).Times(0);
             auto request = readRequest(environment, "rpc-read");
@@ -114,6 +119,7 @@ TEST(KVCMWorkerRegistryTest, RpcReadUsesExplicitCompletionProofAndRejectsDuplica
                       safe ? RegistryState::BUFFER_SAFE : RegistryState::RUNNING);
             EXPECT_EQ(backend->taskRegistry().size(), 1u);
         }
+        });
     }
 }
 
@@ -121,12 +127,15 @@ TEST(KVCMWorkerRegistryTest, ThrowingSdkCannotPublishSafeFromReusedResponse) {
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
     for (const bool protected_payload : {false, true}) {
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", protected_payload ? "1" : "0");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         auto environment = makeBackendEnvironment("kvcm_registry_exception");
         auto client = std::make_shared<MockClientWrapper>();
         EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
         EXPECT_CALL(*client, shutdown()).Times(1);
-        auto backend = makeRegistryBackend(environment, client);
+        auto backend = makeRegistryBackend(environment, client, singleRankConfig(),
+            protected_payload ? RoleType::DECODE : RoleType::PREFILL);
         ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+        ASSERT_EQ(backend->protectUnknownCompletion(), protected_payload);
         EXPECT_CALL(*client, loadKvCachesForTag(_, _, _, _))
             .WillOnce(Invoke([&](const auto&, const auto&, auto&, const auto&) -> bool {
                 EXPECT_EQ(registryState(*backend.backend, "throwing"), RegistryState::RUNNING);
@@ -138,6 +147,7 @@ TEST(KVCMWorkerRegistryTest, ThrowingSdkCannotPublishSafeFromReusedResponse) {
         EXPECT_FALSE(backend->execute(request, response));
         EXPECT_FALSE(response.payload_buffer_safe());
         EXPECT_EQ(registryState(*backend.backend, "throwing"), RegistryState::RUNNING);
+        });
     }
 }
 
@@ -389,16 +399,20 @@ TEST(KVCMWorkerRegistryTest, AllTagsMustFinishBeforeTheReadCanBecomeSafe) {
 
 TEST(KVCMWorkerRegistryTest, LocalAsyncAndCommonReadsPublishProofBeforeBusinessCallback) {
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
-    for (const bool protected_payload : {false, true}) {
-        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", protected_payload ? "1" : "0");
+    for (const bool decode_switch_enabled : {false, true}) {
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", decode_switch_enabled ? "1" : "0");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         for (const auto code : completionCodes<SdkCode>()) {
-            SCOPED_TRACE(::testing::PrintToString(std::make_pair(protected_payload, code)));
+            SCOPED_TRACE(::testing::PrintToString(std::make_pair(decode_switch_enabled, code)));
             auto environment = makeBackendEnvironment("kvcm_registry_local_read");
             auto client = std::make_shared<MockClientWrapper>();
             EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
             EXPECT_CALL(*client, shutdown()).Times(1);
             auto backend = makeRegistryBackend(environment, client);
             ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+            // This is the Prefill match/load entry: enabling Decode publication
+            // must not change its original read protection contract.
+            ASSERT_FALSE(backend->protectUnknownCompletion());
             const kv_cache_manager::Locations locations{{{"tp0_Fdefault", "pace://registry"}}};
             EXPECT_CALL(*client, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
             auto observation = match(*backend.backend, makeStorageRequest(environment));
@@ -419,19 +433,27 @@ TEST(KVCMWorkerRegistryTest, LocalAsyncAndCommonReadsPublishProofBeforeBusinessC
             EXPECT_EQ(registryState(*backend.backend, "block_tree_read_1"), expected);
             EXPECT_EQ(backend->taskRegistry().size(), 1u);
         }
+        });
     }
 }
 
 TEST(KVCMWorkerRegistryTest, ShutdownRejectsUnsubmittedReadsWithoutReplacingRetainedEvidence) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     auto environment = makeBackendEnvironment("kvcm_registry_shutdown");
     auto client = std::make_shared<MockClientWrapper>();
     EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client, shutdown()).Times(1);
-    auto backend = makeRegistryBackend(environment, client);
+    // The protected worker contract belongs to Decode; the switch does not
+    // turn an ordinary Prefill worker into a protected Decode worker.
+    auto backend = makeRegistryBackend(environment, client, singleRankConfig(), RoleType::DECODE);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
-    client->load_status = SdkCode::ER_OK;
+    ASSERT_TRUE(backend->protectUnknownCompletion());
+    // Use the actual WithStatus fallback so any extra SDK load, including after
+    // shutdown, violates this expectation instead of bypassing a legacy mock.
+    EXPECT_CALL(*client, loadKvCachesForTag(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).Times(0);
     auto request = readRequest(environment, "completed");
     RemoteOperationResponsePB response;
     ASSERT_TRUE(backend->execute(request, response));
@@ -451,6 +473,7 @@ TEST(KVCMWorkerRegistryTest, ShutdownRejectsUnsubmittedReadsWithoutReplacingReta
     request.set_op(REMOTE_OPERATION_WRITE);
     EXPECT_FALSE(backend->execute(request, response));
     EXPECT_EQ(backend->taskRegistry().size(), 2u);
+    });
 }
 
 TEST(KVCMWorkerRegistryTest, WriteAndMetadataDoNotParticipateInReadAdmission) {

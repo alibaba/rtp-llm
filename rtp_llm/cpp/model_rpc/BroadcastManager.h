@@ -456,6 +456,10 @@ public:
         return true;
     }
 
+    // RpcCall may validate locally, configure the context, and construct/return
+    // a generated unary Async* reader. It must not call ReadInitialMetadata,
+    // Finish, or submit independent CQ operations: this manager exclusively
+    // owns the first CQ operation and its completion tag through Finish below.
     template<typename RequestPB, typename ResponsePB, typename RpcCall>
     std::shared_ptr<BroadcastResult<RequestPB, ResponsePB>> broadcast(const std::vector<RequestPB>& requests,
                                                                       int                           timeout_ms,
@@ -515,8 +519,8 @@ public:
             auto& ctx = result->worker_contexts_.at(rank);
             try {
                 result->markDispatchStarted(rank);
-                // A throw here (including BroadcastRpcNotStarted) precedes any raw
-                // tag/response/status handoff, so the prepared tag is released.
+                // Under the RpcCall contract above, callback failure precedes
+                // any CQ operation, so the prepared tag can be released.
                 auto reader = rpc_call(ctx->stub, ctx->client_context, ctx->request, completion_queue_.get());
                 if (!reader) {
                     throw std::runtime_error("broadcast rpc call returned null reader");

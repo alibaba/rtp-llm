@@ -1631,8 +1631,8 @@ TEST(KVCMLocalTest, PrefillRpcPreservesExceptionalUnknownFromRawSdkAndStillAccep
                 ASSERT_TRUE(waitForBackendOperationsForTest(*controller.backend));
                 EXPECT_EQ(exceptional.load(), throws ? 1 : 0);
                 EXPECT_EQ(ordinary.load(), throws ? 0 : 1);
-                EXPECT_TRUE(destination.device_pool->isFrozen(destination.block_id));
-                EXPECT_EQ(destination.device_pool->refCount(destination.block_id), refs + 1u);
+                EXPECT_EQ(destination.device_pool->isFrozen(destination.block_id), !write);
+                EXPECT_EQ(destination.device_pool->refCount(destination.block_id), refs + (write ? 0u : 1u));
                 EXPECT_FALSE(controller.backend->protected_quarantine_);
                 rank0->fail = false; // The independent next request must still make progress.
                 ScopedReferencedBlocks next_destination(destination, 1), next_worker(worker_environment, 1);
