@@ -1244,6 +1244,71 @@ def engine_stage_event(observer, stage, started_ns, finished_ns, details):
     return emitted
 
 
+def bind_pp_sample_result_audit(observer, engine_core):
+    """Record when Native PP sample results become observable to the host.
+
+    The execute Future marks last-stage entry, while the sample Future carries
+    the result later consumed by the scheduler. Neither is a GPU clock.
+    """
+    if not getattr(observer, "_native_request_state_audit_enabled", False):
+        return False
+    stepper = getattr(getattr(engine_core, "step_fn", None), "__self__", None)
+    if (
+        type(stepper).__name__ != "LazyPushStepper"
+        or type(stepper).__module__ != "vllm_torchtpu.core.pp_lazy_step"
+    ):
+        return False
+    if getattr(observer, "_pp_sample_audit_stepper", None) is stepper:
+        return True
+    try:
+        original = stepper._dispatch
+        if not callable(original) or not hasattr(stepper, "in_flight"):
+            raise ValueError("Missing Native PP dispatch diagnostic boundary")
+
+        def record_ready(output_key, has_sample_call, future):
+            try:
+                observer.on_request_lifecycle_event(
+                    {
+                        "event": "pp_sample_result_ready",
+                        "event_time_us": time.time_ns() // 1000,
+                        "ready_perf_ns": time.perf_counter_ns(),
+                        "scheduler_output_key": output_key,
+                        "has_sample_call": has_sample_call,
+                        "cancelled": future.cancelled(),
+                    }
+                )
+            except Exception:
+                observer._pp_sample_audit_failures = (
+                    getattr(observer, "_pp_sample_audit_failures", 0) + 1
+                )
+
+        @wraps(original)
+        def dispatch(*args, **kwargs):
+            result = original(*args, **kwargs)
+            try:
+                if result:
+                    step = stepper.in_flight[-1]
+                    output_key = id(step.scheduler_output)
+                    has_sample_call = step.future is not step.exec_future
+                    step.future.add_done_callback(
+                        lambda future: record_ready(output_key, has_sample_call, future)
+                    )
+            except Exception:
+                observer._pp_sample_audit_failures = (
+                    getattr(observer, "_pp_sample_audit_failures", 0) + 1
+                )
+            return result
+
+        stepper._dispatch = dispatch
+        observer._pp_sample_audit_stepper = stepper
+        return True
+    except Exception:
+        observer._pp_sample_audit_failures = (
+            getattr(observer, "_pp_sample_audit_failures", 0) + 1
+        )
+        return False
+
+
 def bind_engine_loop_audit(observer, engine_core):
     """Time original bound methods without changing arguments, results or errors.
 
@@ -1251,6 +1316,7 @@ def bind_engine_loop_audit(observer, engine_core):
     round includes execution/other stages, and none is CPU self time. Consumers
     must union overlaps and cannot treat a tracked context as exclusive ownership.
     """
+    bind_pp_sample_result_audit(observer, engine_core)
     if (
         getattr(observer, "_engine_loop_probe_bound_hooks", 0)
         and getattr(observer, "_engine_loop_probe_bound_core", None) is engine_core
