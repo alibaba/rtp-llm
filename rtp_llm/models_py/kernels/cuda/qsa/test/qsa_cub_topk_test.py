@@ -168,6 +168,118 @@ class QsaCubTopkTest(unittest.TestCase):
                 graph.reset()
         torch.cuda.current_stream().wait_stream(stream)
 
+    def test_device_length_buckets_refresh_boundaries_and_preserve_native_bits(self):
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        try:
+            with torch.cuda.stream(stream):
+                for columns in (8191, 8192):
+                    scores = torch.empty(16, columns, device="cuda")
+                    pattern = torch.tensor(
+                        [
+                            0,
+                            1,
+                            2,
+                            3,
+                            511 * 4 + 3,
+                            512 * 4,
+                            513 * 4 + 1,
+                            2048 * 4 + 2,
+                            2064 * 4 + 3,
+                            4095 * 4 + 1,
+                            4096 * 4,
+                            4096 * 4 + 3,
+                            4097 * 4,
+                            columns * 4 + 3,
+                            -1,
+                            (columns + 1) * 4 + 1,
+                        ],
+                        device="cuda",
+                        dtype=torch.int32,
+                    )
+                    lengths = pattern.clone()
+                    short = pattern.clamp(min=0, max=2064 * 4 + 3)
+                    empty = torch.zeros_like(lengths)
+                    column_ids = torch.arange(columns, device="cuda")[None]
+                    for finite in (True, False):
+                        scores.normal_()
+                        self.assertIsNotNone(
+                            cub.try_cub_qsa_tokens(
+                                scores,
+                                lengths,
+                                finite_only=finite,
+                                device_length_buckets=True,
+                            )
+                        )
+                        module = cub._load_module(scores.device)
+                        graph = torch.cuda.CUDAGraph()
+                        try:
+                            with (
+                                patch.object(
+                                    module,
+                                    "qsa_cub_topk_length_buckets",
+                                    wraps=module.qsa_cub_topk_length_buckets,
+                                ) as bucket,
+                                patch.object(
+                                    torch,
+                                    "topk",
+                                    side_effect=AssertionError("CUB did not dispatch"),
+                                ) as topk,
+                            ):
+                                with torch.cuda.graph(graph, stream=stream):
+                                    actual = try_select_qsa_tokens(
+                                        scores,
+                                        lengths,
+                                        compress_ratio=4,
+                                        token_budget=2048,
+                                        finite_only=finite,
+                                        scores_are_masked=False,
+                                        device_length_buckets=True,
+                                    )
+                                bucket.assert_called_once()
+                                topk.assert_not_called()
+                            for step, kind in enumerate(
+                                (
+                                    "random",
+                                    "equal",
+                                    "ties",
+                                    "nonfinite",
+                                    "negative_nan",
+                                    "signed_zero",
+                                )
+                            ):
+                                for refreshed in (
+                                    pattern.roll(step),
+                                    short,
+                                    empty,
+                                    pattern.roll(step),
+                                ):
+                                    self._fill_selection_scores(scores, kind)
+                                    lengths.copy_(refreshed)
+                                    scores.masked_fill_(
+                                        column_ids >= lengths[:, None] // 4,
+                                        float("nan") if step % 2 else 1.0e30,
+                                    )
+                                    legacy = cub.try_cub_qsa_tokens(
+                                        scores, lengths, finite_only=finite
+                                    )
+                                    native = self.reference(scores, lengths, finite)
+                                    valid = (lengths >= 0) & (lengths // 4 <= columns)
+                                    actual.fill_(-99)
+                                    graph.replay()
+                                    # Raw invalid lengths retain legacy behavior;
+                                    # supported rows match pinned Torch exactly.
+                                    torch.testing.assert_close(
+                                        actual, legacy, rtol=0, atol=0
+                                    )
+                                    torch.testing.assert_close(
+                                        actual[valid], native[valid], rtol=0, atol=0
+                                    )
+                        finally:
+                            graph.reset()
+        finally:
+            torch.cuda.current_stream().wait_stream(stream)
+
     def test_owner_masked_contract_and_unqualified_fallbacks(self):
         scores = torch.randn(4, 2048, device="cuda")
         lengths = torch.tensor([129, 4099, 8191, 7], device="cuda", dtype=torch.int32)
@@ -181,34 +293,246 @@ class QsaCubTopkTest(unittest.TestCase):
         torch.testing.assert_close(
             actual, self.reference(scores, lengths), rtol=0, atol=0
         )
+        module = cub._load_module(scores.device)
+        for rows, columns in ((4, 2047), (4, 2048), (4, 6144), (33, 8191), (33, 8192)):
+            adjacent = torch.randn(rows, columns, device="cuda")
+            visible = torch.arange(rows, device="cuda", dtype=torch.int32) * 379
+            visible.clamp_(max=columns * 4)
+            visible[0] = columns * 4 - 1
+            adjacent.masked_fill_(
+                torch.arange(columns, device="cuda")[None] >= visible[:, None] // 4,
+                float("nan"),
+            )
+            expected = self.reference(adjacent, visible)
+            with (
+                patch.object(
+                    module,
+                    "qsa_cub_topk_length_buckets",
+                    side_effect=AssertionError("unexpected length-bucket entry"),
+                ) as bucket,
+                patch.object(
+                    module,
+                    "qsa_cub_init_length_buckets",
+                    side_effect=AssertionError("unexpected length-bucket init"),
+                ) as initialize,
+                patch.object(
+                    module, "qsa_cub_topk", wraps=module.qsa_cub_topk
+                ) as original,
+            ):
+                selected = cub.try_cub_qsa_tokens(
+                    adjacent, visible, device_length_buckets=True
+                )
+                original.assert_called_once()
+                bucket.assert_not_called()
+                initialize.assert_not_called()
+            torch.testing.assert_close(selected, expected, rtol=0, atol=0)
         self.assertIsNone(cub.try_cub_qsa_tokens(scores[:, ::2], lengths))
         self.assertIsNone(cub.try_cub_qsa_tokens(scores.double(), lengths))
         self.assertIsNone(cub.try_cub_qsa_tokens(scores.requires_grad_(), lengths))
         self.assertIsNone(cub.try_cub_qsa_tokens(scores.detach().cpu(), lengths.cpu()))
 
     def test_unprimed_capture_or_failed_build_keeps_original_selector(self):
-        scores = torch.randn(4, 2048, device="cuda")
-        lengths = torch.full((4,), 8192, device="cuda", dtype=torch.int32)
-        with (
-            patch.object(cub, "_MODULE", None),
-            patch.object(cub, "_BUILD_FAILED", False),
-            patch("torch.cuda.is_current_stream_capturing", return_value=True),
+        for columns, options in (
+            (2048, {}),
+            (8191, {"device_length_buckets": True}),
+            (8192, {"device_length_buckets": True}),
         ):
-            self.assertIsNone(cub.try_cub_qsa_tokens(scores, lengths))
-        with (
-            patch.object(cub, "_MODULE", None),
-            patch.object(cub, "_BUILD_FAILED", True),
-        ):
-            actual = try_select_qsa_tokens(
-                scores,
-                lengths,
-                compress_ratio=4,
-                token_budget=2048,
-                scores_are_masked=True,
+            scores = torch.randn(4, columns, device="cuda")
+            lengths = torch.tensor(
+                [3, 129, columns * 2 + 3, columns * 4], device="cuda", dtype=torch.int32
             )
-        torch.testing.assert_close(
-            actual, self.reference(scores, lengths), rtol=0, atol=0
-        )
+            scores.masked_fill_(
+                torch.arange(columns, device="cuda")[None] >= lengths[:, None] // 4,
+                float("nan") if options else float("-inf"),
+            )
+            expected = self.reference(scores, lengths)
+            with (
+                patch.object(cub, "_MODULE", None),
+                patch.object(cub, "_BUILD_FAILED", False),
+                patch("torch.cuda.is_current_stream_capturing", return_value=True),
+            ):
+                self.assertIsNone(cub.try_cub_qsa_tokens(scores, lengths, **options))
+            with (
+                patch.object(cub, "_MODULE", None),
+                patch.object(cub, "_BUILD_FAILED", True),
+            ):
+                actual = try_select_qsa_tokens(
+                    scores,
+                    lengths,
+                    compress_ratio=4,
+                    token_budget=2048,
+                    scores_are_masked=not bool(options),
+                    **options,
+                )
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            if options:
+                from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
+                    select_qsa_paged_tokens,
+                )
+
+                self.assertTrue(cub.is_supported(scores, lengths))
+                module = cub._load_module(scores.device)
+                self.assertIsNotNone(module)
+                native_cub = cub.try_cub_qsa_tokens
+                column_ids = torch.arange(columns, device="cuda")[None]
+                long_lengths = torch.tensor(
+                    [columns * 4, 4097 * 4 + 3, 4096 * 4, 2064 * 4 + 1],
+                    device="cuda",
+                    dtype=torch.int32,
+                )
+                short_lengths = torch.tensor(
+                    [3, 129, 2048 * 4 + 2, 2064 * 4 + 3],
+                    device="cuda",
+                    dtype=torch.int32,
+                )
+                empty_lengths = torch.zeros_like(lengths)
+
+                def consume():
+                    return select_qsa_paged_tokens(
+                        scores,
+                        lengths,
+                        compress_ratio=4,
+                        token_budget=2048,
+                        validate_lengths=False,
+                        scores_are_masked=False,
+                        device_length_buckets=True,
+                    )
+
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+
+                def capture_fallback(*, use_original_cub=False):
+                    def observe_cub(*args, **kwargs):
+                        self.assertTrue(kwargs.get("device_length_buckets"))
+                        result = native_cub(*args, **kwargs)
+                        if use_original_cub:
+                            self.assertIsNotNone(result)
+                        else:
+                            self.assertIsNone(result)
+                        return result
+
+                    graph = torch.cuda.CUDAGraph()
+                    try:
+                        with (
+                            patch.object(
+                                cub, "try_cub_qsa_tokens", side_effect=observe_cub
+                            ) as cub_selector,
+                            patch.object(
+                                module, "qsa_cub_topk", wraps=module.qsa_cub_topk
+                            ) as original,
+                            patch.object(
+                                module,
+                                "qsa_cub_topk_length_buckets",
+                                side_effect=AssertionError("unready bucket entry"),
+                            ) as bucket,
+                            patch.object(torch, "topk", wraps=torch.topk) as topk,
+                        ):
+                            with torch.cuda.graph(graph, stream=stream):
+                                replayed = consume()
+                            cub_selector.assert_called_once()
+                            bucket.assert_not_called()
+                            if use_original_cub:
+                                original.assert_called_once()
+                                topk.assert_not_called()
+                            else:
+                                original.assert_not_called()
+                                topk.assert_called_once()
+                        for step, refreshed in enumerate(
+                            (long_lengths, short_lengths, empty_lengths, long_lengths)
+                        ):
+                            lengths.copy_(refreshed)
+                            scores.normal_()
+                            scores.masked_fill_(
+                                column_ids >= lengths[:, None] // 4,
+                                float("nan") if step % 2 else 1.0e30,
+                            )
+                            replayed.fill_(-99)
+                            graph.replay()
+                            torch.testing.assert_close(
+                                replayed,
+                                self.reference(scores, lengths),
+                                rtol=0,
+                                atol=0,
+                            )
+                    finally:
+                        graph.reset()
+
+                try:
+                    with torch.cuda.stream(stream):
+                        # Compile/warm every operation in the complete fallback
+                        # before entering any real capture below.
+                        with (
+                            patch.object(cub, "_MODULE", None),
+                            patch.object(cub, "_BUILD_FAILED", True),
+                        ):
+                            for _ in range(3):
+                                consume()
+                        self.assertIsNotNone(native_cub(scores, lengths))
+                        with (
+                            patch.object(
+                                module,
+                                "qsa_cub_init",
+                                side_effect=AssertionError(
+                                    "capture attempted old init"
+                                ),
+                            ) as initialize_original,
+                            patch.object(
+                                module,
+                                "qsa_cub_init_length_buckets",
+                                side_effect=AssertionError("capture attempted init"),
+                            ) as initialize,
+                            patch(
+                                "torch.utils.cpp_extension.load_inline",
+                                side_effect=AssertionError("capture attempted build"),
+                            ) as build,
+                        ):
+                            for failed in (False, True):
+                                with (
+                                    patch.object(cub, "_MODULE", None),
+                                    patch.object(cub, "_BUILD_FAILED", failed),
+                                ):
+                                    capture_fallback()
+                            with patch.object(cub, "_INITIALIZED_DEVICES", set()):
+                                capture_fallback()
+                            with (
+                                patch.object(cub, "_LENGTH_BUCKET_DEVICES", set()),
+                                patch.object(
+                                    cub, "_LENGTH_BUCKET_FAILED_DEVICES", set()
+                                ),
+                            ):
+                                capture_fallback(use_original_cub=True)
+                            initialize_original.assert_not_called()
+                            initialize.assert_not_called()
+                            build.assert_not_called()
+                        with (
+                            patch.object(cub, "_LENGTH_BUCKET_DEVICES", set()),
+                            patch.object(cub, "_LENGTH_BUCKET_FAILED_DEVICES", set()),
+                            patch.object(
+                                module,
+                                "qsa_cub_init_length_buckets",
+                                side_effect=RuntimeError("init rejected"),
+                            ) as initialize,
+                        ):
+                            with self.assertLogs(cub._LOGGER, level="WARNING"):
+                                failed_init_output = consume()
+                            torch.testing.assert_close(
+                                failed_init_output,
+                                self.reference(scores, lengths),
+                                rtol=0,
+                                atol=0,
+                            )
+                            initialize.assert_called_once()
+                            initialize.reset_mock()
+                            capture_fallback(use_original_cub=True)
+                            initialize.assert_not_called()
+                            torch.testing.assert_close(
+                                cub.try_cub_qsa_tokens(scores, lengths),
+                                self.reference(scores, lengths),
+                                rtol=0,
+                                atol=0,
+                            )
+                finally:
+                    torch.cuda.current_stream().wait_stream(stream)
 
     @staticmethod
     def _selection_lengths(rows, generation=0):

@@ -9,17 +9,36 @@
 
 namespace rtp_llm {
 
-// A deployment-wide configuration may retain generation-prefill buckets on
-// non-PDFUSION roles. Those roles ignore the feature, including its execution-
-// mode conflict checks. Keep this scope shared by engine validation and runner
-// ownership; speculative execution is checked separately within that scope.
+// Legacy full-prefill buckets belong to PDFUSION; explicit segmented prefill
+// also admits PREFILL. Keep engine validation and runner ownership in the same
+// scope, with speculative execution checked separately within that scope.
 inline bool isGenerationPrefillCudaGraphRequested(const HWKernelConfig& hw_kernel_config, RoleType role_type) {
-    return role_type == RoleType::PDFUSION && hw_kernel_config.enable_cuda_graph
-           && !hw_kernel_config.generation_prefill_capture_token_buckets.empty();
+    const auto backend = hw_kernel_config.effectiveGenerationPrefillGraphBackend();
+    return (role_type == RoleType::PDFUSION || (role_type == RoleType::PREFILL && backend == "segmented"))
+           && backend != "disabled";
 }
 
-inline bool supportsGenerationPrefillCudaGraphExecutionMode(SpeculativeType speculative_type, bool has_propose_model) {
-    return speculative_type == SP_TYPE_NONE && !has_propose_model;
+inline bool supportsGenerationPrefillCudaGraphExecutionMode(SpeculativeType speculative_type,
+                                                            bool            has_propose_model,
+                                                            bool            segmented = false) {
+    return (speculative_type == SP_TYPE_NONE && !has_propose_model)
+           || (segmented && speculative_type == SP_TYPE_MTP && has_propose_model);
+}
+
+// Segments contain model-local GDN/projection work. EP dispatch/combine stays
+// in the live layer loop; MTP draft and target/verify runner ownership remains
+// governed by shouldCreateGenerationPrefillCudaGraph.
+inline bool supportsSegmentedPrefillExpertParallel(const ParallelismConfig& config,
+                                                   SpeculativeType          speculative_type,
+                                                   bool                     use_spec_decoding) {
+    if (config.ep_size == 1) {
+        return true;
+    }
+    if (config.tp_size != 2 || config.ep_size != 2) {
+        return false;
+    }
+    return (config.role_type == RoleType::PDFUSION && speculative_type == SP_TYPE_NONE && !use_spec_decoding)
+           || (config.role_type == RoleType::PREFILL && speculative_type == SP_TYPE_MTP && use_spec_decoding);
 }
 
 inline bool generationPrefillCudaGraphPaddedTokenIndexFitsInt32(int64_t max_requests, int64_t max_bucket) {
@@ -51,23 +70,21 @@ inline bool generationPrefillCudaGraphMaxRequestsFitsCapacity(int64_t max_reques
            && max_requests <= reachable_capacity;
 }
 
-// Generation prefill is an optional second runner owned only by the normal
-// PDFUSION main-generation wrapper. PREFILL/DECODE role wrappers,
-// MTP/DSpARK target/draft wrappers, and embedding
-// wrappers keep using their primary CUDA-graph roles. In particular, the
-// speculative target wrapper does not acquire a generation-prefill runner;
-// its initial prompt prefill remains eager in the first implementation.
-// This predicate describes wrapper ownership, not configuration acceptance.
-// NormalEngine rejects an explicit generation-prefill/speculative combination
-// on PDFUSION before any wrapper is constructed; other roles ignore it.
+// The full backend keeps its ordinary-generation ownership. Only explicit
+// segmented MTP targets also own an initial-prompt runner; verify and draft
+// retain their primary graph roles.
 inline bool shouldCreateGenerationPrefillCudaGraph(const HWKernelConfig& hw_kernel_config,
                                                    bool                  allow_cuda_graph,
                                                    bool                  primary_graph_is_prefill,
                                                    RoleType              role_type,
-                                                   SpeculativeType       speculative_type) {
+                                                   SpeculativeType       speculative_type,
+                                                   bool                  speculative_target = false) {
     return isGenerationPrefillCudaGraphRequested(hw_kernel_config, role_type) && allow_cuda_graph
            && !primary_graph_is_prefill
-           && supportsGenerationPrefillCudaGraphExecutionMode(speculative_type, /*has_propose_model=*/false);
+           && supportsGenerationPrefillCudaGraphExecutionMode(
+               speculative_type,
+               speculative_type != SP_TYPE_NONE,
+               speculative_target && hw_kernel_config.effectiveGenerationPrefillGraphBackend() == "segmented");
 }
 
 inline bool isSingleDeviceGenerationPrefillCudaGraphConfig(const ParallelismConfig& config) {

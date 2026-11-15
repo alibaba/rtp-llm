@@ -64,6 +64,13 @@ models_py_test(
 )
 
 models_py_test(
+    name = "ple_prefetch_test_sm120",
+    src = "ple/ple_prefetch_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    deps = _REFERENCE_DEPS,
+)
+
+models_py_test(
     name = "ple_inline_uva_graph_test",
     src = "ple/ple_inline_uva_graph_test.py",
     gpu = "L20_CU13",

@@ -313,6 +313,8 @@ private:
     TensorHolder buffer_holder_;
 
     bool     warm_up_;
+    // Only the explicit segmented plan measures complete startup transactions.
+    bool     joint_graph_warmup_;
     RoleType role_type_;
     // True when any KV-cache group is CacheGroupType::LINEAR (RWKV / Mamba /
     // hybrid linear+full). Per-step state advances every token, so the page

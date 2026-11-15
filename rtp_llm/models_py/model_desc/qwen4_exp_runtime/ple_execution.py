@@ -188,6 +188,94 @@ class PLEExecution:
                 ]
         return plans
 
+    def _start_graph_ple_prefetch(
+        self,
+        inputs: PyModelInputs,
+        attention_inputs,
+        ple_ids: torch.Tensor | None = None,
+    ):
+        """Explicit ordinary-decode plan; hash committed history without writes."""
+        ctx_inputs = select_attention_inputs_for_tag(
+            attention_inputs, PLE_NGRAM_CTX_TAG
+        )
+        if (
+            not bool(ctx_inputs.is_cuda_graph)
+            or bool(ctx_inputs.is_prefill)
+            or bool(ctx_inputs.is_target_verify)
+        ):
+            raise RuntimeError("PLE graph prefetch supports ordinary decode only")
+        enabled = [
+            (int(key), ple)
+            for key, ple in self.ple_layers.items()
+            if getattr(getattr(ple, "ple_embedding", None), "supports_prefetch", False)
+        ]
+        if not enabled or self.kv_cache is None:
+            return {}
+        self._validate_ple_mode(ctx_inputs)
+        if ple_ids is None:
+            ple_ids = self._ple_input_ids(inputs)
+        ids = ple_ids.reshape(-1).long()
+        sequence_plus_one = getattr(ctx_inputs, "sequence_lengths_plus_1_device", None)
+        table = getattr(ctx_inputs, "kv_cache_block_id_device", None)
+        if (
+            not ids.is_cuda
+            or sequence_plus_one is None
+            or sequence_plus_one.device != ids.device
+            or sequence_plus_one.dtype != torch.int32
+            or sequence_plus_one.ndim != 1
+            or sequence_plus_one.numel() != ids.numel()
+            or table is None
+            or table.device != ids.device
+            or table.dtype != torch.int32
+            or table.ndim != 2
+            or table.shape[0] != ids.numel()
+        ):
+            raise RuntimeError(
+                "PLE graph prefetch requires fixed device decode metadata"
+            )
+        sequence_lengths = sequence_plus_one.to(torch.long) - 1
+        live = sequence_lengths > 0
+        plans = {}
+        for layer_idx, ple in enabled:
+            embedding = ple.ple_embedding
+            cache = self.kv_cache.get_layer_cache(layer_idx, PLE_NGRAM_CTX_TAG)
+            page_size = int(cache.seq_size_per_block)
+            if page_size <= 0:
+                raise RuntimeError(
+                    "PLE graph prefetch cache page size must be positive"
+                )
+            pool = self._fixed_state_pool(
+                cache, torch.int64, embedding.context_len, 1
+            ).squeeze(-1)
+            if pool.device != ids.device:
+                raise RuntimeError("PLE graph prefetch cache must share the ids device")
+            pages = torch.div(sequence_lengths - 1, page_size, rounding_mode="floor")
+            blocks = self._physical_blocks(
+                ctx_inputs,
+                PLE_NGRAM_CTX_TAG,
+                pages,
+                int(pool.shape[0]),
+                pool.device,
+                graph_capture=True,
+            )
+            row_live = live & blocks.gt(0)
+            context = torch.where(
+                row_live[:, None], pool.index_select(0, blocks), embedding.eos_token_id
+            )
+            current_ids = torch.where(row_live, ids, embedding.eos_token_id)
+            history = torch.cat((context, current_ids[:, None]), dim=1)
+            hashed = embedding.hashed_ids(history, 1)
+            # Invalid/padded rows must neither read a real table row nor retain
+            # values left by a preceding replay of this bucket.
+            hashed = torch.where(row_live[:, None, None], hashed, -1)
+            handle = embedding.start_graph_prefetch(hashed)
+            if handle is None:
+                raise RuntimeError(
+                    "PLE graph prefetch bank exceeds its retained-byte budget"
+                )
+            plans[layer_idx] = [handle]
+        return plans
+
     def _apply_ple(
         self,
         layer_idx: int,

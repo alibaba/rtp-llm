@@ -1328,6 +1328,17 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
         return false;
     }
     state.current_real_graph_bs = *it;
+    if (require_exact_decode_batch_size_ && role_ == CudaGraphRole::DECODE
+        && state.current_batch_size != state.current_real_graph_bs) {
+        // Per-tensor FP8 producers without a live-row mask must not see the
+        // bucket's dummy rows. Reject before preparation or any state writer.
+        if (observe_fallback) {
+            RTP_LLM_LOG_DEBUG("decode graph requires an exact batch: live=%d captured=%d, fallback to normal run",
+                              state.current_batch_size,
+                              state.current_real_graph_bs);
+        }
+        return false;
+    }
     RTP_LLM_LOG_DEBUG(
         "batch size used in replay: %d (graph key %d)", state.current_batch_size, state.current_real_graph_bs);
 

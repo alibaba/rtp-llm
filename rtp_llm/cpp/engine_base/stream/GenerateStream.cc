@@ -1369,7 +1369,10 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
                   torch::Tensor(),
                   torch::Tensor(),
                   update_info.update_remote_generate,
-                  update_info.force_update_info});
+                  update_info.force_update_info,
+                  std::nullopt,
+                  std::nullopt,
+                  update_info.generation_prefill_cuda_graph_status});
 
     // Freeze TTFT after output update while holding the stream lock; mirrors
     // update(). Later speculative steps re-freeze the same first-token value.

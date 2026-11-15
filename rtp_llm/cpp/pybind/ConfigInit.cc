@@ -881,6 +881,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("use_swizzleA", &HWKernelConfig::use_swizzleA)
         .def_readwrite("enable_cuda_graph", &HWKernelConfig::enable_cuda_graph)
         .def_readwrite("enable_cuda_graph_debug_mode", &HWKernelConfig::enable_cuda_graph_debug_mode)
+        .def_readwrite("generation_prefill_graph_backend", &HWKernelConfig::generation_prefill_graph_backend)
+        .def_property_readonly("effective_generation_prefill_graph_backend",
+                               &HWKernelConfig::effectiveGenerationPrefillGraphBackend)
         .def_readwrite("generation_prefill_cuda_graph_max_requests",
                        &HWKernelConfig::generation_prefill_cuda_graph_max_requests)
         .def_readwrite("generation_prefill_capture_token_buckets",
@@ -900,7 +903,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.decode_capture_batch_sizes,
                                       self.generation_prefill_cuda_graph_max_requests,
                                       self.generation_prefill_capture_token_buckets,
-                                      self.enable_decode_cascade_attention);
+                                      self.enable_decode_cascade_attention,
+                                      self.generation_prefill_graph_backend);
             },
             [](py::tuple t) {
                 if (t.size() != 5 && t.size() != 7 && t.size() != 8 && t.size() != 9 && t.size() != 10)
@@ -919,9 +923,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     if (t.size() >= 8) {
                         c.enable_decode_cascade_attention = t[7].cast<bool>();
                     }
-                    // Sizes 9/10 carry the retired independent decode capacity
-                    // at t[8] (ignored; capacity is derived from buckets); the
-                    // 10-tuple additionally re-states the cascade flag at t[9].
+                    // Legacy sizes 9/10 carry a retired integer capacity at
+                    // t[8]. New states append the backend string instead.
+                    if (t.size() == 9 && py::isinstance<py::str>(t[8])) {
+                        c.generation_prefill_graph_backend = t[8].cast<std::string>();
+                    }
                     if (t.size() >= 10) {
                         c.enable_decode_cascade_attention = t[9].cast<bool>();
                     }

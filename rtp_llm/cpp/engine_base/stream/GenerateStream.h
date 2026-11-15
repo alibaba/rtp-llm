@@ -78,6 +78,8 @@ struct StreamSpecUpdateInfo {
     // updates leave speculative_propose_step at zero and are not counted.
     int speculative_propose_step = 0;
     int accepted_draft_tokens    = 0;
+    GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status{
+        GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
 };
 
 struct SpeculativeExecutorStreamOutput {

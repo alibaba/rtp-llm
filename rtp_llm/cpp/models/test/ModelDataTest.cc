@@ -557,6 +557,26 @@ TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRunnerOwnershipIsLimitedToNo
     // prefill runner in the first implementation.
     EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, true, RoleType::PDFUSION, SP_TYPE_NONE));
 
+    config.generation_prefill_graph_backend = "segmented";
+    EXPECT_TRUE(supportsGenerationPrefillCudaGraphExecutionMode(SP_TYPE_MTP, true, true));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphExecutionMode(SP_TYPE_MTP, false, true));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphExecutionMode(SP_TYPE_DSPARK, true, true));
+    EXPECT_TRUE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PDFUSION, SP_TYPE_MTP, true));
+    EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PDFUSION, SP_TYPE_MTP));
+    EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, true, RoleType::PDFUSION, SP_TYPE_MTP, true));
+    EXPECT_TRUE(isGenerationPrefillCudaGraphRequested(config, RoleType::PREFILL));
+    EXPECT_TRUE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PREFILL, SP_TYPE_NONE));
+    EXPECT_TRUE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PREFILL, SP_TYPE_MTP, true));
+    EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, true, RoleType::PREFILL, SP_TYPE_MTP, true));
+    EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PREFILL, SP_TYPE_MTP));
+    EXPECT_FALSE(isGenerationPrefillCudaGraphRequested(config, RoleType::DECODE));
+
+    config.generation_prefill_graph_backend = "disabled";
+    EXPECT_FALSE(isGenerationPrefillCudaGraphRequested(config, RoleType::PDFUSION));
+    config.generation_prefill_graph_backend = "full";
+    EXPECT_TRUE(isGenerationPrefillCudaGraphRequested(config, RoleType::PDFUSION));
+    config.generation_prefill_graph_backend.clear();
+
     config.enable_cuda_graph = false;
     EXPECT_FALSE(isGenerationPrefillCudaGraphRequested(config, RoleType::PDFUSION));
     EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PDFUSION, SP_TYPE_NONE));
@@ -565,6 +585,35 @@ TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRunnerOwnershipIsLimitedToNo
     EXPECT_FALSE(isGenerationPrefillCudaGraphRequested(config, RoleType::PDFUSION));
     EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PDFUSION, SP_TYPE_NONE));
     EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, false, false, RoleType::PDFUSION, SP_TYPE_NONE));
+}
+
+TEST_F(ModelDataTest, testGenerationPrefillCudaGraphEp2PrefillMtpKeepsTargetOwnership) {
+    HWKernelConfig config;
+    config.enable_cuda_graph                        = true;
+    config.generation_prefill_graph_backend         = "segmented";
+    config.generation_prefill_capture_token_buckets = {2048, 8192};
+    ParallelismConfig parallelism;
+    parallelism.tp_size   = 2;
+    parallelism.ep_size   = 2;
+    parallelism.role_type = RoleType::PREFILL;
+
+    EXPECT_TRUE(supportsSegmentedPrefillExpertParallel(parallelism, SP_TYPE_MTP, true));
+    EXPECT_TRUE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PREFILL, SP_TYPE_MTP, true));
+    EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PREFILL, SP_TYPE_MTP));
+    EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, true, RoleType::PREFILL, SP_TYPE_MTP, true));
+    EXPECT_FALSE(supportsSegmentedPrefillExpertParallel(parallelism, SP_TYPE_MTP, false));
+    EXPECT_FALSE(supportsSegmentedPrefillExpertParallel(parallelism, SP_TYPE_DSPARK, true));
+    EXPECT_FALSE(supportsSegmentedPrefillExpertParallel(parallelism, SP_TYPE_NONE, false));
+
+    parallelism.role_type = RoleType::DECODE;
+    EXPECT_FALSE(supportsSegmentedPrefillExpertParallel(parallelism, SP_TYPE_MTP, true));
+    parallelism.role_type = RoleType::PDFUSION;
+    EXPECT_TRUE(supportsSegmentedPrefillExpertParallel(parallelism, SP_TYPE_NONE, false));
+    EXPECT_FALSE(supportsSegmentedPrefillExpertParallel(parallelism, SP_TYPE_MTP, true));
+    parallelism.tp_size = 4;
+    EXPECT_FALSE(supportsSegmentedPrefillExpertParallel(parallelism, SP_TYPE_NONE, false));
+    parallelism.ep_size = 1;
+    EXPECT_TRUE(supportsSegmentedPrefillExpertParallel(parallelism, SP_TYPE_MTP, true));
 }
 
 TEST_F(ModelDataTest, testGenerationPrefillCudaGraphPaddedTokenIndexUsesCompleteSentinelRange) {

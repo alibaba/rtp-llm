@@ -80,22 +80,54 @@ def sm120_suites():
         name = "smoke_sm120_qwen4_exp",
         tests = [
             custom_smoke_test(
-                name = "qwen4_exp_mixed_tp2_mtp_ipc_graph_sm120",
+                name = name,
                 main = "qwen4_exp_smoke_test.py",
-                smoke_args = _QWEN4_SMOKE_ARGS,
+                smoke_args = smoke_args,
                 gpu_type = ["RTX_5000_PRO_CU13"],
                 data = ["//rtp_llm:sdk", ":smoke_framework_srcs", "data/model/qwen4_exp/q_r_qwen4_exp_fp8_full.json"],
                 deps = ["//rtp_llm:transformers"],
-            ),
+            )
+            for name, smoke_args in [
+                ("qwen4_exp_mixed_tp2_mtp_ipc_graph_sm120", _QWEN4_SMOKE_ARGS),
+                ("qwen4_exp_mixed_tp2_ipc_graph_sm120", _QWEN4_BASE_SMOKE_ARGS + " --enable_cuda_graph 1"),
+                ("qwen4_exp_mixed_tp2_ipc_eager_sm120", _QWEN4_BASE_SMOKE_ARGS + " --enable_cuda_graph 0"),
+                ("qwen4_exp_mixed_tp2_ipc_segmented_sm120", _QWEN4_BASE_SMOKE_ARGS
+                 + " --ep_size 1 --enable_cuda_graph 1 --generation_prefill_graph_backend segmented"
+                 + " --generation_prefill_capture_config '8192' --generation_prefill_cuda_graph_max_requests 4"
+                 + " --concurrency_limit 4 --max_context_batch_size 4 --prefill_chunk_size 8192"
+                 + " --decode_capture_config '1,2,4' --warm_up 0"),
+                ("qwen4_exp_mixed_tp2_mtp_ipc_segmented_sm120", _QWEN4_SMOKE_ARGS
+                 + " --ep_size 1 --generation_prefill_graph_backend segmented"
+                 + " --generation_prefill_capture_config '8192' --generation_prefill_cuda_graph_max_requests 4"
+                 + " --concurrency_limit 4 --max_context_batch_size 4 --prefill_chunk_size 8192 --warm_up 0"),
+            ] + [
+                (
+                    "qwen4_exp_mixed_tp%d%s_nccl_segmented_sm120" % (tp, "_mtp" if mtp else ""),
+                    _QWEN4_BASE_SMOKE_ARGS.replace("--tp_size 2", "--tp_size %d" % tp)
+                    .replace("--all_reduce_backend sm120_ipc", "--all_reduce_backend nccl")
+                    + " --world_size %d --ep_size 1 --enable_cuda_graph 1" % tp
+                    + " --generation_prefill_graph_backend segmented"
+                    + " --generation_prefill_capture_config '2048,8192'"
+                    + " --generation_prefill_cuda_graph_max_requests 4"
+                    + " --concurrency_limit 4 --max_context_batch_size 4 --prefill_chunk_size 8192 --warm_up 0"
+                    + (" --sp_type mtp --sp_model_type qwen4_exp_mtp --gen_num_per_cycle 3" if mtp else " --decode_capture_config '1,2,4'"),
+                )
+                for tp in (4, 8)
+                for mtp in (False, True)
+            ]
         ],
     )
 
 # Mixed FP8/NVFP4 TP2 with MTP, CUDA Graph and IPC AllReduce.
-_QWEN4_SMOKE_ARGS = (
+_QWEN4_BASE_SMOKE_ARGS = (
     "--act_type BF16 --tp_size 2"
     + " --reserver_runtime_mem_mb 4096 --max_seq_len 32768"
     + " --seq_size_per_block 128 --fp8_kv_cache 1 --reuse_cache 1"
     + " --moe_strategy nvfp4_cutlass"
+    + " --all_reduce_backend sm120_ipc"
+)
+_QWEN4_SMOKE_ARGS = (
+    _QWEN4_BASE_SMOKE_ARGS
     + " --sp_type mtp --sp_model_type qwen4_exp_mtp --gen_num_per_cycle 3"
-    + " --enable_cuda_graph 1 --all_reduce_backend sm120_ipc"
+    + " --enable_cuda_graph 1"
 )

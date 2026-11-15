@@ -301,6 +301,9 @@ struct HWKernelConfig {
     // switch is on and this capture bucket list is explicitly configured.
     int              generation_prefill_cuda_graph_max_requests = 1;
     std::vector<int> generation_prefill_capture_token_buckets;
+    // Empty preserves the legacy opt-in through capture buckets.
+    std::string generation_prefill_graph_backend;
+    std::string effectiveGenerationPrefillGraphBackend() const;
     // Prefill CUDA Graph capture configuration
     // Can be set via: prefill_capture_file_path, prefill_capture_seq_lens, or prefill_capture_max_seq_len + step
     std::vector<int> prefill_capture_seq_lens;

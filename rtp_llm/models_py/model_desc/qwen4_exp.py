@@ -312,6 +312,15 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 ).squeeze(0)
             )
             offset = end
+        core = getattr(self.qsa_indexer, "_prefill_score_core", None)
+        if (
+            len(selections) == 1
+            and core is not None
+            and core.borrowed_selection(self.qsa_indexer, selections[0])
+        ):
+            # The caller-owned bank replaces this B1 cat copy. Its next writer
+            # runs after the current sparse FMHA consumer on the same stream.
+            return selections[0]
         return torch.cat(selections, dim=0)
 
     def forward(
@@ -929,6 +938,11 @@ class Qwen4ExpModel(Qwen35Model):
         self._closed = True
 
     def initialize(self, init_resource) -> bool:
+        if (
+            self.__dict__.get("_ordinary_decode_graph_plan", False)
+            and init_resource.kv_cache is None
+        ):
+            self.release_segmented_prefill_warmup()
         initialized = super().initialize(init_resource)
         # The target and the draft both export their wide post-block residual:
         # target -> first draft step, draft -> subsequent draft steps.  Draft
@@ -938,6 +952,56 @@ class Qwen4ExpModel(Qwen35Model):
             init_resource.is_speculative or getattr(self.config, "is_mtp", False)
         )
         return initialized
+
+    def release_segmented_prefill_warmup(self) -> None:
+        # All temporary target/verify/draft graphs have already been destroyed.
+        # Keep weights and TP transports, but release every pool-bound owner.
+        coordinator = self.__dict__.get("_ple_transaction_coordinator")
+        if coordinator is not None:
+            coordinator.close()
+        for ple in self.ple_layers.values():
+            ple.ple_embedding.clear_graph_banks(clear_eager=True)
+        self._ple_execution_runtime = None
+        self._mtp_target_hidden_states = None
+
+    def configure_ordinary_decode_graph_plan(self) -> None:
+        # Enabled only with the explicitly budgeted segmented model plan.
+        if type(self) is not Qwen4ExpModel or bool(
+            getattr(self.config, "is_mtp", False)
+        ):
+            raise ValueError("ordinary graph plan requires the Qwen4 target model")
+        pc = self.parallelism_config
+        self._ordinary_decode_graph_plan = (
+            pc.tp_size in (2, 4, 8)
+            and pc.tp_size == pc.get_attn_tp_size() == pc.get_ffn_tp_size()
+            and pc.ep_size == pc.dp_size == pc.pp_size == 1
+        )
+
+    def segmented_prefill_extra_memory_bytes(
+        self, live_limit, rows, longest, page
+    ) -> int:
+        from .qwen4_exp_runtime.segmented_prefill import extra_runtime_bytes
+
+        return extra_runtime_bytes(self, live_limit, rows, longest, page)
+
+    def segmented_prefill_warmup_shapes(self, longest, live_limit, rows, page):
+        from .qwen4_exp_runtime.segmented_prefill import warmup_shapes
+
+        return warmup_shapes(longest, live_limit, rows, page)
+
+    def initialize_segmented_prefill_warmup_cache(self, cache) -> None:
+        # Only temporary measurement pools reach this hook. Prefix fallback
+        # requires finite recurrent/history/KV payloads and positive FP8 scales.
+        for index in range(cache.layer_count):
+            for group in cache.get_layer_cache_groups(index):
+                group.kv_cache_base.zero_()
+                scales = group.kv_scale_base
+                if scales is not None and scales.numel():
+                    scales.fill_(1)
+                if group.tag == PLE_NGRAM_CTX_TAG:
+                    group.kv_cache_base.view(torch.int64).fill_(
+                        ple_eos_token_id(self.config)
+                    )
 
     def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         hidden = getattr(self, "_mtp_target_hidden_states", None)
@@ -1107,6 +1171,9 @@ class Qwen4ExpModel(Qwen35Model):
         """Release eager-only state after each graph warmup forward."""
         if get_primary_attention_inputs(inputs).is_target_verify:
             self._ple_coordinator().clear_speculative_target_graph_capture()
+        elif self.__dict__.get("_ordinary_decode_graph_plan", False):
+            for ple in self.ple_layers.values():
+                ple.ple_embedding.finish_graph_warmup()
 
     def on_cuda_graph_capture(self, graph_key: int, inputs: PyModelInputs) -> None:
         """Retain model-owned tensors for this captured graph instance."""
@@ -1158,6 +1225,16 @@ class Qwen4ExpModel(Qwen35Model):
     ):
         if not self.ple_layers:
             return {}
+        if self.__dict__.get("_ordinary_decode_graph_plan", False):
+            primary_inputs = get_primary_attention_inputs(inputs)
+            if (
+                primary_inputs.is_cuda_graph
+                and not primary_inputs.is_prefill
+                and not primary_inputs.is_target_verify
+            ):
+                return self._ple_execution()._start_graph_ple_prefetch(
+                    inputs, attention_inputs, ple_ids
+                )
         return self._ple_execution()._start_eager_ple_prefetch(
             inputs, attention_inputs, ple_ids
         )
@@ -1200,7 +1277,9 @@ class Qwen4ExpModel(Qwen35Model):
             )
         return tags[0]
 
-    def _build_attn_meta(self, inputs, device, is_cuda_graph=False):
+    def _build_attn_meta(
+        self, inputs, device, is_cuda_graph=False, gdn_prefill_prepared=None
+    ):
         linear_inputs = None
         if self.kv_cache is not None:
             linear_layer_idx = next(
@@ -1217,7 +1296,19 @@ class Qwen4ExpModel(Qwen35Model):
                     self._attention_tag(linear_layer_idx),
                 )
         return super()._build_attn_meta(
-            inputs, device, is_cuda_graph, linear_attention_inputs=linear_inputs
+            inputs,
+            device,
+            is_cuda_graph,
+            linear_attention_inputs=linear_inputs,
+            gdn_prefill_prepared=gdn_prefill_prepared,
+        )
+
+    def create_segmented_prefill_runner(self, buckets, max_requests, dummy_factory):
+        from .cuda_graph.segmented_prefill import SegmentedPrefillGraphRunner
+        from .qwen4_exp_runtime.segmented_prefill import QwenSegmentedPrefillAdapter
+
+        return SegmentedPrefillGraphRunner(
+            QwenSegmentedPrefillAdapter(self, buckets, max_requests, dummy_factory)
         )
 
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
@@ -1281,6 +1372,9 @@ class Qwen4ExpModel(Qwen35Model):
                 attention_inputs, INDEXER_STATE_TAG
             ),
             is_mtp_draft=is_draft,
+            qsa_decode_uninitialized_score_tail=self.__dict__.get(
+                "_ordinary_decode_graph_plan", False
+            ),
             metadata_cache=metadata_cache,
             position_state_cache=(
                 self.kv_cache.get_layer_cache(layer_idx, INDEXER_ROPE_POS_TAG)
@@ -1324,7 +1418,9 @@ class Qwen4ExpModel(Qwen35Model):
     def _ple_input_ids(self, inputs: PyModelInputs) -> torch.Tensor:
         return ple_input_ids(inputs, ple_eos_token_id(getattr(self, "config", None)))
 
-    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+    def forward(
+        self, inputs: PyModelInputs, fmha_impl: Any = None, *, segmented_prefill=None
+    ) -> PyModelOutputs:
         if self.__dict__.get("_closed", False):
             raise RuntimeError("Qwen4 model is closed")
         target_reduce = self.__dict__.get("_target_reduce")
@@ -1338,7 +1434,13 @@ class Qwen4ExpModel(Qwen35Model):
             from .qwen4_exp_runtime.prefill_preflight import prefill_geometry_scope
 
             with prefill_geometry_scope(self, inputs, fmha_impl):
-                outputs = self._forward_with_ple_prefetch(inputs, fmha_impl)
+                outputs = (
+                    self._forward_with_ple_prefetch(inputs, fmha_impl)
+                    if segmented_prefill is None
+                    else self._forward_with_ple_prefetch(
+                        inputs, fmha_impl, segmented_prefill=segmented_prefill
+                    )
+                )
             return outputs
         finally:
             if target_reduce is not None:
@@ -1350,7 +1452,7 @@ class Qwen4ExpModel(Qwen35Model):
                     finish()
 
     def _forward_with_ple_prefetch(
-        self, inputs: PyModelInputs, fmha_impl: Any = None
+        self, inputs: PyModelInputs, fmha_impl: Any = None, *, segmented_prefill=None
     ) -> PyModelOutputs:
         if (
             self.ple_layers
@@ -1429,7 +1531,18 @@ class Qwen4ExpModel(Qwen35Model):
             )
 
         is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
-        attn_meta = self._build_attn_meta(inputs, hidden_states.device, is_cuda_graph)
+        if segmented_prefill is None:
+            attn_meta = self._build_attn_meta(
+                inputs, hidden_states.device, is_cuda_graph
+            )
+        else:
+            attn_meta = self._build_attn_meta(
+                inputs,
+                hidden_states.device,
+                is_cuda_graph,
+                gdn_prefill_prepared=segmented_prefill.prepared,
+            )
+            attn_meta.segmented_prefill = segmented_prefill
 
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)

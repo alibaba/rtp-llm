@@ -5625,6 +5625,63 @@ static void runShortAndLongPrefillRounds(SchedulerBase&           scheduler,
     long_stream->update(makeSingleTokenUpdate(104));
 }
 
+TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetKeepsMultimodalStreamsWhole) {
+    for (auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        ChunkSchedulerTestConfig config;
+        config.role_type = role;
+        ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+        ASSERT_TRUE(env.init());
+        const auto make_media = [&](int tokens, int rows = 1) {
+            auto input                                             = std::make_shared<GenerateInput>();
+            input->input_ids                                       = torch::ones({tokens}, torch::kInt32);
+            input->generate_config                                 = makeTestGenerateConfig();
+            input->generate_config->num_return_sequences           = rows;
+            input->multimodal_features                             = std::vector<torch::Tensor>{torch::zeros({2, 4})};
+            auto whole_runtime                                     = env.runtime_config;
+            whole_runtime.fifo_scheduler_config.prefill_chunk_size = 0;
+            return std::make_shared<NormalGenerateStream>(
+                input, env.model_config, whole_runtime, env.resource_context, nullptr);
+        };
+
+        auto                         text  = env.makeStream(std::vector<int>(8, 1));
+        auto                         media = make_media(12);
+        std::list<GenerateStreamPtr> active{text, media};
+        auto                         selected = env.scheduler().selectPrefillPrefix(active);
+        ASSERT_EQ(selected.size(), 1);
+        EXPECT_EQ(selected.front(), text);
+        EXPECT_EQ(text->currentChunkLen(), 8);
+        EXPECT_FALSE(media->chunkedPrefillEnabled());
+        EXPECT_FALSE(media->hasError());
+        active.pop_front();
+        selected = env.scheduler().selectPrefillPrefix(active);
+        ASSERT_EQ(selected.size(), 1);
+        EXPECT_EQ(selected.front(), media);
+        EXPECT_EQ(media->contextLength(), 12);
+        EXPECT_EQ(media->maxChunkSize(), 0);
+
+        text     = env.makeStream(std::vector<int>(8, 1));
+        media    = make_media(12);
+        active   = {media, text};
+        selected = env.scheduler().selectPrefillPrefix(active);
+        ASSERT_EQ(selected.size(), 2);
+        EXPECT_EQ(media->maxChunkSize(), 0);
+        EXPECT_EQ(text->currentChunkLen(), 4);
+
+        for (auto geometry : {std::pair<int, int>{17, 1}, {9, 2}}) {
+            media    = make_media(geometry.first, geometry.second);
+            text     = env.makeStream(std::vector<int>(4, 1));
+            active   = {media, text};
+            selected = env.scheduler().selectPrefillPrefix(active);
+            ASSERT_EQ(selected.size(), 1);
+            EXPECT_EQ(selected.front(), text);
+            EXPECT_TRUE(media->hasError());
+            EXPECT_EQ(media->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_EQ(media->maxChunkSize(), 0);
+            EXPECT_EQ(text->currentChunkLen(), 4);
+        }
+    }
+}
+
 TEST_F(FIFOSchedulerTest, testChunkedPrefillNeverReturnsMixedContextAndDecodeBatch) {
     ChunkSchedulerTestConfig config;
     config.role_type          = RoleType::PDFUSION;

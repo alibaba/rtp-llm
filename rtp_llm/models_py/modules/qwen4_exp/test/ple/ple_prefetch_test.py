@@ -263,6 +263,105 @@ class PLEPrefetchTest(unittest.TestCase):
         module.finish_prefetch()
         module.close()
 
+    def test_native_graph_prefetch_replays_fork_gather_join_with_fixed_banks(self):
+        module = self._module()
+        graphs = []
+        try:
+            # Separate banks permit alternating buckets without replacing any
+            # address already referenced by a captured graph.
+            for count in (2, 4):
+                ids = torch.arange(count, device="cuda", dtype=torch.int64) + 5
+                module.consume_prefetch(module.start_graph_prefetch(ids))
+                module.finish_graph_warmup()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    handle = module.start_graph_prefetch(ids)
+                    output = module.consume_prefetch(handle).clone()
+                graphs.append((graph, ids, output, handle.bank.rows.data_ptr()))
+            retained = module.resource_usage()["graph_retained_bytes"]
+            self.assertEqual(retained, (2 + 4) * (8 + 160 * 2))
+            self.assertEqual(module.resource_usage()["eager_retained_bytes"], 0)
+            self.assertFalse(module._prefetcher._active_slots)
+            for step in range(4):
+                for graph, ids, output, pointer in reversed(graphs):
+                    ids.copy_(
+                        (torch.arange(ids.numel(), device="cuda") * 7 + step) % 22 - 1
+                    )
+                    graph.replay()
+                    torch.testing.assert_close(
+                        output, module._gather_torch(ids.cpu()).cuda(), atol=0, rtol=0
+                    )
+                    bank = module._prefetcher._graph_banks[tuple(ids.shape)]
+                    self.assertEqual(bank.rows.data_ptr(), pointer)
+            self.assertEqual(module.resource_usage()["graph_retained_bytes"], retained)
+        finally:
+            for graph, *_ in graphs:
+                graph.reset()
+            module.close()
+
+    def test_graph_bank_budget_owner_shape_stream_and_capture_teardown_guards(self):
+        module = self._module()
+        ids = torch.tensor([5, 16], device="cuda", dtype=torch.int64)
+        prefetcher = module._prefetcher
+        prefetcher._max_eager_bytes = 2 * (8 + 160 * 2)
+        self.assertIsNone(
+            module.start_graph_prefetch(
+                torch.zeros(3, device="cuda", dtype=torch.int64)
+            )
+        )
+        handle = module.start_graph_prefetch(ids)
+        module.consume_prefetch(handle)
+        with patch.object(torch.cuda, "is_current_stream_capturing", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "finish warmup"):
+                module.start_graph_prefetch(ids)
+        module.finish_graph_warmup()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = module.start_graph_prefetch(ids)
+            module.consume_prefetch(captured)
+        self.assertIsNone(module.start_prefetch(ids))
+        other = self._module()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "different embedding"):
+                other.consume_prefetch(handle)
+            foreign_stream = torch.cuda.Stream()
+            with torch.cuda.stream(foreign_stream):
+                with self.assertRaisesRegex(RuntimeError, "producer stream"):
+                    module.consume_prefetch(handle)
+                with patch.object(
+                    torch.cuda, "is_current_stream_capturing", return_value=True
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "producer stream"):
+                        module.start_graph_prefetch(ids)
+            with patch.object(
+                torch.cuda, "is_current_stream_capturing", return_value=True
+            ):
+                with self.assertRaisesRegex(RuntimeError, "warmed before capture"):
+                    module.start_graph_prefetch(ids.view(1, 2))
+                with self.assertRaisesRegex(RuntimeError, "capture ends"):
+                    module.close()
+            self.assertIs(module._prefetcher, prefetcher)
+            self.assertTrue(module.shards)
+            graph.reset()
+            retained = prefetcher.retained_bytes
+            with patch.object(
+                torch.cuda, "synchronize", side_effect=RuntimeError("drain failed")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "drain failed"):
+                    module.close()
+            self.assertEqual(prefetcher.retained_bytes, retained)
+            self.assertFalse(prefetcher._closed)
+            module.clear_graph_banks()
+            self.assertEqual(prefetcher.retained_graph_bytes, 0)
+            with self.assertRaisesRegex(RuntimeError, "stale"):
+                module.consume_prefetch(handle)
+            module.consume_prefetch(module.start_graph_prefetch(ids))
+            module.finish_graph_warmup()
+        finally:
+            graph.reset()
+            other.close()
+            module.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -203,6 +203,10 @@ public:
     // a clean failure destroys it before propagating the original exception.
     static CudaGraphRunner* initializeCapture(std::unique_ptr<CudaGraphRunner> runner);
 
+    void setRequireExactDecodeBatchSize(bool required) {
+        require_exact_decode_batch_size_ = required;
+    }
+
 private:
     // Common capture logic for both prefill and decode
     void captureOneGraphInstance(int key, const char* key_type);
@@ -255,6 +259,7 @@ private:
     py::object              py_after_capture_method_;
     py::object              py_after_replay_method_;
     bool                    enable_cuda_graph_{false};
+    bool                    require_exact_decode_batch_size_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
     bool                    draft_prefill_uses_request_lanes_{false};

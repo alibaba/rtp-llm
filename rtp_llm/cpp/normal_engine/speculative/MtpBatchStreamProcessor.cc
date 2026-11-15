@@ -1505,6 +1505,8 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
 
         spec_update_infos.push_back(
             {new_tokens, 1, torch::Tensor(), std::move(last_hidden_states), std::move(propose_all_probs)});
+        spec_update_infos.back().generation_prefill_cuda_graph_status =
+            prefill_output.model_output.generation_prefill_cuda_graph_status;
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;

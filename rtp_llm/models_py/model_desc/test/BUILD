@@ -3,6 +3,13 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "qwen_segmented_prefill_test",
+    srcs = ["qwen_segmented_prefill_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "0"},
+)
+
+py_test(
     name = "qwen_gdn_graph_replay_test_rocm",
     srcs = ["qwen_gdn_graph_replay_test.py"],
     main = "qwen_gdn_graph_replay_test.py",

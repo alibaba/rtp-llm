@@ -114,14 +114,16 @@ torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tenso
 }
 
 GraphBase* PyWrappedModel::selectGraphRunner(const torch_ext::PyAttentionInputs& attention_inputs) const {
-    if (!is_prefill_cuda_graph_mode_ && attention_inputs.is_prefill && generation_prefill_graph_runner_) {
+    if (!is_prefill_cuda_graph_mode_ && attention_inputs.is_prefill && !attention_inputs.is_target_verify
+        && generation_prefill_graph_runner_) {
         return generation_prefill_graph_runner_.get();
     }
     return graph_runner_.get();
 }
 
 CudaGraphState& PyWrappedModel::selectGraphState(const torch_ext::PyAttentionInputs& attention_inputs) {
-    if (!is_prefill_cuda_graph_mode_ && attention_inputs.is_prefill && generation_prefill_graph_runner_) {
+    if (!is_prefill_cuda_graph_mode_ && attention_inputs.is_prefill && !attention_inputs.is_target_verify
+        && generation_prefill_graph_runner_) {
         return generation_prefill_cuda_graph_state_;
     }
     return graph_state_;
@@ -794,6 +796,11 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
 
 void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync) {
     RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs");
+#if USING_CUDA
+    if (segmented_generation_prefill_ && generation_prefill_graph_runner_) {
+        static_cast<SegmentedPrefillGraphRunner*>(generation_prefill_graph_runner_.get())->waitForPreviousForward();
+    }
+#endif
     PreparedAttentionInputsGuard prepared_guard(prepared_attention_inputs_);
     d2d_copies_.clear();
     if (pinned_check_remaining_ > 0) {
@@ -806,6 +813,11 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
         attention_inputs = buildPyAttentionInputs(inputs);
         // Fake/warmup streams alias reserved block zero and have no live cache rows.
         attention_inputs.is_s_padded = inputs.warmup || inputs.is_fake_stream;
+        if (segmented_generation_prefill_ && inputs.warmup) {
+            // This backend's budget inputs own real positive pages; exercise
+            // the same eager writers and allocations as serving inputs.
+            attention_inputs.is_s_padded = false;
+        }
     }
     if (!inputs.warmup && inputs.pd_separation) {
         attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
@@ -914,7 +926,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     // Packed hidden-state collection is eager, not a generation-prefill graph attempt.
     GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status =
         !capture_hidden_states && owns_generation_prefill_cuda_graph_ && !is_prefill_cuda_graph_mode_
-                && has_context_request ?
+                && !inputs.is_target_verify && has_context_request ?
             generation_prefill_cuda_graph_init_status_ :
             GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
     const auto with_generation_prefill_cuda_graph_status = [&](GptModelOutputs outputs) {
@@ -998,8 +1010,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         auto&      graph_state  = selectGraphState(py_model_inputs.attention_inputs);
         const bool is_generation_prefill_runner =
             graph_runner != nullptr && graph_runner == generation_prefill_graph_runner_.get();
-        if (!capture_hidden_states && owns_generation_prefill_cuda_graph_ && has_context_request
-            && generation_prefill_graph_runner_ != nullptr && !is_generation_prefill_runner) {
+        if (!capture_hidden_states && owns_generation_prefill_cuda_graph_ && !inputs.is_target_verify
+            && has_context_request && generation_prefill_graph_runner_ != nullptr && !is_generation_prefill_runner) {
             generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED;
         }
         const bool can_run_graph = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
@@ -1018,12 +1030,19 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 py_model_inputs.attention_inputs.is_target_verify,
                 py_model_inputs.attention_inputs.is_prefill,
                 graph_state.current_real_graph_bs);
-            py_model_inputs.attention_inputs.is_s_padded = true;
+            if (!is_generation_prefill_runner || !segmented_generation_prefill_) {
+                py_model_inputs.attention_inputs.is_s_padded = true;
+            }
             py_model_outputs                             = graph_runner->forward(py_model_inputs, graph_state);
             if (is_generation_prefill_runner) {
                 generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
             }
-            RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
+            RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed, is_target_verify=%d, is_prefill=%d, "
+                              "logical_bs=%d, graph_bs=%d",
+                              py_model_inputs.attention_inputs.is_target_verify,
+                              py_model_inputs.attention_inputs.is_prefill,
+                              graph_state.current_batch_size,
+                              graph_state.current_real_graph_bs);
         } else {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");

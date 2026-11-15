@@ -275,6 +275,23 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
             continue;
         }
 
+        if (!stream->chunkedPrefillEnabled() && stream->multimodalFeaturesLength() != 0) {
+            // A whole media request shares the token budget but cannot be
+            // split at a scheduler-selected token inside its embedding span.
+            if (rows <= 0 || remaining > budget_left / rows) {
+                if (!selected.empty()) {
+                    break;
+                }
+                it = finish_invalid_stream(
+                    it, ErrorCode::INVALID_PARAMS, "complete multimodal prefill exceeds the token budget");
+                continue;
+            }
+            selected.push_back(stream);
+            budget_left -= remaining * rows;
+            ++it;
+            continue;
+        }
+
         const int64_t grant = computeChunkGrant(budget_left, rows, remaining, block_size);
 
         if (grant <= 0) {

@@ -462,6 +462,7 @@ class Qwen4ExpQSAIndexer(nn.Module):
         # Widest possible result: every selected block contributes ratio tokens,
         # plus the unscored tail, which can hold at most ratio - 1 of them.
         self.max_selected = token_budget + compress_ratio - 1
+        self._prefill_score_core = None
         # Build with the same Torch pow/divide kernels as the reference before
         # capture. Device pow approximations can shift BF16 cos/sin values.
         frequency = None
@@ -630,6 +631,16 @@ class Qwen4ExpQSAIndexer(nn.Module):
         from rtp_llm.models_py.kernels.cuda.qsa.indexer_prefill_score import (
             try_prefill_score,
         )
+
+        core = getattr(self, "_prefill_score_core", None)
+        if (
+            core is not None
+            and past_raw_keys is None
+            and precomputed_block_keys is not None
+        ):
+            selected = core(self, q, block_keys, positions)
+            if selected is not None:
+                return selected
 
         scores = try_prefill_score(q, block_keys)
         if scores is not None:

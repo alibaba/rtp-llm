@@ -33,6 +33,7 @@
 #endif
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
+#include "rtp_llm/cpp/models/SegmentedPrefillGraphRunner.h"
 #endif
 #include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
@@ -176,6 +177,7 @@ private:
     // Per-wrapper ownership, not the process-wide configuration request. Only
     // the normal main-generation wrapper can own this secondary runner.
     const bool                       owns_generation_prefill_cuda_graph_{false};
+    const bool                       segmented_generation_prefill_{false};
     bool                             enable_cuda_graph_{false};
     bool                             is_prefill_cuda_graph_mode_{false};
     GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_init_status_{
@@ -234,7 +236,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                                                allow_cuda_graph,
                                                                                is_prefill_cuda_graph_mode,
                                                                                params.parallelism_config.role_type,
-                                                                               params.sp_config.type)),
+                                                                               params.sp_config.type,
+                                                                               use_spec_decoding && !params.model_id)),
+    segmented_generation_prefill_(owns_generation_prefill_cuda_graph_
+                                  && params.hw_kernel_config.effectiveGenerationPrefillGraphBackend() == "segmented"),
     enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && allow_cuda_graph && pp_size_ == 1),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
     generation_prefill_cuda_graph_init_status_(owns_generation_prefill_cuda_graph_ ?
@@ -249,9 +254,29 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         params.hw_kernel_config.generation_prefill_capture_token_buckets;
     const int generation_prefill_graph_request_capacity =
         params.hw_kernel_config.generation_prefill_cuda_graph_max_requests;
+    if (params.hw_kernel_config.effectiveGenerationPrefillGraphBackend() == "segmented") {
+        RTP_LLM_CHECK_WITH_INFO(
+            owns_generation_prefill_cuda_graph_,
+            "segmented prefill requires a PDFUSION/PREFILL main/target model with CUDA graphs enabled");
+#if USING_CUDA
+        const auto& p = params.parallelism_config;
+        const bool  supported_tp =
+            p.tp_size == 2 || ((p.tp_size == 4 || p.tp_size == 8) && p.local_world_size == p.tp_size);
+        const bool supported_ep = supportsSegmentedPrefillExpertParallel(p, params.sp_config.type, use_spec_decoding);
+        RTP_LLM_CHECK_WITH_INFO(
+            getComputeCapabilityMajor() == 12 && getComputeCapabilityMinor() == 0 && supported_tp
+                && p.world_size == p.tp_size && p.ffn_tp_size == p.tp_size && p.dp_size == 1 && supported_ep
+                && p.pp_size == 1 && !p.prefill_cp_config.is_enabled() && !p.prefill_cp_config.is_prefill_enabled()
+                && description_.data_type == DataType::TYPE_BF16,
+            "segmented prefill requires SM120 BF16 TP2/4/8 EP1 (TP4/8 single-node) or EP2 ordinary PDFUSION/PREFILL MTP, without CP/DP/PP");
+#else
+        RTP_LLM_FAIL("segmented prefill requires NVIDIA CUDA");
+#endif
+    }
     if (owns_generation_prefill_cuda_graph_) {
         const auto& parallelism = params.parallelism_config;
-        RTP_LLM_CHECK_WITH_INFO(isSingleDeviceGenerationPrefillCudaGraphConfig(parallelism),
+        RTP_LLM_CHECK_WITH_INFO(segmented_generation_prefill_
+                                    || isSingleDeviceGenerationPrefillCudaGraphConfig(parallelism),
                                 "Generation prefill CUDA graph currently supports only single-device execution: "
                                 "world_size=%ld tp_size=%ld dp_size=%ld ep_size=%ld pp_size=%ld "
                                 "ffn_tp_size=%ld prefill_cp=%d",
@@ -308,6 +333,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                 HWKernelConfig::kGenerationPrefillCudaGraphMaxCaptureTokens,
                                 invalid_bucket == buckets.end() ? 0 : *invalid_bucket);
         const int64_t max_bucket = *std::max_element(buckets.begin(), buckets.end());
+        RTP_LLM_CHECK_WITH_INFO(!segmented_generation_prefill_ || max_bucket <= params.max_seq_len,
+                                "segmented prefill dummy sequence must fit max_seq_len");
         RTP_LLM_CHECK_WITH_INFO(
             generation_prefill_graph_request_capacity < std::numeric_limits<int>::max()
                 && generationPrefillCudaGraphPaddedTokenIndexFitsInt32(generation_prefill_graph_request_capacity,
@@ -412,6 +439,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                                                   "forward";
     py_forward_method_         = py_model_.attr(forward_method);
     if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value()) {
+        RTP_LLM_CHECK_WITH_INFO(!segmented_generation_prefill_,
+                                "segmented prefill requires a published cache topology and startup budget");
         // No published topology means there is no trustworthy model geometry
         // for any graph role (including prefill warmup). Keep the eager path.
         RTP_LLM_LOG_WARNING(
@@ -530,6 +559,17 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         }
         auto py_initialize_method = py_instance.attr("initialize");
         try {
+#if USING_CUDA
+            if (segmented_generation_prefill_) {
+                RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_instance, "configure_ordinary_decode_graph_plan")
+                                            && py::hasattr(py_instance, "create_segmented_prefill_runner"),
+                                        "segmented prefill requires a model adapter");
+                if (!use_spec_decoding) {
+                    py_instance.attr("configure_ordinary_decode_graph_plan")();
+                    graph_runner->setRequireExactDecodeBatchSize(true);
+                }
+            }
+#endif
             py_init_result = py_initialize_method(init_resources);
             // Python initialization/JIT can take a different amount of time on
             // each EP/TP rank. Synchronize immediately before capture so every
@@ -541,7 +581,26 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             throw;
         }
 
-        if (owns_generation_prefill_cuda_graph_) {
+#if USING_CUDA
+        if (segmented_generation_prefill_) {
+            auto runner = std::make_unique<SegmentedPrefillGraphRunner>(params, graph_params, py_instance);
+            try {
+                runner->initCapture();
+            } catch (...) {
+                if (runner->captureSessionMayBeDirty()) {
+                    (void)runner.release();
+                    (void)graph_runner_.release();
+                }
+                throw;
+            }
+            generation_prefill_graph_runner_           = std::move(runner);
+            generation_prefill_cuda_graph_init_status_ = GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
+            RTP_LLM_LOG_INFO("generation prefill CUDA graph backend=segmented enabled: max_requests=%d buckets=%zu",
+                             generation_prefill_graph_request_capacity,
+                             generation_prefill_cuda_graph_buckets.size());
+        } else
+#endif
+            if (owns_generation_prefill_cuda_graph_) {
             bool masked_moe_backend_supported = false;
 #if USING_CUDA
             masked_moe_backend_supported =

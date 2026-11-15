@@ -380,6 +380,7 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
     StreamGroups stream_groups(streams);
 
     MergedOutput target_output;
+    target_output.model_output.generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
     target_output.model_output.all_hidden_states =
         torch::tensor({0.1f, 0.2f, 1.1f, 1.2f, 1.3f, 1.4f}, torch::kFloat32).reshape({3, 2});
     target_output.sampler_output.token_ids = torch::tensor({2, -1, 1, 1, 2, 3}, torch::kInt32).reshape({2, 3});
@@ -394,6 +395,8 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
 
     auto status = processor.dispatchPrefill(stream_groups, std::move(target_output), std::move(draft_output));
     EXPECT_TRUE(status.ok());
+    EXPECT_EQ(stream1->generationPrefillCudaGraphStatus(), GenerationPrefillCudaGraphStatus::REPLAYED);
+    EXPECT_EQ(stream2->generationPrefillCudaGraphStatus(), GenerationPrefillCudaGraphStatus::REPLAYED);
 
     checkOutput(stream1, {2, 1}, {1, 2}, {0.2, 0.1, 0.3, 0.5}, {0.3, 0.4});
     checkOutput(stream2, {1, 2, 3}, {3, 0}, {0.3, 0.1, 0.4, 0.2}, {1.7, 1.8});

@@ -46,6 +46,7 @@ def _qsa_paged_score_kernel(
     D: tl.constexpr,
     block_size: tl.constexpr,
     BN: tl.constexpr,
+    INITIALIZE_SCORE_TAIL: tl.constexpr,
 ):
     rd = tl.arange(0, D)
     row = tl.program_id(0).to(tl.int64)
@@ -56,6 +57,10 @@ def _qsa_paged_score_kernel(
     n_mask = rn < max_ctx_len
 
     T = tl.load(ctx_ptr + row)
+    if blk * BN >= T:
+        if INITIALIZE_SCORE_TAIL:
+            tl.store(out_ptr + row * max_ctx_len + rn, float("-inf"), mask=n_mask)
+        return
     in_context = n_mask & (rn < T)
 
     bi = rn // block_size
@@ -117,6 +122,7 @@ def qsa_paged_indexer_score(
     max_ctx_len: Optional[int] = None,
     block_n: int = _BLOCK_N,
     validate_block_table: bool = True,
+    initialize_score_tail: bool = True,
 ) -> torch.Tensor:
     """Score one decode step against the paged indexer KV pool.
 
@@ -140,6 +146,10 @@ def qsa_paged_indexer_score(
     Returns:
         ``[B * next_n, max_ctx_len]`` fp32 logits; -inf past the per-row
         ``context_lens`` boundary or for an unallocated / missing logical block.
+        With ``initialize_score_tail=False``, only valid-length columns are
+        defined: every consumer must mask from the same device lengths, even
+        in fallbacks and subsequent gathers. This mode is fixed at capture;
+        switching the producer/consumer contract requires a new graph.
     """
     if not q_bf16.is_cuda:
         raise ValueError("qsa_paged_indexer_score requires CUDA tensors")
@@ -237,5 +247,6 @@ def qsa_paged_indexer_score(
         D=D,
         block_size=block_size,
         BN=block_n,
+        INITIALIZE_SCORE_TAIL=initialize_score_tail,
     )
     return logits
