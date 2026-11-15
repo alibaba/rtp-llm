@@ -69,7 +69,7 @@ TEST_F(NormalEngineTest, StopRetainsScheduledResourcesUntilForwardFinishes) {
     bool released_in_forward = false;
     {
         std::unique_lock<std::mutex> lock(scheduler->lock_);
-        EXPECT_TRUE(scheduler->cond_.wait_for(lock, std::chrono::seconds(5), [&] { return scheduler->stop_; }));
+        EXPECT_TRUE(scheduler->cond_.wait_for(lock, std::chrono::seconds(5), [&] { return scheduler->stop_.load(); }));
         released_in_forward = stream->streamCacheResource().isResourceReleased();
     }
     resume.set_value();
