@@ -3,7 +3,7 @@ load("//bazel:defs.bzl", "rpm_library")
 rpm_library(
     name = "hf3fs",
     rpms = [
-        "@hf3fs_rpm//file:file",
+        "@rtp_deps//:hf3fs_rpm",
     ],
     lib_path = "usr/lib64",
     include_path = "usr/include",

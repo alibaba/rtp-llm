@@ -5,6 +5,11 @@ load(":pip.bzl", "PIP_EXTRA_ARGS")
 
 package(default_visibility = ["//visibility:public"])
 
+alias(
+    name = "hf3fs_rpm",
+    actual = "@hf3fs_rpm//file:file",
+)
+
 py_test(
     name = "requirements_sources_test",
     srcs = ["requirements_sources_test.py"],
