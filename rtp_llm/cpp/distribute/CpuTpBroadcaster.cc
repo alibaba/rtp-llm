@@ -309,6 +309,7 @@ void CpuTpBroadcaster::reset() {
         my_uds_path_.clear();
     }
     base_path_.clear();
+    local_engine_session_path_.clear();
     tp_rank_       = 0;
     tp_size_       = 1;
     next_sequence_ = 0;
@@ -317,11 +318,20 @@ void CpuTpBroadcaster::reset() {
     initialized_.store(false, std::memory_order_release);
 }
 
-void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& base_path) {
+std::string CpuTpBroadcaster::localEngineSessionPath() {
+    std::lock_guard<std::mutex> lock(mu_);
+    return local_engine_session_path_;
+}
+
+void CpuTpBroadcaster::initialize(int                tp_rank,
+                                  int                tp_size,
+                                  const std::string& base_path,
+                                  const std::string& local_engine_session_path) {
     std::lock_guard<std::mutex> lock(mu_);
 
     if (initialized_.load(std::memory_order_acquire)) {
-        if (tp_rank_ == tp_rank && tp_size_ == tp_size && base_path_ == base_path) {
+        if (tp_rank_ == tp_rank && tp_size_ == tp_size && base_path_ == base_path
+            && local_engine_session_path_ == local_engine_session_path) {
             return;
         }
         RTP_LLM_FAIL("CpuTpBroadcaster re-init mismatch: was rank=%d size=%d path=%s, "
@@ -334,6 +344,7 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
                      base_path.c_str());
     }
 
+    local_engine_session_path_ = local_engine_session_path;
     if (tp_size <= 1) {
         // Single-rank no-op; broadcast() short-circuits.
         tp_rank_ = tp_rank;

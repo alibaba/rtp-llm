@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import sys
 import unittest
 from contextlib import ExitStack
@@ -13,6 +14,50 @@ from rtp_llm.models_py.distributed import collective_torch as collective
 
 
 class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
+    def test_local_tp_and_dp_ep_groups_share_shutdown_session(self):
+        compute_ops = SimpleNamespace(
+            register_comm_ops=MagicMock(), init_cpu_tp_broadcaster=MagicMock()
+        )
+        config = SimpleNamespace(
+            tp_size=4,
+            dp_size=2,
+            pp_size=1,
+            ep_size=8,
+            world_size=8,
+            local_world_size=8,
+            tp_rank=1,
+            world_rank=1,
+        )
+        with (
+            patch.dict(sys.modules, {"librtp_compute_ops": compute_ops}),
+            patch.object(collective, "_group_map", {}),
+            patch.object(collective, "_parallelism_config", config),
+            patch.object(
+                torch.distributed, "get_rank", side_effect=lambda: config.world_rank
+            ),
+            patch.object(
+                collective,
+                "_engine_loop_coordinator_base_path",
+                "/tmp/owned/session_dp0",
+            ),
+        ):
+            for dp_rank in (0, 1):
+                config.world_rank = dp_rank * config.tp_size + config.tp_rank
+                path = f"/tmp/owned/session_dp{dp_rank}"
+                with patch.object(collective, "_cpu_tp_broadcaster_base_path", path):
+                    collective._register_process_groups_to_cpp()
+                    compute_ops.init_cpu_tp_broadcaster.assert_called_with(
+                        1, 4, path, "/tmp/owned/session_dp0"
+                    )
+            config.ep_size = 4
+            with patch.object(
+                collective, "_cpu_tp_broadcaster_base_path", "/tmp/owned/session_dp0"
+            ):
+                collective._register_process_groups_to_cpp()
+                compute_ops.init_cpu_tp_broadcaster.assert_called_with(
+                    1, 4, "/tmp/owned/session_dp0"
+                )
+
     def _registered_callbacks(self, config=None, process_group=None, stage_group=None):
         if process_group is None:
             process_group = MagicMock()

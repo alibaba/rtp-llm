@@ -38,6 +38,7 @@ _group_map: Dict[Union[Group, str], torch.distributed.ProcessGroup] = {}
 _parallelism_config: Optional[ParallelismConfig] = None
 _initialized: bool = False  # Track if we've initialized (to prevent double init)
 _cpu_tp_broadcaster_base_path: Optional[str] = None
+_engine_loop_coordinator_base_path: Optional[str] = None
 _rocm_rccl = None
 _symm_mem = None
 _all_reduce_module = None
@@ -108,6 +109,8 @@ def _init_all_reduce(
 def _make_cpu_tp_broadcaster_base_path(
     parallelism_config: ParallelismConfig,
     nccl_init_port: int,
+    *,
+    dp_rank_override: Optional[int] = None,
 ) -> str:
     session_id = os.environ.get("RTP_LLM_CPU_TP_BROADCASTER_ID")
     if not session_id:
@@ -120,10 +123,13 @@ def _make_cpu_tp_broadcaster_base_path(
             os.environ.get("TMPDIR", "/tmp"), f"rtp_llm_{os.getuid()}"
         )
     os.makedirs(base_dir, mode=0o700, exist_ok=True)
+    dp_rank = (
+        parallelism_config.dp_rank if dp_rank_override is None else dp_rank_override
+    )
     # pp_rank disambiguates the TP groups of different PP stages.
     base_path = os.path.join(
         base_dir,
-        f"rtp_llm_tp_{session_id}_pp{parallelism_config.pp_rank}_dp{parallelism_config.dp_rank}",
+        f"rtp_llm_tp_{session_id}_pp{parallelism_config.pp_rank}_dp{dp_rank}",
     )
     rank0_path = f"{base_path}_0.sock"
     if len(os.fsencode(rank0_path)) >= _UDS_SUN_PATH_LIMIT:
@@ -202,7 +208,7 @@ def init_distributed_environment(
     Raises:
         RuntimeError: If changing a live collective policy without destroying it
     """
-    global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
+    global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path, _engine_loop_coordinator_base_path
 
     if collective_config is None:
         collective_config = CollectiveConfig()
@@ -217,6 +223,9 @@ def init_distributed_environment(
             _normalize_parallelism_ranks(parallelism_config)
             _cpu_tp_broadcaster_base_path = _make_cpu_tp_broadcaster_base_path(
                 parallelism_config, nccl_init_port
+            )
+            _engine_loop_coordinator_base_path = _make_cpu_tp_broadcaster_base_path(
+                parallelism_config, nccl_init_port, dp_rank_override=0
             )
             _create_process_groups(
                 parallelism_config,
@@ -233,6 +242,9 @@ def init_distributed_environment(
     _normalize_parallelism_ranks(parallelism_config)
     _cpu_tp_broadcaster_base_path = _make_cpu_tp_broadcaster_base_path(
         parallelism_config, nccl_init_port
+    )
+    _engine_loop_coordinator_base_path = _make_cpu_tp_broadcaster_base_path(
+        parallelism_config, nccl_init_port, dp_rank_override=0
     )
 
     assert backend in ["nccl"], "backend current only supports nccl"
@@ -753,11 +765,24 @@ def _register_process_groups_to_cpp():
         # dp_rank disambiguates DP groups on the same node.
         base_path = _cpu_tp_broadcaster_base_path
         assert base_path is not None
-        librtp_compute_ops.init_cpu_tp_broadcaster(
-            _parallelism_config.tp_rank,
-            _parallelism_config.tp_size,
-            base_path,
-        )
+        world_size = getattr(_parallelism_config, "world_size", 0)
+        if (
+            world_size > 1
+            and getattr(_parallelism_config, "pp_size", 1) == 1
+            and getattr(_parallelism_config, "ep_size", 0) == world_size
+            and getattr(_parallelism_config, "local_world_size", 0) == world_size
+            and _engine_loop_coordinator_base_path is not None
+        ):
+            librtp_compute_ops.init_cpu_tp_broadcaster(
+                _parallelism_config.tp_rank,
+                _parallelism_config.tp_size,
+                base_path,
+                _engine_loop_coordinator_base_path,
+            )
+        else:
+            librtp_compute_ops.init_cpu_tp_broadcaster(
+                _parallelism_config.tp_rank, _parallelism_config.tp_size, base_path
+            )
         logging.info(
             f"Initialized CpuTpBroadcaster (tp_rank={_parallelism_config.tp_rank}, "
             f"tp_size={_parallelism_config.tp_size}, base_path={base_path})"
@@ -803,7 +828,7 @@ def destroy_distributed_environment():
     After calling this function, init_distributed_environment() can be called again
     to reinitialize the distributed environment.
     """
-    global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
+    global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path, _engine_loop_coordinator_base_path
     global _canonical_p2p
 
     rank = torch.distributed.get_rank()
@@ -843,6 +868,7 @@ def destroy_distributed_environment():
     logging.info(f"[rank: {rank}] Distributed environment destroyed")
     _parallelism_config = None
     _cpu_tp_broadcaster_base_path = None
+    _engine_loop_coordinator_base_path = None
     _initialized = False
     gc.collect()
 

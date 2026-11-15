@@ -24,6 +24,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <c10/core/InferenceMode.h>
@@ -466,6 +467,9 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
         }
     } else {
         THROW_IF_STATUS_ERROR(executor_->process(schedule_output));
+    }
+    if (mode == preRunMode::build_system_prompt && loop_coordinator_) {
+        loop_coordinator_->afterStep();
     }
 #if USING_CUDA
     if (mode == preRunMode::build_system_prompt) {
@@ -918,6 +922,21 @@ KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_c
 }
 
 absl::Status NormalEngine::startLoop() {
+    if (parallelism_config.pp_size == 1
+        && EngineLoopCoordinator::supportsLocalGroup(parallelism_config.world_size,
+                                                     parallelism_config.local_world_size,
+                                                     parallelism_config.tp_size,
+                                                     parallelism_config.ep_size)) {
+        loop_coordinator_ = EngineLoopCoordinator::create(CpuTpBroadcaster::instance().localEngineSessionPath(),
+                                                          parallelism_config.world_rank,
+                                                          parallelism_config.world_size,
+                                                          parallelism_config.local_world_size);
+        if (loop_coordinator_) {
+            RTP_LLM_LOG_INFO("local engine shutdown coordinator ready, rank=%ld, size=%ld",
+                             parallelism_config.world_rank,
+                             parallelism_config.world_size);
+        }
+    }
     if (parallelism_config.tp_rank == 0) {
         THROW_IF_STATUS_ERROR(initSystemPrompt());
     }
@@ -929,20 +948,37 @@ absl::Status NormalEngine::startLoop() {
     return absl::OkStatus();
 }
 
+void NormalEngine::prepareForStop(int64_t drain_timeout_ms) {
+    if (loop_coordinator_) {
+        loop_coordinator_->waitForStopReady(std::chrono::milliseconds(drain_timeout_ms));
+    }
+}
+
 absl::Status NormalEngine::stop() {
     /** RPC shutdown releases the executor; the destructor can call stop again. */
     if (!executor_) {
         return absl::OkStatus();
     }
     RTP_LLM_LOG_INFO("stop normal engine");
+    prepareForStop(0);
     running_                    = false;
     const auto scheduler_status = scheduler_->requestStop();
-    // Ask rank 0 to stop at a step boundary. Receivers must finish all model
-    // collectives for inputs that rank 0 has already published before exiting.
-    CpuTpBroadcaster::instance().requestStop();
+    if (loop_coordinator_) {
+        loop_coordinator_->requestStop();
+    } else {
+        // Without local EP coordination, retain the existing TP boundary protocol.
+        CpuTpBroadcaster::instance().requestStop();
+    }
     loop_thread_->join();
-    // The loop has finished its last model step and async dispatch. Only now
-    // can cancellation release page tables and LINEAR replay leases.
+    if (loop_coordinator_) {
+        RTP_LLM_LOG_INFO("local engine loop stopped at common round %lu", loop_coordinator_->completedSteps());
+        setCurrentThreadDevice(getDeviceId());
+        executor_->drainForShutdown();
+        runtimeSyncAndCheck();
+        loop_coordinator_->waitForGpuDrain();
+        RTP_LLM_LOG_INFO("all local engine ranks drained before model teardown");
+    }
+    // Do not release page tables or LINEAR replay leases before the final GPU work.
     const auto release_status = scheduler_->stop();
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
@@ -956,7 +992,9 @@ void NormalEngine::loop() try {
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
     auto& tp_broadcaster = CpuTpBroadcaster::instance();
-    while (parallelism_config.pp_size > 1 ? running_.load() : !tp_broadcaster.shouldStop(!running_)) {
+    while (loop_coordinator_              ? loop_coordinator_->beforeStep(running_) :
+           parallelism_config.pp_size > 1 ? running_.load() :
+                                            !tp_broadcaster.shouldStop(!running_)) {
         try {
             auto status = parallelism_config.pp_size > 1 ? pp_step() : step();
             if (!status.ok()) {
@@ -967,6 +1005,9 @@ void NormalEngine::loop() try {
             running_ = false;
             RTP_LLM_LOG_INFO("normal engine TP loop stopped: %s", e.what());
             break;
+        }
+        if (loop_coordinator_) {
+            loop_coordinator_->afterStep();
         }
     }
     running_ = false;

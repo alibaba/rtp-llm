@@ -297,10 +297,10 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         model_id_++;
         if (parallelism_config.tp_rank == 0) {
             // kmon metric init
-            (void)initKmonitorFactory();
             auto kmon_tags = kmonitor::MetricsTags();
             kmon_tags.AddTag("dp_rank", std::to_string(parallelism_config.dp_rank));
-            params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
+            runtime_metrics_reporter_ = createRuntimeMetricsReporter(kmon_tags);
+            params.metrics_reporter   = runtime_metrics_reporter_;
         }
         return params;
     } catch (const std::exception& e) {
@@ -478,6 +478,7 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
 void RtpLLMOp::stop() {
     const int64_t stop_timeout_ms = getGrpcStopTimeoutMs();
     if (!is_server_shutdown_) {
+        std::shared_ptr<CacheStore> cache_store;
         if (model_rpc_service_) {
             model_rpc_service_->beginShutdown();
         }
@@ -500,7 +501,13 @@ void RtpLLMOp::stop() {
             grpc_server_.reset();
         }
         if (model_rpc_service_) {
+            const auto engine        = model_rpc_service_->getEngine();
+            const auto cache_manager = engine ? engine->getCacheManager() : nullptr;
+            cache_store              = cache_manager ? cache_manager->getCacheStore() : nullptr;
             pybind11::gil_scoped_release release;
+            if (engine) {
+                engine->prepareForStop(stop_timeout_ms);
+            }
             model_rpc_service_->stop();
             pybind11::gil_scoped_acquire acquire;
             model_rpc_service_.reset();
@@ -513,11 +520,18 @@ void RtpLLMOp::stop() {
         // bounded flush of remaining spans; never blocks process exit
         {
             pybind11::gil_scoped_release release;
-            /** Release the grammar reporter before KMonitor shutdown to avoid use-after-free at static destruction. */
+            if (cache_store) {
+                // Destroy RPC workers before closing their shared transport.
+                // Tensor owners may retain the store for later MR deregistration.
+                cache_store->stop();
+                RTP_LLM_LOG_INFO("cache store transports stopped before KMonitor shutdown");
+            }
+            // Release the grammar backend's MetricsReporter while KMonitorFactory
+            // is still alive, after all request owners have stopped.
             LogitsProcessorFactory::shutdown();
             telemetry::TelemetryRuntime::shutdown();
         }
-        stopKmonitorFactory();
+        runtime_metrics_reporter_.reset();
     }
 }
 

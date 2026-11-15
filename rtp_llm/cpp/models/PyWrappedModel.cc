@@ -267,14 +267,12 @@ void PyWrappedModel::cleanupAfterConstructionFailure() noexcept {
         py_forward_method_ = py::object();
         generation_prefill_graph_runner_.reset();
         graph_runner_.reset();
-        if (py_model_ && py::hasattr(py_model_, "close")) {
-            if (owns_py_model_) {
-                py_model_.attr("close")();
-            }
-            py_model_ = py::object();
-        } else {
-            py_model_.release();
+        if (owns_py_model_ && py_model_ && py::hasattr(py_model_, "close")) {
+            py_model_.attr("close")();
         }
+        // Every wrapper owns its Python reference, including borrowed models.
+        // Drop it under the GIL even when the model has no optional close hook.
+        py_model_ = py::object();
     } catch (const std::exception& e) {
         // A failed drain must keep its storage owner alive. Never let member
         // destruction decrement this handle after the GIL guard has unwound.
@@ -419,14 +417,12 @@ PyWrappedModel::~PyWrappedModel() {
         graph_runner_.reset();
         // Runners retain Python methods and graph-owned tensors. Drain and
         // destroy them before releasing the model object they reference.
-        if (py_model_ && py::hasattr(py_model_, "close")) {
-            if (owns_py_model_) {
-                py_model_.attr("close")();
-            }
-            py_model_ = py::object();
-        } else {
-            py_model_.release();
+        if (owns_py_model_ && py_model_ && py::hasattr(py_model_, "close")) {
+            py_model_.attr("close")();
         }
+        // Every wrapper owns its Python reference, including borrowed models.
+        // Drop it under the GIL even when the model has no optional close hook.
+        py_model_ = py::object();
         RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python object instance released.");
     } catch (const py::error_already_set& e) {
         py_model_.release();

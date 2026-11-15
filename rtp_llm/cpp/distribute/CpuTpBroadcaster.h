@@ -34,7 +34,11 @@ public:
     // Bootstrap UDS endpoints. Call once per process. Subsequent calls with
     // matching (tp_rank, tp_size, base_path) are no-ops; mismatched re-init
     // throws.
-    void initialize(int tp_rank, int tp_size, const std::string& base_path);
+    void        initialize(int                tp_rank,
+                           int                tp_size,
+                           const std::string& base_path,
+                           const std::string& local_engine_session_path = "");
+    std::string localEngineSessionPath();
 
     // Blocking broadcast of one framed payload from `buf` originating at root.
     // Calls are serialized per process. Throws on transport or frame-contract
@@ -69,6 +73,7 @@ private:
     int               tp_rank_           = 0;
     int               tp_size_           = 1;
     std::string       base_path_;
+    std::string       local_engine_session_path_;
     int               listen_fd_ = -1;  // rank 0 only
     // peer_fds_[k] = fd connecting this rank to rank k. peer_fds_[tp_rank_] = -1.
     std::vector<int> peer_fds_;

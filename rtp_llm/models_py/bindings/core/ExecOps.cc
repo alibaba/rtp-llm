@@ -956,13 +956,14 @@ void registerExecCtxOps(pybind11::module& m) {
 
     m.def(
         "init_cpu_tp_broadcaster",
-        [](int tp_rank, int tp_size, const std::string& base_path) {
+        [](int tp_rank, int tp_size, const std::string& base_path, const std::string& local_engine_session_path) {
             py::gil_scoped_release release;
-            CpuTpBroadcaster::instance().initialize(tp_rank, tp_size, base_path);
+            CpuTpBroadcaster::instance().initialize(tp_rank, tp_size, base_path, local_engine_session_path);
         },
         py::arg("tp_rank"),
         py::arg("tp_size"),
-        py::arg("base_path"));
+        py::arg("base_path"),
+        py::arg("local_engine_session_path") = "");
 
     m.def("destroy_cpu_tp_broadcaster", []() {
         py::gil_scoped_release release;

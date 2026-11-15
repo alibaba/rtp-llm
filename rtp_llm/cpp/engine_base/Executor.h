@@ -25,6 +25,9 @@ public:
         return absl::OkStatus();
     }
 
+    // Only after the common final model round; retain storage until all GPUs drain.
+    virtual void drainForShutdown() {}
+
     // Batch-recording helpers shared by executors. They cannot live in
     // rtp_llm/cpp/observability: engine_base/stream already depends on that
     // library (RecordedBatch in StreamGroups, identity publishing in

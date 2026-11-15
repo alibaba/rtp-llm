@@ -4,6 +4,22 @@ cc_test = cc_test_wrapper
 
 package(default_visibility = ["//visibility:public"])
 
+cc_library(
+    name = "engine_loop_coordinator",
+    srcs = ["EngineLoopCoordinator.cc"],
+    hdrs = ["EngineLoopCoordinator.h"],
+    copts = copts(),
+)
+
+cc_test(
+    name = "engine_loop_coordinator_test",
+    srcs = ["test/EngineLoopCoordinatorTest.cc"],
+    deps = [":engine_loop_coordinator", "@com_google_googletest//:gtest_main"],
+    env = {"GPU_COUNT": "0"},
+    copts = copts(),
+    timeout = "short",
+)
+
 # Pure CPU broadcaster used by tpSyncModelInputs to bypass NCCL's
 # cudaDeviceSynchronize stall on the small per-step CPU tensors.
 # Star topology over Unix Domain Sockets, intra-node TP only.
