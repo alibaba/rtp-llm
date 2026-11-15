@@ -96,7 +96,6 @@ private:
                                     int        prefill_memory_reuse_len,
                                     int        prefill_disk_reuse_len);
 
-private:
     std::string decode_cluster_name_;
 };
 

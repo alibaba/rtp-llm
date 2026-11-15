@@ -2,6 +2,7 @@ import pickle
 import unittest
 
 from rtp_llm.ops import (
+    FIFOSchedulerConfig,
     GrammarConfig,
     HWKernelConfig,
     MoeConfig,
@@ -358,6 +359,44 @@ class RuntimeConfigPickleTest(unittest.TestCase):
                 restored.__setstate__(state[:size])
                 self.assertEqual(restored.output_dispatcher_worker_count, 0)
                 self.assertEqual(restored.model_warm_up, size == 12)
+
+
+class _LegacyFIFOSchedulerConfig:
+    def __init__(self, state):
+        self.state = state
+
+    def __reduce__(self):
+        return _new_config, (FIFOSchedulerConfig,), self.state
+
+
+class FIFOSchedulerConfigPickleTest(unittest.TestCase):
+    def test_async_flag_roundtrip_keeps_admission_limits(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                config = FIFOSchedulerConfig()
+                config.max_context_batch_size = 128
+                config.max_batch_tokens_size = 102400000
+                config.max_inited_kv_cache_streams = 64
+                config.max_batch_tokens_without_cache = 768000
+                config.prefill_async_scheduling = enabled
+                restored = pickle.loads(pickle.dumps(config))
+                self.assertEqual(restored.__getstate__(), config.__getstate__())
+
+    def test_legacy_states_default_to_serial_scheduling(self):
+        state = (128, 102400000, "default", "1:1", True, 64, 768000)
+        for size in (2, 4, 6, 7):
+            with self.subTest(size=size):
+                restored = pickle.loads(
+                    pickle.dumps(_LegacyFIFOSchedulerConfig(state[:size]))
+                )
+                self.assertFalse(restored.prefill_async_scheduling)
+                self.assertEqual(restored.max_context_batch_size, 128)
+                self.assertEqual(restored.max_batch_tokens_size, 102400000)
+                if size >= 6:
+                    self.assertTrue(restored.cp_force_single_prefill)
+                    self.assertEqual(restored.max_inited_kv_cache_streams, 64)
+                if size >= 7:
+                    self.assertEqual(restored.max_batch_tokens_without_cache, 768000)
 
 
 if __name__ == "__main__":

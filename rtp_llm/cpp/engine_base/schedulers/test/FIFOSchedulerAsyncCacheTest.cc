@@ -1,3 +1,4 @@
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <future>
@@ -72,12 +73,15 @@ protected:
 
     std::shared_ptr<FIFOScheduler> createScheduler(size_t max_generate_batch_size        = 100,
                                                    size_t max_inited_kv_cache_streams    = 0,
-                                                   size_t max_batch_tokens_without_cache = 0) {
+                                                   size_t max_batch_tokens_without_cache = 0,
+                                                   bool   prefill_async_scheduling       = false,
+                                                   size_t max_batch_tokens_size          = 8192) {
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
         RuntimeConfig runtime_config;
         runtime_config.max_generate_batch_size                              = max_generate_batch_size;
-        runtime_config.fifo_scheduler_config.max_batch_tokens_size          = 8192;
+        runtime_config.fifo_scheduler_config.prefill_async_scheduling       = prefill_async_scheduling;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size          = max_batch_tokens_size;
         runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams    = max_inited_kv_cache_streams;
         runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = max_batch_tokens_without_cache;
         PDSepConfig         pd_sep_config;
@@ -232,6 +236,105 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_WithAllocatorReadiness_Enter
     EXPECT_EQ(scheduler->loading_cache_streams_.size(), 1);
     EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
     EXPECT_EQ(scheduler->runningStreamsSize(), 0);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, PrefillCacheCompletionReturnsWithinBoundedPoll) {
+    autil::EnvGuard poll_interval("RTP_LLM_SCHEDULER_POLL_INTERVAL_MS", "1000");
+    auto            scheduler = createScheduler(8, 0, 0, true);
+    auto            stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
+    auto            context   = makeControlledAllocatorContext();
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    ASSERT_TRUE(scheduler->schedule()->empty());
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+
+    std::atomic<bool> give_up = false;
+    auto              next    = std::async(std::launch::async, [&] {
+        while (true) {
+            auto batch = scheduler->schedule();
+            if (!batch.ok() || !batch->empty() || give_up.load()) {
+                return batch;
+            }
+        }
+    });
+    EXPECT_EQ(next.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    bool completed        = false;
+    bool callback_pending = false;
+    {
+        std::lock_guard<std::mutex> lock(scheduler->lock_);
+        completed        = context->completeTransfers(1, true);
+        callback_pending = scheduler->cache_load_completion_pending_.load(std::memory_order_acquire);
+    }
+    if (!completed) {
+        give_up.store(true);
+        scheduler->stop();
+        FAIL() << "allocator completion failed";
+    }
+    EXPECT_TRUE(callback_pending);
+    const auto status = next.wait_for(std::chrono::milliseconds(200));
+    if (status != std::future_status::ready) {
+        give_up.store(true);
+        scheduler->stop();
+    }
+    ASSERT_EQ(status, std::future_status::ready);
+    auto batch = next.get();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_EQ(batch->front(), stream);
+    EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
+    EXPECT_TRUE(scheduler->stop().ok());
+    EXPECT_TRUE(scheduler->finalizeStop().ok());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, PrefillGroupCacheCompletionReturnsWithinBoundedPoll) {
+    autil::EnvGuard poll_interval("RTP_LLM_SCHEDULER_POLL_INTERVAL_MS", "1000");
+    auto            scheduler      = createScheduler(8, 0, 0, true);
+    auto            direct_stream  = createStream({1, 2}, /*reuse_cache=*/false);
+    auto            loading_stream = createStream({3, 4}, /*reuse_cache=*/true);
+    auto            context        = makeControlledAllocatorContext();
+    installReadinessAllocator([context, loading_stream](const MallocInfo& info) {
+        return info.request_id == loading_stream->streamId() ? context : nullptr;
+    });
+    ASSERT_EQ(scheduler->enqueueGroup({direct_stream, loading_stream}).first, std::vector<bool>({true, true}));
+    ASSERT_TRUE(scheduler->schedule()->empty());
+    ASSERT_EQ(loading_stream->getStatus(), StreamState::LOADING_CACHE);
+
+    std::atomic<bool> give_up = false;
+    auto              next    = std::async(std::launch::async, [&] {
+        while (true) {
+            auto batch = scheduler->schedule();
+            if (!batch.ok() || !batch->empty() || give_up.load()) {
+                return batch;
+            }
+        }
+    });
+    EXPECT_EQ(next.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    bool completed        = false;
+    bool callback_pending = false;
+    {
+        std::lock_guard<std::mutex> lock(scheduler->lock_);
+        completed        = context->completeTransfers(1, true);
+        callback_pending = scheduler->cache_load_completion_pending_.load(std::memory_order_acquire);
+    }
+    if (!completed) {
+        give_up.store(true);
+        scheduler->stop();
+        FAIL() << "allocator completion failed";
+    }
+    EXPECT_TRUE(callback_pending);
+    const auto status = next.wait_for(std::chrono::milliseconds(200));
+    if (status != std::future_status::ready) {
+        give_up.store(true);
+        scheduler->stop();
+    }
+    ASSERT_EQ(status, std::future_status::ready);
+    auto batch = next.get();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 2);
+    EXPECT_EQ(direct_stream->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(loading_stream->getStatus(), StreamState::RUNNING);
+    EXPECT_TRUE(scheduler->stop().ok());
+    EXPECT_TRUE(scheduler->finalizeStop().ok());
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorSuccess_MovesToRunning) {
@@ -713,8 +816,11 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testOrdinaryCacheCompletionDoesNotMixIntoRun
     auto isolated_result = scheduler->schedule();
     ASSERT_TRUE(isolated_result.ok());
     ASSERT_EQ(isolated_result.value().size(), 2);
+    // OFF preserves the original group boundary: an ordinary cache completion
+    // is observed only after the running group finishes.
     EXPECT_EQ(ordinary_loading->getStatus(), StreamState::LOADING_CACHE);
     EXPECT_EQ(scheduler->loading_cache_streams_.size(), 1);
+    EXPECT_TRUE(scheduler->cache_ready_streams_.empty());
 
     group_stream_1->reportEvent(StreamEvents::GenerateDone);
     group_stream_2->reportEvent(StreamEvents::GenerateDone);
@@ -1150,6 +1256,615 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testQuotaDeferredContextTimeoutReleasesResou
     EXPECT_TRUE(residual->streamCacheResource().isResourceReleased());
     EXPECT_TRUE(scheduler->empty());
     EXPECT_EQ(scheduler->onflightStreams(), 0);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, OffGroupLaneDefersWaitingTimeoutUntilGroupFinishes) {
+    auto scheduler = createScheduler(1, 0, 0, false);
+    auto grouped   = createStream();
+    auto waiting   = createStream();
+    ASSERT_EQ(scheduler->enqueueGroup({grouped}).first, std::vector<bool>({true}));
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(first->size(), 1);
+    ASSERT_EQ(first->front(), grouped);
+
+    ASSERT_TRUE(scheduler->enqueue(waiting).ok());
+    waiting->generateInput()->generate_config->timeout_ms = 1;
+    waiting->begin_time_us_                               = autil::TimeUtility::currentTimeInMicroSeconds() - 10000;
+    auto second                                           = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    EXPECT_EQ(waiting->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 1);
+
+    grouped->reportEvent(StreamEvents::GenerateDone);
+    auto third = scheduler->schedule();
+    ASSERT_TRUE(third.ok());
+    EXPECT_TRUE(third->empty());
+    EXPECT_EQ(waiting->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(waiting->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_TRUE(scheduler->empty());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, PrefillExecutionLeaseAllowsNextBatchWithoutReentry) {
+    auto scheduler = createScheduler(1, 0, 0, true);
+    auto a         = createStream();
+    auto b         = createStream();
+    ASSERT_TRUE(scheduler->enqueue(a).ok());
+    ASSERT_TRUE(scheduler->enqueue(b).ok());
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(first->size(), 1);
+    ASSERT_EQ(first->front(), a);
+    scheduler->beginPrefillExecution();
+
+    auto second = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    ASSERT_EQ(second->size(), 1);
+    EXPECT_EQ(second->front(), b);
+    EXPECT_TRUE(a->hasPendingAsyncBookkeeping());
+    EXPECT_TRUE(b->hasPendingAsyncBookkeeping());
+    EXPECT_EQ(scheduler->countInitedKVCacheStreams(), 2);
+    EXPECT_EQ(scheduler->onflightStreams(), 2);
+    EXPECT_FALSE(scheduler->empty());
+
+    a->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+    EXPECT_FALSE(a->hasPendingAsyncBookkeeping());
+    scheduler->beginPrefillExecution();
+    b->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+    ASSERT_TRUE(scheduler->stop().ok());
+    ASSERT_TRUE(scheduler->finalizeStop().ok());
+    EXPECT_FALSE(b->hasPendingAsyncBookkeeping());
+    EXPECT_TRUE(scheduler->empty());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, PrefillExecutionStillCountsAgainstInitializedLimit) {
+    auto scheduler = createScheduler(1, 1, 0, true);
+    auto a         = createStream();
+    auto b         = createStream();
+    ASSERT_TRUE(scheduler->enqueue(a).ok());
+    ASSERT_TRUE(scheduler->enqueue(b).ok());
+    ASSERT_EQ(scheduler->schedule()->front(), a);
+    scheduler->beginPrefillExecution();
+    EXPECT_TRUE(scheduler->schedule()->empty());
+    EXPECT_EQ(b->curBlocksNum(), 0);
+    a->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+    auto next = scheduler->schedule();
+    ASSERT_TRUE(next.ok());
+    ASSERT_EQ(next->size(), 1);
+    EXPECT_EQ(next->front(), b);
+    EXPECT_FALSE(a->hasPendingAsyncBookkeeping());
+    ASSERT_TRUE(scheduler->stop().ok());
+    ASSERT_TRUE(scheduler->finalizeStop().ok());
+    EXPECT_FALSE(b->hasPendingAsyncBookkeeping());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, PrefillLookaheadCountsAndWakesCacheReadyStreams) {
+    auto scheduler = createScheduler(2, 2, 0, true);
+    auto a         = createStream();
+    auto b         = createStream();
+    auto c         = createStream();
+    ASSERT_TRUE(scheduler->enqueue(a).ok());
+    ASSERT_EQ(scheduler->schedule()->size(), 1);
+    ASSERT_TRUE(b->initKVBlock().ok());
+    scheduler->cache_ready_streams_.push_back(b);
+    scheduler->schedule_trigger_ = false;
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    EXPECT_TRUE(scheduler->schedule_trigger_);
+    EXPECT_EQ(scheduler->countInitedKVCacheStreams(), 2);
+    ASSERT_TRUE(scheduler->enqueue(c).ok());
+    auto next = scheduler->schedule();
+    ASSERT_TRUE(next.ok());
+    ASSERT_EQ(next->size(), 1);
+    EXPECT_EQ(next->front(), b);
+    EXPECT_EQ(c->curBlocksNum(), 0);
+    ASSERT_TRUE(scheduler->stop().ok());
+    ASSERT_TRUE(scheduler->finalizeStop().ok());
+    EXPECT_FALSE(a->hasPendingAsyncBookkeeping());
+    EXPECT_FALSE(b->hasPendingAsyncBookkeeping());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, PrefillStopDefersReleaseUntilPrepareAndExecutionDrain) {
+    auto scheduler = createScheduler(1, 0, 0, true);
+    auto a         = createStream();
+    auto b         = createStream();
+    ASSERT_TRUE(scheduler->enqueue(a).ok());
+    ASSERT_TRUE(scheduler->enqueue(b).ok());
+    ASSERT_EQ(scheduler->schedule()->front(), a);
+    scheduler->beginPrefillExecution();
+    ASSERT_EQ(scheduler->schedule()->front(), b);
+    auto stopped = std::async(std::launch::async, [&] { return scheduler->stop(); });
+    ASSERT_EQ(stopped.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_TRUE(stopped.get().ok());
+    EXPECT_TRUE(a->hasPendingAsyncBookkeeping());
+    EXPECT_TRUE(b->hasPendingAsyncBookkeeping());
+    EXPECT_TRUE(scheduler->schedule()->empty());
+    ASSERT_TRUE(scheduler->finalizeStop().ok());
+    EXPECT_FALSE(a->hasPendingAsyncBookkeeping());
+    EXPECT_FALSE(b->hasPendingAsyncBookkeeping());
+    EXPECT_TRUE(scheduler->empty());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, FailedPrefillPreparationReturnsItsLease) {
+    auto scheduler = createScheduler(1, 0, 0, true);
+    auto stream    = createStream();
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    ASSERT_EQ(scheduler->schedule()->size(), 1);
+    scheduler->discardPreparedPrefill("controlled preparation failure");
+    EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_TRUE(scheduler->empty());
+}
+TEST_F(FIFOSchedulerAsyncCacheTest, PrefillCannotAcquireReleasedOrCancelledResources) {
+    auto stream = createStream();
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    ASSERT_TRUE(stream->tryHoldPrefillResources());
+    EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    stream->releaseResource();
+    EXPECT_FALSE(stream->tryHoldPrefillResources());
+
+    auto cancelled = createStream();
+    ASSERT_TRUE(cancelled->initKVBlock().ok());
+    cancelled->reportError(ErrorCode::CANCELLED, "controlled cancellation");
+    EXPECT_FALSE(cancelled->tryHoldPrefillResources());
+    cancelled->moveToNext();
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, ContinuingDecodeRetainsSerialSchedulerOwnership) {
+    auto scheduler = createScheduler(1, 0, 0, true);
+    auto stream    = createStream({1, 2, 3}, false, false, 3);
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    ASSERT_EQ(scheduler->schedule()->size(), 1);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    stream->setIsContextStream(false);
+    scheduler->completePrefillExecution();
+
+    auto continuation = scheduler->schedule();
+    ASSERT_TRUE(continuation.ok());
+    ASSERT_EQ(continuation->size(), 1);
+    EXPECT_EQ(continuation->front(), stream);
+    EXPECT_FALSE(scheduler->beginPrefillExecution());
+    EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+    EXPECT_TRUE(scheduler->executing_prefill_streams_.empty());
+    EXPECT_EQ(scheduler->running_streams_.size(), 1);
+    ASSERT_TRUE(scheduler->stop().ok());
+    ASSERT_TRUE(scheduler->finalizeStop().ok());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, ContinuingDecodeMaintainsPendingStreams) {
+    auto scheduler    = createScheduler(2, 0, 0, true);
+    auto continuation = createStream({1, 2, 3}, false, false, 3);
+    auto completed    = createStream();
+    ASSERT_TRUE(scheduler->enqueue(continuation).ok());
+    ASSERT_TRUE(scheduler->enqueue(completed).ok());
+    ASSERT_EQ(scheduler->schedule()->size(), 2);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    continuation->setIsContextStream(false);
+    completed->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+    EXPECT_EQ(completed->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(completed->curBlocksNum(), 0);
+    ASSERT_EQ(scheduler->schedule()->front(), continuation);
+
+    auto cancelled = createStream();
+    ASSERT_TRUE(scheduler->enqueue(cancelled).ok());
+    cancelled->reportError(ErrorCode::CANCELLED, "controlled cancellation");
+
+    auto timed_out                          = createStream();
+    timed_out->generateConfig()->timeout_ms = 1;
+    timed_out->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds() - 1000000);
+    ASSERT_TRUE(scheduler->enqueue(timed_out).ok());
+
+    auto result = scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->size(), 1);
+    EXPECT_EQ(result->front(), continuation);
+    EXPECT_EQ(cancelled->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(timed_out->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(timed_out->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_TRUE(scheduler->waiting_streams_.empty());
+    EXPECT_FALSE(scheduler->beginPrefillExecution());
+    ASSERT_TRUE(scheduler->stop().ok());
+    ASSERT_TRUE(scheduler->finalizeStop().ok());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, OrdinaryReadyBatchDoesNotWaitForExecutionOrFullBudget) {
+    auto scheduler = createScheduler(8, 0, 0, true);
+    auto a         = createStream();
+    auto b         = createStream();
+    auto c         = createStream();
+    ASSERT_TRUE(scheduler->enqueue(a).ok());
+    ASSERT_EQ(scheduler->schedule()->size(), 1);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    ASSERT_TRUE(scheduler->enqueue(b).ok());
+    ASSERT_TRUE(scheduler->enqueue(c).ok());
+
+    auto       next   = std::async(std::launch::async, [&] { return scheduler->schedule(); });
+    const auto status = next.wait_for(std::chrono::seconds(2));
+    if (status != std::future_status::ready) {
+        scheduler->stop();
+    }
+    EXPECT_EQ(status, std::future_status::ready);
+    auto batch = next.get();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 2);
+    EXPECT_EQ(batch->front(), b);
+    EXPECT_EQ(batch->back(), c);
+    EXPECT_TRUE(a->hasPendingAsyncBookkeeping());
+    EXPECT_EQ(scheduler->executing_prefill_streams_.front(), a);
+    EXPECT_TRUE(scheduler->stop().ok());
+    EXPECT_TRUE(scheduler->finalizeStop().ok());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, OrdinaryLookaheadWakesForRequestBeforeExecutionCompletes) {
+    auto scheduler = createScheduler(8, 0, 0, true);
+    auto a         = createStream();
+    auto b         = createStream();
+    ASSERT_TRUE(scheduler->enqueue(a).ok());
+    ASSERT_EQ(scheduler->schedule()->size(), 1);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    auto next = std::async(std::launch::async, [&] { return scheduler->schedule(); });
+    EXPECT_EQ(next.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    EXPECT_TRUE(scheduler->enqueue(b).ok());
+    const auto status = next.wait_for(std::chrono::seconds(2));
+    if (status != std::future_status::ready) {
+        scheduler->stop();
+    }
+    EXPECT_EQ(status, std::future_status::ready);
+    auto batch = next.get();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_EQ(batch->front(), b);
+    EXPECT_TRUE(a->hasPendingAsyncBookkeeping());
+    EXPECT_EQ(scheduler->executing_prefill_streams_.front(), a);
+    EXPECT_TRUE(scheduler->stop().ok());
+    EXPECT_TRUE(scheduler->finalizeStop().ok());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, CompletionKeepsCapacityVisibleUntilLeaseReleaseFinishes) {
+    auto scheduler = createScheduler(1, 1, 0, true);
+    auto a         = createStream();
+    auto b         = createStream();
+    ASSERT_TRUE(scheduler->enqueue(a).ok());
+    ASSERT_TRUE(scheduler->enqueue(b).ok());
+    ASSERT_EQ(scheduler->schedule()->front(), a);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+
+    // Stop deferred resource release at the stream lock, after count reached zero.
+    a->markDeferredRelease();
+    std::unique_lock<std::mutex> stream_lock(*a->mutex_);
+    auto       completed = std::async(std::launch::async, [&] { scheduler->completePrefillExecution(); });
+    const auto deadline  = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (a->hasPendingAsyncBookkeeping() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    EXPECT_FALSE(a->hasPendingAsyncBookkeeping());
+    EXPECT_EQ(completed.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    {
+        std::lock_guard<std::mutex> scheduler_lock(scheduler->lock_);
+        EXPECT_EQ(scheduler->countInitedKVCacheStreams(), 1);
+        EXPECT_EQ(scheduler->executing_prefill_streams_.size(), 1);
+    }
+    EXPECT_EQ(scheduler->onflightStreams(), 2);
+    EXPECT_TRUE(scheduler->schedule()->empty());
+    EXPECT_EQ(b->curBlocksNum(), 0);
+
+    stream_lock.unlock();
+    EXPECT_EQ(completed.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    completed.get();
+    EXPECT_TRUE(scheduler->stop().ok());
+    EXPECT_TRUE(scheduler->finalizeStop().ok());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, LookaheadSealsAtPaddedTokenCapacityBeforeExecutionCompletes) {
+    auto scheduler = createScheduler(4, 0, 0, true, 9);
+    auto a         = createStream({1, 2});
+    auto b         = createStream({1, 2, 3, 4});
+    auto c         = createStream({5, 6, 7, 8});
+    ASSERT_TRUE(scheduler->enqueue(a).ok());
+    ASSERT_EQ(scheduler->schedule()->size(), 1);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    ASSERT_TRUE(scheduler->enqueue(b).ok());
+    ASSERT_TRUE(scheduler->enqueue(c).ok());
+    auto       prepared = std::async(std::launch::async, [&] { return scheduler->schedule(); });
+    const auto status   = prepared.wait_for(std::chrono::seconds(2));
+    if (status != std::future_status::ready) {
+        scheduler->stop();
+    }
+    EXPECT_EQ(status, std::future_status::ready);
+    auto batch = prepared.get();
+    EXPECT_TRUE(batch.ok());
+    if (batch.ok()) {
+        EXPECT_EQ(batch->size(), 2);
+    }
+    EXPECT_TRUE(a->hasPendingAsyncBookkeeping());
+    a->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+    EXPECT_TRUE(scheduler->stop().ok());
+    EXPECT_TRUE(scheduler->finalizeStop().ok());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, LookaheadSealsAtFreshTokenQuota) {
+    auto scheduler = createScheduler(4, 0, 6, true);
+    auto a         = createStream();
+    auto b         = createStream({1, 2, 3, 4});
+    auto c         = createStream({5, 6, 7, 8});
+    ASSERT_TRUE(scheduler->enqueue(a).ok());
+    ASSERT_EQ(scheduler->schedule()->size(), 1);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    EXPECT_TRUE(scheduler->enqueue(b).ok());
+    EXPECT_TRUE(scheduler->enqueue(c).ok());
+    auto       prepared = std::async(std::launch::async, [&] { return scheduler->schedule(); });
+    const auto status   = prepared.wait_for(std::chrono::seconds(2));
+    if (status != std::future_status::ready) {
+        scheduler->stop();
+    }
+    EXPECT_EQ(status, std::future_status::ready);
+    auto batch = prepared.get();
+    EXPECT_TRUE(batch.ok());
+    if (batch.ok()) {
+        EXPECT_EQ(batch->size(), 2);
+    }
+    a->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+    EXPECT_TRUE(scheduler->stop().ok());
+    EXPECT_TRUE(scheduler->finalizeStop().ok());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, LookaheadDoesNotReserveDecodeTokensForReadyContextRows) {
+    auto scheduler = createScheduler(4, 0, 0, true, 8);
+    auto a         = createStream({1, 2}, false, false, 0);
+    auto b         = createStream({1, 2, 3, 4}, false, false, 0);
+    auto c         = createStream({5, 6, 7, 8}, false, false, 0);
+    ASSERT_TRUE(scheduler->enqueue(a).ok());
+    ASSERT_EQ(scheduler->schedule()->size(), 1);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    EXPECT_TRUE(scheduler->enqueue(b).ok());
+    EXPECT_TRUE(scheduler->enqueue(c).ok());
+    auto       prepared = std::async(std::launch::async, [&] { return scheduler->schedule(); });
+    const auto status   = prepared.wait_for(std::chrono::seconds(2));
+    if (status != std::future_status::ready) {
+        scheduler->stop();
+    }
+    EXPECT_EQ(status, std::future_status::ready);
+    auto batch = prepared.get();
+    EXPECT_TRUE(batch.ok());
+    if (batch.ok()) {
+        EXPECT_EQ(batch->size(), 2);
+    }
+    a->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+    EXPECT_TRUE(scheduler->stop().ok());
+    EXPECT_TRUE(scheduler->finalizeStop().ok());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, PrefillExecutionBoundaryAdmitsLateReadyRequest) {
+    auto scheduler = createScheduler(2, 0, 0, true);
+    auto a         = createStream();
+    auto b         = createStream();
+    auto late      = createStream();
+    ASSERT_TRUE(scheduler->enqueue(a).ok());
+    ASSERT_EQ(scheduler->schedule()->front(), a);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    ASSERT_TRUE(scheduler->enqueue(b).ok());
+    auto prepared = scheduler->schedule();
+    ASSERT_TRUE(prepared.ok());
+    ASSERT_EQ(prepared->size(), 1);
+    ASSERT_EQ(prepared->front(), b);
+    ASSERT_TRUE(scheduler->enqueue(late).ok());
+    a->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+
+    EXPECT_TRUE(scheduler->refreshPreparedPrefill(*prepared));
+    ASSERT_EQ(prepared->size(), 2);
+    EXPECT_EQ(prepared->front(), b);
+    EXPECT_EQ(prepared->back(), late);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    b->reportEvent(StreamEvents::GenerateDone);
+    late->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+    ASSERT_TRUE(scheduler->stop().ok());
+    ASSERT_TRUE(scheduler->finalizeStop().ok());
+    EXPECT_TRUE(scheduler->empty());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, PrefillExecutionBoundaryRespectsBatchLimit) {
+    auto scheduler = createScheduler(2, 0, 0, true);
+    auto a         = createStream();
+    auto b         = createStream();
+    auto late      = createStream();
+    auto deferred  = createStream();
+    ASSERT_TRUE(scheduler->enqueue(a).ok());
+    ASSERT_EQ(scheduler->schedule()->front(), a);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    ASSERT_TRUE(scheduler->enqueue(b).ok());
+    auto prepared = scheduler->schedule();
+    ASSERT_TRUE(prepared.ok());
+    ASSERT_EQ(prepared->size(), 1);
+    ASSERT_TRUE(scheduler->enqueue(late).ok());
+    ASSERT_TRUE(scheduler->enqueue(deferred).ok());
+    a->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+    EXPECT_TRUE(scheduler->refreshPreparedPrefill(*prepared));
+    ASSERT_EQ(prepared->size(), 2);
+    EXPECT_EQ(prepared->back(), late);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 1);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    b->reportEvent(StreamEvents::GenerateDone);
+    late->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+    auto next = scheduler->schedule();
+    ASSERT_TRUE(next.ok());
+    ASSERT_EQ(next->front(), deferred);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    deferred->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+    ASSERT_TRUE(scheduler->stop().ok());
+    ASSERT_TRUE(scheduler->finalizeStop().ok());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, PrefillExecutionBoundaryIncludesCompletedCacheLoad) {
+    auto scheduler = createScheduler(2, 0, 0, true);
+    auto a         = createStream();
+    auto ready     = createStream();
+    auto loading   = createStream({4, 5, 6}, /*reuse_cache=*/true);
+    ASSERT_TRUE(scheduler->enqueue(a).ok());
+    ASSERT_EQ(scheduler->schedule()->front(), a);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    auto context = makeControlledAllocatorContext();
+    installReadinessAllocator([context, loading](const MallocInfo& info) {
+        return info.request_id == loading->streamId() ? context : nullptr;
+    });
+    ASSERT_TRUE(scheduler->enqueue(ready).ok());
+    ASSERT_TRUE(scheduler->enqueue(loading).ok());
+    auto prepared = scheduler->schedule();
+    ASSERT_TRUE(prepared.ok());
+    ASSERT_EQ(prepared->size(), 1);
+    EXPECT_EQ(loading->getStatus(), StreamState::LOADING_CACHE);
+    ASSERT_TRUE(context->completeTransfers(1, true));
+    a->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+
+    EXPECT_TRUE(scheduler->refreshPreparedPrefill(*prepared));
+    ASSERT_EQ(prepared->size(), 2);
+    EXPECT_EQ(prepared->front(), ready);
+    EXPECT_EQ(prepared->back(), loading);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    ready->reportEvent(StreamEvents::GenerateDone);
+    loading->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+    ASSERT_TRUE(scheduler->stop().ok());
+    ASSERT_TRUE(scheduler->finalizeStop().ok());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, PrefillBoundaryJoinsCompletedLoadAtExactTokenLimit) {
+    auto scheduler       = createScheduler(2, 0, 0, true, 7);
+    auto a               = createStream();
+    auto ready           = createStream({4, 5, 6}, /*reuse_cache=*/true);
+    auto loading         = createStream({7, 8, 9}, /*reuse_cache=*/true);
+    auto ready_context   = makeControlledAllocatorContext();
+    auto loading_context = makeControlledAllocatorContext();
+    const std::unordered_map<int64_t, std::shared_ptr<AsyncContext>> contexts{{ready->streamId(), ready_context},
+                                                                              {loading->streamId(), loading_context}};
+    installReadinessAllocator([contexts](const MallocInfo& info) -> std::shared_ptr<AsyncContext> {
+        const auto it = contexts.find(info.request_id);
+        return it == contexts.end() ? nullptr : it->second;
+    });
+
+    ASSERT_TRUE(scheduler->enqueue(a).ok());
+    ASSERT_EQ(scheduler->schedule()->front(), a);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    ASSERT_TRUE(scheduler->enqueue(ready).ok());
+    ASSERT_TRUE(scheduler->enqueue(loading).ok());
+    ASSERT_TRUE(scheduler->schedule()->empty());
+    ASSERT_TRUE(ready_context->completeTransfers(1, true));
+    a->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+    auto prepared = scheduler->schedule();
+    ASSERT_TRUE(prepared.ok());
+    ASSERT_EQ(prepared->size(), 1);
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1);
+    ASSERT_TRUE(loading_context->completeTransfers(1, true));
+    EXPECT_TRUE(scheduler->refreshPreparedPrefill(*prepared));
+    ASSERT_EQ(prepared->size(), 2);
+    EXPECT_EQ(prepared->front(), ready);
+    EXPECT_EQ(prepared->back(), loading);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    ready->reportEvent(StreamEvents::GenerateDone);
+    loading->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+    ASSERT_TRUE(scheduler->stop().ok());
+    ASSERT_TRUE(scheduler->finalizeStop().ok());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, SlowCacheLoadDoesNotHoldReadyNextBatch) {
+    auto scheduler     = createScheduler(2, 0, 1, true);
+    auto a             = createStream();
+    auto ready         = createStream({4, 5, 6}, /*reuse_cache=*/true);
+    auto slow          = createStream({7, 8, 9}, /*reuse_cache=*/true);
+    auto ready_context = makeControlledAllocatorContext();
+    auto slow_context  = makeControlledAllocatorContext();
+    const std::unordered_map<int64_t, std::shared_ptr<AsyncContext>> contexts{{ready->streamId(), ready_context},
+                                                                              {slow->streamId(), slow_context}};
+    installReadinessAllocator([contexts](const MallocInfo& info) -> std::shared_ptr<AsyncContext> {
+        const auto it = contexts.find(info.request_id);
+        return it == contexts.end() ? nullptr : it->second;
+    });
+
+    ASSERT_TRUE(scheduler->enqueue(a).ok());
+    ASSERT_EQ(scheduler->schedule()->front(), a);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    ASSERT_TRUE(scheduler->enqueue(ready).ok());
+    ASSERT_TRUE(scheduler->enqueue(slow).ok());
+    auto pending = scheduler->schedule();
+    ASSERT_TRUE(pending.ok());
+    EXPECT_TRUE(pending->empty());
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 2);
+
+    ASSERT_TRUE(ready_context->completeTransfers(1, true));
+    a->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+    auto next = scheduler->schedule();
+    ASSERT_TRUE(next.ok());
+    ASSERT_EQ(next->size(), 1);
+    EXPECT_EQ(next->front(), ready);
+    EXPECT_EQ(slow->getStatus(), StreamState::LOADING_CACHE);
+    auto shortest_boundary = std::chrono::steady_clock::duration::max();
+    for (int i = 0; i < 3; ++i) {
+        const auto boundary_start = std::chrono::steady_clock::now();
+        EXPECT_FALSE(scheduler->refreshPreparedPrefill(*next));
+        shortest_boundary = std::min(shortest_boundary, std::chrono::steady_clock::now() - boundary_start);
+    }
+    EXPECT_LT(shortest_boundary, std::chrono::milliseconds(8));
+    EXPECT_EQ(next->size(), 1);
+    EXPECT_EQ(slow->getStatus(), StreamState::LOADING_CACHE);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+
+    ASSERT_TRUE(slow_context->completeTransfers(1, true));
+    auto later = scheduler->schedule();
+    ASSERT_TRUE(later.ok());
+    ASSERT_EQ(later->size(), 1);
+    EXPECT_EQ(later->front(), slow);
+    ready->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    slow->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+    ASSERT_TRUE(scheduler->stop().ok());
+    ASSERT_TRUE(scheduler->finalizeStop().ok());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, PrefillExecutionBoundaryPreservesGroupBarrier) {
+    auto scheduler = createScheduler(2, 0, 0, true);
+    auto a         = createStream();
+    auto ready     = createStream();
+    auto late      = createStream();
+    auto grouped   = createStream();
+    ASSERT_TRUE(scheduler->enqueue(a).ok());
+    ASSERT_EQ(scheduler->schedule()->front(), a);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    ASSERT_TRUE(scheduler->enqueue(ready).ok());
+    auto prepared = scheduler->schedule();
+    ASSERT_TRUE(prepared.ok());
+    ASSERT_EQ(prepared->size(), 1);
+    ASSERT_EQ(scheduler->enqueueGroup({grouped}).first, std::vector<bool>({true}));
+    ASSERT_TRUE(scheduler->enqueue(late).ok());
+    a->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+
+    EXPECT_FALSE(scheduler->refreshPreparedPrefill(*prepared));
+    ASSERT_EQ(prepared->size(), 1);
+    EXPECT_EQ(prepared->front(), ready);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 2);
+    ASSERT_TRUE(scheduler->beginPrefillExecution());
+    ready->reportEvent(StreamEvents::GenerateDone);
+    scheduler->completePrefillExecution();
+    ASSERT_TRUE(scheduler->stop().ok());
+    ASSERT_TRUE(scheduler->finalizeStop().ok());
 }
 
 }  // namespace rtp_llm

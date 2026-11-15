@@ -175,28 +175,28 @@ struct KVCacheConfig {
     std::string                             multi_task_prompt     = "";
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
-    int64_t                                 reserve_block_ratio                             = 5;
-    int                                     max_block_size_per_item                         = 16;
-    int64_t                                 memory_cache_size_mb                            = 0;
-    int64_t                                 memory_cache_sync_timeout_ms                    = 10000;
-    std::string                             disk_cache_paths                                = "";
-    int64_t                                 disk_cache_size_mb                              = 0;
-    bool                                    disk_cache_buffered_io                          = true;
-    int64_t                                 disk_cache_read_thread_count                    = 16;
-    int64_t                                 disk_cache_write_thread_count                   = 16;
-    int64_t                                 disk_cache_sync_timeout_ms                      = 30000;
+    int64_t                                 reserve_block_ratio           = 5;
+    int                                     max_block_size_per_item       = 16;
+    int64_t                                 memory_cache_size_mb          = 0;
+    int64_t                                 memory_cache_sync_timeout_ms  = 10000;
+    std::string                             disk_cache_paths              = "";
+    int64_t                                 disk_cache_size_mb            = 0;
+    bool                                    disk_cache_buffered_io        = true;
+    int64_t                                 disk_cache_read_thread_count  = 16;
+    int64_t                                 disk_cache_write_thread_count = 16;
+    int64_t                                 disk_cache_sync_timeout_ms    = 30000;
     // Evict/store override; -1 inherits the load timeout above.
-    int64_t                                 disk_cache_evict_timeout_ms                     = -1;
-    int64_t                                 disk_cache_evict_max_pending_bytes              = 100 * 1024 * 1024;
-    int64_t                                 disk_cache_staging_block_count                  = 128;
-    int64_t                                 memory_cache_max_descriptors_per_transfer_batch = 32;
+    int64_t disk_cache_evict_timeout_ms                     = -1;
+    int64_t disk_cache_evict_max_pending_bytes              = 100 * 1024 * 1024;
+    int64_t disk_cache_staging_block_count                  = 128;
+    int64_t memory_cache_max_descriptors_per_transfer_batch = 32;
     // Prefer WorkLoop for supported final layouts; legal legacy layouts fall back at creation.
     bool btc_transfer_engine_async = true;
     // Slots per device in each WorkLoop's private async CRC service.
-    int64_t btc_crc_slot_count                           = 8;
-    int64_t block_tree_transfer_worker_count             = 1;
-    int64_t block_tree_business_queue_max_size           = 10000;
-    int64_t block_tree_transfer_queue_max_size           = 10000;
+    int64_t btc_crc_slot_count                 = 8;
+    int64_t block_tree_transfer_worker_count   = 1;
+    int64_t block_tree_business_queue_max_size = 10000;
+    int64_t block_tree_transfer_queue_max_size = 10000;
     // Coordinator recovery and completion cleanup; interval zero pauses both.
     // Query/forget timeout is positive; both durations must fit int milliseconds.
     int64_t block_tree_frozen_recovery_interval_ms       = 1000;
@@ -517,6 +517,7 @@ struct FIFOSchedulerConfig {
     //   invalid input falls back to "1".
     std::string decode_prefill_ratio           = "1";
     bool        cp_force_single_prefill        = true;
+    bool        prefill_async_scheduling       = false;
     int64_t     max_inited_kv_cache_streams    = 0;
     int64_t     max_batch_tokens_without_cache = 0;
     std::string to_string() const;

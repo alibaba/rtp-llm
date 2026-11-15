@@ -4090,51 +4090,50 @@ TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix
 }
 
 TEST_F(FIFOSchedulerTest, prefillTokenLimitsPreserveReserveAndAvoidOverflow) {
-    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
-        test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeSchedulerResources(test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
     ASSERT_TRUE(cache_manager->init());
-    model_config.max_seq_len                                    = 8;
-    runtime_config.max_generate_batch_size                      = 4;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8;
-    FIFOScheduler scheduler(runtime_config,
-                            model_config,
-                            PDSepConfig{},
-                            ParallelismConfig{},
-                            ModelSpecificConfig{},
-                            cache_manager);
-    auto prefill = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 0);
+    model_config.max_seq_len                                   = 8;
+    runtime_config.max_generate_batch_size                     = 4;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8;
+    FIFOScheduler scheduler(
+        runtime_config, model_config, PDSepConfig{}, ParallelismConfig{}, ModelSpecificConfig{}, cache_manager);
+    auto prefill    = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 0);
     auto generation = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 2);
     for (size_t admitted_tokens : {size_t(3), size_t(4), size_t(5)}) {
         // Two rows of length four: the rectangle itself exactly fills the cap.
-        EXPECT_EQ(scheduler.fitsPrefillTokenLimits(1, admitted_tokens, 4, 1, prefill), admitted_tokens <= 4);
-        EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, admitted_tokens, 4, 1, generation));
+        EXPECT_EQ(
+            scheduler.fitsPrefillTokenLimits(1, admitted_tokens, 4, 1, prefill, scheduler.running_streams_.size()),
+            admitted_tokens <= 4);
+        EXPECT_FALSE(
+            scheduler.fitsPrefillTokenLimits(1, admitted_tokens, 4, 1, generation, scheduler.running_streams_.size()));
     }
     scheduler.max_batch_tokens_size_ = 9;
-    EXPECT_TRUE(scheduler.fitsPrefillTokenLimits(1, 4, 4, 1, generation));
+    EXPECT_TRUE(scheduler.fitsPrefillTokenLimits(1, 4, 4, 1, generation, scheduler.running_streams_.size()));
     scheduler.running_streams_.push_back(generation);
-    EXPECT_TRUE(scheduler.fitsPrefillTokenLimits(1, 4, 4, 1, prefill));
-    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 4, 4, 1, generation));
+    EXPECT_TRUE(scheduler.fitsPrefillTokenLimits(1, 4, 4, 1, prefill, scheduler.running_streams_.size()));
+    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 4, 4, 1, generation, scheduler.running_streams_.size()));
     // The helper accounts for running reserve, but the caller still disallows
     // mixing a prefill into a running generation batch.
     EXPECT_FALSE(scheduler.evaluateRunningBatch(FIFOScheduler::ScheduleRuntime{}, prefill));
     EXPECT_FALSE(scheduler.evaluateRunningBatch(std::list<GenerateStreamPtr>{}, prefill));
     scheduler.max_batch_tokens_size_ = 8;
-    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 4, 4, 1, prefill));
+    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 4, 4, 1, prefill, scheduler.running_streams_.size()));
     scheduler.max_batch_tokens_size_ = 1;
-    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 0, 0, prefill));
+    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 0, 0, prefill, scheduler.running_streams_.size()));
     scheduler.running_streams_.clear();
     // Both modes retain the singleton fast path for zero or undersized budgets.
     for (size_t budget : {size_t(0), size_t(3)}) {
         scheduler.max_batch_tokens_size_ = budget;
-        EXPECT_TRUE(scheduler.fitsPrefillTokenLimits(0, 0, 0, 0, generation));
-        EXPECT_TRUE(scheduler.fitsPrefillTokenLimits(0, 0, 0, 0, prefill));
-        EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 0, 0, prefill));
+        EXPECT_TRUE(scheduler.fitsPrefillTokenLimits(0, 0, 0, 0, generation, scheduler.running_streams_.size()));
+        EXPECT_TRUE(scheduler.fitsPrefillTokenLimits(0, 0, 0, 0, prefill, scheduler.running_streams_.size()));
+        EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 0, 0, prefill, scheduler.running_streams_.size()));
     }
     scheduler.max_batch_tokens_size_ = 8;
-    const auto max_size = std::numeric_limits<size_t>::max();
-    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, max_size, 4, 1, prefill));
-    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 4, max_size, prefill));
-    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, max_size, 1, prefill));
+    const auto max_size              = std::numeric_limits<size_t>::max();
+    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, max_size, 4, 1, prefill, scheduler.running_streams_.size()));
+    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 4, max_size, prefill, scheduler.running_streams_.size()));
+    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, max_size, 1, prefill, scheduler.running_streams_.size()));
 }
 
 TEST_F(FIFOSchedulerTest, fullBudgetPrefillOnlyDoesNotMixWithGeneration) {

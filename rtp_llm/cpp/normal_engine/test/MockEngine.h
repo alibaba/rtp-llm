@@ -100,8 +100,8 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     model_config.attn_config.kernel_tokens_per_block = config.tokens_per_block;
     kv_cache_config.seq_size_per_block               = model_config.attn_config.tokens_per_block;
     kv_cache_config.kernel_seq_size_per_block        = model_config.attn_config.kernel_tokens_per_block;
-    runtime_config.reserve_runtime_mem_mb     = 1024;
-    const size_t hidden_units                 = 128;
+    runtime_config.reserve_runtime_mem_mb            = 1024;
+    const size_t hidden_units                        = 128;
 
     auto opts = torch::TensorOptions().dtype(torch::kHalf).device(torch::kCUDA);
 
@@ -198,7 +198,7 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     return rtp_llm_params;
 }
 
-std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config) {
+std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config, bool start_loop = true) {
     rtp_llm::ModelConfig   model_config;
     rtp_llm::RuntimeConfig runtime_config;
     rtp_llm::KVCacheConfig kv_cache_config;
@@ -213,7 +213,7 @@ std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config) {
             NormalExecutor::test_model_factory = nullptr;
         }
     } factory_reset_guard;
-    return make_shared<NormalEngine>(rtp_llm_params, nullptr);
+    return make_shared<NormalEngine>(rtp_llm_params, nullptr, start_loop);
 }
 
 }  // namespace rtp_llm

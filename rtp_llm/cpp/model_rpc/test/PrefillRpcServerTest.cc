@@ -165,6 +165,10 @@ public:
         process_id_ = process_id;
     }
 
+    void setPrefillAsyncSchedulingForTest(bool enabled) {
+        maga_init_params_.runtime_config.fifo_scheduler_config.prefill_async_scheduling = enabled;
+    }
+
     void setEngineForTest(bool is_mtp_eagle) {
         engine_ = std::make_shared<TestEngineBase>(is_mtp_eagle);
     }
@@ -702,6 +706,34 @@ TEST_F(PrefillRpcServerTest, downstreamRetriesReuseOriginalAbsoluteDeadline) {
     EXPECT_EQ(second_deadline, *context->request_deadline);
     EXPECT_EQ(decode_server.allocateCount(), 2);
     EXPECT_TRUE(context->closeGrpcStream().ok());
+}
+
+TEST_F(PrefillRpcServerTest, moreThan32AllocationsCompleteBeforeFetch) {
+    TestDecodeRpcServer decode_server(/*fail_first_allocate=*/false);
+    ASSERT_TRUE(decode_server.start());
+    auto connection = resource_.rpc_pool.getReadyConnection("127.0.0.1:" + std::to_string(decode_server.listenPort()),
+                                                            std::chrono::seconds(1));
+    ASSERT_TRUE(connection.ok()) << connection.status();
+
+    TestPrefillRpcServer server;
+    server.setProcessIdForTest("prefill-client");
+    server.setPrefillAsyncSchedulingForTest(true);
+    std::vector<GenerateInputPB>                         requests(33);
+    std::vector<std::unique_ptr<PrefillGenerateContext>> contexts;
+    contexts.reserve(requests.size());
+    for (size_t i = 0; i < requests.size(); ++i) {
+        requests[i].set_request_id(i + 1);
+        // Only the 33rd allocation needs a short deadline to expose the old gate.
+        auto context             = makeContext(&requests[i], /*timeout_ms=*/i == 32 ? 3000 : 20000);
+        context->grpc_connection = *connection;
+        server.remoteAllocateResourceForTest(*context);
+        ASSERT_FALSE(context->hasError()) << "slot " << i;
+        contexts.emplace_back(std::move(context));
+    }
+    EXPECT_EQ(decode_server.allocateCount(), requests.size());
+    for (auto& context : contexts) {
+        EXPECT_TRUE(context->closeGrpcStream().ok());
+    }
 }
 
 TEST_F(PrefillRpcServerTest, downstreamWithoutRequestDeadlineKeepsMaxRpcTimeout) {
