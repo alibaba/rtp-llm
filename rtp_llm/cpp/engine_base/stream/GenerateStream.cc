@@ -117,7 +117,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     sampling_state_.cum_log_probs = torch::zeros({(int64_t)init_batch_size}, torch::kFloat32);
 
     is_context_stream_ = std::make_shared<std::atomic<bool>>(true);
-    generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
+    generate_status_   = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
     sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);
@@ -146,7 +146,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                              config.return_hidden_states                     ? "return_hidden_states" :
                              config.return_all_hidden_states                 ? "return_all_hidden_states" :
                              getReturnAllProbs() != ReturnAllProbsMode::NONE ? "return_all_probs" :
-                             input->custom_output_token_position >= 0       ? "custom_output" :
+                             input->custom_output_token_position >= 0        ? "custom_output" :
                              multimodalFeaturesLength() != 0                 ? "multimodal" :
                                                                                nullptr;
         if (reason != nullptr) {
@@ -182,7 +182,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                                                             !resource_context.defer_grammar_to_pp_tail,
                                                                             output_vocab_size_ > 0);
     if (processors_result.ok()) {
-        auto processors = std::move(processors_result.value());
+        auto processors                   = std::move(processors_result.value());
         sampling_state_.logits_processors = std::move(processors);
     } else {
         const auto& err = processors_result.status();
@@ -1352,8 +1352,8 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
     // update normal output buffer
     updateOutput({new_tokens,
                   num_new_tokens,
-                  torch::Tensor(),
-                  torch::Tensor(),
+                  update_info.target_hidden_states,
+                  update_info.target_logits,
                   torch::Tensor(),
                   torch::Tensor(),
                   torch::Tensor(),

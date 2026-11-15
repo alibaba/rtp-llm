@@ -972,7 +972,7 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
             auto committed_len           = torch::cat(sequence_lengths_gpu, 0);
             model_input.sequence_lengths = committedLenToDraftDecodePosition(committed_len, host_holder);
             model_input.prefix_lengths   = model_input.sequence_lengths;
-            model_input.input_lengths = toCudaInt32(model_input.input_lengths, host_holder);
+            model_input.input_lengths    = toCudaInt32(model_input.input_lengths, host_holder);
             if (device_positions) {
                 expandTargetVerifyPositionIds(stream_groups, model_input, model_input.prefix_lengths, 1);
             }
@@ -1503,8 +1503,20 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
             }
         }
 
-        spec_update_infos.push_back(
-            {new_tokens, 1, torch::Tensor(), std::move(last_hidden_states), std::move(propose_all_probs)});
+        StreamSpecUpdateInfo update_info{
+            new_tokens, 1, torch::Tensor(), std::move(last_hidden_states), std::move(propose_all_probs)};
+        // NormalSamplerInputGatherer preserves raw model logits when any
+        // stream requests return_logits. Copy only the requested model rows
+        // before the executor releases/reuses the target forward buffers.
+        const auto& target_output = prefill_output.model_output;
+        if (stream->returnLogits() && target_output.logits.defined()) {
+            update_info.target_logits = target_output.logits.narrow(0, batch_idx_in, cur_batch_size).cpu().clone();
+        }
+        if (stream->generateConfig()->return_hidden_states && target_output.hidden_states.defined()) {
+            update_info.target_hidden_states =
+                target_output.hidden_states.narrow(0, batch_idx_in, cur_batch_size).cpu().clone();
+        }
+        spec_update_infos.push_back(std::move(update_info));
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;

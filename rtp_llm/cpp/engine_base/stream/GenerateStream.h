@@ -78,6 +78,10 @@ struct StreamSpecUpdateInfo {
     // updates leave speculative_propose_step at zero and are not counted.
     int speculative_propose_step = 0;
     int accepted_draft_tokens    = 0;
+    // Opt-in target output for ordinary MTP prefill. These owned host rows
+    // are distinct from the draft features retained for the next round.
+    torch::Tensor target_logits{};
+    torch::Tensor target_hidden_states{};
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -281,7 +285,7 @@ public:
     // When useChunkWindow() is true, contextLength() returns the current chunk length.
     // initial_reuse_length_ stays frozen for cache-hit metrics.
     void setChunkSize(int chunk_size) {
-        chunk_size_ = chunk_size;
+        chunk_size_     = chunk_size;
         max_chunk_size_ = std::max(max_chunk_size_, chunk_size);
     }
     int maxChunkSize() const {
@@ -302,7 +306,7 @@ public:
     bool hasAdvancedChunk() const {
         return chunk_advanced_;
     }
-    int  cacheStorePublishStartToken() const {
+    int cacheStorePublishStartToken() const {
         return chunk_advanced_ ? prefixLength() : 0;
     }
     // Prompt token right after the current chunk; valid only for middle chunks.
@@ -921,8 +925,8 @@ protected:
     bool         consumerFinishedWithoutLock() const;
     virtual bool consumerReadyWithoutLock() const;
 
-    int                      estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
-    bool                     reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
+    int  estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
+    bool reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
     bool prepareUpdateWithoutLock(const std::optional<ErrorInfo>& error_info, bool force_update_info);
     std::optional<ErrorInfo> updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info);
     std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);
@@ -1061,7 +1065,7 @@ protected:
     // just for bool test
     bool perf_test_ = false;
     friend class StreamCacheResource;
-    bool is_fake_stream_ = false;
+    bool                             is_fake_stream_ = false;
     std::shared_ptr<RecordedRequest> recorded_request_;
 
     // prefill TP size queried from prefill server (used for asymmetric TP)
