@@ -1668,6 +1668,12 @@ class VLLMEngineObserver:
         self._workload_dirty_request_ids: set[str] = set()
         self._workload_contributions: dict[str, _WorkloadContribution] = {}
         self._pending_cache_lookup_request_ids: set[str] = set()
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        self._native_request_state_audit_enabled = (
+            self._native_ingress
+            and int(getattr(parallel_config, "pipeline_parallel_size", 1)) > 1
+        )
+        self._native_request_states: dict[str, tuple[str, str, bool]] = {}
         self._workload_aggregate = _WorkloadAggregate()
         self._current_workload: _ObservedWorkload | None = None
         self._running_prefill_started_ns: dict[str, int] = {}
@@ -3794,6 +3800,34 @@ class VLLMEngineObserver:
                 self._active_scheduled_tokens,
             )
 
+    def _audit_native_request_state(self, request, queue):
+        if not self._native_request_state_audit_enabled:
+            return
+        request_id = str(request.request_id)
+        status = getattr(request, "status", None)
+        status_name = str(getattr(status, "name", status))
+        lookup_complete = self._native_cache_lookup_complete(request)
+        observed = (queue, status_name, lookup_complete)
+        if self._native_request_states.get(request_id) == observed:
+            return
+        self._native_request_states[request_id] = observed
+        stats = getattr(request, "prefill_stats", None)
+        self.on_request_lifecycle_event(
+            {
+                "event": "native_request_state",
+                "event_time_us": time.time_ns() // 1000,
+                "observed_perf_ns": time.perf_counter_ns(),
+                "request_id": request_id,
+                "queue": queue,
+                "native_status": status_name,
+                "cache_lookup_complete": lookup_complete,
+                "computed_tokens": int(getattr(request, "num_computed_tokens", 0)),
+                "prompt_tokens": int(getattr(request, "num_prompt_tokens", 0)),
+                "local_cached_tokens": getattr(stats, "num_local_cached_tokens", None),
+                "external_cached_tokens": getattr(stats, "num_external_cached_tokens", None),
+            }
+        )
+
     def _partition_prefill_workload(self, scheduler):
         try:
             running = tuple(scheduler.running)
@@ -3818,6 +3852,12 @@ class VLLMEngineObserver:
             if request_id in seen_request_ids:
                 return
             seen_request_ids.add(request_id)
+            if self._native_request_state_audit_enabled:
+                request = scheduler.requests.get(request_id)
+                if request is not None:
+                    self._audit_native_request_state(
+                        request, "running" if running_now else "waiting"
+                    )
             contribution = self._workload_contributions.get(request_id)
             if contribution is not None:
                 if running_now:
@@ -3837,6 +3877,9 @@ class VLLMEngineObserver:
             append(request)
         for request_id in getattr(scheduler, "requests", {}):
             append(request_id)
+        if self._native_request_state_audit_enabled:
+            for request_id in self._native_request_states.keys() - seen_request_ids:
+                del self._native_request_states[request_id]
         return (
             max_running_request_count,
             running_capacity_slot_count,
@@ -6295,6 +6338,7 @@ class VLLMEngineObserver:
         with self._workload_lock:
             self._workload_contributions.clear()
             self._pending_cache_lookup_request_ids.clear()
+            self._native_request_states.clear()
             self._workload_aggregate = _WorkloadAggregate()
             self._current_workload = None
             self._running_prefill_started_ns.clear()

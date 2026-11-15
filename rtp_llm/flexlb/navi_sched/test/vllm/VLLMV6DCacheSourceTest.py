@@ -177,6 +177,77 @@ class VLLMV6DCacheSourceTest(unittest.TestCase):
         self.assertFalse(observer._workload_contributions)
         self.assertEqual(-1, observer._workload_aggregate.apply.call_args.args[1])
 
+    def test_native_request_readiness_audit_records_transitions_only(self):
+        observer = SimpleNamespace(
+            _native_request_state_audit_enabled=True,
+            _native_request_states={},
+            on_request_lifecycle_event=mock.Mock(),
+            _native_cache_lookup_complete=self.function("_native_cache_lookup_complete"),
+        )
+        observe = self.function("_audit_native_request_state")
+        request = SimpleNamespace(request_id="r", num_prompt_tokens=64,
+                                  num_computed_tokens=0,
+                                  status=SimpleNamespace(name="WAITING"),
+                                  prefill_stats=SimpleNamespace(num_prompt_tokens=0,
+                                      num_local_cached_tokens=0,
+                                      num_external_cached_tokens=0))
+        observe(observer, request, "waiting")
+        first = observer.on_request_lifecycle_event.call_args.args[0]
+        self.assertFalse(first["cache_lookup_complete"])
+        self.assertEqual("WAITING", first["native_status"])
+        for _ in range(100):
+            observe(observer, request, "waiting")
+        observer.on_request_lifecycle_event.assert_called_once()
+        request.prefill_stats.num_prompt_tokens = 64
+        request.prefill_stats.num_external_cached_tokens = 48
+        request.status.name = "WAITING_FOR_REMOTE_KVS"
+        observe(observer, request, "waiting")
+        second = observer.on_request_lifecycle_event.call_args.args[0]
+        self.assertTrue(second["cache_lookup_complete"])
+        self.assertEqual("waiting", second["queue"])
+        self.assertEqual("WAITING_FOR_REMOTE_KVS", second["native_status"])
+        self.assertEqual(48, second["external_cached_tokens"])
+        self.assertEqual(0, second["computed_tokens"])
+        request.status.name = "RUNNING"
+        request.num_computed_tokens = 56
+        observe(observer, request, "running")
+        self.assertEqual(3, observer.on_request_lifecycle_event.call_count)
+        observer._native_request_state_audit_enabled = False
+        request.status.name = "FINISHED_STOPPED"
+        observe(observer, request, "running")
+        self.assertEqual(3, observer.on_request_lifecycle_event.call_count)
+        self.assertEqual(56, request.num_computed_tokens)
+        self.assertEqual("FINISHED_STOPPED", request.status.name)
+
+    def test_native_request_audit_cleans_removed_requests_during_workload_scan(self):
+        partition = self.function("_partition_prefill_workload")
+        partition.__globals__["_PrefillWorkloadSliceAggregate"] = lambda: SimpleNamespace(
+            apply=mock.Mock(), snapshot=lambda: None
+        )
+        request = SimpleNamespace(request_id="r", num_prompt_tokens=64,
+                                  num_computed_tokens=0, num_cached_tokens=-1)
+        observer = SimpleNamespace(
+            _native_request_state_audit_enabled=True,
+            _native_request_states={"removed": ("waiting", "WAITING", False)},
+            _workload_contributions={},
+            on_request_lifecycle_event=mock.Mock(),
+            _native_cache_lookup_complete=self.function("_native_cache_lookup_complete"),
+        )
+        observer._audit_native_request_state = MethodType(
+            self.function("_audit_native_request_state"), observer
+        )
+        scheduler = SimpleNamespace(requests={"r": request}, running=[],
+                                    waiting=[request], max_num_running_reqs=8)
+        partition(observer, scheduler)
+        self.assertEqual({"r"}, set(observer._native_request_states))
+        partition(observer, scheduler)
+        observer.on_request_lifecycle_event.assert_called_once()
+        scheduler.requests.clear()
+        scheduler.waiting.clear()
+        partition(observer, scheduler)
+        self.assertFalse(observer._native_request_states)
+        observer.on_request_lifecycle_event.assert_called_once()
+
     def test_native_v6d_presence_controls_capability_without_a_navisched_switch(self):
         class Connector:
             def __init__(self):
