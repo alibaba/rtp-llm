@@ -22,13 +22,49 @@ public:
                  const std::vector<std::string>&),
                 (override));
     MOCK_METHOD((std::pair<ClientErrorCode, WriteLocation>),
-                StartWrite,
+                StartWriteRequest,
                 (const std::string&,
                  const std::vector<int64_t>&,
                  const std::vector<int64_t>&,
                  const std::vector<std::string>&,
                  int64_t),
+                ());
+    std::pair<ClientErrorCode, WriteLocation> StartWrite(const std::string&              trace_id,
+                                                         const std::vector<int64_t>&     keys,
+                                                         const std::vector<int64_t>&     tokens,
+                                                         const std::vector<std::string>& groups,
+                                                         int64_t                         timeout
+#ifdef KVCM_INTERNAL
+                                                         ,
+                                                         int32_t min_replica_count = 0
+#endif
+                                                         ) override {
+#ifdef KVCM_INTERNAL
+        EXPECT_EQ(min_replica_count, 0);
+#endif
+        return StartWriteRequest(trace_id, keys, tokens, groups, timeout);
+    }
+#ifdef KVCM_INTERNAL
+    MOCK_METHOD((std::pair<ClientErrorCode, BackendLocations>),
+                GetCacheLocationsByBackend,
+                (const std::string&,
+                 const std::vector<int64_t>&,
+                 const std::vector<int64_t>&,
+                 const BlockMask&,
+                 const std::vector<std::string>&,
+                 StorageType,
+                 BackendSelectStrategy),
                 (override));
+    MOCK_METHOD((std::pair<ClientErrorCode, HostCacheState>),
+                GetHostCacheState,
+                (const std::string&,
+                 QueryType,
+                 const std::vector<int64_t>&,
+                 const std::vector<std::string>&,
+                 int32_t,
+                 const std::vector<StorageType>&),
+                (override));
+#endif
     MOCK_METHOD(ClientErrorCode,
                 FinishWrite,
                 (const std::string&, const std::string&, const BlockMask&, const Locations&),
