@@ -327,8 +327,12 @@ bool CostSchedulerGraphState::init(
     }
     if (_context->getScheduleBeginTimeUs() > 0) {
         _optimizationBeginUs = _context->getScheduleBeginTimeUs();
-        _config.optimizationTimeBudgetUs =
+        const auto sharedBudgetUs =
             _context->getScheduleDeadlineUs() - _optimizationBeginUs;
+        _config.optimizationTimeBudgetUs = _config.optimizationTimeBudgetUs > 0
+                                              ? std::min(_config.optimizationTimeBudgetUs,
+                                                         sharedBudgetUs)
+                                              : sharedBudgetUs;
     } else {
         _replayCollectionBaselineUs = _context->getReplayCollectionTimeUs();
     }

@@ -1628,7 +1628,10 @@ bool CostSchedulerKernelInternal::optimize(
                                          ? context.getScheduleBeginTimeUs()
                                          : autil::TimeUtility::monotonicTimeUs();
     if (context.getScheduleBeginTimeUs() > 0) {
-        optimizationTimeBudgetUs = context.getScheduleDeadlineUs() - optimizationBeginUs;
+        const auto sharedBudgetUs = context.getScheduleDeadlineUs() - optimizationBeginUs;
+        optimizationTimeBudgetUs = optimizationTimeBudgetUs > 0
+                                      ? std::min(optimizationTimeBudgetUs, sharedBudgetUs)
+                                      : sharedBudgetUs;
         if (replayInfo) {
             replayInfo->optimizationTimeBudgetUs = optimizationTimeBudgetUs;
         }

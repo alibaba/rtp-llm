@@ -352,7 +352,9 @@ bool NaviSchedMaster::init()
             stop();
             return false;
         }
-        schedulerConfig["optimization_time_budget_us"] = _maxWaitScheduleTimeMs * 800;
+        if (schedulerConfig.find("optimization_time_budget_us") == schedulerConfig.end()) {
+            schedulerConfig["optimization_time_budget_us"] = _maxWaitScheduleTimeMs * 800;
+        }
     }
     autil::legacy::json::JsonMap contextConfig;
     contextConfig["max_wait_schedule_count"] = _configuredMaxWaitScheduleCount;

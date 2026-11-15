@@ -179,8 +179,14 @@ navi::ErrorCode SchedulerConfigR::init(navi::ResourceInitContext &ctx)
 {
     _bizName = ctx.getBizName();
     if (!_initialConfigJson.empty()) {
+        bool hasConfiguredOptimizationBudget = false;
         try {
-            autil::legacy::FromJsonString(_snapshot.config, _initialConfigJson);
+            const auto initialConfig =
+                autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
+                    autil::legacy::json::ParseJson(_initialConfigJson));
+            hasConfiguredOptimizationBudget =
+                initialConfig.find("optimization_time_budget_us") != initialConfig.end();
+            autil::legacy::FromJson(_snapshot.config, autil::legacy::Any(initialConfig));
         } catch (const std::exception &error) {
             NAVI_KERNEL_LOG(ERROR, "invalid initial scheduler config: %s", error.what());
             return navi::EC_ABORT;
@@ -189,8 +195,10 @@ navi::ErrorCode SchedulerConfigR::init(navi::ResourceInitContext &ctx)
             NAVI_KERNEL_LOG(ERROR, "invalid initial scheduler config values");
             return navi::EC_ABORT;
         }
-        _snapshot.config.cost.optimizationTimeBudgetUs =
-            _snapshot.config.maxWaitScheduleTimeMs * 800;
+        if (!hasConfiguredOptimizationBudget) {
+            _snapshot.config.cost.optimizationTimeBudgetUs =
+                _snapshot.config.maxWaitScheduleTimeMs * 800;
+        }
     }
     _snapshot.generation = std::max<uint64_t>(
         _snapshot.generation, static_cast<uint64_t>(autil::TimeUtility::currentTime()));
