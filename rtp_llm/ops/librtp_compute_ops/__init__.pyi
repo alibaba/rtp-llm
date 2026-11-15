@@ -267,6 +267,7 @@ class PyAttentionInputs:
     is_cuda_graph: bool
     is_prefill: bool
     is_s_padded: bool
+    is_warmup: bool
     is_target_verify: bool
     is_mtp_draft_update: bool
     logical_request_count: int

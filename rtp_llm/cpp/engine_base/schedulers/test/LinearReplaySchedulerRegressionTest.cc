@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 
@@ -284,6 +285,57 @@ TEST_F(LinearReplaySchedulerRegressionTest, FixedDecodeBootstrapKeepsBoundaryCan
 
 TEST_F(LinearReplaySchedulerRegressionTest, FixedDecodeBootstrapSupportsNonBoundaryPrompt) {
     checkFixedDecodeBootstrap(/*prompt_length=*/10);
+}
+
+TEST_F(LinearReplaySchedulerRegressionTest, SynchronousDecodeReservesReplayProposalPages) {
+    auto manager = std::make_shared<KVCacheManager>(replayConfig());
+    ASSERT_TRUE(manager->init());
+    auto candidate = stream(7, resources(manager, RoleType::PDFUSION));
+    candidate->setReserveStep(speculative_.gen_num_per_cycle);
+    candidate->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(candidate->moveToNext(), StreamState::RUNNING);
+    candidate->setIsContextStream(false);
+    ASSERT_EQ(candidate->moveToNext(), StreamState::RUNNING);
+    const auto&  blocks   = candidate->streamCacheResource().kvCache().blocks(0, "linear");
+    const size_t required = (candidate->seqLength() + 3) / 4 + candidate->reserveStep() - 1;
+    ASSERT_GE(blocks.size(), required);
+    for (size_t index = 1; index < required; ++index) {
+        EXPECT_GT(blocks[index], 0);
+    }
+}
+
+TEST_F(LinearReplaySchedulerRegressionTest, RatioPromotionWaitsForRetiringReplayLease) {
+    parallelism_.role_type = RoleType::PDFUSION;
+    auto manager           = std::make_shared<KVCacheManager>(replayConfig());
+    ASSERT_TRUE(manager->init());
+    const auto  context = resources(manager, RoleType::PDFUSION);
+    PDSepConfig pd;
+    pd.role_type = RoleType::PDFUSION;
+    PDFusionRatioScheduler scheduler(runtime_, model_, pd, parallelism_, manager);
+    auto                   old = stream(6, context);
+    old->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(old->moveToNext(), StreamState::RUNNING);
+    old->setIsContextStream(false);
+    ASSERT_EQ(old->moveToNext(), StreamState::RUNNING);
+    auto round = old->prepareLinearReplayRound();
+    ASSERT_TRUE(round.ok()) << round.status();
+    old->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_EQ(old->moveToNext(), StreamState::FINISHED);
+
+    auto waiting = stream(6, context);
+    waiting->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(waiting->moveToNext(), StreamState::RUNNING);
+    waiting->setIsContextStream(false);
+    scheduler.pending_decode_streams_.push_back(waiting);
+    EXPECT_FALSE(scheduler.promotePendingDecodeStreams());
+    ASSERT_FALSE(waiting->hasError()) << waiting->stopReason();
+    EXPECT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
+    EXPECT_EQ(scheduler.runningStreamsSize(), 0);
+    round = absl::FailedPreconditionError("round completed");
+    EXPECT_TRUE(scheduler.promotePendingDecodeStreams());
+    EXPECT_EQ(scheduler.pendingDecodeStreamsSize(), 0);
+    EXPECT_EQ(scheduler.runningStreamsSize(), 1);
+    EXPECT_FALSE(waiting->hasError()) << waiting->stopReason();
 }
 
 TEST_F(LinearReplaySchedulerRegressionTest, PipelineExecutorKeepsLegacyLinearCacheContract) {

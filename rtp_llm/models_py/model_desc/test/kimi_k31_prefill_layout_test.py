@@ -13,6 +13,7 @@ from rtp_llm.models_py.distributed.collective_torch import (
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_page_rr_impl import (
     PageRRSparseMlaOp,
 )
+from rtp_llm.models_py.modules.kimi_k3.dsa import KimiK31DSA
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig, RoleType
 from rtp_llm.test.utils.port_util import PortManager
 
@@ -69,6 +70,57 @@ def _prefill_layout_worker(rank, port):
         empty = op._prefill(head_shard[:0])
         assert empty.shape == (0, 8, 16)
         assert op.communicator.restore_queries(empty).shape == (0, 4, 16)
+        query_cp = PageRRSparseMlaOp(
+            num_heads=8,
+            kv_lora_rank=8,
+            qk_rope_head_dim=8,
+            qk_nope_head_dim=8,
+            page_size=128,
+            softmax_extra_scale=1.0,
+            top_k=8,
+            parallelism_config=parallel,
+            workspace_owner=SimpleNamespace(
+                prefill_query_cp=True,
+                sfa_metadata_free=False,
+                sfa_use_fp8=False,
+                mega_a2a=False,
+            ),
+        )
+        query_cp.plan(SimpleNamespace(is_prefill=False), None)
+        partial = torch.full(
+            (2, 8, 8), 2 + rank * 4, dtype=torch.bfloat16, device="cuda"
+        )
+        lse = torch.full((2, 8), 0.0 if rank == 0 else 1.5849625, device="cuda")
+        lengths = torch.tensor(
+            [3, 3 if rank == 0 else 0], dtype=torch.int32, device="cuda"
+        )
+        merged = query_cp.communicator.combine(partial, lse, lengths, output_dim=8)
+        expected = torch.tensor([5.0, 2.0], dtype=torch.bfloat16, device="cuda")
+        torch.testing.assert_close(
+            merged, expected[None, :, None].expand(8, 2, 8), rtol=0, atol=0.03125
+        )
+        # Fix values at the sparse-attention boundary; run the real output gate
+        # and replicated projection path, including its final request-row layout.
+        attention = object.__new__(KimiK31DSA)
+        torch.nn.Module.__init__(attention)
+        attention.prologue = "test"
+        attention.prefill_query_cp = True
+        attention.tp_size, attention.tp_rank = 2, rank
+        attention._fp8_output_gate = False
+        attention._mtp_bf16_collectives = None
+        attention.output = torch.nn.Identity()
+        values = merged.transpose(0, 1).reshape(2, 64).contiguous()
+        attention._decode_prologue = lambda *_: (values, torch.zeros_like(values))
+        actual = attention(
+            values,
+            {"full": SimpleNamespace(workspace_owner=None)},
+            None,
+            attention_inputs=SimpleNamespace(valid_token_mask=None),
+            metadata=SimpleNamespace(query_layout=None, outer_layout=None),
+        )
+        torch.testing.assert_close(
+            actual, (expected[rank] / 2).expand(1, 64), rtol=0, atol=0.03125
+        )
         torch.cuda.synchronize()
     finally:
         destroy_distributed_environment()

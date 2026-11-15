@@ -1744,12 +1744,27 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // Target consumes the already-built device input. Host history/grammar
     // consumers still need the previous commit, but must not delay its launch.
+    absl::Status previous_bookkeeping_status;
     if (launch_spec_sampler_prepare && useStreamAsync() && useDropBroadSync()) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC(
             "executor.mtp.decode_step(wait_prev_bookkeeping_pre_host_prepare,stream_count=%zu)", streams.size());
-        spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
-        stream_groups                              = StreamGroups(streams);
-        prev_bookkeeping_synced_for_host_consumers = true;
+        try {
+            spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+            stream_groups                              = StreamGroups(streams);
+            prev_bookkeeping_synced_for_host_consumers = true;
+        } catch (const std::exception& error) {
+            if (!speculativeTargetTransactionsEnabled()) {
+                throw;
+            }
+            previous_bookkeeping_status =
+                absl::InternalError(std::string("previous bookkeeping host prepare threw: ") + error.what());
+        } catch (...) {
+            if (!speculativeTargetTransactionsEnabled()) {
+                throw;
+            }
+            previous_bookkeeping_status =
+                absl::InternalError("previous bookkeeping host prepare threw an unknown exception");
+        }
     }
 
     if (!speculativeTargetTransactionsEnabled()) {
@@ -1757,7 +1772,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     // Prepare history and proposal slots independently of target verification.
-    if (launch_spec_sampler_prepare) {
+    if (launch_spec_sampler_prepare && previous_bookkeeping_status.ok()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_spec_sampler_prepare_async)");
         auto*         processor = batch_stream_processor_.get();
         auto          groups    = stream_groups;
@@ -1785,6 +1800,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     SamplerOutput sampler_output;
     auto          run_sampling_and_cap = [&]() -> absl::Status {
+        if (!previous_bookkeeping_status.ok()) {
+            return previous_bookkeeping_status;
+        }
         // trick: update draft sampler output after spec decode to avoid kernel launch overhead
         if (isTpRank0()) {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(update_draft_sampler_output)");

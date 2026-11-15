@@ -71,6 +71,14 @@ class GraphModeTaggedModel(TaggedBlockTableModel):
         return super().forward(inputs, fmha_impl)
 
 
+class PhysicalCountTaggedModel(GraphModeTaggedModel):
+    def forward(self, inputs, fmha_impl=None):
+        for attention in inputs.attention_inputs.values():
+            assert attention.physical_token_count == inputs.input_hiddens.size(0)
+            assert attention.physical_request_count == attention.input_lengths.numel()
+        return super().forward(inputs, fmha_impl)
+
+
 class TaggedStateBlockTableModel(TaggedBlockTableModel):
     """Derive model-owned state pages from the graph's only block tables."""
 
@@ -759,6 +767,22 @@ class RectangularMtpDraftModel:
 
 
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    def test_single_rank_capture_publishes_physical_query_extent(self):
+        for queries in (1, 4):
+            with self.subTest(queries=queries):
+                runner = CudaGraphRunner()
+                runner.init_decode(
+                    PhysicalCountTaggedModel(),
+                    HIDDEN_SIZE,
+                    64,
+                    KERNEL_BLOCK_TABLE_WIDTH,
+                    [1, 2],
+                    GROUP_TAGS,
+                    is_target_verify=queries > 1,
+                    num_tokens_per_bs=queries,
+                    max_context_batch_size=2,
+                )
+
     def test_decode_capacity_rejects_int32_overflow_before_allocation(self):
         for capacity, max_seq_len, tokens_per_row in (
             (65536, 65536, 1),  # Padding product exceeds int32.

@@ -325,6 +325,7 @@ def _page_rr_cache_slot(
     cp_size: tl.constexpr,
     cp_rank: tl.constexpr,
     check_owner: tl.constexpr = False,
+    allow_reserved_block_zero: tl.constexpr = False,
 ):
     # Ownership uses physical pages; tables and cache writers use kernel subpages.
     global_page = position // page_size
@@ -343,7 +344,9 @@ def _page_rr_cache_slot(
             "local block table width is insufficient for an owner page",
         )
         tl.device_assert(
-            (~owner) | (~in_table) | (physical_page > 0),
+            (~owner)
+            | (~in_table)
+            | (physical_page >= (0 if allow_reserved_block_zero else 1)),
             "owner page points to a null or unused local block",
         )
     slot = physical_page.to(tl.int64) * kernel_page_size + offset % kernel_page_size
@@ -379,6 +382,7 @@ def _prepare_prefill_metadata(
     cp_size: tl.constexpr,
     cp_rank: tl.constexpr,
     block: tl.constexpr,
+    allow_reserved_block_zero: tl.constexpr = False,
 ):
     row = tl.program_id(0) * block + tl.arange(0, block)
     valid = row < tokens
@@ -406,6 +410,7 @@ def _prepare_prefill_metadata(
         cp_size,
         cp_rank,
         check_owner=True,
+        allow_reserved_block_zero=allow_reserved_block_zero,
     )
     tl.store(slots + row, slot, valid)
 

@@ -21,6 +21,11 @@ ATTENTION_PROJECTION_MODULES = {
 
 
 class KimiK31Nvfp4Weight(OnlineNvfp4Projection, CompositeWeight, QuantWeight):
+    def update(self, tensor, device, load_config, **kwargs):
+        raise PermissionError(
+            f"NVFP4 projection {self.name!r} requires a service restart to update codes and scales"
+        )
+
     @classmethod
     def support(cls, quant_config, src_weight_info):
         return False  # Explicit K3.1 policy; never selected model-wide.

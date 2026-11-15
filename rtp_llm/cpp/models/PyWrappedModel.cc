@@ -465,6 +465,7 @@ std::optional<std::string> PyWrappedModel::takeDeferredHiddenStateCaptureError()
 torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs");
     torch_ext::PyAttentionInputs py_attn_inputs;
+    py_attn_inputs.is_warmup                    = inputs.warmup || inputs.is_fake_stream;
     const int64_t                token_count    = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
     const int64_t                logical_tokens = inputs.sp_logical_tokens > 0 ? inputs.sp_logical_tokens : token_count;
     if (const auto* replay = inputs.targetLinearReplay()) {

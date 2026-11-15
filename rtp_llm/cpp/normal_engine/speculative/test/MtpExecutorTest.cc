@@ -888,7 +888,7 @@ struct MtpExecutorComponents {
 class MtpExecutorTest: public DeviceTestBase {
 public:
     void runMultiBatchDecode(bool use_mtp_hidden_buffer, bool request_lanes = false);
-    void runDSparkSpecLogitsWorkerScenario(bool previous_commit_pending);
+    void runDSparkSpecLogitsWorkerScenario(bool previous_commit_pending, bool previous_commit_throws = false);
 
     GenerateStreamPtr createContextStream(const ModelConfig&     model_config,
                                           const RuntimeConfig&   runtime_config,
@@ -3501,7 +3501,7 @@ private:
 
 }  // namespace
 
-void MtpExecutorTest::runDSparkSpecLogitsWorkerScenario(bool previous_commit_pending) {
+void MtpExecutorTest::runDSparkSpecLogitsWorkerScenario(bool previous_commit_pending, bool previous_commit_throws) {
     constexpr int32_t gamma      = 3;
     constexpr int32_t vocab_size = 4;
 
@@ -3536,6 +3536,11 @@ void MtpExecutorTest::runDSparkSpecLogitsWorkerScenario(bool previous_commit_pen
         observed_processor ? std::static_pointer_cast<RejectDraftTokenSpecProcessor>(observed_processor) :
                              std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen());
     stream->sampling_state_.logits_processors.push_back(processor);
+    if (previous_commit_throws) {
+        // Keep this failure on the rank-zero host-prepare path rather than
+        // letting a competing speculative-logits worker consume it first.
+        stream->sampling_state_.logits_processors.clear();
+    }
     const auto main_thread_id = std::this_thread::get_id();
 
     GptModelInputs target_input;
@@ -3578,6 +3583,9 @@ void MtpExecutorTest::runDSparkSpecLogitsWorkerScenario(bool previous_commit_pen
             if (commit_gate.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
                 throw std::runtime_error("previous processor commit was never released");
             }
+            if (previous_commit_throws) {
+                throw std::runtime_error("injected previous bookkeeping failure");
+            }
             observed_processor->updateStatus({}, 1);
         });
         ASSERT_EQ(worker_ready.wait_for(std::chrono::seconds(10)), std::future_status::ready);
@@ -3586,7 +3594,7 @@ void MtpExecutorTest::runDSparkSpecLogitsWorkerScenario(bool previous_commit_pen
         // state and wakes this controller immediately. Every wait is bounded.
         release_previous = std::async(std::launch::async, [=] {
             const bool target_overlapped = target_ready.wait_for(std::chrono::seconds(10)) == std::future_status::ready;
-            if (target_overlapped) {
+            if (target_overlapped && !previous_commit_throws) {
                 observed_length.wait_for(std::chrono::seconds(5));
             }
             allow_commit->set_value();
@@ -3648,6 +3656,22 @@ void MtpExecutorTest::runDSparkSpecLogitsWorkerScenario(bool previous_commit_pen
                     std::move(components.fake_sampler),
                     std::move(components.fake_draft_prefill_model));
 
+    if (previous_commit_throws) {
+        std::vector<bool> local_statuses;
+        components.executor->speculative_target_status_reducer_for_test_ = [&local_statuses](bool local_ok) {
+            local_statuses.push_back(local_ok);
+            return local_ok;
+        };
+        try {
+            components.executor->process(ScheduleOutput{{stream}});
+            ADD_FAILURE() << "previous bookkeeping failure must be reported";
+        } catch (const std::exception& error) {
+            EXPECT_NE(std::string(error.what()).find("sampling/cap failed on at least one TP rank"), std::string::npos);
+        }
+        EXPECT_NE(std::find(local_statuses.begin(), local_statuses.end(), false), local_statuses.end());
+        EXPECT_TRUE(release_previous.get());
+        return;
+    }
     auto status = components.executor->process(ScheduleOutput{{stream}});
     ASSERT_TRUE(status.ok()) << status.ToString();
     EXPECT_NE(std::thread::id(), processor->invocationThreadId());
@@ -3672,6 +3696,14 @@ TEST_F(MtpExecutorTest, ReviewTransactionalSpecLogitsWaitsForPreviousCommit) {
         GTEST_SKIP() << "Run with RTP_LLM_STREAM_ASYNC=1 and RTP_LLM_DROP_BROAD_SYNC=1";
     }
     runDSparkSpecLogitsWorkerScenario(true);
+}
+
+TEST_F(MtpExecutorTest, ReviewTransactionalPreviousBookkeepingFailureReachesConsensus) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    if (!components.executor->useStreamAsync() || !components.executor->useDropBroadSync()) {
+        GTEST_SKIP() << "Run with RTP_LLM_STREAM_ASYNC=1 and RTP_LLM_DROP_BROAD_SYNC=1";
+    }
+    runDSparkSpecLogitsWorkerScenario(true, true);
 }
 
 TEST_F(MtpExecutorTest, ReviewDraftPrefillLayoutUsesTheWrappedPythonDraft) {

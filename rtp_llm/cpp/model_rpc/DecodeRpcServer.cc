@@ -276,6 +276,9 @@ DecodeRpcServer::prefillPeerPartitions(const std::vector<std::string>& peer_addr
     }
 
     const int peer_count = static_cast<int>(peer_addrs.size());
+    if (use_mla && attention_tp % peer_count != 0 && peer_count % attention_tp != 0) {
+        return {};
+    }
     if (use_mla || replicated_kv) {
         const int peer_index = use_mla ? (attention_tp >= peer_count ? attention_rank / (attention_tp / peer_count) :
                                                                        attention_rank * (peer_count / attention_tp)) :

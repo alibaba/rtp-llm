@@ -1,6 +1,7 @@
 """Exercise the shared RMSNorm contract consumed by natural K3.1 DSA."""
 
 import unittest
+from types import SimpleNamespace
 
 import torch
 from torch.nn import functional as F
@@ -8,6 +9,7 @@ from torch.nn import functional as F
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_fp8_quant_triton import (
     rmsnorm_fp8_quant_ue8m0,
 )
+from rtp_llm.models_py.modules.kimi_k3.natural_dsa import NaturalPairedProjection
 
 
 class KimiK31NormContractTest(unittest.TestCase):
@@ -16,6 +18,36 @@ class KimiK31NormContractTest(unittest.TestCase):
         torch.manual_seed(311)
         self.input = torch.randn((7, 512), dtype=torch.bfloat16, device="cuda")
         self.weight = torch.linspace(0.5, 1.5, 512, dtype=torch.bfloat16, device="cuda")
+
+    def test_paired_projection_quantization_accepts_row_strided_queries(self):
+        projection = NaturalPairedProjection(
+            SimpleNamespace(weight=self.input.new_empty(512, 32).normal_()),
+            SimpleNamespace(weight=self.input.new_empty(16, 32).normal_()),
+        )
+        query, _ = projection(self.input.new_empty(7, 32).normal_())
+        self.assertFalse(query.is_contiguous())
+        for store_norm in (False, True):
+            with self.subTest(store_norm=store_norm):
+                actual = rmsnorm_fp8_quant_ue8m0(
+                    query, self.weight, eps=1e-6, store_norm=store_norm
+                )
+                expected = rmsnorm_fp8_quant_ue8m0(
+                    query.contiguous(), self.weight, eps=1e-6, store_norm=store_norm
+                )
+                for result, reference in zip(actual, expected):
+                    if reference is None:
+                        self.assertIsNone(result)
+                    else:
+                        if result.dtype == torch.float8_e4m3fn:
+                            result, reference = result.view(
+                                torch.uint8
+                            ), reference.view(torch.uint8)
+                        torch.testing.assert_close(
+                            result,
+                            reference,
+                            rtol=0,
+                            atol=0,
+                        )
 
     def test_fp8_only_projection_can_omit_normalized_output(self):
         _, reference_values, reference_scales = rmsnorm_fp8_quant_ue8m0(
@@ -29,6 +61,10 @@ class KimiK31NormContractTest(unittest.TestCase):
             values.view(torch.uint8), reference_values.view(torch.uint8), rtol=0, atol=0
         )
         torch.testing.assert_close(scales, reference_scales, rtol=0, atol=0)
+
+    def test_quantization_still_rejects_column_strided_input(self):
+        with self.assertRaisesRegex(ValueError, "contiguous"):
+            rmsnorm_fp8_quant_ue8m0(self.input[:, ::2], self.weight[:256], eps=1e-6)
 
     def test_joint_fp8_nvfp4_projection_publishes_normalized_amax(self):
         partials = torch.full((2,), float("nan"), dtype=torch.float32, device="cuda")
