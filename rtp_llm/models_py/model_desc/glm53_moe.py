@@ -2,6 +2,8 @@ import os
 from typing import Any, Dict, Optional
 
 import torch
+from torch import nn
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.glm53_prefill_parallel import (
@@ -10,7 +12,8 @@ from rtp_llm.models.glm53_prefill_parallel import (
     mla_cp_enabled,
     shared_expert_local_enabled,
 )
-from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.distributed.glm53_collective_gemm import all_gather
 from rtp_llm.models_py.distributed.sequence_parallel import (
     shard_tokens,
     token_shard_layout,
@@ -42,7 +45,6 @@ from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 try:
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
@@ -435,7 +437,9 @@ class GenericMoeLayer(nn.Module):
         # Preserve that opt-in path; native GLM53 uses gate_chunk_rows == 0.
         local_router = self.route_local_tokens and self.gate_chunk_rows == 0
         if sequence_parallel_layout is not None:
-            from rtp_llm.models_py.distributed.collective_torch import all_gather_trim
+            from rtp_llm.models_py.distributed.glm53_collective_gemm import (
+                all_gather_trim,
+            )
 
             if self.routed_tp_size <= 1 or self.ep_size <= 1:
                 raise ValueError(

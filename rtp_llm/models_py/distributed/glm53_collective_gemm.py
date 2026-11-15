@@ -1,11 +1,15 @@
 """GLM Prefill BF16 collective-GEMM, adapted from origin/feat/k3_dev.
 
-The persistent RS workspace and PyTorch AG pipeline belong to one TP group.
-Decode DP and small/ragged fallback paths retain the ordinary collectives.
+The RS workspace and AG pipelines belong to one TP group. Ordinary non-Graph
+Prefill also owns the small BF16 symmetric-memory AG path. Other execution
+modes and unsupported payloads retain their existing collective dispatch.
 """
 
 import os
+import socket
+import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 import torch
@@ -25,13 +29,158 @@ class _State:
     peer_pointers: Optional[torch.Tensor] = None
     data_offset_bytes: int = 0
     reduce_partials: Any = None
+    initialization: tuple = ()
+    native_all_gather: Any = None
 
 
 _STATE: Optional[_State] = None
 _MIN_TOKENS = 32768
 
 
-def configure_glm53_collective_gemm(group, hidden: int) -> None:
+class _NativeAllGather:
+    """One model-owned buffer; its next writer waits for the previous copy-out.
+
+    Only configured non-Graph Prefill uses this owner. The lock orders host
+    submissions; the event also orders different CUDA streams after the lock
+    has been released. Outputs belong to the caller, never to the symm buffer.
+    """
+
+    def __init__(self, communicator):
+        self.communicator = communicator
+        self.lock = threading.Lock()
+        self.completion = torch.cuda.Event()
+        self.failed = False
+        self.completion.record(torch.cuda.current_stream(communicator.device))
+
+    def gather(self, tensor):
+        with self.lock, torch.cuda.device(self.communicator.device):
+            if self.failed:
+                raise RuntimeError("GLM native AllGather owner previously failed")
+            stream = torch.cuda.current_stream(self.communicator.device)
+            try:
+                stream.wait_event(self.completion)
+                tensor.record_stream(stream)
+                source = tensor
+                if tensor.data_ptr() % 16:
+                    # Storage offsets can differ across ranks. Stage locally
+                    # instead of choosing a different collective on this rank.
+                    source = tensor.clone()
+                    source.record_stream(stream)
+                output = self.communicator.all_gather(source)
+                if output is None:
+                    raise RuntimeError("GLM native AllGather unexpectedly declined")
+                # all_gather includes out.copy_ from the reusable symm buffer.
+                self.completion.record(stream)
+            except BaseException:
+                # A partially submitted collective is not a local fallback.
+                self.failed = True
+                raise
+            return output.view(
+                self.communicator.world_size * tensor.shape[0], *tensor.shape[1:]
+            )
+
+
+def _initialization_key(parallelism, enable_cuda_graph):
+    return (
+        *(
+            int(getattr(parallelism, field))
+            for field in (
+                "world_size",
+                "world_rank",
+                "local_world_size",
+                "local_rank",
+                "tp_size",
+                "tp_rank",
+                "dp_size",
+                "pp_size",
+            )
+        ),
+        str(parallelism.role_type).rsplit(".", 1)[-1],
+        bool(enable_cuda_graph),
+    )
+
+
+def _native_ag_contract(group, parallelism, enable_cuda_graph):
+    """Publish a local startup verdict, including the actual TP membership.
+
+    Failures here are voted down before anyone constructs the communicator.
+    Rendezvous exceptions from the communicator itself deliberately propagate.
+    """
+    from rtp_llm.models_py.distributed.rank_layout import Group, RankLayout
+    from rtp_llm.models_py.distributed.symm_mem import torch_symm_mem_available
+
+    try:
+        world = dist.get_world_size(group)
+        member = dist.get_rank(group)
+        ranks = [dist.get_global_rank(group, rank) for rank in range(world)]
+        expected = RankLayout.from_parallelism_config(parallelism).group_of(
+            Group.TP, parallelism.world_rank
+        )
+        local_world = int(parallelism.local_world_size)
+        role = str(parallelism.role_type).rsplit(".", 1)[-1]
+        # The boot identity prevents repeated/container-local hostnames from
+        # being mistaken for CUDA-IPC locality. An unavailable identity declines.
+        node = [
+            socket.gethostname(),
+            Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+            os.getuid(),
+        ]
+        device = torch.cuda.current_device()
+        admitted = (
+            torch_symm_mem_available
+            and bool(node[1])
+            and role == "PREFILL"
+            and not enable_cuda_graph
+            and world in (2, 4, 8)
+            and world == parallelism.tp_size
+            and parallelism.world_size == dist.get_world_size()
+            and ranks == expected
+            and local_world > 0
+            and min(ranks) // local_world == max(ranks) // local_world
+            and ranks[member] == parallelism.world_rank == dist.get_rank()
+            and member == parallelism.tp_rank
+            and device == parallelism.local_rank == parallelism.world_rank % local_world
+        )
+        return {
+            "admitted": bool(admitted),
+            "shared": [
+                ranks,
+                expected,
+                int(parallelism.world_size),
+                local_world,
+                int(parallelism.dp_size),
+                int(parallelism.pp_size),
+                role,
+                bool(enable_cuda_graph),
+                node,
+            ],
+            "device": device,
+        }
+    except (OSError, ValueError, RuntimeError, AttributeError, IndexError):
+        return {"admitted": False}
+
+
+def _configure_native_all_gather(group, parallelism, enable_cuda_graph):
+    from rtp_llm.models_py.distributed.collective_utils import exchange_group_state
+    from rtp_llm.models_py.distributed.symm_mem import TorchSymmMemCommunicator
+
+    local = _native_ag_contract(group, parallelism, enable_cuda_graph)
+    peers = exchange_group_state(group, local, "glm53_native_all_gather")
+    if not (
+        all(peer.get("admitted", False) for peer in peers)
+        and all(peer["shared"] == local["shared"] for peer in peers)
+        and len({peer["device"] for peer in peers}) == len(peers)
+    ):
+        return None
+    communicator = TorchSymmMemCommunicator(group, local["device"])
+    if communicator.disabled:
+        return None
+    return _NativeAllGather(communicator)
+
+
+def configure_glm53_collective_gemm(
+    group, hidden: int, parallelism, *, enable_cuda_graph: bool
+) -> None:
     """Initialize collectively after model/distributed initialization, before forward."""
     global _STATE
     ag = os.environ.get("GLM53_PREFILL_AG_GEMM", "0") == "1"
@@ -39,6 +188,7 @@ def configure_glm53_collective_gemm(group, hidden: int) -> None:
     stable_rs = os.environ.get("GLM53_PREFILL_STABLE_RS", "0") == "1"
     if not ag and not rs and not stable_rs:
         return
+    initialization = _initialization_key(parallelism, enable_cuda_graph)
     max_tokens = int(os.environ.get("GLM53_COLLECTIVE_MAX_TOKENS", "1048576"))
     if max_tokens <= 0 or max_tokens % group.size():
         raise ValueError(
@@ -57,6 +207,7 @@ def configure_glm53_collective_gemm(group, hidden: int) -> None:
             or _STATE.all_gather != ag
             or _STATE.gemm_reduce_scatter != rs
             or _STATE.stable_reduce_scatter != stable_rs
+            or _STATE.initialization != initialization
         ):
             raise RuntimeError(
                 "GLM collective-GEMM was already initialized differently"
@@ -104,6 +255,14 @@ def configure_glm53_collective_gemm(group, hidden: int) -> None:
                 completion.record(stream)
             else:
                 workspace._last_stream = stream
+    # Preserve existing DeepGEMM workspace initialization and group order.
+    # This optional communicator is owned by this GLM Prefill state, never by
+    # the permanently disabled global AllReduce/symm communicator.
+    native_all_gather = (
+        _configure_native_all_gather(group, parallelism, enable_cuda_graph)
+        if ag
+        else None
+    )
     _STATE = _State(
         group,
         max_tokens,
@@ -116,7 +275,62 @@ def configure_glm53_collective_gemm(group, hidden: int) -> None:
         peer_pointers=peer_pointers,
         data_offset_bytes=data_offset_bytes,
         reduce_partials=reduce_partials,
+        initialization=initialization,
+        native_all_gather=native_all_gather,
     )
+
+
+def all_gather(tensor: torch.Tensor, group, *, role: Optional[str] = None):
+    """GLM-only small BF16 AG; preserve ordinary and CP typed fallbacks.
+
+    Admission is fixed collectively at model initialization with CUDA Graph
+    disabled. Only the existing ordinary-Prefill metadata activates it; Decode,
+    target verification and calls outside a GLM forward retain their original
+    path. A manual capture in an admitted non-Graph model is an error, not an
+    attempt to choose a different route on this rank. Mixed-rank capture is
+    outside this contract.
+    """
+    from rtp_llm.models_py.distributed import collective_torch
+    from rtp_llm.models_py.modules.dsv4.forward_metadata import metadata_cache
+
+    state = _STATE
+    native = state.native_all_gather if state is not None else None
+    if (
+        native is not None
+        and group == collective_torch.Group.TP
+        and metadata_cache() is not None
+    ):
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "GLM native AllGather requires configured non-Graph Prefill"
+            )
+        communicator = native.communicator
+        if (
+            tensor.ndim > 0
+            and tensor.numel() > 0
+            and tensor.device == communicator.device
+            # The op may select 16-byte vectors from the gathered output.
+            # Each rank's shard must match that alignment. The owner stages
+            # misaligned pointers without changing the collective route.
+            and tensor.numel() * tensor.element_size() % 16 == 0
+            and communicator.should_torch_symm_mem_allgather(tensor)
+        ):
+            with torch.profiler.record_function("RTP::glm53.prefill.native_all_gather"):
+                return native.gather(tensor)
+    if role is not None:
+        # CP roles already have a separate pynccl/typed-payload dispatcher.
+        # Keep that exact fallback when the native BF16 route declines.
+        from rtp_llm.models_py.distributed.pynccl_cp import all_gather as cp_all_gather
+
+        return cp_all_gather(tensor, group=group, role=role)
+    return collective_torch.all_gather(tensor, group)
+
+
+def all_gather_trim(tensor: torch.Tensor, logical_tokens: int, group):
+    gathered = all_gather(tensor, group)
+    if not 0 <= logical_tokens <= gathered.shape[0]:
+        raise ValueError("logical token count exceeds the gathered rows")
+    return gathered.narrow(0, 0, logical_tokens)
 
 
 def reduce_scatter_glm53(tensor: torch.Tensor) -> torch.Tensor:
