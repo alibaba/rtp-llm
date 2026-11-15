@@ -138,6 +138,9 @@ struct MergedOutput {
 public:
     GptModelOutputs model_output;
     SamplerOutput   sampler_output;
+    // Decode publication reuses the output-copy wait even with CPU outputs.
+    // This is a local writer dependency, not all-rank Prefill readiness proof.
+    bool wait_for_kv_writer{false};
 };
 
 }  // namespace rtp_llm

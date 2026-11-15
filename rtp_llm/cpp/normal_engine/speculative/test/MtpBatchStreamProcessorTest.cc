@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <limits>
 #include <thread>
@@ -1544,6 +1545,94 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     // (MtpExecutor::publishSyncMtpDeviceState); dispatchDecode itself only
     // performs host bookkeeping now, so no device-state asserts here.
 }
+
+#if USING_CUDA
+TEST_F(MtpBatchStreamProcessorTest, DecodeDispatchWaitsForFinalDraftBeforeUpdatingStream) {
+    class TrackingUpdateProcessor: public BaseLogitsProcessor {
+    public:
+        std::shared_ptr<torch::Event> writer;
+        int accepted_tokens{0};
+        bool updated_before_writer{false};
+        std::optional<ErrorInfo> process(const SamplerInputs&, size_t, size_t) override { return std::nullopt; }
+        void updateMultiSeqStatus(const std::vector<int>&) override {}
+        std::optional<ErrorInfo> updateStatus(const torch::Tensor&, int32_t count) override {
+            updated_before_writer |= !writer->query();
+            accepted_tokens += count;
+            return std::nullopt;
+        }
+    };
+    ModelConfig model;
+    model.max_seq_len = 128;
+    model.vocab_size = 8;
+    model.num_layers = 1;
+    SpeculativeExecutionConfig sp;
+    sp.type = SP_TYPE_DSPARK;
+    sp.gen_num_per_cycle = 5;
+    auto cache = makeProcessorCacheConfig();
+    ResourceContext resources;
+    resources.cache_manager = std::make_shared<KVCacheManager>(cache);
+    auto stream = createContextStream(model, RuntimeConfig{}, resources, {1}, /*block_id=*/1);
+    stream->generateConfig()->max_new_tokens = 8;
+    stream->setIsContextStream(false);
+    StreamGroups groups({stream});
+    MtpBatchStreamProcessor processor(model, {}, {}, cache, sp, false);
+    speculative::SpeculativeSamplerOutput result;
+    auto tracker = std::make_shared<TrackingUpdateProcessor>();
+    tracker->writer = result.transfer_done_event;
+    stream->logits_processor_list_.push_back(tracker);
+
+    // Poison the host views until a later final-draft event. A missing processor
+    // wait must consume invalid/stale data or update before the event is ready.
+    auto host = torch::full({8}, -1, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+    auto device = torch::tensor({2, 2, 3, 0, 0, 0, 0, 1},
+                                torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    result.accept_len_cpu = host.narrow(0, 0, 1);
+    result.accept_tokens_cpu = host.narrow(0, 1, 6).reshape({1, 6});
+    result.verified_draft_lengths_cpu = host.narrow(0, 7, 1);
+    result.accept_len = device.narrow(0, 0, 1);
+    result.accept_tokens = device.narrow(0, 1, 6).reshape({1, 6});
+    cuda_graph::graphGetCurrentStream().synchronize();
+    auto producer = cuda_graph::graphGetStreamFromPool(false);
+    ScopedSamplerStreamGate gate(producer);
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool dispatch_finished = false;
+    std::thread release_gate;
+    std::exception_ptr failure;
+    absl::Status status;
+    try {
+        {
+            cuda_graph::GraphStreamGuard guard(producer);
+            host.copy_(device, /*non_blocking=*/true);
+            result.transfer_done_event->record(producer);
+        }
+        release_gate = std::thread([&] {
+            std::unique_lock<std::mutex> lock(mutex);
+            // Only a fuse for the intentionally blocked writer; elapsed time
+            // is not an assertion or evidence of physical overlap/performance.
+            cv.wait_for(lock, std::chrono::milliseconds(200), [&] { return dispatch_finished; });
+            lock.unlock();
+            gate.release();
+        });
+        status = processor.dispatchDecode(groups, result, MergedOutput{});
+    } catch (...) { failure = std::current_exception(); }
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        dispatch_finished = true;
+    }
+    cv.notify_all();
+    gate.release();
+    if (release_gate.joinable()) release_gate.join();
+    producer.synchronize(); // Test writer quiescence before any host/tensor teardown.
+    if (failure) std::rethrow_exception(failure);
+    EXPECT_TRUE(status.ok());
+    EXPECT_FALSE(gate.timedOut());
+    EXPECT_FALSE(tracker->updated_before_writer);
+    EXPECT_EQ(tracker->accepted_tokens, 2);
+    EXPECT_EQ(stream->seqLength(), 3);
+    EXPECT_EQ(stream->speculativeVerifiedDraftTokens(), 1);
+}
+#endif
 
 TEST_F(MtpBatchStreamProcessorTest, DecodeVerifiedDraftLengthsRequireHostPayloadOrKnownDenseWidth) {
     ModelConfig model;

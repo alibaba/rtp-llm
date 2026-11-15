@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 #include <algorithm>
 #include <atomic>
 #include <functional>
@@ -246,7 +247,7 @@ protected:
     kmonitor::MetricsReporterPtr metrics_reporter_;
 };
 
-TEST_F(PrefillRpcServerTest, GenerateHandoffExplicitlyExcludesSampledTokenOnlyWhenEnabledAndReady) {
+TEST_F(PrefillRpcServerTest, GenerateHandoffDoesNotSendRemovedBoundaryField) {
     class HandoffClient final: public PrefillGenerateContext::ClientStream {
     public:
         bool Read(GenerateOutputsPB*) override {
@@ -271,6 +272,7 @@ TEST_F(PrefillRpcServerTest, GenerateHandoffExplicitlyExcludesSampledTokenOnlyWh
     for (const std::string mode : {"enabled", "disabled", "not_ready", "error"}) {
         SCOPED_TRACE(mode);
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", mode == "disabled" ? "0" : "1");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         GenerateInputPB request;
         auto            context = makeContext(&request);
         context->meta           = std::make_shared<RpcServerRuntimeMeta>();
@@ -298,10 +300,8 @@ TEST_F(PrefillRpcServerTest, GenerateHandoffExplicitlyExcludesSampledTokenOnlyWh
         EXPECT_EQ(handoff.request_id(), 42);
         EXPECT_EQ(handoff.client_id(), "prefill");
         EXPECT_EQ(handoff.first_generate_token_id(), 7);
-        EXPECT_EQ(handoff.has_prefill_kv_handoff(), mode == "enabled");
-        if (handoff.has_prefill_kv_handoff()) {
-            EXPECT_EQ(handoff.prefill_kv_handoff().computed_kv_end(), 3);
-        }
+        EXPECT_EQ(GenerateRequestPB::descriptor()->FindFieldByNumber(13), nullptr);
+        }, [&] { TearDown(); metrics_reporter_.reset(); });
     }
 }
 

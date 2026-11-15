@@ -27,6 +27,7 @@ test_deps = [
 
 cc_test(
     name = "block_tree_loader_test",
+    testonly = True,
     exec_properties = {"gpu": "L20_CU13"},
     srcs = ["BlockTreeLoaderTest.cc"],
     copts = test_copts,
@@ -34,7 +35,7 @@ cc_test(
         "L20_CU13",
         "exclusive-if-local",
     ],
-    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],
     env = {},
 )
 

@@ -90,7 +90,6 @@ private:
     std::atomic<size_t>                            next_load_{0}, next_evict_{0};
     bool                                           async_{false}, enable_disk_cache_{false};
     size_t                                         transfer_worker_count_{1};
-    bool                                           track_decode_origins_{false};
     size_t                                         crc_slot_count_;
 };
 

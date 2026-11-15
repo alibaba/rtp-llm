@@ -3,19 +3,6 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//:__subpackages__"])
 
-cc_library(
-    name = "decode_cache_origin",
-    hdrs = ["DecodeCacheOrigin.h"],
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "physical_decode_origins",
-    hdrs = ["PhysicalDecodeOrigins.h"],
-    deps = [":decode_cache_origin"],
-    visibility = ["//visibility:public"],
-)
-
 
 
 # KVCache utilities - simple inline functions, no external dependencies
@@ -45,8 +32,6 @@ cc_library(
         "Logger.h",
         "RemoteCacheConfig.h",
         "DecodePublicationLifecycle.h",
-        "DecodePublicationBudget.h",
-        "RemoteRestoreLifecycle.h",
         "StringUtil.h",
         "StatusUtil.h",
         "Exception.h",
@@ -294,5 +279,13 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
     ],
     copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "decode_publication_test_support",
+    testonly = True,
+    hdrs = ["DecodePublicationTest.h"],
+    deps = ["@com_google_googletest//:gtest"],
     visibility = ["//visibility:public"],
 )

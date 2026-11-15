@@ -8,8 +8,12 @@ namespace rtp_llm {
 bool remoteCacheGdrEnabled();
 
 // One feature switch for every P CP / D DP topology. No legacy or CP-specific
-// flags are read. Publication is disabled unless explicitly enabled.
+// flags are read. The value is cached on first use during startup and cannot
+// be changed at runtime. Publication is disabled unless explicitly enabled.
 bool remoteCacheDecodePublicationEnabled();
+// Invalid startup values reject Decode backend initialization; other roles
+// keep the disabled publication path.
+bool remoteCacheDecodePublicationConfigValid();
 
 struct DecodePublicationLimits {
     // Configuration-only default for a 4 GiB pool. Backend initialization

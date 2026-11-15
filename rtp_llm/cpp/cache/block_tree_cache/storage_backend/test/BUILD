@@ -9,6 +9,7 @@ cc_test_wrapper(
     copts = copts(),
     deps = [
         "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:decode_publication_accounting",
         "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
         "//rtp_llm/cpp/utils:core_utils",
         "@com_google_googletest//:gtest",
@@ -16,3 +17,5 @@ cc_test_wrapper(
     ] + torch_deps(),
     tags = ["L20_CU13"],
 )
+
+exports_files(["ReservedCompletionLaneHostTest.cc"])

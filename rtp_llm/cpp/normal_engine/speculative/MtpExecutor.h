@@ -101,7 +101,8 @@ protected:
                                                                          bool               linear_attention);
     static std::shared_ptr<torch::Event> bookkeepingReadyEvent(bool v41_async_reservation,
                                                                const std::shared_ptr<torch::Event>& transfer_event,
-                                                               const std::shared_ptr<torch::Event>& draft_event);
+                                                               const std::shared_ptr<torch::Event>& draft_event,
+                                                               bool decode_publication = false);
     static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
     static bool dsparkDraftGraphAllowed(bool is_dspark, RoleType role_type);
     struct AcceptLenMetricsSnapshot {
@@ -296,6 +297,8 @@ private:
                                int64_t              schedule_time_us,
                                int64_t              model_forward_us);
 
+    void retainDecodePublicationPages(const StreamGroups&, const GptModelInputs&, const GptModelInputs&,
+                                      const speculative::SpeculativeSamplerOutput&);
     GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
 
     std::unique_ptr<ModelBase>                                               model_;

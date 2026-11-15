@@ -1,6 +1,5 @@
 #pragma once
 
-#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
@@ -92,9 +91,6 @@ public:
     };
 
 private:
-    // Read once when the startup-owned server is constructed, never per RPC.
-    const bool decode_publication_enabled_ = remoteCacheDecodePublicationEnabled();
-
     struct LoadCacheResult {
         ErrorInfo error_info;
         size_t    loaded_cache_block_count = 0;

@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/utils/DecodePublicationLifecycle.h"
 #include <gtest/gtest.h>
 #include <future>
+#include <limits>
 #include <atomic>
 #include <stdexcept>
 #include <string>
@@ -11,6 +12,33 @@ namespace rtp_llm::kvcm {
 namespace {
 using Accounting = DecodePublicationAccounting;
 using Clock      = Accounting::Clock;
+
+// Exercise the real production accounting after retiring the unused budget class.
+// Empty plans are filtered by publication planning; no constructor-throw contract
+// is imposed on this accounting type. Zero capacity must reject positive work.
+TEST(DecodePublicationAccountingTest, ZeroCapacityRejectsPositiveWork) {
+    auto no_bytes = std::make_shared<Accounting>(0, 1);
+    auto no_jobs = std::make_shared<Accounting>(1, 0);
+    EXPECT_FALSE(no_bytes->tryAcquire(1, std::nullopt));
+    EXPECT_FALSE(no_jobs->tryAcquire(1, std::nullopt));
+    EXPECT_EQ(no_bytes->snapshot().jobs, 0u);
+    EXPECT_EQ(no_jobs->snapshot().bytes, 0u);
+}
+
+TEST(DecodePublicationAccountingTest, ByteCapacityArithmeticCannotOverflow) {
+    const auto maximum = std::numeric_limits<size_t>::max();
+    auto state = std::make_shared<Accounting>(maximum, 3);
+    auto first = state->tryAcquire(maximum - 1, std::nullopt);
+    ASSERT_TRUE(first);
+    EXPECT_FALSE(state->tryAcquire(2, std::nullopt));
+    auto last = state->tryAcquire(1, std::nullopt);
+    ASSERT_TRUE(last);
+    EXPECT_EQ(state->snapshot().bytes, maximum);
+    first.reset();
+    last.reset();
+    EXPECT_EQ(state->snapshot().bytes, 0u);
+    EXPECT_EQ(state->snapshot().jobs, 0u);
+}
 
 TEST(DecodePublicationAccountingTest, BudgetsCoverLeaseCopiesAndFrozenPages) {
     auto state = std::make_shared<Accounting>(100, 2);

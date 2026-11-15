@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -12,8 +13,6 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
-#include "rtp_llm/cpp/utils/RemoteRestoreLifecycle.h"
-#include "rtp_llm/cpp/cache/DecodeReuseSources.h"
 
 namespace rtp_llm {
 
@@ -66,6 +65,7 @@ public:
     void reportMallocRetry() const;
     bool isContextStream() const;
 
+    void publishCompletedDecode(size_t computed_end);
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
@@ -121,14 +121,6 @@ public:
     bool enableCacheLookup() const;
     Tier insertTarget() const;
     void reportCacheReuseMetrics();
-    bool hasPendingRemoteRestore() const {
-        return remote_restore_lifecycle_.pendingForward();
-    }
-    void reportRemoteContextReady(std::optional<RemoteRestoreTiming::Clock::time_point> gpu_ready_at = std::nullopt);
-    bool hasPendingDecodeReuse() const {
-        return decode_reuse_use_state_.pending();
-    }
-    void reportDecodeCacheUse(std::optional<RemoteRestoreTiming::Clock::time_point> gpu_ready_at);
 
     void holdKVCacheForPDSep();
     void releaseKVCacheForPDSep();
@@ -145,34 +137,32 @@ public:
     }
 
 private:
+    bool         publicationKeysFresh() const;
     void         clearCacheReuseState();
     void         recordCacheReuseMallocResult(const MallocResult& result);
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
     absl::Status finalizeAllocatorLoad();
     bool         deferAllocatorLoadRelease();
     void         publishAllocatorReuse(const LoadAsyncContext& context, bool local_only);
-    void         reportRemoteRestoreLatency(const char* mode, int64_t latency_us);
-    void         adoptDecodeReuse(DecodeReuseSourcesPtr sources, int64_t adopted_end);
 
     GenerateStream*                stream_;
     BatchKVCacheResourcePtr        batch_kv_cache_resource_;
     ResourceContext                resource_context_;
     std::vector<TaggedBlockIdPair> block_update_mapping_;
 
-    bool                                                  need_release_resource_ = true;
-    bool                                                  last_block_aligned_    = false;
-    int                                                   malloc_failed_times_   = 0;
-    bool                                                  fake_inited_           = false;
-    bool                                                  resource_released_     = false;
-    bool                                                  skip_remote_cache_     = false;
-    std::shared_ptr<AsyncContext>                         allocator_load_context_;
-    std::weak_ptr<AsyncContext>                           notified_load_context_;
-    RtpLLMCacheReuseMetricsCollector                      cache_reuse_metrics_;
-    int64_t                                               malloc_begin_time_us_    = 0;
-    int64_t                                               load_wait_begin_time_us_ = 0;
-    RemoteRestoreLifecycle                                remote_restore_lifecycle_;
-    DecodeReuseUseState                                   decode_reuse_use_state_;
-    std::optional<RemoteRestoreTiming::Clock::time_point> remote_restore_attempt_started_at_;
+    // Only keys prepared here for the current single-row token history.
+    size_t                           publication_key_tokens_{0};
+    bool                             need_release_resource_ = true;
+    bool                             last_block_aligned_    = false;
+    int                              malloc_failed_times_   = 0;
+    bool                             fake_inited_           = false;
+    bool                             resource_released_     = false;
+    bool                             skip_remote_cache_     = false;
+    std::shared_ptr<AsyncContext>    allocator_load_context_;
+    std::weak_ptr<AsyncContext>      notified_load_context_;
+    RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
+    int64_t                          malloc_begin_time_us_    = 0;
+    int64_t                          load_wait_begin_time_us_ = 0;
 
     // Physical block pins held for PD separation.
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;

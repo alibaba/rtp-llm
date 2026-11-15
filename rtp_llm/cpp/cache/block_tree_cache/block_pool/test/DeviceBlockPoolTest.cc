@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 
+#include <limits>
 #include <memory>
 #include <new>
 #include <optional>
@@ -287,7 +288,7 @@ TEST(DeviceBlockPoolTest, PublicationPinReleasesDespiteThrowingCapacityNotificat
     EXPECT_EQ(pool.refCount(block), 2u);
     pool.decRef(block);
     EXPECT_TRUE(pool.isAllocated(block));
-    EXPECT_NO_THROW(release());
+    EXPECT_NO_THROW(release.reset());
     EXPECT_EQ(notifications, 1u);
     EXPECT_FALSE(pool.isAllocated(block));
     EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
@@ -313,8 +314,82 @@ TEST(DeviceBlockPoolTest, PublicationPinCallbackAllocationFailureDoesNotAcquireR
     EXPECT_THROW(pool.pinForRemotePublication(block), std::bad_alloc);
     EXPECT_EQ(pool.refCount(block), 1u);
     EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
+    EXPECT_THROW(pool.tryPinForRemotePublication(block), std::bad_alloc);
+    EXPECT_EQ(pool.refCount(block), 1u);
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
     *fail = false;
     pool.decRef(block);
+}
+
+TEST(DeviceBlockPoolTest, TryPublicationPinChecksAllocationAndAcquiresUnderOneLock) {
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    const auto before = pool.freeBlocksNum();
+    EXPECT_FALSE(pool.tryPinForRemotePublication(NULL_BLOCK_IDX));
+    EXPECT_FALSE(pool.tryPinForRemotePublication(0));
+    EXPECT_FALSE(pool.tryPinForRemotePublication(std::numeric_limits<BlockIdxType>::max()));
+    const auto block = pool.malloc().value();
+    { // A freshly allocated page may have zero references; allocation is the contract.
+        auto token = pool.tryPinForRemotePublication(block);
+        ASSERT_TRUE(token);
+        EXPECT_EQ(pool.refCount(block), 1u);
+        EXPECT_EQ(token.get(), &pool);
+        EXPECT_EQ(token.get_deleter().block, block);
+    }
+    EXPECT_FALSE(pool.isAllocated(block));
+    EXPECT_FALSE(pool.tryPinForRemotePublication(block));
+    EXPECT_EQ(pool.freeBlocksNum(), before);
+    const auto held = pool.malloc().value();
+    pool.incRef(held);
+    auto token = pool.tryPinForRemotePublication(held);
+    ASSERT_TRUE(token);
+    EXPECT_EQ(pool.refCount(held), 2u);
+    pool.decRef(held);
+    EXPECT_TRUE(pool.isAllocated(held));
+    token.reset();
+    EXPECT_FALSE(pool.isAllocated(held));
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
+    EXPECT_EQ(pool.freeBlocksNum(), before);
+}
+
+TEST(DeviceBlockPoolTest, PublicationPinMoveAndResetReleaseExactlyOnceWithIndependentCallbackCopies) {
+    struct Observer {
+        std::shared_ptr<std::vector<int>> seen;
+        int count{0};
+        void operator()() { seen->push_back(++count); }
+    };
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    auto seen = std::make_shared<std::vector<int>>();
+    pool.setCapacityChangeCallback(Observer{seen});
+    const auto first = pool.malloc().value(), second = pool.malloc().value();
+    pool.incRef(first); pool.incRef(second);
+    auto a = pool.pinForRemotePublication(first), b = pool.pinForRemotePublication(second);
+    pool.decRef(first); pool.decRef(second);
+    EXPECT_TRUE(seen->empty());
+    auto moved = std::move(a);
+    EXPECT_FALSE(a);
+    EXPECT_TRUE(moved);
+    moved = std::move(b); // Release first, then adopt second.
+    EXPECT_FALSE(b);
+    EXPECT_FALSE(pool.isAllocated(first));
+    EXPECT_TRUE(pool.isAllocated(second));
+    moved.reset();
+    moved.reset();
+    EXPECT_FALSE(pool.isAllocated(second));
+    EXPECT_EQ(*seen, (std::vector<int>{1, 1})); // Shared mutable functor state would incorrectly yield 1,2.
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
+}
+TEST(DeviceBlockPoolTest, PublicationPinDestructionWithoutCallbackReturnsCapacity) {
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    const auto block = pool.malloc().value();
+    {
+        auto token = pool.pinForRemotePublication(block);
+        EXPECT_TRUE(pool.isAllocated(block));
+        EXPECT_EQ(pool.refCount(block), 1u);
+    }
+    EXPECT_FALSE(pool.isAllocated(block));
 }
 
 TEST(DeviceBlockPoolTest, LifecycleUsesIBlockPoolSemantics) {
@@ -495,27 +570,20 @@ TEST(DeviceBlockPoolTest, RequestReleaseCannotConsumeConnectorReference) {
     EXPECT_FALSE(pool.isAllocated(block));
 }
 
-TEST(DeviceBlockPoolTest, DonorReuseChangesOriginIncarnationButAnUnchangedReferenceDoesNot) {
+TEST(DeviceBlockPoolTest, DonorReplacementKeepsItsExclusivePhysicalAllocation) {
     DeviceBlockPool pool(makeConfig());
     ASSERT_TRUE(pool.init());
-    ASSERT_TRUE(pool.enableDecodeOriginTracking());
     const auto donor = pool.malloc().value();
     pool.incRef(donor);
-    const auto parsed = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".7680.7680.8192.8200.8201");
-    ASSERT_TRUE(parsed);
-    const auto source = std::make_shared<const DecodeCacheOrigin>(*parsed);
-    const auto first  = pool.decodeOriginIncarnation(donor);
-    ASSERT_TRUE(pool.bindDecodeOrigin(donor, first, "full", source));
+    ASSERT_TRUE(pool.isAllocated(donor));
+    ASSERT_EQ(pool.refCount(donor), 1u);
     BlockIndicesType replacements;
     int              required_free = 0;
     ASSERT_TRUE(pool.tryReplaceRequestReferences({{donor, 1, 1}}, 0, replacements, required_free));
-    EXPECT_EQ(pool.decodeOriginIncarnation(donor), first);
-    EXPECT_EQ(pool.decodeOrigin(donor, "full"), source);
     ASSERT_TRUE(pool.tryReplaceRequestReferences({{donor, 1, 0}}, 1, replacements, required_free));
     ASSERT_EQ(replacements, (BlockIndicesType{donor}));
-    EXPECT_NE(pool.decodeOriginIncarnation(donor), first);
-    EXPECT_FALSE(pool.decodeOrigin(donor, "full"));
-    EXPECT_FALSE(pool.bindDecodeOrigin(donor, first, "full", source));
+    EXPECT_TRUE(pool.isAllocated(donor));
+    EXPECT_EQ(pool.refCount(donor), 1u);
     pool.decRef(donor);
     EXPECT_EQ(pool.freeBlocksNum(), pool.totalBlocksNum());
 }
