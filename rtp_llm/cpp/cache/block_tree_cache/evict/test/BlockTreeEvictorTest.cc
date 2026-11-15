@@ -37,6 +37,7 @@
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 namespace {
