@@ -662,6 +662,13 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                 addBatchError(response, request_id, ErrorCode::INVALID_PARAMS, "EnqueueBatch does not support beam search");
                 continue;
             }
+            if (config.num_return_sequences() > 1) {
+                addBatchError(response,
+                              request_id,
+                              ErrorCode::INVALID_PARAMS,
+                              "EnqueueBatch does not support multiple return sequences");
+                continue;
+            }
             if (dp_slot.dp_rank() != local_dp_rank) {
                 addBatchError(response,
                               request_id,
@@ -716,6 +723,10 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                 item_context = makeBatchRequestContext(item, batch_span);
                 auto input = QueryConverter::transQuery(&item);
                 item_context->request_info = input->request_info;
+                if (input->generate_config->isPrefillOnly()) {
+                    reject_item(ErrorCode::INVALID_PARAMS, "EnqueueBatch does not support prefill-only inputs");
+                    continue;
+                }
                 input->request_deadline_ms =
                     engine_->getCacheManager()->prefillRequestDeadline(config->unique_key(), config->timeout_ms());
                 if (input->request_deadline_ms <= currentTimeMs()) {
@@ -933,7 +944,8 @@ void PrefillRpcServer::cancelCleanupTick() {
             ErrorInfo(ErrorCode::INVALID_PARAMS, "GetPeerInfo invalid tp_size=" + std::to_string(pc.tp_size)));
     }
     response->set_tp_size(static_cast<int32_t>(pc.tp_size));
-    response->set_cp_size(static_cast<int32_t>(pc.prefill_cp_config.kv_cache_sharded ? pc.tp_size : 1));
+    const auto& cp = pc.prefill_cp_config;
+    response->set_cp_size(static_cast<int32_t>(cp.is_enabled() && cp.kv_cache_sharded ? pc.tp_size : 1));
     RTP_LLM_LOG_INFO("GetPeerInfo: tp_size=%ld, cp_size=%d", pc.tp_size, response->cp_size());
     return grpc::Status::OK;
 }

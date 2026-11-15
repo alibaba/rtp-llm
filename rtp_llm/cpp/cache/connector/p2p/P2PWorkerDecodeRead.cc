@@ -279,16 +279,21 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
         auto                        pending_cancel = pending_cancel_keys_.find(unique_key);
         if (pending_cancel != pending_cancel_keys_.end()) {
-            const bool still_valid = currentTimeMs() <= pending_cancel->second;
-            pending_cancel_keys_.erase(pending_cancel);
-            schedulePendingCancelExpiryLocked();
-            if (still_valid) {
+            if (currentTimeMs() <= pending_cancel->second) {
                 reportReadMetrics(collector, false, read_start_time_us, task_group);
                 return ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED,
                                  "read cancelled before recv registration");
             }
+            pending_cancel_keys_.erase(pending_cancel);
+            schedulePendingCancelExpiryLocked();
         }
-        building_read_keys_.insert(unique_key);
+        // A new registration must not replace the lease of an earlier read.
+        std::lock_guard<std::mutex> lease_lock(lease_map_mutex_);
+        if (read_tasks_.count(unique_key) > 0 || lease_map_.count(unique_key) > 0
+            || !building_read_keys_.insert(unique_key).second) {
+            return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                             "read already registered for key=" + unique_key);
+        }
     }
 
     const auto prepare_start_us = currentTimeUs();
@@ -302,9 +307,6 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
         {
             std::lock_guard<std::mutex> lock(read_tasks_mutex_);
             building_read_keys_.erase(unique_key);
-            if (pending_cancel_keys_.erase(unique_key) > 0) {
-                schedulePendingCancelExpiryLocked();
-            }
             if (has_inflight_task) {
                 task_group->lease->seal();
                 std::lock_guard<std::mutex> lease_lock(lease_map_mutex_);
@@ -326,10 +328,7 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
         building_read_keys_.erase(unique_key);
         read_tasks_[unique_key] = task_group;
-        pending_cancel          = pending_cancel_keys_.erase(unique_key) > 0;
-        if (pending_cancel) {
-            schedulePendingCancelExpiryLocked();
-        }
+        pending_cancel          = pending_cancel_keys_.count(unique_key) > 0;
         // Publish the lease before registration stops being visible. A lease
         // query after CANCEL_READ acknowledgement must always observe one of them.
         std::lock_guard<std::mutex> lease_lock(lease_map_mutex_);
@@ -355,9 +354,6 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
     {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
         building_read_keys_.erase(unique_key);
-        if (pending_cancel_keys_.erase(unique_key) > 0) {
-            schedulePendingCancelExpiryLocked();
-        }
         read_tasks_.erase(unique_key);
     }
 
@@ -443,19 +439,19 @@ bool P2PWorkerDecodeRead::cancelRead(const std::string& unique_key, int64_t requ
     std::shared_ptr<ReadTaskGroup> task_group;
     {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
+        const int64_t               now_ms            = currentTimeMs();
+        const int64_t               ttl_ms            = std::max<int64_t>(1, config_.p2p_cancelled_keys_ttl_ms);
+        const int64_t               fallback_deadline = now_ms > std::numeric_limits<int64_t>::max() - ttl_ms ?
+                                                            std::numeric_limits<int64_t>::max() :
+                                                            now_ms + ttl_ms;
+        const bool                  has_finite_request_deadline =
+            request_deadline_ms > 0 && request_deadline_ms != std::numeric_limits<int64_t>::max();
+        auto& expiry = pending_cancel_keys_[unique_key];
+        expiry       = std::max(
+            expiry, has_finite_request_deadline ? std::max(request_deadline_ms, fallback_deadline) : fallback_deadline);
+        schedulePendingCancelExpiryLocked();
         auto                        it = read_tasks_.find(unique_key);
         if (it == read_tasks_.end()) {
-            const int64_t now_ms = currentTimeMs();
-            const int64_t ttl_ms = std::max<int64_t>(1, config_.p2p_cancelled_keys_ttl_ms);
-            const int64_t fallback_deadline = now_ms > std::numeric_limits<int64_t>::max() - ttl_ms ?
-                                                  std::numeric_limits<int64_t>::max() :
-                                                  now_ms + ttl_ms;
-            const bool has_finite_request_deadline =
-                request_deadline_ms > 0 && request_deadline_ms != std::numeric_limits<int64_t>::max();
-            pending_cancel_keys_[unique_key] = has_finite_request_deadline ?
-                                                   std::max(request_deadline_ms, fallback_deadline) :
-                                                   fallback_deadline;
-            schedulePendingCancelExpiryLocked();
             RTP_LLM_LOG_INFO("cancelRead: queued pending cancel, unique_key: %s, during_registration: %d",
                              unique_key.c_str(),
                              building_read_keys_.count(unique_key) > 0);

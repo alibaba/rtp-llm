@@ -64,7 +64,7 @@ private:
     std::shared_ptr<arpc::RdmaMempool> rdma_mempool_;
     mutable std::shared_mutex          mr_mutex_;
     std::vector<mr_info>               mr_info_list_;
-    uint64_t                           max_reg_mem_size_ = std::numeric_limits<uint64_t>::max();  // unlimited size
+    uint64_t                           max_reg_mem_size_ = 2ULL * 1024 * 1024 * 1024;
     uint64_t                           min_reg_mem_size_ = 1L * 1024;                             // 1KB
 };
 

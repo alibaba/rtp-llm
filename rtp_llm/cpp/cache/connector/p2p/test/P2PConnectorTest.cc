@@ -25,6 +25,7 @@
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 
 namespace rtp_llm {
@@ -208,6 +209,22 @@ TEST(P2PConnectorConfigValidationTest, RejectsInvalidTimeoutBeforeStartingBacken
     config.scheduler_config.p2p_lease_query_timeout_ms = 0;
     P2PConnector connector(config, std::make_shared<MockLayerBlockConverter>(), nullptr);
     EXPECT_FALSE(connector.init());
+}
+
+TEST(P2PConnectorRegistrationTest, RegistersLayerStorageWithPhysicalBlockAlignment) {
+    const auto config      = test::makeSimpleMhaCacheConfig(2, 8, 16, DataType::TYPE_FP16, 1, 64);
+    auto       coordinator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
+    ASSERT_TRUE(coordinator->init());
+    LayerBlockConverterImpl converter(coordinator);
+    const auto              buffers = converter.getAllBuffers();
+    ASSERT_EQ(buffers.size(), 2u);
+
+    const auto& group = config.topology().groups().front();
+    for (const auto& [buffer, alignment] : buffers) {
+        EXPECT_EQ(alignment, group.kvBlockStrideBytes());
+        EXPECT_EQ(buffer.size_bytes, alignment * group.block_num);
+        EXPECT_LT(alignment, buffer.size_bytes);
+    }
 }
 
 TEST_F(P2PConnectorTest, TransferBackendCreatesOnlyTheRequestedEndpoint) {
@@ -450,6 +467,7 @@ TEST_F(P2PConnectorTest, HandleReadRejectsMissingPlanDigestBeforeResourceWait) {
               transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
     EXPECT_NE(response.error_message().find("plan digest mismatch"), std::string::npos);
     EXPECT_FALSE(resource_wait_reached);
+    EXPECT_EQ(connector_->streamStore()->storedRequestDeadlineMs(request.unique_key()), -1);
 }
 
 TEST_F(P2PConnectorTest, HandleReadAcceptsMatchingPlanDigestBeforeResourceWait) {

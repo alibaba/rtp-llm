@@ -8,14 +8,19 @@ namespace rtp_llm {
 
 constexpr int64_t kDefaultRpcTimeoutMs = 3600 * 1000;
 
-inline int64_t normalizeRpcTimeoutMs(int64_t request_timeout_ms, int64_t max_rpc_timeout_ms) {
+inline int64_t configuredRpcTimeoutMs(int64_t request_timeout_ms, int64_t max_rpc_timeout_ms) {
     if (request_timeout_ms > 0) {
         return request_timeout_ms;
     }
     if (max_rpc_timeout_ms > 0) {
         return max_rpc_timeout_ms;
     }
-    return kDefaultRpcTimeoutMs;
+    return 0;
+}
+
+inline int64_t normalizeRpcTimeoutMs(int64_t request_timeout_ms, int64_t max_rpc_timeout_ms) {
+    const auto configured = configuredRpcTimeoutMs(request_timeout_ms, max_rpc_timeout_ms);
+    return configured > 0 ? configured : kDefaultRpcTimeoutMs;
 }
 
 inline int32_t clampRpcTimeoutMsToInt32(int64_t timeout_ms) {

@@ -16,6 +16,7 @@ namespace {
 constexpr int64_t kLeasePollInitialIntervalMs = 10;
 constexpr int64_t kLeasePollMaxIntervalMs     = 100;
 constexpr int64_t kLeasePollRpcTimeoutMs      = 500;
+constexpr int64_t kRetainedKvExitGraceMs      = 30 * 1000;
 
 const char* readOutcomeHoldReason(ErrorCode error_code) {
     switch (error_code) {
@@ -157,7 +158,6 @@ void P2PConnectorAsyncReadContext::beginLeaseHold() {
 
 bool P2PConnectorAsyncReadContext::expireTransferDeadlineIfNeeded() {
     DoneNotifier done_notifier{*this};
-    checkDone();
     if (transfer_stop_at_ms_ <= 0 || P2PNotification::nowMs() < transfer_stop_at_ms_) {
         return false;
     }
@@ -633,8 +633,10 @@ bool P2PConnectorAsyncReadContextChecker::init(const kmonitor::MetricsReporterPt
     group_block_bytes_.clear();
     total_kv_bytes_ = 0;
     for (const auto& group : config.topology->groups()) {
-        const size_t block_bytes = (group.kvBlockStrideBytes() + group.kvScaleStrideBytes())
-                                   * config.topology->layerIdsForGroup(group.tag).size();
+        const auto   physical    = config.physical_block_bytes_by_group.find(group.tag);
+        const size_t block_bytes = physical != config.physical_block_bytes_by_group.end() ?
+                                       physical->second :
+                                       config.topology->blockSizeBytesForGroup(group.tag);
         group_block_bytes_.emplace(group.tag, block_bytes);
         total_kv_bytes_ += block_bytes * group.block_num;
     }
@@ -646,6 +648,7 @@ bool P2PConnectorAsyncReadContextChecker::init(const kmonitor::MetricsReporterPt
     metrics_reporter_    = metrics_reporter;
     tp_broadcast_client_ = tp_broadcast_client;
     control_pool_        = control_pool;
+    control_capacity_               = control_pool_->getThreadNum();
     stopping_.store(false);
     async_read_check_thread_ = std::thread([this] {
         while (!stopping_.load()) {
@@ -654,13 +657,16 @@ bool P2PConnectorAsyncReadContextChecker::init(const kmonitor::MetricsReporterPt
             int64_t next = std::numeric_limits<int64_t>::max();
             {
                 std::lock_guard<std::mutex> lock(async_contexts_mutex_);
-                const bool                  allow_control = !control_busy_->load();
+                const bool                  allow_control = control_inflight_->load() < control_capacity_;
                 for (const auto& context : async_contexts_) {
                     next = std::min(next, context->nextWakeupMs(false));
-                    if (allow_control) {
+                    if (allow_control && !context->control_active_.load()) {
                         next = std::min(next, std::max(control_submit_retry_ms_, context->nextWakeupMs(true)));
                     }
                 }
+            }
+            if (retained_kv_over_threshold_since_ms_ != 0) {
+                next = std::min(next, retained_kv_over_threshold_since_ms_ + kRetainedKvExitGraceMs);
             }
             if (!stopping_.load()) {
                 notification_->waitUntil(generation, next);
@@ -740,7 +746,7 @@ void P2PConnectorAsyncReadContextChecker::checkRetainedResources(
         RTP_LLM_CHECK_WITH_INFO(groups.size() == group_block_bytes_.size(), "P2P retained KV topology mismatch");
         for (const auto& [tag, block_bytes] : group_block_bytes_) {
             for (const auto block : groups.blocks(tag)) {
-                if (!isNullBlockIdx(block)) {
+                if (!isNullBlockIdx(block) && block > 0) {
                     held_blocks[tag].insert(block);
                 }
             }
@@ -777,7 +783,20 @@ void P2PConnectorAsyncReadContextChecker::checkRetainedResources(
     // Exact strict comparison without overflowing size_t or rounding percentages.
     const size_t threshold_bytes = (total_kv_bytes_ / 100) * kv_leak_exit_threshold_percent_
                                    + (total_kv_bytes_ % 100) * kv_leak_exit_threshold_percent_ / 100;
-    if (held_bytes > threshold_bytes) {
+    if (held_bytes <= threshold_bytes) {
+        retained_kv_over_threshold_since_ms_ = 0;
+        return;
+    }
+    if (retained_kv_over_threshold_since_ms_ == 0) {
+        retained_kv_over_threshold_since_ms_ = now_ms;
+        RTP_LLM_LOG_WARNING("P2P retained KV exceeded exit threshold; allowing lease cleanup: "
+                            "held_bytes=%zu total_bytes=%zu exit_threshold_percent=%d grace_ms=%ld",
+                            held_bytes,
+                            total_kv_bytes_,
+                            kv_leak_exit_threshold_percent_,
+                            kRetainedKvExitGraceMs);
+    }
+    if (now_ms - retained_kv_over_threshold_since_ms_ >= kRetainedKvExitGraceMs) {
         RTP_LLM_LOG_ERROR("P2P retained KV exceeded exit threshold; aborting rank 0 with KV still held: "
                           "held_bytes=%zu total_bytes=%zu held_percent=%.2f exit_threshold_percent=%d",
                           held_bytes,
@@ -799,15 +818,9 @@ void P2PConnectorAsyncReadContextChecker::checkOnce() {
     std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>> controls;
     for (const auto& context : snapshot) {
         // Consuming a failed RPC completion can throw. Keep it inside the checker
-        // thread: the context stays tracked, so the transfer deadline and lease
-        // watchdog still converge instead of the process terminating.
+        // thread and still advance the transfer deadline and cancel processing.
         try {
             context->checkDone();
-            context->expireTransferDeadlineIfNeeded();
-            context->checkCancelDone();
-            if (context->needsControl()) {
-                controls.push_back(context);
-            }
         } catch (const std::exception& e) {
             RTP_LLM_LOG_ERROR(
                 "P2PConnectorAsyncReadContextChecker checkOnce: async read context threw, unique_key: %s, error: %s",
@@ -818,28 +831,50 @@ void P2PConnectorAsyncReadContextChecker::checkOnce() {
                 "P2PConnectorAsyncReadContextChecker checkOnce: async read context threw, unique_key: %s",
                 context->uniqueKey().c_str());
         }
+        try {
+            context->expireTransferDeadlineIfNeeded();
+            context->checkCancelDone();
+            if (!context->control_active_.load() && context->needsControl()) {
+                controls.push_back(context);
+            }
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("P2P checker deadline or cancel processing failed, unique_key: %s, error: %s",
+                              context->uniqueKey().c_str(),
+                              e.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("P2P checker deadline or cancel processing failed, unique_key: %s",
+                              context->uniqueKey().c_str());
+        }
     }
     checkRetainedResources(snapshot);
-    // Connection acquisition and lease queries can block. Keep them off both
-    // the CQ consumer and deadline checker, with one job on the existing pool.
-    if (!controls.empty() && control_pool_ && P2PNotification::nowMs() >= control_submit_retry_ms_
-        && !control_busy_->exchange(true)) {
-        auto                           context = controls[lease_poll_cursor_++ % controls.size()];
-        std::weak_ptr<P2PNotification> weak    = notification_;
-        const auto                     busy    = control_busy_;
-        auto                           ret     = control_pool_->pushTask(
-            [context, client = tp_broadcast_client_, busy, weak] {
-                context->runControl(client);
-                busy->store(false);
-                if (auto notification = weak.lock()) {
-                    notification->notify();
-                }
-            },
-            false);
-        if (ret != autil::ThreadPoolBase::ERROR_NONE) {
-            busy->store(false);
-            // Queue saturation is retried on a bounded timer, not a busy loop.
-            control_submit_retry_ms_ = P2PNotification::nowMs() + kLeasePollInitialIntervalMs;
+    // One job per context, bounded globally by the dedicated control pool.
+    const size_t available = control_capacity_ - control_inflight_->load();
+    if (control_pool_ && P2PNotification::nowMs() >= control_submit_retry_ms_) {
+        const size_t count = std::min(available, controls.size());
+        for (size_t i = 0; i < count; ++i) {
+            auto                           context  = controls[lease_poll_cursor_++ % controls.size()];
+            std::weak_ptr<P2PNotification> weak     = notification_;
+            const auto                     inflight = control_inflight_;
+            context->control_active_.store(true);
+            inflight->fetch_add(1);
+            const auto ret = control_pool_->pushTask(
+                [context, client = tp_broadcast_client_, inflight, weak] {
+                    context->runControl(client);
+                    context->control_active_.store(false);
+                    inflight->fetch_sub(1);
+                    if (auto notification = weak.lock()) {
+                        notification->notify();
+                    }
+                },
+                /*isBlocked=*/false,
+                /*executeWhenFail=*/false);
+            if (ret != autil::ThreadPoolBase::ERROR_NONE) {
+                context->control_active_.store(false);
+                inflight->fetch_sub(1);
+                // Queue saturation is retried on a bounded timer, not a busy loop.
+                control_submit_retry_ms_ = P2PNotification::nowMs() + kLeasePollInitialIntervalMs;
+                break;
+            }
         }
     }
 

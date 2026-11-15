@@ -422,8 +422,10 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
         }
         if (stream->hasEvent(StreamEvents::PrefillHandoffReady)) {
             if (stream->queryPdSep() && stream->resourceContext().role_type == RoleType::PREFILL) {
-                while (!context->IsCancelled() && !stream->checkTimeoutAndHasError()
-                       && stream->getStatus() != StreamState::FINISHED) {
+                while (!context->IsCancelled() && stream->getStatus() != StreamState::FINISHED) {
+                    if (stream->checkTimeoutAndHasError()) {
+                        return serializeErrorMsg(request_key, stream->statusInfo());
+                    }
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
                 if (context->IsCancelled()) {
@@ -435,9 +437,6 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
             }
             break;
         }
-    }
-    if (stream->hasError()) {
-        return serializeErrorMsg(request_key, stream->statusInfo());
     }
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
 

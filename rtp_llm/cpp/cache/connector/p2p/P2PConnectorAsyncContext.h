@@ -225,6 +225,7 @@ private:
     KickoffState         kickoff_state_{KickoffState::QUEUED};  // guarded by state_mutex_
     std::shared_ptr<P2PNotification> notification_;                         // accessed with atomic_load/store
     std::atomic<int64_t>             control_retry_ms_{0};
+    std::atomic<bool>                control_active_{false};
 };
 
 /// @brief 完成事件唤醒状态检查；定时器只处理 deadline 和控制 RPC 重试
@@ -260,14 +261,16 @@ private:
     std::atomic<bool>                                          stopping_{false};
     std::shared_ptr<P2PNotification>                           notification_{std::make_shared<P2PNotification>()};
     std::shared_ptr<autil::LockFreeThreadPool>                 control_pool_;
-    // At most one control job on the dedicated pool; kickoff cannot starve it.
-    std::shared_ptr<std::atomic<bool>> control_busy_{std::make_shared<std::atomic<bool>>(false)};
+    // Independent leases may be queried concurrently on the dedicated pool.
+    std::shared_ptr<std::atomic<size_t>> control_inflight_{std::make_shared<std::atomic<size_t>>(0)};
+    size_t                               control_capacity_{0};
     size_t                                                     lease_poll_cursor_{0};
     int64_t                                                    control_submit_retry_ms_{0};
     std::map<std::string, size_t>                              group_block_bytes_;
     size_t                                                     total_kv_bytes_{0};
     int                                                        kv_leak_exit_threshold_percent_{30};
     int64_t                                                    last_leak_log_ms_{0};
+    int64_t                                                    retained_kv_over_threshold_since_ms_{0};
 };
 
 }  // namespace rtp_llm

@@ -493,12 +493,13 @@ TEST_F(TcpTaskContextTest, Run_WithTask_CancelInTransferring_OverridesSuccess) {
 
     auto task = makeTask(1, nullptr, 0);
     ctx->setTask(task);
-    task->startTransfer();  // PENDING → TRANSFERRING
+    ASSERT_TRUE(ctx->startTransfer());
     task->cancel();         // sets cancel_requested_=true; task is NOT done yet
 
     // run(true) calls notifyDone(true) internally; the cancel flag overrides the success.
     ctx->run(true);
 
+    EXPECT_TRUE(task->done());
     EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_TASK_CANCELLED);
     EXPECT_EQ(resp.error_message(), "TransferTask cancelled during transfer");
     EXPECT_EQ(closure.run_count(), 1);
@@ -515,7 +516,7 @@ TEST_F(TcpTaskContextTest, Run_WithTask_ExpiredDeadline_OverridesSuccess) {
     block_infos[1] = std::make_shared<KeyBlockInfo>();
     auto task      = std::make_shared<TransferTask>(std::move(block_infos), currentTimeMs() - 100);
     ctx->setTask(task);
-    task->startTransfer();
+    ASSERT_TRUE(ctx->startTransfer());
 
     // run(true) calls notifyDone(true) internally; isTimeout() overrides the result.
     ctx->run(true);

@@ -156,7 +156,8 @@ bool RdmaTaskContext::startTransfer() {
         RTP_LLM_LOG_WARNING("startTransfer: task is null, unique_key: %s", unique_key_.c_str());
         return false;
     }
-    return task_->startTransfer();
+    transfer_started_ = task_->startTransfer();
+    return transfer_started_;
 }
 
 std::string RdmaTaskContext::getUniqueKey() const {
@@ -423,9 +424,9 @@ void RdmaTaskContext::run(bool               success,
 void RdmaTaskContext::notifyTransferDone(bool success, TransferErrorCode error_code, const std::string& error_message) {
     if (task_) {
         if (success && task_->acceptsBatches()) {
-            task_->notifyBatchDone(batch_keys_);
+            task_->notifyBatchDone(batch_keys_, transfer_started_);
         } else {
-            task_->notifyDone(success, success ? TransferErrorCode::OK : error_code, error_message);
+            task_->notifyDone(success, error_code, error_message, transfer_started_);
         }
     }
 }

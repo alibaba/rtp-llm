@@ -47,8 +47,7 @@ public:
                                                            std::function<bool()> is_cancelled = nullptr);
     std::optional<SideChannelData> takePrefillPayload(const std::string& unique_key);
     std::optional<SideChannelData> clearPrefillPayload(const std::string& unique_key);
-    std::optional<SideChannelData> markTerminal(const std::string& unique_key);
-    void                           eraseRequest(const std::string& unique_key);
+    std::optional<SideChannelData> eraseRequest(const std::string& unique_key);
     void                           stop();
 
     static grpc::Status fillStartLoadResponsePayload(const SideChannelData&           data,
@@ -58,7 +57,6 @@ private:
     struct Entry {
         int64_t                        deadline_ms = 0;
         bool                           consumed    = false;
-        bool                           terminal    = false;
         std::optional<SideChannelData> side_channel_data;
     };
 

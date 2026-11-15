@@ -72,7 +72,7 @@ bool P2PSchedulerDecodeRead::init(const std::string& process_id) {
 
     // The checker has at most one control job in flight. Isolate that job
     // from kickoff threads which may be stalled in channel creation or D2H.
-    control_pool_ = std::make_shared<autil::LockFreeThreadPool>(1, 16, nullptr, "P2PReadControl");
+    control_pool_ = std::make_shared<autil::LockFreeThreadPool>(4, 16, nullptr, "P2PReadControl");
     if (!control_pool_->start()) {
         RTP_LLM_LOG_ERROR("P2PSchedulerDecodeRead init failed: control pool start failed");
         control_pool_.reset();
@@ -98,7 +98,8 @@ ErrorInfo P2PSchedulerDecodeRead::checkPeerCpLayout(int prefill_tp_size, int pre
 
     // kv_cache_sharded 是部署级同配开关（OpaqueKVCacheSpec::fixedRegionCpSize 的 DECODE
     // 分支已依赖此前提），因此本端可以推出对端应有的 CP 片数。
-    const int derived = cp_cfg.kv_cache_sharded ? prefill_tp_size : 1;
+    const bool peer_sharded = cp_cfg.is_prefill_enabled() && cp_cfg.kv_cache_sharded;
+    const int  derived      = peer_sharded ? prefill_tp_size : 1;
     if (prefill_cp_size != derived) {
         return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
                          "peer CP layout drift: reported prefill_cp_size=" + std::to_string(prefill_cp_size)
@@ -106,8 +107,8 @@ ErrorInfo P2PSchedulerDecodeRead::checkPeerCpLayout(int prefill_tp_size, int pre
                              + " (kv_cache_sharded=" + std::to_string(cp_cfg.kv_cache_sharded ? 1 : 0)
                              + ", prefill_tp_size=" + std::to_string(prefill_tp_size) + ")");
     }
-    // 配置里显式写了 prefill_cp_size 时，它也必须与上报值一致。
-    if (cp_cfg.prefill_cp_size > 0 && static_cast<int>(cp_cfg.prefill_cp_size) != prefill_cp_size) {
+    // 仅在启用 KV 分片时以配置的 CP 片数校验物理布局。
+    if (peer_sharded && cp_cfg.prefill_cp_size > 0 && cp_cfg.prefill_cp_size != prefill_cp_size) {
         return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
                          "peer CP layout drift: reported prefill_cp_size=" + std::to_string(prefill_cp_size)
                              + " but local prefill_cp_config.prefill_cp_size="
@@ -132,10 +133,8 @@ P2PSchedulerDecodeRead::planFor(int prefill_tp_size, int prefill_cp_size, const 
     // （ShardLayoutFactory::peerOf），因此 GetPeerInfo / StartLoad 无需新增字段。
     const auto dst_layout = ShardLayoutFactory::fromTopology(
         *config_.topology, config_.parallelism_config, RoleType::DECODE, config_.cache_key_tokens_per_block);
-    const auto src_layout = ShardLayoutFactory::peerOf(dst_layout,
-                                                       prefill_tp_size,
-                                                       config_.parallelism_config.prefill_cp_config.kv_cache_sharded,
-                                                       RoleType::PREFILL);
+    const auto src_layout =
+        ShardLayoutFactory::peerOf(dst_layout, prefill_tp_size, prefill_cp_size > 1, RoleType::PREFILL);
     const auto tags = ShardLayoutFactory::tagsOf(*config_.topology);
 
     auto result =
@@ -453,7 +452,8 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
                     {ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "P2P kickoff failed after possible RPC dispatch"});
             }
         },
-        false);
+        /*isBlocked=*/false,
+        /*executeWhenFail=*/false);
     if (submit_result != autil::ThreadPoolBase::ERROR_NONE) {
         return report_early_failure(ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
                                               "failed to submit P2P async read kickoff task"));

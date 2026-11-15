@@ -192,7 +192,7 @@ void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, P2PConnector
     if (collector->decode_worker_recv_wait_time_us >= 0) {
         REPORT_MUTABLE_METRIC(decode_worker_recv_wait_time_us_metric, collector->decode_worker_recv_wait_time_us);
     }
-    if (collector->decode_worker_recv_task_time_us >= 0) {
+    if (decode_worker_recv_task_time_us_metric && collector->decode_worker_recv_task_time_us >= 0) {
         kmonitor::MetricsTags transfer_tags = tags ? *tags : kmonitor::MetricsTags();
         transfer_tags.AddTag("success", collector->decode_worker_success ? "true" : "false");
         decode_worker_recv_task_time_us_metric->Report(&transfer_tags, collector->decode_worker_recv_task_time_us);
@@ -331,7 +331,8 @@ void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, P2PConnector
         REPORT_MUTABLE_METRIC(prefill_worker_write_send_submit_time_us_metric,
                               collector->prefill_worker_write_send_submit_time_us);
     }
-    if (collector->prefill_worker_write_send_complete_time_us >= 0) {
+    if (prefill_worker_write_send_complete_time_us_metric
+        && collector->prefill_worker_write_send_complete_time_us >= 0) {
         kmonitor::MetricsTags transfer_tags = tags ? *tags : kmonitor::MetricsTags();
         transfer_tags.AddTag("success", collector->prefill_worker_write_success ? "true" : "false");
         prefill_worker_write_send_complete_time_us_metric->Report(

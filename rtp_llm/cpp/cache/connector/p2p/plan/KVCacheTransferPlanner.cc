@@ -46,7 +46,11 @@ size_t viewBytes(const ShardLayout::GroupLayout& group, const PartitionSpec& par
         return group.kv_block_stride_bytes / partition_count;
     }
     if (slice.mode == CpBlockSliceMode::PAYLOAD_BYTES) {
-        return group.k_block_payload_bytes / partition_count / slice_count;
+        const size_t payload = group.k_block_payload_bytes;
+        if (payload % partition_count != 0 || (payload / partition_count) % slice_count != 0) {
+            return 0;
+        }
+        return payload / partition_count / slice_count;
     }
     return group.kv_block_stride_bytes / partition_count / slice_count;
 }
@@ -135,6 +139,9 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
     if (key_span > static_cast<size_t>(std::numeric_limits<int>::max())) {
         return planError("group key span exceeds supported range for tag '" + tag + "'");
     }
+    if (sg.policy.group_type == CacheGroupType::FULL && key_span != 1) {
+        return planError("FULL P2P group must cover exactly one cache key per block for tag '" + tag + "'");
+    }
 
     if (sg.policy.active_tail_blocks != dg.policy.active_tail_blocks) {
         std::ostringstream oss;
@@ -221,7 +228,7 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
     // 注意 (a) 抓不到这条 —— 两侧还原出的全局块大小相等，缺失在键维度。
     // (c) cp_slice 的前置条件。CPSlotMapper::sliceBlockForPeer 要求 parts.size() == 1，
     // 即被切的 block 必须是单一 BlockInfo —— 这与 head 维切分（产出 K/V 两个子块）互斥。
-    // 同时 PAYLOAD_BYTES 模式以 k_block_payload_bytes 为分母，须为正且能被 cp_size 整除。
+    // PAYLOAD_BYTES 的整除检查在生成实际切片的 route 时执行。
     for (bool is_src : {true, false}) {
         const ShardLayout& side  = is_src ? src : dst;
         const auto         slice = side.effectiveSlice(tag);
@@ -234,16 +241,6 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
                 << "(head_shard_count=" << side.headShardCount(tag)
                 << "); sliceBlockForPeer requires a single block part";
             return planError(oss.str());
-        }
-        if (slice == CpBlockSliceMode::PAYLOAD_BYTES) {
-            const size_t payload = side.group(tag).k_block_payload_bytes;
-            if (payload == 0 || payload % static_cast<size_t>(side.cpSize()) != 0) {
-                std::ostringstream oss;
-                oss << "tag '" << tag << "' on " << sideName(is_src)
-                    << " side uses PAYLOAD_BYTES cp_slice but k_block_payload_bytes=" << payload
-                    << " is not a positive multiple of cp_size=" << side.cpSize();
-                return planError(oss.str());
-            }
         }
     }
 
@@ -474,17 +471,6 @@ void KVCacheTransferPlanner::assignSlices(const ShardLayout& src,
     }
 }
 
-std::vector<int>
-KVCacheTransferPlanner::ranksWithCoord(const ShardLayout& side, const std::string& tag, int cp_rank, int head_shard) {
-    std::vector<int> out;
-    for (int r = 0; r < side.rankCount(); ++r) {
-        if (side.cpRank(r) == cp_rank && side.headShard(r, tag) == head_shard) {
-            out.push_back(r);
-        }
-    }
-    return out;
-}
-
 size_t KVCacheTransferPlanner::sourceReplicaOffset(const std::string& unique_key, int source_rank_count) {
     if (source_rank_count <= 1) {
         return 0;
@@ -543,27 +529,37 @@ PlanResult KVCacheTransferPlanner::plan(const ShardLayout&              src,
         // 字节相同的副本。目的端每个 rank 都必须被喂到（各自独立内存），源端则在副本类内
         // 选举一个。选举按比例散开，与今天 decode_servers[tp_rank / local_partition_count]
         // 的行为一致。
+        using Coord = std::pair<int, int>;
+        std::map<Coord, std::vector<int>> source_ranks;
+        for (int rank = 0; rank < src.rankCount(); ++rank) {
+            source_ranks[{src.cpRank(rank), src.headShard(rank, tag)}].push_back(rank);
+        }
+        std::map<Coord, size_t> destination_counts;
+        std::vector<size_t>     destination_indices(dst.rankCount());
+        for (int rank = 0; rank < dst.rankCount(); ++rank) {
+            destination_indices[rank] = destination_counts[{dst.cpRank(rank), dst.headShard(rank, tag)}]++;
+        }
+        std::vector<std::vector<const CpPair*>> cp_by_destination(dst.cpSize());
+        for (const auto& pair : cp_pairs) {
+            cp_by_destination[pair.dst_cp].push_back(&pair);
+        }
+        std::vector<std::vector<const HeadPair*>> heads_by_destination(dst.headShardCount(tag));
+        for (const auto& pair : head_pairs) {
+            heads_by_destination[pair.dst_head].push_back(&pair);
+        }
+
         for (int dst_rank = 0; dst_rank < dst.rankCount(); ++dst_rank) {
-            const int dst_cp   = dst.cpRank(dst_rank);
-            const int dst_head = dst.headShard(dst_rank, tag);
+            const int    dst_cp         = dst.cpRank(dst_rank);
+            const int    dst_head       = dst.headShard(dst_rank, tag);
+            const size_t dst_index      = destination_indices[dst_rank];
+            const size_t dst_class_size = destination_counts.at({dst_cp, dst_head});
 
-            const std::vector<int> dst_class = ranksWithCoord(dst, tag, dst_cp, dst_head);
-            const auto             dst_it    = std::find(dst_class.begin(), dst_class.end(), dst_rank);
-            const size_t           dst_index = static_cast<size_t>(std::distance(dst_class.begin(), dst_it));
-            const size_t           dst_class_size = std::max<size_t>(1, dst_class.size());
-
-            for (const auto& cp_pair : cp_pairs) {
-                if (cp_pair.dst_cp != dst_cp) {
-                    continue;
-                }
-                for (const auto& head_pair : head_pairs) {
-                    if (head_pair.dst_head != dst_head) {
-                        continue;
-                    }
-
-                    const std::vector<int> src_class =
-                        ranksWithCoord(src, tag, cp_pair.src_cp, head_pair.src_head);
-                    if (src_class.empty()) {
+            for (const auto* cp : cp_by_destination[dst_cp]) {
+                const auto& cp_pair = *cp;
+                for (const auto* head : heads_by_destination[dst_head]) {
+                    const auto& head_pair = *head;
+                    const auto  src_coord = source_ranks.find({cp_pair.src_cp, head_pair.src_head});
+                    if (src_coord == source_ranks.end()) {
                         std::ostringstream oss;
                         oss << "tag '" << tag << "' has no src rank with coord (cp=" << cp_pair.src_cp
                             << ", head=" << head_pair.src_head << ")";
@@ -571,6 +567,7 @@ PlanResult KVCacheTransferPlanner::plan(const ShardLayout&              src,
                         result.plan.routes.clear();
                         return result;
                     }
+                    const auto& src_class = src_coord->second;
                     // 副本类内按比例选举，把出口散开而非全压在第一个 rank 上。
                     const size_t elected_index =
                         ((dst_index * src_class.size()) / dst_class_size + source_replica_offset % src_class.size())

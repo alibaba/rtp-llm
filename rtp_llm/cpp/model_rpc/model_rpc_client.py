@@ -74,15 +74,13 @@ def _selected_pd_separation(
     generate_config: GenerateConfig,
     enqueued_by_master: bool,
 ) -> Optional[bool]:
-    if selected_role == RoleType.PDFUSION:
+    if selected_role in (RoleType.PDFUSION, RoleType.PREFILL):
         return False
-    if selected_role not in (RoleType.PREFILL, RoleType.DECODE):
+    if selected_role != RoleType.DECODE:
         return None
-    if selected_role == RoleType.DECODE and enqueued_by_master:
+    if enqueued_by_master:
         return True
-    # Match the request-level PD decision at the selected backend. These are
-    # the request fields actually sent to the selected Prefill endpoint, so
-    # the result describes its real PD-vs-local branch rather than process role.
+    # Match Decode's request-level PD eligibility checks.
     return (
         generate_config.max_new_tokens > 1
         and generate_config.num_beams <= 1
@@ -1480,6 +1478,10 @@ class ModelRpcClient(object):
             if role_addr.role in (RoleType.DECODE, RoleType.PDFUSION) and role_addr.ip:
                 selected_role = role_addr.role
                 break
+        if selected_role == RoleType.PREFILL:
+            # A directly submitted request has no Decode peer to attach to a handoff.
+            # Keep any business unique_key, but prevent it from enabling a handoff.
+            input_pb.generate_config.can_use_pd_separation = False
         logging.debug(
             f"request: [{input_py.request_id}] send to address: {target_address}"
         )
@@ -1855,6 +1857,8 @@ class ModelRpcClient(object):
                 span, item_metadata = start_batch_item_span(inp.request_id, i)
                 item_spans.append(span)
                 input_pb = trans_input(inp)
+                if input_pb.multimodal_inputs:
+                    await self._wait_greennet_verdict(inp, input_pb)
                 carrier = dict(item_metadata)
                 if carrier.get("traceparent"):
                     input_pb.request_info.trace_context.traceparent = carrier[

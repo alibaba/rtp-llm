@@ -401,7 +401,10 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_CHECK(nums == total_blocks);
 
     if (total_blocks > 0) {
-        if (reuseCache() && !stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED) {
+        const bool side_channel_only = resource_context_.role_type == RoleType::DECODE && stream_->queryPdSep()
+                                       && !stream_->needsDecodeAfterPrefill();
+        if (!side_channel_only && reuseCache() && !stream_->hasErrorWithoutLock()
+            && stream_->getStatus() == StreamState::FINISHED) {
             const Tier target_tier = storeTarget();
             RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d, target_tier=%s",
                               stream_->streamId(),
@@ -806,6 +809,9 @@ bool StreamCacheResource::loadCacheDone() {
                     stream_->reportErrorWithoutLock(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
                                                      std::string("invalid P2P side-channel payload: ") + error.what());
                 }
+            }
+            if (stream_->generateInput()->request_deadline_is_handoff_only && !stream_->hasErrorWithoutLock()) {
+                stream_->p2p_handoff_completed_.store(true);
             }
             p2p_load_context_.reset();
         } else {

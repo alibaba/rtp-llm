@@ -21,6 +21,12 @@ TEST(RpcTimeoutUtilsTest, FallsBackToDefaultGrpcTimeoutWhenConfigIsNotPositive) 
     EXPECT_EQ(normalizeRpcTimeoutMs(-1, -1), kDefaultRpcTimeoutMs);
 }
 
+TEST(RpcTimeoutUtilsTest, ConfiguredTimeoutSeparatesUnboundedGenerationFromHandoffFallback) {
+    EXPECT_EQ(configuredRpcTimeoutMs(1234, 5678), 1234);
+    EXPECT_EQ(configuredRpcTimeoutMs(-1, 5678), 5678);
+    EXPECT_EQ(configuredRpcTimeoutMs(-1, 0), 0);
+}
+
 TEST(RpcTimeoutUtilsTest, ClampRpcTimeoutMsToInt32CapsLargeValues) {
     EXPECT_EQ(clampRpcTimeoutMsToInt32(1234), 1234);
     EXPECT_EQ(clampRpcTimeoutMsToInt32(static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 10),

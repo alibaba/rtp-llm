@@ -812,7 +812,7 @@ TEST_F(P2PResourceStoreDeadlineIndexTest, TerminalStateRetainedForOneHourWithout
     // The request deadline does not remove the terminal record or retain payload.
     store.checkTimeout(deadline);
     EXPECT_TRUE(store.isMarkedCancelled(key));
-    EXPECT_FALSE(store.result_store_.entries_.at(key).side_channel_data.has_value());
+    EXPECT_EQ(store.result_store_.entries_.count(key), 0u);
     EXPECT_TRUE(store.resource_map_.empty());
     store.markTerminal(key, deadline + 7200000, P2PConnectorResourceStore::TerminalReason::COMPLETED);
     EXPECT_EQ(store.nextDeadlineMsLocked(), expires_at);
@@ -927,6 +927,22 @@ TEST_F(P2PResourceStoreDeadlineIndexTest, ExpiredCallbacksDoNotRecreateCollected
     EXPECT_TRUE(store.deadline_index_.empty());
 }
 
+TEST_F(P2PResourceStoreDeadlineIndexTest, UnregisteredStartLoadCannotCreateTerminalRecords) {
+    auto& store  = *stream_store_;
+    using Reason = P2PConnectorResourceStore::TerminalReason;
+    for (auto reason : {Reason::FAILED, Reason::TIMED_OUT, Reason::CANCELLED}) {
+        store.markTerminal("unregistered", 0, reason);
+        EXPECT_TRUE(store.request_states_.empty());
+        EXPECT_TRUE(store.deadline_index_.empty());
+        EXPECT_TRUE(store.result_store_.entries_.empty());
+
+        ASSERT_GT(store.requestDeadline("registered", 5000), 0);
+        store.markTerminal("registered", 0, reason);
+        EXPECT_TRUE(store.isMarkedCancelled("registered"));
+        store.checkTimeout(store.nextDeadlineMsLocked());
+    }
+}
+
 TEST_F(P2PResourceStoreDeadlineIndexTest, TerminalBeforeRegistrationRejectsBothLateProducersForOneHour) {
     auto& store = *stream_store_;
     for (const auto original_deadline : {int64_t{0}, currentTimeMs() - 1, currentTimeMs() + 7200000}) {
@@ -966,7 +982,7 @@ TEST_F(P2PResourceStoreDeadlineIndexTest, ReadyPayloadCannotBeTakenAfterCancella
     EXPECT_FALSE(store.takePrefillPayload("ready-then-cancel", data));
     store.publishPrefillPayload("ready-then-cancel", deadline, std::move(data));
     EXPECT_FALSE(store.waitPrefillPayloadReady("ready-then-cancel", deadline));
-    EXPECT_FALSE(store.result_store_.entries_.at("ready-then-cancel").side_channel_data.has_value());
+    EXPECT_EQ(store.result_store_.entries_.count("ready-then-cancel"), 0u);
 }
 
 TEST_F(P2PResourceStoreDeadlineIndexTest, LoadDeadlineClosesResultWhileStillWaitingForResource) {
@@ -993,7 +1009,7 @@ TEST_F(P2PResourceStoreDeadlineIndexTest, LoadDeadlineClosesResultWhileStillWait
     EXPECT_FALSE(store.takePrefillPayload("pending-resource", data));
     EXPECT_FALSE(store.addResource(createMockMeta("pending-resource", 6201, deadline), createMockKVCacheResource()));
     store.publishPrefillPayload("pending-resource", deadline, std::move(data));
-    EXPECT_FALSE(store.result_store_.entries_.at("pending-resource").side_channel_data.has_value());
+    EXPECT_EQ(store.result_store_.entries_.count("pending-resource"), 0u);
     store.checkTimeout(load_deadline + 3600000);
     EXPECT_TRUE(store.result_store_.entries_.empty());
 }

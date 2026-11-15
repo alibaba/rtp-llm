@@ -2289,6 +2289,16 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenFinishesSingleTokenRequestAfter
     stream_->generateConfig()->pd_separation = true;
     auto& resource = stream_->streamCacheResource();
     stream_->generateConfig()->max_new_tokens = 1;
+    stream_->generateConfig()->reuse_cache    = true;
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_GT(resource.curBlocksNum(), 0);
+    const auto real_allocator = cache_manager_->coordinator_manager_;
+    auto       allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    EXPECT_CALL(*allocator, insertIntoCache(testing::_, testing::_)).Times(0);
+    EXPECT_CALL(*allocator, free(testing::_)).WillOnce(testing::Invoke([real_allocator](const FreeInfo& info) {
+        real_allocator->free(info);
+    }));
+    cache_manager_->coordinator_manager_      = allocator;
     stream_->generate_status_->status         = StreamState::LOADING_CACHE;
 
     auto matched_resource = std::make_shared<KVCacheResource>();
@@ -2314,6 +2324,52 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenFinishesSingleTokenRequestAfter
     EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
     EXPECT_TRUE(stream_->isFinished());
     EXPECT_EQ(stream_->seqLength(), stream_->inputLength() + 1);
+    EXPECT_EQ(resource.curBlocksNum(), 0);
+    cache_manager_->coordinator_manager_ = real_allocator;
+}
+
+TEST_F(StreamCacheResourceTest, testP2PHandoffReleasesOnlyTheBootstrapDeadline) {
+    for (bool handoff_only : {false, true}) {
+        prepareResource(/*reuse_cache=*/false, RoleType::DECODE);
+        stream_->generateConfig()->pd_separation = true;
+        auto input                               = stream_->generateInput();
+        input->request_deadline_ms               = currentTimeMs() + 30000;
+        input->request_deadline_is_handoff_only  = handoff_only;
+        stream_->generate_status_->status        = StreamState::LOADING_CACHE;
+        EXPECT_EQ(stream_->deadlineMs(), input->request_deadline_ms);
+
+        PrefillResultStore::SideChannelData data;
+        data.has_first_token = true;
+        data.first_token_id  = 7;
+        P2PConnectorStartLoadResponsePB response;
+        ASSERT_TRUE(PrefillResultStore::fillStartLoadResponsePayload(data, response).ok());
+        completeP2PSideChannel(std::move(response));
+        ASSERT_FALSE(stream_->hasError());
+        EXPECT_EQ(stream_->deadlineMs(),
+                  handoff_only ? std::numeric_limits<int64_t>::max() : input->request_deadline_ms);
+    }
+}
+
+TEST_F(StreamCacheResourceTest, testP2PHandoffAtSequenceLimitPublishesEmptyTerminalOutput) {
+    prepareResource(/*reuse_cache=*/false, RoleType::DECODE);
+    stream_->generateConfig()->pd_separation  = true;
+    stream_->generateConfig()->max_new_tokens = 2;
+    stream_->max_seq_len_                     = stream_->inputLength();
+    stream_->generate_status_->status         = StreamState::LOADING_CACHE;
+
+    PrefillResultStore::SideChannelData data;
+    data.has_first_token = true;
+    data.first_token_id  = 7;
+    P2PConnectorStartLoadResponsePB response;
+    ASSERT_TRUE(PrefillResultStore::fillStartLoadResponsePayload(data, response).ok());
+    completeP2PSideChannel(std::move(response));
+    EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+    ASSERT_FALSE(stream_->hasError());
+    auto output = stream_->nextOutput();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().generate_outputs.size(), 1u);
+    EXPECT_EQ(output.value().generate_outputs.front().output_ids.numel(), 0);
+    EXPECT_TRUE(output.value().generate_outputs.front().finished);
 }
 
 TEST_F(StreamCacheResourceTest, testP2PFirstTokenAllowsAbsentPromptScoresForEmptySlice) {

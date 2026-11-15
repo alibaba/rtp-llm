@@ -203,10 +203,10 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         transfer_deadline_ms = std::min(transfer_deadline_ms, request_deadline_ms);
     }
     if (cancelled || request_deadline_ms <= 0 || currentTimeMs() >= transfer_deadline_ms) {
-        stream_store_->markTerminal(unique_key, 0,
-                                    cancelled ? P2PConnectorResourceStore::TerminalReason::CANCELLED
-                                              : P2PConnectorResourceStore::TerminalReason::TIMED_OUT);
-        stream_store_->clearPrefillPayload(unique_key);
+        stream_store_->markTerminal(unique_key,
+                                    request_deadline_ms,
+                                    cancelled ? P2PConnectorResourceStore::TerminalReason::CANCELLED :
+                                                P2PConnectorResourceStore::TerminalReason::TIMED_OUT);
         response.set_error_code(transErrorCodeToRPC(cancelled ? ErrorCode::CANCELLED : ErrorCode::GENERATE_TIMEOUT));
         response.set_error_message(cancelled ? "request registration wait cancelled" :
                                                "request registration or load deadline expired");

@@ -76,7 +76,7 @@ public:
 
     private:
         FirstError first_error_;
-        void updateStreamFromResponse();
+        void       parseSideChannelPayload(P2PSideChannelPayload& side_channel_payload);
 
     public:
         bool                                                                              success_ = false;

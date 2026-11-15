@@ -71,9 +71,8 @@ TEST_F(PrefillResultStoreTest, WaitBeforePublish) {
     EXPECT_TRUE(waiter.get());
 }
 
-TEST_F(PrefillResultStoreTest, TerminalBeforePublishRejectsLateResultAndDeadlineUpdate) {
-    store_.markTerminal("request");
-    store_.updateDeadline("request", deadline_ + 5000);
+TEST_F(PrefillResultStoreTest, ErasedRequestRejectsLateResult) {
+    store_.eraseRequest("request");
     store_.publishPrefillPayload("request", data());
     EXPECT_FALSE(store_.waitPrefillPayloadReady("request", deadline_));
     EXPECT_FALSE(store_.takePrefillPayload("request").has_value());
@@ -93,7 +92,7 @@ TEST_F(PrefillResultStoreTest, TerminalDropsPayloadOutsideStoreLock) {
         },
         torch::TensorOptions().dtype(torch::kFloat32));
     store_.publishPrefillPayload("request", std::move(result));
-    auto retired = store_.markTerminal("request");
+    auto retired = store_.eraseRequest("request");
     EXPECT_FALSE(destroyed);
     retired.reset();
     EXPECT_TRUE(destroyed);
@@ -112,7 +111,7 @@ TEST_F(PrefillResultStoreTest, TerminalWakesWaiter) {
         });
     });
     ASSERT_EQ(entered.get_future().wait_for(std::chrono::seconds(1)), std::future_status::ready);
-    store_.markTerminal("request");
+    store_.eraseRequest("request");
     ASSERT_EQ(waiter.wait_for(std::chrono::seconds(1)), std::future_status::ready);
     EXPECT_FALSE(waiter.get());
 }

@@ -232,6 +232,12 @@ void P2PConnectorResourceStore::markTerminal(const std::string& unique_key,
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
         auto it = request_states_.find(unique_key);
         if (it == request_states_.end()) {
+            // StartLoad may fail, time out or be cancelled before any matching
+            // GenerateStream arrives. An unregistered caller has no deadline
+            // assigned by Prefill and must not allocate a terminal record.
+            if (reason != TerminalReason::COMPLETED && !validDeadline(request_deadline_ms)) {
+                return;
+            }
             // StartLoad may end before GenerateStream registers its deadline.
             it = request_states_.emplace(unique_key, RequestState{request_deadline_ms}).first;
         }
@@ -239,7 +245,8 @@ void P2PConnectorResourceStore::markTerminal(const std::string& unique_key,
             it->second.terminal = true;
             it->second.terminal_expire_at_ms = currentTimeMs() + kTombstoneRetentionMs;
         }
-        retired = result_store_.markTerminal(unique_key);
+        // request_states_ owns the replay fence; retire the payload row now.
+        retired             = result_store_.eraseRequest(unique_key);
         request_deadline_ms = it->second.request_deadline_ms;
         auto resource = resource_map_.find(unique_key);
         if (resource != resource_map_.end()) {
@@ -319,7 +326,7 @@ void P2PConnectorResourceStore::checkTimeout(int64_t now_ms) {
             if (!state.terminal) {
                 state.terminal = true;
                 state.terminal_expire_at_ms = now_ms + kTombstoneRetentionMs;
-                if (auto data = result_store_.markTerminal(it->first)) {
+                if (auto data = result_store_.eraseRequest(it->first)) {
                     retired.push_back(std::move(*data));
                 }
                 auto resource = resource_map_.find(it->first);
@@ -330,7 +337,6 @@ void P2PConnectorResourceStore::checkTimeout(int64_t now_ms) {
                 }
             }
             if (now_ms >= state.terminal_expire_at_ms) {
-                result_store_.eraseRequest(it->first);
                 request_states_.erase(it);
             } else {
                 // Resources still expire at the original phase deadline. Only

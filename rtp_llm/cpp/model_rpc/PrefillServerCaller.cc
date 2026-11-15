@@ -1,5 +1,4 @@
 #include "rtp_llm/cpp/model_rpc/PrefillServerCaller.h"
-#include "rtp_llm/cpp/model_rpc/RpcTimeoutUtils.h"
 #include "rtp_llm/cpp/utils/GrpcAddressUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
@@ -269,9 +268,14 @@ grpc::Status PrefillServerCaller::callPrefillToAddr(grpc::ServerContext*        
 
     // 创建客户端上下文
     grpc::ClientContext client_context;
-    const auto          rpc_timeout_ms = normalizeRpcTimeoutMs(request->generate_config().timeout_ms(), 0);
-    const auto          deadline       = std::chrono::system_clock::now() + std::chrono::milliseconds(rpc_timeout_ms);
-    client_context.set_deadline(deadline);
+    const auto          rpc_timeout_ms = request->generate_config().timeout_ms();
+    auto deadline = server_context ? server_context->deadline() : std::chrono::system_clock::time_point::max();
+    if (rpc_timeout_ms > 0) {
+        deadline = std::min(deadline, std::chrono::system_clock::now() + std::chrono::milliseconds(rpc_timeout_ms));
+    }
+    if (deadline != std::chrono::system_clock::time_point::max()) {
+        client_context.set_deadline(deadline);
+    }
     SyncPrefillRpcCancelGuard cancel_guard(is_cancelled, &client_context, deadline);
 
     // 调用 PrefillServer 的 GenerateStreamCall
@@ -396,8 +400,12 @@ grpc::Status PrefillServerCaller::forwardBatchGenerate(const BatchGenerateInputP
     if (!connection.ok())
         return grpcStatusFromErrorInfo({ErrorCode::GET_CONNECTION_FAILED, connection.status().ToString()});
     grpc::ClientContext context;
-    const auto          deadline = std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline_ms));
-    context.set_deadline(deadline);
+    const auto          deadline = deadline_ms > 0 ?
+                                       std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline_ms)) :
+                                       std::chrono::system_clock::time_point::max();
+    if (deadline_ms > 0) {
+        context.set_deadline(deadline);
+    }
     SyncPrefillRpcCancelGuard cancel_guard(is_cancelled, &context, deadline);
     return connection->stub->BatchGenerateCall(&context, request, response);
 }

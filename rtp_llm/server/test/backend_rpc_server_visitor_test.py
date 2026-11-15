@@ -105,6 +105,7 @@ class _FakeRouteTokenIds:
 class _FakeRouteInput:
     request_id = 456
     token_ids = _FakeRouteTokenIds()
+    mm_inputs = ()
     # The visitor routes v41 vision inputs through the master schedule path;
     # non-vision requests carry no v41 payload.
     v41_inputs = None
@@ -1261,6 +1262,26 @@ class MixedFrontendBatchTest(unittest.IsolatedAsyncioTestCase):
         for item in inputs:
             self.assertEqual(item.generate_config.role_addrs, [fusion])
 
+    async def test_fusion_batch_resolves_vit_for_multimodal_items(self):
+        fusion = RoleAddr(
+            role=RoleType.PDFUSION, ip="fusion", http_port=9000, grpc_port=9001
+        )
+        vit = RoleAddr(role=RoleType.VIT, ip="vit", http_port=8000, grpc_port=8001)
+        for role in (RoleType.PDFUSION, RoleType.FRONTEND):
+            with self.subTest(role=role):
+                visitor = self.make_visitor()
+                visitor.pd_sep_config.role_type = role
+                visitor.backend_role_list.append(RoleType.VIT)
+                visitor.host_service.get_backend_role_addrs.side_effect = (
+                    lambda roles: [vit] if roles == [RoleType.VIT] else [fusion]
+                )
+                text, vision = _FakeRouteInput(), _FakeRouteInput()
+                vision.mm_inputs = [object()]
+                await visitor.batch_enqueue([text, vision])
+                self.assertNotIn(vit, text.generate_config.role_addrs)
+                self.assertIn(vit, vision.generate_config.role_addrs)
+                visitor.route_ips.assert_not_awaited()
+
     async def test_missing_batch_targets_fail_before_rpc(self):
         visitor = self.make_visitor()
         visitor.host_service.get_backend_role_addrs.return_value = []
@@ -1294,6 +1315,49 @@ class MixedFrontendBatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item.generate_config.role_addrs, pair)
         self.assertTrue(item.enqueued_by_master)
         visitor.host_service.get_backend_role_addrs.assert_not_called()
+
+    async def test_pd_frontend_batch_resolves_vit_for_prefill_fallback(self):
+        visitor = self.make_visitor()
+        visitor.backend_role_list.append(RoleType.VIT)
+        prefill = RoleAddr(role=RoleType.PREFILL, ip="prefill", http_port=1, grpc_port=2)
+        decode = RoleAddr(role=RoleType.DECODE, ip="decode", http_port=3, grpc_port=4)
+        vit = RoleAddr(role=RoleType.VIT, ip="vit", http_port=5, grpc_port=6)
+        visitor.host_service.get_backend_role_addrs.side_effect = [
+            [],
+            [prefill, decode],
+            [vit],
+        ]
+        item = _FakeRouteInput()
+        item.mm_inputs = [object()]
+        await visitor.batch_enqueue([item])
+        self.assertEqual(item.generate_config.role_addrs, [prefill, decode, vit])
+        visitor.model_rpc_client.batch_enqueue.assert_awaited_once_with([item])
+
+    async def test_prefill_entry_batches_each_pd_pair_and_preserves_response_order(self):
+        visitor = self.make_visitor()
+        visitor.pd_sep_config.role_type = RoleType.PREFILL
+        visitor.host_service.service_available = True
+        decode = RoleAddr(role=RoleType.DECODE, ip="decode", http_port=1, grpc_port=2)
+        prefill_a = RoleAddr(role=RoleType.PREFILL, ip="a", http_port=3, grpc_port=4)
+        prefill_b = RoleAddr(role=RoleType.PREFILL, ip="b", http_port=3, grpc_port=4)
+        inputs = [_FakeRouteInput() for _ in range(3)]
+        for index, item in enumerate(inputs):
+            item.request_id = index
+
+        async def route(item):
+            prefill = prefill_b if item.request_id == 1 else prefill_a
+            item.generate_config.role_addrs = [decode, prefill]
+            item.enqueued_by_master = True
+
+        visitor.route_ips.side_effect = route
+        visitor.model_rpc_client.batch_enqueue.side_effect = lambda batch: [
+            item.request_id for item in batch
+        ]
+
+        self.assertEqual(await visitor.batch_enqueue(inputs), [0, 1, 2])
+        visitor.model_rpc_client.batch_enqueue.assert_any_await([inputs[0], inputs[2]])
+        visitor.model_rpc_client.batch_enqueue.assert_any_await([inputs[1]])
+        self.assertEqual(visitor.model_rpc_client.batch_enqueue.await_count, 2)
 
 
 if __name__ == "__main__":

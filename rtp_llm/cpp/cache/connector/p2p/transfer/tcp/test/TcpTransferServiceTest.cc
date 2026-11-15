@@ -204,7 +204,7 @@ protected:
         while (std::chrono::steady_clock::now() < deadline) {
             {
                 std::shared_lock<std::shared_mutex> lock(task->mutex_);
-                if (task->transferring_ && !task->done_) {
+                if (task->in_flight_ > 0 && !task->done_) {
                     return true;
                 }
             }
@@ -524,8 +524,7 @@ TEST_F(TcpTransferServiceTest, E3_BufferMismatch_SubBlockOutOfRange) {
 // ===========================================================================
 
 // G3: Two concurrent transfer RPCs for the same unique_key both match the
-//     same task; startTransfer() has no exclusive lock, so both proceed.
-//     Both closures must fire and the task must end up in a consistent state.
+//     same task. Both closures must fire, and completion must cover both copies.
 TEST_F(TcpTransferServiceTest, G3_ConcurrentTransfers_SameKey_BothComplete) {
     if (!device_initialized_) {
         GTEST_SKIP() << "No GPU device";

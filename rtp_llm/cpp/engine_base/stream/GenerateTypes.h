@@ -117,6 +117,7 @@ public:
     // tagging only — never used for engine-side scheduling decisions.
     int32_t priority = 0;
     int64_t request_deadline_ms = 0;  // Local P2P deadline.
+    bool    request_deadline_is_handoff_only = false;
 
     // Selected position in input_ids; -1 means no custom output.
     int custom_output_token_position = -1;

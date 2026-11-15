@@ -79,9 +79,6 @@ private:
                              const CpPair&      cp_pair,
                              SliceSpec&         src_slice,
                              SliceSpec&         dst_slice);
-
-    static std::vector<int>
-    ranksWithCoord(const ShardLayout& side, const std::string& tag, int cp_rank, int head_shard);
 };
 
 }  // namespace rtp_llm

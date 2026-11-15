@@ -116,10 +116,6 @@ void ChatService::generateResponse(const std::shared_ptr<GenerateConfig>&       
         ctx->render_stream_response_blocking(outputs, config, chat_request.stream.value_or(false));
         index += 1;
     }
-    if (stream->hasError()) {
-        auto error_info = stream->statusInfo();
-        throw HttpApiServerException(transErrorCodeToHttpExceptionType(error_info.code()), error_info.ToString());
-    }
     if (index != 0) {
         ctx->render_stream_response_flush_blocking(outputs, config, chat_request.stream.value_or(false));
         index += 1;
@@ -181,7 +177,7 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
             const auto exception = streamErrorToHttpException(status);
             metric_reporter_->reportErrorQpsMetric(chat_request.source.value_or("unknown"), exception.getType());
             AccessLogWrapper::logExceptionAccess(body, request_id, exception.what());
-            write_sse_response(formatException(exception));
+            write_sse_response(index > 0 ? createStreamErrorJson(status.ToString()) : formatException(exception));
             writer->WriteDone();
             return;
         }
@@ -203,21 +199,6 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
         std::string json_response =
             ctx->render_stream_response(output_status.value(), config, chat_request.stream.value_or(false));
         write_sse_response(json_response);
-    }
-    if (stream->hasError()) {
-        auto error_info = stream->statusInfo();
-        if (index > 0) {
-            std::string error_json = createStreamErrorJson(error_info.ToString());
-            write_sse_response(error_json);
-            writer->WriteDone();
-            if (metric_reporter_) {
-                metric_reporter_->reportErrorQpsMetric(chat_request.source.value_or("unknown"),
-                                                      transErrorCodeToHttpExceptionType(error_info.code()));
-            }
-            AccessLogWrapper::logExceptionAccess(body, request_id, error_info.ToString());
-            return;
-        }
-        throw HttpApiServerException(transErrorCodeToHttpExceptionType(error_info.code()), error_info.ToString());
     }
     if (index != 0) {
         std::string json_response =

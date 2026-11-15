@@ -40,17 +40,18 @@ public:
     const KeyBlockInfoMap& getBlockInfos() const {
         return block_infos_;
     }
-    void
-    notifyDone(bool success, TransferErrorCode error_code = TransferErrorCode::OK, const std::string& error_msg = "");
-    void notifyBatchDone(const std::vector<int64_t>& keys);
+    void    notifyDone(bool               success,
+                       TransferErrorCode  error_code = TransferErrorCode::OK,
+                       const std::string& error_msg  = "",
+                       bool               started    = true);
+    void    notifyBatchDone(const std::vector<int64_t>& keys, bool started = true);
     bool acceptsBatches() const { return static_cast<bool>(on_batch_copied_); }
     int64_t deadlineMs() const { return deadline_ms_; }
 
     /// Record the first logical failure while outstanding DMA still owns the buffers.
     void recordError(TransferErrorCode error_code, const std::string& error_message);
 
-    /// @brief 原子地将任务从 PENDING 迁移到 TRANSFERRING 状态。
-    /// @return false 表示任务已在 PENDING 阶段被 cancel，调用方应立即报告失败。
+    /// Acquire one physical receive slot. Call completion once for each acquired slot.
     bool startTransfer();
 
     /// @brief 强制终止任务，无论当前状态如何（仅供 P2P connector worker 超时安全网使用）。
@@ -62,6 +63,11 @@ public:
     }
 
 private:
+    void completeTransfer(TransferErrorCode           error_code,
+                          const std::string&          error_msg,
+                          const std::vector<int64_t>* batch_keys,
+                          bool                        started);
+
     KeyBlockInfoMap block_infos_;
     BatchCopiedCallback on_batch_copied_;
     int64_t         deadline_ms_;
@@ -70,7 +76,8 @@ private:
 
     mutable std::shared_mutex mutex_;
     bool                      done_             = false;
-    bool                      transferring_     = false;
+    size_t                    in_flight_            = 0;
+    bool                      completion_requested_ = false;
     bool                      cancel_requested_ = false;
     mutable TransferErrorCode error_code_       = TransferErrorCode::OK;
     mutable std::string       error_msg_;

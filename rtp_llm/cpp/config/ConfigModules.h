@@ -398,7 +398,7 @@ struct CacheStoreConfig {
     int64_t p2p_transfer_not_done_resource_hold_ms =
         10 * 1000;  // D 后等待 RDMA 物理完成的时间；到期后 close 相关 connection
     int64_t p2p_lease_query_timeout_ms = 20 * 1000;  // 单轮 lease 查询的超时上限，内部最多等待 500ms
-    int     p2p_kv_leak_exit_threshold_percent = 30;  // 滞留目标 KV 字节占总 KV 容量超过该百分比则退出
+    int     p2p_kv_leak_exit_threshold_percent = 30;         // 滞留目标 KV 字节占总 KV 容量持续 30 秒超过该百分比则退出
 
     int64_t p2p_cancel_broadcast_timeout_ms              = 1000;
     // TTL for cancelled_keys_ tombstones; should cover the longest expected

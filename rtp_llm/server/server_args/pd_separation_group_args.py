@@ -36,6 +36,6 @@ def init_pd_separation_group_args(parser, pd_separation_config):
         type=int,
         default=2 * 3600 * 1000,  # 2h
         help="RPC 调用最大超时（毫秒），用作 per-request 未传 timeout 时的默认值；"
-        "<=0 表示不设 deadline（链路不超时）；"
+        "<=0 表示不设置默认生成期限；PD 交接阶段仍有独立的资源清理期限；"
         "per-request generate_config.timeout_ms 优先级更高",
     )

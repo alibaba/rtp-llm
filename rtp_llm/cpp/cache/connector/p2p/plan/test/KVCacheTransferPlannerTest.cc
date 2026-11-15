@@ -288,9 +288,6 @@ TEST(PlannerGroupA, A5_Np1pRegressionSrcSendsWholeBlock) {
         EXPECT_EQ(r->src_partition, (PartitionSpec{1, 0}))
             << "src must send the whole local block; a second split on the source side is the §2.3 defect";
         EXPECT_EQ(r->dst_partition, (PartitionSpec{2, s % 2}));
-
-        // 反向断言：若源端也切分，两侧字节数会差一倍
-        EXPECT_NE(r->src_partition, (PartitionSpec{2, s % 2}));
     }
     expectAllRouteBytesMatch(result.plan);
 }
@@ -315,9 +312,6 @@ TEST(PlannerGroupA, A6_MlaNp1dElectsOneSenderPerDst) {
     for (int idle : {1, 3, 5, 7}) {
         EXPECT_TRUE(result.plan.forPrefillRank(idle).empty()) << "src_rank " << idle << " should not be elected";
     }
-    // 反向断言：全局只选一个发送方会让除第一个以外的 decode rank 拿不到数据
-    EXPECT_NE(rankPairs(result.plan, kFullTag), (std::set<std::pair<int, int>>{{0, 0}}));
-
     expectNoHeadPartitioning(result.plan);
     expectAllRouteBytesMatch(result.plan);
 }
@@ -397,8 +391,6 @@ TEST(PlannerGroupA, A8_HybridRrAndCompactCoexist) {
         EXPECT_TRUE(r->src_keys.include_final_key) << "COMPACT group must carry the final-key exception";
     }
 
-    // 反向断言：不选举会产生 cp_size 平方条冗余 route
-    EXPECT_NE(result.plan.forTag(kSwaTag).size(), 16u);
     expectAllRouteBytesMatch(result.plan);
 }
 
@@ -446,12 +438,13 @@ TEST(PlannerGroupA, A9_CpByteSlicing) {
 
     // PAYLOAD_BYTES 模式的分母是 k_block_payload_bytes，不是 stride。这里刻意让
     // payload < stride（模拟 blockStrideBytes 的对齐上取整），以区分两种 slice 模式的分母。
-    dst.groups[kFixedTag].k_block_payload_bytes = dst.group(kFixedTag).kv_block_stride_bytes - 4096;
+    dst.groups[kFixedTag].k_block_payload_bytes = dst.group(kFixedTag).kv_block_stride_bytes - 4100;
     src.groups[kFixedTag].k_block_payload_bytes = dst.group(kFixedTag).k_block_payload_bytes / 4;
     // src 已预切片，其本地块尺寸对齐到 payload 分片
     src.groups[kFixedTag].kv_block_stride_bytes = src.group(kFixedTag).k_block_payload_bytes;
 
     EXPECT_EQ(src.group(kFixedTag).kv_block_stride_bytes * 4, dst.group(kFixedTag).k_block_payload_bytes);
+    EXPECT_NE(src.group(kFixedTag).k_block_payload_bytes % 4, 0u);
     // dst 带对齐填充：stride > payload。PAYLOAD_BYTES 模式下守恒量是 payload 而非 stride。
     EXPECT_GT(dst.group(kFixedTag).kv_block_stride_bytes, dst.group(kFixedTag).k_block_payload_bytes);
 
@@ -1067,6 +1060,65 @@ TEST(PlannerGroupD, FactoryMirrorsCpStatePayloadFromRealSpecs) {
             }
         }
     }
+}
+
+TEST(PlannerGroupD, FactoryMirrorsReplicatedMhaHeadShards) {
+    AttentionConfigs attention{};
+    attention.kv_head_num   = 4;
+    attention.size_per_head = 128;
+    auto make_mha_layout    = [&attention](int tp_size, RoleType role) {
+        auto pc      = makePc(tp_size, CPRotateMethod::DISABLED, false);
+        pc.role_type = role;
+        KVCacheSpecDesc desc;
+        desc.tag        = kFullTag;
+        desc.cache_type = KVCacheSpecType::MultiHeadAttention;
+        desc.dtype      = DataType::TYPE_FP16;
+        SpecBuildContext ctx;
+        ctx.seq_size_per_block = kSeqSizePerBlock;
+        ctx.parallelism_config = &pc;
+        ctx.attn_config        = &attention;
+        GroupBase group;
+        group.tag       = desc.tag;
+        group.spec      = MHAKVCacheSpec::build(desc, ctx);
+        group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        group.block_num = 8;
+        auto topology   = CacheTopology::create({group}, {{0, {kFullTag}}});
+        return ShardLayoutFactory::fromTopology(*topology, pc, role, kSeqSizePerBlock);
+    };
+
+    auto prefill = make_mha_layout(8, RoleType::PREFILL);
+    auto decode  = make_mha_layout(2, RoleType::DECODE);
+    ASSERT_EQ(prefill.headShardCount(kFullTag), 4);
+    EXPECT_EQ(prefill.headShard(0, kFullTag), 0);
+    EXPECT_EQ(prefill.headShard(1, kFullTag), 0);
+    EXPECT_EQ(prefill.headShard(2, kFullTag), 1);
+    EXPECT_EQ(prefill.headShard(7, kFullTag), 3);
+    ASSERT_EQ(decode.headShardCount(kFullTag), 2);
+    const auto inferred_prefill = ShardLayoutFactory::peerOf(decode, 8, false, RoleType::PREFILL);
+    const auto inferred_decode  = ShardLayoutFactory::peerOf(prefill, 2, false, RoleType::DECODE);
+    EXPECT_EQ(inferred_prefill.group(kFullTag).kv_block_stride_bytes, prefill.group(kFullTag).kv_block_stride_bytes);
+    EXPECT_EQ(inferred_decode.group(kFullTag).kv_block_stride_bytes, decode.group(kFullTag).kv_block_stride_bytes);
+
+    const auto on_decode  = KVCacheTransferPlanner::plan(inferred_prefill, decode, {kFullTag});
+    const auto on_prefill = KVCacheTransferPlanner::plan(prefill, inferred_decode, {kFullTag});
+    ASSERT_TRUE(on_decode.ok()) << on_decode.error.ToString();
+    ASSERT_TRUE(on_prefill.ok()) << on_prefill.error.ToString();
+    EXPECT_EQ(on_decode.plan.digest(), on_prefill.plan.digest());
+    ASSERT_EQ(on_decode.plan.routes.size(), 4u);
+    expectAllRouteBytesMatch(on_decode.plan);
+    for (const auto& route : on_decode.plan.routes) {
+        EXPECT_EQ(prefill.headShard(route.src_rank, kFullTag) / 2, decode.headShard(route.dst_rank, kFullTag));
+    }
+}
+
+TEST(PlannerGroupD, RejectsFullGroupsCoveringMultipleCacheKeys) {
+    auto src                                   = mlaLayout(2, CPRotateMethod::ALL_GATHER, true);
+    auto dst                                   = mlaLayout(1);
+    src.groups.at(kFullTag).seq_size_per_block = 2 * kSeqSizePerBlock;
+    dst.groups.at(kFullTag).seq_size_per_block = 2 * kSeqSizePerBlock;
+    const auto result                          = KVCacheTransferPlanner::plan(src, dst, {kFullTag});
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(result.error.ToString().find("exactly one cache key per block"), std::string::npos);
 }
 
 // 用例 D4: 两端独立求值结果一致（「跨端协议零改动」的正确性根据）

@@ -4498,6 +4498,7 @@ class PdTraceDecisionTest(unittest.TestCase):
     def test_decode_matches_pd_support_and_master_admission(self):
         config = GenerateConfig(max_new_tokens=8)
         self.assertTrue(_selected_pd_separation(RoleType.DECODE, config, False))
+        self.assertFalse(_selected_pd_separation(RoleType.PREFILL, config, False))
         config.can_use_pd_separation = False
         self.assertFalse(_selected_pd_separation(RoleType.DECODE, config, False))
         self.assertTrue(_selected_pd_separation(RoleType.DECODE, config, True))

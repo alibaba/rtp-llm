@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import com.google.protobuf.ByteString;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -59,6 +60,41 @@ import static org.mockito.Mockito.when;
  * Checks request scheduling priority, capacity waiting and progress across blocked placements.
  */
 class RequestSchedulerTest {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void requestsThatNeedLocalPrefillUseRouteDeliveryInBatchMode(boolean beamSearch) {
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
+        ConfigService service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        DefaultRouter router = mockRouter();
+        RequestRegistry lifecycle = mock(RequestRegistry.class);
+        BalanceContext context = RequestLifecycleTestSupport.context(config, 919L);
+        context.setGenerateInputPb(ByteString.copyFromUtf8("serialized request"));
+        context.getRequest().setMaxNewTokens(beamSearch ? 8 : 0);
+        context.getRequest().setNumBeams(beamSearch ? 2 : 1);
+        var future = new CompletableFuture<Response>();
+        when(lifecycle.register(context)).thenReturn(future);
+        when(router.select(context))
+                .thenReturn(PlacementResult.blocked(new PlacementKey(RoleType.PREFILL, null)));
+        var scheduler =
+                new RequestScheduler(
+                        service,
+                        router,
+                        mock(EndpointRegistry.class),
+                        mock(BatchSchedulerReporter.class),
+                        mock(EvictionManager.class),
+                        lifecycle,
+                        new PlacementAvailability());
+        try {
+            assertSame(future, scheduler.submit(context));
+            verify(router).select(context);
+            verify(router, never()).select(any(), any());
+            assertEquals(0, scheduler.getQueuedRequestCount());
+        } finally {
+            scheduler.closePlacement();
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void vitOnlyDoesNotRegisterOrQueueAndSameIdCanLaterSchedulePd(boolean queue) {

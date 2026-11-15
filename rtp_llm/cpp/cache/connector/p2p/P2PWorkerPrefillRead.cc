@@ -347,7 +347,7 @@ int P2PWorkerPrefillRead::dispatchPendingLayerTransfers(
 
         bool dispatched = false;
         for (const auto& buffer_key : expected_buffer_keys) {
-            if (!transfer_result->all_success.load() || cancel_flag->load()) {
+            if (!transfer_result->all_success.load() || cancel_flag->load() || currentTimeMs() >= return_deadline_ms) {
                 break;
             }
             {
@@ -365,6 +365,23 @@ int P2PWorkerPrefillRead::dispatchPendingLayerTransfers(
             }
             const auto count = sendLayerToPartitions(
                 buffer, worker_plan, unique_key, return_deadline_ms, cancel_flag, transfer_result);
+            const auto expected_count = worker_plan.routeCountForTag(buffer->cacheTag());
+            if (count != expected_count) {
+                std::lock_guard<std::mutex> lock(transfer_result->result_mutex);
+                if (transfer_result->all_success.exchange(false)) {
+                    if (cancel_flag->load()) {
+                        transfer_result->error_code = ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED;
+                    } else if (currentTimeMs() >= return_deadline_ms) {
+                        transfer_result->error_code = ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT;
+                    } else {
+                        transfer_result->error_code = ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED;
+                    }
+                    transfer_result->error_msg =
+                        "sendKVCache: incomplete buffer dispatch, unique_key=" + unique_key + " buffer=" + buffer_key
+                        + " chunk_id=" + std::to_string(buffer->chunkId()) + " sent=" + std::to_string(count)
+                        + " expected=" + std::to_string(expected_count);
+                }
+            }
             if (count > 0) {
                 const auto ready_us = currentTimeUs();
                 if (transfer_result->first_buffer_ready_us < 0) {
@@ -479,8 +496,15 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
             return count;
         }
 
-        if (transfer_result->dispatch_failed.load() || (cancel_flag && cancel_flag->load(std::memory_order_relaxed))
-            || currentTimeMs() >= transfer_deadline_ms) {
+        if (transfer_result->dispatch_failed.load() || (cancel_flag && cancel_flag->load(std::memory_order_relaxed))) {
+            return count;
+        }
+        if (currentTimeMs() >= transfer_deadline_ms) {
+            mark_dispatch_failure(ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT,
+                                  "sendKVCache: layer dispatch deadline exceeded, unique_key=" + unique_key
+                                      + " buffer=" + buffer_key + " chunk_id=" + std::to_string(chunk_id)
+                                      + " sent=" + std::to_string(count) + " expected="
+                                      + std::to_string(worker_plan.routeCountForTag(layer_cache_buffer->cacheTag())));
             return count;
         }
 

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <map>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -32,9 +33,9 @@ struct ShardLayout {
         /// 见 OpaqueKVCacheSpec::isPrefillCpSliced。
         bool pre_sliced = false;
 
-        /// head 分片数是 **spec 类型的属性**，不是这一侧的属性：只有会除
-        /// get_attn_tp_size() 的 spec 才被 head 切分。由 deriveHeadShardCounts() 填充。
-        int head_shard_count = 1;
+        // MHA may replicate KV heads across adjacent attention ranks.
+        uint32_t global_kv_heads  = 0;
+        int      head_shard_count = 1;
     };
 
     ParallelismConfig            pc;
@@ -45,8 +46,10 @@ struct ShardLayout {
 
     int cpSize() const {
         // Decode's flag describes its Prefill peer; local Decode pages are not CP-sharded.
-        return pc.role_type != RoleType::DECODE && pc.prefill_cp_config.kv_cache_sharded ?
-                   static_cast<int>(pc.tp_size) : 1;
+        return pc.role_type != RoleType::DECODE && pc.prefill_cp_config.is_enabled()
+                       && pc.prefill_cp_config.kv_cache_sharded ?
+                   static_cast<int>(pc.tp_size) :
+                   1;
     }
 
     // Compact state pages retain Prefill's token geometry on Decode, without
@@ -78,7 +81,15 @@ struct ShardLayout {
 
     int headShard(int rank, const std::string& tag) const {
         const int n = headShardCount(tag);
-        return n > 1 ? rank % n : 0;
+        if (n <= 1) {
+            return 0;
+        }
+        if (group(tag).global_kv_heads == 0) {
+            return rank % n;
+        }
+        const int attn_tp = static_cast<int>(pc.get_attn_tp_size());
+        // Weight loading puts replicas of a KV shard on consecutive ranks.
+        return (rank % attn_tp) / (attn_tp / n);
     }
 
     bool hasGroup(const std::string& tag) const {
@@ -120,8 +131,6 @@ struct ShardLayout {
 
     // ---- 构造辅助 ----
 
-    /// 只有会除 get_attn_tp_size() 的 spec 才按 attention TP 切 head。
-    /// MHAKVCacheSpec / LinearKVCacheSpec: 会除；MLAKVCacheSpec / Opaque: 不会。
     static bool specShardsHeads(KVCacheSpecType spec_type) {
         return spec_type == KVCacheSpecType::MultiHeadAttention || spec_type == KVCacheSpecType::LinearAttention;
     }
@@ -132,6 +141,9 @@ struct ShardLayout {
         for (auto& [tag, g] : groups) {
             (void)tag;
             g.head_shard_count = specShardsHeads(g.spec_type) ? attn_tp : 1;
+            if (g.spec_type == KVCacheSpecType::MultiHeadAttention && g.global_kv_heads > 0) {
+                g.head_shard_count = std::gcd(g.global_kv_heads, attn_tp);
+            }
         }
     }
 

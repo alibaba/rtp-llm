@@ -34,6 +34,7 @@ cc_library(
     deps = [
         ":transfer_plan",
         "//rtp_llm/cpp/cache:cache_config",
+        "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
     ],
 )

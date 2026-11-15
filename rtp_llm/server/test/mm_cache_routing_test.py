@@ -341,9 +341,23 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.request.mm_token_expansion, expansion)
         self.visitor.master_client.get_vit_cache_metadata.assert_not_awaited()
 
-    async def test_domain_pd_incomplete_hashes_fail_before_decode(self):
+    async def test_domain_pd_uses_prefill_fallback_if_hash_rpc_is_unavailable(self):
         decode = self.prefill.model_copy(update={"role": RoleType.DECODE})
         self.request.generate_config.role_addrs = [self.vit, self.prefill, decode]
+        self.visitor.master_client.get_vit_cache_metadata.return_value = None
+        await self.visitor._expand_pd_multimodal_tokens(self.request)
+        wire = trans_input(self.request)
+        self.assertFalse(wire.generate_config.can_use_pd_separation)
+        self.assertFalse(wire.HasField("multimodal_token_layout"))
+        self.assertEqual(list(wire.token_ids), [1, 99, 2])
+        self.assertEqual(
+            self.request.generate_config.role_addrs, [self.vit, self.prefill, decode]
+        )
+
+    async def test_admitted_pd_cannot_fallback_when_hash_rpc_is_unavailable(self):
+        decode = self.prefill.model_copy(update={"role": RoleType.DECODE})
+        self.request.generate_config.role_addrs = [self.vit, self.prefill, decode]
+        self.request.enqueued_by_master = True
         self.visitor.master_client.get_vit_cache_metadata.return_value = None
         with self.assertRaisesRegex(FtRuntimeException, "complete routing hashes"):
             await self.visitor._expand_pd_multimodal_tokens(self.request)
@@ -407,7 +421,13 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         client.get_backend_role_addrs = AsyncMock(
             side_effect=[
                 FlexlbResponse(role_addrs=[vit], result={"server_status": [status]}),
-                FlexlbResponse.ok([self.prefill, vit]),
+                FlexlbResponse.ok(
+                    [
+                        self.prefill,
+                        vit,
+                        self.prefill.model_copy(update={"role": RoleType.DECODE}),
+                    ]
+                ),
             ]
         )
         self.visitor.master_client = client
@@ -423,6 +443,8 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 list(route_calls[1].kwargs["input_pb"].token_ids), [1, 99, 2]
             )
             self.assertIsNone(self.request.mm_token_expansion)
+            await self.visitor._expand_pd_multimodal_tokens(self.request)
+            self.assertFalse(self.request.generate_config.can_use_pd_separation)
 
             wire = MultimodalInputsPB(request_id=self.request.request_id)
             wire.multimodal_inputs.add().CopyFrom(

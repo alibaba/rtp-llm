@@ -300,6 +300,7 @@ TEST_F(ChatServiceTest, ChatCompletions) {
     EXPECT_CALL(*mock_stream, nextOutput(_))
         .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))))
         .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::FINISHED, "finished")));
+    EXPECT_CALL(*mock_stream, hasError()).WillOnce(Return(false));
 
     EXPECT_CALL(*mock_metric_reporter_, reportResponseFirstTokenLatencyMs).WillOnce(Invoke([](double val) {
         EXPECT_TRUE(val >= 0);
@@ -462,7 +463,6 @@ TEST_F(ChatServiceTest, ChatCompletions_StreamErrorJsonEscaped) {
     EXPECT_CALL(*mock_render_, render_chat_request).WillOnce(Return(rendered_inputs));
 
     auto mock_stream = CreateMockGenerateStream();
-    mock_stream->reportError(ErrorCode::UNKNOWN_ERROR, "bad \"quote\"\nline");
     auto stream = std::dynamic_pointer_cast<GenerateStream>(mock_stream);
     EXPECT_CALL(*mock_engine_, enqueue(Matcher<const std::shared_ptr<GenerateInput>&>(_))).WillOnce(Return(stream));
 
@@ -481,10 +481,10 @@ TEST_F(ChatServiceTest, ChatCompletions_StreamErrorJsonEscaped) {
     GenerateOutputs outputs;
     outputs.generate_outputs.push_back(output);
 
-    EXPECT_CALL(*mock_stream, hasError()).WillOnce(Return(false)).WillOnce(Return(true));
+    EXPECT_CALL(*mock_stream, hasError()).WillOnce(Return(false));
     EXPECT_CALL(*mock_stream, nextOutput(_))
         .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))))
-        .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::FINISHED, "finished")));
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::UNKNOWN_ERROR, "bad \"quote\"\nline")));
 
     std::vector<std::string> writes;
     EXPECT_CALL(*mock_writer_, Write).WillRepeatedly(Invoke([&writes](const std::string& data) {

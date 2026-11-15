@@ -307,9 +307,9 @@ void DecodeLoadHelper::Result::cancel() {
     }
 }
 
-void DecodeLoadHelper::Result::updateStreamFromResponse() {
+void DecodeLoadHelper::Result::parseSideChannelPayload(P2PSideChannelPayload& side_channel_payload) {
     if (response.has_payload()) {
-        const auto& payload = response.payload();
+        auto& payload                      = *response.mutable_payload();
         side_channel_payload.has_rng_state = payload.has_rng_state();
         side_channel_payload.rng_offset = payload.rng_offset();
         side_channel_payload.has_first_token =
@@ -325,9 +325,11 @@ void DecodeLoadHelper::Result::updateStreamFromResponse() {
         side_channel_payload.multimodal_lengths =
             std::map<int, int>(payload.multimodal_lengths().begin(), payload.multimodal_lengths().end());
         side_channel_payload.has_data         = true;
-        if (payload.has_prompt_logits())
-            side_channel_payload.prompt_logits = payload.prompt_logits();
+        if (payload.has_prompt_logits()) {
+            side_channel_payload.prompt_logits.emplace().Swap(payload.mutable_prompt_logits());
+        }
 
+        auto& tensors = *payload.mutable_tensors();
         for (const char* name : {"first_token_logits",
                                  "first_token_hidden_states",
                                  "first_token_all_hidden_states",
@@ -335,9 +337,9 @@ void DecodeLoadHelper::Result::updateStreamFromResponse() {
                                  "first_token_softmax_probs",
                                  "first_token_cum_log_probs",
                                  "first_token_all_probs"}) {
-            const auto it = payload.tensors().find(name);
-            if (it != payload.tensors().end() && it->second.has_tensor()) {
-                side_channel_payload.first_token_tensors[name].CopyFrom(it->second.tensor());
+            const auto it = tensors.find(name);
+            if (it != tensors.end() && it->second.has_tensor()) {
+                side_channel_payload.first_token_tensors[name].Swap(it->second.mutable_tensor());
             }
         }
 
@@ -352,14 +354,14 @@ void DecodeLoadHelper::Result::updateStreamFromResponse() {
             }
         }
 
-        auto it_probs = payload.tensors().find("propose_probs");
-        if (it_probs != payload.tensors().end() && it_probs->second.has_tensor()) {
-            side_channel_payload.propose_probs.CopyFrom(it_probs->second.tensor());
+        auto it_probs = tensors.find("propose_probs");
+        if (it_probs != tensors.end() && it_probs->second.has_tensor()) {
+            side_channel_payload.propose_probs.Swap(it_probs->second.mutable_tensor());
         }
 
-        auto it_hidden = payload.tensors().find("propose_hidden");
-        if (it_hidden != payload.tensors().end() && it_hidden->second.has_tensor()) {
-            side_channel_payload.propose_hidden.CopyFrom(it_hidden->second.tensor());
+        auto it_hidden = tensors.find("propose_hidden");
+        if (it_hidden != tensors.end() && it_hidden->second.has_tensor()) {
+            side_channel_payload.propose_hidden.Swap(it_hidden->second.mutable_tensor());
         }
 
         auto it_pos = payload.tensors().find("position_ids");
@@ -379,6 +381,24 @@ void DecodeLoadHelper::Result::updateStreamFromResponse() {
 }
 
 void DecodeLoadHelper::Result::complete(bool ok) {
+    if (done()) {
+        return;
+    }
+    P2PSideChannelPayload parsed_payload;
+    ErrorInfo             parse_error;
+    if (ok && status.ok() && response.error_code() == ErrorCodePB::NONE_ERROR) {
+        // Finish owns the response. Parse before locking so cancellation and
+        // deadline observation can proceed while the payload is unpacked.
+        try {
+            parseSideChannelPayload(parsed_payload);
+        } catch (const std::exception& error) {
+            parse_error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                                    std::string("StartLoad response processing failed: ") + error.what());
+        } catch (...) {
+            parse_error =
+                ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "Unknown exception while processing StartLoad response");
+        }
+    }
     std::function<void()> callback;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -403,23 +423,18 @@ void DecodeLoadHelper::Result::complete(bool ok) {
                 + server_addr + " request_id=" + std::to_string(request_id) + " key=" + unique_key
                 + " wire_code=" + std::to_string(static_cast<int>(response.error_code())) + "]";
         } else {
-            try {
-                updateStreamFromResponse();
-            } catch (const std::exception& error) {
-                error_code = ErrorCode::EXECUTION_EXCEPTION;
-                error_message = std::string("StartLoad response processing failed: ") + error.what();
-            } catch (...) {
-                error_code = ErrorCode::EXECUTION_EXCEPTION;
-                error_message = "Unknown exception while processing StartLoad response";
-            }
-            if (error_code != ErrorCode::EXECUTION_EXCEPTION && !side_channel_payload.has_first_token) {
+            if (parse_error.hasError()) {
+                error_code    = parse_error.code();
+                error_message = parse_error.ToString();
+            } else if (!parsed_payload.has_first_token) {
                 error_message =
                     "StartLoad response is missing the required first token [location=DecodeLoadHelper::complete "
                     "observer_role=DECODE peer="
                     + server_addr + " request_id=" + std::to_string(request_id) + " key=" + unique_key + "]";
-            } else if (error_code != ErrorCode::EXECUTION_EXCEPTION) {
-                success_   = true;
-                error_code = ErrorCode::NONE_ERROR;
+            } else {
+                side_channel_payload = std::move(parsed_payload);
+                success_             = true;
+                error_code           = ErrorCode::NONE_ERROR;
             }
         }
         first_error_.record(ErrorInfo(error_code, error_message));

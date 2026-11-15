@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/CacheTopology.h"
+#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayout.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 
@@ -38,6 +39,9 @@ public:
             if (group.spec) {
                 g.spec_type             = group.spec->type;
                 g.k_block_payload_bytes = group.spec->k_block_payload_bytes();
+            }
+            if (auto mha_spec = std::dynamic_pointer_cast<const MHAKVCacheSpec>(group.spec)) {
+                g.global_kv_heads = mha_spec->globalKvHeads();
             }
             layout.groups[group.tag] = g;
         }

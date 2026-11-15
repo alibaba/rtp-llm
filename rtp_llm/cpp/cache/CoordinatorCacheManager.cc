@@ -1084,7 +1084,7 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
     selected_resource->initGroups(config_.topologyPtr());
 
-    if (is_connector && cp_slot_mapper_ && cp_slot_mapper_->isSharded() && cache_keys == resource_keys) {
+    if (is_connector && cache_keys == resource_keys) {
         // P2P projects the complete logical keys onto each rank's physical table later.
         // Keep each group's local layout intact, including sparse and reserved slots.
         for (size_t group_id = 0; group_id < groups.size(); ++group_id) {

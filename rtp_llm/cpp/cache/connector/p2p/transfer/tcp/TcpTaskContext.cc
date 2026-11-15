@@ -42,7 +42,8 @@ bool TcpTaskContext::startTransfer() {
         RTP_LLM_LOG_WARNING("startTransfer: task is null, unique_key: %s", unique_key_.c_str());
         return false;
     }
-    return task_->startTransfer();
+    transfer_started_ = task_->startTransfer();
+    return transfer_started_;
 }
 
 const std::string& TcpTaskContext::getUniqueKey() const {
@@ -218,9 +219,9 @@ void TcpTaskContext::run(bool success, TransferErrorCode error_code, const std::
 
     if (task_) {
         if (success && task_->acceptsBatches()) {
-            task_->notifyBatchDone(batch_keys_);
+            task_->notifyBatchDone(batch_keys_, transfer_started_);
         } else {
-            task_->notifyDone(success, success ? TransferErrorCode::OK : error_code, error_message);
+            task_->notifyDone(success, error_code, error_message, transfer_started_);
         }
         // notifyDone() may override the result (e.g. cancel_requested_ was set during transfer).
         // Read back the authoritative result so sender and receiver see the same outcome.

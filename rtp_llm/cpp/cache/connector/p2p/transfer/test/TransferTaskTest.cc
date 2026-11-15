@@ -478,6 +478,26 @@ TEST_F(TransferTaskTest, FirstFailureSurvivesCancelForceCancelAndLaterCompletion
     EXPECT_EQ(task.errorMessage(), "connection reset peer=worker:9000");
 }
 
+TEST_F(TransferTaskTest, CancellingOverlappingBatchesWaitsForLastPhysicalReceive) {
+    TransferTask task({}, currentTimeMs() + 5000, [](const auto&) { return false; });
+    ASSERT_TRUE(task.startTransfer());
+    ASSERT_TRUE(task.startTransfer());
+    int completed = 0;
+    task.setDoneCallback([&] { ++completed; });
+
+    task.notifyBatchDone({1});
+    task.cancel();
+    EXPECT_FALSE(task.startTransfer());
+    task.notifyDone(false, TransferErrorCode::CANCELLED, "rejected receive", /*started=*/false);
+    EXPECT_FALSE(task.done());
+    EXPECT_EQ(completed, 0);
+
+    task.notifyBatchDone({2});
+    EXPECT_TRUE(task.done());
+    EXPECT_EQ(completed, 1);
+    EXPECT_EQ(task.errorCode(), TransferErrorCode::CANCELLED);
+}
+
 TEST_F(TransferTaskTest, ObservedTimeoutRemainsFirstWhilePhysicalTransferFinishes) {
     TransferTask task({}, currentTimeMs() - 1);
     ASSERT_TRUE(task.startTransfer());

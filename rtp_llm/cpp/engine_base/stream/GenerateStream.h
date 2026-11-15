@@ -885,6 +885,9 @@ public:
 
     int64_t deadlineMs() const {
         if (generate_input_->request_deadline_ms > 0) {
+            if (generate_input_->request_deadline_is_handoff_only && p2p_handoff_completed_.load()) {
+                return std::numeric_limits<int64_t>::max();
+            }
             return generate_input_->request_deadline_ms;
         }
         const int timeout_ms = generate_input_->generate_config->timeout_ms;
@@ -965,6 +968,7 @@ protected:
     std::shared_ptr<GenerateStateMachine> generate_status_;
     std::atomic<bool>                     pp_inflight_{false};
     std::vector<StreamState>              sub_generate_status_;
+    std::atomic<bool>                     p2p_handoff_completed_{false};
     int                                   max_seq_len_;
     int64_t                               vocab_size_;
     size_t                                output_vocab_size_;

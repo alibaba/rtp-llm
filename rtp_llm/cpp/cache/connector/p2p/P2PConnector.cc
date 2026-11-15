@@ -24,6 +24,10 @@ bool P2PConnector::init() {
         RTP_LLM_LOG_ERROR("init failed: load_cache_timeout_ms must be in (0, INT32_MAX]");
         return false;
     }
+    if (scheduler.p2p_cancel_broadcast_timeout_ms <= 0) {
+        RTP_LLM_LOG_ERROR("init failed: p2p_cancel_broadcast_timeout_ms must be positive");
+        return false;
+    }
     if (config_.role_type == RoleType::DECODE && scheduler.p2p_lease_query_timeout_ms <= 0) {
         RTP_LLM_LOG_ERROR("init failed: p2p_lease_query_timeout_ms must be positive on Decode");
         return false;

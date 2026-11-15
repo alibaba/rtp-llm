@@ -22,8 +22,7 @@ std::optional<PrefillResultStore::SideChannelData>
 PrefillResultStore::publishPrefillPayload(const std::string& unique_key, SideChannelData&& data) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto                        it = entries_.find(unique_key);
-    if (stopping_ || it == entries_.end() || it->second.terminal || it->second.consumed
-        || currentTimeMs() >= it->second.deadline_ms) {
+    if (stopping_ || it == entries_.end() || it->second.consumed || currentTimeMs() >= it->second.deadline_ms) {
         return std::nullopt;
     }
     std::optional<SideChannelData> retired;
@@ -55,8 +54,7 @@ bool PrefillResultStore::waitPrefillPayloadReady(const std::string&    unique_ke
             lock.lock();
         }
         auto it = entries_.find(unique_key);
-        if (stopping_ || cancelled || it == entries_.end() || it->second.terminal
-            || it->second.consumed) {
+        if (stopping_ || cancelled || it == entries_.end() || it->second.consumed) {
             return false;
         }
         const auto effective_deadline_ms = std::min(deadline_ms, it->second.deadline_ms);
@@ -78,8 +76,8 @@ std::optional<PrefillResultStore::SideChannelData>
 PrefillResultStore::takePrefillPayload(const std::string& unique_key) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto                        it = entries_.find(unique_key);
-    if (stopping_ || it == entries_.end() || it->second.terminal || it->second.consumed
-        || currentTimeMs() >= it->second.deadline_ms || !it->second.side_channel_data) {
+    if (stopping_ || it == entries_.end() || it->second.consumed || currentTimeMs() >= it->second.deadline_ms
+        || !it->second.side_channel_data) {
         return std::nullopt;
     }
     std::optional<SideChannelData> consumed;
@@ -100,20 +98,17 @@ PrefillResultStore::clearPrefillPayload(const std::string& unique_key) {
     return retired;
 }
 
-std::optional<PrefillResultStore::SideChannelData> PrefillResultStore::markTerminal(const std::string& unique_key) {
+std::optional<PrefillResultStore::SideChannelData> PrefillResultStore::eraseRequest(const std::string& unique_key) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto&                       entry = entries_[unique_key];
-    entry.terminal                    = true;
+    const auto                  it = entries_.find(unique_key);
+    if (it == entries_.end()) {
+        return std::nullopt;
+    }
     std::optional<SideChannelData> retired;
-    retired.swap(entry.side_channel_data);
+    retired.swap(it->second.side_channel_data);
+    entries_.erase(it);
     cv_.notify_all();
     return retired;
-}
-
-void PrefillResultStore::eraseRequest(const std::string& unique_key) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    entries_.erase(unique_key);
-    cv_.notify_all();
 }
 
 void PrefillResultStore::stop() {

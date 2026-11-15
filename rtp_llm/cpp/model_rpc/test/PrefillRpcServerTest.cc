@@ -29,14 +29,17 @@ TEST(PrefillRpcServerTest, GetPeerInfoReturnsOnlySelectedPeerLayoutWithoutWorker
     pc.dp_size          = 3;
     pc.dp_rank          = 2;
     // No worker address list is needed to report the selected endpoint's layout.
-    for (bool sharded : {false, true}) {
-        pc.prefill_cp_config.kv_cache_sharded = sharded;
-        grpc::ServerContext   context;
-        GetPeerInfoRequestPB  request;
-        GetPeerInfoResponsePB response;
-        ASSERT_TRUE(server.GetPeerInfo(&context, &request, &response).ok());
-        EXPECT_EQ(response.tp_size(), 4);
-        EXPECT_EQ(response.cp_size(), sharded ? 4 : 1);
+    for (auto method : {CPRotateMethod::DISABLED, CPRotateMethod::ALL_GATHER}) {
+        pc.prefill_cp_config.method = method;
+        for (bool sharded : {false, true}) {
+            pc.prefill_cp_config.kv_cache_sharded = sharded;
+            grpc::ServerContext   context;
+            GetPeerInfoRequestPB  request;
+            GetPeerInfoResponsePB response;
+            ASSERT_TRUE(server.GetPeerInfo(&context, &request, &response).ok());
+            EXPECT_EQ(response.tp_size(), 4);
+            EXPECT_EQ(response.cp_size(), method == CPRotateMethod::ALL_GATHER && sharded ? 4 : 1);
+        }
     }
 }
 
@@ -117,7 +120,7 @@ TEST(PrefillRpcServerTest, BatchDuplicateIdsRejectEveryItemWithoutChangingExisti
     EXPECT_EQ(server.onflight_requests_.load(), 0u);
 }
 
-TEST(PrefillRpcServerTest, BatchRejectsFixedAndVariableBeamBeforeAdmission) {
+TEST(PrefillRpcServerTest, BatchRejectsBeamAndMultipleReturnSequencesBeforeAdmission) {
     PrefillRpcServer server;
     EnqueueBatchRequestPB request;
     auto* slot = request.add_dp_slots();
@@ -128,17 +131,23 @@ TEST(PrefillRpcServerTest, BatchRejectsFixedAndVariableBeamBeforeAdmission) {
     auto* variable_beam = slot->add_requests()->mutable_input();
     variable_beam->set_request_id(2);
     variable_beam->mutable_generate_config()->add_variable_num_beams(2);
+    auto* multiple_sequences = slot->add_requests()->mutable_input();
+    multiple_sequences->set_request_id(3);
+    multiple_sequences->mutable_generate_config()->set_num_return_sequences(2);
 
     grpc::ServerContext context;
     EnqueueBatchResponsePB response;
     ASSERT_TRUE(server.EnqueueBatch(&context, &request, &response).ok());
     EXPECT_EQ(response.successes_size(), 0);
-    ASSERT_EQ(response.errors_size(), 2);
+    ASSERT_EQ(response.errors_size(), 3);
     for (int i = 0; i < response.errors_size(); ++i) {
         EXPECT_EQ(response.errors(i).request_id(), slot->requests(i).input().request_id());
         EXPECT_EQ(response.errors(i).error_info().error_code(), static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
-        EXPECT_EQ(response.errors(i).error_info().error_message(), "EnqueueBatch does not support beam search");
     }
+    EXPECT_EQ(response.errors(0).error_info().error_message(), "EnqueueBatch does not support beam search");
+    EXPECT_EQ(response.errors(1).error_info().error_message(), "EnqueueBatch does not support beam search");
+    EXPECT_EQ(response.errors(2).error_info().error_message(),
+              "EnqueueBatch does not support multiple return sequences");
     EXPECT_TRUE(server.batch_entries_.empty());
 }
 

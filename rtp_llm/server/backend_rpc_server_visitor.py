@@ -648,6 +648,10 @@ class BackendRPCServerVisitor:
             not self._mm_cache_routing
             or not input.mm_inputs
             or input.mm_token_expansion is not None
+            or (
+                not input.generate_config.can_use_pd_separation
+                and not input.enqueued_by_master
+            )
             or not any(
                 a.role == RoleType.DECODE for a in input.generate_config.role_addrs
             )
@@ -665,6 +669,11 @@ class BackendRPCServerVisitor:
         metadata = await self.master_client.get_vit_cache_metadata(
             vit_addrs[0], keys, input=input
         )
+        if metadata is None and not input.enqueued_by_master:
+            # Decode forwards non-PD requests to Prefill, which can compute the
+            # embeddings and expand the original tokens using the regular RPC.
+            input.generate_config.can_use_pd_separation = False
+            return
         spans = []
         try:
             token_ids, full_length = multimodal_routing_tokens(
@@ -1150,8 +1159,85 @@ class BackendRPCServerVisitor:
         ):
             for input in inputs:
                 await self.route_ips(input)
+            return await self._enqueue_routed_batches(inputs)
+
+        if RoleType.VIT in self.backend_role_list:
+            inputs_needing_vit = [
+                input
+                for input in inputs
+                if (
+                    input.mm_inputs
+                    or getattr(getattr(input, "v41_inputs", None), "images", None)
+                )
+                and not any(
+                    addr.ip and addr.role == RoleType.VIT
+                    for addr in input.generate_config.role_addrs
+                )
+            ]
+            if inputs_needing_vit:
+                vit_addrs = self.host_service.get_backend_role_addrs([RoleType.VIT])
+                if not vit_addrs:
+                    raise FtRuntimeException(
+                        ExceptionType.ROUTE_ERROR, "Could not resolve batch ViT address"
+                    )
+                for input in inputs_needing_vit:
+                    input.generate_config.role_addrs = [
+                        addr
+                        for addr in input.generate_config.role_addrs
+                        if addr.role != RoleType.VIT
+                    ] + vit_addrs
 
         return await self.model_rpc_client.batch_enqueue(inputs)
+
+    async def _enqueue_routed_batches(
+        self, inputs: list[GenerateInput]
+    ) -> list[GenerateOutputs]:
+        # Keep each item's route, including any Prefill already selected by Master.
+        # A Decode batch RPC can only attach to one Prefill endpoint.
+        groups = {}
+        for index, input in enumerate(inputs):
+            addresses = input.generate_config.role_addrs
+            target = next(
+                (
+                    (addr.role, addr.ip, addr.grpc_port)
+                    for addr in addresses
+                    if addr.ip and addr.role in (RoleType.DECODE, RoleType.PDFUSION)
+                ),
+                None,
+            )
+            prefill = next(
+                (
+                    (addr.ip, addr.grpc_port)
+                    for addr in addresses
+                    if addr.role == RoleType.PREFILL
+                ),
+                None,
+            )
+            key = (target, prefill, input.enqueued_by_master)
+            groups.setdefault(key, []).append((index, input))
+        if len(groups) == 1:
+            return await self.model_rpc_client.batch_enqueue(inputs)
+
+        tasks = [
+            asyncio.create_task(
+                self.model_rpc_client.batch_enqueue([input for _, input in group])
+            )
+            for group in groups.values()
+        ]
+        try:
+            results = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        indexed_outputs = [
+            (index, output)
+            for group, outputs in zip(groups.values(), results)
+            for (index, _), output in zip(group, outputs)
+        ]
+        indexed_outputs.sort(key=lambda item: item[0])
+        return [output for _, output in indexed_outputs]
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
         roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(

@@ -30,15 +30,25 @@ std::shared_ptr<const PlanResult> P2PSchedulerPrefillRead::planFor(int          
     // 与 decode 侧同一个 planner 函数、镜像的参数。decode 的 cp_size 由部署级同配开关推导。
     const auto src_layout = ShardLayoutFactory::fromTopology(
         *config_.topology, config_.parallelism_config, RoleType::PREFILL, config_.cache_key_tokens_per_block);
-    const auto dst_layout = ShardLayoutFactory::peerOf(src_layout,
-                                                      decode_tp_size,
-                                                      config_.parallelism_config.prefill_cp_config.kv_cache_sharded,
-                                                      RoleType::DECODE);
+    const auto dst_layout =
+        ShardLayoutFactory::peerOf(src_layout, decode_tp_size, src_layout.cpSize() > 1, RoleType::DECODE);
     const auto tags   = ShardLayoutFactory::tagsOf(*config_.topology);
     auto       result =
         std::make_shared<const PlanResult>(KVCacheTransferPlanner::plan(src_layout, dst_layout, tags, offset));
 
+    if (!result->ok()) {
+        return result;
+    }
     std::lock_guard<std::mutex> lock(plan_cache_mutex_);
+    const auto                  cached = plan_cache_.find(key);
+    if (cached != plan_cache_.end()) {
+        return cached->second;
+    }
+    // Bound the cache by the number of local replica offsets. StartLoad's
+    // peer TP can vary across requests.
+    if (plan_cache_.size() >= std::max<size_t>(1, config_.parallelism_config.tp_size)) {
+        plan_cache_.erase(plan_cache_.begin());
+    }
     auto [it, inserted] = plan_cache_.emplace(key, result);
     (void)inserted;
     return it->second;
@@ -169,8 +179,15 @@ P2PSchedulerPrefillRead::sendKVCache(const std::string&                         
     params.routes      = std::move(rank_routes);
     params.plan_digest = plan_digest;
 
-    const auto broadcast_start_us       = currentTimeUs();
-    auto result = tp_broadcast_client_->broadcast(std::move(params));
+    const auto                                  broadcast_start_us = currentTimeUs();
+    std::shared_ptr<P2PBroadcastClient::Result> result;
+    try {
+        result = tp_broadcast_client_->broadcast(std::move(params));
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_WARNING("sendKVCache: broadcast threw, unique_key=%s, error=%s", unique_key.c_str(), error.what());
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("sendKVCache: broadcast threw, unique_key=%s", unique_key.c_str());
+    }
     collector->prefill_scheduler_broadcast_submit_time_us = currentTimeUs() - broadcast_start_us;
     if (!result) {
         std::string error_msg = "sendKVCache: broadcast failed, request_id: " + std::to_string(request_id);
@@ -248,17 +265,28 @@ P2PSchedulerPrefillRead::waitForBroadcastCompletion(const std::shared_ptr<P2PBro
     std::shared_ptr<P2PBroadcastClient::Result> cancel_result = nullptr;
     int                                         sleep_ms      = 1;
     constexpr int                               kBackoffCapMs = 8;
+    const auto                                  cancel_workers = [&] {
+        try {
+            return tp_broadcast_client_->cancel(unique_key,
+                                                P2PConnectorBroadcastType::CANCEL_HANDLE_READ,
+                                                request_deadline_ms,
+                                                request_id,
+                                                deadline_ms);
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_WARNING(
+                "sendKVCache: cancel broadcast threw, unique_key=%s, error=%s", unique_key.c_str(), error.what());
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("sendKVCache: cancel broadcast threw, unique_key=%s", unique_key.c_str());
+        }
+        return std::shared_ptr<P2PBroadcastClient::Result>{};
+    };
     while (!result->done()) {
         result->checkDone();
         if (!cancel_result && is_cancelled && is_cancelled()) {
             RTP_LLM_LOG_WARNING("sendKVCache: request cancelled by client, request_id: %ld, unique_key: %s",
                                 request_id,
                                 unique_key.c_str());
-            cancel_result = tp_broadcast_client_->cancel(unique_key,
-                                                         P2PConnectorBroadcastType::CANCEL_HANDLE_READ,
-                                                         request_deadline_ms,
-                                                         request_id,
-                                                         deadline_ms);
+            cancel_result = cancel_workers();
             if (!cancel_result) {
                 // Cancellation is already terminal for this StartLoad. Do not
                 // keep waiting for the original HANDLE_READ merely because the
@@ -272,11 +300,7 @@ P2PSchedulerPrefillRead::waitForBroadcastCompletion(const std::shared_ptr<P2PBro
                 deadline_ms,
                 request_id,
                 unique_key.c_str());
-            cancel_result = tp_broadcast_client_->cancel(unique_key,
-                                                         P2PConnectorBroadcastType::CANCEL_HANDLE_READ,
-                                                         request_deadline_ms,
-                                                         request_id,
-                                                         deadline_ms);
+            cancel_result = cancel_workers();
             if (deadline_exceeded_out) {
                 *deadline_exceeded_out = true;
             }
@@ -306,11 +330,7 @@ P2PSchedulerPrefillRead::waitForBroadcastCompletion(const std::shared_ptr<P2PBro
             deadline_ms,
             request_id,
             unique_key.c_str());
-        cancel_result = tp_broadcast_client_->cancel(unique_key,
-                                                     P2PConnectorBroadcastType::CANCEL_HANDLE_READ,
-                                                     request_deadline_ms,
-                                                     request_id,
-                                                     deadline_ms);
+        cancel_result = cancel_workers();
         if (deadline_exceeded_out) {
             *deadline_exceeded_out = true;
         }

@@ -236,8 +236,10 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
         generate_output.output_ids = torch::empty({1, (int64_t)output_len}, torch::kInt32);
 
         // TODO(xinfei.sxf) optimize this copy : only copy last token
-        complete_token_ids_->copyTokensTo(
-            i, generate_output.output_ids.data_ptr<int32_t>(), last_output_pos_, output_len);
+        if (output_len > 0) {
+            complete_token_ids_->copyTokensTo(
+                i, generate_output.output_ids.data_ptr<int32_t>(), last_output_pos_, output_len);
+        }
         if (logits_result.defined()) {
             if (logits_result.size(0) <= 1) {
                 generate_output.logits = logits_result.cpu().clone();
@@ -511,8 +513,12 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    if (seqLength() - last_output_pos_ == 0
-        && !(update_info.num_new_tokens == 0 && generate_input_->generate_config->isPrefillOnly())) {
+    // A request at the sequence limit can finish without committing the
+    // handoff token. Publish its terminal frame so batch collection can finish.
+    const bool empty_terminal_output =
+        finished_ && seqLength() == inputLength() && nextStepSeqLengthLimit() <= static_cast<size_t>(inputLength());
+    if (seqLength() - last_output_pos_ == 0 && !empty_terminal_output
+        && !(update_info.num_new_tokens == 0 && generateConfig()->isPrefillOnly())) {
         return;
     }
 

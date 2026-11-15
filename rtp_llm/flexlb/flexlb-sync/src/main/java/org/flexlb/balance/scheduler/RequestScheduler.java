@@ -6,6 +6,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
@@ -184,11 +185,24 @@ public final class RequestScheduler {
             } else {
                 selectAndPublishEncoder(context);
             }
-        } else if (requestConfig.isDirect()) {
+        } else if (requestConfig.isDirect() || requiresPrefillExecution(context, requestConfig)) {
             submitDirect(context);
         } else {
             enqueueGenerationRequest(context, future);
         }
+    }
+
+    private static boolean requiresPrefillExecution(BalanceContext context, FlexlbConfig config) {
+        if (config.getDispatcher().getType() != DispatcherConfig.Type.BATCH
+                || context.getGenerateInputPb() == null
+                || context.getGenerateInputPb().isEmpty()) {
+            return false;
+        }
+        // The client must send these requests to the selected route for full
+        // Prefill execution. An EnqueueBatch acknowledgment would require
+        // Decode to attach to a handoff these requests cannot use.
+        var request = context.getRequest();
+        return request.getMaxNewTokens() == 0 || request.getNumBeams() > 1;
     }
 
     private void enqueueEncoderRequest(BalanceContext context, CompletableFuture<Response> future) {

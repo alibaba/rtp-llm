@@ -1788,6 +1788,8 @@ TEST_F(P2PConnectorWorkerTest, CancelRead_ReturnTrue_DuringRecvRegistrationWindo
     });
 
     ASSERT_TRUE(mock_receiver_->waitUntilRecvEntered(std::chrono::seconds(1)));
+    const auto duplicate = decode_->read(request_id, unique_key, deadline_ms, makeReadPlan(layer_cache_buffers));
+    EXPECT_EQ(duplicate.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
     EXPECT_TRUE(decode_->cancelRead(unique_key));
 
     bool sealed       = true;
@@ -1870,10 +1872,11 @@ TEST_F(P2PConnectorWorkerTest, CancelReadBeforeReadCancelsLateRead) {
     route.cache_tag     = layer_cache_buffers[0]->cacheTag();
     route.layer_buffers = layer_cache_buffers;
     plan.routes.push_back(route);
-    auto result = decode_->read(3009, unique_key, currentTimeMs() + 5000, plan);
-
-    EXPECT_TRUE(result.hasError());
-    EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const auto result = decode_->read(3009, unique_key, currentTimeMs() + 5000, plan);
+        EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED);
+    }
+    EXPECT_EQ(mock_receiver_->recvCallCount(), 0);
     EXPECT_EQ(mock_receiver_->taskCount(), 0);
 }
 

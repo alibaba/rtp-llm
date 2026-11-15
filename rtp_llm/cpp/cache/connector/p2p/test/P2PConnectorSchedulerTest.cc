@@ -273,7 +273,9 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadUsesConfiguredLoadBudgetAndRequestDea
     waitAsyncContextDone(result.context);
     ASSERT_TRUE(result.context->success());
     auto request = prefill_server_->service()->getLastStartLoadRequest();
-    EXPECT_EQ(request.timeout_ms(), 1000);
+    EXPECT_GT(request.timeout_ms(), 0);
+    EXPECT_LE(request.timeout_ms(), 1000);
+    EXPECT_GE(request.timeout_ms(), before + 1000 - currentTimeMs());
 }
 
 TEST_F(P2PConnectorSchedulerTest, AsyncReadKeepsRequestDeadlineSeparateFromLoadBudget) {
@@ -289,6 +291,23 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadKeepsRequestDeadlineSeparateFromLoadB
     EXPECT_GE(request.timeout_ms(), request_deadline_ms - currentTimeMs());
     EXPECT_EQ(result.context->request_deadline_ms_, request_deadline_ms);
     EXPECT_LE(result.context->transfer_deadline_ms_, request_deadline_ms);
+}
+
+TEST(P2PSchedulerDecodeReadTest, UnshardedPeerUsesOnePhysicalCpShard) {
+    P2PConnectorSchedulerConfig config;
+    auto&                       cp = config.parallelism_config.prefill_cp_config;
+    cp.prefill_cp_size             = 4;
+    for (auto method : {CPRotateMethod::DISABLED, CPRotateMethod::PREFILL_CP}) {
+        cp.method = method;
+        for (bool sharded : {false, true}) {
+            cp.kv_cache_sharded = sharded;
+            P2PSchedulerDecodeRead scheduler(config, nullptr, nullptr);
+
+            const bool active = method == CPRotateMethod::PREFILL_CP && sharded;
+            EXPECT_EQ(scheduler.checkPeerCpLayout(/*prefill_tp_size=*/4, /*prefill_cp_size=*/1).hasError(), active);
+            EXPECT_EQ(scheduler.checkPeerCpLayout(/*prefill_tp_size=*/4, /*prefill_cp_size=*/4).hasError(), !active);
+        }
+    }
 }
 
 TEST_F(P2PConnectorSchedulerTest, InvalidLoadConfigurationUsesBoundedSharedFallback) {
@@ -1475,6 +1494,31 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_QueryTimeout_RetainsTargetUntilRetry
     EXPECT_TRUE(allBlockRefsEqual(allocated, 0));
 }
 
+TEST_F(P2PConnectorSchedulerTest, LeaseQueriesForDistinctRequestsCanOverlap) {
+    for (const auto& server : tp_broadcast_servers_) {
+        server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::QUERY_LEASE_STATUS, 700);
+        server->service()->setLeaseStatus(true, 1, 1, true);
+    }
+    const auto deadline          = currentTimeMs() + 5000;
+    auto       make_held_context = [&](const std::string& key) {
+        auto context =
+            std::make_shared<P2PConnectorAsyncReadContext>(nullptr, key, nullptr, 10000, false, deadline, deadline);
+        context->markKickoffUnconfirmed(ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "test lease hold"));
+        context->cancel_confirmed_.store(true);
+        decode_scheduler_->checker_->addContext(context);
+        return context;
+    };
+    const auto first  = make_held_context("lease-overlap-first");
+    const auto second = make_held_context("lease-overlap-second");
+    ASSERT_TRUE(waitUntil([&] { return first->control_active_.load() && second->control_active_.load(); }));
+    EXPECT_TRUE(first->resourceHoldPending());
+    EXPECT_TRUE(second->resourceHoldPending());
+    for (const auto& server : tp_broadcast_servers_) {
+        server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::QUERY_LEASE_STATUS, 0);
+    }
+    ASSERT_TRUE(waitUntil([&] { return !first->resourceHoldPending() && !second->resourceHoldPending(); }));
+}
+
 namespace {
 
 void disableRetainedKvCoreDump() {
@@ -1500,18 +1544,24 @@ TEST(P2PRetainedKvTest, ThresholdUsesCapacityBytesAndStrictGreaterThan) {
     checker.total_kv_bytes_    = 1000;
     // Exactly 30%, including duplicate contexts/blocks, must keep running.
     checker.checkRetainedResources({context, context});
-    resource->mutableBlockIds("group0").assign({1, 2, 3, NULL_BLOCK_IDX});
+    resource->mutableBlockIds("group0").assign({0, 1, 2, 3, NULL_BLOCK_IDX});
     checker.checkRetainedResources({context});
     resource->mutableBlockIds("group0").assign({1, 2, 3, 4});
+    checker.checkRetainedResources({context});
+    ASSERT_NE(checker.retained_kv_over_threshold_since_ms_, 0);
     EXPECT_EXIT({
         disableRetainedKvCoreDump();
+        checker.retained_kv_over_threshold_since_ms_ -= 31000;
         checker.checkRetainedResources({context});
     }, ::testing::KilledBySignal(SIGABRT), "");
     checker.kv_leak_exit_threshold_percent_ = 40;
     checker.checkRetainedResources({context});
+    EXPECT_EQ(checker.retained_kv_over_threshold_since_ms_, 0);
     checker.kv_leak_exit_threshold_percent_ = 39;
+    checker.checkRetainedResources({context});
     EXPECT_EXIT({
         disableRetainedKvCoreDump();
+        checker.retained_kv_over_threshold_since_ms_ -= 31000;
         checker.checkRetainedResources({context});
     }, ::testing::KilledBySignal(SIGABRT), "");
 }
@@ -1540,12 +1590,15 @@ TEST(P2PRetainedKvTest, DistinctRequestsAccumulateAndGroupsUseDifferentBlockSize
     const auto b               = make_context({1, 2}, {}, true);  // Reordered rows; union is 600 bytes, 30%.
     checker.checkRetainedResources({a, b});
     const auto c = make_context({3}, {});  // Union is 700 bytes, 35%.
+    checker.checkRetainedResources({a, b, c});
     EXPECT_EXIT({
         disableRetainedKvCoreDump();
+        checker.retained_kv_over_threshold_since_ms_ -= 31000;
         checker.checkRetainedResources({a, b, c});
     }, ::testing::KilledBySignal(SIGABRT), "");
     c->lease_hold_pending_.store(false);
     checker.checkRetainedResources({a, b, c});
+    EXPECT_EQ(checker.retained_kv_over_threshold_since_ms_, 0);
 }
 
 TEST(P2PRetainedKvTest, InitDerivesCapacityAndRejectsInvalidThreshold) {
@@ -1559,12 +1612,16 @@ TEST(P2PRetainedKvTest, InitDerivesCapacityAndRejectsInvalidThreshold) {
         EXPECT_FALSE(checker.init(nullptr, nullptr, pool, config));
     }
     config.p2p_kv_leak_exit_threshold_percent = 45;
+    config.physical_block_bytes_by_group.emplace(config.topology->groups().front().tag, 135);
     ASSERT_TRUE(checker.init(nullptr, nullptr, pool, config));
     checker.stop();
     size_t expected_bytes = 0;
     for (const auto& group : config.topology->groups()) {
-        expected_bytes += group.block_num * config.topology->layerIdsForGroup(group.tag).size()
-                          * (group.kvBlockStrideBytes() + group.kvScaleStrideBytes());
+        const auto physical = config.physical_block_bytes_by_group.find(group.tag);
+        expected_bytes += group.block_num
+                          * (physical != config.physical_block_bytes_by_group.end() ?
+                                 physical->second :
+                                 config.topology->blockSizeBytesForGroup(group.tag));
     }
     EXPECT_EQ(checker.total_kv_bytes_, expected_bytes);
     EXPECT_EQ(checker.kv_leak_exit_threshold_percent_, 45);
@@ -1681,7 +1738,7 @@ TEST(P2PReadNotificationTest, BusyControlJobDoesNotDelayDeadline) {
     auto entered_future = entered->get_future();
     auto release        = std::make_shared<std::promise<void>>();
     auto gate           = release->get_future().share();
-    checker.control_busy_->store(true);
+    checker.control_inflight_->store(1);
     ASSERT_EQ(pool->pushTask(
                   [entered, gate] {
                       entered->set_value();
@@ -1886,5 +1943,9 @@ TEST(P2PReplicaPlanTest, BothSchedulersRotateMirrorPlansAndBoundCacheBySourceRan
     const auto error = prefill.checkPlanDigest(1, first->plan.digest(), "decode-dp-1");
     EXPECT_EQ(error.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
     EXPECT_NE(error.ToString().find("plan digest mismatch"), std::string::npos);
+    for (int peer_tp = 2; peer_tp <= 16; ++peer_tp) {
+        ASSERT_TRUE(prefill.planFor(peer_tp, "decode-dp-0")->ok());
+        EXPECT_LE(prefill.plan_cache_.size(), 8u);
+    }
 }
 }  // namespace rtp_llm

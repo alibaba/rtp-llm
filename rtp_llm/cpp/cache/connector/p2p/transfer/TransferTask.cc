@@ -28,7 +28,7 @@ void TransferTask::cancel() {
         if (done_) {
             return;
         }
-        if (!transferring_) {
+        if (in_flight_ == 0) {
             // PENDING: fast fail，立即终止
             done_               = true;
             if (error_code_ == TransferErrorCode::OK) {
@@ -53,10 +53,10 @@ void TransferTask::cancel() {
 
 bool TransferTask::startTransfer() {
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    if (done_) {
+    if (done_ || cancel_requested_) {
         return false;
     }
-    transferring_ = true;
+    ++in_flight_;
     return true;
 }
 
@@ -106,51 +106,55 @@ void TransferTask::recordError(TransferErrorCode error_code, const std::string& 
     }
 }
 
-void TransferTask::notifyDone(bool success, TransferErrorCode error_code, const std::string& error_msg) {
+void TransferTask::notifyDone(bool success, TransferErrorCode error_code, const std::string& error_msg, bool started) {
+    completeTransfer(success ? TransferErrorCode::OK : error_code, error_msg, nullptr, started);
+}
+
+void TransferTask::notifyBatchDone(const std::vector<int64_t>& keys, bool started) {
+    completeTransfer(TransferErrorCode::OK, "", &keys, started);
+}
+
+void TransferTask::completeTransfer(TransferErrorCode           error_code,
+                                    const std::string&          error_msg,
+                                    const std::vector<int64_t>* batch_keys,
+                                    bool                        started) {
     std::function<void()> done_callback;
     {
         std::unique_lock<std::shared_mutex> lock(mutex_);
         if (done_) {
             return;
         }
-        done_ = true;
-        if (error_code_ != TransferErrorCode::OK) {
-            // An earlier cancellation/failure already owns the result.
-        } else if (!success) {
+        if (started && in_flight_ > 0) {
+            --in_flight_;
+        }
+        if (error_code_ == TransferErrorCode::OK && error_code != TransferErrorCode::OK) {
             error_code_ = error_code;
             error_msg_  = error_msg;
-        } else if (currentTimeMs() >= deadline_ms_) {
+        }
+        if (error_code_ == TransferErrorCode::OK && currentTimeMs() >= deadline_ms_) {
             // deadline 已过，无论传输是否物理完成，对调用方均视为超时
             error_code_ = TransferErrorCode::TIMEOUT;
             error_msg_  = "TransferTask timed out";
-        } else if (cancel_requested_) {
-            error_code_ = TransferErrorCode::CANCELLED;
-            error_msg_  = "TransferTask cancelled during transfer";
-        } else {
-            error_code_ = TransferErrorCode::OK;
-            error_msg_  = error_msg;
         }
+        if (!completion_requested_) {
+            completion_requested_ =
+                error_code_ != TransferErrorCode::OK || !batch_keys || on_batch_copied_(*batch_keys);
+        }
+        // A duplicate receive can still own the destination after the logical
+        // result is known. Publish completion only after all holders finish.
+        if (!completion_requested_ || in_flight_ > 0) {
+            return;
+        }
+        if (error_code_ == TransferErrorCode::OK) {
+            error_msg_ = error_msg;
+        }
+        done_               = true;
         total_cost_time_us_ = currentTimeUs() - start_time_us_;
         done_callback       = std::move(done_callback_);
     }
     if (done_callback) {
         done_callback();
     }
-}
-
-void TransferTask::notifyBatchDone(const std::vector<int64_t>& keys) {
-    {
-        std::unique_lock<std::shared_mutex> lock(mutex_);
-        if (done_) {
-            return;
-        }
-        if (error_code_ == TransferErrorCode::OK && !cancel_requested_ && currentTimeMs() < deadline_ms_
-            && !on_batch_copied_(keys)) {
-            transferring_ = false;
-            return;
-        }
-    }
-    notifyDone(true);
 }
 
 void TransferTask::setDoneCallback(std::function<void()> callback) {
