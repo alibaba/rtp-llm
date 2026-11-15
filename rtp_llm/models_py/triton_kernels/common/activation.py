@@ -21,8 +21,10 @@ def _silu_and_mul_kernel(
     pid_b = tl.program_id(axis=0)  # Batch dimension
     pid_n_block = tl.program_id(axis=1)  # N-dimension block
 
-    input_row_start_ptr = input_ptr + pid_b * input_row_stride
-    output_row_start_ptr = output_ptr + pid_b * output_row_stride
+    # Expert expansion can put a row more than 2**31 elements from the base.
+    row = pid_b.to(tl.int64)
+    input_row_start_ptr = input_ptr + row * input_row_stride
+    output_row_start_ptr = output_ptr + row * output_row_stride
 
     n_offsets = pid_n_block * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
 
