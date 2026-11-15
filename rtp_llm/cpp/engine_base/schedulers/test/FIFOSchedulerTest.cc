@@ -4354,7 +4354,7 @@ TEST_F(FIFOSchedulerTest, ReviewRegressionSingletonFanoutCannotExceedModelCapaci
 }
 
 TEST_F(FIFOSchedulerTest, QueryCpFanoutAdmissionIncludesPerSequencePadding) {
-    auto resources = makeReadinessResources(512, 64, RoleType::PREFILL, 32, 8192);
+    auto resources = makeReadinessResources(2048, 64, RoleType::PREFILL, 32, 8192);
     resources.model_config.max_seq_len = 8192;
     resources.model_config.max_prefill_tokens = 8672;
     ASSERT_TRUE(resources.cache_manager->init());
@@ -4374,6 +4374,8 @@ TEST_F(FIFOSchedulerTest, QueryCpFanoutAdmissionIncludesPerSequencePadding) {
     input->generate_config->max_new_tokens = 2;
     auto stream = std::make_shared<NormalGenerateStream>(
         input, resources.model_config, resources.runtime_config, resources.resource_context, nullptr);
+    // Keep KV allocation from masking the execution-workspace limit.
+    ASSERT_GT(resources.cache_manager->freeBlocksNum(), 2 * stream->currentBatchSize());
     ASSERT_LE(17 * stream->currentBatchSize(), resources.model_config.max_prefill_tokens);
     ASSERT_GT(32 * stream->currentBatchSize(), resources.model_config.max_prefill_tokens);
     ASSERT_TRUE(scheduler.enqueue(stream).ok());
