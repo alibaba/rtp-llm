@@ -13,6 +13,9 @@ from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitCon
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+from rtp_llm.multimodal.kvcm.registered_transport import (
+    RegisteredTransportUnavailableError,
+)
 from rtp_llm.multimodal.kvcm.tensor_object import (
     pack_object,
     plan_object,
@@ -48,6 +51,9 @@ class RemoteCacheTest(unittest.TestCase):
             },
         )
 
+        error.reason = "private credential=do-not-log"
+        self.assertNotIn("error_reason", MMRemoteEmbeddingCache._error_context(error))
+
         class BrokenError(RuntimeError):
             @property
             def code(self):
@@ -57,6 +63,95 @@ class RemoteCacheTest(unittest.TestCase):
             MMRemoteEmbeddingCache._error_context(BrokenError()),
             {"error_type": "BrokenError"},
         )
+
+    def test_error_logs_preserve_safe_reason_fields_without_exception_text(self):
+        secret = "private credential=do-not-log"
+        sdk_error = RuntimeError(secret)
+        sdk_error.code = SimpleNamespace(name="ER_SDK_ERROR_BUFFER_SAFE")
+        sdk_error.reason = "sdk_buffer_safe_failure"
+        sdk_error.data_transfer_may_be_inflight = False
+        errors = [
+            (sdk_error, "sdk_buffer_safe_failure"),
+            (
+                RegisteredTransportUnavailableError(
+                    secret,
+                    quarantined=True,
+                    initial_failure={
+                        "error_type": "RuntimeError",
+                        "error_code": "ER_SDK_TIMEOUT",
+                        "error_reason": "sdk_timeout",
+                        "data_transfer_may_be_inflight": True,
+                    },
+                    quarantine_id="abcd1234",
+                ),
+                "gdr_transport_quarantined",
+            ),
+            (
+                RegisteredTransportUnavailableError(secret, quarantined=False),
+                "gdr_transport_closed",
+            ),
+        ]
+        for operation, method, stage in (
+            ("read", "object_size", "metadata"),
+            ("read", "load_one", "transfer"),
+            ("write", "save_one", "transfer"),
+        ):
+            for error, reason in errors:
+                with self.subTest(operation=operation, stage=stage, reason=reason):
+                    store = Store(
+                        {"key": pack_object(plan_object((torch.ones(3), None)))}
+                    )
+                    remote = self.remote(store)
+                    with patch.object(
+                        store, method, side_effect=error
+                    ), self.assertLogs(level="WARNING") as logs:
+                        if operation == "read":
+                            self.assertIsNone(remote.load("key", trace_id="safe-read"))
+                        else:
+                            remote.submit_result(
+                                "key", (torch.ones(3), None), trace_id="safe-write"
+                            )
+                            deadline = time.monotonic() + 2
+                            while (
+                                remote.stats()["inflight_tasks"]
+                                and time.monotonic() < deadline
+                            ):
+                                time.sleep(0.005)
+                            self.assertEqual(remote.stats()["inflight_tasks"], 0)
+                        remote.close()
+                    payloads = [
+                        json.loads(line.split("MM_EMB_REMOTE_JSON ", 1)[1])
+                        for line in logs.output
+                        if "MM_EMB_REMOTE_JSON " in line
+                    ]
+                    failures = [
+                        p for p in payloads if p["event"] == operation + "_error"
+                    ]
+                    self.assertEqual(len(failures), 1)
+                    self.assertEqual(failures[0]["error_reason"], reason)
+                    self.assertEqual(failures[0]["error_type"], type(error).__name__)
+                    self.assertEqual(failures[0]["stage"], stage)
+                    self.assertEqual(failures[0]["key"], "key")
+                    self.assertEqual(failures[0]["trace_id"], "safe-" + operation)
+                    if stage == "metadata":
+                        self.assertEqual(failures[0]["nbytes"], 0)
+                    else:
+                        self.assertGreater(failures[0]["nbytes"], 0)
+                    if reason == "gdr_transport_quarantined":
+                        self.assertTrue(failures[0]["restart_required"])
+                        self.assertEqual(failures[0]["quarantine_id"], "abcd1234")
+                        self.assertEqual(
+                            failures[0]["initial_error_code"], "ER_SDK_TIMEOUT"
+                        )
+                        self.assertEqual(
+                            failures[0]["initial_error_reason"], "sdk_timeout"
+                        )
+                    if error is sdk_error:
+                        self.assertEqual(
+                            failures[0]["error_code"], "ER_SDK_ERROR_BUFFER_SAFE"
+                        )
+                        self.assertFalse(failures[0]["data_transfer_may_be_inflight"])
+                    self.assertNotIn(secret, "\n".join(logs.output))
 
     def remote(self, store, **kwargs):
         options = dict(
@@ -2272,12 +2367,26 @@ class GdrStartupLifetimeTest(unittest.TestCase):
             "rtp_llm.multimodal.kvcm.registered_transport.RegisteredObjectTransport",
             return_value=client,
         ) as constructor, patch(
+            "rtp_llm.multimodal.kvcm._config.RtpKvMetaObjectClientConfig.from_env",
+            return_value=object(),
+        ) as parse_config, patch(
             "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
         ) as report:
+            from rtp_llm.multimodal.kvcm import RtpKvMetaObjectConfigError
+
             model = SimpleNamespace(
                 model_type="test", compute_dtype="bf16", ckpt_path=directory
             )
+            parse_config.side_effect = RtpKvMetaObjectConfigError(
+                "discovery unavailable"
+            )
+            with self.assertRaises(RtpKvMetaObjectConfigError):
+                MMRemoteEmbeddingCache.from_configs(model, vit, device="cuda:0")
+            constructor.assert_not_called()  # No arena/MR exists on a pure VIP failure.
+            parse_config.side_effect = None
+            report.reset_mock()
             cache = MMRemoteEmbeddingCache.from_configs(model, vit, device="cuda:0")
+            self.assertEqual(parse_config.call_count, 2)
             constructor.assert_called_once()  # Registration precedes any request.
             self.assertIsNone(cache.load("first"))
             self.assertIsNone(cache.load("second"))

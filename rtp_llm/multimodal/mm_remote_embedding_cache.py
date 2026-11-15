@@ -20,6 +20,7 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
 from rtp_llm.multimodal.kvcm.lookup import KvMetaLookupError
+from rtp_llm.multimodal.kvcm.registered_transport import _safe_error_context
 from rtp_llm.multimodal.kvcm.tensor_object import (
     pack_object,
     plan_object,
@@ -133,27 +134,44 @@ class MMRemoteEmbeddingCache:
                     path.read_bytes()
                 ).hexdigest()
 
+        client_kwargs = dict(
+            max_object_bytes=vit_config.mm_remote_cache_max_object_bytes,
+            call_timeout_ms=vit_config.mm_remote_cache_read_timeout_ms,
+            get_timeout_ms=vit_config.mm_remote_cache_read_timeout_ms,
+            put_timeout_ms=vit_config.mm_remote_cache_write_timeout_ms,
+        )
+
         def raw_factory(**registration):
-            kwargs = dict(
-                max_object_bytes=vit_config.mm_remote_cache_max_object_bytes,
-                call_timeout_ms=vit_config.mm_remote_cache_read_timeout_ms,
-                get_timeout_ms=vit_config.mm_remote_cache_read_timeout_ms,
-                put_timeout_ms=vit_config.mm_remote_cache_write_timeout_ms,
-            )
             if kv_cache_config is not None:
                 return RtpKvMetaObjectClient.from_kv_cache_config(
-                    kv_cache_config, **kwargs, **registration
+                    kv_cache_config, **client_kwargs, **registration
                 )
-            return RtpKvMetaObjectClient.from_env(**kwargs, **registration)
+            return RtpKvMetaObjectClient.from_env(**client_kwargs, **registration)
 
         def factory():
             if gdr_enabled:
+                from rtp_llm.multimodal.kvcm._config import RtpKvMetaObjectClientConfig
                 from rtp_llm.multimodal.kvcm.registered_transport import (
                     RegisteredObjectTransport,
                 )
 
+                # Resolve discovery before allocating an arena or registering
+                # memory. A pure config/VIP failure must not quarantine an MR.
+                prepared_config = (
+                    RtpKvMetaObjectClientConfig.from_kv_cache_config(
+                        kv_cache_config, **client_kwargs
+                    )
+                    if kv_cache_config is not None
+                    else RtpKvMetaObjectClientConfig.from_env(**client_kwargs)
+                )
+
+                def registered_factory(**registration):
+                    return RtpKvMetaObjectClient._from_config(
+                        prepared_config, **registration
+                    )
+
                 return RegisteredObjectTransport(
-                    raw_factory,
+                    registered_factory,
                     max_object_bytes=vit_config.mm_remote_cache_max_object_bytes,
                     device=device,
                     observe_stage=cls._observe_stage,
@@ -251,23 +269,7 @@ class MMRemoteEmbeddingCache:
 
     @staticmethod
     def _error_context(error):
-        fields = {"error_type": type(error).__name__}
-        try:
-            code = getattr(error, "code", None)
-            name = getattr(code, "name", None)
-            if isinstance(name, str) and len(name) <= 80:
-                fields["error_code"] = name
-            elif type(code) is int:
-                fields["error_code"] = code
-            reason = getattr(error, "reason", None)
-            if isinstance(reason, str) and len(reason) <= 80:
-                fields["error_reason"] = reason
-            inflight = getattr(error, "data_transfer_may_be_inflight", None)
-            if type(inflight) is bool:
-                fields["data_transfer_may_be_inflight"] = inflight
-        except Exception:
-            pass  # Diagnostics must not turn cache fallback into request failure.
-        return fields
+        return _safe_error_context(error)
 
     def record(self, event, *, key=None, trace_id=None, **fields):
         with self._stats_lock:
@@ -690,6 +692,8 @@ class MMRemoteEmbeddingCache:
                 "write_error",
                 key=key,
                 trace_id=trace_id,
+                stage="pack",
+                nbytes=plan.nbytes,
                 **self._error_context(error),
             )
             self._report_operation("write", started, "error", plan.nbytes)
@@ -704,10 +708,12 @@ class MMRemoteEmbeddingCache:
             self._report_queue_wait("write", queued_at)
             api_ms = None
             outcome = "error"
+            failure_stage = "client_acquire"
             try:
                 with self._observe_stage("write", "client_acquire"):
                     client = self._get_client()
                 api_started = time.perf_counter()
+                failure_stage = "transfer"
                 with self._observe_stage("write", "transfer", buffer.numel()):
                     try:
                         client.save_one(key, buffer, trace_id=trace_id)
@@ -732,6 +738,8 @@ class MMRemoteEmbeddingCache:
                     "write_error",
                     key=key,
                     trace_id=trace_id,
+                    stage=failure_stage,
+                    nbytes=nbytes,
                     **self._error_context(error),
                 )
             finally:
@@ -802,7 +810,7 @@ class MMRemoteEmbeddingCache:
         timeout_ms = min(self.read_timeout_ms, timeout_ms or self.read_timeout_ms)
         deadline = time.monotonic() + timeout_ms / 1000
         started = time.perf_counter()
-        timing = {}
+        timing = {"stage": "queue", "nbytes": 0}
         payload_nbytes = 0
         outcome = "error"
         if not self._reserve(0):
@@ -818,17 +826,20 @@ class MMRemoteEmbeddingCache:
             try:
                 if time.monotonic() >= deadline:
                     raise TimeoutError("remote embedding queue deadline expired")
+                timing["stage"] = "client_acquire"
                 with self._observe_stage("read", "client_acquire"):
                     client = self._get_client()
                 remaining_ms = int((deadline - time.monotonic()) * 1000)
                 if remaining_ms <= 0:
                     raise TimeoutError("remote embedding lookup deadline expired")
                 api_started = time.perf_counter()
+                timing["stage"] = "metadata"
                 size = self._lookup_object_size(client, key, trace_id, remaining_ms)
                 if size is None:
                     timing["outcome"] = "miss"
                     timing["sdk_api_ms"] = (time.perf_counter() - api_started) * 1000
                     return None
+                timing["nbytes"] = size
                 with self._lock:
                     budget_exceeded = self._bytes + 3 * size > self.max_inflight_bytes
                     if not budget_exceeded:
@@ -841,6 +852,7 @@ class MMRemoteEmbeddingCache:
                     return None
                 if time.monotonic() >= deadline:
                     raise TimeoutError("remote embedding transfer deadline expired")
+                timing["stage"] = "transfer"
                 buffer = torch.empty(size, dtype=torch.uint8)
                 with self._observe_stage("read", "transfer", size):
                     try:
@@ -868,6 +880,7 @@ class MMRemoteEmbeddingCache:
                     self.record("load_miss", key=key, trace_id=trace_id)
                 return None
             with self._observe_stage("read", "restore"):
+                timing["stage"] = "restore"
                 value = unpack_object(
                     buffer,
                     max_bytes=self.max_object_bytes,
@@ -895,13 +908,18 @@ class MMRemoteEmbeddingCache:
                 tensors=plan.header["tensors"],
             )
             return value
-        except _TIMEOUT_ERRORS:
+        except _TIMEOUT_ERRORS as error:
             outcome = "timeout"
             self._count("read_timeout")
             if future is not None:
                 future.cancel()
             self.record(
-                "read_error", key=key, trace_id=trace_id, error_type="TimeoutError"
+                "read_error",
+                key=key,
+                trace_id=trace_id,
+                stage=timing["stage"],
+                nbytes=timing["nbytes"],
+                **self._error_context(error),
             )
             return None
         except Exception as error:
@@ -909,6 +927,8 @@ class MMRemoteEmbeddingCache:
                 "read_error",
                 key=key,
                 trace_id=trace_id,
+                stage=timing["stage"],
+                nbytes=timing["nbytes"],
                 **self._error_context(error),
             )
             return None

@@ -1,13 +1,16 @@
 import ctypes
+import json
 import threading
 import time
 import unittest
 from contextlib import contextmanager, nullcontext
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
 from rtp_llm.multimodal.kvcm.registered_transport import (
     RegisteredObjectTransport,
+    RegisteredTransportUnavailableError,
     _enable_sync_memops,
 )
 from torch.utils._python_dispatch import TorchDispatchMode
@@ -217,13 +220,29 @@ class RegisteredTransportFailureTest(unittest.TestCase):
             with self.subTest(operation=operation):
                 transport = self.transport()
                 native = getattr(transport._client, operation)
-                native.side_effect = TimeoutError("DMA completion is unknown")
+                error = TimeoutError("private credential=do-not-log")
+                error.code = SimpleNamespace(name="ER_SDK_TIMEOUT")
+                error.reason = "sdk_timeout"
+                error.data_transfer_may_be_inflight = True
+                native.side_effect = error
                 buffer = torch.zeros(16, dtype=torch.uint8)
                 with self.assertLogs(level="ERROR") as logs:
                     with self.assertRaises(TimeoutError):
-                        getattr(transport, operation)("key", buffer)
+                        getattr(transport, operation)(
+                            "key", buffer, trace_id="first-gdr-failure"
+                        )
                 self.assertEqual(len(logs.output), 1)
-                self.assertIn("TimeoutError: DMA completion is unknown", logs.output[0])
+                first = json.loads(logs.output[0].split("MM_EMB_GDR_QUARANTINE ", 1)[1])
+                self.assertEqual(first["action"], "restart_worker")
+                self.assertEqual(first["error_code"], "ER_SDK_TIMEOUT")
+                self.assertEqual(first["error_reason"], "sdk_timeout")
+                self.assertTrue(first["data_transfer_may_be_inflight"])
+                self.assertEqual(first["key"], "key")
+                self.assertEqual(first["trace_id"], "first-gdr-failure")
+                self.assertEqual(first["reason"], "gdr_transport_quarantined")
+                self.assertEqual(first["stage"], "sdk_transfer")
+                self.assertEqual(first["nbytes"], 16)
+                self.assertNotIn("private credential=do-not-log", logs.output[0])
                 self.assertTrue(transport._poisoned)
                 self.assertIn(
                     transport, RegisteredObjectTransport._quarantined_transports
@@ -233,17 +252,52 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                     transport._pool,
                     transport._client,
                 )
-                for method in ("load_one", "save_one"):
-                    with self.assertRaises(RuntimeError):
-                        getattr(transport, method)("key", buffer)
-                with self.assertRaises(RuntimeError):
-                    transport.object_size("key")
+                with self.assertNoLogs(level="ERROR"):
+                    for method in ("load_one", "save_one"):
+                        with self.assertRaises(RuntimeError):
+                            getattr(transport, method)("key", buffer)
+                    with self.assertRaises(
+                        RegisteredTransportUnavailableError
+                    ) as rejected:
+                        transport.object_size("key")
+                self.assertEqual(
+                    rejected.exception.quarantine_id, first["quarantine_id"]
+                )
+                self.assertEqual(
+                    rejected.exception.initial_failure["error_code"], "ER_SDK_TIMEOUT"
+                )
+                self.assertTrue(rejected.exception.restart_required)
                 native.assert_called_once()
                 transport.close()
                 transport.close()
                 client.close.assert_not_called()
                 self.assertIs(transport._arena, arena)
                 self.assertIs(transport._pool, pool)
+
+    def test_quarantine_distinguishes_gpu_copy_from_post_sdk_wait(self):
+        for operation, expected_stage in (
+            ("save_one", "gpu_copy"),
+            ("load_one", "gpu_ready_wait"),
+        ):
+            with self.subTest(operation=operation):
+                transport = self.transport()
+                torch.cuda.current_stream().synchronize.side_effect = RuntimeError(
+                    "private CUDA detail"
+                )
+                try:
+                    with self.assertLogs(level="ERROR") as logs, self.assertRaises(
+                        RuntimeError
+                    ):
+                        getattr(transport, operation)(
+                            "key", torch.zeros(16, dtype=torch.uint8)
+                        )
+                    first = json.loads(
+                        logs.output[0].split("MM_EMB_GDR_QUARANTINE ", 1)[1]
+                    )
+                    self.assertEqual(first["stage"], expected_stage)
+                    self.assertNotIn("private CUDA detail", logs.output[0])
+                finally:
+                    torch.cuda.current_stream().synchronize.side_effect = None
 
     def test_proven_quiescent_sdk_failure_allows_the_next_operation(self):
         for operation in ("save_one", "load_one"):
@@ -265,6 +319,24 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                 self.assertEqual(native.call_count, 2)
                 transport.close()
                 transport._client.close.assert_called_once()
+
+    def test_unavailable_reason_distinguishes_closed_from_quarantined(self):
+        for poisoned in (False, True):
+            with self.subTest(poisoned=poisoned):
+                transport = self.transport()
+                transport._poisoned = poisoned
+                transport.close()
+                with self.assertRaises(RegisteredTransportUnavailableError) as raised:
+                    transport.object_size("key")
+                self.assertEqual(
+                    raised.exception.reason,
+                    "gdr_transport_quarantined" if poisoned else "gdr_transport_closed",
+                )
+                self.assertEqual(
+                    str(raised.exception),
+                    "registered transport unavailable; restart worker after GDR failure",
+                )
+                transport._client.object_size.assert_not_called()
 
     def test_failed_safety_check_does_not_hide_the_original_error(self):
         transport = self.transport()
@@ -313,8 +385,13 @@ class RegisteredTransportFailureTest(unittest.TestCase):
             retained = RegisteredObjectTransport._quarantined_transports[0]
             self.assertIs(retained._arena, arena)
             self.assertIs(retained._pool, pool.return_value)
-            with self.assertRaisesRegex(RuntimeError, "quarantined"):
+            with self.assertRaisesRegex(RuntimeError, "quarantined") as rejected:
                 RegisteredObjectTransport(factory, max_object_bytes=16, device="cuda:0")
+            self.assertEqual(rejected.exception.reason, "gdr_transport_quarantined")
+            self.assertEqual(
+                rejected.exception.initial_failure["error_type"], "RuntimeError"
+            )
+            self.assertEqual(rejected.exception.quarantine_id, retained._quarantine_id)
             self.assertEqual(allocate.call_count, 2)
             factory.assert_called_once()
 
