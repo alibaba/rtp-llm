@@ -1,11 +1,14 @@
 """Run on an explicitly reserved GPU; covers pinned host reads in graph replay."""
 
 import os
+import tempfile
 import unittest
 import uuid
+from pathlib import Path
 from unittest.mock import patch
 
 import torch
+from safetensors.torch import save_file
 
 from rtp_llm.models_py.modules.dsv41.engram import (
     Engram,
@@ -38,8 +41,16 @@ class EngramCudaTest(unittest.TestCase):
         )
         self.weight = torch.randn(4000, 32).to(torch.float8_e4m3fn)
         self.scales = torch.randint(125, 130, (4000, 1), dtype=torch.uint8)
+        checkpoint = tempfile.TemporaryDirectory()
+        self.addCleanup(checkpoint.cleanup)
+        path = Path(checkpoint.name) / "engram.safetensors"
+        save_file({"weight": self.weight, "scales": self.scales}, path)
         self.pinned = _PinnedSharedTable(
-            self.weight, self.scales, "test-" + uuid.uuid4().hex, "cuda:0"
+            self.weight,
+            self.scales,
+            "test-" + uuid.uuid4().hex,
+            "cuda:0",
+            source_tensors=[(path, "weight"), (path, "scales")],
         )
         self.embedding = HostEngramEmbedding(
             self.pinned.weight, self.pinned.scales, pinned=self.pinned

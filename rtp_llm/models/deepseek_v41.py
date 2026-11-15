@@ -92,6 +92,14 @@ class DeepSeekV41Weight(DeepSeekV4Weight):
 
 class DeepSeekV41(DeepSeekV4):
 
+    def load(self, skip_python_model: bool = False):
+        from rtp_llm.models_py.modules.dsv41.engram import reclaim_abandoned_tables
+
+        # Reclaim killed workers' host tables before checkpoint page-cache and
+        # model allocations compete for the same host-memory budget.
+        reclaim_abandoned_tables()
+        return super().load(skip_python_model=skip_python_model)
+
     @classmethod
     def _create_config(cls, ckpt_path):
         with open(os.path.join(ckpt_path, "config.json")) as reader:
