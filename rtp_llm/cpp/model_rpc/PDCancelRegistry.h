@@ -37,7 +37,6 @@ public:
         std::atomic<bool> local_done{false};
         bool              downstream_done = false;
         std::atomic<bool> terminal{false};
-        bool                 cleanup_overdue = false;
         int64_t           retain_until_ms = 0;
         std::atomic<int64_t> next_cancel_retry_ms{0};
         std::atomic<int64_t> cancel_retry_delay_ms{50};
@@ -103,7 +102,6 @@ private:
     size_t                                  record_capacity_       = 1u << 20;
     size_t                                  control_capacity_      = 1u << 20;
     size_t                                  control_record_count_  = 0;
-    size_t                                  overdue_cancels_       = 0;
     size_t                                  request_rejections_    = 0;
     size_t                                  control_rejections_    = 0;
     int64_t                                 last_pressure_log_ms_  = 0;
@@ -117,6 +115,7 @@ private:
     std::unordered_map<int64_t, CancelFence> absent_fences_;
     std::multimap<int64_t, int64_t>         fence_expirations_;
     std::set<std::pair<int64_t, int64_t>>   entry_expirations_;
+    std::set<std::pair<int64_t, int64_t>>   overdue_cancels_;
     static constexpr size_t                  kPendingBatchSize = 128;
     std::map<int64_t, Handle>                pending_cancels_;
     std::map<int64_t, Handle>                local_pending_cancels_;

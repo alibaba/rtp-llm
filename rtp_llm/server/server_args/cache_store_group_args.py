@@ -101,7 +101,10 @@ def init_cache_store_group_args(parser, cache_store_config):
         bind_to=(cache_store_config, "p2p_transfer_not_done_resource_hold_ms"),
         type=int,
         default=10000,
-        help="RDMA：到达 transfer deadline 后等待该时长，再 close 相关 connection（毫秒）。",
+        help=(
+            "RDMA：传输超时后等待该时长再关闭相关连接（毫秒）。"
+            "已派发的读操作若缺少完成回调，Decode 会继续保留目标 KV，并计入滞留退出阈值。"
+        ),
     )
     cache_store_group.add_argument(
         "--p2p_lease_query_timeout_ms",

@@ -33,8 +33,8 @@ void PDCancelRegistry::trimLocked(int64_t now_ms) {
     while (!entry_expirations_.empty() && entry_expirations_.begin()->first <= now_ms
            && entries_trimmed < kMaxExpirationsPerPass) {
         ++entries_trimmed;
-        const auto [expires_at_ms, request_id] = *entry_expirations_.begin();
-        entry_expirations_.erase(entry_expirations_.begin());
+        auto expired                            = entry_expirations_.extract(entry_expirations_.begin());
+        const auto& [expires_at_ms, request_id] = expired.value();
         auto it = entries_.find(request_id);
         if (it == entries_.end()) {
             continue;
@@ -44,10 +44,7 @@ void PDCancelRegistry::trimLocked(int64_t now_ms) {
             continue;
         }
         if (e->canceled.load() && !e->terminal) {
-            if (!e->cleanup_overdue) {
-                e->cleanup_overdue = true;
-                ++overdue_cancels_;
-            }
+            overdue_cancels_.insert(std::move(expired));
             continue;
         }
         if (!e->local_done || e->stream) {
@@ -85,7 +82,7 @@ void PDCancelRegistry::trimLocked(int64_t now_ms) {
 }
 
 void PDCancelRegistry::reportPressureLocked() {
-    if (overdue_cancels_ == 0 && request_rejections_ == 0 && control_rejections_ == 0) {
+    if (overdue_cancels_.empty() && request_rejections_ == 0 && control_rejections_ == 0) {
         return;
     }
     const auto now_ms =
@@ -94,16 +91,23 @@ void PDCancelRegistry::reportPressureLocked() {
     if (last_pressure_log_ms_ != 0 && now_ms - last_pressure_log_ms_ < 30000) {
         return;
     }
+    // Each overdue index key is the first cancellation time plus kRetentionMs.
+    const int64_t oldest_cancel_age_ms =
+        overdue_cancels_.empty() ?
+            0 :
+            kRetentionMs + std::max<int64_t>(0, currentTimeMs() - overdue_cancels_.begin()->first);
     RTP_LLM_LOG_WARNING(
         "PD cancellation registry pressure: request_records=%zu request_capacity=%zu control_records=%zu "
-        "control_capacity=%zu request_rejections=%zu control_rejections=%zu overdue_cancels=%zu",
+        "control_capacity=%zu request_rejections=%zu control_rejections=%zu overdue_cancels=%zu "
+        "oldest_overdue_cancel_age_ms=%ld",
         entries_.size() - control_record_count_,
         record_capacity_,
         control_record_count_ + absent_fences_.size(),
         control_capacity_,
         request_rejections_,
         control_rejections_,
-        overdue_cancels_);
+        overdue_cancels_.size(),
+        oldest_cancel_age_ms);
     last_pressure_log_ms_ = now_ms;
     request_rejections_   = 0;
     control_rejections_   = 0;
@@ -409,10 +413,7 @@ bool PDCancelRegistry::complete(const Handle& handle) {
                                          stream))
         return false;
     handle->terminal = true;
-    if (handle->cleanup_overdue) {
-        handle->cleanup_overdue = false;
-        --overdue_cancels_;
-    }
+    overdue_cancels_.erase({handle->retain_until_ms, handle->identity.request_id});
     local_pending_cancels_.erase(handle->identity.request_id);
     // Local terminal is independent of remote control-plane availability. Keep
     // the cancellation fence and bounded retry record independently of Prefill

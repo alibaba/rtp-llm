@@ -984,17 +984,18 @@ TEST(PDCancelRegistryTest, ActiveReadCannotBeRetiredByCancellationRetention) {
         std::lock_guard<std::mutex> lock(registry.mutex_);
         ASSERT_EQ(handle->retain_until_ms, overdue_at);
         registry.trimLocked(overdue_at - 1);
-        EXPECT_EQ(registry.overdue_cancels_, 0u);
+        EXPECT_TRUE(registry.overdue_cancels_.empty());
         registry.trimLocked(overdue_at);
         registry.trimLocked(overdue_at);
-        EXPECT_EQ(registry.overdue_cancels_, 1u);
+        ASSERT_EQ(registry.overdue_cancels_.size(), 1u);
+        EXPECT_EQ(*registry.overdue_cancels_.begin(), std::make_pair(overdue_at, int64_t{117}));
     }
     EXPECT_EQ(registry.find(117), handle);
     EXPECT_TRUE(registry.isCanceled("reading117"));
     EXPECT_FALSE(handle->terminal);
     registry.endRead("reading117");
     ASSERT_TRUE(registry.complete(handle));
-    EXPECT_EQ(registry.overdue_cancels_, 0u);
+    EXPECT_TRUE(registry.overdue_cancels_.empty());
     EXPECT_FALSE(handle->downstream_done);
 }
 
