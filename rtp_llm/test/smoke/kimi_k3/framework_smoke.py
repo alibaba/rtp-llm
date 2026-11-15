@@ -159,10 +159,12 @@ class FrameworkRunner(Runner):
         partial = self.partial_prefix(cached)
         self.stage("partial_prefix", [partial])
 
-        # A finite normal cache pool makes eviction cheap and reproducible.
+        # Admit four CP blocks at a time, leaving room for the unaligned
+        # tail in the 31 usable Device slots. A whole long prompt would force
+        # synchronous DROP before the watermark can demote cached KV to Host.
         # These are sequential requests, not a prescribed scheduler batch.
         pressure = [
-            self.fixture(f"pressure_{i}", CHUNK_INPUT_TOKENS, owner=i % 2)
+            self.fixture(f"pressure_{i}", 4 * self.reuse_unit_tokens + 7, owner=i % 2)
             for i in range(PRESSURE_REQUESTS)
         ]
         self.stage("cache_pressure", pressure)
