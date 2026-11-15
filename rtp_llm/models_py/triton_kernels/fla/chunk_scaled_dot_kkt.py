@@ -43,7 +43,11 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
     IS_LOG2: tl.constexpr,
+    live_count=None,
 ):
+    if live_count is not None:
+        if tl.program_id(0) >= tl.load(live_count):
+            return
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
@@ -112,6 +116,7 @@ def chunk_scaled_dot_kkt_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32,
+    prepared=None,
 ) -> torch.Tensor:
     r"""
     Compute beta * K * K^T.
@@ -141,7 +146,9 @@ def chunk_scaled_dot_kkt_fwd(
     H = beta.shape[-1]
     BT = chunk_size
     chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+        prepared.chunk_indices[BT]
+        if prepared is not None
+        else prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     )
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
@@ -152,6 +159,7 @@ def chunk_scaled_dot_kkt_fwd(
         A=A,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        live_count=None if prepared is None else prepared.live_counts[BT],
         T=T,
         H=H,
         Hg=Hg,

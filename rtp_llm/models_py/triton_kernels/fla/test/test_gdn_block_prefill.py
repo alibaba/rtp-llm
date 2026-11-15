@@ -35,6 +35,215 @@ def _constexpr_linear_offset_test_kernel(output, stride):
 
 
 class BlockTest(unittest.TestCase):
+    def test_prepared_tables_keep_capacity_across_partitions(self):
+        from rtp_llm.models_py.triton_kernels.fla.prepared import GdnPrefillPrepared
+
+        prepared = GdnPrefillPrepared(257, 5, "cpu")
+        owners = [
+            prepared.cu_seqlens,
+            prepared.prefix_lengths,
+            prepared.chunk_offsets,
+            prepared.conv_metadata.batch_ptr,
+            *prepared.chunk_indices.values(),
+        ]
+        pointers = [tensor.data_ptr() for tensor in owners]
+        for lengths in ((257,), (1, 63, 64, 65), (0, 65, 0, 128, 1), (), (129, 128)):
+            prepared.refresh(lengths, [128] * len(lengths))
+            padded = (*lengths, *((0,) * (5 - len(lengths))))
+            cu = [sum(padded[:row]) for row in range(6)]
+            self.assertEqual(prepared.cu_seqlens.tolist(), cu)
+            for size, table in prepared.chunk_indices.items():
+                expected = [
+                    [row, chunk]
+                    for row, length in enumerate(padded)
+                    for chunk in range((length + size - 1) // size)
+                ]
+                count = int(prepared.live_counts[size])
+                self.assertEqual(table[:count].tolist(), expected)
+                self.assertTrue(bool((table[count:] == -1).all()))
+            expected_conv = [
+                [row, chunk]
+                for row, length in enumerate(padded)
+                for chunk in range((length + 7) // 8)
+            ]
+            count = int(prepared.conv_metadata.live_count)
+            self.assertEqual(
+                torch.stack(
+                    (
+                        prepared.conv_metadata.batch_ptr[:count],
+                        prepared.conv_metadata.token_chunk_offset_ptr[:count],
+                    ),
+                    1,
+                ).tolist(),
+                expected_conv,
+            )
+            self.assertEqual([tensor.data_ptr() for tensor in owners], pointers)
+        before = prepared.cu_seqlens.clone()
+        for lengths, prefixes in (((258,), (0,)), ((1,) * 6, (0,) * 6), ((1,), (-1,))):
+            with self.assertRaises(ValueError):
+                prepared.refresh(lengths, prefixes)
+            torch.testing.assert_close(prepared.cu_seqlens, before)
+
+    @unittest.skipUnless(
+        torch.cuda.is_available() and torch.version.hip is None,
+        "NVIDIA CUDA is required",
+    )
+    def test_prepared_graph_refreshes_conv_chunks_and_all_state_pages(self):
+        from rtp_llm.models_py.triton_kernels.causal_conv1d.causal_conv1d import (
+            causal_conv1d_fn,
+        )
+        from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
+        from rtp_llm.models_py.triton_kernels.fla.prepared import GdnPrefillPrepared
+
+        torch.manual_seed(827)
+        tokens, batch, heads, dim = 512, 4, 1, 64
+        prepared = GdnPrefillPrepared(tokens, batch, "cuda")
+        prepared.refresh((257, 1, 63, 65), (0, 128, 0, 128))
+        raw = torch.randn(tokens, 3 * dim, device="cuda", dtype=torch.bfloat16) * 0.1
+        original = raw.clone()
+        weight = torch.randn(3 * dim, 4, device="cuda", dtype=torch.bfloat16) * 0.1
+        gates = -torch.rand(1, tokens, heads, device="cuda") * 0.1
+        beta = torch.rand_like(gates).bfloat16()
+        base_table = torch.arange(1, 17, device="cuda", dtype=torch.int32).view(
+            batch, 4
+        )
+        table = base_table.clone()
+        conv = torch.randn(
+            17, 3, 3 * dim, device="cuda", dtype=torch.bfloat16
+        ).transpose(1, 2)
+        states = torch.randn(17, heads, dim, dim, device="cuda") * 0.05
+        original_conv, original_states = conv.clone(), states.clone()
+        initial = torch.empty(batch, heads, dim, dim, device="cuda")
+
+        def run():
+            load_initial_state_from_block_map(
+                prepared.prefix_lengths, table, states, initial, 128, prepared=prepared
+            )
+            mixed = causal_conv1d_fn(
+                raw.T,
+                weight,
+                None,
+                conv,
+                prepared.cu_seqlens,
+                table,
+                prepared.prefix_lengths,
+                128,
+                metadata=prepared.conv_metadata,
+            ).T
+            q, k, v = (
+                part.reshape(1, tokens, heads, dim).contiguous()
+                for part in mixed.chunk(3, -1)
+            )
+            output, h, final = chunk_gated_delta_rule(
+                q,
+                k,
+                v,
+                gates,
+                beta,
+                initial_state=initial,
+                output_final_state=True,
+                cu_seqlens=prepared.cu_seqlens,
+                use_qk_l2norm_in_kernel=True,
+                prepared=prepared,
+            )
+            store_ssm_state_to_block_map(
+                h,
+                final,
+                prepared.prefix_lengths,
+                prepared.cu_seqlens,
+                table,
+                states,
+                128,
+                64,
+                prepared=prepared,
+            )
+            return output, h, final
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            run()
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual, chunks, final = run()
+        for step, lengths in enumerate(
+            ((257, 1, 63, 65), (0, 65, 0, 128), (0, 0, 0, 0), (1, 127, 64, 257))
+        ):
+            prefixes = [128 if row % 2 else 0 for row in range(batch)]
+            prepared.refresh(lengths, prefixes)
+            raw.copy_(original)
+            raw[sum(lengths) :] = float("nan")
+            conv.copy_(original_conv)
+            states.copy_(original_states)
+            table.copy_(base_table.roll(step, 0))
+            table[~prepared.request_live] = -1
+            for row, length in enumerate(lengths):
+                if not prefixes[row] and length:
+                    table[row, : (length - 1) // 128] = -1
+            initial.fill_(float("nan"))
+            chunks.fill_(float("nan"))
+            final.fill_(float("nan"))
+            graph.replay()
+            expected = torch.zeros_like(actual)
+            ref_conv, ref_states = original_conv.clone(), original_states.clone()
+            offset = 0
+            touched = set()
+            for row, length in enumerate(lengths):
+                if not length:
+                    continue
+                cu = torch.tensor([0, length], device="cuda", dtype=torch.int32)
+                prefix = prepared.prefix_lengths[row : row + 1]
+                mapping = table[row : row + 1]
+                ref_initial = torch.empty_like(initial[:1])
+                load_initial_state_from_block_map(
+                    prefix, mapping, ref_states, ref_initial, 128
+                )
+                mixed = causal_conv1d_fn(
+                    raw[offset : offset + length].T,
+                    weight,
+                    None,
+                    ref_conv,
+                    cu,
+                    mapping,
+                    prefix,
+                    128,
+                ).T
+                q, k, v = (
+                    part.reshape(1, length, heads, dim).contiguous()
+                    for part in mixed.chunk(3, -1)
+                )
+                result, h, end = chunk_gated_delta_rule(
+                    q,
+                    k,
+                    v,
+                    gates[:, offset : offset + length],
+                    beta[:, offset : offset + length],
+                    initial_state=ref_initial,
+                    output_final_state=True,
+                    cu_seqlens=cu,
+                    use_qk_l2norm_in_kernel=True,
+                )
+                store_ssm_state_to_block_map(
+                    h, end, prefix, cu, mapping, ref_states, 128, 64
+                )
+                expected[:, offset : offset + length] = result
+                for page in range(
+                    prefixes[row] // 128, (prefixes[row] + length + 127) // 128
+                ):
+                    slot = int(mapping[0, page])
+                    if slot > 0:
+                        touched.add(slot)
+                offset += length
+            torch.testing.assert_close(actual, expected, rtol=0.02, atol=0.005)
+            torch.testing.assert_close(conv, ref_conv, rtol=0, atol=0)
+            torch.testing.assert_close(states, ref_states, rtol=0.02, atol=0.005)
+            untouched = [slot for slot in range(17) if slot not in touched]
+            torch.testing.assert_close(
+                states[untouched], original_states[untouched], rtol=0, atol=0
+            )
+        graph.reset()
+
     def test_chunk_boundaries_interleaved_and_decode(self):
         for block in (32, 64, 96, 128):
             with self.subTest(block=block):

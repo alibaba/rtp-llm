@@ -14,6 +14,236 @@ from rtp_llm.models_py.triton_kernels.fla.utils import assert_close
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class GdnSm120PrefillTest(unittest.TestCase):
+    def test_prepared_graphs_keep_separate_capacity_workspaces(self):
+        from rtp_llm.models_py.kernels.cuda.gdn_sm120.prefill import (
+            sm120_prefill_prepared,
+        )
+        from rtp_llm.models_py.triton_kernels.fla.block import (
+            load_initial_state_from_block_map,
+        )
+        from rtp_llm.models_py.triton_kernels.fla.prepared import GdnPrefillPrepared
+
+        self.assertEqual(torch.cuda.get_device_capability(), (12, 0))
+        fixtures = []
+        for capacity, key_heads, heads, batch in (
+            (2048, 2, 4, 2),
+            (4096, 2, 4, 2),
+            (8192, 8, 24, 4),
+            (8192, 4, 12, 4),
+            (8192, 2, 6, 4),
+        ):
+            torch.manual_seed(837 + capacity)
+            prepared = GdnPrefillPrepared(capacity, batch, "cuda")
+            prepared.refresh((257, 129), (0, 128))
+            prepared.require_prefix_alignment(128)
+            q = torch.nn.functional.normalize(
+                torch.randn(capacity, key_heads, 128, device="cuda"), dim=-1
+            ).bfloat16()
+            k = torch.nn.functional.normalize(
+                torch.randn_like(q).float(), dim=-1
+            ).bfloat16()
+            v = torch.randn(capacity, heads, 128, device="cuda", dtype=torch.bfloat16)
+            original = (q.clone(), k.clone(), v.clone())
+            alpha = torch.exp(-torch.rand(capacity, heads, device="cuda") * 0.1)
+            beta = torch.rand_like(alpha).bfloat16().float()
+            width = capacity // 128 + 1
+            table = torch.arange(
+                1, batch * width + 1, device="cuda", dtype=torch.int32
+            ).view(batch, width)
+            pool = torch.randn(table.numel() + 1, heads, 128, 128, device="cuda") * 0.01
+            base_pool = pool.clone()
+            initial = torch.empty(batch, heads, 128, 128, device="cuda")
+
+            def run():
+                load_initial_state_from_block_map(
+                    prepared.prefix_lengths,
+                    table,
+                    pool,
+                    initial,
+                    128,
+                    prepared=prepared,
+                )
+                output, checkpoints, final, starts = sm120_prefill_prepared(
+                    q,
+                    k,
+                    v,
+                    alpha,
+                    beta,
+                    initial,
+                    prepared.cu_seqlens,
+                    prepared=prepared,
+                )
+                store_page_checkpoints_kernel[(batch, capacity // 128, heads * 16)](
+                    checkpoints,
+                    final,
+                    starts,
+                    prepared.cu_seqlens,
+                    prepared.prefix_lengths,
+                    table,
+                    pool,
+                    TABLE_STRIDE=table.stride(0),
+                    CACHE_STRIDE=pool.stride(0),
+                    HEADS=heads,
+                    PAGE=128,
+                    BLOCK=1024,
+                    request_live=prepared.request_live,
+                )
+                return output, checkpoints, final
+
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                run()
+            torch.cuda.current_stream().wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                output, checkpoints, final = run()
+            fixtures.append(
+                (
+                    prepared,
+                    (q, k, v),
+                    original,
+                    alpha,
+                    beta,
+                    table,
+                    pool,
+                    base_pool,
+                    initial,
+                    graph,
+                    output,
+                    checkpoints,
+                    final,
+                )
+            )
+        pointers = [
+            {tensor.data_ptr() for tensor in item[0].workspace.values()}
+            | {item[0].sm120_cp_chunk_len.data_ptr()}
+            for item in fixtures
+        ]
+        for index, pointer_set in enumerate(pointers):
+            for other in pointers[index + 1 :]:
+                self.assertFalse(pointer_set & other)
+        for lengths in (
+            (257, 129),
+            (65, 0),
+            (0, 0),
+            (129, 257),
+            (8192,),
+            (4093, 2051, 2048),
+            (6141, 1025, 1026),
+            (4096, 4096),
+        ):
+            for (
+                prepared,
+                inputs,
+                original,
+                alpha,
+                beta,
+                table,
+                pool,
+                base_pool,
+                initial,
+                graph,
+                output,
+                checkpoints,
+                final,
+            ) in fixtures:
+                if (
+                    sum(lengths) > prepared.token_capacity
+                    or len(lengths) > prepared.batch_capacity
+                ):
+                    continue
+                prefixes = tuple(
+                    128 if row == 1 and sum(lengths) < 2048 else 0
+                    for row in range(len(lengths))
+                )
+                prepared.refresh(lengths, prefixes)
+                table.copy_(
+                    torch.arange(
+                        1, table.numel() + 1, device="cuda", dtype=torch.int32
+                    ).view_as(table)
+                )
+                for row, length in enumerate(lengths):
+                    if length and not prefixes[row]:
+                        table[row, : (length - 1) // 128] = -1
+                for current, source in zip(inputs, original):
+                    current.copy_(source)
+                    current[sum(lengths) :] = float("nan")
+                pool.copy_(base_pool)
+                initial.fill_(float("nan"))
+                checkpoints.fill_(float("nan"))
+                final.fill_(float("nan"))
+                graph.replay()
+                for current, source in zip(inputs, original):
+                    torch.testing.assert_close(
+                        current[: sum(lengths)],
+                        source[: sum(lengths)],
+                        rtol=0,
+                        atol=0,
+                    )
+                    torch.testing.assert_close(
+                        current[sum(lengths) :],
+                        torch.zeros_like(current[sum(lengths) :]),
+                        rtol=0,
+                        atol=0,
+                    )
+                expected_output = torch.zeros_like(output)
+                expected_pool = base_pool.clone()
+                touched = set()
+                cu = [0]
+                for length in lengths:
+                    cu.append(cu[-1] + length)
+                if cu[-1]:
+                    start_state = torch.zeros_like(initial[: len(lengths)])
+                    for row, prefix in enumerate(prefixes):
+                        if prefix and lengths[row]:
+                            start_state[row] = base_pool[int(table[row, 0])]
+                    # Compare the entire live batch, retaining eager's original
+                    # CP policy. Per-row calls can select a different CP length.
+                    q, k, v = (tensor[: cu[-1]].contiguous() for tensor in inputs)
+                    reference, pages, end, _ = sm120_prefill_prepared(
+                        q,
+                        k,
+                        v,
+                        alpha[: cu[-1]].contiguous(),
+                        beta[: cu[-1]].contiguous(),
+                        start_state,
+                        torch.tensor(cu, device="cuda", dtype=torch.int32),
+                        lengths,
+                    )
+                    expected_output[:, : cu[-1]] = reference
+                    torch.testing.assert_close(
+                        checkpoints[: sum(n // 128 for n in lengths)],
+                        pages,
+                        rtol=0,
+                        atol=0,
+                    )
+                checkpoint = 0
+                for row, length in enumerate(lengths):
+                    if not length:
+                        continue
+                    torch.testing.assert_close(final[row], end[row], rtol=0, atol=0)
+                    for page in range((length + 127) // 128):
+                        slot = int(table[row, prefixes[row] // 128 + page])
+                        if slot > 0:
+                            expected_pool[slot] = (
+                                end[row]
+                                if (page + 1) * 128 >= length
+                                else pages[checkpoint + page]
+                            )
+                            touched.add(slot)
+                    checkpoint += length // 128
+                torch.testing.assert_close(output, expected_output, rtol=0, atol=0)
+                torch.testing.assert_close(pool, expected_pool, rtol=0, atol=0)
+                untouched = [
+                    slot for slot in range(pool.shape[0]) if slot not in touched
+                ]
+                torch.testing.assert_close(
+                    pool[untouched], base_pool[untouched], rtol=0, atol=0
+                )
+        for fixture in fixtures:
+            fixture[9].reset()
+
     def test_overwritten_cuda13_wheel_uses_native_prefill(self):
         from unittest.mock import patch
 
@@ -157,20 +387,29 @@ class GdnSm120PrefillTest(unittest.TestCase):
                     torch.testing.assert_close(got, ref, rtol=0, atol=0)
 
     def test_real_qwen4_three_value_heads_per_key_head(self):
-        for lengths in ((257,), (129, 257), (1, 7, 63)):
+        for key_heads, heads, lengths in (
+            (8, 24, (257,)),
+            (8, 24, (129, 257)),
+            (8, 24, (1, 7, 63)),
+            (4, 12, (257,)),
+            (2, 6, (257,)),
+            (2, 6, (4223,)),
+        ):
             torch.manual_seed(79301 + sum(lengths))
             total = sum(lengths)
-            q = torch.randn(1, total, 8, 128, device="cuda", dtype=torch.bfloat16)
+            q = torch.randn(
+                1, total, key_heads, 128, device="cuda", dtype=torch.bfloat16
+            )
             k = torch.randn_like(q)
-            v = torch.randn(1, total, 24, 128, device="cuda", dtype=torch.bfloat16)
-            g = -torch.rand(1, total, 24, device="cuda") * 0.1
+            v = torch.randn(1, total, heads, 128, device="cuda", dtype=torch.bfloat16)
+            g = -torch.rand(1, total, heads, device="cuda") * 0.1
             beta = torch.rand_like(g).bfloat16()
             cu = torch.tensor(
                 [0] + list(__import__("itertools").accumulate(lengths)),
                 device="cuda",
                 dtype=torch.int32,
             )
-            initial = torch.randn(len(lengths), 24, 128, 128, device="cuda") * 0.05
+            initial = torch.randn(len(lengths), heads, 128, 128, device="cuda") * 0.05
             actual, pages, final, starts = sm120_prefill_with_checkpoints(
                 q, k, v, g, beta, initial, cu, lengths
             )
@@ -182,6 +421,27 @@ class GdnSm120PrefillTest(unittest.TestCase):
             self.assertEqual(pages.shape, ref_pages.shape)
             if ref_pages.numel():
                 assert_close("GQA3 every page versus FP64", ref_pages, pages, 0.005)
+            if lengths == (4223,):
+                # TP8 resumes its last 127 tokens from the 4096-token page.
+                tail = [tensor[:, 4096:].contiguous() for tensor in (q, k, v, g, beta)]
+                tail_cu = torch.tensor([0, 127], device="cuda", dtype=torch.int32)
+                cached = pages[31:32].clone().contiguous()
+                resumed, _, resumed_final, _ = sm120_prefill_with_checkpoints(
+                    *tail, cached, tail_cu, (127,)
+                )
+                legacy, _, legacy_final = chunk_gated_delta_rule(
+                    *tail,
+                    initial_state=cached,
+                    output_final_state=True,
+                    cu_seqlens=tail_cu,
+                    use_qk_l2norm_in_kernel=True,
+                )
+                for name, output, state in (
+                    ("CP", resumed, resumed_final),
+                    ("FLA", legacy, legacy_final),
+                ):
+                    assert_close(name + " resumed output", ref[:, 4096:], output, 0.005)
+                    assert_close(name + " resumed final", ref_final, state, 0.005)
 
     def test_checkpoint_store_all_pages_prefix_sentinel_and_dtype(self):
         lengths, prefixes = (257, 128, 7), (128, 256, 0)

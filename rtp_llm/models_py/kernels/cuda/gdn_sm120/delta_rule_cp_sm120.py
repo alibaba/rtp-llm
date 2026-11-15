@@ -53,7 +53,9 @@ def _sm120_compile_options(device):
     return (cute.EnableTVMFFI(True),) + sm12x_compile_options(device)
 
 
-def _get_cp_workspace(name, shape, dtype, device):
+def _get_cp_workspace(name, shape, dtype, device, workspace=None):
+    if workspace is not None:
+        return workspace.get_workspace(name, shape, dtype, device)
     nbytes = math.prod(shape) * dtype.itemsize
     return _get_cache_buf(name, nbytes, device)[:nbytes].view(dtype).view(shape)
 
@@ -494,6 +496,7 @@ def cp_delta_rule_t_precompute_dsl_sm120(
     _skip_check: bool = False,
     _device=None,
     _stream=None,
+    workspace=None,
 ):
     """Precompute signed, beta-folded CP T tiles for the SM120 CP path.
 
@@ -559,6 +562,7 @@ def cp_delta_rule_t_precompute_dsl_sm120(
         (total_t_blocks, num_sab_heads, 64, 64),
         k.dtype,
         device,
+        workspace,
     )
     if total_t_blocks == 0:
         return t
@@ -652,6 +656,7 @@ class CPDeltaRuleMNPrecomputeSm120(KeyedCompileMixin):
         dtype: type[cutlass.Numeric] = cutlass.Float16,
         acc_dtype: type[cutlass.Numeric] = cutlass.Float32,
         cu_seqlens_dtype: type[cutlass.Numeric] = cutlass.Int64,
+        device_cp: bool = False,
     ):
         self.dtype = dtype
         self.acc_dtype = acc_dtype
@@ -662,6 +667,7 @@ class CPDeltaRuleMNPrecomputeSm120(KeyedCompileMixin):
         self.v_stage = 2
         self.t_stage = 2
         self.alpha_stage = 2
+        self.device_cp = device_cp
         self.manual_cache_key(
             "dtype",
             "acc_dtype",
@@ -672,6 +678,7 @@ class CPDeltaRuleMNPrecomputeSm120(KeyedCompileMixin):
             "v_stage",
             "t_stage",
             "alpha_stage",
+            *(("device_cp",) if device_cp else ()),
         )
 
     @cute.jit
@@ -1225,7 +1232,7 @@ class CPDeltaRuleMNPrecomputeSm120(KeyedCompileMixin):
         g_transfer_t: cute.Tensor,
         g_state_t: cute.Tensor,
         g_cu_seqlens: cute.Tensor,
-        chunk_len: cutlass.Int32,
+        chunk_len,
         num_k_heads: cutlass.Int32,
         num_v_heads: cutlass.Int32,
         num_sab_heads: cutlass.Int32,
@@ -1344,7 +1351,7 @@ class CPDeltaRuleMNPrecomputeSm120(KeyedCompileMixin):
         g_transfer_t: cute.Tensor,
         g_state_t: cute.Tensor,
         g_cu_seqlens: cute.Tensor,
-        chunk_len: cutlass.Int32,
+        chunk_len,
         num_k_heads: cutlass.Int32,
         num_v_heads: cutlass.Int32,
         num_sab_heads: cutlass.Int32,
@@ -1376,6 +1383,8 @@ class CPDeltaRuleMNPrecomputeSm120(KeyedCompileMixin):
         chunk_idx_in_seq = bx // num_sab_heads
         seq_start = g_cu_seqlens[seq_idx]
         seq_len = cutlass.Int32(g_cu_seqlens[seq_idx + 1] - seq_start)
+        if cutlass.const_expr(self.device_cp):
+            chunk_len = cutlass.Int32(chunk_len[0])
         num_cp_chunks = chunks_for_len(seq_len, chunk_len)
         is_valid_chunk = chunk_idx_in_seq < num_cp_chunks
 
@@ -1629,10 +1638,11 @@ class CPDeltaRuleMNPrecomputeSm120(KeyedCompileMixin):
 
 
 @functools.cache
-def _get_mn_precompute_kernel(kernel_dtype, cu_seqlens_dtype):
+def _get_mn_precompute_kernel(kernel_dtype, cu_seqlens_dtype, device_cp=False):
     return CPDeltaRuleMNPrecomputeSm120(
         kernel_dtype,
         cu_seqlens_dtype=integer_dtype_to_cutlass(cu_seqlens_dtype),
+        device_cp=device_cp,
     )
 
 
@@ -1649,6 +1659,7 @@ def cp_delta_rule_mn_precompute_dsl_sm120(
     _skip_check: bool = False,
     _device=None,
     _stream=None,
+    workspace=None,
 ):
     """Run the SM120 CP preprocess kernel and return its native output layout.
 
@@ -1751,10 +1762,10 @@ def cp_delta_rule_mn_precompute_dsl_sm120(
     )
     workspace_shape = (total_cp_chunks, num_sab_heads, d, d)
     transfer_t = _get_cp_workspace(
-        "gdn_cp_sm120_local_transfer", workspace_shape, torch.float32, device
+        "gdn_cp_sm120_local_transfer", workspace_shape, torch.float32, device, workspace
     )
     state_t = _get_cp_workspace(
-        "gdn_cp_sm120_local_state", workspace_shape, torch.float32, device
+        "gdn_cp_sm120_local_state", workspace_shape, torch.float32, device, workspace
     )
     if total_cp_chunks == 0:
         return transfer_t, state_t
@@ -1771,7 +1782,10 @@ def cp_delta_rule_mn_precompute_dsl_sm120(
     )
 
     compile_options = _sm120_compile_options(device)
-    kernel = _get_mn_precompute_kernel(kernel_dtype, cu_seqlens.dtype)
+    if workspace is None:
+        kernel = _get_mn_precompute_kernel(kernel_dtype, cu_seqlens.dtype)
+    else:
+        kernel = _get_mn_precompute_kernel(kernel_dtype, cu_seqlens.dtype, True)
     compiled = get_cached_compile(kernel, compile_options)
     if compiled is None:
         from_dlpack = lambda *args, **kwargs: cute.runtime.from_dlpack(
@@ -1785,7 +1799,13 @@ def cp_delta_rule_mn_precompute_dsl_sm120(
             from_dlpack(transfer_t.view(-1), assumed_align=16).mark_layout_dynamic(),
             from_dlpack(state_t.view(-1), assumed_align=16).mark_layout_dynamic(),
             from_dlpack(cu_seqlens, assumed_align=8).mark_layout_dynamic(),
-            cutlass.Int32(cp_chunk_len),
+            (
+                cutlass.Int32(cp_chunk_len)
+                if workspace is None
+                else from_dlpack(
+                    workspace.sm120_cp_chunk_len, assumed_align=4
+                ).mark_layout_dynamic()
+            ),
             cutlass.Int32(num_k_heads),
             cutlass.Int32(num_v_heads),
             cutlass.Int32(num_sab_heads),
@@ -1803,7 +1823,7 @@ def cp_delta_rule_mn_precompute_dsl_sm120(
         transfer_t.view(-1),
         state_t.view(-1),
         cu_seqlens,
-        cp_chunk_len,
+        cp_chunk_len if workspace is None else workspace.sm120_cp_chunk_len,
         num_k_heads,
         num_v_heads,
         num_sab_heads,
@@ -1832,6 +1852,7 @@ class CPDeltaRuleFixupHmmaSm120(KeyedCompileMixin):
         initial_state_inner_strides: tuple[int, ...] | None = None,
         output_state_inner_strides: tuple[int, ...] | None = None,
         store_initial_state: bool = False,
+        device_cp: bool = False,
     ):
         self.needs_initial_state = needs_initial_state
         self.store_final_state = store_final_state
@@ -1856,6 +1877,7 @@ class CPDeltaRuleFixupHmmaSm120(KeyedCompileMixin):
         self.k_tiles = 16
         self.min_blocks_per_mp = 1
         self.use_3xtf32 = False
+        self.device_cp = device_cp
         self.manual_cache_key(
             "needs_initial_state",
             "store_final_state",
@@ -1880,6 +1902,7 @@ class CPDeltaRuleFixupHmmaSm120(KeyedCompileMixin):
             "k_tiles",
             "min_blocks_per_mp",
             "use_3xtf32",
+            *(("device_cp",) if device_cp else ()),
         )
 
     @cute.jit
@@ -2110,7 +2133,7 @@ class CPDeltaRuleFixupHmmaSm120(KeyedCompileMixin):
         g_output_state_t: cute.Tensor,
         g_state_indices_t: cute.Tensor,
         g_cu_seqlens: cute.Tensor,
-        chunk_len: cutlass.Int32,
+        chunk_len,
         total_cp_chunks: cutlass.Int32,
         num_seqs: cutlass.Int32,
         num_heads: cutlass.Int32,
@@ -2171,7 +2194,7 @@ class CPDeltaRuleFixupHmmaSm120(KeyedCompileMixin):
         g_output_state_t: cute.Tensor,
         g_state_indices_t: cute.Tensor,
         g_cu_seqlens: cute.Tensor,
-        chunk_len: cutlass.Int32,
+        chunk_len,
         total_cp_chunks: cutlass.Int32,
         num_seqs: cutlass.Int32,
         num_heads: cutlass.Int32,
@@ -2186,6 +2209,8 @@ class CPDeltaRuleFixupHmmaSm120(KeyedCompileMixin):
         seq_idx = head_seq_idx // num_heads
         seq_start = g_cu_seqlens[seq_idx]
         seq_len = cutlass.Int32(g_cu_seqlens[seq_idx + 1] - seq_start)
+        if cutlass.const_expr(self.device_cp):
+            chunk_len = cutlass.Int32(chunk_len[0])
         num_chunks = chunks_for_len(seq_len, chunk_len)
         chunk_start = varlen_chunk_idx(seq_idx, seq_start, 0, chunk_len)
 
@@ -2471,6 +2496,7 @@ class CPDeltaRuleFixupSimtSm120(KeyedCompileMixin):
         initial_state_inner_strides: tuple[int, ...] | None = None,
         output_state_inner_strides: tuple[int, ...] | None = None,
         store_initial_state: bool = False,
+        device_cp: bool = False,
     ):
         self.needs_initial_state = needs_initial_state
         self.store_final_state = store_final_state
@@ -2489,6 +2515,7 @@ class CPDeltaRuleFixupSimtSm120(KeyedCompileMixin):
         self.num_warps = 4
         self.min_blocks_per_mp = 2
         self.registers_per_thread = 256
+        self.device_cp = device_cp
         self.manual_cache_key(
             "needs_initial_state",
             "store_final_state",
@@ -2507,6 +2534,7 @@ class CPDeltaRuleFixupSimtSm120(KeyedCompileMixin):
             "num_warps",
             "min_blocks_per_mp",
             "registers_per_thread",
+            *(("device_cp",) if device_cp else ()),
         )
 
     @cute.jit
@@ -2658,7 +2686,7 @@ class CPDeltaRuleFixupSimtSm120(KeyedCompileMixin):
         g_output_state_t: cute.Tensor,
         g_state_indices_t: cute.Tensor,
         g_cu_seqlens: cute.Tensor,
-        chunk_len: cutlass.Int32,
+        chunk_len,
         total_cp_chunks: cutlass.Int32,
         num_seqs: cutlass.Int32,
         num_heads: cutlass.Int32,
@@ -2705,7 +2733,7 @@ class CPDeltaRuleFixupSimtSm120(KeyedCompileMixin):
         g_output_state_t: cute.Tensor,
         g_state_indices_t: cute.Tensor,
         g_cu_seqlens: cute.Tensor,
-        chunk_len: cutlass.Int32,
+        chunk_len,
         total_cp_chunks: cutlass.Int32,
         num_seqs: cutlass.Int32,
         num_heads: cutlass.Int32,
@@ -2719,6 +2747,8 @@ class CPDeltaRuleFixupSimtSm120(KeyedCompileMixin):
         seq_start = g_cu_seqlens[seq_idx]
         seq_end = g_cu_seqlens[seq_idx + 1]
         seq_len = cutlass.Int32(seq_end - seq_start)
+        if cutlass.const_expr(self.device_cp):
+            chunk_len = cutlass.Int32(chunk_len[0])
         num_chunks = chunks_for_len(seq_len, chunk_len)
         chunk_start = varlen_chunk_idx(seq_idx, seq_start, 0, chunk_len)
         gap_start = chunk_start + num_chunks
@@ -2873,6 +2903,7 @@ def _get_fixup_kernel(
     cu_seqlens_dtype,
     state_indices_dtype,
     initial_state_inner_strides,
+    device_cp=False,
 ):
     kernel_kwargs = dict(
         needs_initial_state=needs_initial_state,
@@ -2884,6 +2915,8 @@ def _get_fixup_kernel(
         ),
         initial_state_inner_strides=initial_state_inner_strides,
     )
+    if device_cp:
+        kernel_kwargs["device_cp"] = True
     if kernel_kind == "simt_row4":
         return CPDeltaRuleFixupSimtSm120(rows_per_cta=4, **kernel_kwargs)
     if kernel_kind == "simt_row8":
@@ -2906,6 +2939,7 @@ def cp_delta_rule_fixup_dsl_sm120(
     _kernel_kind: str | None = None,
     _device=None,
     _stream=None,
+    workspace=None,
 ):
     """Fix CP precompute chunk artifacts into global chunk-boundary states.
 
@@ -2991,7 +3025,11 @@ def cp_delta_rule_fixup_dsl_sm120(
     num_seqs = cu_seqlens.shape[0] - 1
 
     fixed_state = _get_cp_workspace(
-        "gdn_cp_sm120_fixed_state", local_state.shape, local_state.dtype, device
+        "gdn_cp_sm120_fixed_state",
+        local_state.shape,
+        local_state.dtype,
+        device,
+        workspace,
     )
     if total_cp_chunks == 0:
         return fixed_state
@@ -3035,6 +3073,7 @@ def cp_delta_rule_fixup_dsl_sm120(
             if use_state_indices and needs_initial_state
             else None
         ),
+        **({"device_cp": True} if workspace is not None else {}),
     )
     compiled = get_cached_compile(kernel, compile_options)
     if compiled is None:
@@ -3066,7 +3105,13 @@ def cp_delta_rule_fixup_dsl_sm120(
             None,
             state_indices_cute,
             from_dlpack(cu_seqlens, assumed_align=8).mark_layout_dynamic(),
-            cutlass.Int32(cp_chunk_len),
+            (
+                cutlass.Int32(cp_chunk_len)
+                if workspace is None
+                else from_dlpack(
+                    workspace.sm120_cp_chunk_len, assumed_align=4
+                ).mark_layout_dynamic()
+            ),
             cutlass.Int32(total_cp_chunks),
             cutlass.Int32(num_seqs),
             cutlass.Int32(num_heads),
@@ -3082,7 +3127,7 @@ def cp_delta_rule_fixup_dsl_sm120(
         None,
         state_indices if use_state_indices else None,
         cu_seqlens,
-        cp_chunk_len,
+        cp_chunk_len if workspace is None else workspace.sm120_cp_chunk_len,
         total_cp_chunks,
         num_seqs,
         num_heads,
@@ -3130,6 +3175,7 @@ class CPDeltaRulePrefillSm120(KeyedCompileMixin):
         checkpoint_cu_starts_dtype: torch.dtype | None = None,
         state_inner_strides: tuple[int, ...] | None = None,
         initial_state_inner_strides: tuple[int, ...] | None = None,
+        device_cp: bool = False,
     ):
         self.needs_alpha = True
         self.dtype = dtype
@@ -3157,6 +3203,7 @@ class CPDeltaRulePrefillSm120(KeyedCompileMixin):
         self.t_stage = 1
         self.qk_stage = 1
         self.kk_stage = 1
+        self.device_cp = device_cp
         self.manual_cache_key(
             "needs_alpha",
             "needs_initial_state",
@@ -3183,6 +3230,7 @@ class CPDeltaRulePrefillSm120(KeyedCompileMixin):
             "qk_stage",
             "kk_stage",
             "alpha_beta_stage",
+            *(("device_cp",) if device_cp else ()),
             "t_stage",
         )
 
@@ -4563,7 +4611,7 @@ class CPDeltaRulePrefillSm120(KeyedCompileMixin):
         num_k_heads: cutlass.Int32,
         num_v_heads: cutlass.Int32,
         num_sab_heads: cutlass.Int32,
-        chunk_len: cutlass.Int32,
+        chunk_len,
         total_cp_chunks: cutlass.Int32,
         max_cp_chunks_per_seq: cutlass.Int32,
         num_seqs: cutlass.Int32,
@@ -4763,7 +4811,7 @@ class CPDeltaRulePrefillSm120(KeyedCompileMixin):
         num_k_heads: cutlass.Int32,
         num_v_heads: cutlass.Int32,
         num_sab_heads: cutlass.Int32,
-        chunk_len: cutlass.Int32,
+        chunk_len,
         total_cp_chunks: cutlass.Int32,
         num_seqs: cutlass.Int32,
         total_checkpoints: cutlass.Int32,
@@ -4798,6 +4846,8 @@ class CPDeltaRulePrefillSm120(KeyedCompileMixin):
         chunk_idx_in_seq = bx // num_sab_heads
         seq_start = g_cu_seqlens[seq_idx]
         seq_len = cutlass.Int32(g_cu_seqlens[seq_idx + 1] - seq_start)
+        if cutlass.const_expr(self.device_cp):
+            chunk_len = cutlass.Int32(chunk_len[0])
         num_cp_chunks = chunks_for_len(seq_len, chunk_len)
         is_valid_chunk = chunk_idx_in_seq < num_cp_chunks
 
@@ -5169,6 +5219,7 @@ def _get_prefill_kernel(
     checkpoint_cu_starts_dtype,
     state_inner_strides,
     initial_state_inner_strides,
+    device_cp=False,
 ):
     return CPDeltaRulePrefillSm120(
         kernel_dtype,
@@ -5184,6 +5235,7 @@ def _get_prefill_kernel(
         checkpoint_cu_starts_dtype=checkpoint_cu_starts_dtype,
         state_inner_strides=state_inner_strides,
         initial_state_inner_strides=initial_state_inner_strides,
+        device_cp=device_cp,
     )
 
 
@@ -5210,6 +5262,7 @@ def cp_delta_rule_prefill_dsl_sm120(
     _skip_check: bool = False,
     _device=None,
     _stream=None,
+    workspace=None,
 ):
     """Run CP main prefill with precomputed T and fixed-up chunk states.
 
@@ -5437,9 +5490,14 @@ def cp_delta_rule_prefill_dsl_sm120(
     }[q.dtype]
 
     workspace_size = get_device_sm_count(device) * 128
-    tensormaps_t = _get_cache_buf(
-        "gdn_cp_sm120_prefill_tensormaps", workspace_size, device
-    )
+    if workspace is None:
+        tensormaps_t = _get_cache_buf(
+            "gdn_cp_sm120_prefill_tensormaps", workspace_size, device
+        )
+    else:
+        tensormaps_t = workspace.get_workspace(
+            "gdn_cp_sm120_prefill_tensormaps", (workspace_size,), torch.uint8, device
+        )
     stream = (
         _stream
         if _stream is not None
@@ -5477,6 +5535,7 @@ def cp_delta_rule_prefill_dsl_sm120(
             if use_state_indices and needs_initial_state
             else None
         ),
+        **({"device_cp": True} if workspace is not None else {}),
     )
     state_arg = state if store_final_state else fixed_state
     compile_options = _sm120_compile_options(device)
@@ -5530,7 +5589,13 @@ def cp_delta_rule_prefill_dsl_sm120(
             cutlass.Int32(num_k_heads),
             cutlass.Int32(num_v_heads),
             cutlass.Int32(num_sab_heads),
-            cutlass.Int32(cp_chunk_len),
+            (
+                cutlass.Int32(cp_chunk_len)
+                if workspace is None
+                else from_dlpack(
+                    workspace.sm120_cp_chunk_len, assumed_align=4
+                ).mark_layout_dynamic()
+            ),
             cutlass.Int32(total_cp_chunks),
             cutlass.Int32(max_cp_chunks_per_seq),
             cutlass.Int32(num_seqs),
@@ -5559,7 +5624,7 @@ def cp_delta_rule_prefill_dsl_sm120(
         num_k_heads,
         num_v_heads,
         num_sab_heads,
-        cp_chunk_len,
+        cp_chunk_len if workspace is None else workspace.sm120_cp_chunk_len,
         total_cp_chunks,
         max_cp_chunks_per_seq,
         num_seqs,
@@ -5588,6 +5653,7 @@ def cp_delta_rule_dsl_sm120(
     max_seqlen: int | None = None,
     cp_chunk_len: int | None = None,
     cp_chunk_len_granularity: int = CP_CHUNK_LEN_GRANULARITY,
+    workspace=None,
 ):
     """Run the CP SM120 delta-rule prefill pipeline on flat varlen tensors.
 
@@ -5621,7 +5687,12 @@ def cp_delta_rule_dsl_sm120(
         raise RuntimeError("max_seqlen must be provided when num_seqs != 1")
     if max_seqlen <= 0:
         raise RuntimeError(f"max_seqlen must be positive, got {max_seqlen}")
-    if cp_chunk_len is None:
+    if workspace is not None:
+        # Allocation and launch geometry use a fixed bound; kernels read the
+        # original eager policy's live value from the plan-owned device slot.
+        # Existing is_valid_chunk/num_chunks guards mask the extra CTAs.
+        cp_chunk_len = workspace.sm120_min_cp_chunk_len
+    elif cp_chunk_len is None:
         num_heads = max(q.shape[1], v.shape[1])
         cp_chunk_len = choose_cp_chunk_len_host(
             max_seqlen,
@@ -5786,6 +5857,7 @@ def cp_delta_rule_dsl_sm120(
         _skip_check=True,
         _device=device,
         _stream=stream,
+        workspace=workspace,
     )
     local_transfer, local_state = cp_delta_rule_mn_precompute_dsl_sm120(
         k,
@@ -5799,6 +5871,7 @@ def cp_delta_rule_dsl_sm120(
         _skip_check=True,
         _device=device,
         _stream=stream,
+        workspace=workspace,
     )
     fixed_state = cp_delta_rule_fixup_dsl_sm120(
         local_transfer,
@@ -5811,6 +5884,7 @@ def cp_delta_rule_dsl_sm120(
         _skip_check=True,
         _device=device,
         _stream=stream,
+        workspace=workspace,
     )
 
     cp_delta_rule_prefill_dsl_sm120(
@@ -5835,4 +5909,5 @@ def cp_delta_rule_dsl_sm120(
         _skip_check=True,
         _device=device,
         _stream=stream,
+        workspace=workspace,
     )

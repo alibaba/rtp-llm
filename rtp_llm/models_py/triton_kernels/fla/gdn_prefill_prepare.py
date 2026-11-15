@@ -127,6 +127,59 @@ def prepare_sm120_prefill(mixed_qkv, a, b, alog, bias, key_heads, value_heads):
 
 
 @triton.jit
+def _clear_qkv_padding(
+    Q,
+    K,
+    V,
+    NumTokens,
+    ROWS: tl.constexpr,
+    Q_WIDTH: tl.constexpr,
+    K_WIDTH: tl.constexpr,
+    V_WIDTH: tl.constexpr,
+    MAX_WIDTH: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    live = tl.load(NumTokens).to(tl.int64)
+    start = tl.program_id(0).to(tl.int64) * BLOCK
+    remaining = ROWS - live
+    if start >= remaining * MAX_WIDTH:
+        return
+    offsets = start + tl.arange(0, BLOCK)
+    tl.store(Q + live * Q_WIDTH + offsets, 0, offsets < remaining * Q_WIDTH)
+    tl.store(K + live * K_WIDTH + offsets, 0, offsets < remaining * K_WIDTH)
+    tl.store(V + live * V_WIDTH + offsets, 0, offsets < remaining * V_WIDTH)
+
+
+def clear_sm120_prefill_padding(q, k, v, num_tokens):
+    """Zero caller-owned capacity padding in place; never write live Q/K/V rows."""
+    if torch.version.hip is not None or not all(
+        tensor.is_cuda
+        and tensor.device == num_tokens.device
+        and tensor.dtype in (torch.float16, torch.bfloat16)
+        and tensor.ndim == 3
+        and tensor.shape[0] == q.shape[0]
+        and tensor.shape[1] > 0
+        and tensor.shape[2] == 128
+        and tensor.is_contiguous()
+        for tensor in (q, k, v)
+    ):
+        raise ValueError("prepared SM120 GDN requires contiguous CUDA Q/K/V")
+    widths = [tensor.shape[1] * 128 for tensor in (q, k, v)]
+    _clear_qkv_padding[(triton.cdiv(q.shape[0] * max(widths), 1024),)](
+        q,
+        k,
+        v,
+        num_tokens,
+        ROWS=q.shape[0],
+        Q_WIDTH=widths[0],
+        K_WIDTH=widths[1],
+        V_WIDTH=widths[2],
+        MAX_WIDTH=max(widths),
+        BLOCK=1024,
+    )
+
+
+@triton.jit
 def _checkpoint_starts(Cu, Starts, BATCH: tl.constexpr, BLOCK: tl.constexpr):
     b = tl.arange(0, BLOCK)
     begin = tl.load(Cu + b, b < BATCH, other=0)

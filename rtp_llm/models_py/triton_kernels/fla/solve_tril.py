@@ -29,7 +29,11 @@ def solve_tril_16x16_kernel(
     H: tl.constexpr,
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    live_count=None,
 ):
+    if live_count is not None:
+        if tl.program_id(0) >= tl.load(live_count):
+            return
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
@@ -94,7 +98,11 @@ def merge_16x16_to_32x32_inverse_kernel(
     H: tl.constexpr,
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    live_count=None,
 ):
+    if live_count is not None:
+        if tl.program_id(0) >= tl.load(live_count):
+            return
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
@@ -192,7 +200,11 @@ def merge_16x16_to_64x64_inverse_kernel(
     H: tl.constexpr,
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    live_count=None,
 ):
+    if live_count is not None:
+        if tl.program_id(0) >= tl.load(live_count):
+            return
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
@@ -492,6 +504,7 @@ def solve_tril(
     A: torch.Tensor,
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float,
+    prepared=None,
 ) -> torch.Tensor:
     """
     Compute the inverse of the lower triangular matrix
@@ -517,7 +530,9 @@ def solve_tril(
     )
 
     chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, 16) if cu_seqlens is not None else None
+        prepared.chunk_indices[16]
+        if prepared is not None
+        else prepare_chunk_indices(cu_seqlens, 16) if cu_seqlens is not None else None
     )
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, 16)
     solve_tril_16x16_kernel[NT, B * H](
@@ -525,6 +540,7 @@ def solve_tril(
         Ad=Ad,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        live_count=None if prepared is None else prepared.live_counts[16],
         T=T,
         H=H,
         BT=BT,
@@ -541,7 +557,9 @@ def solve_tril(
         else merge_16x16_to_64x64_inverse_kernel
     )
     chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+        prepared.chunk_indices[BT]
+        if prepared is not None
+        else prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     )
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     merge_fn[NT, B * H](
@@ -550,6 +568,7 @@ def solve_tril(
         Ai=Ai,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        live_count=None if prepared is None else prepared.live_counts[BT],
         T=T,
         H=H,
         BT=BT,

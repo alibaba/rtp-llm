@@ -31,6 +31,7 @@ class CausalConv1dMetadata:
     batch_ptr: torch.Tensor
     token_chunk_offset_ptr: torch.Tensor
     total: int
+    live_count: Optional[torch.Tensor] = None
 
 
 def prepare_causal_conv1d_metadata(
@@ -155,7 +156,11 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     SEQ_SIZE_PER_BLOCK: tl.constexpr,
+    live_count=None,
 ):
+    if live_count is not None:
+        if tl.program_id(0) >= tl.load(live_count):
+            return
     conv_states_ptr = initial_states_ptr
     stride_conv_state_seq = stride_istate_seq
     stride_conv_state_dim = stride_istate_dim
@@ -170,7 +175,6 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     # single-sequence id
     idx_seq = tl.load(batch_ptr + tl.program_id(0))
     chunk_offset = tl.load(token_chunk_offset_ptr + tl.program_id(0)).to(tl.int64)
-    prefix_length = tl.load(prefix_lengths_ptr + idx_seq).to(tl.int32)
 
     # BLOCK_N elements along the feature-dimension (channel)
     idx_feats = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -184,6 +188,10 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     seqlen = sequence_end_index - sequence_start_index
 
     token_offset = BLOCK_M * chunk_offset.to(tl.int64)
+    if live_count is not None:
+        if token_offset >= seqlen:
+            return
+    prefix_length = tl.load(prefix_lengths_ptr + idx_seq).to(tl.int32)
     segment_len = min(BLOCK_M, seqlen - token_offset)
 
     # base of the sequence
@@ -653,6 +661,7 @@ def causal_conv1d_fn(
         NP2_STATELEN=np2_statelen,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
+        live_count=metadata.live_count,
     )
     return out.to(original_x_dtype)
 

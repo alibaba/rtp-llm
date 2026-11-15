@@ -19,8 +19,11 @@ def load_initial_state_from_block_map_kernel(
     BLOCK_V: tl.constexpr,
     SEQ_SIZE_PER_BLOCK: tl.constexpr,
     CONV_STRIDE_TOKEN: tl.constexpr,
+    request_live=None,
 ):
-
+    if request_live is not None:
+        if not tl.load(request_live + tl.program_id(0)):
+            return
     SSM_PER_HEAD = K * V
     SSM_PER_BATCH = HEAD_NUM * SSM_PER_HEAD
 
@@ -75,6 +78,7 @@ def load_initial_state_from_block_map(
     initial_states: torch.Tensor,
     seq_size_per_block: int,
     block_v: int = 64,
+    prepared=None,
 ):
     batch = block_map.shape[0]
     _, head_num, v, k = conv_states.shape
@@ -96,6 +100,7 @@ def load_initial_state_from_block_map(
         SEQ_SIZE_PER_BLOCK=seq_size_per_block,
         CONV_STRIDE_TOKEN=token_stride_conv,
         BLOCK_V=block_v,
+        request_live=None if prepared is None else prepared.request_live,
     )
 
 
@@ -163,7 +168,11 @@ def store_ssm_state_to_block_map_kernel(
     SEQ_SIZE_PER_BLOCK: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
     CONV_STRIDE_TOKEN: tl.constexpr,
+    live_count=None,
 ):
+    if live_count is not None:
+        if tl.program_id(0) >= tl.load(live_count):
+            return
     i_c, i_h, i_v = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
     batch = tl.load(chunk_indices + i_c * 2).to(tl.int32)
@@ -238,13 +247,18 @@ def store_ssm_state_to_block_map(
     seq_size_per_block: int,
     chunk_size: int,
     block_v: int = 64,
+    prepared=None,
 ):
     # fp32 required: the Triton kernel accumulates SSM state directly at the
     # loaded dtype; lower precision causes numerical drift across chunks.
     assert (
         h.dtype == torch.float32 and final_states.dtype == torch.float32
     ), "h and final_states must be float32"
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
+    chunk_indices = (
+        prepared.chunk_indices[chunk_size]
+        if prepared is not None
+        else prepare_chunk_indices(cu_seqlens, chunk_size)
+    )
     _, head_num, v, k = ssm_states.shape
     chunk_num = chunk_indices.shape[0]
     block_map_stride_b = block_map.stride(0)
@@ -266,6 +280,7 @@ def store_ssm_state_to_block_map(
         SEQ_SIZE_PER_BLOCK=seq_size_per_block,
         CONV_STRIDE_TOKEN=token_stride_ssm_state,
         CHUNK_SIZE=chunk_size,
+        live_count=None if prepared is None else prepared.live_counts[chunk_size],
     )
 
 
@@ -283,7 +298,11 @@ def store_page_checkpoints_kernel(
     HEADS: tl.constexpr,
     PAGE: tl.constexpr,
     BLOCK: tl.constexpr,
+    request_live=None,
 ):
+    if request_live is not None:
+        if not tl.load(request_live + tl.program_id(0)):
+            return
     batch, page, tile = (
         tl.program_id(0).to(tl.int64),
         tl.program_id(1).to(tl.int64),
