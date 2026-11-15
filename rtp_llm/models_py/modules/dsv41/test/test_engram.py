@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import math
+import mmap
 import os
 import tempfile
 import unittest
@@ -37,6 +38,34 @@ class EngramTest(unittest.TestCase):
     def setUp(self):
         self.layout = engram.EngramLayout(_config())
         self.hash = engram.NgramHashState(self.layout, token_map=list(range(32)))
+
+    def test_shared_table_stream_matches_native_fp8_and_scale_bytes(self):
+        from safetensors.torch import save_file
+
+        weight = torch.arange(128).reshape(4, 32).to(torch.float8_e4m3fn)
+        scales = torch.tensor([[125], [126], [127], [128]], dtype=torch.uint8)
+        expected = b"".join(
+            tensor.view(torch.uint8).numpy().tobytes() for tensor in (weight, scales)
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "table.safetensors"
+            save_file({"weight": weight, "scales": scales}, path)
+            sources = [(path, "weight"), (path, "scales")]
+            for source_tensors in (None, sources):
+                with mmap.mmap(-1, len(expected)) as mapping:
+                    engram._copy_table_bytes(mapping, (weight, scales), source_tensors)
+                    self.assertEqual(mapping[:], expected)
+
+    def test_failed_stream_releases_shared_mapping_views(self):
+        from safetensors.torch import save_file
+
+        weight = torch.ones(4, 32, dtype=torch.uint8)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "table.safetensors"
+            save_file({"weight": weight}, path)
+            with mmap.mmap(-1, weight.numel()) as mapping:
+                with self.assertRaises(KeyError):
+                    engram._copy_table_bytes(mapping, (weight,), [(path, "missing")])
 
     def test_hash_matches_scalar_reference_with_boundary_and_dead_tokens(self):
         windows = torch.tensor([[7, 6, 5, 4], [4, 3, -1, -1], [8, 7, 6, 5]])

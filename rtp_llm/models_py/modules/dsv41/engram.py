@@ -350,6 +350,27 @@ class _CudaArrayView:
         }
 
 
+def _copy_table_bytes(mapping, tensors, source_tensors=None):
+    with memoryview(mapping) as destination:
+        offset = 0
+        for index, tensor in enumerate(tensors):
+            size = tensor.numel()
+            with destination[offset : offset + size] as output:
+                if source_tensors is not None:
+                    from rtp_llm.utils.ckpt_file_info import CkptFileInfo
+
+                    path, name = source_tensors[index]
+                    CkptFileInfo(str(path)).copy_tensor_bytes(name, output)
+                else:
+                    with memoryview(
+                        tensor.view(torch.uint8).reshape(-1).numpy()
+                    ) as source:
+                        for begin in range(0, size, 64 * 1024**2):
+                            end = min(begin + 64 * 1024**2, size)
+                            output[begin:end] = source[begin:end]
+            offset += size
+
+
 class _PinnedSharedTable:
     """One physical tmpfs allocation shared by independent prefill/decode groups.
 
@@ -360,7 +381,7 @@ class _PinnedSharedTable:
     exits; stale leases from SIGKILL are pruned on the next access.
     """
 
-    def __init__(self, weight, scales, source_identity, device):
+    def __init__(self, weight, scales, source_identity, device, *, source_tensors=None):
         digest = hashlib.sha256(source_identity.encode()).hexdigest()[:24]
         data_path = Path("/dev/shm") / f"rtp_llm_engram_{os.getuid()}_{digest}"
         lock_path = Path("/tmp") / (data_path.name + ".lock")
@@ -391,17 +412,7 @@ class _PinnedSharedTable:
                         file.truncate(total_bytes)
                         mapping = mmap.mmap(file.fileno(), total_bytes)
                         try:
-                            destination = np.frombuffer(mapping, dtype=np.uint8)
-                            offset = 0
-                            for tensor in (weight, scales):
-                                source = tensor.view(torch.uint8).reshape(-1).numpy()
-                                for begin in range(0, source.size, 64 * 1024**2):
-                                    end = min(begin + 64 * 1024**2, source.size)
-                                    destination[offset + begin : offset + end] = source[
-                                        begin:end
-                                    ]
-                                offset += source.size
-                            del destination, source
+                            _copy_table_bytes(mapping, (weight, scales), source_tensors)
                         finally:
                             mapping.close()
                     os.replace(partial, data_path)
@@ -696,7 +707,16 @@ class Engram(nn.Module):
                 identity.extend(
                     [str(path.resolve()), str(stat.st_size), str(stat.st_mtime_ns)]
                 )
-            pinned = _PinnedSharedTable(table, scales, "|".join(identity), device)
+            pinned = _PinnedSharedTable(
+                table,
+                scales,
+                "|".join(identity),
+                device,
+                source_tensors=[
+                    (root / weight_map[prefix + suffix], prefix + suffix)
+                    for suffix in ("embed.weight", "embed.scale")
+                ],
+            )
             table, scales = pinned.weight, pinned.scales
             projection = V41MXFP8Linear(
                 load("wkv.weight").to(device), load("wkv.scale").to(device)

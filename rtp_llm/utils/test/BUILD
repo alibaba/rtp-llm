@@ -137,6 +137,13 @@ py_test(
 )
 
 py_test(
+    name = "ckpt_file_info_test",
+    srcs = ["ckpt_file_info_test.py"],
+    deps = ["//rtp_llm:utils", "//rtp_llm:safetensors"],
+    env = {"GPU_COUNT": "0"},
+)
+
+py_test(
     # Verifies load_tensor_slice / copy-out on a real ROCm build (hip asserted).
     name = "ckpt_database_test_rocm",
     srcs = ["ckpt_database_test.py"],

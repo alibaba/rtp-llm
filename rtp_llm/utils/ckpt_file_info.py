@@ -142,6 +142,10 @@ class CkptFileInfo:
                     metadata = json.loads(header)
                 for key in f_.keys():
                     meta[key] = metadata[key]["data_offsets"][0]
+                self._safetensors_data_start = 8 + length_of_header
+                self._safetensors_byte_sizes = {
+                    key: metadata[key]["data_offsets"][1] - meta[key] for key in meta
+                }
             self.metadata = meta
         else:
             self.metadata = torch.load(file, pickle_module=meta_pickler)
@@ -159,6 +163,30 @@ class CkptFileInfo:
             if tensor_name not in data:
                 raise KeyError(f"Tensor '{tensor_name}' not found in the file")
             return data[tensor_name].dtype
+
+    def copy_tensor_bytes(self, name: str, destination) -> None:
+        """Stream unchanged safetensors bytes into a writable contiguous buffer.
+
+        Large file-backed CPU tensors otherwise fault the source a page at a
+        time when copied into shared RAM. Explicit bulk reads let remote
+        filesystems fill the destination without an extra tensor allocation.
+        """
+        if not self.is_safetensor():
+            raise ValueError("Byte streaming requires a safetensors checkpoint")
+        with memoryview(destination) as raw, raw.cast("B") as target:
+            if target.readonly or len(target) != self._safetensors_byte_sizes[name]:
+                raise ValueError("Destination must be writable and match tensor bytes")
+            with open(self.file_name, "rb", buffering=0) as source:
+                source.seek(self._safetensors_data_start + self.metadata[name])
+                offset = 0
+                while offset < len(target):
+                    end = min(offset + 64 * 1024**2, len(target))
+                    with target[offset:end] as block:
+                        count = source.readinto(block)
+                    if not count:
+                        raise EOFError(f"Truncated checkpoint tensor: {name}")
+                    offset += count
+                    self._note_bytes_read(count)
 
     def _get_safetensor_handle(self):
         if not hasattr(self, "_st_handle") or self._st_handle is None:
