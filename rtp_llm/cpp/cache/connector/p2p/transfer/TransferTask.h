@@ -1,10 +1,12 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <shared_mutex>
 #include <string>
 #include <map>
+#include <vector>
 
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheReceiver.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
@@ -17,8 +19,11 @@ namespace transfer {
 /// @brief 单次 recv 任务（一层一个 partition），实现 IKVCacheRecvTask
 class TransferTask: public IKVCacheRecvTask {
 public:
-    TransferTask(KeyBlockInfoMap block_infos, int64_t deadline_ms):
-        block_infos_(std::move(block_infos)), deadline_ms_(deadline_ms), start_time_us_(currentTimeUs()) {}
+    TransferTask(KeyBlockInfoMap block_infos, int64_t deadline_ms, BatchCopiedCallback on_batch_copied = {}):
+        block_infos_(std::move(block_infos)),
+        on_batch_copied_(std::move(on_batch_copied)),
+        deadline_ms_(deadline_ms),
+        start_time_us_(currentTimeUs()) {}
     ~TransferTask() override = default;
 
 public:
@@ -28,20 +33,28 @@ public:
     void              cancel() override;
     TransferErrorCode errorCode() const override;
     std::string       errorMessage() const override;
+    void              setDoneCallback(std::function<void()> callback) override;
 
 public:
     // 内部使用（TcpTransferService / RdmaTransferService 通知完成）
     const KeyBlockInfoMap& getBlockInfos() const {
         return block_infos_;
     }
-    void
-    notifyDone(bool success, TransferErrorCode error_code = TransferErrorCode::OK, const std::string& error_msg = "");
+    void    notifyDone(bool               success,
+                       TransferErrorCode  error_code = TransferErrorCode::OK,
+                       const std::string& error_msg  = "",
+                       bool               started    = true);
+    void    notifyBatchDone(const std::vector<int64_t>& keys, bool started = true);
+    bool acceptsBatches() const { return static_cast<bool>(on_batch_copied_); }
+    int64_t deadlineMs() const { return deadline_ms_; }
 
-    /// @brief 原子地将任务从 PENDING 迁移到 TRANSFERRING 状态。
-    /// @return false 表示任务已在 PENDING 阶段被 cancel，调用方应立即报告失败。
+    /// Record the first logical failure while outstanding DMA still owns the buffers.
+    void recordError(TransferErrorCode error_code, const std::string& error_message);
+
+    /// Acquire one physical receive slot. Call completion once for each acquired slot.
     bool startTransfer();
 
-    /// @brief 强制终止任务，无论当前状态如何（仅供 P2PConnectorWorker 超时安全网使用）。
+    /// @brief 强制终止任务，无论当前状态如何（仅供 P2P connector worker 超时安全网使用）。
     void forceCancel() override;
 
     int64_t totalCostTimeUs() const {
@@ -50,17 +63,25 @@ public:
     }
 
 private:
+    void completeTransfer(TransferErrorCode           error_code,
+                          const std::string&          error_msg,
+                          const std::vector<int64_t>* batch_keys,
+                          bool                        started);
+
     KeyBlockInfoMap block_infos_;
+    BatchCopiedCallback on_batch_copied_;
     int64_t         deadline_ms_;
     int64_t         start_time_us_      = 0;
     int64_t         total_cost_time_us_ = 0;
 
     mutable std::shared_mutex mutex_;
     bool                      done_             = false;
-    bool                      transferring_     = false;
+    size_t                    in_flight_            = 0;
+    bool                      completion_requested_ = false;
     bool                      cancel_requested_ = false;
-    TransferErrorCode         error_code_       = TransferErrorCode::OK;
-    std::string               error_msg_;
+    mutable TransferErrorCode error_code_       = TransferErrorCode::OK;
+    mutable std::string       error_msg_;
+    std::function<void()>     done_callback_;
 };
 
 /// @brief 内部 task store，被 TcpKVCacheReceiver / RdmaKVCacheReceiver 私有持有
@@ -71,7 +92,10 @@ public:
 
     /// @brief 创建并注册一个新的 recv task
     std::shared_ptr<TransferTask>
-    addTask(const std::string& unique_key, KeyBlockInfoMap block_infos, int64_t deadline_ms);
+    addTask(const std::string& unique_key,
+            KeyBlockInfoMap block_infos,
+            int64_t deadline_ms,
+            BatchCopiedCallback on_batch_copied = {});
 
     /// @brief 按 unique_key 查询 task（不转移所有权）
     std::shared_ptr<TransferTask> getTask(const std::string& unique_key) const;
@@ -83,6 +107,8 @@ public:
 private:
     mutable std::shared_mutex                            mutex_;
     std::map<std::string, std::shared_ptr<TransferTask>> task_map_;
+    std::map<std::string, int64_t> completed_batches_;
+    std::multimap<int64_t, std::string> completed_expiry_;
 };
 
 }  // namespace transfer

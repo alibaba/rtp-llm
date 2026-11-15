@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma/RdmaConnection.h"
 #include "aios/network/rdma/accl/RdmaMempool.h"
 #include "aios/network/accl-barex/include/accl/barex/highlevel/xclient_transport.h"
+#include "autil/LoopThread.h"
 #include <memory>
 #include <string>
 #include <shared_mutex>
@@ -30,7 +31,9 @@ public:
 
 private:
     std::shared_ptr<RdmaHostConnectionPool> getOrCreateConnectionPool(const std::string& ip, uint32_t port);
-    std::shared_ptr<RdmaConnection> createNewConnection(const std::string& ip, uint32_t port);
+    std::shared_ptr<RdmaConnection> makeConnection(const std::string& ip, uint32_t port);
+    void startConnection(const std::shared_ptr<RdmaConnection>& connection, const std::string& ip, uint32_t port);
+    void sweepExpiredPendingRequests();
 
 private:
     // 连接管理参数
@@ -46,6 +49,9 @@ private:
     std::map<std::string, std::shared_ptr<RdmaHostConnectionPool>> host_connection_pools_;
 
     std::shared_ptr<IRdmaMemoryManager> memory_manager_;
+
+    // Periodic sweep of expired pending requests across all connections
+    autil::LoopThreadPtr deadline_sweep_thread_;
 
     // 初始化标志
     bool initialized_ = false;

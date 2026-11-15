@@ -21,7 +21,8 @@ bool TcpKVCacheReceiver::init(uint32_t listen_port,
                               int      worker_thread_count,
                               uint32_t anet_rpc_thread_num,
                               uint32_t anet_rpc_queue_num,
-                              int64_t  wait_check_interval_us) {
+                              int64_t  wait_check_interval_us,
+                              uint32_t worker_queue_size) {
     transfer_service_         = std::make_shared<TcpTransferService>(task_store_, metrics_reporter_);
     const int64_t interval_us = wait_check_interval_us > 0 ? wait_check_interval_us : int64_t{1000};
     if (!transfer_service_->init(interval_us, worker_thread_count)) {
@@ -31,7 +32,7 @@ bool TcpKVCacheReceiver::init(uint32_t listen_port,
 
     tcp_server_ = std::make_shared<transfer::TcpServer>();
     if (!tcp_server_->init(
-            io_thread_count, worker_thread_count, listen_port, true, anet_rpc_thread_num, anet_rpc_queue_num)) {
+            io_thread_count, worker_thread_count, listen_port, true, anet_rpc_thread_num, anet_rpc_queue_num, worker_queue_size)) {
         RTP_LLM_LOG_WARNING("create tcp server failed");
         return false;
     }
@@ -56,7 +57,7 @@ bool TcpKVCacheReceiver::regMem(const BlockInfo& /*block_info*/, uint64_t /*alig
 }
 
 transfer::IKVCacheRecvTaskPtr TcpKVCacheReceiver::recv(const transfer::RecvRequest& request) {
-    return task_store_->addTask(request.unique_key, request.block_info, request.deadline_ms);
+    return task_store_->addTask(request.unique_key, request.block_info, request.deadline_ms, request.on_batch_copied);
 }
 
 void TcpKVCacheReceiver::stealTask(const std::string& unique_key) {

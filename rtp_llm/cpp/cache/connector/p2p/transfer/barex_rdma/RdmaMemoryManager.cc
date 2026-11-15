@@ -148,7 +148,23 @@ bool RdmaMemoryManager::regUserMrInternal(void* buf, uint64_t size, bool gpu, ui
         }
         auto nic_rkeys = std::make_shared<std::map<uint32_t, uint32_t>>();
         for (auto& [nicid, ibv_mr] : mr_mem.mrs) {
+            if (!ibv_mr) {
+                RTP_LLM_LOG_ERROR("registered RDMA MR is null, addr=%p size=%lu nicid=%u", reg_buf, reg_size, nicid);
+                success = false;
+                break;
+            }
             nic_rkeys->insert({nicid, ibv_mr->rkey});
+        }
+        // RDMA MR 通常在进程初始化时统一注册管理；入表记录必须具有有效 MR 和非空 rkey 集合。
+        // 注册阶段发现异常时回滚本次注册并返回失败，禁止将无效记录插入 MR 表。
+        if (nic_rkeys->empty()) {
+            RTP_LLM_LOG_ERROR("registered RDMA MR has no rkeys, addr=%p size=%lu gpu=%d", reg_buf, reg_size, gpu);
+            success = false;
+        }
+        if (!success) {
+            rdma_mempool_->DeregUserMr(reg_buf, gpu ? arpc::RdmaMempool::GPU : arpc::RdmaMempool::CPU);
+            // 保留 to_reg_size，由下方失败分支清理此前成功注册的分段。
+            break;
         }
         mr_infos.push_back(mr_info(buf, reg_buf, (int8_t*)reg_buf + reg_size, mr_mem, nic_rkeys));
         reg_buf = (void*)((uint64_t)reg_buf + reg_size);

@@ -43,8 +43,9 @@ struct MHAKVCacheSpec: public KVCacheSpec {
         const auto     attn_tp        = std::max<int64_t>(1, ctx.parallelism_config->get_attn_tp_size());
         const uint32_t tp             = static_cast<uint32_t>(attn_tp);
         const uint32_t kv             = static_cast<uint32_t>(attn.kv_head_num);
-        const uint32_t local_kv_heads = (kv % tp == 0) ? kv / tp : kv / std::gcd(kv, tp);
+        const uint32_t local_kv_heads = kv / std::gcd(kv, tp);
         auto           spec           = std::make_shared<MHAKVCacheSpec>(desc.tag, seq, kernel, local_kv_heads);
+        spec->global_kv_head_num_     = kv;
         spec->dtype_                  = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
         RTP_LLM_CHECK_WITH_INFO(spec->dtype_ != DataType::TYPE_INVALID,
                                 "KVCacheSpecDesc tag=%s cache_type=%d requires valid dtype",
@@ -65,6 +66,10 @@ struct MHAKVCacheSpec: public KVCacheSpec {
 
     uint32_t localKvHeads() const {
         return local_kv_head_num;
+    }
+
+    uint32_t globalKvHeads() const {
+        return global_kv_head_num_;
     }
     // Zero denotes an unspecified layout, which requires whole-block copies.
     uint32_t headDim() const {
@@ -125,6 +130,7 @@ private:
     size_t   per_token_k_elems       = 0;
     size_t   per_token_k_scale_bytes = 0;
     uint32_t head_dim_               = 0;
+    uint32_t global_kv_head_num_     = 0;
 };
 
 }  // namespace rtp_llm
