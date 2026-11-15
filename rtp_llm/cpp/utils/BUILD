@@ -5,7 +5,12 @@ package(default_visibility = ["//:__subpackages__"])
 
 filegroup(
     name = "scr_logger_test_sources",
-    srcs = ["Logger.cc", "Logger.h"],
+    srcs = [
+        "Exception.h",
+        "Logger.cc",
+        "Logger.h",
+        "StringUtil.h",
+    ],
     visibility = [
         "//rtp_llm/utils/test:__pkg__",
         "//rtp_llm/utils/scr/test:__pkg__",

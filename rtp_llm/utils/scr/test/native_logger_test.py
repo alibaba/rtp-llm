@@ -115,7 +115,7 @@ int main() {
                 target.write_text(body)
             (temp / "main.cc").write_text(source)
             binary = temp / "logger-test"
-            subprocess.run(
+            compile_result = subprocess.run(
                 [
                     "c++",
                     "-std=c++17",
@@ -129,10 +129,10 @@ int main() {
                     "-o",
                     str(binary),
                 ],
-                check=True,
                 capture_output=True,
                 text=True,
             )
+            self.assertEqual(compile_result.returncode, 0, compile_result.stderr)
             env = {
                 key: value for key, value in os.environ.items() if key != "LOG_LEVEL"
             }
