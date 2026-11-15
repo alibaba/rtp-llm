@@ -165,6 +165,12 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
         && src.headShardCount(tag) != dst.headShardCount(tag)) {
         return planError("LinearAttention asymmetric head sharding is unsupported for tag '" + tag + "'");
     }
+    // The side with fewer shards must partition each larger block. Even an
+    // MHA spec uses whole-block conversion in a model configured for MLA.
+    if (sg.spec_type == KVCacheSpecType::MultiHeadAttention && (src.use_mla || dst.use_mla)
+        && src.headShardCount(tag) != dst.headShardCount(tag)) {
+        return planError("asymmetric MHA head sharding requires block partitioning for tag '" + tag + "'");
+    }
 
     // (a) 字节维度：还原出的全局尺寸必须一致。**守恒量取决于 slice 模式**：
     //   PAYLOAD_BYTES -> sliceBlockForPeer 以 k_block_payload_bytes 为分母，守恒量是 payload
@@ -677,6 +683,7 @@ ShardLayout ShardLayout::forPeer(const ShardLayout&       self,
     peer.pc                              = peer_pc;
     peer.cache_key_tokens_per_block      = self.cache_key_tokens_per_block;
     peer.use_group_cache_transfer_policy = self.use_group_cache_transfer_policy;
+    peer.use_mla                         = self.use_mla;
     peer.groups                          = self.groups;  // same-build: policy / spec 类型 / seq 尺寸两侧相同
 
     peer.deriveHeadShardCounts();

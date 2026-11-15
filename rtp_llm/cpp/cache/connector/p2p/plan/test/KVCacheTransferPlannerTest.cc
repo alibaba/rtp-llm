@@ -715,6 +715,21 @@ TEST(PlannerGroupB, NonFullGroupCannotUseRoundRobinCp) {
         << result.error.ToString();
 }
 
+TEST(PlannerGroupB, MlaModelCannotPartitionAnMhaGroupAsymmetrically) {
+    auto two_shards  = mhaLayout(2);
+    auto four_shards = mhaLayout(4);
+    ASSERT_TRUE(KVCacheTransferPlanner::plan(two_shards, four_shards, {kFullTag}).ok());
+    two_shards.use_mla = four_shards.use_mla = true;
+
+    for (const auto& result : {KVCacheTransferPlanner::plan(two_shards, four_shards, {kFullTag}),
+                               KVCacheTransferPlanner::plan(four_shards, two_shards, {kFullTag})}) {
+        ASSERT_FALSE(result.ok());
+        EXPECT_NE(result.error.ToString().find("asymmetric MHA head sharding requires block partitioning"),
+                  std::string::npos);
+    }
+    EXPECT_TRUE(KVCacheTransferPlanner::plan(two_shards, two_shards, {kFullTag}).ok());
+}
+
 TEST(PlannerGroupB, HybridPrefillCannotTailLimitRoundRobinFullGroup) {
     auto full_tail                      = makeMlaFullGroup();
     full_tail.policy.active_tail_blocks = 2;

@@ -135,6 +135,7 @@ P2PSchedulerDecodeRead::planFor(int prefill_tp_size, int prefill_cp_size, const 
     auto dst_layout = ShardLayoutFactory::fromTopology(
         *config_.topology, config_.parallelism_config, RoleType::DECODE, config_.cache_key_tokens_per_block);
     dst_layout.use_group_cache_transfer_policy = config_.use_group_cache_transfer_policy;
+    dst_layout.use_mla                         = config_.use_mla;
     const auto src_layout =
         ShardLayoutFactory::peerOf(dst_layout, prefill_tp_size, prefill_cp_size > 1, RoleType::PREFILL);
     const auto tags = ShardLayoutFactory::tagsOf(*config_.topology);

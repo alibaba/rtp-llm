@@ -31,6 +31,7 @@ std::shared_ptr<const PlanResult> P2PSchedulerPrefillRead::planFor(int          
     auto src_layout = ShardLayoutFactory::fromTopology(
         *config_.topology, config_.parallelism_config, RoleType::PREFILL, config_.cache_key_tokens_per_block);
     src_layout.use_group_cache_transfer_policy = config_.use_group_cache_transfer_policy;
+    src_layout.use_mla                         = config_.use_mla;
     const auto dst_layout =
         ShardLayoutFactory::peerOf(src_layout, decode_tp_size, src_layout.cpSize() > 1, RoleType::DECODE);
     const auto tags   = ShardLayoutFactory::tagsOf(*config_.topology);
