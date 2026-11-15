@@ -1470,6 +1470,17 @@ class _NaviSchedScheduler:
 
     def update_from_output(self, scheduler_output, model_runner_output):
         started_ns = time.perf_counter_ns()
+        transfer_output = getattr(model_runner_output, "kv_connector_output", None)
+        for request_id in getattr(transfer_output, "finished_recving", None) or ():
+            self._observer.on_request_lifecycle_event(
+                {
+                    "event": "kv_transfer_received",
+                    "event_time_us": time.time_ns() // 1000,
+                    "received_perf_ns": started_ns,
+                    "request_id": request_id,
+                }
+            )
+        before_native_ns = time.perf_counter_ns()
         try:
             return self._scheduler.update_from_output(
                 scheduler_output, model_runner_output
@@ -1487,7 +1498,8 @@ class _NaviSchedScheduler:
                 "update_from_output",
                 started_ns,
                 finished_ns,
-                native_ms=(after_native_ns - started_ns) / 1_000_000,
+                audit_ms=(before_native_ns - started_ns) / 1_000_000,
+                native_ms=(after_native_ns - before_native_ns) / 1_000_000,
                 report_ms=(finished_ns - after_native_ns) / 1_000_000,
                 scheduled_tokens=sum(scheduler_output.num_scheduled_tokens.values()),
             )
