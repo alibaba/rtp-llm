@@ -500,7 +500,7 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
         return ready
 
     def _initialize_bf16_collective(self, init_resource):
-        if self.tp_size == 1 or (
+        if self.tp_size not in (2, 4, 8, 16) or (
             init_resource.is_decode_role and type(self) is not KimiK3Model
         ):
             return

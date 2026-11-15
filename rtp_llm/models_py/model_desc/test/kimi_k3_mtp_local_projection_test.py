@@ -218,6 +218,21 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
         fp8_collective.assert_not_called()
         self.assertIsNone(model._fp8_collective)
 
+    def test_bf16_unsupported_fusion_topology_keeps_regular_projections(self):
+        model = self._bf16_mtp_model(device="cuda")
+        model.tp_size = 6
+        model._projection_staging_tokens = 66
+        with (
+            patch("torch.cuda.get_device_capability", return_value=(10, 3)),
+            patch("rtp_llm.models_py.model_desc.kimi_k3._get_group"),
+            patch(
+                "rtp_llm.models_py.modules.factory.linear.impl.cuda.bf16_comm_fusion.Bf16CollectiveProjection",
+            ) as collective,
+        ):
+            model._initialize_bf16_collective(SimpleNamespace(is_decode_role=False))
+        collective.assert_not_called()
+        self.assertIsNone(model.layers[0].attention._bf16_collective)
+
     def test_bf16_draft_initializes_eligible_prefill_collective(self):
         model = self._bf16_mtp_model(device="cuda")
         init_resource = SimpleNamespace(kv_cache=None, is_decode_role=False)

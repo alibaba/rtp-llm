@@ -2031,10 +2031,8 @@ void CudaGraphRunner::initCapture() {
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
 
-        if (sequence_parallel_size_ > 1 || isMtpDraftPrefillCudaGraph()) {
-            inputs.attention_inputs.physical_token_count   = max_num_token_;
-            inputs.attention_inputs.physical_request_count = max_bs_;
-        }
+        inputs.attention_inputs.physical_token_count   = max_num_token_;
+        inputs.attention_inputs.physical_request_count = max_bs_;
 
         // The eager datatype-probe forward runs before per-bucket graph
         // inputs are created. Give it the same valid no-prefix sentinel
@@ -2310,10 +2308,8 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         inputs.attention_inputs.valid_token_mask =
             capture_mem_hold_.py_model_inputs_.attention_inputs.valid_token_mask.slice(0, 0, token_slice_len);
     }
-    if (sequence_parallel_size_ > 1 || isMtpDraftPrefillCudaGraph()) {
-        inputs.attention_inputs.physical_token_count   = token_slice_len;
-        inputs.attention_inputs.physical_request_count = batch_size;
-    }
+    inputs.attention_inputs.physical_token_count   = token_slice_len;
+    inputs.attention_inputs.physical_request_count = batch_size;
     if (isGenerationPrefillCudaGraph()) {
         // Generation prefill builds embeddings from input_ids. Keep this
         // transport-only tensor empty, matching initCapture(), instead of

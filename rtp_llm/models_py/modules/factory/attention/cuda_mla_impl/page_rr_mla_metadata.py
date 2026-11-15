@@ -157,6 +157,7 @@ class PageRRMlaMetadata:
                 cp_size=self.cp_size,
                 cp_rank=self.cp_rank,
                 block=128,
+                allow_reserved_block_zero=bool(getattr(inputs, "is_warmup", False)),
                 debug=True,
             )
         if sparse_query_positions:

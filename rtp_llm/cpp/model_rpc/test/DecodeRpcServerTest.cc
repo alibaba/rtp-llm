@@ -522,6 +522,15 @@ TEST(DecodeRpcServerTest, NonLinearGroupsKeepLegacyReplicaSelection) {
     EXPECT_EQ(replicated.at(peers[1]).remote_partition_id, 5);
 }
 
+TEST(DecodeRpcServerTest, MlaPeerPartitionsRejectIncompatibleTpWithoutIndexingPeers) {
+    const std::vector<std::string> peers{
+        "127.0.0.1:1000:2000", "127.0.0.1:1001:2001", "127.0.0.1:1002:2002", "127.0.0.1:1003:2003"};
+    for (int rank = 0; rank < 6; ++rank) {
+        SCOPED_TRACE(rank);
+        ASSERT_TRUE(DecodeRpcServer::prefillPeerPartitions(peers, 6, rank, /*use_mla=*/true).empty());
+    }
+}
+
 TEST(DecodeRpcServerTest, ReplicatedLinearHeadsUseAttentionTpRatherThanPeerCount) {
     const std::vector<std::string> peers{
         "127.0.0.1:1000:2000", "127.0.0.1:1001:2001", "127.0.0.1:1002:2002", "127.0.0.1:1003:2003"};

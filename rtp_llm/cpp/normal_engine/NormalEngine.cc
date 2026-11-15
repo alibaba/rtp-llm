@@ -113,18 +113,16 @@ private:
     std::shared_ptr<KVCacheManager> previous_cache_manager_;
 };
 
-std::shared_ptr<KVCacheManager> createGenerationPrefillCudaGraphWarmUpCacheManager(const EngineInitParams& params) {
+std::shared_ptr<KVCacheManager> createPrefillWarmUpCacheManager(const EngineInitParams& params) {
     auto cache_config = CacheConfigCreator::createWarmupConfig(
         params.model_config_, params.parallelism_config, params.kv_cache_config, /*gen_num_per_cycle=*/0);
 
-    RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block > 0,
-                            "generation prefill CUDA graph warmup requires a positive KV block size");
+    RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block > 0, "prefill warmup requires a positive KV block size");
 
-    // This temporary pool only supplies the KV tensor bound into the captured
-    // model. The warmup config publishes complete per-group capacities before
-    // KVCacheManager allocates the reserved block 0, as in decode warmup.
+    // This temporary pool supplies KV backing for the warmup model. The warmup config publishes complete per-group
+    // capacities before KVCacheManager allocates the reserved block 0, as in decode warmup.
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
-    RTP_LLM_CHECK_WITH_INFO(cache_manager->init(), "init generation prefill CUDA graph warmup KV cache manager failed");
+    RTP_LLM_CHECK_WITH_INFO(cache_manager->init(), "init prefill warmup KV cache manager failed");
     return cache_manager;
 }
 
@@ -637,7 +635,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
                                                    /*primary_graph_is_prefill=*/false,
                                                    params.parallelism_config.role_type,
                                                    params.sp_config.type);
-        if (!generation_prefill_cuda_graph_requested) {
+        if (!generation_prefill_cuda_graph_requested
+            && model_config_.local_kv_cache_layout != LocalKVCacheLayoutPolicy::PAGE_RR) {
             if (parallelism_config.pp_size > 1) {
                 executor_.reset(new PPExecutor(params, nullptr, true));
             } else {
@@ -652,19 +651,20 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
             return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
         }
 
-        // A normal prefill warmup historically has no CacheManager. Generation
-        // prefill CUDA Graph, however, needs a real KV layout and reserved dummy
-        // block 0 during construction. Capture against a minimal temporary pool so
-        // graph-owned tensors and graph-pool reservations are included in the
-        // runtime budget before the production KV pool consumes the remaining
-        // memory. Speculative/MTP models stay on their independent warmup path.
-        auto warmup_cache_manager = createGenerationPrefillCudaGraphWarmUpCacheManager(params);
+        // Page-RR attention and generation-prefill graphs need KV backing during
+        // warmup. Use a minimal temporary pool so activation and graph storage is
+        // measured before the production KV pool consumes the remaining memory.
+        auto warmup_cache_manager = createPrefillWarmUpCacheManager(params);
 
         const auto baseline_status    = getGpuExecStatus().device_memory_status;
         const auto baseline_allocated = cuda_graph::graphAllocatedBytes();
         const auto baseline_reserved  = cuda_graph::graphReservedBytes();
 
-        executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0));
+        if (parallelism_config.pp_size > 1) {
+            executor_.reset(new PPExecutor(params, warmup_cache_manager, true));
+        } else {
+            executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0));
+        }
         {
             // NormalGenerateStream snapshots ResourceContext at construction. Bind
             // the same temporary manager used by NormalExecutor so fakeInitKVBlock

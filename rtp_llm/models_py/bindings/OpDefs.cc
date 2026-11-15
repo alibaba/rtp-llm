@@ -205,6 +205,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("total_tokens", &PyAttentionInputs::total_tokens)
         .def_readwrite("padding_offset", &PyAttentionInputs::padding_offset)
         .def_readwrite("is_s_padded", &PyAttentionInputs::is_s_padded)
+        .def_readwrite("is_warmup", &PyAttentionInputs::is_warmup)
         .def_readonly("prefix_lengths_device", &PyAttentionInputs::prefix_lengths_device)
         .def_readwrite("sequence_lengths_plus_1_device", &PyAttentionInputs::sequence_lengths_plus_1_device)
         .def_readonly("input_lengths_device", &PyAttentionInputs::input_lengths_device)

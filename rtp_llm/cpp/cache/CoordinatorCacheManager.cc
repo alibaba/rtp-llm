@@ -950,7 +950,9 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
             auto&       filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(group_id)];
             auto&      group        = kv_cache_groups_[static_cast<size_t>(group_id)];
             const bool  replay_group     = config_.isLinearReplayGroup(group_id);
-            const int group_reserve = replay_group ? 0 : reserve_step;
+            // Async replay already reserves its complete next-step upper bound.
+            // Synchronous/fallback draft execution still needs proposal states.
+            const int  group_reserve = replay_group && malloc_info.preserve_inflight ? 0 : reserve_step;
             const bool replay_mutable =
                 isMutableLinearReplayGroup(config_, kv_resource->cacheResource(b), group_id);
             auto required_positions =
@@ -968,7 +970,8 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
             }
             const bool reuse_cache = malloc_info.reuse_cache && !replay_mutable;
             // Decode reserves proposal slots even while earlier pages are in flight.
-            const bool decode_allocation = malloc_info.enable_remove_skipped_blocks && !replay_group;
+            const bool decode_allocation =
+                malloc_info.enable_remove_skipped_blocks && (!replay_group || !malloc_info.preserve_inflight);
             const bool allocated = decode_allocation ?
                                        group->mallocForDecode(block_ids, group_seq_len, reuse_cache,
                                                               group_reserve, &filled_positions, required_positions) :
@@ -997,7 +1000,7 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
                     kv_resource->mutableBlockIds(b, tag),
                     malloc_info.reuse_cache
                         && !isMutableLinearReplayGroup(config_, kv_resource->cacheResource(b), group_id),
-                    config_.isLinearReplayGroup(group_id) ? 0 : reserve_step);
+                    reserve_step);
             }
         }
         return {true, 0};

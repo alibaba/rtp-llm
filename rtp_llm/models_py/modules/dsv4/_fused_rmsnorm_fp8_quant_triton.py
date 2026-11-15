@@ -126,8 +126,8 @@ def rmsnorm_fp8_quant_ue8m0(
         raise ValueError(f"weight must be bf16, got {weight.dtype}")
     if not x.is_cuda or not weight.is_cuda:
         raise RuntimeError("rmsnorm_fp8_quant_ue8m0 requires CUDA tensors")
-    if not x.is_contiguous():
-        raise ValueError("x must be contiguous")
+    if x.stride(1) != 1:
+        raise ValueError("x must have contiguous rows")
     m, n = x.shape
     if weight.shape != (n,) or not weight.is_contiguous():
         raise ValueError(f"weight must be contiguous [{n}], got {tuple(weight.shape)}")

@@ -2,11 +2,15 @@
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import torch
 
 from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.weight_manager import WeightManager
+from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.kimi_k3.kimi_k31_weight import KimiK31Weight
+from rtp_llm.models.kimi_k3.nvfp4_weight import KimiK31Nvfp4Weight
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.dsa_kv_workspace import (
     DsaWorkspaceOwner,
 )
@@ -53,6 +57,50 @@ def _load_config(rank):
 
 
 class KimiK31ReviewRegressionTest(unittest.TestCase):
+    def test_nvfp4_hot_update_cannot_partially_replace_codes(self):
+        descriptor = KimiK31Nvfp4Weight(
+            AtomicWeight(W.mla_q_b_w, []), module="dsa.query"
+        )
+        codes = torch.ones((32, 16), dtype=torch.uint8)
+        manager = object.__new__(WeightManager)
+        manager._weights = SimpleNamespace(
+            weights=[{descriptor.name: codes}], update_layer_weight=Mock()
+        )
+        manager._weights_loader = SimpleNamespace(
+            get_load_config=lambda: SimpleNamespace(num_layers=1, layer_range=[0])
+        )
+        manager._weight_module = SimpleNamespace(layer_weights=[[descriptor]])
+        manager._s_helper = SimpleNamespace(
+            build_from_meta=lambda _: torch.ones((32, 32), dtype=torch.bfloat16)
+        )
+        manager._working_stream = torch.cuda.current_stream()
+        manager._device = "cpu"
+        # IPC and quantization are boundaries; exercise the real update routing
+        # and descriptor lifecycle without requiring an SM100 quantizer.
+        with (
+            patch("rtp_llm.model_loader.weight_manager.SharedMemIpcMeta.decode"),
+            patch.object(descriptor, "_split", return_value={}),
+            patch.object(
+                descriptor,
+                "_postprocess",
+                return_value={
+                    descriptor.name: codes,
+                    descriptor.local_key: torch.ones((128, 4), dtype=torch.uint8),
+                    descriptor.global_key: torch.ones(1),
+                    descriptor.logical_n_key: torch.tensor(32),
+                },
+            ),
+            self.assertRaisesRegex(PermissionError, "restart"),
+        ):
+            manager.update(
+                {
+                    "name": "model.layers.0." + descriptor.name,
+                    "desc": "test",
+                    "method": "shm",
+                }
+            )
+        manager._weights.update_layer_weight.assert_not_called()
+
     def test_mla_manifest_builds_for_query_cp_and_regular_roles(self):
         for query_cp, role in (
             (True, RoleType.PREFILL),

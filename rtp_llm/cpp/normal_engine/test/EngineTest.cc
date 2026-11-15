@@ -801,6 +801,34 @@ TEST_F(NormalEngineTest, testPrefillWarmUpUsesCachelessSingleInput) {
     EXPECT_TRUE(saw_cacheless_warmup);
 }
 
+TEST_F(NormalEngineTest, PageRrPrefillWarmupHasReservedCacheBacking) {
+    CustomConfig config;
+    config.warm_up = true;
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    params.model_config_.local_kv_cache_layout = LocalKVCacheLayoutPolicy::PAGE_RR;
+    bool saw_warmup                            = false;
+    NormalExecutor::test_model_factory         = [&](const GptModelInitParams& init_params) {
+        return std::make_unique<MockModel>(model_config.vocab_size, [&](const GptModelInputs& inputs) {
+            if (inputs.warmup) {
+                saw_warmup = true;
+                EXPECT_TRUE(inputs.kv_cache_block_id.defined());
+                EXPECT_TRUE(inputs.kv_cache_kernel_block_id.defined());
+                EXPECT_FALSE(inputs.kv_cache_group_tags.empty());
+            }
+        });
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_reset_guard;
+    auto engine = std::make_shared<NormalEngine>(params, nullptr);
+    EXPECT_TRUE(saw_warmup);
+}
+
 #if USING_CUDA
 TEST_F(NormalEngineTest, testPpPrefillWarmupStaysCachelessWithGenerationGraphBuckets) {
     autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "0");

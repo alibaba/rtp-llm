@@ -7,6 +7,12 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3Model
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.dsa_page_rr_params import (
+    DsaPageRRParams,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.page_rr_mla_metadata import (
+    PageRRMlaMetadata,
+)
 from rtp_llm.models_py.modules.factory.attention.kda_impl import KdaPagedPrefill
 from rtp_llm.models_py.modules.hybrid.query_layout import QueryLayout
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
@@ -15,6 +21,65 @@ from rtp_llm.ops.compute_ops import PyAttentionInputs
 
 
 class KimiK31DeviceInputTest(unittest.TestCase):
+    def _warmup_attention(self):
+        attention = SimpleNamespace(
+            is_target_verify=False,
+            is_mtp_draft_update=False,
+            kv_cache_kernel_block_id_device=None,
+            padding_offset=None,
+        )
+        attention.is_prefill = attention.is_s_padded = attention.is_warmup = True
+        attention.input_lengths = torch.tensor([4], dtype=torch.int32)
+        attention.prefix_lengths = torch.tensor([0], dtype=torch.int32)
+        attention.input_lengths_device = attention.input_lengths.cuda()
+        attention.prefix_lengths_device = attention.prefix_lengths.cuda()
+        attention.cu_seqlens_device = torch.tensor(
+            [0, 4], dtype=torch.int32, device="cuda"
+        )
+        attention.logical_token_count = attention.physical_token_count = 4
+        return attention
+
+    def test_prefill_requires_explicit_warmup_cache_backing(self):
+        attention = self._warmup_attention()
+        metadata = PageRRMlaMetadata(4096, 128, 1, 0)
+        with self.assertRaisesRegex(ValueError, "page table"):
+            metadata.prepare_prefill(attention)
+
+    def test_dsa_warmup_accepts_reserved_zero_pages(self):
+        attention = self._warmup_attention()
+        attention.kv_cache_kernel_block_id_device = torch.zeros(
+            (1, 32), dtype=torch.int32, device="cuda"
+        )
+        parallelism = SimpleNamespace(
+            tp_size=1,
+            tp_rank=0,
+            prefill_cp_config=SimpleNamespace(
+                kv_cache_sharded=True, is_enabled=lambda: False
+            ),
+        )
+        params = DsaPageRRParams(
+            SimpleNamespace(tokens_per_block=4096, kernel_tokens_per_block=128),
+            parallelism,
+        )
+        params.prepare(attention)
+        self.assertTrue(params.is_warmup)
+        self.assertEqual(params.slot_mapping.tolist(), [0, 1, 2, 3])
+
+    def test_graph_padding_alone_does_not_replace_real_kda_cache(self):
+        attention = PyAttentionInputs()
+        attention.is_s_padded = True
+        cache = torch.ones((2, 128), device="cuda")
+        original, backing = KdaPagedPrefill._warmup_cache_inputs(attention, cache)
+        self.assertIs(original, attention)
+        self.assertIs(backing, cache)
+        attention.is_warmup = True
+        attention.kv_cache_kernel_block_id = torch.zeros((1, 2), dtype=torch.int32)
+        scratch_view, scratch = KdaPagedPrefill._warmup_cache_inputs(attention, cache)
+        self.assertEqual(scratch_view.kv_cache_kernel_block_id.tolist(), [[1, 1]])
+        self.assertEqual(attention.kv_cache_kernel_block_id.tolist(), [[0, 0]])
+        self.assertNotEqual(scratch.data_ptr(), cache.data_ptr())
+        self.assertTrue(torch.all(cache == 1).item())
+
     def test_eager_kda_preparation_receives_complete_host_mirrors(self):
         self.assertTrue(torch.cuda.is_available(), "requires the CUDA CI worker")
         attention = PyAttentionInputs()

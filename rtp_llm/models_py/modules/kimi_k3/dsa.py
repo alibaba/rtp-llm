@@ -1065,6 +1065,7 @@ class KimiK31DSA(KimiK3MLA):
                 output = gate_sigmoid_mul(output, gate, mask)
         use_fused_rs = (
             not local_query
+            and not self.prefill_query_cp
             and self._fp8_output_gate
             and self._fp8_collective is not None
             and self._fp8_collective.eligible_rs(
@@ -1092,11 +1093,18 @@ class KimiK31DSA(KimiK3MLA):
             and self.tp_size > 1
         ):
             with profile_scope("RTP::attention.output_reduce_scatter"):
-                output = (
-                    self._mtp_bf16_collectives.reduce_scatter(output)
-                    if self._mtp_bf16_collectives is not None
-                    else reduce_scatter_bf16(output, Group.TP)
-                )
+                if self.prefill_query_cp:
+                    # Query-CP keeps complete projection weights. Local Decode
+                    # restores all heads, so select rows without summing replicas.
+                    output = output.chunk(self.tp_size, dim=0)[
+                        self.tp_rank
+                    ].contiguous()
+                else:
+                    output = (
+                        self._mtp_bf16_collectives.reduce_scatter(output)
+                        if self._mtp_bf16_collectives is not None
+                        else reduce_scatter_bf16(output, Group.TP)
+                    )
         owner = getattr(next(iter(fmha.values())), "workspace_owner", None)
         if owner is not None:
             owner.release_eager_buffers()

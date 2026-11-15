@@ -6,7 +6,12 @@ from types import SimpleNamespace
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.distributed.collective_torch import get_mla_dcp
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_gather_into,
+    get_mla_dcp,
+    get_process_group,
+)
 from rtp_llm.models_py.utils.module_profiler import profile_scope
 from rtp_llm.utils.model_weight import W
 
@@ -19,6 +24,36 @@ class QueryCpLayout:
 
     def __init__(self, heads):
         self.heads = heads
+        self.decode_communicator = None
+
+    def prepare_decode(self, kv_lora_rank, rope_head_dim):
+        if self.decode_communicator is not None:
+            return
+        size = torch.distributed.get_world_size(get_process_group(Group.TP))
+        if self.heads % size:
+            raise ValueError("query CP heads must be divisible by TP")
+        self.decode_communicator = get_mla_dcp(
+            SimpleNamespace(
+                head_num=self.heads // size,
+                kv_lora_rank=kv_lora_rank,
+                rope_head_dim=rope_head_dim,
+            ),
+            torch.device("cuda", torch.cuda.current_device()),
+            torch.bfloat16,
+        )
+
+    def query_gather(self, query):
+        if query.shape[0] != self.heads:
+            raise ValueError("query CP decode requires every query head")
+        return query
+
+    def combine(self, partial, lse, lengths, *, output_dim=None):
+        local = self.decode_communicator.combine(
+            partial, lse, lengths, output_dim=output_dim
+        )
+        output = local.new_empty((self.heads, *local.shape[1:]))
+        all_gather_into(local, output, Group.TP)
+        return output
 
     def scatter_queries(self, query):
         if query.shape[1] != self.heads:
@@ -85,6 +120,8 @@ class PageRRSparseMlaOp(SparseMlaOp):
 
     def plan(self, params, block_table, attn_inputs=None):
         self.params = params
+        if not params.is_prefill and isinstance(self.communicator, QueryCpLayout):
+            self.communicator.prepare_decode(self.kv_lora_rank, self.qk_rope_head_dim)
         if self._decode_fp8_backend() == "sched":
             from rtp_llm.models_py.utils.flash_mla_legacy import get_mla_metadata
 

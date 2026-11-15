@@ -1556,7 +1556,10 @@ TEST_F(GenerateStreamTest, MtpCacheReservationExtendsLinearReplayWithoutInvalida
     ASSERT_TRUE(round.ok());
     ASSERT_NE(round->initial_state_hold, nullptr);
     const auto anchor  = cacheTable(stream);
-    auto       pending = pendingMtpCacheSnapshot(stream, 9);
+    // Synchronous admission may already own proposal slots. Cross the actual
+    // snapshot extent to exercise an asynchronous extension rather than a hit.
+    const int  next_bound = static_cast<int>((anchor.size(2) + 1) * config.seq_size_per_block);
+    auto       pending    = pendingMtpCacheSnapshot(stream, next_bound);
     const auto epoch   = stream->getMtpAsyncDeviceState().epoch;
 
     ASSERT_TRUE(stream->prepareMtpCacheForNextStep());
