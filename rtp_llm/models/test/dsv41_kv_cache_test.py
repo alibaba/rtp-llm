@@ -1,3 +1,4 @@
+import itertools
 import json
 import os
 import tempfile
@@ -9,7 +10,14 @@ from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.deepseek_v41 import DeepSeekV41
-from rtp_llm.ops import CacheMemoryPlacement
+from rtp_llm.ops import (
+    CacheMemoryPlacement,
+    CpBlockSliceMode,
+    CpPrefillSliceLayout,
+    DataType,
+    KVCacheSpecType,
+    OpaqueBlockEntryCountMode,
+)
 from rtp_llm.server.server_args.server_args import setup_args
 
 
@@ -37,6 +45,121 @@ def capacity(desc):
 
 
 class Dsv41KvCacheConfigTest(TestCase):
+    def test_native_descriptor_contract_for_remote_config_mirror(self):
+        # Paired with MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWireConfigs.
+        # This checks the real Python generator, not execution of a Python->C++
+        # bridge or kernel/transfer. Keep the C++ test-only mirror in sync.
+        # The C++ mirror models the legacy indexer layout; compact is the default.
+        for compact, bounded in itertools.product((False, True), repeat=2):
+            for draft in (False, True):
+                with self.subTest(compact=compact, bounded=bounded, draft=draft), patch.dict(
+                    os.environ,
+                    {
+                        "DSV41_SWA_BOUNDED_REPLAY": str(int(bounded)),
+                        "DSV41_COMPACT_INDEXER_KV": str(int(compact)),
+                    },
+                    clear=True,
+                ):
+                    config = model_config(draft)
+                    config.attn_config.tokens_per_block = 256
+                    config.attn_config.sliding_window = 128
+                    if draft:
+                        config.num_layers = 3
+                        config.attn_config.layer_compress_ratios = [0, 0, 0]
+                    DeepSeekV41._apply_kv_cache_config(config, KVCacheConfig())
+                    self.assertEqual(config.attn_config.tokens_per_block, 256)
+                    self.assertEqual(config.attn_config.kernel_tokens_per_block, 128)
+                    self.assertEqual(config.cache_min_replay_tokens, 128 if bounded else 1)
+                    self.assertEqual(
+                        config.cache_key_hash_seed,
+                        (0x4453563431494232 if bounded else 0x4453563431494632)
+                        if compact
+                        else (0x4453563431494231 if bounded else 0x4453563431494631),
+                    )
+                    tags = [
+                        [desc.tag for desc in layer]
+                        for layer in config.kv_cache_spec_descs
+                    ]
+                    tail_tag = "decoder_swa_kv" if bounded else "swa_kv"
+                    expected = (
+                        [[tail_tag]] * 3
+                        if draft
+                        else [
+                            ["swa_kv"],
+                            [
+                                "swa_kv",
+                                "csa_kv",
+                                "indexer_kv_c2" if compact else "indexer_kv",
+                                "csa_state",
+                            ],
+                            ["swa_kv"],
+                            ["swa_kv", "hca_kv", "indexer_kv"],
+                            [tail_tag],
+                        ]
+                    )
+                    self.assertEqual(tags, expected)
+                    by_tag = descriptors(config)
+                    for tag, desc in by_tag.items():
+                        with self.subTest(tag=tag):
+                            indexer = tag in ("indexer_kv", "indexer_kv_c2")
+                            if indexer or tag in ("csa_kv", "hca_kv"):
+                                self.assertEqual(
+                                    desc.cache_type, KVCacheSpecType.OPAQUE_KV
+                                )
+                                self.assertEqual(
+                                    desc.entry_count_mode,
+                                    OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED,
+                                )
+                                self.assertEqual(
+                                    desc.entry_elems, 68 if indexer else 288
+                                )
+                                self.assertEqual(
+                                    desc.compression_ratio,
+                                    2 if tag in ("csa_kv", "indexer_kv_c2") else 1,
+                                )
+                                self.assertEqual(
+                                    desc.block_stride_bytes_alignment,
+                                    0 if indexer else 4608,
+                                )
+                                self.assertEqual(desc.entry_dtype, DataType.TYPE_UINT8)
+                                continue
+                            state = tag == "csa_state"
+                            self.assertEqual(desc.cache_type, KVCacheSpecType.OPAQUE_STATE)
+                            self.assertTrue(desc.is_state_cache)
+                            self.assertEqual(
+                                desc.entry_count_mode, OpaqueBlockEntryCountMode.STATE_RING
+                            )
+                            self.assertEqual(desc.entry_elems, 1024 if state else 528)
+                            self.assertEqual(
+                                desc.entry_dtype,
+                                DataType.TYPE_FP32 if state else DataType.TYPE_UINT8,
+                            )
+                            self.assertEqual(desc.compression_ratio, 2 if state else 128)
+                            self.assertEqual(desc.state_ring_overlap, 0)
+                            self.assertTrue(desc.state_ring_include_gen_num_per_cycle)
+                            self.assertEqual(
+                                desc.block_stride_bytes_alignment, 0 if state else 16896
+                            )
+                            self.assertEqual(desc.block_stride_alignment_min_entries, 128)
+                            self.assertTrue(desc.cp.scale_seq_size)
+                            self.assertTrue(desc.cp.align_payload)
+                            self.assertEqual(
+                                desc.cp.prefill_slice_layout,
+                                CpPrefillSliceLayout.PAYLOAD
+                                if state
+                                else CpPrefillSliceLayout.BLOCK_STRIDE,
+                            )
+                            self.assertEqual(
+                                desc.cp.slice,
+                                CpBlockSliceMode.PAYLOAD_BYTES
+                                if state
+                                else CpBlockSliceMode.EQUAL_BYTES,
+                            )
+                            self.assertEqual(
+                                desc.reuse.enable_prefix_reuse,
+                                False if tag == "decoder_swa_kv" else None,
+                            )
+
     def test_model_factory_keeps_cli_overrides_after_legacy_hook(self):
         with tempfile.TemporaryDirectory() as ckpt:
             Path(ckpt, "config.json").write_text(

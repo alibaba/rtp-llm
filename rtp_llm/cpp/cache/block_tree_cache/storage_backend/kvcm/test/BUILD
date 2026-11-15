@@ -1,17 +1,6 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
 
 cc_test(
-    name = "dtop_origin_metadata_test",
-    srcs = ["DtopOriginMetadataTest.cc"],
-    copts = copts(),
-    deps = [
-        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:dtop_origin_metadata",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
-    ],
-)
-
-cc_test(
     name = "sdk_buffer_safety_test",
     srcs = ["SdkBufferSafetyTest.cc"],
     copts = copts(),
@@ -47,9 +36,10 @@ cc_test_wrapper(
         "//:using_remote_kv_cache": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    deps = [
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + [
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:client",
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:subscriber",
+        "//rtp_llm/cpp/cache/block_tree_cache",  # ScopeRollback used by the recovery test.
         "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
@@ -222,13 +212,15 @@ cc_test_wrapper(
         "//:using_remote_kv_cache": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    deps = kvcm_backend_test_deps + [
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + kvcm_backend_test_deps + [
         "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache:device_block_pool_config_helper",
         "//rtp_llm/cpp/cache/test:block_pool_test_helper",
         "//rtp_llm/cpp/utils:async_profile_trace",
         "//rtp_llm/cpp/utils:async_profiling_scope",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
 )
 
@@ -254,6 +246,7 @@ cc_test_wrapper(
 
 cc_test_wrapper(
     name = "kvcm_mock_only_full_test",
+    testonly = True,
     exec_properties = {"gpu": "L20_CU13"},
     srcs = [
         "KVCMMockOnlyFullTest.cc",
@@ -269,7 +262,7 @@ cc_test_wrapper(
         "//:using_remote_kv_cache": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    deps = kvcm_backend_test_deps,
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + kvcm_backend_test_deps,
 )
 
 cc_test_wrapper(
@@ -339,6 +332,7 @@ cc_test_wrapper(
 
 cc_test_wrapper(
     name = "native_dtop_completion_test",
+    testonly = True,
     exec_properties = {"gpu": "L20_CU13"},
     srcs = [
         "NativeDtopCompletionTest.cc",
@@ -354,5 +348,28 @@ cc_test_wrapper(
         "//:using_remote_kv_cache": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    deps = kvcm_backend_test_deps,
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support",
+            "//rtp_llm/cpp/cache:cache",
+            "//rtp_llm/cpp/cache/test:block_pool_test_helper",
+            "//rtp_llm/cpp/cache/block_tree_cache",
+            "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils"] + kvcm_backend_test_deps,
+)
+
+# Do not link kvcm_storage_backend: this test includes its current .cc once.
+cc_test_wrapper(
+    name = "kvcm_submission_boundary_test",
+    testonly = True,
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = ["KVCMSubmissionBoundaryTest.cc", "KVCMMockTestBase.h", "MockKVCMClient.h"],
+    copts = ["-fno-access-control"] + copts(),
+    target_compatible_with = select({
+        "//:using_remote_kv_cache": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + [d for d in kvcm_backend_test_deps if d != "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:kvcm_storage_backend"] + [
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:submission_boundary_test_source",
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:sdk_buffer_safety",
+    ],
+    tags = ["L20_CU13", "exclusive-if-local"],
 )

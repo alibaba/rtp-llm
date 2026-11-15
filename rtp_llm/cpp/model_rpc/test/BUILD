@@ -172,12 +172,13 @@ cc_test(
 
 cc_test(
     name = "prefill_rpc_server_test",
+    testonly = True,
     srcs = [
         "PrefillRpcServerTest.cc",
         "RpcEngineStartupTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps + [
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + test_deps + [
         "//rtp_llm/cpp/normal_engine/test:mock_engine",
     ],
     env = {},
@@ -187,9 +188,10 @@ cc_test(
 
 cc_test(
     name = "decode_rpc_server_test",
+    testonly = True,
     srcs = ["DecodeRpcServerTest.cc"],
     copts = test_copts,
-    deps = test_deps + [
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + test_deps + [
         "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     ],

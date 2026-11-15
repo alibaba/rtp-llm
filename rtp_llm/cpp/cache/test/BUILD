@@ -3,17 +3,6 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
-cc_test(
-    name = "decode_reuse_sources_test",
-    srcs = ["DecodeReuseSourcesTest.cc"],
-    copts = copts(),
-    deps = [
-        "//rtp_llm/cpp/cache:decode_reuse_sources",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
-    ],
-)
-
 cc_import(
     name = "cuda13_torch_nvshmem",
     shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
@@ -275,6 +264,7 @@ cc_test(
 
 cc_test(
     name = "single_type_kv_cache_allocator_test",
+    testonly = True,
     srcs = [
         "SingleTypeCoordinatorCacheManagerTest.cc",
     ],
@@ -283,6 +273,7 @@ cc_test(
     deps = test_deps + [
         ":block_pool_test_helper",
         ":block_tree_cache_allocator_test_helper",
+        "//rtp_llm/cpp/utils:decode_publication_test_support",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
     ],
@@ -458,9 +449,10 @@ cc_test(
 
 cc_test(
     name = "coordinator_cache_manager_atomic_update_test",
+    testonly = True,
     srcs = ["CoordinatorCacheManagerAtomicUpdateTest.cc"],
     copts = copts(),
-    deps = [
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + [
         "@havenask//aios/autil:env_util",
         ":block_tree_cache_allocator_test_helper",
         ":cache_config_test_utils",
@@ -481,4 +473,11 @@ cc_test(
     },
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "cache_prefix_hash_test",
+    srcs = ["CachePrefixHashTest.cc"],
+    copts = test_copts,
+    deps = test_deps + ["//rtp_llm/cpp/cache:cache_core", "//rtp_llm/cpp/utils:hash_util"],
 )

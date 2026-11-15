@@ -221,10 +221,10 @@ void GenerateStateMachine::releaseResource() {
         return;
     }
     // releaseResource runs under GenerateStream::mutex_; do not wait here.
-    // If a worker still owns KV blocks, mark deferred and let its dec path
-    // perform the release after the pending count drains.
+    // Bookkeeping, a submitting frame, or UNKNOWN GPU last use can still own
+    // these pages. Share the public release path's guard, not just its count.
     GenerateStream* stream = stream_cache_resource_->stream();
-    if (stream != nullptr && stream->hasPendingAsyncBookkeeping()) {
+    if (stream != nullptr && stream->hasOutstandingResourceUseWithoutLock()) {
         stream->markDeferredRelease();
         return;
     }

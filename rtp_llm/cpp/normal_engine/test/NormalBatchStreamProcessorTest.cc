@@ -1,12 +1,15 @@
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <functional>
+#include <exception>
 #include <future>
 #include <limits>
 #include <list>
 #include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <set>
@@ -23,6 +26,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/normal_engine/AsyncRunner.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/Sampler.h"
@@ -36,6 +40,10 @@
 #include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+
+#if USING_CUDA
+#include <cuda_runtime_api.h>
+#endif
 
 using namespace std;
 
@@ -166,49 +174,112 @@ protected:
 
 class OutputDispatchTest: public NormalBatchStreamProcessorTest, public ::testing::WithParamInterface<int> {};
 
-TEST_P(OutputDispatchTest, RestoreGpuReadinessNeedsProducerRankDependencyAndExistingConsumerFence) {
+INSTANTIATE_TEST_SUITE_P(SerialAndParallel, OutputDispatchTest, ::testing::Values(0, 2));
+
+#if USING_CUDA
+TEST_P(OutputDispatchTest, CpuOutputsWaitForWriterOnlyWhenRequested) {
     class RecordingStream final: public NormalGenerateStream {
     public:
         using NormalGenerateStream::NormalGenerateStream;
-        void updateOutput(const StreamUpdateInfo& update_info) override {
-            readiness.push_back(update_info.context_kv_all_rank_gpu_ready_at);
-            observations.push_back(RemoteRestoreTiming::Clock::now());
-            NormalGenerateStream::updateOutput(update_info);
+        std::shared_ptr<torch::Event> writer;
+        std::vector<bool> writer_ready;
+        void updateOutput(const StreamUpdateInfo& update) override {
+            writer_ready.push_back(writer->query());
+            NormalGenerateStream::updateOutput(update);
         }
-        std::vector<std::optional<RemoteRestoreTiming::Clock::time_point>> readiness;
-        std::vector<RemoteRestoreTiming::Clock::time_point>                observations;
     };
-    for (const bool rank_dependency : {false, true}) {
-        for (const bool gpu_output : {false, true}) {
-            SCOPED_TRACE(testing::Message() << "rank_dependency=" << rank_dependency << " gpu_output=" << gpu_output);
-            auto query                             = std::make_shared<GenerateInput>();
-            query->input_ids                       = hostIntBuffer({0});
-            query->generate_config                 = std::make_shared<GenerateConfig>();
-            query->generate_config->max_new_tokens = 8;
-            query->generate_config->ignore_eos     = true;
-            ModelConfig config;
-            config.max_seq_len = 16;
-            config.vocab_size  = 2;
-            auto stream = std::make_shared<RecordingStream>(query, config, RuntimeConfig{}, ResourceContext{}, nullptr);
-            stream->generate_status_->status = StreamState::RUNNING;
-            StreamGroups streams({stream});
-            MergedOutput outputs;
-            outputs.model_output.context_kv_has_rank_completion_dependency = rank_dependency;
-            auto token_ids                   = torch::tensor({1}, torch::kInt32).reshape({1, 1});
-            outputs.sampler_output.token_ids = gpu_output ? token_ids.to(torch::kCUDA) : token_ids;
-            NormalOutputDispatcher dispatcher({}, GetParam());
-            ASSERT_TRUE(dispatcher.dispatch(streams, outputs).ok());
-            ASSERT_EQ(stream->readiness.size(), 1u);
-            EXPECT_EQ(stream->readiness.front().has_value(), rank_dependency && gpu_output);
-            if (stream->readiness.front()) {
-                EXPECT_LE(*stream->readiness.front(), stream->observations.front());
-            }
-            EXPECT_EQ(stream->outputTokenLen(), 1);
+    struct Gate {
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool released{false};
+        std::atomic<bool> timed_out{false};
+        void release() {
+            { std::lock_guard<std::mutex> lock(mutex); released = true; }
+            cv.notify_all();
         }
+    };
+    for (bool asynchronous : {false, true}) for (bool wait_for_writer : {false, true}) {
+        SCOPED_TRACE(testing::Message() << "async=" << asynchronous << " writer_wait=" << wait_for_writer);
+        auto model = makeLogprobsModelConfig();
+        auto query = std::make_shared<GenerateInput>();
+        query->input_ids = hostIntBuffer({0});
+        query->generate_config = std::make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 8;
+        query->generate_config->ignore_eos = true;
+        auto stream = std::make_shared<RecordingStream>(query, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        StreamGroups streams({stream});
+        CacheConfig cache;
+        initFullCacheConfig(cache, 1);
+        NormalBatchStreamProcessor processor(model, {}, {}, cache, false, GetParam());
+        MergedOutput outputs;
+        outputs.sampler_output.token_ids = torch::tensor({1}, torch::kInt32).reshape({1, 1});
+        outputs.sampler_output.success = torch::tensor({true}, torch::kBool);
+        // False is the original P/off default; true represents protected D.
+        if (wait_for_writer) outputs.wait_for_kv_writer = true;
+        EXPECT_EQ(outputs.wait_for_kv_writer, wait_for_writer);
+        auto producer = cuda_graph::graphGetStreamFromPool(false);
+        auto consumer = cuda_graph::graphGetStreamFromPool(false);
+        while (consumer == producer) consumer = cuda_graph::graphGetStreamFromPool(false);
+        stream->writer = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+        AsyncRunner runner(consumer);
+        runner.launch([] {});
+        runner.sync(consumer);
+        consumer.synchronize(); // Warm the actual worker before blocking the writer.
+        auto gate = std::make_shared<Gate>();
+        auto* owner = new std::shared_ptr<Gate>(gate);
+        const auto launch_status = cudaLaunchHostFunc(producer.stream(), [](void* opaque) {
+            std::unique_ptr<std::shared_ptr<Gate>> owner(static_cast<std::shared_ptr<Gate>*>(opaque));
+            auto state = *owner;
+            std::unique_lock<std::mutex> lock(state->mutex);
+            if (!state->cv.wait_for(lock, std::chrono::seconds(5), [&] { return state->released; }))
+                state->timed_out.store(true);
+        }, owner);
+        if (launch_status != cudaSuccess) delete owner;
+        ASSERT_EQ(launch_status, cudaSuccess);
+        std::thread releaser;
+        std::mutex done_mutex;
+        std::condition_variable done_cv;
+        bool done = false;
+        std::exception_ptr failure;
+        absl::Status status;
+        try {
+            stream->writer->record(producer);
+            if (wait_for_writer) {
+                releaser = std::thread([&] {
+                    std::unique_lock<std::mutex> lock(done_mutex);
+                    // Only releases the intentional dependency; no time assertion.
+                    done_cv.wait_for(lock, std::chrono::milliseconds(200), [&] { return done; });
+                    lock.unlock();
+                    gate->release();
+                });
+            }
+            if (asynchronous) {
+                runner.launch([&] {
+                    stream->writer->block(cuda_graph::graphGetCurrentStream());
+                    status = processor.dispatch(streams, outputs);
+                });
+                runner.sync(consumer);
+            } else {
+                cuda_graph::GraphStreamGuard guard(producer);
+                status = processor.dispatch(streams, outputs);
+            }
+        } catch (...) { failure = std::current_exception(); }
+        { std::lock_guard<std::mutex> lock(done_mutex); done = true; }
+        done_cv.notify_all();
+        gate->release();
+        if (releaser.joinable()) releaser.join();
+        producer.synchronize();
+        consumer.synchronize(); // Actual GPU quiescence before stream/tensor teardown.
+        if (failure) std::rethrow_exception(failure);
+        EXPECT_TRUE(status.ok());
+        EXPECT_FALSE(gate->timed_out.load());
+        ASSERT_EQ(stream->writer_ready.size(), 1u);
+        EXPECT_EQ(stream->writer_ready.front(), wait_for_writer);
+        EXPECT_EQ(stream->outputTokenLen(), 1);
     }
 }
-
-INSTANTIATE_TEST_SUITE_P(SerialAndParallel, OutputDispatchTest, ::testing::Values(0, 2));
+#endif
 
 TEST_P(OutputDispatchTest, testDispatchPreservesCpuProfilingAndAsyncDisableGuard) {
     namespace tap = torch::autograd::profiler;
@@ -746,7 +817,6 @@ TEST_P(NormalBatchStreamProcessorPrefillOnlyTest, prefillOnlySkipsLmHeadAndDispa
         EXPECT_EQ(update_info.new_tokens.sizes(), (torch::IntArrayRef{1, 0}));
         EXPECT_FALSE(update_info.update_remote_generate);
         EXPECT_FALSE(update_info.force_update_info);
-        EXPECT_FALSE(update_info.context_kv_all_rank_gpu_ready_at);
         EXPECT_FALSE(update_info.prompt_logits.has_value());
         EXPECT_FALSE(update_info.error_info.has_value());
 

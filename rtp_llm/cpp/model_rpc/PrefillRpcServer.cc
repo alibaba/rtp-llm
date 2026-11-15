@@ -5,7 +5,6 @@
 #include "autil/Scope.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
-#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
@@ -626,12 +625,6 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     generate_request.set_client_id(process_id_);
     generate_request.set_request_id(prefill_context.request_id);
     generate_request.set_first_generate_token_id(first_token);
-    if (remoteCacheDecodePublicationEnabled() && !stream->hasError()
-        && stream->hasEvent(StreamEvents::NeedRemoteGenerate) && stream->seqLength() > 0) {
-        // All speculative modes hand over the prompt-tail position here. The
-        // final sampled token is sent below, but does not yet have target KV.
-        generate_request.mutable_prefill_kv_handoff()->set_computed_kv_end(stream->seqLength() - 1);
-    }
     auto context_position_ids = stream->getContextPositionIds();
     if (context_position_ids.defined()) {
         generate_request.mutable_position_ids()->CopyFrom(

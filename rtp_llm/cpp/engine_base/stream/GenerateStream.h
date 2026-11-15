@@ -67,9 +67,6 @@ struct StreamUpdateInfo {
     // evaluated against the pre-update output. Thinking-only packets use
     // num_new_tokens; ordinary/content-only packets use zero.
     int32_t logprobs_offset = 0;
-    // Set only after a proven all-rank producer dependency AND the existing
-    // consumer stream completion. A plain CPU stream update is not proof.
-    std::optional<RemoteRestoreTiming::Clock::time_point> context_kv_all_rank_gpu_ready_at = std::nullopt;
 };
 
 struct StreamSpecUpdateInfo {
@@ -202,6 +199,8 @@ public:
         return GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
     }
     void update(const StreamUpdateInfo& update_info);
+    std::shared_ptr<const DecodeEndpoint> latestDecodePublicationEndpoint() const;
+    void setDecodePublicationPages(std::vector<std::shared_ptr<const DecodeEndpoint>> pages);
     void specUpdate(const StreamSpecUpdateInfo& update_info);
     bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
@@ -657,6 +656,10 @@ public:
     // Count worker claims on this stream's KV resource.
     // releaseResource waits for zero so worker-side update/specUpdate cannot
     // write into blocks already returned to the pool.
+    bool mayCrossDecodePublicationBoundary(size_t unit, size_t advance) const;
+    bool beginDecodePublicationSubmission();
+    void endDecodePublicationSubmission();
+    void retainUnknownDecodePublication(const std::shared_ptr<GenerateStream>& owner);
     void incPendingAsyncBookkeeping();
     void decPendingAsyncBookkeepingAndMaybeRelease();
     bool hasPendingAsyncBookkeeping() const;
@@ -1080,7 +1083,12 @@ protected:
     // Separate lock/cv avoids deadlocking releaseResource with worker updates
     // that need mutex_. Shared ownership preserves the coordinator across
     // GenerateStream copies captured by async workers.
+    std::shared_ptr<GenerateStream> unknown_decode_publication_;
+    void tryReleaseResourceAfterBookkeeping();
     struct AsyncBookkeepingCoordinator {
+        // Copies already share the stream mutex/resources and this coordinator.
+        // Keep submission claims shared too; a raw atomic member deletes the copy constructor.
+        std::atomic<size_t>     submissions{0};
         std::atomic<int>        count{0};
         std::atomic<bool>       defer_release{false};
         std::mutex              mu;
@@ -1119,6 +1127,9 @@ protected:
     int prefill_tp_size_ = -1;
 
 private:
+    // Caller holds mutex_; retaining the stream alone does not prevent explicit KV release.
+    bool hasOutstandingResourceUseWithoutLock() const;
+    friend struct GenerateStateMachine;
     AsyncProfileRequest request_profile_;
 };
 

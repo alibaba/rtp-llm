@@ -1,8 +1,10 @@
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
 #include <future>
 #include <tuple>
 #include <thread>
+#include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "kmonitor/client/core/MetricsData.h"
@@ -21,13 +23,12 @@ Match hostCacheMatchFixture() {
     }
 }
 
-double quarantineGauge(kmonitor::MutableMetric* metric) {
+double snapshotMetric(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags& tags = {}) {
     if (metric == nullptr) {
         ADD_FAILURE() << "metric is null";
         return -1;
     }
-    kmonitor::MetricsTags tags;
-    kmonitor::Metric*     gauge = metric->DeclareMetric(&tags);
+    kmonitor::Metric* gauge = metric->DeclareMetric(&tags);
     if (gauge == nullptr) {
         ADD_FAILURE() << "metric series is missing";
         return -1;
@@ -81,7 +82,8 @@ TEST(KVCMMockOnlyFullTest, MetadataRpcPreservesFiltersMasksAndHitResponses) {
     RemoteOperationResponsePB response;
 
     const kv_cache_manager::BackendLocations by_backend{
-        {{kv_cache_manager::StorageType::ST_TAIRMEMPOOL, 4096, locations[0]}}, {}};
+        {{kv_cache_manager::StorageType::ST_TAIRMEMPOOL, 4096, locations[0]}},
+        {{kv_cache_manager::StorageType::ST_TAIRMEMPOOL, 4096, {{names[1], "pace://masked"}}}}};
     EXPECT_CALL(*client, getCacheLocationsByBackend("", "metadata", keys, tokens, mask, names,
                                                    kv_cache_manager::StorageType::ST_TAIRMEMPOOL))
         .WillOnce(Return(std::make_pair(true, by_backend)));
@@ -97,7 +99,9 @@ TEST(KVCMMockOnlyFullTest, MetadataRpcPreservesFiltersMasksAndHitResponses) {
     ASSERT_EQ(hit.specs_size(), 1);
     EXPECT_EQ(hit.specs(0).name(), names[0]);
     EXPECT_EQ(hit.specs(0).uri(), "pace://hit");
-    EXPECT_EQ(response.backend_locations(1).locations_size(), 0);
+    ASSERT_EQ(response.backend_locations(1).locations_size(), 1);
+    ASSERT_EQ(response.backend_locations(1).locations(0).specs_size(), 1);
+    EXPECT_EQ(response.backend_locations(1).locations(0).specs(0).uri(), "pace://masked");
 
     const kv_cache_manager::HostCacheState hosts{hostCacheMatchFixture<kv_cache_manager::HostCacheMatch>()};
     EXPECT_CALL(*client, getHostCacheState("", "metadata", kv_cache_manager::QueryType::QT_PREFIX_MATCH,
@@ -160,6 +164,9 @@ TEST(KVCMMockOnlyFullTest, RejectsLegacyDsv41CustomLocationSpecNames) {
 }
 
 TEST(KVCMMockOnlyFullTest, CustomConfigExcludesDisabledStateAndKeepsActiveAliases) {
+    for (const bool enabled : {false, true}) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+    test::withDecodePublicationStartup([&] {
     BackendEnvironment environment;
     environment.cache_config.dtype = DataType::TYPE_FP16;
     environment.cache_config.layer_num = 2;
@@ -202,8 +209,10 @@ TEST(KVCMMockOnlyFullTest, CustomConfigExcludesDisabledStateAndKeepsActiveAliase
     config.kvcm_client_config = autil::legacy::ToJsonString(kvcm::ClientWrapper::ConfigMap{{"custom", custom}});
     RuntimeConfig runtime;
     runtime.model_name = "kvcm_test_model";
+    auto parallel = singleRankConfig();
+    parallel.role_type = RoleType::PREFILL;
     BackendHandle backend(std::make_unique<KVCMStorageBackend>(environment.cache_config, config, runtime,
-        singleRankConfig(), SpeculativeExecutionConfig{}, nullptr, false, nullptr, client));
+        parallel, SpeculativeExecutionConfig{}, nullptr, false, nullptr, client));
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
     const kv_cache_manager::Locations locations{{{"tp0_Ffull0", "full_101"}}};
     EXPECT_CALL(*client, match(_, _, kv_cache_manager::QueryType::QT_PREFIX_MATCH,
@@ -212,6 +221,8 @@ TEST(KVCMMockOnlyFullTest, CustomConfigExcludesDisabledStateAndKeepsActiveAliase
     auto result = match(*backend.backend, makeStorageRequest(environment));
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.matched_blocks_num, 1u);
+    });
+    }
 }
 
 TEST(KVCMMockOnlyFullTest, SwaPayloadMatchUsesBatchLocationsForFullPrefix) {
@@ -308,7 +319,8 @@ TEST(KVCMMockOnlyFullTest, BackendReadPreservesLocalPrefixAndStopsAtRemoteMiss) 
     const auto backend_type = kv_cache_manager::StorageType::ST_TAIRMEMPOOL;
     const auto spec_size = static_cast<int32_t>(environment.cache_config.blockSizeBytesForGroup("default"));
     const kv_cache_manager::BackendLocations locations{
-        {}, {{backend_type, spec_size, {{"tp0_Fdefault", "uri_102"}}}},
+        {{backend_type, spec_size, {{"tp0_Fdefault", "uri_local_never_loaded"}}}},
+        {{backend_type, spec_size, {{"tp0_Fdefault", "uri_102"}}}},
         {{backend_type, spec_size, {{"tp0_Fdefault", "uri_103"}}}}, {},
         {{backend_type, spec_size, {{"tp0_Fdefault", "uri_105"}}}}};
     const kv_cache_manager::BlockMask offset = kv_cache_manager::BlockMaskOffset{1};
@@ -339,8 +351,62 @@ TEST(KVCMMockOnlyFullTest, BackendReadPreservesLocalPrefixAndStopsAtRemoteMiss) 
     EXPECT_TRUE(read(*backend.backend, std::move(request), std::move(result.match_meta)));
 }
 
+TEST(KVCMMockOnlyFullTest, BackendLookupIgnoresLocalHitsAndRejectsMalformedRequiredShape) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+    auto environment = makeBackendEnvironment("kvcm_backend_lookup_shape");
+    auto client = std::make_shared<MockClientWrapper>();
+    auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    KVCacheConfig config;
+    config.kvcm_model_sdk_config = R"([{"type":"pace"}])";
+    config.kvcm_read_backend_type = 3;
+    ParallelismConfig parallel;
+    parallel.role_type = RoleType::PREFILL;
+    parallel.prefill_cp_config.prefill_cp_size = 1;
+    EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client, shutdown()).Times(1);
+    EXPECT_CALL(*client, loadKvCachesForTag(_, _, _, _)).Times(0);
+    auto backend = makeBackend(environment, parallel, client, nullptr, reporter, true, config);
+    ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(), environment.pools_by_tag,
+        [&](int layer, const std::string&, int block) {
+            return environment.device_pool->convertIndexToBuffer(layer, block);
+        }));
+    const auto type = kv_cache_manager::StorageType::ST_TAIRMEMPOOL;
+    const auto bytes = static_cast<int32_t>(environment.cache_config.blockSizeBytesForGroup("default"));
+    const kv_cache_manager::BackendLocations local_only{
+        {{type, bytes, {{"tp0_Fdefault", "pace://local_never_loaded"}}}}, {}, {}};
+    const std::vector<kv_cache_manager::BackendLocations> replies{
+        local_only, {}, {local_only[0], local_only[1]},
+        {local_only[0], local_only[1], local_only[2], {}}};
+    const kv_cache_manager::BlockMask offset = kv_cache_manager::BlockMaskOffset{1};
+    for (const auto& reply : replies) {
+        EXPECT_CALL(*client, getCacheLocationsByBackend(_, _, std::vector<int64_t>({101, 102, 103}), _,
+                                                       offset, _, type))
+            .WillOnce(Return(std::make_pair(true, reply)));
+        auto result = match(*backend.backend, makeStorageRequest(environment, {101, 102, 103}, 1));
+        if (reply.size() == 3) {
+            ASSERT_TRUE(result.success);
+            EXPECT_EQ(result.matched_blocks_num, 1u);
+        } else {
+            EXPECT_FALSE(result.success);
+            EXPECT_EQ(result.matched_blocks_num, 0u);
+            EXPECT_EQ(result.match_meta, nullptr);
+        }
+    }
+    auto* metrics = reporter->getMetricsGroup<RtpLLMRemoteCacheOutcomeMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    for (const auto& [outcome, count] : std::vector<std::tuple<const char*, double>>{
+             {"not_found", 0}, {"found_unusable", 0}, {"failed", 0}}) {
+        kmonitor::MetricsTags tags("stage", "lookup");
+        tags.AddTag("outcome", outcome);
+        EXPECT_DOUBLE_EQ(snapshotMetric(metrics->outcome_qps_metric, tags), count);
+    }
+    });
+}
+
 TEST(KVCMMockOnlyFullTest, TP2WorkerRegistersItsRankAndExecutesLocalPayload) {
     autil::EnvGuard decode_publish("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_tp2_worker");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
@@ -436,6 +502,7 @@ TEST(KVCMMockOnlyFullTest, TP2WorkerRegistersItsRankAndExecutesLocalPayload) {
     ASSERT_TRUE(write_result.get());
     ASSERT_EQ(write_response.actual_uris_size(), 1);
     EXPECT_EQ(write_response.actual_uris(0), "actual_write_uri");
+    });
 }
 
 TEST(KVCMMockOnlyFullTest, TP2CoordinatorRejectsMissingBroadcastManager) {
@@ -595,9 +662,9 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionWithoutFreezingL
                               }));
     auto* quarantine_metrics = metrics_reporter->getMetricsGroup<RtpLLMRemoteCacheQuarantineMetrics>();
     ASSERT_NE(quarantine_metrics, nullptr);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_count_metric), 0);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotMetric(quarantine_metrics->quarantined_lease_count_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotMetric(quarantine_metrics->quarantined_block_count_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotMetric(quarantine_metrics->quarantined_block_ratio_metric), 0);
 
     kv_cache_manager::WriteLocation write_location;
     write_location.write_session_id = "tp2_failed_broadcast_write";
@@ -608,7 +675,6 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionWithoutFreezingL
     }};
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, _, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
-    EXPECT_CALL(*client_wrapper, abortWrite(_, _, _)).Times(0);
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, "tp2_failed_broadcast_write", _, _))
         .WillOnce(Invoke([](const std::string&,
                             const std::string&,
@@ -633,9 +699,9 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionWithoutFreezingL
     EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 0u);
     EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_count_metric), 1);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotMetric(quarantine_metrics->quarantined_lease_count_metric), 1);
+    EXPECT_DOUBLE_EQ(snapshotMetric(quarantine_metrics->quarantined_block_count_metric), 1);
+    EXPECT_DOUBLE_EQ(snapshotMetric(quarantine_metrics->quarantined_block_ratio_metric), 0);
     for (const auto& state : states) {
         const auto requests = snapshotRequests(state);
         ASSERT_EQ(requests.size(), 1u);
@@ -646,13 +712,14 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionWithoutFreezingL
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), source_ref_count);
     EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_count_metric), 0);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotMetric(quarantine_metrics->quarantined_lease_count_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotMetric(quarantine_metrics->quarantined_block_count_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotMetric(quarantine_metrics->quarantined_block_ratio_metric), 0);
 }
 
 TEST(KVCMMockOnlyFullTest, TP2ReadRpcFailureFreezesDestinationAndPreservesDeadline) {
     autil::EnvGuard decode_publish("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     for (auto failure_code : {grpc::StatusCode::DEADLINE_EXCEEDED, grpc::StatusCode::UNAVAILABLE}) {
         SCOPED_TRACE(static_cast<int>(failure_code));
         auto environment            = makeBackendEnvironment("kvcm_storage_backend_tp2_read_rpc_timeout");
@@ -698,6 +765,7 @@ TEST(KVCMMockOnlyFullTest, TP2ReadRpcFailureFreezesDestinationAndPreservesDeadli
         EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), request_ref_count + 1);
     }
+    });
 }
 
 TEST(KVCMMockOnlyFullTest, RejectsMismatchedTransferVectorsBeforeClientIO) {
@@ -917,8 +985,8 @@ TEST(KVCMMockOnlyFullTest, WriteHonorsOffsetBlockMask) {
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, 40, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
     EXPECT_CALL(*client_wrapper, saveKvCachesForTag(_, _, _, _)).Times(0);
-    EXPECT_CALL(*client_wrapper, finishWrite(_, _, _, _, _)).Times(0);
-    EXPECT_CALL(*client_wrapper, abortWrite(_, _, "invalid_mask_session"))
+    EXPECT_CALL(*client_wrapper, finishWrite(_, _, "invalid_mask_session",
+        ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{0}}), ::testing::IsEmpty()))
         .WillOnce(Invoke([&](const auto&...) {
             for (const auto block : block_ids)
                 EXPECT_EQ(environment.device_pool->refCount(block), 2u);
@@ -935,7 +1003,8 @@ TEST(KVCMMockOnlyFullTest, WriteHonorsOffsetBlockMask) {
     write_location.locations.resize(1);
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, 40, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
-    EXPECT_CALL(*client_wrapper, abortWrite(_, _, "mismatched_locations_session"))
+    EXPECT_CALL(*client_wrapper, finishWrite(_, _, "mismatched_locations_session",
+        ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{0}}), ::testing::IsEmpty()))
         .WillOnce(Invoke([&](const auto&...) {
             for (const auto block : block_ids)
                 EXPECT_EQ(environment.device_pool->refCount(block), 2u);
@@ -1090,7 +1159,6 @@ TEST(KVCMMockOnlyFullTest, MismatchedActualUriCountAbortsWriteSession) {
     EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", kv_cache_manager::UriStrVec{"write_uri"}, _, _))
         .WillOnce(Return(std::make_pair(true, kv_cache_manager::UriStrVec({"actual_uri", "unexpected_extra_uri"}))));
     // Invalid returned metadata does not erase the SDK's BUFFER_SAFE proof.
-    EXPECT_CALL(*client_wrapper, abortWrite(_, _, "shape_session")).Times(1);
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, "shape_session", _, _))
         .WillOnce(Invoke([](const std::string&,
                             const std::string&,
@@ -1147,8 +1215,8 @@ TEST(KVCMMockOnlyFullTest, TransferFailureAbortsWriteSession) {
         .WillOnce(Return(std::make_pair(true, write_location)));
     EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", kv_cache_manager::UriStrVec{"write_uri"}, _, _))
         .WillOnce(Return(std::make_pair(false, kv_cache_manager::UriStrVec{})));
-    // An unknown payload keeps the existing single Finish(0) attempt.
-    EXPECT_CALL(*client_wrapper, abortWrite(_, _, _)).Times(0);
+    // Keep the existing single zero-mask close policy, independently of source
+    // buffer safety. Ordinary P writes only read local sources and keep no FROZEN target.
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, "abort_session", _, _))
         .WillOnce(Invoke([](const std::string&,
                             const std::string&,
@@ -1223,8 +1291,9 @@ TEST(KVCMMockOnlyFullTest, LateSuccessfulLocalPayloadsFailWithoutFreezingComplet
     write_location.locations = locations;
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, 40, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
-    EXPECT_CALL(*client_wrapper, abortWrite(_, _, "late_completed_session")).WillOnce(Return(true));
-    EXPECT_CALL(*client_wrapper, finishWrite(_, _, _, _, _)).Times(0);
+    EXPECT_CALL(*client_wrapper, finishWrite(_, _, "late_completed_session",
+        ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{0}}), ::testing::IsEmpty()))
+        .WillOnce(Return(true));
 
     const TransferTask task({}, std::chrono::seconds(1));
     const auto late_return = task.deadline() + std::chrono::milliseconds(10);

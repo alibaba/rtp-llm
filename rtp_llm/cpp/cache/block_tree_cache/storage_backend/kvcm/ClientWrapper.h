@@ -17,7 +17,6 @@
 #include "kvcm_client/transfer_client.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMConfig.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkTransferObserver.h"
 
 namespace rtp_llm {
 namespace kvcm {
@@ -27,7 +26,8 @@ class ClientWrapper {
 public:
     using ConfigMap = std::map<std::string, KVCMConfigPtr>;
     explicit ClientWrapper(std::unique_ptr<ClientFactory> client_factory = std::make_unique<ClientFactory>(),
-                           std::chrono::milliseconds reinit_interval = std::chrono::seconds(10));
+                           std::chrono::milliseconds reinit_interval = std::chrono::seconds(10),
+                           bool bound_sdk_calls = true);
     virtual ~ClientWrapper();
     virtual bool
     init(const ConfigMap& config_str_map, const kv_cache_manager::InitParams& init_params, const std::string& tag);
@@ -44,7 +44,7 @@ public:
     // Internal optional telemetry: completed logical payload per SDK chunk,
     // or completion-unknown for an attempted failed/throwing SDK call. The
     // observer must be thread-safe and must not reenter this wrapper.
-    using TransferObserver = SdkTransferObserver;
+    using TransferObserver = std::function<void(bool is_read, size_t completed_bytes, bool completion_unknown)>;
     void setTransferObserver(TransferObserver observer);
     // Internal outcome proof, not an SDK ABI extension. NOT_STARTED is set
     // only by local pre-I/O checks. A normal SDK error is not DMA completion.
@@ -92,8 +92,6 @@ public:
                              const std::string&                 write_session_id,
                              const kv_cache_manager::BlockMask& block_mask,
                              const kv_cache_manager::Locations& locations);
-    virtual bool abortWrite(const std::string& unique_id, const std::string& trace_id,
-                            const std::string& write_session_id);
 
     // The tag selects a registered transfer client; vector slots stay private.
     // PACE uses the first client, which owns all GPU registrations. Span-bound backends must use their own pool's tag.
@@ -150,6 +148,7 @@ private:
     // Shutdown takes this lock exclusively before destroying the pool transfer clients.
     std::shared_mutex transfer_mutex_;
     TransferObserver  transfer_observer_;
+    const bool bound_sdk_calls_;
     // Borrowed URI/IOV/trace descriptors must survive an SDK error or throw
     // whose payload completion is unknown, together with the registered client.
     struct PendingTransfer {

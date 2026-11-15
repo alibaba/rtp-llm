@@ -632,7 +632,7 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     }
     if (remoteCacheDecodePublicationEnabled()) {
         // No sampled token has been appended on D yet. Successful all-rank
-        // loading establishes the bound against which P's assertion is checked.
+        // loading establishes the local Prefill-computed boundary.
         decode_context.loaded_prefill_kv_end = decode_context.getStream()->seqLength();
     }
     RTP_LLM_LOG_DEBUG("request [%s] load cache from prefill done", decode_context.request_key.c_str());
@@ -685,23 +685,12 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
             serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
         return;
     }
-    if (remoteCacheDecodePublicationEnabled() && generate_request.has_prefill_kv_handoff()) {
+    if (remoteCacheDecodePublicationEnabled() && decode_context.loaded_prefill_kv_end) {
         GRPC_RET_IF_ERROR(decode_context,
-                          generate_request.request_id() == decode_context.request_id
-                              && generate_request.client_id() == decode_context.allocate_request.client_id(),
+                          generate_stream->kvCache().decodeCompletionLifecycle().recordPrefillComputedEnd(
+                              *decode_context.loaded_prefill_kv_end),
                           grpc::StatusCode::INVALID_ARGUMENT,
-                          "prefill KV handoff request identity mismatch");
-        const auto computed_end = generate_request.prefill_kv_handoff().computed_kv_end();
-        GRPC_RET_IF_ERROR(decode_context,
-                          computed_end >= 0 && decode_context.loaded_prefill_kv_end
-                              && computed_end == *decode_context.loaded_prefill_kv_end
-                              && computed_end == generate_stream->seqLength(),
-                          grpc::StatusCode::INVALID_ARGUMENT,
-                          "prefill KV handoff does not match successfully loaded KV");
-        GRPC_RET_IF_ERROR(decode_context,
-                          generate_stream->kvCache().decodeCompletionLifecycle().recordPrefillComputedEnd(computed_end),
-                          grpc::StatusCode::INVALID_ARGUMENT,
-                          "prefill KV handoff changes an established boundary");
+                          "loaded prefill boundary changes an established boundary");
     }
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);
