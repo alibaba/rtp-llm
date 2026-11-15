@@ -19,19 +19,34 @@ ConnectionSlot RdmaHostConnectionPool::getNextConnection() {
     return {nullptr, idx};
 }
 
-std::shared_ptr<RdmaConnection> RdmaHostConnectionPool::installOrGetExistingAt(
+ConnectionInstallResult RdmaHostConnectionPool::installOrGetExistingAt(
     size_t idx, const std::shared_ptr<RdmaConnection>& new_conn) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (idx >= connections_.size()) {
-        return nullptr;
+        return {nullptr, false};
     }
     auto& slot = connections_[idx];
     if (slot && slot->getState() != RdmaConnectionState::FAILED) {
-        return slot;
+        return {slot, false};
     }
     slot = new_conn;
     RTP_LLM_LOG_DEBUG("rdma host connection pool set connection[%zu] to %s:%u", idx, ip_.c_str(), port_);
-    return new_conn;
+    return {new_conn, true};
+}
+
+void RdmaHostConnectionPool::sweepAllConnections() {
+    std::vector<std::shared_ptr<RdmaConnection>> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& conn : connections_) {
+            if (conn) {
+                snapshot.push_back(conn);
+            }
+        }
+    }
+    for (auto& conn : snapshot) {
+        conn->sweepExpiredPendingRequests();
+    }
 }
 
 }  // namespace barex_rdma

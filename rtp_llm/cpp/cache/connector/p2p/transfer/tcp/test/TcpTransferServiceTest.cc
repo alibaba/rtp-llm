@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <future>
 #include <memory>
 #include <string>
@@ -18,6 +19,9 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <torch/torch.h>
 #include <c10/cuda/CUDAStream.h>
+#include <cuda_runtime.h>
+
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 
 namespace rtp_llm {
 namespace transfer {
@@ -61,6 +65,61 @@ private:
     std::future<void>  future_ = p_.get_future();
 };
 
+class CudaEventGate {
+public:
+    bool init() {
+        if (cudaStreamCreateWithFlags(&control_stream_, cudaStreamNonBlocking) != cudaSuccess) {
+            return false;
+        }
+        if (cudaEventCreateWithFlags(&event_, cudaEventDisableTiming) != cudaSuccess) {
+            return false;
+        }
+        if (cudaLaunchHostFunc(control_stream_, waitCallback, this) != cudaSuccess) {
+            return false;
+        }
+        return cudaEventRecord(event_, control_stream_) == cudaSuccess;
+    }
+
+    ~CudaEventGate() {
+        release();
+        if (control_stream_) {
+            cudaStreamSynchronize(control_stream_);
+        }
+        if (event_) {
+            cudaEventDestroy(event_);
+        }
+        if (control_stream_) {
+            cudaStreamDestroy(control_stream_);
+        }
+    }
+
+    cudaEvent_t event() const {
+        return event_;
+    }
+
+    void release() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            released_ = true;
+        }
+        cv_.notify_all();
+    }
+
+private:
+    static void CUDART_CB waitCallback(void* opaque) {
+        auto* gate = static_cast<CudaEventGate*>(opaque);
+        std::unique_lock<std::mutex> lock(gate->mutex_);
+        gate->cv_.wait(lock, [gate]() { return gate->released_; });
+    }
+
+private:
+    std::mutex              mutex_;
+    std::condition_variable cv_;
+    bool                    released_{false};
+    cudaStream_t            control_stream_{nullptr};
+    cudaEvent_t             event_{nullptr};
+};
+
 // ---------------------------------------------------------------------------
 // Proto helpers
 // ---------------------------------------------------------------------------
@@ -80,7 +139,7 @@ static void addRequestBlock(::tcp_transfer::TcpLayerBlockTransferRequest&       
 static ::tcp_transfer::TcpLayerBlockTransferRequest makeRequest(const std::string& unique_key, int64_t deadline_ms) {
     ::tcp_transfer::TcpLayerBlockTransferRequest req;
     req.set_unique_key(unique_key);
-    req.set_deadline_ms(deadline_ms);
+    req.set_timeout_ms(deadline_ms - currentTimeMs());
     return req;
 }
 
@@ -88,9 +147,9 @@ static ::tcp_transfer::TcpLayerBlockTransferRequest makeRequest(const std::strin
 // Task / block helpers
 // ---------------------------------------------------------------------------
 
-static KeyBlockInfoMap makeBlocks(int64_t cache_key, void* addr, size_t size) {
+static KeyBlockInfoMap makeBlocks(int64_t cache_key, void* addr, size_t size, int device_index = -1) {
     auto kbi = std::make_shared<KeyBlockInfo>();
-    kbi->blocks.push_back(BlockInfo{false, 0, 0, addr, size});
+    kbi->blocks.push_back(BlockInfo{device_index >= 0, device_index, 0, addr, size});
     KeyBlockInfoMap m;
     m[cache_key] = kbi;
     return m;
@@ -140,6 +199,20 @@ protected:
         return std::memcmp(cpu_tensor.data_ptr(), expected.data(), size) == 0;
     }
 
+    bool waitForTransferring(const std::shared_ptr<TransferTask>& task, std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            {
+                std::shared_lock<std::shared_mutex> lock(task->mutex_);
+                if (task->in_flight_ > 0 && !task->done_) {
+                    return true;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return false;
+    }
+
     // Issue one transfer RPC and return the closure for waiting.
     std::unique_ptr<BlockingClosure> issueTransfer(const ::tcp_transfer::TcpLayerBlockTransferRequest* req,
                                                    ::tcp_transfer::TcpLayerBlockTransferResponse*      resp) {
@@ -172,7 +245,8 @@ TEST_F(TcpTransferServiceTest, A1_NormalTransfer_RecvFirst_Success) {
     const std::string content(size, 'A');
     auto              gpu_buf = allocDevice(size);
 
-    auto task = task_store_->addTask("k1", makeBlocks(1, gpu_buf.data_ptr(), size), currentTimeMs() + 5000);
+    auto task = task_store_->addTask(
+        "k1", makeBlocks(1, gpu_buf.data_ptr(), size, gpu_buf.get_device()), currentTimeMs() + 5000);
     ASSERT_NE(task, nullptr);
 
     auto req = makeRequest("k1", currentTimeMs() + 5000);
@@ -204,7 +278,8 @@ TEST_F(TcpTransferServiceTest, A2_NormalTransfer_TransferFirst_RecvLater_Success
     auto                                          closure = issueTransfer(&req, &resp);
 
     // Register task AFTER the RPC is already waiting.
-    auto task = task_store_->addTask("k2", makeBlocks(1, gpu_buf.data_ptr(), size), currentTimeMs() + 5000);
+    auto task = task_store_->addTask(
+        "k2", makeBlocks(1, gpu_buf.data_ptr(), size, gpu_buf.get_device()), currentTimeMs() + 5000);
     ASSERT_NE(task, nullptr);
 
     ASSERT_TRUE(closure->waitFor(kWait));
@@ -227,9 +302,8 @@ TEST_F(TcpTransferServiceTest, B1_ContextTimeout_NoMatchingRecvTask) {
     EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_CONTEXT_TIMEOUT);
 }
 
-// B3: Task exists but its deadline is already past; notifyDone overrides any
-//     lower-level error with TIMEOUT.
-TEST_F(TcpTransferServiceTest, B3_ContextTimeout_OverridesErrorOnNotifyDone) {
+// B3: Preserve the observed transfer error even if the task deadline has elapsed.
+TEST_F(TcpTransferServiceTest, B3_BufferMismatchIsNotReclassifiedByElapsedTaskDeadline) {
     char dummy[64]{};
 
     // Task has expired deadline but done_=false, so waitCheckProc still matches it.
@@ -245,8 +319,7 @@ TEST_F(TcpTransferServiceTest, B3_ContextTimeout_OverridesErrorOnNotifyDone) {
     auto                                          closure = issueTransfer(&req, &resp);
 
     ASSERT_TRUE(closure->waitFor(kWait));
-    // notifyDone sees isTimeout()=true → TIMEOUT overrides BUFFER_MISMATCH.
-    EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_CONTEXT_TIMEOUT);
+    EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_BUFFER_MISMATCH);
 }
 
 // ===========================================================================
@@ -289,6 +362,68 @@ TEST_F(TcpTransferServiceTest, C2_CancelDuringTransferring_ReturnsCancelled) {
     auto                                          closure = issueTransfer(&req, &resp);
 
     ASSERT_TRUE(closure->waitFor(kWait));
+    EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_TASK_CANCELLED);
+}
+
+// C3: H2D has started but is blocked on its CUDA stream. Cancellation must not
+//     complete the task until the physical copy leaves cudaStreamSynchronize.
+TEST_F(TcpTransferServiceTest, C3_CancelDuringBlockedH2d_KeepsTaskInflightUntilPhysicalCompletion) {
+    if (!device_initialized_) {
+        GTEST_SKIP() << "No GPU device";
+    }
+
+    service_.reset();
+    service_ = std::make_shared<TcpTransferService>(task_store_);
+    ASSERT_TRUE(service_->init(1000, 1));
+
+    CudaEventGate gate;
+    ASSERT_TRUE(gate.init());
+    std::promise<cudaError_t> stream_primed;
+    auto                      stream_primed_future = stream_primed.get_future();
+    torch::Tensor                                 gpu_buf;
+    ::tcp_transfer::TcpLayerBlockTransferRequest   req;
+    ::tcp_transfer::TcpLayerBlockTransferResponse  resp;
+    std::unique_ptr<BlockingClosure>               closure;
+    // Destroy the service before any state referenced by its asynchronous tasks,
+    // including when a fatal assertion returns before the gate is released.
+    struct Cleanup {
+        CudaEventGate&                       gate;
+        std::shared_ptr<TcpTransferService>& service;
+        ~Cleanup() {
+            gate.release();
+            service.reset();
+        }
+    } cleanup{gate, service_};
+
+    ASSERT_EQ(service_->getWorkerThreadPool()->pushTask([&]() {
+                  auto copy_stream = getNoBlockCopyStream(0).stream();
+                  stream_primed.set_value(cudaStreamWaitEvent(copy_stream, gate.event(), 0));
+              }),
+              autil::ThreadPoolBase::ERROR_NONE);
+    ASSERT_EQ(stream_primed_future.wait_for(kWait), std::future_status::ready);
+    ASSERT_EQ(stream_primed_future.get(), cudaSuccess);
+
+    constexpr size_t  size = 64;
+    const std::string content(size, 'H');
+    gpu_buf = allocDevice(size);
+    auto task = task_store_->addTask(
+        "k_c3", makeBlocks(1, gpu_buf.data_ptr(), size, gpu_buf.get_device()), currentTimeMs() + 5000);
+    ASSERT_NE(task, nullptr);
+
+    req = makeRequest("k_c3", currentTimeMs() + 5000);
+    addRequestBlock(req, 1, {{size, content}});
+    closure = issueTransfer(&req, &resp);
+
+    ASSERT_TRUE(waitForTransferring(task, std::chrono::seconds(1)));
+    task->cancel();
+    EXPECT_FALSE(task->done());
+    EXPECT_FALSE(closure->waitFor(std::chrono::milliseconds(50)));
+
+    gate.release();
+    ASSERT_TRUE(closure->waitFor(kWait));
+    EXPECT_TRUE(task->done());
+    EXPECT_FALSE(task->success());
+    EXPECT_EQ(task->errorCode(), TransferErrorCode::CANCELLED);
     EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_TASK_CANCELLED);
 }
 
@@ -353,7 +488,8 @@ TEST_F(TcpTransferServiceTest, E2b_ExtraKeyInSender_IgnoredOnSuccess) {
     const std::string content(size, 'V');
     auto              gpu_buf = allocDevice(size);
 
-    auto task = task_store_->addTask("k_e2b", makeBlocks(1, gpu_buf.data_ptr(), size), currentTimeMs() + 5000);
+    auto task = task_store_->addTask(
+        "k_e2b", makeBlocks(1, gpu_buf.data_ptr(), size, gpu_buf.get_device()), currentTimeMs() + 5000);
     ASSERT_NE(task, nullptr);
 
     auto req = makeRequest("k_e2b", currentTimeMs() + 5000);
@@ -392,8 +528,7 @@ TEST_F(TcpTransferServiceTest, E3_BufferMismatch_SubBlockOutOfRange) {
 // ===========================================================================
 
 // G3: Two concurrent transfer RPCs for the same unique_key both match the
-//     same task; startTransfer() has no exclusive lock, so both proceed.
-//     Both closures must fire and the task must end up in a consistent state.
+//     same task. Both closures must fire, and completion must cover both copies.
 TEST_F(TcpTransferServiceTest, G3_ConcurrentTransfers_SameKey_BothComplete) {
     if (!device_initialized_) {
         GTEST_SKIP() << "No GPU device";
@@ -403,7 +538,8 @@ TEST_F(TcpTransferServiceTest, G3_ConcurrentTransfers_SameKey_BothComplete) {
     const std::string content(size, 'G');
     auto              gpu_buf = allocDevice(size);
 
-    auto task = task_store_->addTask("k_g3", makeBlocks(1, gpu_buf.data_ptr(), size), currentTimeMs() + 5000);
+    auto task = task_store_->addTask(
+        "k_g3", makeBlocks(1, gpu_buf.data_ptr(), size, gpu_buf.get_device()), currentTimeMs() + 5000);
     ASSERT_NE(task, nullptr);
 
     auto req1 = makeRequest("k_g3", currentTimeMs() + 5000);

@@ -14,6 +14,11 @@ enum RdmaTransferErrorCodePB {
     RDMA_TRANSFER_CONTEXT_TIMEOUT  = 4;
     // Matching recv task was already cancelled before the transfer RPC arrived
     RDMA_TRANSFER_TASK_CANCELLED   = 5;
+    RDMA_TRANSFER_CONNECTION_FAILED = 6;
+    RDMA_TRANSFER_NOT_INITIALIZED = 7;
+    RDMA_TRANSFER_QUEUE_REJECTED = 8;
+    RDMA_TRANSFER_COPY_FAILED = 9;
+    RDMA_TRANSFER_CONTEXT_DESTROYED = 10;
 }
 
 message RdmaNicRKey {
@@ -44,7 +49,7 @@ message RdmaLayerBlockTransferRequest {
     optional string                      unique_key       = 2;
     optional string                      server_rdma_ip   = 3;
     optional uint32                      server_rdma_port = 4;
-    optional int64                       deadline_ms      = 5;
+    optional int64                       timeout_ms      = 5;
 }
 
 message RdmaLayerBlockTransferResponse {
