@@ -196,4 +196,3 @@ py_test(
     ],
     deps = ["//rtp_llm:sdk"],
 )
-
