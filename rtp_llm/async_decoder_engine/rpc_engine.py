@@ -64,6 +64,7 @@ class LanguageCppEngine(BaseEngine):
                     engine_config=engine_config,
                     vit_config=self.model.vit_config,
                     device=f"cuda:{engine_config.parallelism_config.local_rank}",
+                    defer_remote_cache=True,
                 )
             )
         self.rtp_llm_op_ = RtpLLMOp(
@@ -92,8 +93,14 @@ class LanguageCppEngine(BaseEngine):
         """Phase 2: bind the RPC/HTTP listeners after the startup barrier."""
         if self._service_started:
             return
+        if self.mm_process_engine is not None:
+            # KVCM client construction can start discovery and resolve live endpoints.
+            self.mm_process_engine.start_remote_embedding_cache()
         self.rtp_llm_op_.start_service()
-        if self.config.task_type == TaskType.LANGUAGE_MODEL and self.world_info is not None:
+        if (
+            self.config.task_type == TaskType.LANGUAGE_MODEL
+            and self.world_info is not None
+        ):
             self.rtp_llm_op_.ft_op.start_http_server(
                 self.model.model_weights_loader,
                 self.world_info,

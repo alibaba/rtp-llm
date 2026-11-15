@@ -254,22 +254,22 @@ void RtpLLMOp::startRPCServer() {
                                       0;
     rpc_server_deferred_ = false;
 
+    // Publish the thread before releasing the GIL so Python stop() can join it.
+    server_start_failed_ = false;
+    grpc_server_thread_  = std::thread([this]() {
+        try {
+            startRPCServerInternal(*deferred_init_params_);
+        } catch (const std::exception& e) {
+            setServerStartError(e.what());
+        } catch (...) {
+            setServerStartError("unknown exception while starting RPC server");
+        }
+    });
     {
         pybind11::gil_scoped_release release;
-        server_start_failed_ = false;
-        stop_requested_      = false;
-        grpc_server_thread_ = std::thread([this]() {
-            try {
-                startRPCServerInternal(*deferred_init_params_);
-            } catch (const std::exception& e) {
-                setServerStartError(e.what());
-            } catch (...) {
-                setServerStartError("unknown exception while starting RPC server");
-            }
-        });
         const int64_t startup_timeout_ms = getStartupTimeoutMs(health_timeout_s);
         const auto    begin_wait_us      = autil::TimeUtility::currentTimeInMicroSeconds();
-        while (!is_server_ready_) {
+        while (!is_server_ready_ && !stop_requested_) {
             if (server_start_failed_) {
                 std::lock_guard<std::mutex> lock(server_state_mutex_);
                 RTP_LLM_FAIL("deferred RPC server start failed: %s", server_start_error_.c_str());
@@ -281,6 +281,7 @@ void RtpLLMOp::startRPCServer() {
             sleep(1);
         }
     }
+    RTP_LLM_CHECK_WITH_INFO(!stop_requested_, "RPC server stopped during startup");
 }
 
 void RtpLLMOp::updateRuntimeEndpoints(py::object runtime_config) {

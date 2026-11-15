@@ -348,6 +348,12 @@ private:
     LocalRpcServer& server_;
 };
 
+TEST(LocalRpcServerTest, StopBeforeEngineInitializationIsSafe) {
+    LocalRpcServer server;
+    ASSERT_EQ(server.getEngine(), nullptr);
+    EXPECT_NO_THROW(server.stop());
+}
+
 TEST(LocalRpcServerTest, BatchTraceKeepsPerItemParentsErrorsAndTransportOk) {
     namespace memory = opentelemetry::exporter::memory;
     for (const bool enabled : {false, true}) {

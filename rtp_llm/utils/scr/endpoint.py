@@ -77,9 +77,10 @@ def resolve_world_info(
 ) -> WorldInfo:
     """Replace transport endpoints while preserving logical rank identity.
 
-    The control plane may provide a file path or inline JSON through
-    ``RTP_LLM_SCR_ENDPOINT_MANIFEST``.  A missing manifest is tolerated during
-    the initial checkpoint, but never during a restore of a multi-node world.
+    Callers using ``RTP_LLM_SCR_ENDPOINT_MANIFEST`` opt into the manifest and
+    transport-readiness requirements via the flags below. The serving
+    launcher uses loopback for single-Pod SCR and VIP discovery for
+    multi-Pod SCR.
     """
     if manifest is _MANIFEST_UNSET:
         manifest = read_restore_manifest(generation)
