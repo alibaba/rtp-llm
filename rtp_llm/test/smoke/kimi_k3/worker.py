@@ -654,6 +654,30 @@ class Worker:
                 )
                 if cores:
                     errors.append(f"Service generated core dumps: {cores}")
+                    # Offline postmortem only, after the service has stopped.
+                    # Keep the verdict fatal and retain the original core files.
+                    debugger = shutil.which("gdb")
+                    if debugger:
+                        with (self.task / "core-backtrace.txt").open("w") as report:
+                            try:
+                                subprocess.run(
+                                    [
+                                        debugger,
+                                        "-nx",
+                                        "-batch",
+                                        sys.executable,
+                                        "-c",
+                                        str(self.task / cores[0]),
+                                        "-ex",
+                                        "bt 20",
+                                    ],
+                                    stdout=report,
+                                    stderr=subprocess.STDOUT,
+                                    timeout=20,
+                                    check=False,
+                                )
+                            except (OSError, subprocess.TimeoutExpired) as exc:
+                                report.write(f"Core backtrace unavailable: {exc}\n")
                 fatal = re.compile(
                     r"Fatal Python error:|Signal: (?:Aborted|Segmentation fault) \("
                     r"|DeepGEMM grid sync timeout:|CUDA error: unspecified launch failure"
