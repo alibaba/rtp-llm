@@ -295,8 +295,14 @@ class QuantizationConfig:
         if self.quant_type not in _LINEAR_METHOD_REGISTRY:
             if self.quant_type == "none":
                 from rtp_llm.models_py.quant_methods import unquantized  # noqa: F401
-            # Accelerator methods arrive with their implementations and tests
-            # in a later batch; never import a backend absent from this build.
+            elif self.quant_type in (
+                "fp8",
+                "fp8_online",
+                "FP8_PER_TENSOR_COMPRESSED",
+                "FP8_DYNAMIC_PER_TENSOR",
+            ):
+                from rtp_llm.models_py.quant_methods import fp8  # noqa: F401
+            # Per-channel/block and accelerator MoE methods are later batches.
 
         method_cls = _LINEAR_METHOD_REGISTRY.get(self.quant_type)
         if method_cls is None:

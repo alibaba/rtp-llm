@@ -47,6 +47,8 @@ layout using controlled results, not a real distributed/GPU smoke.
 
 ## Two-stage post-load contract
 
+The following contract is also exercised by the per-tensor FP8 batch below.
+
 The two stages serve different purposes; they are not two quantization passes.
 
 1. Stream all checkpoint tensors into CPU modules and validate completeness.
@@ -95,3 +97,34 @@ Bazel targets are `//rtp_llm/models_py/new_loader_test:foundation_test`,
 
 Concrete layer duplicate-dispatch tests remain with the later shared-layer
 batch; this foundation tests the same dispatch contract using small modules.
+
+## Per-tensor FP8 method batch
+
+This commit adds the **layer implementation**, not a new serving rollout.
+`BaseModel` still rejects all model-level quantization for NewLoader (automatic
+mode uses legacy; explicit NewLoader raises). Model-level quantization config
+translation, per-channel/block FP8 and MoE integration remain separate batches.
+The already registered Qwen2/Qwen3/Llama serving scope is unchanged.
+
+The method API now accepts `fp8` / `FP8_PER_TENSOR_COMPRESSED` for prequantized
+E4M3 weights, and `fp8_online` / `FP8_DYNAMIC_PER_TENSOR` for staged BF16/FP16
+weights. Static activation quantization requires a finite positive scalar
+`input_scale`; dynamic mode computes it per invocation. Weight scales are scalar
+and must be finite and positive for prequantized checkpoints. Quantization
+exclusions still select the unquantized method before backend resolution.
+
+Local Linear N/K dimensions must both be divisible by 16, including TP shards.
+Runtime preflight requires CUDA SM89+ or ROCm gfx942/gfx950, `torch._scaled_mm`,
+and the platform's native per-tensor quantization operators. Unsupported backend
+or missing symbols fails before device migration. Imports alone do not initialize
+native operators or import DeepGEMM/DeepEP. ROCm gfx942 converts checkpoint FN to
+FNUZ with matching scale adjustment; gfx950 retains FN. Runtime dtype conversion
+of finalized FP8 parameters is not supported and is diagnosed before GEMM.
+
+`quant_methods/test:test_fp8_per_tensor` covers real temporary checkpoint reads,
+streamed merged/QKV scale handling at TP2, missing/invalid scales, FN/FNUZ
+conversion and once-only conversion across staged/final hooks. CPU backend
+doubles validate loader contracts, **not accelerator correctness**.
+`test_fp8_per_tensor_gpu` (H20_CU13) and `test_fp8_per_tensor_gpu_rocm` (MI308X)
+execute native quantization and scaled GEMM with no backend mocks. They fail if
+the required accelerator is absent. These targets are not marked `open_skip`.

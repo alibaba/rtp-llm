@@ -439,12 +439,17 @@ py_library(
     srcs = [
         "quant_methods/__init__.py",
         "quant_methods/base.py",
+        "quant_methods/fp8.py",
         "quant_methods/unquantized.py",
     ],
     deps = [
         ":quantization_exclusion",
+        "//rtp_llm:ops",
         "//rtp_llm:torch",
-    ],
+    ] + select({
+        "@//:using_rocm": ["//rtp_llm:aiter"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 

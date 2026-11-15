@@ -311,7 +311,7 @@ assert list_models() == []
             silu_and_mul(torch.zeros(2, 3))
 
     def test_unavailable_quantization_fails_without_backend_import(self):
-        for method in ("fp8", "fp8_online", "typo"):
+        for method in ("fp8_block", "fp8_per_channel", "typo"):
             with self.subTest(method=method):
                 with self.assertRaisesRegex(ValueError, "not supported"):
                     ColumnParallelLinear(2, 4, quant_config=QuantizationConfig(method))
