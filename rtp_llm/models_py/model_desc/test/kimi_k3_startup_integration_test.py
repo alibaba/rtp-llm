@@ -6,6 +6,9 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
     SparseMlaImpl,
 )
@@ -40,6 +43,16 @@ def query_cp_parallel(rank=0):
 
 
 class KimiK3StartupIntegrationTest(unittest.TestCase):
+    def test_noncausal_chunk_configuration_fails_before_engine_construction(self):
+        engine = EngineConfig.create(PyEnvConfigs())
+        engine.runtime_config.fifo_scheduler_config.prefill_chunk_size = 128
+        model = NS(
+            num_layers=1, max_seq_len=4096, model_name="noncausal",
+            attn_config=NS(tokens_per_block=64, is_causal=False),
+        )
+        with self.assertRaisesRegex(ValueError, "[Nn]on.causal|is_causal"):
+            ModelFactory.update_engine_config_from_model_config(engine, model)
+
     def test_full_length_warmup_reaches_paged_convolution(self):
         torch.manual_seed(1)
         values = torch.randn((192, 384), dtype=torch.bfloat16, device="cuda")

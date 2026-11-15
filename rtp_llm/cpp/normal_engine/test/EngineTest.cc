@@ -2,6 +2,7 @@
 #include "torch/all.h"
 #include <algorithm>
 #include <cstdlib>
+#include <future>
 #include <limits>
 
 #define private public
@@ -36,6 +37,47 @@ namespace rtp_llm {
 class NormalEngineTest: public DeviceTestBase {
 public:
 };
+
+TEST_F(NormalEngineTest, StopRetainsScheduledResourcesUntilForwardFinishes) {
+    autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+    ModelConfig model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    params.runtime_config.warm_up = false;
+    std::promise<void> entered, resume;
+    auto entered_future = entered.get_future();
+    auto resume_future = resume.get_future();
+    NormalExecutor::test_model_factory = [&](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(model_config.vocab_size, [&](const GptModelInputs&) {
+            entered.set_value();
+            EXPECT_EQ(resume_future.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+        });
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() { NormalExecutor::test_model_factory = nullptr; }
+    } factory_reset;
+    auto engine = std::make_shared<NormalEngine>(params, nullptr);
+    auto input = std::make_shared<GenerateInput>();
+    input->input_ids = torch::tensor({1, 2}, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->generate_config->max_new_tokens = 4;
+    auto stream = engine->enqueue(input);
+    ASSERT_EQ(entered_future.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    auto stopped = std::async(std::launch::async, [&] { return engine->stop(); });
+    auto* scheduler = static_cast<FIFOScheduler*>(engine->scheduler_.get());
+    bool released_in_forward = false;
+    {
+        std::unique_lock<std::mutex> lock(scheduler->lock_);
+        EXPECT_TRUE(scheduler->cond_.wait_for(lock, std::chrono::seconds(5), [&] { return scheduler->stop_; }));
+        released_in_forward = stream->streamCacheResource().isResourceReleased();
+    }
+    resume.set_value();
+    ASSERT_EQ(stopped.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    EXPECT_TRUE(stopped.get().ok());
+    EXPECT_FALSE(released_in_forward);
+    EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
+}
 
 namespace {
 

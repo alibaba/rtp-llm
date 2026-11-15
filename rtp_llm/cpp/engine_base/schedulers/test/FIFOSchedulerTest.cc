@@ -4353,6 +4353,36 @@ TEST_F(FIFOSchedulerTest, ReviewRegressionSingletonFanoutCannotExceedModelCapaci
     EXPECT_EQ(stream->getStatus(), StreamState::FINISHED);
 }
 
+TEST_F(FIFOSchedulerTest, QueryCpFanoutAdmissionIncludesPerSequencePadding) {
+    auto resources = makeReadinessResources(512, 64, RoleType::PREFILL, 32, 8192);
+    resources.model_config.max_seq_len = 8192;
+    resources.model_config.max_prefill_tokens = 8672;
+    ASSERT_TRUE(resources.cache_manager->init());
+    ParallelismConfig parallel;
+    parallel.role_type = RoleType::PREFILL;
+    parallel.tp_size = 8;
+    parallel.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    parallel.prefill_cp_config.prefill_cp_size = 8;
+    parallel.prefill_cp_config.preserve_tp_layout = true;
+    PDSepConfig pd;
+    pd.role_type = RoleType::PREFILL;
+    FIFOScheduler scheduler(resources.runtime_config, resources.model_config, pd, parallel, resources.cache_manager);
+    auto input = std::make_shared<GenerateInput>();
+    input->input_ids = torch::ones({17}, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->generate_config->num_return_sequences = 510;
+    input->generate_config->max_new_tokens = 2;
+    auto stream = std::make_shared<NormalGenerateStream>(
+        input, resources.model_config, resources.runtime_config, resources.resource_context, nullptr);
+    ASSERT_LE(17 * stream->currentBatchSize(), resources.model_config.max_prefill_tokens);
+    ASSERT_GT(32 * stream->currentBatchSize(), resources.model_config.max_prefill_tokens);
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    const auto scheduled = scheduler.schedule();
+    ASSERT_TRUE(scheduled.ok()) << scheduled.status();
+    EXPECT_TRUE(scheduled->streams.empty());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+}
+
 TEST_F(FIFOSchedulerTest, groupIsolation_size2) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
     auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);

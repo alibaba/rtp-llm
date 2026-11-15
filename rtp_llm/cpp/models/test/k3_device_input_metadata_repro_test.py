@@ -12,6 +12,26 @@ from rtp_llm.cpp.models.test.pywrapped_model_cache_store_integration_test import
 
 
 class K3DeviceInputMetadataReproTest(unittest.TestCase):
+    def test_no_sp_padding_still_publishes_physical_counts(self):
+        class InspectCounts(CacheStoreForwardModel):
+            requires_sequence_parallel_padding = False
+
+            def __init__(self):
+                super().__init__()
+                self.counts = []
+
+            def _forward_one(self, inputs):
+                attn = inputs.attention_inputs
+                if isinstance(attn, dict):
+                    attn = next(iter(attn.values()))
+                self.counts.append((attn.physical_token_count, attn.physical_request_count))
+                return super()._forward_one(inputs)
+
+        model = InspectCounts()
+        run_scenario(model, "multi_tag")
+        self.assertTrue(model.counts)
+        self.assertEqual(model.counts[0], (8, 3))
+
     def test_native_cacheless_warmup_publishes_attention_marker(self):
         class InspectWarmup(CacheStoreForwardModel):
             def __init__(self):
