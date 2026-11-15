@@ -69,6 +69,8 @@ class ScrTransportBoundaryTest(unittest.TestCase):
                             NCCL_SOCKET_IFNAME="scr_vxlan0",
                             GLOO_SOCKET_IFNAME="scr_vxlan0",
                         )
+                    elif active:
+                        expected_env.update(NCCL_SOCKET_IFNAME="lo", GLOO_SOCKET_IFNAME="lo")
                     self.assertEqual(dict(os.environ), expected_env)
 
     def test_dp_fanout_uses_loopback_only_for_single_node_templates(self):

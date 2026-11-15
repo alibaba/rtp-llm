@@ -13,7 +13,8 @@ def _migrate_legacy_gang_env() -> None:
     ``GANG_ANNOCATION_PATH`` was a typo in a released interface; launch scripts
     and manifests outside this repository may still set it.  Migrating it here
     keeps a custom annotation path working instead of silently falling back to
-    the default.
+    the default. The corrected name wins when both spellings are supplied, so
+    deploys can override stale aliases during migration.
     """
     legacy = os.environ.get(_LEGACY_GANG_ANNOTATION_ENV)
     if not legacy:

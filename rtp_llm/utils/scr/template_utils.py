@@ -450,7 +450,13 @@ class EpsilonAdapter:
         checkpoint = getattr(self.epsilon, "snapstart_checkpoint", None)
         if not callable(checkpoint):
             raise EpsilonProtocolError("Epsilon snapstart_checkpoint is unavailable")
+        if _callable_accepts(checkpoint, "wait_mode") is False:
+            raise EpsilonProtocolError(
+                "SCR requires Epsilon snapstart_checkpoint(wait_mode=1)"
+            )
 
+        # The blocking ABI is mandatory: restoring listeners before the
+        # controller releases the checkpoint quorum breaks the template.
         kwargs: dict[str, Any] = {
             "wait_mode": 1,
             "worker_id": worker_id,
@@ -563,7 +569,7 @@ def _synchronize_cuda(device: Any | None = None) -> None:
     # initialized torch.cuda before KV registration; a registered CUDA cache
     # therefore cannot be skipped by this guard.
     torch = sys.modules.get("torch")
-    if torch is None or not bool(getattr(torch.cuda, "_initialized", False)):
+    if torch is None or not torch.cuda.is_initialized():
         return
 
     if not torch.cuda.is_available():
@@ -583,7 +589,7 @@ def _prepare_cuda_for_arrival(device: Any | None = None) -> None:
         )
     torch = sys.modules.get("torch")
     cuda_initialized = bool(
-        torch is not None and getattr(torch.cuda, "_initialized", False)
+        torch is not None and torch.cuda.is_initialized()
     )
     if gpu_state_registered and not cuda_initialized:
         raise RuntimeError(
@@ -625,7 +631,7 @@ def _capture_cuda_device() -> Any | None:
         # query it after CUDA has already been initialized by the backend.
         if (
             torch is not None
-            and bool(getattr(torch.cuda, "_initialized", False))
+            and torch.cuda.is_initialized()
             and torch.cuda.is_available()
         ):
             return torch.cuda.current_device()

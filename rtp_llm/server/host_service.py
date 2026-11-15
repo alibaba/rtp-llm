@@ -247,7 +247,8 @@ class MasterService:
         self.backend_refresh_thread = None
         if not self.master_vip.domain:
             return
-        defer_until_release("master-discovery", self.start_refresh)
+        # Each visitor owns its own route snapshot and refresh worker.
+        defer_until_release(f"master-discovery:{id(self)}", self.start_refresh)
 
     def start_refresh(self) -> None:
         # Template startup reaches this only after identity fixup and release.

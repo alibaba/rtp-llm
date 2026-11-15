@@ -299,10 +299,11 @@ def set_parallelism_config(
         world_rank: World rank to apply (local_rank = world_rank % local_world_size, etc.). Default 0.
     """
     world_size = parallelism_config.world_size
+    explicit_local_size = os.environ.get("LOCAL_WORLD_SIZE")
     need_local = (
         world_size > 1
         and parallelism_config.local_world_size == 1
-        and os.environ.get("LOCAL_WORLD_SIZE") != "1"
+        and not (explicit_local_size and int(explicit_local_size) == 1)
     )
     if need_local:
         if torch.cuda.is_available():

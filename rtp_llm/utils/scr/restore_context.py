@@ -39,19 +39,17 @@ class RestoreContext:
                 )
             return network.validate_world_info(current, parallelism_config, gang_info)
 
-        manifest = self.endpoint_manifest
         # Single-Pod control channels use loopback; CacheStore and P/D RPC
         # connections are first initialized after this barrier. Only the
         # existing multi-node topology needs the external transport gate.
-        require_transport = is_restore_phase(manifest) and current.num_nodes > 1
-        if current.num_nodes == 1 and network.local_comm_enabled(
+        use_loopback = network.local_comm_enabled(
             parallelism_config.world_size,
             parallelism_config.local_world_size,
             current.num_nodes,
-        ):
-            # Peer RPC stays on loopback even if the seed declared an inline
-            # manifest. CacheStore advertisement uses the refreshed Pod IP.
-            manifest = None
+        )
+        # A loopback Pod does not consume the optional endpoint projection.
+        manifest = None if use_loopback else self.endpoint_manifest
+        require_transport = is_restore_phase(manifest) and current.num_nodes > 1
         restored = resolve_world_info(
             current,
             generation=self.generation,

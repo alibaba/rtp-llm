@@ -458,6 +458,8 @@ def multi_rank_start(
     ctx = multiprocessing.get_context("spawn")
     processes, rank_pipe_readers = [], []
     try:
+        if scr_manifest is not None and py_env_configs.distribute_config.fake_gang_env:
+            raise ValueError("FAKE_GANG_ENV cannot participate in an SCR template")
         _create_rank_processes(
             global_controller,
             py_env_configs,

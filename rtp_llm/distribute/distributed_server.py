@@ -254,9 +254,12 @@ def get_frontend_world_info(
     missing = [rank for rank in leaders if rank not in present]
     if not missing:
         return current
+    # Match backend registration's total budget. The communication timeout
+    # controls each attempt, so a late leader can still register and be found.
     budget = distribute_config.gang_timeout_min * 60
+    attempt_timeout = 3
     if distribute_config.dist_comm_timeout is not None:
-        budget = min(budget, distribute_config.dist_comm_timeout)
+        attempt_timeout = min(attempt_timeout, distribute_config.dist_comm_timeout)
     deadline = time.monotonic() + budget
     members = list(current.members)
     # A frontend with no route cannot serve its DP lane. Wait for the actual
@@ -264,7 +267,9 @@ def get_frontend_world_info(
     while missing:
         try:
             master_ip, master_port = get_master(distribute_config, pc)
-            timeout = timedelta(seconds=max(0.001, min(3, deadline - time.monotonic())))
+            timeout = timedelta(
+                seconds=max(0.001, min(attempt_timeout, deadline - time.monotonic()))
+            )
             store = TCPStore(
                 host_name=master_ip,
                 port=int(master_port or server_config.start_port) - 1,

@@ -141,12 +141,17 @@ def internal_ip(pc, fallback: str, gang_info: GangInfoReader) -> str:
 
 def configure_network(pc) -> None:
     """Select the platform interface before constructing collective transports."""
-    if not enabled(pc):
+    if enabled(pc):
+        interface = VIP_INTERFACE
+    elif local_comm_enabled(pc.world_size, pc.local_world_size):
+        # Local collectives must survive restoring the seed into a new Pod IP.
+        interface = "lo"
+    else:
         return
     # Launchers may default to an underlay interface (maga_start.sh uses eth0).
     # Once the SCR network is validated, its transports must use the VIP device.
-    os.environ["NCCL_SOCKET_IFNAME"] = VIP_INTERFACE
-    os.environ["GLOO_SOCKET_IFNAME"] = VIP_INTERFACE
+    os.environ["NCCL_SOCKET_IFNAME"] = interface
+    os.environ["GLOO_SOCKET_IFNAME"] = interface
 
 
 def validate_world_info(current, pc, gang_info: GangInfoReader):

@@ -343,7 +343,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
 
     def test_initialized_cuda_is_quiesced_without_registered_tensors(self) -> None:
         with mock.patch.object(scr, "_registrations", {}), mock.patch(
-            "torch.cuda._initialized", True
+            "torch.cuda.is_initialized", return_value=True
         ), mock.patch("torch.cuda.is_available", return_value=True), mock.patch(
             "torch.cuda.synchronize"
         ) as synchronize, mock.patch("torch.cuda.empty_cache") as empty_cache:
@@ -360,7 +360,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             scr, "_is_tensor", side_effect=lambda value: isinstance(value, _FakeTensor)
         ), mock.patch.object(scr, "_capture_cuda_device", return_value=5), mock.patch(
             "torch.cuda.is_available", return_value=True
-        ), mock.patch("torch.cuda._initialized", True), mock.patch(
+        ), mock.patch("torch.cuda.is_initialized", return_value=True), mock.patch(
             "torch.cuda.synchronize"
         ) as synchronize:
             self.assertTrue(scr.register_for_scr(engine))

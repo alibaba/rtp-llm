@@ -397,13 +397,13 @@ class ScrVipTest(unittest.TestCase):
         self.assertIsNone(restored.master)
         self.assertFalse(restored.initialized)
 
-    def test_interface_selection_only_changes_scr_multinode(self):
-        for switch, phase, local_size, active in (
-            ("1", "checkpoint", 2, True),
-            ("1", "restore", 2, True),
-            ("0", "checkpoint", 2, False),
-            ("1", "normal", 2, False),
-            ("1", "checkpoint", 4, False),
+    def test_interface_selection_for_scr_topologies(self):
+        for switch, phase, local_size, interface in (
+            ("1", "checkpoint", 2, "scr_vxlan0"),
+            ("1", "restore", 2, "scr_vxlan0"),
+            ("0", "checkpoint", 2, "eth0"),
+            ("1", "normal", 2, "eth0"),
+            ("1", "checkpoint", 4, "lo"),
         ):
             with self.subTest(
                 switch=switch, phase=phase, local_size=local_size
@@ -420,9 +420,7 @@ class ScrVipTest(unittest.TestCase):
                 self.pc.local_world_size = local_size
                 network.configure_network(self.pc)
                 for name in ("NCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME"):
-                    self.assertEqual(
-                        os.environ.get(name), "scr_vxlan0" if active else "eth0"
-                    )
+                    self.assertEqual(os.environ.get(name), interface)
 
     def test_interface_selection_without_launcher_defaults(self):
         network.configure_network(self.pc)
