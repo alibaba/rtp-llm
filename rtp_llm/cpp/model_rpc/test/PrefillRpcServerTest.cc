@@ -264,17 +264,18 @@ TEST(PrefillRpcServerTest, GenerateStreamCallRejectsPdRequestWithoutUniqueKey) {
 
 namespace rtp_llm {
 
-TEST(PDCancelRegistryTest, CapacityBoundsNewRecordsButExistingRequestsRemainCancellable) {
+TEST(PDCancelRegistryTest, RequestAndControlCapacityAreIndependent) {
     auto             meta = std::make_shared<RpcServerRuntimeMeta>();
     PDCancelRegistry registry(meta);
-    registry.record_capacity_ = 2;
+    registry.record_capacity_  = 1;
+    registry.control_capacity_ = 1;
+    auto absent                = registry.cancel(121, {ErrorCode::CANCELLED, "first fence"});
+    ASSERT_TRUE(absent.ok());
+    EXPECT_EQ(absent.value(), CANCEL_STATUS_TOMBSTONED);
     GenerateInputPB first_request;
     first_request.set_request_id(120);
     PDCancelRegistry::Handle first;
     ASSERT_TRUE(registry.admit(first_request, "capacity120", "", currentTimeMs() + 10000, first).ok());
-    auto absent = registry.cancel(121, {ErrorCode::CANCELLED, "first fence"});
-    ASSERT_TRUE(absent.ok());
-    EXPECT_EQ(absent.value(), CANCEL_STATUS_TOMBSTONED);
     GenerateInputPB overflow_request;
     overflow_request.set_request_id(122);
     PDCancelRegistry::Handle overflow;
@@ -283,7 +284,8 @@ TEST(PDCancelRegistryTest, CapacityBoundsNewRecordsButExistingRequestsRemainCanc
     EXPECT_FALSE(overflow);
     auto rejected = registry.cancel(122, {ErrorCode::CANCELLED, "not stored"});
     EXPECT_EQ(rejected.status().code(), absl::StatusCode::kResourceExhausted);
-    EXPECT_EQ(registry.entries_.size() + registry.absent_fences_.size(), 2u);
+    EXPECT_EQ(registry.entries_.size(), 1u);
+    EXPECT_EQ(registry.absent_fences_.size(), 1u);
     EXPECT_EQ(registry.absent_fences_.count(122), 0u);
     auto repeated = registry.cancel(121, {ErrorCode::GENERATE_TIMEOUT, "must not replace first"});
     ASSERT_TRUE(repeated.ok());
@@ -324,7 +326,7 @@ TEST(PrefillRpcServerTest, CancelCapacityFailureDoesNotAcknowledgeAnUnstoredFenc
     PrefillRpcServer server;
     server.meta_                              = std::make_shared<RpcServerRuntimeMeta>();
     server.cancel_registry_                   = std::make_unique<PDCancelRegistry>(server.meta_);
-    server.cancel_registry_->record_capacity_ = 1;
+    server.cancel_registry_->control_capacity_ = 1;
     ASSERT_TRUE(server.cancel_registry_->cancel(130, {ErrorCode::CANCELLED, "existing fence"}).ok());
     CancelRequestPB request;
     request.set_request_id(131);

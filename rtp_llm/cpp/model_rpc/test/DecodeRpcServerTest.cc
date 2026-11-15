@@ -510,7 +510,7 @@ TEST(DecodeRpcServerTest, CancelCapacityFailureDoesNotAcknowledgeAnUnstoredFence
     DecodeRpcServer server;
     server.meta_                              = std::make_shared<RpcServerRuntimeMeta>();
     server.cancel_registry_                   = std::make_unique<PDCancelRegistry>(server.meta_);
-    server.cancel_registry_->record_capacity_ = 1;
+    server.cancel_registry_->control_capacity_ = 1;
     ASSERT_TRUE(server.cancel_registry_->cancel(130, {ErrorCode::CANCELLED, "existing fence"}).ok());
     CancelRequestPB request;
     request.set_request_id(131);
@@ -521,6 +521,44 @@ TEST(DecodeRpcServerTest, CancelCapacityFailureDoesNotAcknowledgeAnUnstoredFence
     EXPECT_NE(response.status(), CANCEL_STATUS_TOMBSTONED);
     EXPECT_NE(response.status(), CANCEL_STATUS_ACCEPTED);
     EXPECT_EQ(server.cancel_registry_->absent_fences_.count(131), 0u);
+}
+
+TEST(DecodeRpcServerTest, EarlyCancelWithPrefillAddressUsesControlCapacity) {
+    DecodeRpcServer server;
+    server.meta_                               = std::make_shared<RpcServerRuntimeMeta>();
+    server.cancel_registry_                    = std::make_unique<PDCancelRegistry>(server.meta_);
+    server.cancel_registry_->record_capacity_  = 1;
+    server.cancel_registry_->control_capacity_ = 1;
+
+    grpc::ServerContext context;
+    CancelRequestPB     early_cancel;
+    early_cancel.set_request_id(140);
+    early_cancel.set_prefill_address("prefill:123");
+    CancelResponsePB response;
+    ASSERT_TRUE(server.Cancel(&context, &early_cancel, &response).ok());
+    EXPECT_EQ(response.status(), CANCEL_STATUS_ACCEPTED);
+
+    GenerateInputPB input;
+    input.set_request_id(141);
+    PDCancelRegistry::Handle handle;
+    ASSERT_TRUE(server.cancel_registry_->admit(input, "active141", "", currentTimeMs() + 10000, handle).ok());
+
+    early_cancel.set_request_id(142);
+    response.Clear();
+    EXPECT_EQ(server.Cancel(&context, &early_cancel, &response).error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+    EXPECT_FALSE(server.cancel_registry_->find(142));
+    EXPECT_EQ(server.cancel_registry_->control_record_count_, 1u);
+
+    const auto early = server.cancel_registry_->find(140);
+    ASSERT_TRUE(early);
+    ASSERT_TRUE(server.cancel_registry_->complete(early));
+    {
+        std::lock_guard<std::mutex> lock(server.cancel_registry_->mutex_);
+        server.cancel_registry_->trimLocked(early->retain_until_ms);
+    }
+    EXPECT_EQ(server.cancel_registry_->control_record_count_, 0u);
+    EXPECT_TRUE(server.Cancel(&context, &early_cancel, &response).ok());
+    EXPECT_EQ(response.status(), CANCEL_STATUS_ACCEPTED);
 }
 
 }  // namespace rtp_llm

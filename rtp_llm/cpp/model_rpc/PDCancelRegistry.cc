@@ -64,6 +64,9 @@ void PDCancelRegistry::trimLocked(int64_t now_ms) {
         pending_cancels_.erase(request_id);
         local_pending_cancels_.erase(request_id);
         pending_stream_releases_.erase(request_id);
+        if (e->control_only) {
+            --control_record_count_;
+        }
         entries_.erase(it);
     }
     if (expired_remote_retries != 0) {
@@ -76,7 +79,8 @@ ErrorInfo PDCancelRegistry::admit(const GenerateInputPB& request,
                                   const std::string&     key,
                                   const std::string&     downstream_address,
                                   int64_t                deadline_ms,
-                                  Handle&                handle) {
+                                  Handle&                handle,
+                                  bool                   control_only) {
     std::lock_guard<std::mutex> lock(mutex_);
     trimLocked(currentTimeMs());
     auto existing = entries_.find(request.request_id());
@@ -88,16 +92,23 @@ ErrorInfo PDCancelRegistry::admit(const GenerateInputPB& request,
     if (existing != entries_.end()) {
         return {ErrorCode::INVALID_PARAMS, "duplicate PD request_id"};
     }
-    if (entries_.size() + absent_fences_.size() >= record_capacity_) {
-        return {ErrorCode::CONCURRENCY_LIMIT_ERROR, "PD cancellation registry capacity exhausted"};
+    const bool capacity_exhausted = control_only ? control_record_count_ + absent_fences_.size() >= control_capacity_ :
+                                                   entries_.size() - control_record_count_ >= record_capacity_;
+    if (capacity_exhausted) {
+        return {ErrorCode::CONCURRENCY_LIMIT_ERROR,
+                control_only ? "PD early cancellation capacity exhausted" : "PD request registry capacity exhausted"};
     }
     handle = std::make_shared<Entry>(
         TaskIdentity{request.request_id(), request.has_group_id() ? request.group_id().value() : -1});
     handle->unique_key         = key;
     handle->downstream_address = downstream_address;
     handle->deadline_ms        = deadline_ms;
+    handle->control_only       = control_only;
     handle->downstream_done    = downstream_address.empty();
     entries_.emplace(request.request_id(), handle);
+    if (control_only) {
+        ++control_record_count_;
+    }
     return ErrorInfo::OkStatus();
 }
 
@@ -158,8 +169,8 @@ absl::StatusOr<CancelStatusPB> PDCancelRegistry::cancel(int64_t request_id, cons
         if (absent_fences_.count(request_id)) {
             return CANCEL_STATUS_TOMBSTONED;
         }
-        if (entries_.size() + absent_fences_.size() >= record_capacity_) {
-            return absl::ResourceExhaustedError("PD cancellation registry capacity exhausted");
+        if (control_record_count_ + absent_fences_.size() >= control_capacity_) {
+            return absl::ResourceExhaustedError("PD early cancellation capacity exhausted");
         }
         const auto expires_at_ms = currentTimeMs() + kRetentionMs;
         const bool inserted = absent_fences_.emplace(request_id, CancelFence{expires_at_ms, reason}).second;

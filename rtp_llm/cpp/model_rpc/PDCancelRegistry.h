@@ -30,6 +30,7 @@ public:
         std::string       unique_key;
         std::string       downstream_address;
         int64_t           deadline_ms = 0;
+        bool              control_only = false;
         ErrorInfo         cancel_reason;
         std::atomic<bool> canceled{false};
         GenerateStreamPtr stream;
@@ -48,7 +49,8 @@ public:
                               const std::string&     key,
                               const std::string&     downstream_address,
                               int64_t                deadline_ms,
-                              Handle&                handle);
+                              Handle&                handle,
+                              bool                   control_only = false);
     Handle              find(int64_t request_id);
     void                attach(const Handle& handle, const GenerateStreamPtr& stream);
     void                finishLocal(const Handle& handle);
@@ -94,9 +96,11 @@ private:
     void                                    scheduleExpirationLocked(const Handle& handle, int64_t expires_at_ms);
     static constexpr int64_t                kRetentionMs = 10 * 60 * 1000;
     static constexpr int64_t                kActiveReadExpiryRetryMs = 1000;
-    // Shared bound for admitted requests and cancel-before-admission fences.
-    // Existing requests remain cancellable when new record admission is full.
+    // Cancel-before-admission records have their own budget. Existing request
+    // IDs remain cancellable when either budget is full.
     size_t                                  record_capacity_       = 1u << 20;
+    size_t                                  control_capacity_      = 1u << 20;
+    size_t                                  control_record_count_  = 0;
     static constexpr size_t                 kMaxExpirationsPerPass = 128;
     std::mutex                              mutex_;
     std::unordered_map<int64_t, Handle>     entries_;

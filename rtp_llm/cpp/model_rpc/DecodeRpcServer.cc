@@ -163,7 +163,8 @@ grpc::Status DecodeRpcServer::Cancel(grpc::ServerContext*, const CancelRequestPB
                                                        masterEnqueuedHandoffUniqueKey(request->request_id()),
                                                        request->prefill_address(),
                                                        currentTimeMs() + 10 * 60 * 1000,
-                                                       handle);
+                                                       handle,
+                                                       /*control_only=*/true);
         if (!admission.ok())
             handle = cancel_registry_->find(request->request_id());
         if (admission.ok())
