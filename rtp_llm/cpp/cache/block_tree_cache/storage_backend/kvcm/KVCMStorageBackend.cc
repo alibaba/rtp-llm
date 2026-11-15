@@ -125,6 +125,8 @@ public:
                 std::rethrow_exception(failure);
             } catch (const StorageOperationTimeout& error) {
                 throw StorageOperationTimeout(error.what(), error.reason(), protection);
+            } catch (const StorageOperationPayloadExceptionUnknown& error) {
+                throw StorageOperationPayloadExceptionUnknown(error.what(), error.reason(), protection);
             } catch (const StorageOperationCompletionUnknown& error) {
                 throw StorageOperationCompletionUnknown(error.what(), error.reason(), protection);
             }
