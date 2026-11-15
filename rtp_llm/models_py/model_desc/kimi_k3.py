@@ -423,7 +423,6 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
             and cp.is_enabled()
             and cp.preserve_tp_layout
         )
-        self.requires_sequence_parallel_padding = not self.prefill_query_cp
         self._max_generate_batch_size = int(max_generate_batch_size)
         # The owner passes the global physical input bound. Projection staging
         # only needs to cover the regular prefill shape.

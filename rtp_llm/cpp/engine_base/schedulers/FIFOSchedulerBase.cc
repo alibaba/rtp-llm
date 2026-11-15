@@ -63,11 +63,15 @@ FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runt
     max_seq_len_(model_config.max_seq_len),
     max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
+    max_prefill_tokens_(model_config.max_prefill_tokens),
     max_inited_kv_cache_streams_(
         std::max<int64_t>(runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams, 0)),
     prefill_chunk_size_(runtime_config.fifo_scheduler_config.prefill_chunk_size),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
     metrics_reporter_(metrics_reporter) {
+    if (parallelism_config.prefill_cp_config.is_enabled() && parallelism_config.tp_size > 1) {
+        prefill_token_alignment_ = 2 * static_cast<int64_t>(parallelism_config.tp_size);
+    }
     const auto& config       = cache_manager_->cacheConfig();
     const auto& mapper       = cache_manager_->cpSlotMapper();
     prefill_chunk_alignment_ = combineChunkAlignment(1, config.seq_size_per_block);
@@ -137,6 +141,15 @@ bool FIFOSchedulerBase::refreshAndReapTerminalStreams(std::list<GenerateStreamPt
         reaped = true;
     }
     return reaped;
+}
+
+absl::Status FIFOSchedulerBase::requestStop() {
+    {
+        lock_guard<mutex> lock(lock_);
+        stop_ = true;
+    }
+    cond_.notify_all();
+    return absl::OkStatus();
 }
 
 absl::Status FIFOSchedulerBase::stop() {
@@ -526,7 +539,7 @@ size_t FIFOSchedulerBase::countInitedKVCacheStreams() const {
 }
 
 bool FIFOSchedulerBase::checkPrefillCapacity(const GenerateStreamPtr& stream) {
-    const auto status = stream->validatePrefillCapacity();
+    const auto status = stream->validatePrefillCapacity(prefill_token_alignment_);
     if (status.ok()) {
         return true;
     }

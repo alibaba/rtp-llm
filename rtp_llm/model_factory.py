@@ -459,6 +459,7 @@ class ModelFactory:
             role_type=engine_config.pd_sep_config.role_type,
             use_batch_decode_scheduler=engine_config.runtime_config.use_batch_decode_scheduler,
             seq_size_per_block=model_config.attn_config.tokens_per_block,
+            is_causal=model_config.attn_config.is_causal,
         )
         scheduler_config = engine_config.runtime_config.fifo_scheduler_config
         # Generic MoE executors allocate their fixed-capacity communication

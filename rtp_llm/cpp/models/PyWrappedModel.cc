@@ -94,7 +94,7 @@ private:
 }  // namespace
 
 GptModelInputs PyWrappedModel::padSequenceParallelInputs(const GptModelInputs& source) {
-    if (!sequence_parallel_padding_enabled_ || source.sp_logical_tokens > 0) {
+    if (!usesSequenceParallelPadding(source) || source.sp_logical_tokens > 0) {
         return source;
     }
     GptModelInputs out      = source;
@@ -534,13 +534,11 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.is_prefill          = !decode_batch_size;
     py_attn_inputs.is_target_verify    = inputs.is_target_verify;
     py_attn_inputs.is_mtp_draft_update = inputs.is_mtp_draft_update;
-    if (sequence_parallel_padding_enabled_) {
-        py_attn_inputs.logical_request_count =
-            inputs.sp_logical_requests > 0 ? inputs.sp_logical_requests : inputs.input_lengths.numel();
-        py_attn_inputs.physical_request_count = inputs.input_lengths.numel();
-        py_attn_inputs.logical_token_count    = logical_tokens;
-        py_attn_inputs.physical_token_count   = token_count;
-    }
+    py_attn_inputs.logical_request_count =
+        inputs.sp_logical_requests > 0 ? inputs.sp_logical_requests : inputs.input_lengths.numel();
+    py_attn_inputs.physical_request_count = inputs.input_lengths.numel();
+    py_attn_inputs.logical_token_count    = logical_tokens;
+    py_attn_inputs.physical_token_count   = token_count;
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
         "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",
@@ -585,7 +583,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
             fusedCopy(d2d_copies_);
             d2d_copies_.clear();
         }
-        if (sequence_parallel_padding_enabled_) {
+        if (usesSequenceParallelPadding(inputs)) {
             py_attn_inputs.valid_token_mask =
                 torch::empty({token_count}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
         }
@@ -649,7 +647,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.sequence_lengths_plus_1_device = plus_1_to_device(inputs.sequence_lengths);
     }
 
-    if (sequence_parallel_padding_enabled_ && !py_attn_inputs.valid_token_mask.defined()) {
+    if (usesSequenceParallelPadding(inputs) && !py_attn_inputs.valid_token_mask.defined()) {
         py_attn_inputs.valid_token_mask =
             torch::arange(token_count, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA))
             < logical_tokens;
@@ -698,7 +696,7 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
 
     const auto publication_block_table = [&](const torch::Tensor& table) {
         auto rows = table;
-        if (sequence_parallel_padding_enabled_ && inputs.sp_logical_requests > 0) {
+        if (usesSequenceParallelPadding(inputs) && inputs.sp_logical_requests > 0) {
             RTP_LLM_CHECK_WITH_INFO(inputs.sp_logical_requests <= table.size(0),
                                     "SP publication requires all logical block-table rows");
             // Compute consumes the padded table, while prepareWriteCacheParams
@@ -1147,12 +1145,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
                                   && !(device_props_.enable_prefill_cp && has_context_request)
                                   && (!has_context_request || raw_inputs.is_target_verify
                                       || raw_inputs.is_mtp_draft_update || generation_prefill_graph_runner_);
-    auto        padded_inputs = sequence_parallel_padding_enabled_ ?
-                                    (defer_sp_padding ? raw_inputs : padSequenceParallelInputs(raw_inputs)) :
-                                    GptModelInputs{};
-    const auto& inputs        = sequence_parallel_padding_enabled_ ? padded_inputs : raw_inputs;
-    const auto& post_inputs   = sequence_parallel_padding_enabled_ ? raw_inputs : inputs;
-    if (sequence_parallel_padding_enabled_ && !defer_sp_padding) {
+    const bool sp_padding = usesSequenceParallelPadding(raw_inputs);
+    auto       padded_inputs =
+        sp_padding ? (defer_sp_padding ? raw_inputs : padSequenceParallelInputs(raw_inputs)) : GptModelInputs{};
+    const auto& inputs      = sp_padding ? padded_inputs : raw_inputs;
+    const auto& post_inputs = sp_padding ? raw_inputs : inputs;
+    if (sp_padding && !defer_sp_padding) {
         // Async prepare used raw dimensions; eager consumes the padded layout.
         prepared_attention_inputs_.store(false, std::memory_order_release);
     }
@@ -1218,7 +1216,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
                     GenerationPrefillCudaGraphStatus::GRAPH_INPUT_SHAPE_MISMATCH :
                     graph_state.generation_prefill_status;
         }
-        if (!can_run_graph && sequence_parallel_padding_enabled_ && inputs.sp_logical_tokens == 0) {
+        if (!can_run_graph && usesSequenceParallelPadding(inputs) && inputs.sp_logical_tokens == 0) {
             padded_inputs = padSequenceParallelInputs(inputs);
             holdInputsHostBuffers(inputs);
             prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true, &post_inputs);
@@ -1261,7 +1259,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
 
         if (py_model_outputs.mtp_target_hidden_states.defined()) {
             auto& mtp_hidden = py_model_outputs.mtp_target_hidden_states;
-            if (sequence_parallel_padding_enabled_) {
+            if (usesSequenceParallelPadding(inputs)) {
                 mtp_hidden = mtp_hidden.narrow(0, 0, raw_inputs.combo_tokens.numel());
             }
             // Graph replay reuses its output storage. Each forward result owns
@@ -1286,7 +1284,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
         /** Capture consumes the packed Python output directly; ordinary outputs retain their owned clone. */
         auto hidden_states =
             capture_hidden_states ? py_model_outputs.hidden_states : py_model_outputs.hidden_states.clone();
-        if (sequence_parallel_padding_enabled_) {
+        if (sp_padding) {
             hidden_states = hidden_states.narrow(0, 0, raw_inputs.combo_tokens.numel());
         }
         if (dspark_model_role_ != DSparkModelRole::NONE) {

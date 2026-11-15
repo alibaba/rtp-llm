@@ -31,6 +31,8 @@ ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* 
             if (tensor.is_cuda()) {
                 const auto memory_format = tensor.is_non_overlapping_and_dense() ? torch::MemoryFormat::Preserve :
                                                                                   torch::MemoryFormat::Contiguous;
+                // ATen's nonblocking CUDA-to-CPU copy selects pinned storage.
+                // Wait before publishing it to host readers, including hashes.
                 auto cpu = tensor.to(torch::TensorOptions().device(torch::kCPU),
                                      /*non_blocking=*/true,
                                      /*copy=*/false,

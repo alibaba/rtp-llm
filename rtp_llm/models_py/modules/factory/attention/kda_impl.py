@@ -406,8 +406,9 @@ class KdaPrefill(KdaBase):
         import copy
 
         table = attn_inputs.kv_cache_kernel_block_id
-        if table.device.type != "cpu":
-            raise ValueError("KDA startup cache probes require host block IDs")
+        # DEVICE_INPUT also applies to startup probes. This copy is confined
+        # to warmup; real requests keep their existing metadata preparation.
+        table = table.cpu()
         view = copy.copy(attn_inputs)
         slots = torch.arange(
             1, table.shape[0] + 1, dtype=table.dtype, device=table.device

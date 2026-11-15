@@ -4103,35 +4103,36 @@ TEST_F(FIFOSchedulerTest, prefillTokenLimitsPreserveReserveAndAvoidOverflow) {
     auto generation = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 2);
     for (size_t admitted_tokens : {size_t(3), size_t(4), size_t(5)}) {
         // Two rows of length four: the rectangle itself exactly fills the cap.
-        EXPECT_EQ(scheduler.fitsPrefillTokenLimits(1, admitted_tokens, 4, 1, prefill), admitted_tokens <= 4);
-        EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, admitted_tokens, 4, 1, generation));
+        EXPECT_EQ(scheduler.fitsPrefillTokenLimits(1, admitted_tokens, 4, 1, admitted_tokens, prefill),
+                  admitted_tokens <= 4);
+        EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, admitted_tokens, 4, 1, admitted_tokens, generation));
     }
     scheduler.max_batch_tokens_size_ = 9;
-    EXPECT_TRUE(scheduler.fitsPrefillTokenLimits(1, 4, 4, 1, generation));
+    EXPECT_TRUE(scheduler.fitsPrefillTokenLimits(1, 4, 4, 1, 4, generation));
     scheduler.running_streams_.push_back(generation);
-    EXPECT_TRUE(scheduler.fitsPrefillTokenLimits(1, 4, 4, 1, prefill));
-    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 4, 4, 1, generation));
+    EXPECT_TRUE(scheduler.fitsPrefillTokenLimits(1, 4, 4, 1, 4, prefill));
+    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 4, 4, 1, 4, generation));
     // The helper accounts for running reserve, but the caller still disallows
     // mixing a prefill into a running generation batch.
     EXPECT_FALSE(scheduler.evaluateRunningBatch(FIFOScheduler::ScheduleRuntime{}, prefill));
     EXPECT_FALSE(scheduler.evaluateRunningBatch(std::list<GenerateStreamPtr>{}, prefill));
     scheduler.max_batch_tokens_size_ = 8;
-    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 4, 4, 1, prefill));
+    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 4, 4, 1, 4, prefill));
     scheduler.max_batch_tokens_size_ = 1;
-    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 0, 0, prefill));
+    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 0, 0, 0, prefill));
     scheduler.running_streams_.clear();
     // Both modes retain the singleton fast path for zero or undersized budgets.
     for (size_t budget : {size_t(0), size_t(3)}) {
         scheduler.max_batch_tokens_size_ = budget;
-        EXPECT_TRUE(scheduler.fitsPrefillTokenLimits(0, 0, 0, 0, generation));
-        EXPECT_TRUE(scheduler.fitsPrefillTokenLimits(0, 0, 0, 0, prefill));
-        EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 0, 0, prefill));
+        EXPECT_TRUE(scheduler.fitsPrefillTokenLimits(0, 0, 0, 0, 0, generation));
+        EXPECT_TRUE(scheduler.fitsPrefillTokenLimits(0, 0, 0, 0, 0, prefill));
+        EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 0, 0, 0, prefill));
     }
     scheduler.max_batch_tokens_size_ = 8;
     const auto max_size = std::numeric_limits<size_t>::max();
-    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, max_size, 4, 1, prefill));
-    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 4, max_size, prefill));
-    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, max_size, 1, prefill));
+    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, max_size, 4, 1, max_size, prefill));
+    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 4, max_size, 0, prefill));
+    EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, max_size, 1, 0, prefill));
 }
 
 TEST_F(FIFOSchedulerTest, fullBudgetPrefillOnlyDoesNotMixWithGeneration) {
@@ -4351,6 +4352,69 @@ TEST_F(FIFOSchedulerTest, ReviewRegressionSingletonFanoutCannotExceedModelCapaci
     ASSERT_TRUE(stream->hasError());
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
     EXPECT_EQ(stream->getStatus(), StreamState::FINISHED);
+}
+
+TEST_F(FIFOSchedulerTest, QueryCpFanoutAdmissionIncludesPerSequencePadding) {
+    auto resources                            = makeReadinessResources(2048, 64, RoleType::PREFILL, 32, 8192);
+    resources.model_config.max_seq_len        = 8192;
+    resources.model_config.max_prefill_tokens = 8672;
+    ASSERT_TRUE(resources.cache_manager->init());
+    ParallelismConfig parallel;
+    parallel.role_type                            = RoleType::PREFILL;
+    parallel.tp_size                              = 8;
+    parallel.prefill_cp_config.method             = CPRotateMethod::ALL_GATHER;
+    parallel.prefill_cp_config.prefill_cp_size    = 8;
+    parallel.prefill_cp_config.preserve_tp_layout = true;
+    PDSepConfig pd;
+    pd.role_type = RoleType::PREFILL;
+    FIFOScheduler scheduler(resources.runtime_config, resources.model_config, pd, parallel, resources.cache_manager);
+    auto          input                          = std::make_shared<GenerateInput>();
+    input->input_ids                             = torch::ones({17}, torch::kInt32);
+    input->generate_config                       = std::make_shared<GenerateConfig>();
+    input->generate_config->num_return_sequences = 510;
+    input->generate_config->max_new_tokens       = 2;
+    auto stream                                  = std::make_shared<NormalGenerateStream>(
+        input, resources.model_config, resources.runtime_config, resources.resource_context, nullptr);
+    // Keep KV allocation from masking the execution-workspace limit.
+    ASSERT_GT(resources.cache_manager->freeBlocksNum(), 2 * stream->currentBatchSize());
+    ASSERT_LE(17 * stream->currentBatchSize(), resources.model_config.max_prefill_tokens);
+    ASSERT_GT(32 * stream->currentBatchSize(), resources.model_config.max_prefill_tokens);
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    const auto scheduled = scheduler.schedule();
+    ASSERT_TRUE(scheduled.ok()) << scheduled.status();
+    EXPECT_TRUE(scheduled->streams.empty());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+}
+
+TEST_F(FIFOSchedulerTest, QueryCpFanoutBatchRespectsSharedPhysicalCapacity) {
+    auto resources                            = makeReadinessResources(512, 64, RoleType::PREFILL, 32, 8192);
+    resources.model_config.max_seq_len        = 8192;
+    resources.model_config.max_prefill_tokens = 8672;
+    resources.runtime_config.fifo_scheduler_config.cp_force_single_prefill = false;
+    ASSERT_TRUE(resources.cache_manager->init());
+    ParallelismConfig parallel;
+    parallel.role_type                            = RoleType::PREFILL;
+    parallel.tp_size                              = 8;
+    parallel.prefill_cp_config.method             = CPRotateMethod::ALL_GATHER;
+    parallel.prefill_cp_config.prefill_cp_size    = 8;
+    parallel.prefill_cp_config.preserve_tp_layout = true;
+    PDSepConfig pd;
+    pd.role_type = RoleType::PREFILL;
+    FIFOScheduler scheduler(resources.runtime_config, resources.model_config, pd, parallel, resources.cache_manager);
+    for (int i = 0; i < 3; ++i) {
+        auto input                                   = std::make_shared<GenerateInput>();
+        input->input_ids                             = torch::ones({17}, torch::kInt32);
+        input->generate_config                       = std::make_shared<GenerateConfig>();
+        input->generate_config->num_return_sequences = 128;
+        input->generate_config->max_new_tokens       = 2;
+        auto stream                                  = std::make_shared<NormalGenerateStream>(
+            input, resources.model_config, resources.runtime_config, resources.resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
+    const auto scheduled = scheduler.schedule();
+    ASSERT_TRUE(scheduled.ok()) << scheduled.status();
+    EXPECT_EQ(scheduled->streams.size(), 2u);
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
 }
 
 TEST_F(FIFOSchedulerTest, groupIsolation_size2) {

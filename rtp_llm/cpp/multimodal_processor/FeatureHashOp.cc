@@ -23,6 +23,8 @@ torch::Tensor getMultimodalFeatureHash(const torch::Tensor& embedding) {
         const cudaStream_t         stream     = c10::cuda::getCurrentCUDAStream(emb.get_device());
         auto error = invokeFeatureHash(emb.data_ptr(), rows, row_bytes, gpu_hashes.data_ptr<int32_t>(), stream);
         TORCH_CHECK(error == cudaSuccess, "failed to hash multimodal features on GPU: ", cudaGetErrorString(error));
+        // ATen allocates pinned storage for this nonblocking D2H copy; host
+        // consumers still need the stream completion below before reading it.
         auto hashes = gpu_hashes.to(torch::kCPU, /*non_blocking=*/true);
         error = cudaStreamSynchronize(stream);
         TORCH_CHECK(error == cudaSuccess, "failed to hash multimodal features on GPU: ", cudaGetErrorString(error));

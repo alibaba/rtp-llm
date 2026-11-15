@@ -936,15 +936,18 @@ absl::Status NormalEngine::stop() {
     }
     RTP_LLM_LOG_INFO("stop normal engine");
     running_                    = false;
-    const auto scheduler_status = scheduler_->stop();
+    const auto scheduler_status = scheduler_->requestStop();
     // Ask rank 0 to stop at a step boundary. Receivers must finish all model
     // collectives for inputs that rank 0 has already published before exiting.
     CpuTpBroadcaster::instance().requestStop();
     loop_thread_->join();
+    // The loop has finished its last model step and async dispatch. Only now
+    // can cancellation release page tables and LINEAR replay leases.
+    const auto release_status = scheduler_->stop();
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
     resource_context_.cache_manager->stopMetricsReporter();
-    return scheduler_status;
+    return scheduler_status.ok() ? release_status : scheduler_status;
 }
 
 void NormalEngine::loop() try {

@@ -151,6 +151,7 @@ class KimiK3MLA(nn.Module):
         ):
             raise ValueError("K3 requires NoPE MLA with its output gate")
         self.tp_size = parallelism.tp_size
+        self.tp_rank = parallelism.tp_rank
         self.heads = cfg.head_num // self.tp_size
         self.query_heads = (
             cfg.head_num if parallelism.role_type == RoleType.DECODE else self.heads

@@ -55,6 +55,11 @@ def snapshot_prefill_conv_input(
     """
     import torch
 
+    # Startup probes remap dummy pages to private per-request scratch and
+    # discard its contents. They have no reusable input state to snapshot.
+    if getattr(attn_inputs, "is_warmup", False):
+        return None, None
+
     key = ("prefill_conv_alias", attn_inputs, page_size)
     cache = metadata.prefill_cuda_inputs
     if key not in cache:

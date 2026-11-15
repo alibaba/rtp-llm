@@ -772,6 +772,8 @@ class BackendRPCServerVisitor:
         if input.generate_config.force_disable_sp_run:
             return
 
+        # SP logprobs require per-token target distributions from the backend.
+        # Upgrade SP backends before routing these requests from a newer frontend.
         # speculative decoding does not support batched input
         if len(input.token_ids.shape) == 2 and input.token_ids.size(0) != 1:
             raise FtRuntimeException(

@@ -6,9 +6,11 @@ def _native_mqa_repository(name, arch, sha256):
     # Older internal overlays may already register either repository.
     if native.existing_rule(name):
         return
+    directory = "cu130" if arch == "x86_64" else "cu130_arm"
+    wheel = "deep_gemm-2.8.0%2B122e18b.cu132-cp310-cp310-linux_{}.whl".format(arch)
     http_archive(
         name = name,
-        urls = ["http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.0%2B122e18b.cu132-cp310-cp310-linux_{}.whl".format(arch)],
+        urls = ["https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/{}/{}".format(directory, wheel)],
         sha256 = sha256,
         type = "zip",
         patches = [

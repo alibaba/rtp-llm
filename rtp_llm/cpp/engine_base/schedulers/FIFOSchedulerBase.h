@@ -38,6 +38,7 @@ public:
     // with real group-queue semantics.
     std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
                  enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
+    absl::Status requestStop() override;
     absl::Status stop() override;
     bool         empty() override;
     int64_t      lastScheduleTime() override;
@@ -91,8 +92,10 @@ protected:
     size_t                          max_seq_len_                 = 0;
     size_t                          max_batch_tokens_size_       = 0;
     size_t                          max_generate_batch_size_     = 1;
+    int64_t                         max_prefill_tokens_          = 0;
     size_t                          max_inited_kv_cache_streams_ = 0;
     int64_t                         prefill_chunk_size_          = 0;
+    int64_t                         prefill_token_alignment_     = 1;
     int64_t                         prefill_chunk_alignment_     = 0;
     int64_t                         prefill_chunk_cp_size_       = 0;
     int64_t                         prefill_chunk_padded_rows_   = 0;

@@ -62,7 +62,7 @@ class DraftModelLoadingTest(unittest.TestCase):
                     num_layers=12,
                     max_seq_len=128,
                     model_name="target",
-                    attn_config=SimpleNamespace(tokens_per_block=16),
+                    attn_config=SimpleNamespace(tokens_per_block=16, is_causal=True),
                     to_string=lambda: "target",
                 )
                 model_cls = MagicMock(spec=BaseModel, __name__="TestTarget")

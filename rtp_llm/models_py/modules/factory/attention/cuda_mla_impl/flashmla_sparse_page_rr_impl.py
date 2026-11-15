@@ -459,7 +459,11 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
 
             workspace_owner = DsaWorkspaceOwner.from_model(config, parallelism)
         self.workspace_owner = workspace_owner
-        attention = config.getAttentionConfigs(parallelism.get_attn_tp_size())
+        # Query-CP weights retain every head in all phases, including local
+        # Decode and target verification where no Prefill layout is prepared.
+        attention = config.getAttentionConfigs(
+            1 if workspace_owner.prefill_query_cp else parallelism.get_attn_tp_size()
+        )
         if attention.mla_fp8_compute:
             raise ValueError(
                 "DSA SFA uses BF16 computation independently of cache dtype"

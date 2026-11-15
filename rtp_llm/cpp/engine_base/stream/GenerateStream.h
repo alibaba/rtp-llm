@@ -249,7 +249,7 @@ public:
     void   setGenTimeline(bool gen_timeline);
     bool   updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt);
     size_t maxSeqLen() const;
-    absl::Status validatePrefillCapacity() const;
+    absl::Status validatePrefillCapacity(int64_t token_alignment = 1) const;
     int    inputLength() const;
     int    seqLength() const;
     // NOTE: In generatestream, set seq len must use setSeqLength api, we need to save start_check_seq_length_

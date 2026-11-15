@@ -118,6 +118,13 @@ private:
     bool                                              sequence_parallel_padding_enabled_  = false;
     bool                                              requires_global_mtp_prefill_hidden_ = false;
     std::optional<torch_ext::PyContextParallelParams> mtp_prefill_cp_params_;
+    bool                                              usesSequenceParallelPadding(const GptModelInputs& inputs) const {
+        // CP owns Prefill's per-request padding. Decode/verify still need SP
+        // alignment even when the same model also serves Query-CP Prefill.
+        const bool cp_prefill = device_props_.enable_prefill_cp && inputs.sequence_lengths.numel() == 0
+                                && !inputs.is_target_verify && !inputs.is_mtp_draft_update;
+        return sequence_parallel_padding_enabled_ && !cp_prefill;
+    }
     GptModelInputs                                    padSequenceParallelInputs(const GptModelInputs& inputs);
 
     // Helper functions to reduce code duplication

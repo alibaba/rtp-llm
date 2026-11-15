@@ -168,6 +168,7 @@ bool FIFOScheduler::evaluateRunningBatch(const ScheduleRuntime&   schedule_runti
                                   schedule_runtime.admitted_prefill_token_size_with_cache,
                                   schedule_runtime.admitted_prefill_max_seq_len_with_cache,
                                   schedule_runtime.admitted_prefill_sequence_count,
+                                  schedule_runtime.admitted_prefill_token_size_without_cache,
                                   new_stream);
 }
 
@@ -194,13 +195,19 @@ bool FIFOScheduler::evaluateRunningBatch(const std::list<GenerateStreamPtr>& str
     size_t admitted_tokens         = 0;
     size_t admitted_max_seq_len    = 0;
     size_t admitted_sequence_count = 0;
+    size_t admitted_physical_tokens = 0;
     for (const auto& stream : streams) {
         admitted_tokens += prefillTokenCostWithCache(stream);
         admitted_max_seq_len = std::max(admitted_max_seq_len, prefillSeqLenWithCache(stream));
         admitted_sequence_count += static_cast<size_t>(stream->currentBatchSize());
+        admitted_physical_tokens += prefillTokenCostWithoutCache(stream);
     }
-    return fitsPrefillTokenLimits(
-        admitted_count, admitted_tokens, admitted_max_seq_len, admitted_sequence_count, new_stream);
+    return fitsPrefillTokenLimits(admitted_count,
+                                  admitted_tokens,
+                                  admitted_max_seq_len,
+                                  admitted_sequence_count,
+                                  admitted_physical_tokens,
+                                  new_stream);
 }
 
 bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
@@ -215,7 +222,17 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
                                            size_t                   admitted_tokens,
                                            size_t                   admitted_max_seq_len,
                                            size_t                   admitted_sequence_count,
+                                           size_t                   admitted_physical_tokens,
                                            const GenerateStreamPtr& candidate) const {
+    // A single oversized stream reaches the per-stream rejection path after
+    // cache matching. Further streams must fit the shared, padded workspace.
+    if (admitted_stream_count > 0 && max_prefill_tokens_ > 0 && !candidate->chunkedPrefillEnabled()) {
+        const auto capacity = static_cast<size_t>(max_prefill_tokens_);
+        if (admitted_physical_tokens > capacity
+            || prefillTokenCostWithoutCache(candidate) > capacity - admitted_physical_tokens) {
+            return false;
+        }
+    }
     // Preserve the historical singleton fast path for all execution modes,
     // including when the batch token budget is smaller than the prompt or zero.
     if (admitted_stream_count == 0 && candidate->contextLength() + running_streams_.size() < int(max_seq_len_)) {

@@ -496,9 +496,14 @@ size_t GenerateStream::maxSeqLen() const {
     return max_seq_len_;
 }
 
-absl::Status GenerateStream::validatePrefillCapacity() const {
-    if (max_prefill_tokens_ > 0 && isContextStream() && !isFakeStream() && !chunkedPrefillEnabled()
-        && contextLength() > 0 && currentBatchSize() > max_prefill_tokens_ / contextLength()) {
+absl::Status GenerateStream::validatePrefillCapacity(int64_t token_alignment) const {
+    if (max_prefill_tokens_ <= 0 || !isContextStream() || isFakeStream() || chunkedPrefillEnabled()) {
+        return absl::OkStatus();
+    }
+    RTP_LLM_CHECK_WITH_INFO(token_alignment > 0, "Prefill token alignment must be positive");
+    const int64_t length        = std::max(contextLength(), 0);
+    const int64_t padded_length = (length + token_alignment - 1) / token_alignment * token_alignment;
+    if (padded_length > 0 && currentBatchSize() > max_prefill_tokens_ / padded_length) {
         return absl::InvalidArgumentError("Prefill execution rows exceed initialized model capacity "
                                           + std::to_string(max_prefill_tokens_)
                                           + "; enable chunked prefill or reduce num_return_sequences");

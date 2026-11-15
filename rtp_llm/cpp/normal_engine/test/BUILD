@@ -103,6 +103,16 @@ cc_test(
 )
 
 cc_test(
+    name = "eplb_startup_integration_test",
+    srcs = ["EplbStartupIntegrationTest.cc"],
+    copts = test_copts,
+    deps = [":mock_engine"] + torch_deps() + cuda13_torch_link_deps,
+    env = device_test_envs(),
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
     name = "recording_engine_test",
     srcs = ["RecordingEngineTest.cc"],
     copts = test_copts,
