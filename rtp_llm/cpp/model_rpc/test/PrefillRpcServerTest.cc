@@ -976,18 +976,25 @@ TEST(PDCancelRegistryTest, ActiveReadCannotBeRetiredByCancellationRetention) {
     PDCancelRegistry::Handle handle;
     ASSERT_TRUE(registry.admit(request, "reading117", "prefill:123", currentTimeMs() + 1000, handle).ok());
     ASSERT_EQ(registry.cancel(117, {ErrorCode::CANCELLED, "cancel"}).value(), CANCEL_STATUS_ACCEPTED);
+    const auto overdue_at = handle->retain_until_ms;
     registry.beginRead("reading117");
     registry.finishLocal(handle);
     EXPECT_FALSE(registry.complete(handle));
     {
         std::lock_guard<std::mutex> lock(registry.mutex_);
-        registry.trimLocked(handle->retain_until_ms);
+        ASSERT_EQ(handle->retain_until_ms, overdue_at);
+        registry.trimLocked(overdue_at - 1);
+        EXPECT_EQ(registry.overdue_cancels_, 0u);
+        registry.trimLocked(overdue_at);
+        registry.trimLocked(overdue_at);
+        EXPECT_EQ(registry.overdue_cancels_, 1u);
     }
     EXPECT_EQ(registry.find(117), handle);
     EXPECT_TRUE(registry.isCanceled("reading117"));
     EXPECT_FALSE(handle->terminal);
     registry.endRead("reading117");
     ASSERT_TRUE(registry.complete(handle));
+    EXPECT_EQ(registry.overdue_cancels_, 0u);
     EXPECT_FALSE(handle->downstream_done);
 }
 

@@ -26,6 +26,8 @@ Frontend、FlexLB master、Prefill、Decode 必须来自同一发布版本，使
 
 取消注册表分别为业务请求记录和准入前取消记录设 1,048,576 条上限。业务额度已满时，新请求返回并发容量错误。提前取消额度已满时，无法登记新 ID 的 Cancel 返回 gRPC RESOURCE_EXHAUSTED。已有请求的取消和重复取消仍可执行。每轮最多选取 128 条本地未完成记录和 128 条重试记录进行清理，仍在等待本地物理清理的请求继续保留。
 
+容量拒绝或取消超过 10 分钟仍未完成本地清理时，`PD cancellation registry pressure` 日志记录两类额度的占用、上次告警后的拒绝数及未完成清理的超期数。单个注册表最多每 30 秒告警一次。
+
 Prefill 多模态瞬时错误可用 PREFILL_RETRY_TIMES 配置额外尝试次数（默认0），PREFILL_RETRY_TIMEOUT_MS 限制追加尝试窗口（默认0不另加限制）。每次从原始请求重建输入并保留原始起始时间和 deadline；不可重试错误、取消和请求过期立即停止。该重试不重放入队或 KV 传输，Decode 继续消费 FE 改写的 token IDs。
 
 KV 加载默认预算为 5 秒，单次加载也受请求剩余时间约束。冷启动或建链确需更长预算时，显式配置 `--load_cache_timeout_ms`。升级时从启动参数中移除 `--cache_store_rdma_transfer_wait_timeout_ms`，P2P 读写统一使用请求和传输 deadline。

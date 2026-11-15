@@ -37,6 +37,7 @@ public:
         std::atomic<bool> local_done{false};
         bool              downstream_done = false;
         std::atomic<bool> terminal{false};
+        bool                 cleanup_overdue = false;
         int64_t           retain_until_ms = 0;
         std::atomic<int64_t> next_cancel_retry_ms{0};
         std::atomic<int64_t> cancel_retry_delay_ms{50};
@@ -94,6 +95,7 @@ private:
     void                                    reapFinishedStreams();
     void                                    trimLocked(int64_t now_ms);
     void                                    scheduleExpirationLocked(const Handle& handle, int64_t expires_at_ms);
+    void                                    reportPressureLocked();
     static constexpr int64_t                kRetentionMs = 10 * 60 * 1000;
     static constexpr int64_t                kActiveReadExpiryRetryMs = 1000;
     // Cancel-before-admission records have their own budget. Existing request
@@ -101,6 +103,10 @@ private:
     size_t                                  record_capacity_       = 1u << 20;
     size_t                                  control_capacity_      = 1u << 20;
     size_t                                  control_record_count_  = 0;
+    size_t                                  overdue_cancels_       = 0;
+    size_t                                  request_rejections_    = 0;
+    size_t                                  control_rejections_    = 0;
+    int64_t                                 last_pressure_log_ms_  = 0;
     static constexpr size_t                 kMaxExpirationsPerPass = 128;
     std::mutex                              mutex_;
     std::unordered_map<int64_t, Handle>     entries_;

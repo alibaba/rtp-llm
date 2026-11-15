@@ -40,8 +40,17 @@ void PDCancelRegistry::trimLocked(int64_t now_ms) {
             continue;
         }
         const auto& e = it->second;
-        if (!e->local_done || e->stream || (e->canceled.load() && !e->terminal)
-            || e->retain_until_ms != expires_at_ms) {
+        if (e->retain_until_ms != expires_at_ms) {
+            continue;
+        }
+        if (e->canceled.load() && !e->terminal) {
+            if (!e->cleanup_overdue) {
+                e->cleanup_overdue = true;
+                ++overdue_cancels_;
+            }
+            continue;
+        }
+        if (!e->local_done || e->stream) {
             continue;
         }
         if (active_reads_.count(e->unique_key)) {
@@ -75,6 +84,31 @@ void PDCancelRegistry::trimLocked(int64_t now_ms) {
     }
 }
 
+void PDCancelRegistry::reportPressureLocked() {
+    if (overdue_cancels_ == 0 && request_rejections_ == 0 && control_rejections_ == 0) {
+        return;
+    }
+    const auto now_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    if (last_pressure_log_ms_ != 0 && now_ms - last_pressure_log_ms_ < 30000) {
+        return;
+    }
+    RTP_LLM_LOG_WARNING(
+        "PD cancellation registry pressure: request_records=%zu request_capacity=%zu control_records=%zu "
+        "control_capacity=%zu request_rejections=%zu control_rejections=%zu overdue_cancels=%zu",
+        entries_.size() - control_record_count_,
+        record_capacity_,
+        control_record_count_ + absent_fences_.size(),
+        control_capacity_,
+        request_rejections_,
+        control_rejections_,
+        overdue_cancels_);
+    last_pressure_log_ms_ = now_ms;
+    request_rejections_   = 0;
+    control_rejections_   = 0;
+}
+
 ErrorInfo PDCancelRegistry::admit(const GenerateInputPB& request,
                                   const std::string&     key,
                                   const std::string&     downstream_address,
@@ -95,6 +129,8 @@ ErrorInfo PDCancelRegistry::admit(const GenerateInputPB& request,
     const bool capacity_exhausted = control_only ? control_record_count_ + absent_fences_.size() >= control_capacity_ :
                                                    entries_.size() - control_record_count_ >= record_capacity_;
     if (capacity_exhausted) {
+        ++(control_only ? control_rejections_ : request_rejections_);
+        reportPressureLocked();
         return {ErrorCode::CONCURRENCY_LIMIT_ERROR,
                 control_only ? "PD early cancellation capacity exhausted" : "PD request registry capacity exhausted"};
     }
@@ -142,9 +178,11 @@ void PDCancelRegistry::finishLocal(const Handle& handle) {
     }
     std::lock_guard<std::mutex> lock(mutex_);
     handle->local_done      = true;
-    const auto now_ms = currentTimeMs();
-    scheduleExpirationLocked(handle,
-                             (handle->downstream_done ? now_ms : std::max(now_ms, handle->deadline_ms)) + kRetentionMs);
+    if (!handle->canceled.load()) {
+        const auto now_ms = currentTimeMs();
+        scheduleExpirationLocked(
+            handle, (handle->downstream_done ? now_ms : std::max(now_ms, handle->deadline_ms)) + kRetentionMs);
+    }
     if (handle->canceled.load() || !stream || handle->stream != stream) {
         return;
     }
@@ -170,6 +208,8 @@ absl::StatusOr<CancelStatusPB> PDCancelRegistry::cancel(int64_t request_id, cons
             return CANCEL_STATUS_TOMBSTONED;
         }
         if (control_record_count_ + absent_fences_.size() >= control_capacity_) {
+            ++control_rejections_;
+            reportPressureLocked();
             return absl::ResourceExhaustedError("PD early cancellation capacity exhausted");
         }
         const auto expires_at_ms = currentTimeMs() + kRetentionMs;
@@ -209,6 +249,9 @@ absl::StatusOr<CancelStatusPB> PDCancelRegistry::cancel(int64_t request_id, cons
     if (prior_error.hasError())
         e->cancel_reason = prior_error;
     e->canceled.store(true);
+    // The first scheduled deadline observes cleanup age. Only complete()
+    // can start retirement for a canceled record.
+    scheduleExpirationLocked(e, currentTimeMs() + kRetentionMs);
     pending_stream_releases_.erase(request_id);
     ++canceled_keys_[e->unique_key];
     pending_cancels_.emplace(request_id, e);
@@ -281,6 +324,7 @@ std::vector<PDCancelRegistry::Handle> PDCancelRegistry::pending() {
     reapFinishedStreams();
     std::lock_guard<std::mutex> lock(mutex_);
     trimLocked(currentTimeMs());
+    reportPressureLocked();
     std::vector<Handle> result;
     result.reserve(std::min(pending_cancels_.size(), 2 * kPendingBatchSize));
     std::set<int64_t> selected;
@@ -320,7 +364,7 @@ void PDCancelRegistry::finishDownstream(const Handle& handle) {
     if (handle->terminal) {
         pending_cancels_.erase(handle->identity.request_id);
     }
-    if (handle->local_done) {
+    if (handle->local_done && (!handle->canceled.load() || handle->terminal)) {
         scheduleExpirationLocked(handle, currentTimeMs() + kRetentionMs);
     }
 }
@@ -365,6 +409,10 @@ bool PDCancelRegistry::complete(const Handle& handle) {
                                          stream))
         return false;
     handle->terminal = true;
+    if (handle->cleanup_overdue) {
+        handle->cleanup_overdue = false;
+        --overdue_cancels_;
+    }
     local_pending_cancels_.erase(handle->identity.request_id);
     // Local terminal is independent of remote control-plane availability. Keep
     // the cancellation fence and bounded retry record independently of Prefill
