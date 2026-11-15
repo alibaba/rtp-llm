@@ -14,6 +14,7 @@ from rtp_llm.models.deepseek_v2 import DeepSeekV2, Glm5Mtp, Glm5MtpWeight
 from rtp_llm.models_py.model_desc.glm5_mtp import Glm5MtpModel
 from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp
 from rtp_llm.models_py.modules.factory.attention import attn_factory
+from rtp_llm.models_py.modules.offload.plan import offload_plan_signature
 from rtp_llm.utils.dsa_indexing import build_dsa_indexer_groups
 from rtp_llm.utils.model_weight import W
 
@@ -149,8 +150,30 @@ class Glm5MtpTest(unittest.TestCase):
     def test_graph_wrapper_initialization_keeps_captured_offload_runtime(self):
         model = Glm5MtpModel.__new__(Glm5MtpModel)
         torch.nn.Module.__init__(model)
+        model.max_generate_batch_size = 2
+        model.config = SimpleNamespace(
+            gen_num_per_cycle=3,
+            kv_cache_spec_descs=[
+                [
+                    SimpleNamespace(
+                        tag="default",
+                        offload=SimpleNamespace(enabled=True),
+                        offload_runtime_group=None,
+                    )
+                ]
+            ],
+        )
         storage = SimpleNamespace(
-            resident_planes=[torch.ones(2, 8)],
+            owner_layer=0,
+            tag="default",
+            total_blocks=2,
+            hbm_blocks=1,
+            rows_per_block=1,
+            rows_per_page=1,
+            max_selected_rows=8,
+            max_requests=2,
+            host_planes=[torch.zeros(1, 8)],
+            resident_planes=[torch.ones(9, 8)],
             generations=torch.zeros(2, dtype=torch.int64),
         )
         plan = SimpleNamespace(storage=storage)
@@ -161,6 +184,10 @@ class Glm5MtpTest(unittest.TestCase):
             get_offload_storage=lambda layer, tag: storage,
         )
         resource = SimpleNamespace(kv_cache=cache)
+        model._offload_signature = (
+            offload_plan_signature(cache, model.config.kv_cache_spec_descs),
+            8,
+        )
         with patch(
             "rtp_llm.models_py.model_desc.generic_moe.GenericMoeModel.initialize"
         ) as rebuild:
@@ -168,9 +195,9 @@ class Glm5MtpTest(unittest.TestCase):
             self.assertTrue(model.initialize(resource))
             rebuild.assert_not_called()
         self.assertIs(model.offload_plans[0, "default"], plan)
-        cache.get_offload_storage = lambda layer, tag: SimpleNamespace(
-            resident_planes=[torch.zeros(2, 8)], generations=storage.generations
-        )
+        replacement = SimpleNamespace(**vars(storage))
+        replacement.resident_planes = [torch.zeros_like(storage.resident_planes[0])]
+        cache.get_offload_storage = lambda layer, tag: replacement
         with self.assertRaisesRegex(ValueError, "share their KV storage"):
             model.initialize(resource)
 

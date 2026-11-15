@@ -227,7 +227,7 @@ public:
                 enqueueGroup,
                 (const std::vector<GenerateStreamPtr>&),
                 (override));
-    MOCK_METHOD((absl::StatusOr<std::list<GenerateStreamPtr>>), schedule, (), (override));
+    MOCK_METHOD((absl::StatusOr<ScheduleOutput>), schedule, (), (override));
     MOCK_METHOD(absl::Status, stop, (), (override));
     MOCK_METHOD(bool, empty, (), (override));
     MOCK_METHOD(int64_t, lastScheduleTime, (), (override));
