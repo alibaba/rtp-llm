@@ -3710,6 +3710,19 @@ class VLLMEngineObserver:
         request_id = self._navi_request_id(request)
         return max(0, state.predicted_cache_hits.get(request_id, 0))
 
+    @staticmethod
+    def _native_cache_lookup_complete(request) -> bool:
+        if hasattr(request, "prefill_stats"):
+            stats = request.prefill_stats
+            # Native consumes these stats after reporting the resolved lookup.
+            if stats is None:
+                return True
+            # A newly created PrefillStats has zero prompt and cache counts.
+            if int(getattr(stats, "num_prompt_tokens", 0) or 0) > 0:
+                return True
+        cached_tokens = getattr(request, "num_cached_tokens", -1)
+        return cached_tokens is not None and int(cached_tokens) >= 0
+
     def _make_workload_contribution(
         self, request, inflight_scheduled_tokens: int
     ) -> _WorkloadContribution:
@@ -3720,7 +3733,7 @@ class VLLMEngineObserver:
             - max(0, inflight_scheduled_tokens),
         )
         computed_tokens = min(computed_tokens, prompt_tokens)
-        if int(getattr(request, "num_cached_tokens", -1)) < 0:
+        if not self._native_cache_lookup_complete(request):
             computed_tokens = max(
                 computed_tokens,
                 min(prompt_tokens, self._predicted_cache_hit_for_request(request)),

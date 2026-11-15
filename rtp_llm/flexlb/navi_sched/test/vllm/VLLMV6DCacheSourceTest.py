@@ -88,6 +88,36 @@ class VLLMV6DCacheSourceTest(unittest.TestCase):
             for _ in range(4)
         ]
 
+    def test_workload_uses_resolved_native_cache_state_across_request_versions(self):
+        names = {"_make_workload_contribution", "_native_cache_lookup_complete"}
+        methods = [copy.deepcopy(n) for n in self.observer_class.body
+                   if isinstance(n, ast.FunctionDef) and n.name in names]
+        module = ast.parse("from __future__ import annotations\nclass Observer: pass\n")
+        module.body[1].body = methods
+        namespace = {"_WorkloadContribution": SimpleNamespace}
+        exec(compile(ast.fix_missing_locations(module), str(SOURCE), "exec"), namespace)
+        observer = namespace["Observer"]()
+        observer._predicted_cache_hit_for_request = lambda request: 48
+        observer._forward_request_state = lambda request_id: SimpleNamespace(batch_id=77)
+        cases = [
+            ("new_miss", dict(prefill_stats=SimpleNamespace(num_prompt_tokens=64)), 8, 0),
+            ("new_partial", dict(prefill_stats=SimpleNamespace(num_prompt_tokens=64)), 32, 24),
+            ("new_unresolved", dict(prefill_stats=SimpleNamespace(num_prompt_tokens=0)), 8, 48),
+            ("new_consumed", dict(prefill_stats=None), 32, 24),
+            ("legacy_miss", dict(num_cached_tokens=0), 8, 0),
+            ("legacy_unresolved", dict(num_cached_tokens=-1), 8, 48),
+            ("new_resolved_old_unknown", dict(num_cached_tokens=-1,
+                prefill_stats=SimpleNamespace(num_prompt_tokens=64)), 8, 0),
+        ]
+        for name, fields, computed, expected_context in cases:
+            with self.subTest(name=name):
+                request = SimpleNamespace(request_id="request", num_prompt_tokens=64,
+                                          num_computed_tokens=computed, **fields)
+                result = observer._make_workload_contribution(request, 8)
+                self.assertEqual(expected_context, result.prefill_context_tokens)
+                self.assertEqual(64 - expected_context, result.remaining_prefill_tokens)
+                self.assertEqual(77, result.batch_id)
+
     def test_native_v6d_presence_controls_capability_without_a_navisched_switch(self):
         class Connector:
             def __init__(self):
