@@ -13,9 +13,10 @@ world=32 if os.environ.get('RTP_LLM_RL_WORLD32')=='1' else 72
 if world==32 and os.environ.get('RTP_LLM_RL_WORLD72')=='1':
  raise RuntimeError('Qwen3.8 world32 and world72 are mutually exclusive')
 batch_tokens=int(os.environ.get('RTP_MAX_BATCH_TOKENS_SIZE','8192')) if world==32 else 8192
-if batch_tokens<=0:
- raise RuntimeError('Qwen3.8 requires a positive prefill token budget')
-ep_padded_tokens=world*((max(8192,batch_tokens)+7)//8)
+context_tokens=int(os.environ.get('RTP_Q38_CONTEXT_TOKENS','8192')) if world==32 else 8192
+if batch_tokens<=0 or context_tokens not in (8192,16384):
+ raise RuntimeError('Qwen3.8 requires a valid context and prefill token budget')
+ep_padded_tokens=world*((max(context_tokens,batch_tokens)+7)//8)
 expected={
  'RTP_ARM_BF16_ROPE_BACKEND':MODE,
  'RTP_LLM_RL_MODE':'1',f'RTP_LLM_RL_WORLD{world}':'1',

@@ -15,7 +15,7 @@ export RTP_LLM_RL_MODE=1 RTP_LLM_RL_WORLD32=1 RTP_LLM_RL_START_PAUSED=1 RTP_LLM_
 unset RTP_LLM_RL_WORLD72 RTP_LLM_RL_Q36_EP4 PYTORCH_CUDA_ALLOC_CONF
 export RTP_FIXED_PHYSICAL_EP_LAYOUT=balanced_v1 RTP_RL_BORROW_SINGLETON_HF_SOURCES=1
 export RTP_MAX_BATCH_TOKENS_SIZE="${RTP_MAX_BATCH_TOKENS_SIZE:-8192}"
-export RTP_NCCL_EP_REFERENCE_MAX_PADDED_TOKENS="${RTP_NCCL_EP_REFERENCE_MAX_PADDED_TOKENS:-32768}"
+export RTP_Q38_CONTEXT_TOKENS="${RTP_Q38_CONTEXT_TOKENS:-8192}"
 export RTP_ARM_BF16_ROPE_BACKEND=torch_bf16_v1
 export WORLD_SIZE=32 LOCAL_WORLD_SIZE=4 TP_SIZE=8 DP_SIZE=4 EP_SIZE=32 FFN_SP_SIZE=8 PP_SIZE=1
 export RTP_WORLD_SIZE=32 RTP_LOCAL_WORLD_SIZE=4 RTP_TP_SIZE=8 RTP_DP_SIZE=4 RTP_EP_SIZE=32 RTP_FFN_SP_SIZE=8
@@ -54,16 +54,19 @@ if len(uuids)!=4 or len(set(uuids))!=4:raise ValueError('exactly four physical G
 if not re.fullmatch(r'[a-f0-9]{64}',e['RTP_RL_NATIVE_LIBRARY_SHA256']):raise ValueError('invalid native SHA256')
 if e.get('RTP_LLM_RL_WORLD32_LOCAL_EXPERTS') not in ('0','1'):raise ValueError('select the expert wire format explicitly')
 batch_tokens = int(e['RTP_MAX_BATCH_TOKENS_SIZE'])
-if batch_tokens <= 0:raise ValueError('max batch tokens must be positive')
+context_tokens = int(e['RTP_Q38_CONTEXT_TOKENS'])
+if batch_tokens <= 0 or context_tokens not in (8192, 16384):
+    raise ValueError('invalid Qwen3.8 context or prefill batch budget')
 # Each attention TP group shards its local tokens across eight ranks before
-# the 32-rank gather. A standalone prefill can use the full 8192-token context.
-required_ep_tokens = 32 * ((max(8192, batch_tokens) + 7) // 8)
-if int(e['RTP_NCCL_EP_REFERENCE_MAX_PADDED_TOKENS']) != required_ep_tokens:
+# the 32-rank gather. One standalone prefill may use the full context.
+required_ep_tokens = 32 * ((max(context_tokens, batch_tokens) + 7) // 8)
+if int(e.get('RTP_NCCL_EP_REFERENCE_MAX_PADDED_TOKENS', required_ep_tokens)) != required_ep_tokens:
     raise ValueError(f'EP padded-token cap must match the prefill budget ({required_ep_tokens})')
 for key in ('RTP_RL_BOOTSTRAP_POLICY_MANIFEST','RTP_PHY2LOG_PATH','RLLM_Q38_NCCL_LIBRARY_PATH'):
     if not Path(e[key]).is_file():raise ValueError(f'missing pinned input {key}')
 if not (Path(e['RTP_MODEL_PATH'])/'config.json').is_file():raise ValueError('mounted model metadata is absent')
 PY
+export RTP_NCCL_EP_REFERENCE_MAX_PADDED_TOKENS="${RTP_NCCL_EP_REFERENCE_MAX_PADDED_TOKENS:-$((32 * (( (${RTP_Q38_CONTEXT_TOKENS} > RTP_MAX_BATCH_TOKENS_SIZE ? RTP_Q38_CONTEXT_TOKENS : RTP_MAX_BATCH_TOKENS_SIZE) + 7) / 8)))}"
 args=("$RTP_PYTHON" -m qwen38_world72_entrypoint
   --model_type qwen38_moe_text --checkpoint_path "$RTP_MODEL_PATH" --tokenizer_path "$RTP_MODEL_PATH" --act_type BF16
   --ptuning_path "" --extra_data_path "" --local_extra_data_path ""
@@ -73,7 +76,7 @@ args=("$RTP_PYTHON" -m qwen38_world72_entrypoint
   --moe_strategy nccl_bf16_reference --moe_pure_tp_preshard false --redundant_expert 0 --phy2log_path "$RTP_PHY2LOG_PATH" --eplb_mode NONE
   --use_deepep_moe false --use_deepep_low_latency false --use_deepep_internode false --use_mori_ep false
   --frontend_server_count 0 --frontend_pre_stop_drain_seconds 0 --dash_sc_grpc_pre_stop_drain_seconds 0 --backend_post_frontend_drain_seconds 0
-  --batch_invariant false --enable_fp32_lm_head false --max_seq_len 8192 --kv_cache_mem_mb "${RTP_KV_CACHE_MEM_MB:-4096}"
+  --batch_invariant false --enable_fp32_lm_head false --max_seq_len "$RTP_Q38_CONTEXT_TOKENS" --kv_cache_mem_mb "${RTP_KV_CACHE_MEM_MB:-4096}"
   --ssm_state_dtype fp32 --seq_size_per_block 8192 --kernel_seq_size_per_block 64
   --max_context_batch_size "${RTP_MAX_CONTEXT_BATCH_SIZE:-8}" --max_batch_tokens_size "$RTP_MAX_BATCH_TOKENS_SIZE"
   --concurrency_limit "${RTP_CONCURRENCY_LIMIT:-8}" --enable_mixed_continuous_batching false --pdfusion_coord_mode off
