@@ -11,3 +11,10 @@ py_test(
     srcs = ["runtime_library_path_test.py"],
     data = ["runtime_library_path.sh"],
 )
+
+py_test(
+    name = "collect_bazel_testlogs_test",
+    size = "small",
+    srcs = ["collect_bazel_testlogs.py", "collect_bazel_testlogs_test.py"],
+    env = {"GPU_COUNT": "0"},
+)
