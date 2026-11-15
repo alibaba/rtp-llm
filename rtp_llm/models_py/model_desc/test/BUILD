@@ -9,6 +9,15 @@ k31_review_test_deps = py_test_deps + [
 ]
 
 py_test(
+    name = "kimi_k3_startup_integration_test",
+    srcs = ["kimi_k3_startup_integration_test.py"],
+    deps = k31_review_test_deps,
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
     name = "kimi_k31_review_regression_test",
     srcs = ["kimi_k31_review_regression_test.py"],
     deps = k31_review_test_deps,
