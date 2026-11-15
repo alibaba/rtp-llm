@@ -145,7 +145,7 @@ public:
     bool markPrefillEmitted(int64_t request_id);
 
 private:
-    AwiCollector()                                       = default;
+    AwiCollector();
     AwiCollector(const AwiCollector&)                    = delete;
     AwiCollector& operator=(const AwiCollector&)         = delete;
 

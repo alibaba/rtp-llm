@@ -1,6 +1,20 @@
 #include "rtp_llm/cpp/awi/AwiCollector.h"
 
+#include <cstdlib>
+
 namespace rtp_llm {
+
+AwiCollector::AwiCollector() {
+    // Read the container-level operation id at construction time: boot-phase
+    // events (decode/prefill graph capture during engine warmup) are recorded
+    // before publish_startup_facts can call setDefaultOperationId, so without
+    // this they stay untagged and are invisible to operation-scoped
+    // /awi/observations fetches (the frozen evaluator's graph-capture check).
+    // An unset/empty env keeps the legacy untagged behavior.
+    if (const char* operation_id = ::getenv("AWI_OPERATION_ID")) {
+        default_operation_id_ = operation_id;
+    }
+}
 
 AwiCollector& AwiCollector::instance() {
     static AwiCollector collector;
