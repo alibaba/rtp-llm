@@ -169,6 +169,7 @@ py_library(
     srcs = glob([
         "utils/**/*.py",
     ], exclude = _JIT_CACHE_SRCS + _JIT_CACHE_ENV_SRCS + [
+        "utils/new_loader_support.py",
         "utils/warmup.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
@@ -315,6 +316,8 @@ py_library(
         #":decord",
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
+        "//rtp_llm/models_py:new_loader_models",
+        ":new_loader_routing",
         ":multimodal",
     ] + select({
         "@//:using_ppu": ["//rtp_llm/models_py:ppu_entrypoint"],
@@ -374,6 +377,18 @@ py_library(
         "vipserver/*.py",
     ]),
 )
+
+# Kept outside :utils: the loader runtime itself depends on :utils.
+py_library(
+    name = "new_loader_routing",
+    srcs = ["utils/new_loader_support.py"],
+    deps = [
+        ":new_loader_policy",
+        ":ops",
+        "//rtp_llm/models_py:new_loader_models",
+    ],
+)
+
 
 filegroup(
     name = "alog_config",

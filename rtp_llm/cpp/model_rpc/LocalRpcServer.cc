@@ -1390,6 +1390,12 @@ grpc::Status LocalRpcServer::SetRestart(grpc::ServerContext* context, const Empt
 
 grpc::Status
 LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response) {
+    // The manager is fixed at initialization. Pointer/None checks do not
+    // invoke Python and avoid entering the exception path for a known
+    // deployment capability (e.g. NewLoader).
+    if (!weight_manager_ || weight_manager_.is_none()) {
+        return {grpc::StatusCode::UNIMPLEMENTED, "Online weight updates are unavailable for this deployment"};
+    }
     RTP_LLM_LOG_DEBUG("Receive update weights request from: %s", context->peer().c_str());
     try {
         if (request->name().empty() || request->desc().empty() || request->method().empty()) {

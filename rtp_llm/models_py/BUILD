@@ -481,3 +481,28 @@ py_library(
     deps = ["//rtp_llm:new_loader_device_type"],
     visibility = ["//visibility:public"],
 )
+
+# First production rollout: unquantized dense models only. Do not glob
+# future model batches or tests into the serving dependency closure.
+py_library(
+    name = "new_loader_models",
+    srcs = [
+        "new_models/__init__.py",
+        "new_models/model_base.py",
+        "new_models/qwen2/__init__.py",
+        "new_models/qwen2/language.py",
+        "new_models/qwen3/__init__.py",
+        "new_models/qwen3/language.py",
+        "new_models/llama/__init__.py",
+        "new_models/llama/language.py",
+    ],
+    deps = [
+        ":new_loader_core",
+        ":new_loader_layers",
+        ":models",
+        "//rtp_llm:config",
+        "//rtp_llm:ops",
+        "//rtp_llm:torch",
+    ],
+    visibility = ["//visibility:public"],
+)

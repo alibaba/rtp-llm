@@ -2,6 +2,23 @@ from rtp_llm.server.server_args.util import str2bool
 
 
 def init_load_group_args(parser, load_config, model_args):
+    loader_group = parser.add_argument_group("NewLoader")
+    loader_group.add_argument(
+        "--use_new_loader",
+        env_name="USE_NEW_LOADER",
+        bind_to=(model_args, "use_new_loader"),
+        type=str2bool,
+        default=None,
+        help="默认保持 legacy；true 强制 NewLoader，false 强制 legacy。不支持的强制配置在加载前报错。",
+    )
+    loader_group.add_argument(
+        "--require_weight_update",
+        env_name="REQUIRE_WEIGHT_UPDATE",
+        bind_to=(model_args, "require_weight_update"),
+        type=str2bool,
+        default=None,
+        help="未声明时自动路由保持 legacy；false 允许已适配模型自动使用 NewLoader，true 要求保留在线热更新。",
+    )
     ##############################################################################################################
     # Load Configuration
     ##############################################################################################################

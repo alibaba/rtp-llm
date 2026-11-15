@@ -86,6 +86,19 @@ class ModelFactory:
         )
         model_type = model_config.model_type
         model_cls = ModelFactory.get_model_cls(model_type)
+        if engine_config.sp_config.type != SpeculativeType.NONE:
+            if model_config.use_new_loader is True:
+                raise ValueError(
+                    "Speculative decoding is not supported by this NewLoader batch"
+                )
+            if (
+                model_config.use_new_loader is None
+                and model_config.require_weight_update is False
+            ):
+                logging.info(
+                    "Speculative decoding keeps the legacy loader in this NewLoader batch"
+                )
+                model_config.use_new_loader = False
         if model_type in ("deepseek_v4", "deepseek_v4_mtp"):
             from rtp_llm.models.deepseek_v4 import configure_ppu_scheduler
 

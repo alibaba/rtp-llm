@@ -1,6 +1,25 @@
 load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
 
 def sm8x_suites():
+    # Reuse the legacy checkpoint and goldens; an explicit override prevents
+    # compatibility fallback from accidentally testing the old loader.
+    native.test_suite(
+        name = "smoke_newloader_dense",
+        tests = [
+            smoke_test(
+                name = "newloader_qwen25_fp16",
+                task_info = "data/model/qwen25/q_r_s.json",
+                smoke_args = "--use_new_loader true --require_weight_update false --act_type FP16 --warm_up 0",
+                gpu_type = ["L20_CU13"],
+            ),
+            smoke_test(
+                name = "newloader_qwen25_tp2",
+                task_info = "data/model/qwen25/q_r_s_fp16.json",
+                smoke_args = "--use_new_loader true --require_weight_update false --act_type FP16 --warm_up 0 --tp_size 2",
+                gpu_type = ["L20_CU13"],
+            ),
+        ],
+    )
     # SM8x (L20)
     # ============================================================================
 
