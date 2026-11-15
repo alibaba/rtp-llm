@@ -29,6 +29,7 @@ struct P2PConnectorSchedulerConfig {
     int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
     int64_t                     p2p_cancelled_keys_ttl_ms    = 3600 * 1000;
     std::shared_ptr<const CacheTopology> topology;
+    bool                                 use_group_cache_transfer_policy = false;
     std::map<std::string, size_t>        physical_block_bytes_by_group;
     size_t                               cache_key_tokens_per_block = 1;
     int                                  cp_rank = 0;

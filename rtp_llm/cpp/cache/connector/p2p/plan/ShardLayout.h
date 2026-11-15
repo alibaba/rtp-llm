@@ -40,6 +40,7 @@ struct ShardLayout {
 
     ParallelismConfig            pc;
     size_t                             cache_key_tokens_per_block = 1;
+    bool                               use_group_cache_transfer_policy = false;
     std::map<std::string, GroupLayout> groups;
 
     // ---- rank 坐标：CP 轴与 head 轴相互独立，不做除法分解（设计文档 §3.3）----

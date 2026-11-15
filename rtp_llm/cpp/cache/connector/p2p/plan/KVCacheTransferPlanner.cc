@@ -249,8 +249,21 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
 
     for (bool is_src : {true, false}) {
         const ShardLayout& side = is_src ? src : dst;
-        if (side.headShardCount(tag) > 1 && side.cpSize() > 1
-            && side.effectiveMapping(tag) == CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
+        if (side.effectiveMapping(tag) != CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
+            continue;
+        }
+        const auto& policy = side.group(tag).policy;
+        if (policy.group_type != CacheGroupType::FULL) {
+            return planError("block round-robin CP requires a FULL P2P group for tag '" + tag + "' on "
+                             + sideName(is_src) + " side");
+        }
+        // Prefill applies this tail globally before CP ownership filtering.
+        // Route resolution applies it separately to each owner's keys.
+        if (is_src && side.use_group_cache_transfer_policy && policy.active_tail_blocks > 0) {
+            return planError("FULL round-robin tag '" + tag
+                             + "' cannot use active_tail_blocks in a hybrid Prefill layout");
+        }
+        if (side.headShardCount(tag) > 1) {
             std::ostringstream oss;
             oss << "tag '" << tag << "' is double-sharded on " << sideName(is_src)
                 << " side: head_shard_count=" << side.headShardCount(tag) << " and block round-robin cp_size="
@@ -661,9 +674,10 @@ ShardLayout ShardLayout::forPeer(const ShardLayout&       self,
                                  const ParallelismConfig& peer_pc,
                                  bool                     peer_is_prefill_role) {
     ShardLayout peer;
-    peer.pc     = peer_pc;
-    peer.cache_key_tokens_per_block = self.cache_key_tokens_per_block;
-    peer.groups = self.groups;  // same-build: policy / spec 类型 / seq 尺寸两侧相同
+    peer.pc                              = peer_pc;
+    peer.cache_key_tokens_per_block      = self.cache_key_tokens_per_block;
+    peer.use_group_cache_transfer_policy = self.use_group_cache_transfer_policy;
+    peer.groups                          = self.groups;  // same-build: policy / spec 类型 / seq 尺寸两侧相同
 
     peer.deriveHeadShardCounts();
 

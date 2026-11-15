@@ -704,6 +704,35 @@ TEST(PlannerGroupB, B9_TailCountMismatchIsRejected) {
         << result.error.ToString();
 }
 
+TEST(PlannerGroupB, NonFullGroupCannotUseRoundRobinCp) {
+    auto sharded_swa              = makeSwaGroup();
+    sharded_swa.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+    const auto src                = makeLayout(2, CPRotateMethod::ALL_GATHER, true, {{kSwaTag, sharded_swa}});
+    const auto dst                = makeLayout(1, CPRotateMethod::DISABLED, false, {{kSwaTag, sharded_swa}});
+    const auto result             = KVCacheTransferPlanner::plan(src, dst, {kSwaTag});
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(result.error.ToString().find("round-robin CP requires a FULL P2P group"), std::string::npos)
+        << result.error.ToString();
+}
+
+TEST(PlannerGroupB, HybridPrefillCannotTailLimitRoundRobinFullGroup) {
+    auto full_tail                      = makeMlaFullGroup();
+    full_tail.policy.active_tail_blocks = 2;
+    auto src = makeLayout(2, CPRotateMethod::ALL_GATHER, true, {{kFullTag, full_tail}, {kSwaTag, makeSwaGroup()}});
+    src.use_group_cache_transfer_policy = true;
+    auto dst = makeLayout(1, CPRotateMethod::DISABLED, false, {{kFullTag, full_tail}, {kSwaTag, makeSwaGroup()}});
+    dst.use_group_cache_transfer_policy = true;
+    const auto peer_src                 = ShardLayout::forPeer(dst, src.pc, true);
+    const auto on_prefill               = KVCacheTransferPlanner::plan(src, dst, {kFullTag});
+    const auto on_decode                = KVCacheTransferPlanner::plan(peer_src, dst, {kFullTag});
+    ASSERT_FALSE(on_prefill.ok());
+    ASSERT_FALSE(on_decode.ok());
+    EXPECT_NE(on_prefill.error.ToString().find("cannot use active_tail_blocks in a hybrid Prefill layout"),
+              std::string::npos)
+        << on_prefill.error.ToString();
+    EXPECT_EQ(on_decode.error.ToString(), on_prefill.error.ToString());
+}
+
 // 用例 B4: 解析为空不算错误
 TEST(PlannerGroupB, B4_EmptyResolutionIsNotAnError) {
     const KeyShardSpec spec{/*modulus=*/4, /*residue=*/3};
