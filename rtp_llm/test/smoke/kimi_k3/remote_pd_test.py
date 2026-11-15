@@ -574,7 +574,10 @@ def main(config):
     status.touch()
     config = copy.deepcopy(config)
     for key in ("external_revision", "internal_revision"):
-        config[key] = environment["K3_PD_" + key.upper()]
+        pin = environment.get("K3_PD_" + key.upper(), config.get(key))
+        if key in config and config[key] != pin:
+            raise ValueError(f"{key} differs between config and environment")
+        config[key] = pin
         _digest(config[key])
     connection = {
         "url": environment["K3_PD_BROKER_URL"],

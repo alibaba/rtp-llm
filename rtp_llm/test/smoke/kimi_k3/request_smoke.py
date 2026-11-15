@@ -206,7 +206,7 @@ class SmokeRequests:
 
     def payload(self, prompt="计算2+3。只输出数字，不要解释。", **overrides):
         result = {
-            "model": "kimi-k3",
+            "model": getattr(self.args, "model_type", "kimi_k3"),
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 128,
             "temperature": 0,

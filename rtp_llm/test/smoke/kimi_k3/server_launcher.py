@@ -18,6 +18,10 @@ from pathlib import Path
 
 
 def launch_config(args):
+    model_type = getattr(args, "model_type", "kimi_k3")
+    if model_type not in ("kimi_k3", "kimi_k31"):
+        raise ValueError("PD smoke requires kimi_k3 or kimi_k31")
+    compact = bool(getattr(args, "compact_smoke", False))
     fp8_gemm = bool(getattr(args, "fp8_gemm", False))
     fp8_kv_cache = bool(getattr(args, "fp8_kv_cache", False))
     warm_up = bool(getattr(args, "warm_up", False))
@@ -66,7 +70,7 @@ def launch_config(args):
     # Match the execution settings in prefill-merge.env / decode-merge.env.
     # The smoke owns topology, cache capacity, paths and request boundaries.
     environment = {
-        "MODEL_TYPE": "kimi_k3",
+        "MODEL_TYPE": model_type,
         "CHECKPOINT_PATH": str(checkpoint),
         "TOKENIZER_PATH": str(checkpoint),
         "LOAD_METHOD": "fastsafetensors",
@@ -105,12 +109,14 @@ def launch_config(args):
             }
         ),
         "SP_TYPE": "mtp",
-        "SP_MODEL_TYPE": "kimi_k3_mtp",
+        "SP_MODEL_TYPE": model_type + "_mtp",
         "SP_CHECKPOINT_PATH": str(draft),
         "SP_ACT_TYPE": "BF16",
         "GEN_NUM_PER_CIRCLE": "3",
         "ENABLE_LINEAR_REPLAY": (
-            "1" if args.role == "DECODE" else os.environ.get("ENABLE_LINEAR_REPLAY", "1")
+            "1"
+            if args.role == "DECODE"
+            else os.environ.get("ENABLE_LINEAR_REPLAY", "1")
         ),
         "QUANTIZATION": "FP8_PER_BLOCK" if fp8_gemm else "",
         "SP_QUANTIZATION": "",
@@ -246,6 +252,34 @@ def launch_config(args):
         options["kv_cache_mem_mb"] = kv_cache_mem_mb
     if args.role == "DECODE":
         options["decode_capture_config"] = ",".join(map(str, decode_capture_batches))
+    if compact:
+        if (
+            (tp_size, dp_size) != ((8, 1) if args.role == "PREFILL" else (4, 2))
+            or not orthogonal_smoke
+            or not fp8_gemm
+            or not fp8_kv_cache
+        ):
+            raise ValueError(
+                "Compact smoke requires FP8 P=TP8 and D=DP2/TP4 with PageRR"
+            )
+        overrides = {"prefill_kv_workspace_budget_bytes": 1024**3}
+        if model_type == "kimi_k31":
+            overrides.update(kda_nvfp4=True, dsa_nvfp4=True)
+            environment["FP8_MLA"] = "0"
+        options.update(
+            max_seq_len=262144,
+            max_context_batch_size=4,
+            concurrency_limit=4,
+            seq_size_per_block=1024,
+            kernel_seq_size_per_block=128,
+            reuse_cache_tail_blocks=5 if args.role == "PREFILL" else 2147483647,
+            test_block_num=32 if args.role == "PREFILL" else 64,
+            linear_pool_blocks=24 if args.role == "PREFILL" else 48,
+            cp_force_single_prefill=0,
+            json_model_override_args=json.dumps(overrides),
+        )
+        if args.role == "DECODE":
+            options["decode_capture_config"] = "1,2,4"
     command = [str(Path(args.server).resolve(strict=True))]
     for key, value in options.items():
         command.extend(["--" + key, str(value)])
@@ -478,6 +512,10 @@ def require_gpu_capacity(
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--model-type", choices=("kimi_k3", "kimi_k31"), default="kimi_k3"
+    )
+    parser.add_argument("--compact-smoke", action="store_true")
     parser.add_argument("--role", required=True, choices=["PREFILL", "DECODE"])
     parser.add_argument("--tp-size", type=int, default=8)
     parser.add_argument("--dp-size", type=int, default=1)

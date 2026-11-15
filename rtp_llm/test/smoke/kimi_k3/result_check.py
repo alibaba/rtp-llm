@@ -262,7 +262,14 @@ def _raw_consistency(
         for key, value in comparisons.items():
             if row.get(key) != value:
                 errors.append(f"{name}: summary {key} differs from raw response")
-        if row.get("mtp_accepted_tokens") != aux["output_len"] - aux["iter_count"]:
+        if row.get("mtp_acceptance_source") == "per-position-counters":
+            counters = aux.get("speculative_accepted_tokens_per_pos", [])
+            accepted = sum(counters)
+            if row.get("mtp_accepted_tokens_per_pos") != counters:
+                errors.append(f"{name}: native MTP counters differ from raw response")
+        else:
+            accepted = aux["output_len"] - aux["iter_count"]
+        if row.get("mtp_accepted_tokens") != accepted:
             errors.append(f"{name}: MTP acceptance summary differs from raw response")
         if row.get("observed_decode_role_addrs") != aux.get("role_addrs", []):
             errors.append(f"{name}: Decode owner summary differs from raw response")
@@ -660,6 +667,91 @@ def _group_artifact_errors(
     return errors
 
 
+def _check_compact(result, path, verdict):
+    from framework_smoke import CASES, CHUNK_INPUT_TOKENS, MAX_INFLIGHT, STAGES
+
+    errors = verdict["errors"]
+    records = result["cases"]
+    rows = {row["name"]: row for row in records}
+    stages = result["stages"]
+    members = [name for stage in stages for name in stage["case_names"]]
+    if (
+        len(rows) != len(records)
+        or set(rows) != CASES
+        or {stage["name"] for stage in stages} != STAGES
+        or len(stages) != len(STAGES)
+        or set(members) != CASES
+        or len(members) != len(CASES)
+    ):
+        errors.append("compact framework request/stage matrix is incomplete")
+    if (
+        result.get("model_type") not in ("kimi_k3", "kimi_k31")
+        or result.get("max_inflight") != MAX_INFLIGHT
+        or len(result["decode_role_addrs"]) != 2
+        or result.get("skipped_cases")
+        or result.get("formal_request_retries") != 0
+    ):
+        errors.append("invalid compact smoke model, topology, or retry policy")
+    for stage in stages:
+        if (
+            not stage.get("passed")
+            or stage.get("skipped")
+            or not stage["case_names"]
+            or stage.get("transport") != "http"
+            or stage.get("concurrent")
+            and len(stage["case_names"]) > MAX_INFLIGHT
+        ):
+            errors.append(f"{stage['name']}: incomplete or unbounded HTTP stage")
+    roles = result["decode_role_addrs"]
+    for row in records:
+        errors.extend(independent_answer_check(row))
+        errors.extend(_cache_errors(row, result["block_size"]))
+        owner = row["decode_owner_rank"]
+        if (
+            type(owner) is not int
+            or not 0 <= owner < len(roles)
+            or row.get("selected_decode_role_addr") != roles[owner]
+        ):
+            errors.append(
+                f"{row['name']}: Decode owner differs from requested topology"
+            )
+    if rows["chunked_cold"]["input_len"] != CHUNK_INPUT_TOKENS:
+        errors.append("multi-chunk input length differs from the token fixture")
+    if (
+        rows["chunked_cold"]["decode_owner_rank"]
+        == rows["cross_owner_reuse"]["decode_owner_rank"]
+    ):
+        errors.append("cached handoff did not cross Decode owners")
+    for name, tier in (("cache_device", "device"), ("cache_host", "memory")):
+        if (rows[name].get("prefill_cache_tiers") or {}).get(tier, 0) <= 0:
+            errors.append(f"{name}: required {tier} cache reuse was not observed")
+    cancel = result.get("cancellation") or {}
+    choices = (cancel.get("first_content_event") or {}).get("choices") or []
+    if (
+        cancel.get("client_disconnected") is not True
+        or not (cancel.get("request") or {}).get("stream")
+        or not any(
+            (choice.get("delta") or {}).get("content")
+            and choice.get("finish_reason") is None
+            for choice in choices
+        )
+        or cancel != json.loads((path.parent / "cancellation.json").read_text())
+    ):
+        errors.append("missing streaming disconnect and recovery evidence")
+    request_dir = path.parent / "requests"
+    errors.extend(audit_raw_answers(request_dir, rows))
+    errors.extend(_raw_consistency(request_dir, rows))
+    protocol = result.get("protocol_requests", [])
+    errors.extend(_check_protocol(protocol, path.parent / "protocol"))
+    verdict.update(
+        passed=not errors,
+        case_count=len(records),
+        protocol_request_count=len(protocol),
+        model_type=result["model_type"],
+    )
+    return verdict
+
+
 def check_result(accuracy_path: pathlib.Path | str) -> dict[str, Any]:
     """Validate stored requests, responses, matrix membership, and protocol checks."""
     path = pathlib.Path(accuracy_path)
@@ -680,6 +772,8 @@ def check_result(accuracy_path: pathlib.Path | str) -> dict[str, Any]:
             or result.get("failures")
         ):
             errors.append("smoke runner did not pass")
+        if result.get("suite") == "kimi-pd-compact-v2":
+            return _check_compact(result, path, verdict)
         if (
             result.get("suite") != "main-text-64k-capped"
             or result.get("case_profile") != "compact-64k-v1"
