@@ -90,8 +90,14 @@ class KimiK3StartupIntegrationTest(unittest.TestCase):
             W.linear_attn_alog: torch.zeros(1, device="cuda"),
         }
         prefill = KdaPrefill(config, ParallelismConfig(), weights)
-        inputs = PyAttentionInputs()
-        inputs.is_prefill = inputs.is_warmup = True
+        # Native C++ supplies the read-only device mirrors. Recreate their
+        # published values here while exercising the real shared KDA forward.
+        inputs = NS(
+            is_prefill=True,
+            is_warmup=True,
+            cache_store_inputs=None,
+            cache_store_writer=None,
+        )
         inputs.input_lengths = inputs.input_lengths_device = torch.tensor(
             [64], dtype=torch.int32, device="cuda"
         )
