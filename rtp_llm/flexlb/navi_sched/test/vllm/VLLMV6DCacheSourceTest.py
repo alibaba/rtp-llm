@@ -100,6 +100,18 @@ class VLLMV6DCacheSourceTest(unittest.TestCase):
         observer._predicted_cache_hit_for_request = lambda request: 48
         observer._forward_request_state = lambda request_id: SimpleNamespace(batch_id=77)
         cases = [
+            ("new_resolved_local_before_allocation", dict(prefill_stats=SimpleNamespace(
+                num_prompt_tokens=64, num_local_cached_tokens=24,
+                num_external_cached_tokens=0)), 0, 24),
+            ("new_resolved_external_before_allocation", dict(prefill_stats=SimpleNamespace(
+                num_prompt_tokens=64, num_local_cached_tokens=16,
+                num_external_cached_tokens=24)), 0, 40),
+            ("new_resolved_cache_with_compute_inflight", dict(prefill_stats=SimpleNamespace(
+                num_prompt_tokens=64, num_local_cached_tokens=24,
+                num_external_cached_tokens=0)), 40, 32),
+            ("new_resolved_counts_unavailable", dict(prefill_stats=SimpleNamespace(
+                num_prompt_tokens=64, num_local_cached_tokens=None,
+                num_external_cached_tokens=None)), 8, 0),
             ("new_miss", dict(prefill_stats=SimpleNamespace(num_prompt_tokens=64)), 8, 0),
             ("new_partial", dict(prefill_stats=SimpleNamespace(num_prompt_tokens=64)), 32, 24),
             ("new_unresolved", dict(prefill_stats=SimpleNamespace(num_prompt_tokens=0)), 8, 48),
@@ -127,10 +139,14 @@ class VLLMV6DCacheSourceTest(unittest.TestCase):
         module.body[1].body = methods
         namespace = {"_WorkloadContribution": SimpleNamespace}
         exec(compile(ast.fix_missing_locations(module), str(SOURCE), "exec"), namespace)
-        for fields, resolve in [
+        for fields, resolve, resolved_remaining in [
             (dict(prefill_stats=SimpleNamespace(num_prompt_tokens=0)),
-             lambda r: setattr(r.prefill_stats, "num_prompt_tokens", 64)),
-            (dict(num_cached_tokens=-1), lambda r: setattr(r, "num_cached_tokens", 0)),
+             lambda r: setattr(r.prefill_stats, "num_prompt_tokens", 64), 64),
+            (dict(num_cached_tokens=-1), lambda r: setattr(r, "num_cached_tokens", 0), 64),
+            (dict(prefill_stats=SimpleNamespace(num_prompt_tokens=0)),
+             lambda r: setattr(r, "prefill_stats", SimpleNamespace(
+                 num_prompt_tokens=64, num_local_cached_tokens=24,
+                 num_external_cached_tokens=0)), 40),
         ]:
             with self.subTest(fields=fields):
                 observer = namespace["Observer"]()
@@ -154,11 +170,11 @@ class VLLMV6DCacheSourceTest(unittest.TestCase):
                 self.assertEqual(16, remaining)
                 resolve(request)
                 observer._refresh_workload_contributions(scheduler, set(), {})
-                self.assertEqual(64, remaining)
+                self.assertEqual(resolved_remaining, remaining)
                 self.assertFalse(observer._pending_cache_lookup_request_ids)
                 request.num_computed_tokens = 24
                 observer._refresh_workload_contributions(scheduler, {"r"}, {"r": 8})
-                self.assertEqual(48, remaining)
+                self.assertEqual(min(48, resolved_remaining), remaining)
                 scheduler.requests.clear()
                 observer._refresh_workload_contributions(scheduler, {"r"}, {})
                 self.assertEqual(0, remaining)

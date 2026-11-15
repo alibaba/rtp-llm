@@ -3745,6 +3745,19 @@ class VLLMEngineObserver:
                 computed_tokens,
                 min(prompt_tokens, self._predicted_cache_hit_for_request(request)),
             )
+        else:
+            # Cache lookup can finish before Native allocates a compute slot.
+            # These cached tokens need no compute, even while num_computed_tokens
+            # still describes the request before that allocation.
+            stats = getattr(request, "prefill_stats", None)
+            if stats is not None:
+                resolved_cache_tokens = sum(
+                    max(0, int(getattr(stats, field, 0) or 0))
+                    for field in ("num_local_cached_tokens", "num_external_cached_tokens")
+                )
+                computed_tokens = max(
+                    computed_tokens, min(prompt_tokens, resolved_cache_tokens)
+                )
         remaining_prefill_tokens = max(0, prompt_tokens - computed_tokens)
         state = self._forward_request_state(request.request_id)
         return _WorkloadContribution(
