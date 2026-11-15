@@ -118,6 +118,7 @@ cc_library(
         "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
         "//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/utils:time_util",
         "@com_google_googletest//:gtest",
     ] + torch_deps(),
 )
