@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/model_rpc/PrefillServerCaller.h"
 #include "autil/LoopThread.h"
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
+#include <optional>
 
 namespace rtp_llm {
 
@@ -42,8 +43,8 @@ private:
                                                        int64_t                         deadline_ms,
                                                        std::shared_ptr<GenerateInput>& input,
                                                        GenerateInputPB&                prefill_request,
-                                                       PrefillPeerInfo&                peer_info,
-                                                       grpc::ServerContext*           server_context);
+                                                       std::optional<PrefillPeerInfo>& peer_info,
+                                                       grpc::ServerContext*            server_context);
     static grpc::Status               parsePrefillDpAddr(const std::string& addr, std::string* ip, uint32_t* port);
     void updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) override;
 

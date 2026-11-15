@@ -10,7 +10,6 @@
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 #if USING_CUDA
 #include <ATen/cuda/CUDAGeneratorImpl.h>
-#include <c10/cuda/CUDAGuard.h>
 #endif
 #include <gtest/gtest.h>
 #include <algorithm>
@@ -286,21 +285,6 @@ TEST_F(ExecOpsTest, testInitRuntimeIdempotent) {
 TEST_F(ExecOpsTest, testRuntimeSyncAndCheck) {
     ASSERT_NO_THROW(runtimeSyncAndCheck());
 }
-
-#if USING_CUDA
-TEST_F(ExecOpsTest, testCurrentStreamSyncCompletesHostCopy) {
-    auto stream = c10::cuda::getStreamFromPool();
-    c10::cuda::CUDAStreamGuard guard(stream);
-    auto host = torch::empty({1024}, torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true));
-    auto device = torch::full({1024}, 7.0f, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-    host.copy_(device, /*non_blocking=*/true);
-    cudaCurrentStreamSyncAndCheck();
-    EXPECT_TRUE(stream.query());
-    for (int i = 0; i < host.numel(); ++i) {
-        EXPECT_FLOAT_EQ(host.data_ptr<float>()[i], 7.0f);
-    }
-}
-#endif
 
 TEST_F(ExecOpsTest, testRuntimeCreateEvent) {
     auto event = runtimeCreateEvent();
@@ -914,41 +898,38 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSkipsEmptyCpProjection) {
     EXPECT_EQ(call_count, 0);
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStorePropagatesP2PLayerDispatchFailure) {
-
-    auto inputs = makePyCacheStoreInputs(4, 2);
-    inputs.cache_keys               = torch::tensor({{int64_t(100), int64_t(101)}}, torch::kInt64);
-    inputs.request_deadline_ms      = torch::tensor({int64_t(123456)}, torch::kInt64);
-    inputs.p2p_layer_write          = [](size_t,
-                                int,
-                                const std::string&,
-                                const std::vector<int64_t>&,
-                                const std::vector<int32_t>&,
-                                int64_t,
-                                const std::shared_ptr<torch::Event>&,
-                                int64_t) { return false; };
+TEST_F(ExecOpsTest, testWriteCacheStoreContinuesAfterOneP2PLayerDispatchFailure) {
+    auto inputs                  = makePyCacheStoreInputs(4, 1);
+    inputs.request_id            = torch::tensor({int64_t(42), int64_t(43)}, torch::kInt64);
+    inputs.publish_start_tokens  = torch::tensor({0, 0}, torch::kInt32);
+    inputs.request_deadline_ms   = torch::tensor({int64_t(123456), int64_t(123457)}, torch::kInt64);
+    inputs.request_pd_separation = torch::tensor({true, true}, torch::kBool);
+    inputs.cache_keys            = torch::tensor({{int64_t(100)}, {int64_t(200)}}, torch::kInt64);
+    std::vector<int64_t> dispatched;
+    inputs.p2p_layer_write = [&](size_t,
+                                 int,
+                                 const std::string&,
+                                 const std::vector<int64_t>&,
+                                 const std::vector<int32_t>&,
+                                 int64_t request_id,
+                                 const std::shared_ptr<torch::Event>&,
+                                 int64_t) {
+        dispatched.push_back(request_id);
+        return request_id != 42;
+    };
 
     torch_ext::LayerKVCache layer_cache;
-    layer_cache.kv_cache_base      = torch::zeros({2, 64}, torch::kUInt8);
+    layer_cache.kv_cache_base      = torch::zeros({3, 64}, torch::kUInt8);
     layer_cache.seq_size_per_block = 4;
     layer_cache.layer_id           = 0;
     layer_cache.tag                = "default";
 
-    auto input_lengths  = torch::tensor({8}, torch::kInt32);
-    auto prefix_lengths = torch::tensor({0}, torch::kInt32);
-    auto block_ids      = torch::tensor({{0, 1}}, torch::kInt32);
-
-    inputs.input_lengths_host = input_lengths;
-    inputs.prefix_lengths_host = prefix_lengths;
-    inputs.host_kv_cache_offset = block_ids;
+    inputs.input_lengths_host   = torch::tensor({4, 4}, torch::kInt32);
+    inputs.prefix_lengths_host  = torch::tensor({0, 0}, torch::kInt32);
+    inputs.host_kv_cache_offset = torch::tensor({{1}, {2}}, torch::kInt32);
     auto config = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
-    try {
-        runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr);
-        FAIL() << "Expected P2P layer dispatch failure to propagate";
-    } catch (const std::runtime_error& e) {
-        EXPECT_NE(std::string(e.what()).find("P2P layer publication failed"), std::string::npos);
-        EXPECT_NE(std::string(e.what()).find("42"), std::string::npos);
-    }
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr));
+    EXPECT_EQ(dispatched, (std::vector<int64_t>{42, 43}));
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreSkipsEmptySparseP2PProjection) {

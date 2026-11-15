@@ -8,6 +8,7 @@
 #include <tuple>
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <set>
@@ -15,6 +16,18 @@
 #include <vector>
 
 namespace rtp_llm {
+
+TEST(KVCacheTransferPlannerTest, RejectsUnboundedPeerRankExpansion) {
+    ShardLayout prefill;
+    ShardLayout decode;
+    prefill.pc.tp_size = std::numeric_limits<int>::max();
+    decode.pc.tp_size  = 1;
+
+    const auto result = KVCacheTransferPlanner::plan(prefill, decode, {"full"});
+    EXPECT_FALSE(result.ok());
+    EXPECT_TRUE(result.plan.routes.empty());
+    EXPECT_NE(result.error.ToString().find("rank count exceeds"), std::string::npos);
+}
 
 // ---------------------------------------------------------------------------
 // 公共基线（设计文档 §9.0）

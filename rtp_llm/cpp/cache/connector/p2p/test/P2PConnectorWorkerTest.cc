@@ -16,6 +16,7 @@
 #include <tuple>
 
 #include "autil/LockFreeThreadPool.h"
+#include "autil/Scope.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerPrefillRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
@@ -1785,6 +1786,12 @@ TEST_F(P2PConnectorWorkerTest, CancelRead_ReturnTrue_DuringRecvRegistrationWindo
     std::thread       read_thread([&]() {
         result = decode_->read(request_id, unique_key, deadline_ms, makeReadPlan(layer_cache_buffers));
         done   = true;
+    });
+    autil::ScopeGuard release_and_join([&]() {
+        if (read_thread.joinable()) {
+            mock_receiver_->releaseBlockedRecv();
+            read_thread.join();
+        }
     });
 
     ASSERT_TRUE(mock_receiver_->waitUntilRecvEntered(std::chrono::seconds(1)));

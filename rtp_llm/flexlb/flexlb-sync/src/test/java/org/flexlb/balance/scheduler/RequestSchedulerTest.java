@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import com.google.protobuf.ByteString;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -18,6 +17,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -61,17 +61,45 @@ import static org.mockito.Mockito.when;
  */
 class RequestSchedulerTest {
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void requestsThatNeedLocalPrefillUseRouteDeliveryInBatchMode(boolean beamSearch) {
+    @ValueSource(
+            strings = {
+                "prefill-only",
+                "one-token",
+                "beam",
+                "variable-beam",
+                "multiple-sequences",
+                "pd-disabled",
+                "prompt-logits",
+                "multimodal"
+            })
+    void requestsThatCannotUseBatchAdmissionUseDirectRouteDelivery(String kind) {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         DefaultRouter router = mockRouter();
         RequestRegistry lifecycle = mock(RequestRegistry.class);
         BalanceContext context = RequestLifecycleTestSupport.context(config, 919L);
-        context.setGenerateInputPb(ByteString.copyFromUtf8("serialized request"));
-        context.getRequest().setMaxNewTokens(beamSearch ? 8 : 0);
-        context.getRequest().setNumBeams(beamSearch ? 2 : 1);
+        var input = EngineRpcService.GenerateInputPB.newBuilder();
+        var generation =
+                input.getGenerateConfigBuilder()
+                        .setCanUsePdSeparation(true)
+                        .setMaxNewTokens(8)
+                        .setNumBeams(1)
+                        .setNumReturnSequences(1);
+        switch (kind) {
+            case "prefill-only" -> generation.setMaxNewTokens(0).setPrefillOnly(true);
+            case "one-token" -> generation.setMaxNewTokens(1);
+            case "beam" -> generation.setNumBeams(2);
+            case "variable-beam" -> generation.addVariableNumBeams(1).addVariableNumBeams(2);
+            case "multiple-sequences" -> generation.setNumReturnSequences(2);
+            case "pd-disabled" -> generation.setCanUsePdSeparation(false);
+            case "prompt-logits" -> generation.setReturnPromptLogits(true);
+            case "multimodal" -> input.getMultimodalTokenLayoutBuilder();
+            default -> throw new AssertionError(kind);
+        }
+        context.setGenerateInputPb(input.build().toByteString());
+        context.getRequest().setMaxNewTokens(generation.getMaxNewTokens());
+        context.getRequest().setNumBeams(generation.getNumBeams());
         var future = new CompletableFuture<Response>();
         when(lifecycle.register(context)).thenReturn(future);
         when(router.select(context))

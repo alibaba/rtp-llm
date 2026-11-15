@@ -7,6 +7,8 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 TOOL_DIR = Path(__file__).resolve().parents[1]
 if str(TOOL_DIR) not in sys.path:
@@ -87,6 +89,59 @@ class LoadClientDiscoveryTest(unittest.TestCase):
 
                 self.assertEqual(["127.0.0.1:8101"], client._fallback_prefill_addrs)
                 self.assertEqual(["127.0.0.1:8201"], client._fallback_decode_addrs)
+
+
+class LoadClientStreamTest(unittest.IsolatedAsyncioTestCase):
+    async def test_master_admission_routes_to_real_decode_or_mock_prefill(self):
+        async def outputs():
+            yield SimpleNamespace(flatten_output=SimpleNamespace(finished=[True]))
+
+        for tp_size in (0, 4):
+            with self.subTest(tp_size=tp_size):
+                client = LoadClient.__new__(LoadClient)
+                client.args = SimpleNamespace(timeout_ms=1000)
+                client.pb2 = SimpleNamespace(
+                    GetPeerInfoRequestPB=Mock(return_value=object()),
+                    FetchRequestPB=Mock(return_value=object()),
+                )
+                prefill = SimpleNamespace(
+                    GetPeerInfo=AsyncMock(
+                        return_value=SimpleNamespace(tp_size=tp_size)
+                    ),
+                    FetchResponse=Mock(side_effect=lambda *args, **kwargs: outputs()),
+                )
+                decode = SimpleNamespace(
+                    GenerateStreamCall=Mock(
+                        side_effect=lambda *args, **kwargs: outputs()
+                    ),
+                )
+                stubs = {"prefill:9001": prefill, "decode:9001": decode}
+                client.pb2_grpc = SimpleNamespace(RpcServiceStub=stubs.__getitem__)
+                client._channel = AsyncMock(side_effect=lambda address: address)
+                client._mock_prefill_probes = {}
+                response = SimpleNamespace(
+                    enqueued_by_master=True,
+                    server_status=[
+                        SimpleNamespace(
+                            role="PREFILL", server_ip="prefill", grpc_port=9001
+                        ),
+                        SimpleNamespace(
+                            role="DECODE", server_ip="decode", grpc_port=9001
+                        ),
+                    ],
+                )
+                inputs = [SimpleNamespace(request_id=i) for i in (10, 11)]
+                for item in inputs:
+                    await client._read_engine_stream(item, response)
+
+                prefill.GetPeerInfo.assert_awaited_once()
+                if tp_size:
+                    self.assertEqual(decode.GenerateStreamCall.call_count, 2)
+                    self.assertTrue(all(item.enqueued_by_master for item in inputs))
+                    prefill.FetchResponse.assert_not_called()
+                else:
+                    self.assertEqual(prefill.FetchResponse.call_count, 2)
+                    decode.GenerateStreamCall.assert_not_called()
 
 
 if __name__ == "__main__":

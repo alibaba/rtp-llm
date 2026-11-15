@@ -23,6 +23,7 @@ class RpcCompletionQueue {
     };
     struct State {
         grpc::CompletionQueue                           queue;
+        std::mutex                                      submit_mutex;
         std::mutex                                      mutex;
         std::condition_variable                         drained_cv;
         std::unordered_map<void*, std::unique_ptr<Tag>> tags;
@@ -46,7 +47,8 @@ public:
                     std::lock_guard<std::mutex> lock(state->mutex);
                     auto                        it = state->tags.find(key);
                     if (it == state->tags.end()) {
-                        std::terminate();  // Only registered Finish tags may enter this CQ.
+                        std::fputs("RPC completion queue received an unregistered tag\n", stderr);
+                        continue;
                     }
                     tag = std::move(it->second);
                     state->tags.erase(it);
@@ -67,6 +69,8 @@ public:
         }) {}
 
     ~RpcCompletionQueue() {
+        // Serialize Shutdown with RPC creation without delaying CQ dispatch.
+        std::unique_lock<std::mutex> submit_lock(state_->submit_mutex);
         std::unique_lock<std::mutex> lock(state_->mutex);
         state_->stopping = true;
         for (const auto& entry : state_->tags) {
@@ -75,6 +79,7 @@ public:
             }
         }
         state_->queue.Shutdown();
+        submit_lock.unlock();
         // A stalled transport must not make shutdown unbounded. The consumer
         // owns State (CQ and outstanding RPCs), so detaching cannot free live data.
         const bool drained =
@@ -94,19 +99,24 @@ public:
                 std::function<void(bool)>                   complete) {
         auto                        tag = std::make_unique<Tag>(Tag{context, std::move(complete)});
         void*                       key = tag.get();
-        std::lock_guard<std::mutex> lock(state_->mutex);
-        if (state_->stopping) {
-            return false;
+        std::lock_guard<std::mutex> submit_lock(state_->submit_mutex);
+        {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            if (state_->stopping) {
+                return false;
+            }
+            state_->tags.emplace(key, std::move(tag));
         }
-        state_->tags.emplace(key, std::move(tag));
         try {
             if (start(&state_->queue, key)) {
                 return true;
             }
         } catch (...) {
+            std::lock_guard<std::mutex> lock(state_->mutex);
             state_->tags.erase(key);
             throw;
         }
+        std::lock_guard<std::mutex> lock(state_->mutex);
         state_->tags.erase(key);
         return false;
     }

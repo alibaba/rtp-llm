@@ -696,6 +696,26 @@ TEST_F(PrefillServerCallerTest, ConcurrentSyncCancellationKeepsOtherRequestAndRe
     EXPECT_EQ(first_callback_count.load(), retired_count);
 }
 
+TEST_F(PrefillServerCallerTest, ThrowingSyncCancellationCheckFailsOnlyItsRpc) {
+    FakePrefillRpcServer server(std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kWaitForCancel));
+    ASSERT_TRUE(server.start());
+    auto              request = makeSyncRequest(server, 1041, 5000);
+    std::atomic<bool> throw_from_check{false};
+    auto              call = std::async(std::launch::async, [&] {
+        return caller_.callPrefill(nullptr, &request, nullptr, [&] {
+            if (throw_from_check.load()) {
+                throw std::runtime_error("cancellation check failure");
+            }
+            return false;
+        });
+    });
+    EXPECT_TRUE(server.service()->waitStarted(std::chrono::seconds(1)));
+    throw_from_check.store(true);
+    EXPECT_EQ(call.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_EQ(errorInfoFromGrpcStatus(call.get()).code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_TRUE(server.service()->waitCancelled(std::chrono::seconds(1)));
+}
+
 TEST_F(PrefillServerCallerTest, SyncFallbackClientCancelCancelsPrefillRpc) {
     FakePrefillRpcServer server(std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kWaitForCancel));
     ASSERT_TRUE(server.start());

@@ -625,9 +625,9 @@ bool P2PConnectorAsyncReadContextChecker::init(const kmonitor::MetricsReporterPt
                                                const std::shared_ptr<P2PBroadcastClient>&        tp_broadcast_client,
                                                const std::shared_ptr<autil::LockFreeThreadPool>& control_pool,
                                                const P2PConnectorSchedulerConfig&               config) {
-    if (!control_pool || !config.topology || config.p2p_kv_leak_exit_threshold_percent <= 0
+    if (!control_pool || !config.topology || config.p2p_kv_leak_exit_threshold_percent < 0
         || config.p2p_kv_leak_exit_threshold_percent > 100) {
-        RTP_LLM_LOG_ERROR("P2P lease checker requires topology and a KV leak exit threshold in (0, 100]");
+        RTP_LLM_LOG_ERROR("P2P lease checker requires topology and a KV leak exit threshold in [0, 100]");
         return false;
     }
     group_block_bytes_.clear();
@@ -780,6 +780,9 @@ void P2PConnectorAsyncReadContextChecker::checkRetainedResources(
         RTP_LLM_LOG_INFO("P2P retained KV: all held resources released after physical stop confirmation");
         last_leak_log_ms_ = 0;
     }
+    if (kv_leak_exit_threshold_percent_ == 0) {
+        return;
+    }
     // Exact strict comparison without overflowing size_t or rounding percentages.
     const size_t threshold_bytes = (total_kv_bytes_ / 100) * kv_leak_exit_threshold_percent_
                                    + (total_kv_bytes_ % 100) * kv_leak_exit_threshold_percent_ / 100;
@@ -846,7 +849,6 @@ void P2PConnectorAsyncReadContextChecker::checkOnce() {
                               context->uniqueKey().c_str());
         }
     }
-    checkRetainedResources(snapshot);
     // One job per context, bounded globally by the dedicated control pool.
     const size_t available = control_capacity_ - control_inflight_->load();
     if (control_pool_ && P2PNotification::nowMs() >= control_submit_retry_ms_) {
@@ -877,6 +879,8 @@ void P2PConnectorAsyncReadContextChecker::checkOnce() {
             }
         }
     }
+
+    checkRetainedResources(snapshot);
 
     size_t inflight_after = 0;
     std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>> failed_contexts;

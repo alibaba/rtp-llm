@@ -1902,6 +1902,31 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(target, "fusion:9000")
         self.assertIsNone(response_roles)
 
+    def test_local_prefill_response_attributes_actual_rpc_target(self):
+        client = ModelRpcClient(["local:9000"], {}, role_type=RoleType.PREFILL)
+        vit = RoleAddr(role=RoleType.VIT, ip="vit", http_port=8000, grpc_port=8001)
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2]),
+            generate_config=GenerateConfig(
+                role_addrs=[vit, _prefill_role_addr("unused-prefill", 9001)]
+            ),
+            request_id=1,
+            mm_inputs=[],
+        )
+
+        _, target, roles = client._select_address_and_response_role_addrs(input_py)
+
+        self.assertEqual(target, "local:9000")
+        self.assertEqual(
+            roles,
+            [
+                vit,
+                RoleAddr(
+                    role=RoleType.PREFILL, ip="local", http_port=8999, grpc_port=9000
+                ),
+            ],
+        )
+
     def test_pd_route_ignores_prefill_and_targets_decode_without_mode_flag(self):
         client = ModelRpcClient(["local:9000"], {})
         input_py = GenerateInput(
@@ -1997,6 +2022,22 @@ class ModelRpcClientTest(TestCase):
             outputs = asyncio.run(client.batch_enqueue([input_py]))
         self.assertEqual(len(outputs), 1)
         self.assertEqual(client._channel_pool.targets, ["fusion:9000"])
+
+    def test_pdfusion_rejects_prefill_only_route_in_later_batch_item(self):
+        client = ModelRpcClient(["fusion:9000"], {}, role_type=RoleType.PDFUSION)
+        client._channel_pool = _FakeChannelPool()
+        first = self._make_generate_input(GenerateConfig())
+        second = self._make_generate_input(
+            GenerateConfig(role_addrs=[_prefill_role_addr("prefill", 9001)])
+        )
+
+        with self.assertRaises(FtRuntimeException) as caught:
+            asyncio.run(client.batch_enqueue([first, second]))
+
+        self.assertEqual(
+            caught.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
+        )
+        self.assertEqual(client._channel_pool.targets, [])
 
     def test_pd_batch_enqueue_preserves_master_admission(self):
         client = ModelRpcClient(["127.0.0.1:10101"], {}, 0, RoleType.DECODE)
@@ -2103,6 +2144,30 @@ class ModelRpcClientTest(TestCase):
                 self.assertEqual(str(caught.exception), f"invalid grpc address: {address}")
         self.assertEqual(_split_host_port("host:9000"), ("host", 9000))
         self.assertEqual(_split_host_port("[::1]:9000"), ("::1", 9000))
+
+    def test_invalid_explicit_batch_route_returns_typed_error_without_address(self):
+        client = ModelRpcClient(["127.0.0.1:10101"], {}, 0, RoleType.DECODE)
+        config = GenerateConfig()
+        config.role_addrs = [
+            SimpleNamespace(
+                role=RoleType.DECODE,
+                ip="private-worker",
+                http_port=9002,
+                grpc_port=65536,
+            )
+        ]
+        input_obj = GenerateInput(
+            token_ids=torch.tensor([1]),
+            generate_config=config,
+            request_id=19,
+            mm_inputs=[],
+        )
+        with self.assertRaises(FtRuntimeException) as caught:
+            asyncio.run(client.batch_enqueue([input_obj]))
+        self.assertEqual(caught.exception.exception_type, ExceptionType.INVALID_PARAMS)
+        self.assertIn("request_id=19", caught.exception.message)
+        self.assertNotIn("private-worker", caught.exception.message)
+        self.assertNotIn("65536", caught.exception.message)
 
     def test_explicit_decode_role_addr_formats_raw_ipv6_target(self):
         client = ModelRpcClient(["10.0.0.10:10101"], {}, 0, RoleType.DECODE)
@@ -4286,7 +4351,7 @@ class FirstCauseRpcErrorTest(TestCase):
         self.assertEqual(caught.exception.message, f"relay: {details.error_message}")
 
     def test_aio_rpc_error_preserves_p2p_handoff_failure(self):
-        message = "reporter_role=DECODE: P2P side channel has invalid speculative tokens"
+        message = "reporter_role=DECODE tp_rank=0: StartLoad failed peer=192.0.2.1:9000"
         details = ErrorDetailsPB(error_code=8311, error_message=message)
         error = grpc.aio.AioRpcError(
             code=grpc.StatusCode.INTERNAL,
@@ -4303,8 +4368,25 @@ class FirstCauseRpcErrorTest(TestCase):
             caught.exception.exception_type,
             ExceptionType.P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
         )
-        self.assertEqual(caught.exception.message, f"request=42: {message}")
-        self.assertNotIn("worker:9000", caught.exception.message)
+        self.assertEqual(caught.exception.message, "cache load failed")
+
+    def test_structured_rpc_failure_keeps_code_without_worker_address(self):
+        message = "Prefill GenerateStreamCall getConnection peer=[2001:db8::1]:9000"
+        details = ErrorDetailsPB(
+            error_code=ExceptionType.GET_CONNECTION_FAILED.value, error_message=message
+        )
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        with self.assertRaises(FtRuntimeException) as caught:
+            client._handle_grpc_error(
+                self.rpc_error(
+                    (("grpc-status-details-bin", details.SerializeToString()),)
+                ),
+                "relay",
+            )
+        self.assertEqual(
+            caught.exception.exception_type, ExceptionType.GET_CONNECTION_FAILED
+        )
+        self.assertNotIn("2001:db8", caught.exception.message)
 
     def test_structured_cause_survives_generic_grpc_status(self):
         details = ErrorDetailsPB(error_code=903, error_message="Prefill VIT request=42 failed")

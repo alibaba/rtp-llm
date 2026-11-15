@@ -71,7 +71,7 @@ def remote_cache_suites():
             smoke_test(
                 name = "remote_cache_pd_decode_entrance",
                 data = ["//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin"],
-                gpu_type = ["L20"],
+                gpu_type = ["L20_CU13"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr = 20,
                 envs = {

@@ -522,6 +522,7 @@ TEST_F(P2PMultiRankPeer, DISABLED_Serve) {
             out.load_entered = ranks[0]->service.load_entered.load();
             out.load_done = ranks[0]->service.load_done.load();
             out.source_requests = sources.size();
+            const auto stale_before_ms = currentTimeMs() - 2000;
             const auto store = ranks[0]->connector->streamStore();
             {
                 std::lock_guard<std::mutex> lock(store->resource_map_mutex_);
@@ -529,7 +530,10 @@ TEST_F(P2PMultiRankPeer, DISABLED_Serve) {
                 out.deadline_entries = store->deadline_index_.size();
                 out.resources = store->resource_map_.size();
                 for (const auto& [request_key, state] : store->request_states_) {
-                    if (state.request_deadline_ms < currentTimeMs() - 2000) ++out.expired_records;
+                    const auto expiry = state.terminal ? state.terminal_expire_at_ms : state.deadlineMs();
+                    if (expiry < stale_before_ms) {
+                        ++out.expired_records;
+                    }
                 }
             }
             for (const auto& rank : ranks) {
@@ -538,7 +542,9 @@ TEST_F(P2PMultiRankPeer, DISABLED_Serve) {
                 out.computed_buffers += buffers->computed_buffers_.size();
                 out.source_markers += buffers->removed_requests_.size();
                 for (const auto& [request_key, expiry] : buffers->removed_requests_) {
-                    if (expiry < currentTimeMs() - 2000) ++out.expired_records;
+                    if (expiry < stale_before_ms) {
+                        ++out.expired_records;
+                    }
                 }
             }
             if (diagnostics) out.process = sampleProcess();

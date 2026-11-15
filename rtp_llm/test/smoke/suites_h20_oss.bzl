@@ -181,7 +181,7 @@ def h20_oss_suites():
             smoke_test(
                 name="dense_dp_sep_tp2",
                 task_info="data/model/qwen25/q_r_dp_sep_tp2.json",
-                gpu_type=["H20"],
+                gpu_type=["H20_CU13"],
                 envs={
                     "prefill": [
                         "PYTHONUNBUFFERED=TRUE",
@@ -204,7 +204,7 @@ def h20_oss_suites():
             smoke_test(
                 name="dense_dp_sep_tp1_to_tp2",
                 task_info="data/model/qwen25/q_r_dp_sep_tp2.json",
-                gpu_type=["H20"],
+                gpu_type=["H20_CU13"],
                 envs={
                     "prefill": [
                         "PYTHONUNBUFFERED=TRUE",
@@ -227,7 +227,7 @@ def h20_oss_suites():
             smoke_test(
                 name="dense_dp_sep_tp2_to_tp1",
                 task_info="data/model/qwen25/q_r_dp_sep_tp2.json",
-                gpu_type=["H20"],
+                gpu_type=["H20_CU13"],
                 envs={
                     "prefill": [
                         "PYTHONUNBUFFERED=TRUE",
@@ -250,7 +250,7 @@ def h20_oss_suites():
             smoke_test(
                 name="dense_dp_sep_tp2_to_tp1_decode_entrance_reuse",
                 task_info="data/model/qwen25/q_r_dp_sep_p2p_reuse.json",
-                gpu_type=["H20"],
+                gpu_type=["H20_CU13"],
                 envs={
                     "prefill": [
                         "PYTHONUNBUFFERED=TRUE",
@@ -272,7 +272,7 @@ def h20_oss_suites():
             smoke_test(
                 name="p2p_cp2_to_tp2_decode_entrance",
                 task_info="data/model/qwen25/q_r_dp_sep_p2p_reuse_cp2.json",
-                gpu_type=["H20"],
+                gpu_type=["H20_CU13"],
                 envs={
                     "prefill": ["PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
                     "decode": ["PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
@@ -285,7 +285,7 @@ def h20_oss_suites():
             smoke_test(
                 name="p2p_tp2_to_tp2_bf16_decode_entrance",
                 task_info="data/model/qwen25/q_r_dp_sep_p2p_reuse_cp2.json",
-                gpu_type=["H20"],
+                gpu_type=["H20_CU13"],
                 envs={
                     "prefill": ["PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
                     "decode": ["PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
@@ -298,7 +298,7 @@ def h20_oss_suites():
             smoke_test(
                 name="p2p_tp2_to_dp2_decode_entrance",
                 task_info="data/model/qwen25/q_r_dp_sep_p2p_reuse_dp2.json",
-                gpu_type=["H20"],
+                gpu_type=["H20_CU13"],
                 envs={
                     "prefill": ["PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
                     "decode": ["PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
@@ -311,7 +311,7 @@ def h20_oss_suites():
             smoke_test(
                 name="p2p_tp1_to_dp2_tp2_decode_entrance",
                 task_info="data/model/qwen25/q_r_dp_sep_p2p_reuse_dp2.json",
-                gpu_type=["H20"],
+                gpu_type=["H20_CU13"],
                 envs={
                     "prefill": ["PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
                     "decode": ["PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
@@ -324,7 +324,7 @@ def h20_oss_suites():
             smoke_test(
                 name="p2p_tp2_to_dp3_decode_entrance",
                 task_info="data/model/qwen25/q_r_dp_sep_p2p_reuse_dp3.json",
-                gpu_type=["H20"],
+                gpu_type=["H20_CU13"],
                 envs={
                     "prefill": ["PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
                     "decode": ["PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
@@ -614,7 +614,7 @@ def h20_oss_suites():
                     "prefill": "--load_cache_timeout_ms 120000 --seq_size_per_block 2048 --act_type BF16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --reserver_runtime_mem_mb 9861 --ssm_state_dtype fp32",
                     "decode": "--load_cache_timeout_ms 120000 --seq_size_per_block 2048 --act_type BF16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --reserver_runtime_mem_mb 9861 --ssm_state_dtype fp32"
                 },
-                gpu_type=["H20"],
+                gpu_type=["H20_CU13"],
             ),
             # DashSc gRPC frontend smoke. Tokenizes client-side, sends INT32
             # input_ids via predict_v2.proto ModelStreamInfer to port (START_PORT+8),

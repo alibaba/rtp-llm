@@ -25,8 +25,8 @@ def init_pd_separation_group_args(parser, pd_separation_config):
         env_name="LOAD_CACHE_TIMEOUT_MS",
         bind_to=(pd_separation_config, "load_cache_timeout_ms"),
         type=int,
-        default=60000,
-        help="KV cache 加载超时（毫秒），默认 60000（1 分钟）。",
+        default=5000,
+        help="KV cache 加载超时（毫秒），默认 5000。冷启动或慢建链场景可显式调大。",
     )
 
     pd_separation_group.add_argument(

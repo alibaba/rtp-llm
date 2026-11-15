@@ -36,7 +36,9 @@ using PrefillServerCallerCqDrainer =
 }  // namespace
 
 PrefillServerCallerContext::PrefillServerCallerContext(const std::string& prefill_addr, const std::string& unique_key):
-    prefill_addr_(prefill_addr), unique_key_(unique_key), request_begin_time_us_(currentTimeUs()) {
+    prefill_addr_(prefill_addr), unique_key_(unique_key), drain_entry_(1), request_begin_time_us_(currentTimeUs()) {
+    // Ensure a drain worker is available before posting any gRPC operations.
+    (void)PrefillServerCallerCqDrainer::instance();
     async_state_                   = std::make_shared<PrefillServerCallerAsyncState>();
     async_state_->client_context   = std::make_shared<grpc::ClientContext>();
     async_state_->completion_queue = std::make_shared<grpc::CompletionQueue>();
@@ -294,6 +296,8 @@ void PrefillServerCallerContext::shutdownAndDrainCompletionQueue() {
     if (!async_state || !async_state->completion_queue || async_state->completion_queue_shutdown_drained_) {
         return;
     }
+    // The owner has cancelled the call. Drain only operations already posted:
+    // Finish retrieves the final status and may not overlap a pending Read.
     async_state->completion_queue->Shutdown();
 
     void*      drain_tag = nullptr;
@@ -312,8 +316,8 @@ void PrefillServerCallerContext::shutdownAndDrainCompletionQueue() {
                                 prefill_addr_.c_str(),
                                 kPrefillDrainBudgetMs);
             async_state->completion_queue_shutdown_drained_ = true;
-            PrefillServerCallerCqDrainer::instance().enqueue(async_state);
-            async_state_.reset();
+            drain_entry_.front()                            = std::move(async_state_);
+            PrefillServerCallerCqDrainer::instance().enqueue(drain_entry_);
             return;
         }
     }

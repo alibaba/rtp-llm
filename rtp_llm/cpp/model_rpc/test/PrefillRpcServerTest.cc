@@ -198,7 +198,7 @@ TEST(PrefillRpcServerTest, BatchRejectsUnsupportedMultipleDpBeforeEngineAccess) 
     grpc::ServerContext context;
     EnqueueBatchRequestPB request;
     EnqueueBatchResponsePB response;
-    EXPECT_ANY_THROW(server.EnqueueBatch(&context, &request, &response));
+    EXPECT_EQ(server.EnqueueBatch(&context, &request, &response).error_code(), grpc::StatusCode::UNIMPLEMENTED);
     EXPECT_TRUE(server.batch_entries_.empty());
     EXPECT_EQ(server.onflightRequestNum(), 0u);
 }
@@ -549,6 +549,38 @@ TEST(PDCancelRegistryTest, CleanupTickDropsStreamAfterDeferredReleaseWithoutExpi
     EXPECT_FALSE(handle->stream);
     EXPECT_EQ(registry.find(request.request_id()), handle);
     EXPECT_FALSE(handle->canceled.load());
+}
+
+TEST(PDCancelRegistryTest, RetentionWaitsForStreamCleanupAndThenReclaimsRecord) {
+    PDCancelRegistry registry(std::make_shared<RpcServerRuntimeMeta>());
+    GenerateInputPB  request;
+    request.set_request_id(119);
+    PDCancelRegistry::Handle handle;
+    ASSERT_TRUE(registry.admit(request, "pending-release", "", currentTimeMs() + 1000, handle).ok());
+    auto input             = std::make_shared<GenerateInput>();
+    input->request_id      = request.request_id();
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->input_ids       = torch::tensor({1}, torch::kInt32);
+    ModelConfig model;
+    model.max_seq_len = 32;
+    model.vocab_size  = 128;
+    auto stream = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+    ASSERT_TRUE(stream->finishWithoutGenerate());
+    stream->incPendingAsyncBookkeeping();
+    stream->markDeferredRelease();
+    registry.attach(handle, stream);
+    registry.finishLocal(handle);
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex_);
+        registry.scheduleExpirationLocked(handle, currentTimeMs() - 1);
+        registry.trimLocked(currentTimeMs());
+    }
+    EXPECT_EQ(registry.find(request.request_id()), handle);
+    EXPECT_EQ(handle->stream, stream);
+
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    EXPECT_TRUE(registry.pending().empty());
+    EXPECT_FALSE(registry.find(request.request_id()));
 }
 
 TEST(PDCancelRegistryTest, RacingOrdinaryAndPriorityCancelAckMatchesPublishedTerminal) {

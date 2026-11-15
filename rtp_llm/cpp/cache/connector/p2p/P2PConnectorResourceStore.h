@@ -43,7 +43,7 @@ public:
 
     // GenerateStream registers the local request deadline; duplicates cannot renew it
     // while the record exists. A new handoff attempt must use a new unique_key.
-    int64_t requestDeadline(const std::string& unique_key, int64_t timeout_ms);
+    int64_t requestDeadline(const std::string& unique_key, int64_t timeout_ms, ErrorInfo* error = nullptr);
 
     // Wait for GenerateStream registration without creating request state.
     // Returns zero when the load wait expires, is cancelled, or the request is terminal.
@@ -115,6 +115,8 @@ private:
         }
     };
 
+    using RequestStates = std::map<std::string, RequestState>;
+    RequestStates::iterator findOrCreateRequestLocked(const std::string& unique_key, int64_t deadline_ms);
     void scheduleDeadlineCheckLocked(const std::string& unique_key, RequestState& state);
 
     // Lock order: ResourceStore -> ResultStore. Waiting and serialization run without this lock.
@@ -124,7 +126,10 @@ private:
     std::condition_variable deadline_cv_;
     std::map<std::string, std::shared_ptr<P2PConnectorResourceEntry>> resource_map_;
     // Lifecycle survives resource transfer without retaining the KV resource.
-    std::map<std::string, RequestState> request_states_;
+    RequestStates request_states_;
+    // Bound active and retired records together. Never evict a replay fence to
+    // make room for a new key. Use the same record budget as PDCancelRegistry.
+    size_t request_state_capacity_{1u << 20};
     // Exactly one index entry per request. Updating a deadline replaces its old
     // entry, so repeated publications cannot accumulate stale timer records.
     std::set<std::pair<int64_t, std::string>> deadline_index_;

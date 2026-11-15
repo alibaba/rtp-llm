@@ -125,7 +125,8 @@ enum class Fault {
     None,
     CorruptByte,
     OmitLastLayer,
-    DropBatchAck
+    DropBatchAck,
+    RejectSecondBatchItem
 };
 
 enum class CancelStage : int32_t {
@@ -489,6 +490,7 @@ public:
     std::atomic<int>      generate_done{0}, generate_cancelled{0}, load_done{0}, load_cancelled{0};
     std::atomic<int>      read_done{0}, handle_read_done{0}, cancel_read_calls{0};
     bool                  drop_batch_ack = false;
+    bool                  reject_second_batch_item = false;
 
     grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
                                    const BatchGenerateInputPB* request,
@@ -500,6 +502,14 @@ public:
                               EnqueueBatchResponsePB*      response) override {
         if (!prefill)
             return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "D");
+        if (reject_second_batch_item && request->dp_slots_size() == 1 && request->dp_slots(0).requests_size() == 2) {
+            // Make the second request invalid only at Prefill, after Decode has
+            // prepared both streams and sent its admission RPC.
+            auto partial = *request;
+            partial.mutable_dp_slots(0)->mutable_requests(1)->mutable_input()->mutable_generate_config()->set_num_beams(
+                2);
+            return prefill->EnqueueBatch(context, &partial, response);
+        }
         const auto status = prefill->EnqueueBatch(context, request, response);
         return status.ok() && drop_batch_ack ?
                    grpc::Status(grpc::StatusCode::UNAVAILABLE, "injected loss of successful batch admission ACK") :
@@ -884,7 +894,7 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
     ASSERT_LE(hello.request_timeout_ms, 600000);
     ASSERT_TRUE(hello.dtype == 0 || hello.dtype == 1);
     ASSERT_GE(hello.fault, 0);
-    ASSERT_LE(hello.fault, static_cast<int>(Fault::DropBatchAck));
+    ASSERT_LE(hello.fault, static_cast<int>(Fault::RejectSecondBatchItem));
     const auto transport = environment("P2P_SMOKE_TRANSPORT", "tcp");
     ASSERT_TRUE(transport == "tcp" || transport == "rdma");
     ASSERT_EQ(hello.rdma, transport == "rdma");
@@ -899,6 +909,7 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
             [&prefill] { prefill.batchContextCleanupTick(); }, 10000, "BatchSmokePrefillCleanup");
         PayloadEndpoint endpoint(prefill, &prefill, host);
         endpoint.service.drop_batch_ack = hello.fault == static_cast<int>(Fault::DropBatchAck);
+        endpoint.service.reject_second_batch_item = hello.fault == static_cast<int>(Fault::RejectSecondBatchItem);
         const auto      config = test::makeSimpleMhaCacheConfig(
             kLayers, kBlocks, kTokensPerBlock, hello.dtype == 1 ? DataType::TYPE_INT8 : DataType::TYPE_FP16, 2, 16);
         auto engine     = makePayloadEngine(config, RoleType::PREFILL, endpoint, hello.rdma, hello.load_timeout_ms);
@@ -1268,8 +1279,10 @@ protected:
             EXPECT_EQ(scores.has_target_logprobs(), i == 0);
         }
         EXPECT_EQ(decode_engine_->checked_requests.load(), prompt_scores ? 0 : 2);
-        EXPECT_EQ(prefill_process_->snapshot().load_calls, prompt_scores ? 0 : 2);
-        EXPECT_EQ(prefill_process_->snapshot().generate_calls, 0);
+        const auto prefill = prefill_process_->snapshot();
+        EXPECT_EQ(prefill.peer_calls, prompt_scores ? 0 : 1);
+        EXPECT_EQ(prefill.load_calls, prompt_scores ? 0 : 2);
+        EXPECT_EQ(prefill.generate_calls, 0);
         ASSERT_NO_FATAL_FAILURE(expectReleased());
     }
 
@@ -1464,15 +1477,18 @@ TEST_F(P2PGenerateStreamSmokeTest, BatchAttachesMasterAdmissionsWithoutEnqueuein
 }
 
 TEST_F(P2PGenerateStreamSmokeTest, BatchPartialPrefillAdmissionCancelsEverySubmittedItem) {
-    initialize(DataType::TYPE_FP16);
+    initialize(DataType::TYPE_FP16, Fault::RejectSecondBatchItem);
     BatchGenerateInputPB batch;
     batch.add_inputs()->CopyFrom(request(1901, 8));
-    batch.add_inputs()->CopyFrom(request(1902, 65));  // Payload model max_seq_len is 64.
+    batch.add_inputs()->CopyFrom(request(1902, 11));
     auto stub = RpcService::NewStub(grpc::CreateChannel(decode_rpc_->address(), grpc::InsecureChannelCredentials()));
     grpc::ClientContext context;
     context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(15));
     BatchGenerateOutputsPB response;
-    EXPECT_FALSE(stub->BatchGenerateCall(&context, batch, &response).ok());
+    const auto             status = stub->BatchGenerateCall(&context, batch, &response);
+    EXPECT_FALSE(status.ok());
+    EXPECT_NE(status.error_message().find("Prefill batch request 1902"), std::string::npos);
+    EXPECT_NE(status.error_message().find("EnqueueBatch does not support beam search"), std::string::npos);
     expectCancelDrained();
     EXPECT_EQ(decode_engine_->checked_requests.load(), 0);
     healthyAfterCancel(1903);

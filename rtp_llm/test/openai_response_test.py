@@ -3007,6 +3007,23 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         self.assertEqual(roles, [])
 
+    def test_frontend_rejects_prefill_only_domain_without_master(self):
+        config = PDSepConfig()
+        config.role_type = RoleType.FRONTEND
+        with self.assertRaisesRegex(ValueError, "FRONTEND with a Prefill domain"):
+            BackendRPCServerVisitor.get_backend_role_list(
+                config, HostServiceArgs(prefill_domain="prefill-test")
+            )
+        self.assertEqual(
+            BackendRPCServerVisitor.get_backend_role_list(
+                config,
+                HostServiceArgs(
+                    prefill_domain="prefill-test", master_domain="master-test"
+                ),
+            ),
+            [RoleType.PREFILL],
+        )
+
     def test_pdfusion_frontend_does_not_require_pd_roles(self):
         config = PDSepConfig()
         config.role_type = RoleType.FRONTEND

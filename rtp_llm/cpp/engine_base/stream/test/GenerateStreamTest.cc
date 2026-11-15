@@ -786,6 +786,65 @@ TEST_F(GenerateStreamTest, PDDecodePublishesHandoffOnceThenHonorsStreamingMode) 
     }
 }
 
+TEST(GenerateConfigTest, OptionalValuesSurviveJsonRoundTrip) {
+    GenerateConfig config;
+    config.logits_index = 3;
+    config.random_seed  = 42;
+    const auto json     = autil::legacy::ToJsonString(config, /*isCompact=*/true);
+    EXPECT_EQ(config.logits_index, 3);
+    EXPECT_EQ(config.random_seed, 42);
+    EXPECT_EQ(json.find("\"no_repeat_ngram_size\""), std::string::npos);
+
+    GenerateConfig decoded;
+    autil::legacy::FromJsonString(decoded, json);
+    EXPECT_EQ(decoded.logits_index, 3);
+    EXPECT_EQ(decoded.random_seed, 42);
+    EXPECT_FALSE(decoded.no_repeat_ngram_size.has_value());
+}
+
+TEST_F(GenerateStreamTest, BufferedLocalOutputPreservesRequestedStepLogits) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(
+        builder.createComplexContextStream({1, 2, 3}, RoleType::PDFUSION));
+    auto config                  = stream->generateConfig();
+    config->num_return_sequences = 1;
+    config->max_new_tokens       = 2;
+    config->is_streaming         = false;
+    config->return_logits        = true;
+    config->logits_index         = 1;
+    stream->generate_status_->status.store(StreamState::RUNNING);
+    for (int step : {1, 2}) {
+        stream->step();
+        stream->update({.new_tokens     = torch::full({1, 1}, 40 + step, torch::kInt32),
+                        .num_new_tokens = 1,
+                        .logits         = torch::full({1, 2}, float(step), torch::kFloat32)});
+    }
+    auto result = stream->nextOutput(1);
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.value().generate_outputs.size(), 1u);
+    const auto& output = result.value().generate_outputs.front();
+    EXPECT_TRUE(output.finished);
+    ASSERT_TRUE(output.logits.has_value());
+    EXPECT_TRUE(torch::equal(*output.logits, torch::ones({1, 2})));
+}
+
+TEST_F(GenerateStreamTest, PrefillMissingPromptLossDoesNotPublishHandoff) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(
+        builder.createComplexContextStream({1, 2, 3}, RoleType::PREFILL));
+    stream->generateConfig()->num_return_sequences = 1;
+    stream->generateConfig()->pd_separation        = true;
+    stream->generateConfig()->calculate_loss       = 2;
+    stream->generate_status_->status.store(StreamState::RUNNING);
+
+    stream->update({.new_tokens = torch::tensor({{42}}, torch::kInt32), .num_new_tokens = 1});
+
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::PrefillHandoffReady));
+    const auto result = stream->nextOutput(1);
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), ErrorCode::EXECUTION_EXCEPTION);
+}
+
 TEST_F(GenerateStreamTest, pdUpdatePublishesOutputBeforeRemoteHandoffCompletion) {
     auto builder = GenerateStreamBuilder();
     auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}, RoleType::PREFILL));

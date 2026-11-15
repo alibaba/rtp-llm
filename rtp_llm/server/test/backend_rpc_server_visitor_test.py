@@ -355,6 +355,109 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
             "master+domain_fallback",
         )
 
+    async def test_pd_expansion_skips_out_of_contract_vit_hash_requests(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._mm_cache_routing = True
+        visitor.master_client = SimpleNamespace(get_vit_cache_metadata=AsyncMock())
+        for keys in ([], [str(i) for i in range(257)], ["x" * 4097]):
+            with self.subTest(count=len(keys)):
+                request = _FakeInput()
+                request.mm_inputs = [object()]
+                request.mm_token_expansion = None
+                request.generate_config.can_use_pd_separation = True
+                request.generate_config.role_addrs = [
+                    RoleAddr(
+                        role=RoleType.DECODE, ip="decode", http_port=1, grpc_port=2
+                    ),
+                    RoleAddr(role=RoleType.VIT, ip="vit", http_port=3, grpc_port=4),
+                ]
+                with patch(
+                    "rtp_llm.server.backend_rpc_server_visitor.multimodal_cache_keys",
+                    return_value=keys,
+                ):
+                    await visitor._expand_pd_multimodal_tokens(request)
+
+                self.assertFalse(request.generate_config.can_use_pd_separation)
+                self.assertIsNone(request.mm_token_expansion)
+        visitor.master_client.get_vit_cache_metadata.assert_not_awaited()
+
+    async def test_mixed_frontend_accepts_either_complete_route(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._local_prefill_addresses = []
+        visitor._mm_cache_routing = False
+        visitor.master_config = None
+        visitor.host_service = MagicMock()
+        visitor.backend_role_list = [
+            RoleType.PREFILL,
+            RoleType.DECODE,
+            RoleType.PDFUSION,
+        ]
+        for roles in ((RoleType.PDFUSION,), (RoleType.PREFILL, RoleType.DECODE)):
+            with self.subTest(roles=roles):
+                request = _FakeInput()
+                request.generate_config.role_addrs = [
+                    RoleAddr(role=role, ip="requested", http_port=9000, grpc_port=9001)
+                    for role in roles
+                ]
+                with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor"):
+                    await visitor.route_ips(request)
+                self.assertEqual(
+                    [address.role for address in request.generate_config.role_addrs],
+                    list(roles),
+                )
+        visitor.host_service.get_backend_role_addrs.assert_not_called()
+
+    async def test_mixed_frontend_fills_only_prefill_for_selected_decode(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._local_prefill_addresses = []
+        visitor._mm_cache_routing = False
+        visitor.master_config = None
+        visitor.host_service = MagicMock()
+        visitor.backend_role_list = [
+            RoleType.PREFILL,
+            RoleType.DECODE,
+            RoleType.PDFUSION,
+        ]
+        prefill = RoleAddr(
+            role=RoleType.PREFILL, ip="prefill", http_port=1, grpc_port=2
+        )
+        decode = RoleAddr(role=RoleType.DECODE, ip="decode", http_port=3, grpc_port=4)
+        visitor.host_service.get_backend_role_addrs.return_value = [prefill]
+        request = _FakeInput()
+        request.generate_config.role_addrs = [decode]
+
+        with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor"):
+            await visitor.route_ips(request)
+
+        visitor.host_service.get_backend_role_addrs.assert_called_once_with(
+            [RoleType.PREFILL]
+        )
+        self.assertEqual(request.generate_config.role_addrs, [decode, prefill])
+
+    async def test_mixed_frontend_chooses_fusion_when_prefill_domain_is_unavailable(
+        self,
+    ):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._local_prefill_addresses = []
+        visitor._mm_cache_routing = False
+        visitor.master_config = None
+        visitor.host_service = MagicMock()
+        visitor.host_service.get_master_addr.return_value = None
+        visitor.backend_role_list = [
+            RoleType.DECODE,
+            RoleType.PREFILL,
+            RoleType.PDFUSION,
+        ]
+        decode = RoleAddr(role=RoleType.DECODE, ip="decode", http_port=1, grpc_port=2)
+        fusion = RoleAddr(role=RoleType.PDFUSION, ip="fusion", http_port=3, grpc_port=4)
+        visitor.host_service.get_backend_role_addrs.return_value = [decode, fusion]
+        request = _FakeInput()
+
+        with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor"):
+            await visitor.route_ips(request)
+
+        self.assertEqual(request.generate_config.role_addrs, [fusion])
+
     async def test_route_ips_preserves_request_source_when_domain_completes_roles(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor._local_prefill_addresses = []

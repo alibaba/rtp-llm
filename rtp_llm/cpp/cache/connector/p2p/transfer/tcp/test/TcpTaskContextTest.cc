@@ -120,12 +120,12 @@ protected:
 
     /// Returns a TransferTask whose sole block has addr/size as given.
     static std::shared_ptr<TransferTask>
-    makeTask(int64_t cache_key, void* addr, size_t size_bytes, int64_t deadline_offset_ms = 5000) {
+    makeTask(int64_t cache_key, void* addr, size_t size_bytes, int device_index = -1) {
         auto kbi = std::make_shared<KeyBlockInfo>();
-        kbi->blocks.push_back(BlockInfo{false, 0, 0, addr, size_bytes});
+        kbi->blocks.push_back(BlockInfo{device_index >= 0, device_index, 0, addr, size_bytes});
         KeyBlockInfoMap block_infos;
         block_infos[cache_key] = kbi;
-        return std::make_shared<TransferTask>(std::move(block_infos), currentTimeMs() + deadline_offset_ms);
+        return std::make_shared<TransferTask>(std::move(block_infos), currentTimeMs() + 5000);
     }
 
     // ----- Context builder -----
@@ -369,11 +369,23 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_ValidData_DataCopiedToDevice) {
     ::tcp_transfer::TcpLayerBlockTransferResponse resp;
     MockClosure                                   closure;
     auto                                          ctx = makeContext(&req, &resp, &closure);
-    ctx->setTask(makeTask(key, gpu_buf.data_ptr(), data_size));
+    ctx->setTask(makeTask(key, gpu_buf.data_ptr(), data_size, gpu_buf.get_device()));
 
     CudaCopyUtil copy_util;
     ASSERT_TRUE(ctx->executeCopy(copy_util));
     EXPECT_TRUE(verifyDeviceData(gpu_buf.data_ptr(), content, data_size));
+}
+
+TEST_F(TcpTaskContextTest, HostBackedBlockUsesHostCopy) {
+    std::string           source(64, 'H');
+    std::string           wire(64, '\0');
+    std::string           target(64, '\0');
+    CudaCopyUtil          copy_util;
+    std::vector<CopyTask> download{{source.data(), source.size(), wire.data(), -1, false}};
+    std::vector<CopyTask> upload{{wire.data(), wire.size(), target.data(), -1, false}};
+    ASSERT_TRUE(copy_util.batchCopyToHost(download));
+    ASSERT_TRUE(copy_util.batchCopyToDevice(upload));
+    EXPECT_EQ(target, source);
 }
 
 TEST_F(TcpTaskContextTest, ExecuteCopy_MixedBlocks_RejectsNullDecodeBlock) {

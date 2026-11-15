@@ -58,13 +58,14 @@ public:
         std::unique_ptr<TcpTransferClosure> self_guard(this);
         TransferErrorCode error_code = TransferErrorCode::OK;
         std::string       error_msg;
+        int                                 rpc_code = -1;
 
         if (controller_->Failed()) {
-            error_code = controller_->GetErrorCode() == arpc::ARPC_ERROR_TIMEOUT ? TransferErrorCode::TIMEOUT
-                                                                               : TransferErrorCode::RPC_FAILED;
-            error_msg  = "tcp transfer failed: rpc_code=" + std::to_string(controller_->GetErrorCode())
-                        + " " + controller_->ErrorText() + " peer [" + peer_ip_ + ":"
-                        + std::to_string(peer_port_) + "]";
+            rpc_code = controller_->GetErrorCode();
+            error_code =
+                rpc_code == arpc::ARPC_ERROR_TIMEOUT ? TransferErrorCode::TIMEOUT : TransferErrorCode::RPC_FAILED;
+            error_msg = "tcp transfer failed: rpc_code=" + std::to_string(rpc_code) + " " + controller_->ErrorText()
+                        + " peer [" + peer_ip_ + ":" + std::to_string(peer_port_) + "]";
         } else if (response_->has_error_code() && response_->error_code() != ::tcp_transfer::TCP_TRANSFER_NONE_ERROR) {
             error_code = transTcpErrorCode(response_->error_code());
             error_msg  = "wire_code=" + std::to_string(static_cast<int>(response_->error_code())) + ": "
@@ -81,7 +82,7 @@ public:
                                 peer_port_,
                                 static_cast<int>(error_code),
                                 transferErrorCodeToString(error_code),
-                                controller_->GetErrorCode(),
+                                rpc_code,
                                 response_->has_error_code() ? static_cast<int>(response_->error_code()) : -1,
                                 error_msg.c_str());
         }
@@ -131,6 +132,7 @@ bool TcpKVCacheSender::setBlockBufferInfo(::tcp_transfer::TcpBlockBufferInfo* bl
 
     CopyTask task;
     task.device_index = block_info.device_index;
+    task.is_cuda      = block_info.is_cuda;
     task.src_ptr      = block_info.addr;
     task.size         = block_info.size_bytes;
     task.dst_ptr      = content->data();

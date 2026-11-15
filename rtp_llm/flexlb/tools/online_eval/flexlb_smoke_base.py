@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from online_eval.engine_stream import is_mock_prefill_async
 from online_eval.mock_engine import encode_unique_key
 from online_eval.proto_utils import ensure_proto_modules, ensure_schedule_proto_modules
 
@@ -61,6 +62,7 @@ class FlexLBSmokeBase:
         self.pb2, self.pb2_grpc = ensure_proto_modules()
         self.schedule_pb2, self.schedule_pb2_grpc = ensure_schedule_proto_modules()
         self._channels: dict[str, object] = {}
+        self._mock_prefill_probes = {}
         self._request_counter = args.request_id_base
         self.results: List[ScenarioResult] = []
 
@@ -72,6 +74,7 @@ class FlexLBSmokeBase:
         for channel in self._channels.values():
             await channel.close()
         self._channels.clear()
+        self._mock_prefill_probes.clear()
 
     async def _channel(self, target: str):
         import grpc
@@ -126,7 +129,9 @@ class FlexLBSmokeBase:
         }
         config = self.pb2.GenerateConfigPB(
             max_new_tokens=max(1, output_len),
+            can_use_pd_separation=output_len > 1,
             num_return_sequences=1,
+            num_beams=1,
             top_p=1.0,
             top_k=0,
             temperature=1.0,
@@ -217,21 +222,38 @@ class FlexLBSmokeBase:
             )
 
     async def _start_stream(self, response, request_id: int, input_pb=None):
-        """Start FetchResponse (batch) or GenerateStreamCall (direct/queue)."""
-        target = self._role_addr(response, "PREFILL") or self._role_addr(
-            response, "PDFUSION"
+        """Read admitted and direct requests through the selected engine."""
+        prefill_addr = self._role_addr(response, "PREFILL")
+        mock = False
+        if prefill_addr:
+            prefill_stub = self.pb2_grpc.RpcServiceStub(
+                await self._channel(prefill_addr)
+            )
+            mock = await is_mock_prefill_async(
+                self._mock_prefill_probes, prefill_addr, prefill_stub, self.pb2
+            )
+        target = (
+            prefill_addr
+            if mock
+            else self._role_addr(response, "DECODE")
+            or self._role_addr(response, "PDFUSION")
         )
         if not target:
-            raise RuntimeError("schedule response has no PREFILL/PDFUSION address")
+            raise RuntimeError("schedule response has no DECODE/PDFUSION address")
         stub = self.pb2_grpc.RpcServiceStub(await self._channel(target))
-        if response.enqueued_by_master:
+        if mock and response.enqueued_by_master:
             return stub.FetchResponse(
                 self.pb2.FetchRequestPB(request_id=request_id),
                 timeout=60.0,
             )
         if input_pb is None:
+            if response.enqueued_by_master:
+                raise ValueError(
+                    "real Decode requires the input originally sent to Master"
+                )
             input_pb = self._build_generate_input(request_id)
         self._copy_role_addrs(input_pb, response)
+        input_pb.enqueued_by_master = response.enqueued_by_master
         return stub.GenerateStreamCall(input_pb, timeout=60.0)
 
     # -- Stream consumption -----------------------------------------------
@@ -324,10 +346,8 @@ class FlexLBSmokeBase:
             )
             if response.code != 200 or not response.success:
                 return False, f"schedule failed: {response.error_message}"
-            input_pb = (
-                self._build_generate_input(rid)
-                if not response.enqueued_by_master
-                else None
+            input_pb = self._build_generate_input(
+                rid, output_len=2, block_keys=[rid * 100 + 1]
             )
             stream = await self._start_stream(response, rid, input_pb=input_pb)
             snap = StreamSnapshot()

@@ -13,23 +13,26 @@ class ConcurrencyController:
         self.max_concurrency = max_concurrency
         self.lock = Lock()
         self.current_concurrency = Value("i", 0)
-        self.request_counter = Value("i", 0)
+        self.request_counter = Value("Q", 0)
 
     def get_available_concurrency(self) -> int:
         with self.lock:
             return self.max_concurrency - self.current_concurrency.value
 
-    def increment(self) -> None:
-        while True:
-            with self.lock:
-                if self.current_concurrency.value < self.max_concurrency:
-                    self.current_concurrency.value += 1
-                    self.request_counter.value += 1
-                    return self.request_counter.value
-
+    def increment(self, request_count: int = 1) -> int:
+        if not 1 <= request_count <= 4096:
+            raise ValueError("request_count must fit in the request ID sequence")
+        with self.lock:
+            if self.current_concurrency.value >= self.max_concurrency:
                 raise ConcurrencyException(
                     f"Concurrency limit {self.max_concurrency} reached"
                 )
+            sequence = self.request_counter.value + 1
+            if sequence % 4096 + request_count > 4096:
+                sequence += (-sequence) % 4096
+            self.request_counter.value = sequence + request_count - 1
+            self.current_concurrency.value += 1
+            return sequence
 
     def decrement(self) -> None:
         with self.lock:

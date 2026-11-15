@@ -84,6 +84,13 @@ void P2PConnector::finishP2PPublication(int64_t request_id, int64_t deadline_ms,
     }
 }
 
+bool P2PConnector::rejectLayer(int64_t          request_id,
+                               int64_t          deadline_ms,
+                               int64_t          clock_offset_ms,
+                               const ErrorInfo& error) {
+    return prefill_ && prefill_->rejectLayer(request_id, deadline_ms, clock_offset_ms, error);
+}
+
 bool P2PConnector::writeByLayerTag(int                                layer_id,
                                    const std::string&                 tag,
                                    const KVCacheResourcePtr&          resource,

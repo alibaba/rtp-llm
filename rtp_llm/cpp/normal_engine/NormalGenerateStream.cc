@@ -367,6 +367,11 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     // PD handoff must happen before finished_ assignment.
     if (!finished_ && queryPdSep() && update_info.update_remote_generate
         && resourceContext().role_type == RoleType::PREFILL) {
+        const auto& config = *generate_input_->generate_config;
+        if (config.calculate_loss != 0 && (!loss_.defined() || loss_index_ != inputLength() - 1)) {
+            reportErrorWithoutLock(ErrorCode::EXECUTION_EXCEPTION, "Prefill did not produce the requested prompt loss");
+            return;
+        }
         auto& rc = resourceContext();
 
         reportEventWithoutLock(StreamEvents::PrefillHandoffReady);
@@ -403,7 +408,6 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             side_data.disk_reuse_len   = diskReuseLength();
             side_data.multimodal_lengths = generate_input_->multimodalLengths();
             // Publish owned CPU snapshots. Decode applies these through its normal output path.
-            const auto& config      = *generate_input_->generate_config;
             const auto  save_output = [&](const char* name, const torch::Tensor& tensor, bool requested) {
                 if (requested && tensor.defined()) {
                     side_data.first_token_tensors.emplace(name, tensor.to(torch::kCPU, false, true).contiguous());
@@ -504,10 +508,10 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             || (role == RoleType::DECODE && !update_info.update_remote_generate && iter_count_ == 1));
     const bool need_update = pd_sep_first_token || isStreaming() || finished_;
     if (!need_update) {
-        // Keep the requested step's logits when Decode buffers its token output.
+        // Keep the requested step's logits when the stream buffers its token output.
         const auto logits_index = generateConfig()->logits_index;
-        if (role == RoleType::DECODE && queryPdSep() && returnLogits() && update_info.logits.defined()
-            && logits_index && seqLength() - inputLength() == *logits_index) {
+        if (returnLogits() && update_info.logits.defined() && logits_index
+            && seqLength() - inputLength() == *logits_index) {
             selected_logits_ = selectLogits(update_info.logits).to(torch::kCPU, false, true);
         }
         return;

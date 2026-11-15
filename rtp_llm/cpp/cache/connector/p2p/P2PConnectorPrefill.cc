@@ -22,6 +22,14 @@
 
 namespace rtp_llm {
 
+namespace {
+bool validPublicationDeadline(int64_t deadline_ms, int64_t clock_offset_ms) {
+    const auto max_ms = std::numeric_limits<int64_t>::max();
+    return deadline_ms > 0 && deadline_ms < max_ms && (clock_offset_ms <= 0 || deadline_ms < max_ms - clock_offset_ms)
+           && clock_offset_ms > -deadline_ms;
+}
+}  // namespace
+
 P2PConnectorPrefill::P2PConnectorPrefill(P2PConnectorConfig                          config,
                                          const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
                                          const kmonitor::MetricsReporterPtr&         metrics_reporter):
@@ -97,15 +105,27 @@ std::shared_ptr<AsyncContext> P2PConnectorPrefill::registerResource(const KVCach
 }
 
 void P2PConnectorPrefill::finishP2PPublication(int64_t request_id, int64_t deadline_ms, int64_t clock_offset_ms) {
-    const auto max_ms = std::numeric_limits<int64_t>::max();
-    if (!worker_ || deadline_ms <= 0 || deadline_ms == max_ms
-        || (clock_offset_ms > 0 && deadline_ms >= max_ms - clock_offset_ms) || clock_offset_ms <= -deadline_ms) {
+    if (!worker_ || !validPublicationDeadline(deadline_ms, clock_offset_ms)) {
         return;
     }
     if (worker_->getComputedBuffersStore()->registerRequestHorizon(
             request_id, deadline_ms + clock_offset_ms, deadline_ms)) {
         worker_->finishPublication(request_id, deadline_ms);
     }
+}
+
+bool P2PConnectorPrefill::rejectLayer(int64_t          request_id,
+                                      int64_t          deadline_ms,
+                                      int64_t          clock_offset_ms,
+                                      const ErrorInfo& error) {
+    if (!worker_ || !validPublicationDeadline(deadline_ms, clock_offset_ms)) {
+        return false;
+    }
+    if (!worker_->getComputedBuffersStore()->registerRequestHorizon(
+            request_id, deadline_ms + clock_offset_ms, deadline_ms)) {
+        return true;
+    }
+    return worker_->rejectLayer(request_id, deadline_ms, error);
 }
 
 bool P2PConnectorPrefill::writeByLayerTag(int                                layer_id,
@@ -125,10 +145,7 @@ bool P2PConnectorPrefill::writeByLayerTag(int                                lay
     }
     // The source timestamp remains the buffer/tombstone identity. Reanchor only
     // the acceptance horizon, including when layers arrive before StartLoad.
-    const auto max_ms = std::numeric_limits<int64_t>::max();
-    if (deadline_ms <= 0 || deadline_ms == max_ms
-        || (deadline_clock_offset_ms > 0 && deadline_ms >= max_ms - deadline_clock_offset_ms)
-        || deadline_clock_offset_ms <= -deadline_ms) {
+    if (!validPublicationDeadline(deadline_ms, deadline_clock_offset_ms)) {
         return false;
     }
     const auto local_deadline_ms = deadline_ms + deadline_clock_offset_ms;

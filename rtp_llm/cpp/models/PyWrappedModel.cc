@@ -751,28 +751,22 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
                 chunk_ids.emplace(std::make_pair(request_ids[row], deadline), starts[row]);
             }
         }
-        cache_store_inputs.p2p_layer_write =
-            [manager = cache_manager_,
-             clock_offset_ms = inputs.p2p_deadline_clock_offset_ms,
-             chunk_ids = std::make_shared<const ChunkIds>(std::move(chunk_ids))](
-                size_t                               model_id,
-                int                                  layer_id,
-                const std::string&                   tag,
-                const std::vector<int64_t>&          keys,
-                const std::vector<int32_t>&          blocks,
-                int64_t                              request_id,
-                const std::shared_ptr<torch::Event>& event,
-                int64_t                              deadline_ms) {
-                const auto chunk = chunk_ids->find({request_id, deadline_ms});
-                if (chunk == chunk_ids->end()) {
-                    RTP_LLM_LOG_ERROR("Missing P2P chunk metadata, request_id=%ld deadline_ms=%ld",
-                                      request_id,
-                                      deadline_ms);
-                    return false;
-                }
-                return manager->writeP2PLayer(
-                    model_id, layer_id, tag, keys, blocks, request_id, event, deadline_ms, clock_offset_ms, chunk->second);
-            };
+        cache_store_inputs.p2p_layer_write = [manager         = cache_manager_,
+                                              clock_offset_ms = inputs.p2p_deadline_clock_offset_ms,
+                                              chunk_ids       = std::make_shared<const ChunkIds>(std::move(chunk_ids))](
+                                                 size_t                               model_id,
+                                                 int                                  layer_id,
+                                                 const std::string&                   tag,
+                                                 const std::vector<int64_t>&          keys,
+                                                 const std::vector<int32_t>&          blocks,
+                                                 int64_t                              request_id,
+                                                 const std::shared_ptr<torch::Event>& event,
+                                                 int64_t                              deadline_ms) {
+            const auto chunk    = chunk_ids->find({request_id, deadline_ms});
+            const int  chunk_id = chunk == chunk_ids->end() ? -1 : chunk->second;
+            return manager->writeP2PLayer(
+                model_id, layer_id, tag, keys, blocks, request_id, event, deadline_ms, clock_offset_ms, chunk_id);
+        };
     }
     cache_store_inputs.cache_keys            = inputs.cache_keys;
     return cache_store_inputs;

@@ -315,20 +315,21 @@ grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorI
 
 grpc::Status
 LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& request_info, ErrorInfo error_info) {
-    std::string error_msg = error_info.ToString();
-    const auto  role      = maga_init_params_.pd_sep_config.role_type;
+    const auto error_msg   = error_info.ToString();
+    auto       log_message = error_msg;
+    const auto role        = maga_init_params_.pd_sep_config.role_type;
     if (role == RoleType::PREFILL || role == RoleType::DECODE) {
-        error_msg = "reporter_role=" + roleTypeToString(role) + " stage=rpc_response request_key=" + request_key
-                    + " tp_rank=" + std::to_string(maga_init_params_.parallelism_config.tp_rank)
-                    + (request_info.request_id.empty() ? "" : " source_request_id=" + request_info.request_id)
-                    + (request_info.trace_id.empty() ? "" : " trace_id=" + request_info.trace_id) + ": " + error_msg;
+        log_message = "reporter_role=" + roleTypeToString(role) + " stage=rpc_response request_key=" + request_key
+                      + " tp_rank=" + std::to_string(maga_init_params_.parallelism_config.tp_rank)
+                      + (request_info.request_id.empty() ? "" : " source_request_id=" + request_info.request_id)
+                      + (request_info.trace_id.empty() ? "" : " trace_id=" + request_info.trace_id) + ": " + error_msg;
     }
     const auto request_log_tag = formatRequestLogTag(request_key, request_info);
     RTP_LLM_LOG_WARNING("%s, error_code=%d error_name=%s error_message=[%s]",
                         request_log_tag.c_str(),
                         static_cast<int>(error_info.code()),
                         ErrorCodeToString(error_info.code()).c_str(),
-                        error_msg.c_str());
+                        log_message.c_str());
     auto           grpc_error_code = transErrorCodeToGrpc(error_info.code());
     ErrorDetailsPB error_details;
     error_details.set_error_code(static_cast<int>(error_info.code()));
@@ -342,14 +343,13 @@ LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& 
     }
 }
 
-grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*                              context,
-                                              const string&                                     request_key,
-                                              WriterInterface*                                  writer,
-                                              std::shared_ptr<GenerateStream>&                  stream,
-                                              const std::function<FirstError::Snapshot(bool&)>& check_remote) {
+grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*                         context,
+                                              const string&                                request_key,
+                                              WriterInterface*                             writer,
+                                              std::shared_ptr<GenerateStream>&             stream,
+                                              const std::function<FirstError::Snapshot()>& check_remote) {
     RTP_LLM_PROFILE_FUNCTION();
     // Observe local and remote failures before waiting for another token.
-    bool remote_done = !check_remote;
     // Decode replays the Prefill token into its queue even for non-streaming
     // requests. Collect these internal blocks into one RPC output while retaining
     // optional first-token tensors; streaming and other roles keep block semantics.
@@ -357,7 +357,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
         stream->queryPdSep() && stream->resourceContext().role_type == RoleType::DECODE && !stream->isStreaming();
     BatchStreamOutputCollector complete_output(stream->generateConfig()->logits_index);
     while (true) {
-        auto remote_error = check_remote ? check_remote(remote_done) : FirstError::Snapshot{};
+        auto remote_error = check_remote ? check_remote() : FirstError::Snapshot{};
         auto first        = FirstError::earlier(stream->firstError(), remote_error);
         if (first.error.hasError()) {
             stream->reportError(first.error.code(), first.error.ToString());
@@ -373,28 +373,29 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
             if (result.status().code() == ErrorCode::OUTPUT_QUEUE_NO_UPDATE) {
                 continue;
             }
-            if (result.status().code() != ErrorCode::FINISHED) {
-                return serializeErrorMsg(request_key, stream->generateInput()->request_info, result.status());
-            } else {
-                if (!remote_done) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                    continue;
+            if (result.status().code() == ErrorCode::FINISHED) {
+                if (collect_pd_output) {
+                    return serializeErrorMsg(request_key,
+                                             stream->generateInput()->request_info,
+                                             ErrorInfo(ErrorCode::UNKNOWN_ERROR,
+                                                       "non-streaming PD request finished without terminal output"));
                 }
                 break;
             }
+            return serializeErrorMsg(request_key, stream->generateInput()->request_info, result.status());
         }
         auto output = result.value();
+        const bool terminal_output = !output.generate_outputs.empty()
+                                     && std::all_of(output.generate_outputs.begin(),
+                                                    output.generate_outputs.end(),
+                                                    [](const auto& item) { return item.finished; });
         if (collect_pd_output) {
-            const bool finished = !output.generate_outputs.empty()
-                                  && std::all_of(output.generate_outputs.begin(),
-                                                 output.generate_outputs.end(),
-                                                 [](const auto& item) { return item.finished; });
             const auto status = complete_output.add(std::move(output));
             if (!status.ok()) {
                 stream->reportError(status.code(), status.ToString());
                 return serializeErrorMsg(request_key, stream->generateInput()->request_info, status);
             }
-            if (!finished) {
+            if (!terminal_output) {
                 continue;
             }
             output = complete_output.finish();
@@ -422,19 +423,29 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
         }
         if (stream->hasEvent(StreamEvents::PrefillHandoffReady)) {
             if (stream->queryPdSep() && stream->resourceContext().role_type == RoleType::PREFILL) {
-                while (!context->IsCancelled() && stream->getStatus() != StreamState::FINISHED) {
+                while (!isCancelled(context) && stream->getStatus() != StreamState::FINISHED) {
                     if (stream->checkTimeoutAndHasError()) {
+                        return serializeErrorMsg(request_key, stream->statusInfo());
+                    }
+                    if (stream->deadlineMs() <= currentTimeMs()) {
+                        stream->reportError(ErrorCode::GENERATE_TIMEOUT,
+                                            "Prefill handoff completion deadline exceeded");
                         return serializeErrorMsg(request_key, stream->statusInfo());
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
-                if (context->IsCancelled()) {
+                if (isCancelled(context)) {
                     stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
                     RTP_LLM_LOG_WARNING("request [%s] cancelled by user during Prefill completion wait",
                                         request_key.c_str());
                     return serializeErrorMsg(request_key, stream->statusInfo());
                 }
             }
+            break;
+        }
+        if (collect_pd_output || (check_remote && terminal_output)) {
+            // StartLoad already delivered the handoff. The companion Prefill
+            // RPC may still be draining its own output and cleanup.
             break;
         }
     }
@@ -452,6 +463,7 @@ grpc::Status LocalRpcServer::pollBatchStreamOutput(grpc::ServerContext*         
     for (const auto& stream : streams) {
         collectors.emplace_back(stream->generateConfig()->logits_index);
     }
+    std::vector<bool>                       terminal_outputs(streams.size(), false);
     FirstError::Snapshot                    observed_error;
     auto                                    fail = [&](const grpc::Status& status) {
         FirstError failure;
@@ -486,17 +498,24 @@ grpc::Status LocalRpcServer::pollBatchStreamOutput(grpc::ServerContext*         
             if (stream->hasError())
                 return fail(serializeErrorMsg(
                     key, ErrorInfo(stream->statusInfo().code(), key + ": " + stream->statusInfo().ToString())));
+            if (terminal_outputs[i]) {
+                continue;
+            }
             if (stream->hasOutput()) {
                 auto output = stream->nextOutput();
                 if (!output.ok())
                     return fail(serializeErrorMsg(
                         key, ErrorInfo(output.status().code(), key + ": " + output.status().ToString())));
+                const auto& rows    = output.value().generate_outputs;
+                terminal_outputs[i] = !rows.empty() && std::all_of(rows.begin(), rows.end(), [](const auto& row) {
+                    return row.finished;
+                });
                 auto status = collectors[i].add(std::move(output.value()));
                 if (!status.ok())
                     return fail(serializeErrorMsg(key, ErrorInfo(status.code(), key + ": " + status.ToString())));
                 progress = true;
             }
-            if (stream->getStatus() != StreamState::FINISHED || stream->hasOutput()) {
+            if (!terminal_outputs[i] && (stream->getStatus() != StreamState::FINISHED || stream->hasOutput())) {
                 all_finished = false;
                 if (stream->deadlineMs() <= currentTimeMs()) {
                     return fail(grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, key + " deadline exceeded"));

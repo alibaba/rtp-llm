@@ -943,6 +943,33 @@ TEST_F(P2PResourceStoreDeadlineIndexTest, UnregisteredStartLoadCannotCreateTermi
     }
 }
 
+TEST_F(P2PResourceStoreDeadlineIndexTest, CapacityRejectsNewKeysWithoutEvictingTerminalRecord) {
+    auto& store                   = *stream_store_;
+    store.request_state_capacity_ = 1;
+    const auto deadline           = store.requestDeadline("existing", 5000);
+    ASSERT_GT(deadline, currentTimeMs());
+    store.markTerminal("existing", deadline, P2PConnectorResourceStore::TerminalReason::COMPLETED);
+    const auto expiry = store.nextDeadlineMsLocked();
+    ASSERT_TRUE(expiry.has_value());
+
+    ErrorInfo error;
+    EXPECT_EQ(store.requestDeadline("overflow", 5000, &error), 0);
+    EXPECT_EQ(error.code(), ErrorCode::CONCURRENCY_LIMIT_ERROR);
+    PrefillResultStore::SideChannelData payload;
+    const auto                          future = currentTimeMs() + 5000;
+    store.publishPrefillPayload("overflow", future, std::move(payload));
+    EXPECT_FALSE(store.addResource(createMockMeta("overflow", 6200, future), createMockKVCacheResource()));
+    EXPECT_EQ(store.waitAndStealResource("overflow", future, future), nullptr);
+    store.markCancelled("overflow", future);
+    EXPECT_TRUE(store.isMarkedCancelled("existing"));
+    EXPECT_EQ(store.request_states_.size(), 1u);
+    EXPECT_EQ(store.deadline_index_.size(), 1u);
+    EXPECT_TRUE(store.result_store_.entries_.empty());
+
+    store.checkTimeout(*expiry);
+    EXPECT_GT(store.requestDeadline("overflow", 5000), currentTimeMs());
+}
+
 TEST_F(P2PResourceStoreDeadlineIndexTest, TerminalBeforeRegistrationRejectsBothLateProducersForOneHour) {
     auto& store = *stream_store_;
     for (const auto original_deadline : {int64_t{0}, currentTimeMs() - 1, currentTimeMs() + 7200000}) {

@@ -2161,9 +2161,13 @@ class P2PKvLeakThresholdArgumentsTest(TestCase):
         self.assertEqual(self.parse_config([], env).p2p_kv_leak_exit_threshold_percent, 45)
         config = self.parse_config(["--p2p_kv_leak_exit_threshold_percent", "60"], env)
         self.assertEqual(config.p2p_kv_leak_exit_threshold_percent, 60)
+        self.assertEqual(
+            self.parse_config([], {"P2P_KV_LEAK_EXIT_THRESHOLD_PERCENT": "0"}).p2p_kv_leak_exit_threshold_percent,
+            0,
+        )
 
     def test_out_of_range_threshold_is_rejected(self):
-        for value in ("0", "-1", "101", "invalid"):
+        for value in ("-1", "101", "invalid"):
             for args, env in (
                 (["--p2p_kv_leak_exit_threshold_percent", value], {}),
                 ([], {"P2P_KV_LEAK_EXIT_THRESHOLD_PERCENT": value}),

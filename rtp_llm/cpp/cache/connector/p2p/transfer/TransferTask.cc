@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.h"
 
+#include <exception>
 #include <limits>
 #include <mutex>
 
@@ -8,6 +9,21 @@
 
 namespace rtp_llm {
 namespace transfer {
+
+namespace {
+void invokeDoneCallback(const std::function<void()>& callback) noexcept {
+    if (!callback) {
+        return;
+    }
+    try {
+        callback();
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_ERROR("TransferTask completion callback failed: %s", error.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("TransferTask completion callback failed with an unknown exception");
+    }
+}
+}  // namespace
 
 // ==================== TransferTask ====================
 
@@ -46,9 +62,7 @@ void TransferTask::cancel() {
             }
         }
     }
-    if (done_callback) {
-        done_callback();
-    }
+    invokeDoneCallback(done_callback);
 }
 
 bool TransferTask::startTransfer() {
@@ -75,9 +89,7 @@ void TransferTask::forceCancel() {
         total_cost_time_us_ = currentTimeUs() - start_time_us_;
         done_callback       = std::move(done_callback_);
     }
-    if (done_callback) {
-        done_callback();
-    }
+    invokeDoneCallback(done_callback);
 }
 
 TransferErrorCode TransferTask::errorCode() const {
@@ -152,9 +164,7 @@ void TransferTask::completeTransfer(TransferErrorCode           error_code,
         total_cost_time_us_ = currentTimeUs() - start_time_us_;
         done_callback       = std::move(done_callback_);
     }
-    if (done_callback) {
-        done_callback();
-    }
+    invokeDoneCallback(done_callback);
 }
 
 void TransferTask::setDoneCallback(std::function<void()> callback) {
@@ -167,8 +177,8 @@ void TransferTask::setDoneCallback(std::function<void()> callback) {
             done_callback_ = std::move(callback);
         }
     }
-    if (invoke_now && callback) {
-        callback();
+    if (invoke_now) {
+        invokeDoneCallback(callback);
     }
 }
 

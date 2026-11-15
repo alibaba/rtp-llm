@@ -16,6 +16,7 @@
 namespace rtp_llm {
 
 class Meta;
+class ErrorInfo;
 class P2PConnectorPrefill;
 class P2PConnectorDecode;
 class P2PConnectorResourceStore;
@@ -48,6 +49,7 @@ public:
                                             int                          read_block_num);
 
     void finishP2PPublication(int64_t request_id, int64_t deadline_ms, int64_t clock_offset_ms);
+    bool rejectLayer(int64_t request_id, int64_t deadline_ms, int64_t clock_offset_ms, const ErrorInfo& error);
     bool writeByLayerTag(int                                layer_id,
                          const std::string&                 tag,
                          const KVCacheResourcePtr&          resource,

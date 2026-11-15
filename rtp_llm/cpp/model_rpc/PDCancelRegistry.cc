@@ -40,7 +40,8 @@ void PDCancelRegistry::trimLocked(int64_t now_ms) {
             continue;
         }
         const auto& e = it->second;
-        if (!e->local_done || (e->canceled.load() && !e->terminal) || e->retain_until_ms != expires_at_ms) {
+        if (!e->local_done || e->stream || (e->canceled.load() && !e->terminal)
+            || e->retain_until_ms != expires_at_ms) {
             continue;
         }
         if (e->canceled.load()) {
@@ -246,6 +247,12 @@ void PDCancelRegistry::reapFinishedStreams() {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto it = pending_stream_releases_.find(request_id);
         if (it != pending_stream_releases_.end() && it->second == handle && handle->stream == stream) {
+            // Expiry can pass while stream cleanup is still pending. Restore
+            // its index so retention can retire the record after cleanup.
+            const auto expiration = std::make_pair(handle->retain_until_ms, request_id);
+            if (entry_expirations_.count(expiration) == 0) {
+                entry_expirations_.insert(expiration);
+            }
             handle->stream.reset();
             pending_stream_releases_.erase(it);
         }
@@ -320,7 +327,9 @@ bool PDCancelRegistry::complete(const Handle& handle) {
     if (active_reads_.count(handle->unique_key))
         return false;
     auto stream = handle->stream;
-    if (stream && (stream->getStatus() != StreamState::FINISHED || stream->isDeferredReleasePending()))
+    if (stream
+        && (stream->getStatus() != StreamState::FINISHED || stream->isDeferredReleasePending()
+            || stream->hasPendingAsyncBookkeeping()))
         return false;
     // Resource cleanup may wait for transport callbacks; do not block unrelated
     // admission/Cancel operations under the registry lock.

@@ -155,6 +155,7 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
             }
             CopyTask task;
             task.device_index = bi.device_index;
+            task.is_cuda      = bi.is_cuda;
             task.src_ptr      = const_cast<char*>(proto_block.content().data());
             task.size         = proto_block.len();
             task.dst_ptr      = static_cast<char*>(bi.addr);

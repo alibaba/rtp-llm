@@ -16,7 +16,7 @@ Prefill 向 Decode 的各个 worker 发起 P2P KV 数据传输。TCP 和 RDMA �
 
 ## 泄漏阈值
 
-环境变量 `P2P_KV_LEAK_EXIT_THRESHOLD_PERCENT` 默认 **30**，允许 1～100；也可通过 `--p2p_kv_leak_exit_threshold_percent` 设置。
+环境变量 `P2P_KV_LEAK_EXIT_THRESHOLD_PERCENT` 默认 **30**，允许 0～100，也可通过 `--p2p_kv_leak_exit_threshold_percent` 设置。设为 0 只关闭按阈值退出，滞留指标和租约查询继续运行。
 
 统计对象为失败后仍在等待物理完成的目标 KV，按 `(cache group, block ID)` 去重，再按各 group 的实际块字节数和层数加权。分母为 Decode 本地 KV 总容量，包含 KV scale。正常传输中的请求不计入滞留量。
 
@@ -33,4 +33,4 @@ Prefill 向 Decode 的各个 worker 发起 P2P KV 数据传输。TCP 和 RDMA �
 
 存在滞留时每 30 秒打印容量、占比、阈值和最长持有时间；全部释放后打印恢复日志。后台容量检查不依赖控制 RPC 完成，控制线程繁忙时也会按秒唤醒。
 
-Prefill 的资源预持有、终态 tombstone 和 MR/rkey 错误处理沿用现有逻辑；此改动不重试业务请求。
+Prefill 请求状态表最多保留 1,048,576 个活跃及终态记录。终态记录保留一小时用于防止重放。表满时返回 `RESOURCE_EXHAUSTED`，已有请求仍可完成，保留期到期后会腾出空间。

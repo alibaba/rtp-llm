@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import aiohttp
+from online_eval.engine_stream import is_mock_prefill_async
 from online_eval.mock_engine import encode_unique_key
 from online_eval.proto_utils import ensure_proto_modules, ensure_schedule_proto_modules
 from online_eval.report import write_markdown_report
@@ -158,6 +159,7 @@ class LoadClient:
         self._results: List[dict] = []
         self._channels: Dict[str, List[object]] = {}
         self._channel_rr: Dict[str, int] = {}
+        self._mock_prefill_probes = {}
         self._schedule_stubs: Dict[str, List[object]] = {}
         self._schedule_stub_rr: Dict[str, int] = {}
         self._n_channels: int = getattr(args, "n_channels", 8) or 8
@@ -186,6 +188,7 @@ class LoadClient:
                 await channel.close()
         self._channels.clear()
         self._channel_rr.clear()
+        self._mock_prefill_probes.clear()
         self._schedule_stubs.clear()
         self._schedule_stub_rr.clear()
 
@@ -737,8 +740,15 @@ class LoadClient:
                 grpc_port=int(d_port),
             )
 
-        channel = await self._channel(prefill_addr)
-        stub = self.pb2_grpc.RpcServiceStub(channel)
+        prefill_stub = self.pb2_grpc.RpcServiceStub(await self._channel(prefill_addr))
+        mock = await is_mock_prefill_async(
+            self._mock_prefill_probes, prefill_addr, prefill_stub, self.pb2
+        )
+        stub = prefill_stub
+        if decode_addr and not mock:
+            stub = self.pb2_grpc.RpcServiceStub(await self._channel(decode_addr))
+        if not decode_addr:
+            fb_input.generate_config.can_use_pd_separation = False
         stream = stub.GenerateStreamCall(
             fb_input, timeout=self.args.timeout_ms / 1000.0
         )
@@ -770,17 +780,26 @@ class LoadClient:
     ) -> tuple[Optional[float], Optional[float]]:
         prefill_addr = self._role_addr(schedule_response, "PREFILL")
         pdfusion_addr = self._role_addr(schedule_response, "PDFUSION")
-        target = prefill_addr or pdfusion_addr
+        decode_addr = self._role_addr(schedule_response, "DECODE")
+        mock = False
+        if prefill_addr:
+            prefill_stub = self.pb2_grpc.RpcServiceStub(
+                await self._channel(prefill_addr)
+            )
+            mock = await is_mock_prefill_async(
+                self._mock_prefill_probes, prefill_addr, prefill_stub, self.pb2
+            )
+        target = prefill_addr if mock else decode_addr or pdfusion_addr
         if not target:
-            raise RuntimeError("schedule response has no PREFILL/PDFUSION address")
-        channel = await self._channel(target)
-        stub = self.pb2_grpc.RpcServiceStub(channel)
-        if schedule_response.enqueued_by_master:
+            raise RuntimeError("schedule response has no DECODE/PDFUSION address")
+        stub = self.pb2_grpc.RpcServiceStub(await self._channel(target))
+        if mock and schedule_response.enqueued_by_master:
             stream = stub.FetchResponse(
                 self.pb2.FetchRequestPB(request_id=input_pb.request_id),
                 timeout=self.args.timeout_ms / 1000.0,
             )
         else:
+            input_pb.enqueued_by_master = schedule_response.enqueued_by_master
             stream = stub.GenerateStreamCall(
                 input_pb, timeout=self.args.timeout_ms / 1000.0
             )
@@ -805,7 +824,9 @@ class LoadClient:
         }
         config = self.pb2.GenerateConfigPB(
             max_new_tokens=max(1, req.output_len),
+            can_use_pd_separation=req.output_len > 1,
             num_return_sequences=1,
+            num_beams=1,
             top_p=1.0,
             top_k=0,
             temperature=1.0,

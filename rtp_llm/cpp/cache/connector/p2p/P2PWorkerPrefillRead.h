@@ -62,10 +62,9 @@ public:
         return computed_buffers_;
     }
 
-
-private:
     bool rejectLayer(int64_t request_id, int64_t request_deadline_ms, const ErrorInfo& error);
 
+private:
     void loopCheckProc();
 
     struct SendTransferResult {

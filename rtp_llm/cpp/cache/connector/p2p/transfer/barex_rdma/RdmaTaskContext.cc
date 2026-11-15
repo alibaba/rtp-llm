@@ -360,6 +360,7 @@ RdmaTaskContext::buildRdmaBlockPairs(const std::shared_ptr<RdmaStagingBufferPool
         }
         const size_t block_bytes = static_cast<size_t>(pair.first.numel());
         void* device_addr = pair.first.data_ptr();
+        const auto   device_index = pair.first.get_device();
         if (staging_offset != 0 && block_bytes > staging_capacity - staging_offset) {
             ++staging_index;
             staging_offset = 0;
@@ -369,7 +370,7 @@ RdmaTaskContext::buildRdmaBlockPairs(const std::shared_ptr<RdmaStagingBufferPool
         pair.first = torch::from_blob(host_addr,
                                       {static_cast<int64_t>(block_bytes)},
                                       torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
-        h2d_copy_tasks.push_back({host_addr, block_bytes, static_cast<char*>(device_addr)});
+        h2d_copy_tasks.push_back({host_addr, block_bytes, static_cast<char*>(device_addr), device_index});
         staging_offset += block_bytes;
     }
 

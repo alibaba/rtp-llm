@@ -52,8 +52,10 @@ public:
         return pollStreamOutput(nullptr, "request", nullptr, stream);
     }
 
-    grpc::Status poll(WriterInterface* writer, std::shared_ptr<GenerateStream>& stream) {
-        return pollStreamOutput(nullptr, "request", writer, stream);
+    grpc::Status poll(WriterInterface*                             writer,
+                      std::shared_ptr<GenerateStream>&             stream,
+                      const std::function<FirstError::Snapshot()>& check_remote = {}) {
+        return pollStreamOutput(nullptr, "request", writer, stream, check_remote);
     }
 
     void setModelType(const std::string& model_type) {
@@ -1263,6 +1265,54 @@ TEST(LocalRpcServerTest, CollectInterruptsBlockedNextOutputAfterClientCancellati
     EXPECT_EQ(wait_status, std::future_status::ready);
     EXPECT_EQ(collect_result.get().code(), ErrorCode::CANCELLED);
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
+}
+
+TEST(LocalRpcServerTest, DecodeTerminalResponseStopsPollingCompanionPrefillRpc) {
+    TestLocalRpcServer server;
+    RecordingWriter    writer;
+    auto               normal               = createNormalStream(RoleType::DECODE);
+    normal->generateConfig()->pd_separation = true;
+    GenerateOutputs outputs;
+    GenerateOutput  output;
+    output.finished   = true;
+    output.output_ids = torch::tensor({{42}}, torch::kInt32);
+    outputs.generate_outputs.push_back(std::move(output));
+    normal->enqueueGenerateOutput(std::move(outputs));
+    normal->generate_status_->status.store(StreamState::FINISHED);
+    std::shared_ptr<GenerateStream> stream = normal;
+
+    FirstError late_failure;
+    late_failure.record(ErrorInfo(ErrorCode::CANCELLED, "late Prefill error"));
+    int  polls = 0;
+    auto status =
+        server.poll(&writer, stream, [&] { return ++polls == 1 ? FirstError::Snapshot{} : late_failure.snapshot(); });
+
+    EXPECT_TRUE(status.ok()) << status.error_message();
+    EXPECT_EQ(polls, 1);
+    ASSERT_EQ(writer.outputs_.size(), 1u);
+}
+
+TEST(LocalRpcServerTest, PrefillCompletionWaitHonorsHandoffDeadline) {
+    TestLocalRpcServer server;
+    RecordingWriter    writer;
+    auto               normal                    = createNormalStream(RoleType::PREFILL);
+    normal->generateConfig()->pd_separation      = true;
+    normal->generateInput()->request_deadline_ms = currentTimeMs() - 1;
+    normal->generate_status_->status.store(StreamState::RUNNING);
+    GenerateOutputs outputs;
+    GenerateOutput  output;
+    output.finished   = true;
+    output.output_ids = torch::tensor({{42}}, torch::kInt32);
+    outputs.generate_outputs.push_back(std::move(output));
+    normal->enqueueGenerateOutput(std::move(outputs));
+    normal->reportEvent(StreamEvents::PrefillHandoffReady);
+    std::shared_ptr<GenerateStream> stream = normal;
+
+    const auto status = server.poll(&writer, stream);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(normal->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    ASSERT_EQ(writer.outputs_.size(), 1u);
 }
 
 TEST(LocalRpcServerTest, PollCollectsOnlyNonStreamingDecodeHandoffBlocks) {

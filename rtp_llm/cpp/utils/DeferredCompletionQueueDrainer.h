@@ -6,104 +6,88 @@
 #include <list>
 #include <memory>
 #include <mutex>
-#include <system_error>
 #include <thread>
-#include "rtp_llm/cpp/utils/Logger.h"
-#include <utility>
 
 namespace rtp_llm {
 
 template<typename Entry, typename Traits>
 class DeferredCompletionQueueDrainer {
+    struct State {
+        std::mutex                        mutex;
+        std::condition_variable           cv;
+        std::list<std::shared_ptr<Entry>> pending;
+        bool                              stopping = false;
+        bool                              stopped  = false;
+    };
+
 public:
     static DeferredCompletionQueueDrainer& instance() {
         static DeferredCompletionQueueDrainer drainer;
         return drainer;
     }
 
-    void enqueue(std::shared_ptr<Entry> entry) {
-        if (!entry || !Traits::completionQueue(entry)) {
-            return;
+    void enqueue(std::list<std::shared_ptr<Entry>>& entries) {
+        {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            state_->pending.splice(state_->pending.end(), entries);
         }
-        std::lock_guard<std::mutex> lock(mu_);
-        if (stop_) {
-            return;
-        }
-        pending_.push_back(std::move(entry));
-        if (!started_) {
-            try {
-                thread_ = std::thread([this] { run(); });
-                started_ = true;
-            } catch (const std::system_error& error) {
-                // Keep CQ ownership in pending_. A subsequent enqueue retries
-                // startup; thread exhaustion must not escape a caller's destructor.
-                RTP_LLM_LOG_ERROR("deferred CQ drain thread failed to start: %s", error.what());
-            }
-        }
-        cv_.notify_one();
+        state_->cv.notify_one();
     }
 
     ~DeferredCompletionQueueDrainer() {
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            stop_ = true;
-        }
-        cv_.notify_all();
-        if (thread_.joinable()) {
+        std::unique_lock<std::mutex> lock(state_->mutex);
+        state_->stopping = true;
+        state_->cv.notify_all();
+        const bool stopped =
+            state_->cv.wait_for(lock, std::chrono::milliseconds(100), [this] { return state_->stopped; });
+        lock.unlock();
+        if (stopped) {
             thread_.join();
         } else {
-            // If every startup attempt failed, drain retained queues during
-            // shutdown instead of destroying a CQ with outstanding operations.
-            run();
+            // Pending CQ state belongs to the worker until gRPC confirms drain.
+            thread_.detach();
         }
     }
 
 private:
-    DeferredCompletionQueueDrainer() = default;
+    DeferredCompletionQueueDrainer(): state_(std::make_shared<State>()), thread_([state = state_] { run(state); }) {}
 
-    void run() {
+    static void run(const std::shared_ptr<State>& state) {
+        std::list<std::shared_ptr<Entry>> local;
+        std::unique_lock<std::mutex>      lock(state->mutex);
         while (true) {
-            std::list<std::shared_ptr<Entry>> local;
-            {
-                std::unique_lock<std::mutex> lock(mu_);
-                cv_.wait_for(lock, std::chrono::milliseconds(100), [this] { return stop_ || !pending_.empty(); });
-                if (stop_ && pending_.empty()) {
+            if (local.empty()) {
+                state->cv.wait(lock, [&] { return state->stopping || !state->pending.empty(); });
+                if (state->stopping && state->pending.empty()) {
+                    state->stopped = true;
+                    state->cv.notify_all();
                     return;
                 }
-                local.splice(local.end(), pending_);
+            } else {
+                state->cv.wait_for(lock, std::chrono::milliseconds(10));
             }
-
-            std::list<std::shared_ptr<Entry>> remaining;
-            for (auto& entry : local) {
-                auto completion_queue = Traits::completionQueue(entry);
-                if (!completion_queue) {
-                    continue;
-                }
-
+            local.splice(local.end(), state->pending);
+            lock.unlock();
+            for (auto it = local.begin(); it != local.end();) {
+                auto       cq       = Traits::completionQueue(*it);
                 void*      tag      = nullptr;
                 bool       ok       = false;
-                const auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(1);
-                auto       status   = completion_queue->AsyncNext(&tag, &ok, deadline);
-                if (status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
-                    Traits::markDrained(entry);
-                    continue;
+                const auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(1);
+                if (!cq || cq->AsyncNext(&tag, &ok, deadline) == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
+                    if (cq) {
+                        Traits::markDrained(*it);
+                    }
+                    it = local.erase(it);
+                } else {
+                    ++it;
                 }
-                remaining.push_back(std::move(entry));
             }
-
-            if (!remaining.empty()) {
-                std::lock_guard<std::mutex> lock(mu_);
-                pending_.splice(pending_.end(), remaining);
-            }
+            lock.lock();
         }
     }
 
-    std::mutex                       mu_;
-    std::condition_variable          cv_;
-    std::list<std::shared_ptr<Entry>> pending_;
-    bool                             stop_    = false;
-    bool                             started_ = false;
-    std::thread                      thread_;
+    std::shared_ptr<State> state_;
+    std::thread            thread_;
 };
 
 }  // namespace rtp_llm

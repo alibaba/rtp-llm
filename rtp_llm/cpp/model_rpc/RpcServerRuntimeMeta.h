@@ -68,13 +68,11 @@ public:
             }
             info.running_task_info_list.push_back(std::move(task_info));
         }
-        // A request retains its cancellation control record even
-        // when it has no local stream yet (Stage 2), or its local stream has
-        // already been dequeued while Decode is generating (Stage 4). Emit an
-        // overlay-only TaskInfo without inserting a synthetic engine runtime
-        // entry; it therefore does not change scheduler/load accounting.
+        // FlexLB tracks priority preemption even when there is no local stream.
+        // Keep ordinary cancellation overlays internal until their terminal delta.
         for (const auto& [request_id, overlay] : priority_preemption_overlays_) {
-            if (emitted_preemption_overlays.find(request_id) == emitted_preemption_overlays.end()) {
+            if (overlay.priority_preemption_progress != PriorityPreemptionProgress::NONE
+                && emitted_preemption_overlays.find(request_id) == emitted_preemption_overlays.end()) {
                 info.running_task_info_list.push_back(overlay);
             }
         }

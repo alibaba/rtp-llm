@@ -1286,7 +1286,18 @@ class ModelRpcClient(object):
     def _get_explicit_target_address(self, input_py: GenerateInput) -> str | None:
         for role_addr in input_py.generate_config.role_addrs:
             if role_addr.role in (RoleType.DECODE, RoleType.PDFUSION) and role_addr.ip:
-                return _format_host_port(role_addr.ip, role_addr.grpc_port)
+                try:
+                    return _format_host_port(role_addr.ip, role_addr.grpc_port)
+                except (TypeError, ValueError) as error:
+                    logging.warning(
+                        "Invalid explicit backend route, request_id=%s: %s",
+                        input_py.request_id,
+                        error,
+                    )
+                    raise FtRuntimeException(
+                        ExceptionType.INVALID_PARAMS,
+                        f"request_id={input_py.request_id} has an invalid explicit backend route",
+                    ) from None
         return None
 
     def _build_response_role_addrs(
@@ -1301,15 +1312,39 @@ class ModelRpcClient(object):
                 return list(input_py.generate_config.role_addrs)
         if self._role_type not in (RoleType.PREFILL, RoleType.DECODE):
             return None
-        target_ip, target_port = _split_host_port(target_address)
-        return list(input_py.generate_config.role_addrs) + [
+        try:
+            target_ip, target_port = _split_host_port(target_address)
+        except ValueError as error:
+            logging.warning(
+                "Invalid selected backend route, request_id=%s: %s",
+                input_py.request_id,
+                error,
+            )
+            raise FtRuntimeException(
+                ExceptionType.ROUTE_ERROR,
+                f"request_id={input_py.request_id} has an invalid selected backend route",
+            ) from None
+        return [
+            addr
+            for addr in input_py.generate_config.role_addrs
+            if addr.role != self._role_type
+        ] + [
             RoleAddr(
-                role=RoleType.DECODE,
+                role=self._role_type,
                 ip=target_ip,
                 http_port=target_port - 1,
                 grpc_port=target_port,
             )
         ]
+
+    def _requires_explicit_target(self, input_py: GenerateInput) -> bool:
+        return self._role_type == RoleType.FRONTEND or (
+            self._role_type == RoleType.PDFUSION
+            and any(
+                addr.role == RoleType.PREFILL
+                for addr in input_py.generate_config.role_addrs
+            )
+        )
 
     def _select_address_and_response_role_addrs(
         self, input_py: GenerateInput
@@ -1318,13 +1353,7 @@ class ModelRpcClient(object):
         explicit_target_address = self._get_explicit_target_address(input_py)
         if explicit_target_address is not None:
             address_list = [explicit_target_address]
-        elif self._role_type == RoleType.FRONTEND or (
-            self._role_type == RoleType.PDFUSION
-            and any(
-                addr.role == RoleType.PREFILL
-                for addr in input_py.generate_config.role_addrs
-            )
-        ):
+        elif self._requires_explicit_target(input_py):
             # A frontend has no local inference RPC listener. Incomplete PD
             # routing must not silently target its own configured backend port.
             # A fusion service also must not override an explicit Prefill-only
@@ -1336,7 +1365,10 @@ class ModelRpcClient(object):
             )
 
         if not address_list:
-            raise ValueError(f"No address found for request: {input_py.request_id}")
+            raise FtRuntimeException(
+                ExceptionType.ROUTE_ERROR,
+                f"request_id={input_py.request_id} has no backend address",
+            )
 
         target_address = self._select_target_address(address_list, input_py.request_id)
         response_role_addrs = self._build_response_role_addrs(input_py, target_address)
@@ -1356,6 +1388,28 @@ class ModelRpcClient(object):
         if timeout_ms is None or timeout_ms <= 0:
             return rpc_timeout_ms / 1000
         return timeout_ms / 1000
+
+    @staticmethod
+    def _client_backend_message(error_type: ExceptionType, message: str) -> str:
+        if error_type in (
+            ExceptionType.LOAD_KV_CACHE_FAILED,
+            ExceptionType.REMOTE_LOAD_KV_CACHE_FAILED,
+            ExceptionType.P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
+        ):
+            return "cache load failed"
+        if any(
+            marker in message
+            for marker in (
+                "reporter_role=",
+                "peer=",
+                "tp_rank=",
+                "[received_at ",
+                "ipv4:",
+                "ipv6:",
+            )
+        ):
+            return f"backend request failed ({error_type.name})"
+        return message
 
     @staticmethod
     def _raise_backend_error(code: int, message: str) -> None:
@@ -1378,7 +1432,9 @@ class ModelRpcClient(object):
             "backend failure: backend_error_code=%d frontend_error_code=%d error_name=%s message=%s",
             code, error_type.value, error_type.name, message,
         )
-        raise FtRuntimeException(error_type, message)
+        raise FtRuntimeException(
+            error_type, ModelRpcClient._client_backend_message(error_type, message)
+        )
 
     @staticmethod
     def _raise_pb_error(error, request_desc: str) -> None:
@@ -1777,7 +1833,7 @@ class ModelRpcClient(object):
             for inp in inputs
         ]
         if any(
-            (self._role_type == RoleType.FRONTEND and role is None)
+            (role is None and self._requires_explicit_target(inp))
             or (role == RoleType.PDFUSION and getattr(inp, "enqueued_by_master", False))
             for role, inp in zip(selected_roles, inputs)
         ):
@@ -1926,7 +1982,7 @@ class ModelRpcClient(object):
                         )
                         raise FtRuntimeException(
                             exception_type,
-                            f"batch item {i} failed: {error_message}",
+                            f"batch item {i} failed: {self._client_backend_message(exception_type, error_message)}",
                         )
                     conversion_index = i
                     stream_state = StreamState()

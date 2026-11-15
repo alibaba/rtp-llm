@@ -89,13 +89,35 @@ bool P2PConnectorResourceStore::init() {
     return true;
 }
 
-int64_t P2PConnectorResourceStore::requestDeadline(const std::string& unique_key, int64_t timeout_ms) {
+P2PConnectorResourceStore::RequestStates::iterator
+P2PConnectorResourceStore::findOrCreateRequestLocked(const std::string& unique_key, int64_t deadline_ms) {
+    auto it = request_states_.lower_bound(unique_key);
+    if (it != request_states_.end() && it->first == unique_key) {
+        return it;
+    }
+    if (request_states_.size() >= request_state_capacity_) {
+        return request_states_.end();
+    }
+    return request_states_.emplace_hint(it, unique_key, RequestState{deadline_ms});
+}
+
+int64_t
+P2PConnectorResourceStore::requestDeadline(const std::string& unique_key, int64_t timeout_ms, ErrorInfo* error) {
+    if (error) {
+        *error = ErrorInfo::OkStatus();
+    }
     const int64_t now = currentTimeMs();
     if (unique_key.empty() || timeout_ms <= 0 || timeout_ms > std::numeric_limits<int32_t>::max()) {
         return 0;
     }
     std::lock_guard<std::mutex> lock(resource_map_mutex_);
-    auto it = request_states_.try_emplace(unique_key, RequestState{now + timeout_ms}).first;
+    auto                        it = findOrCreateRequestLocked(unique_key, now + timeout_ms);
+    if (it == request_states_.end()) {
+        if (error) {
+            *error = {ErrorCode::CONCURRENCY_LIMIT_ERROR, "Prefill handoff record capacity exhausted"};
+        }
+        return 0;
+    }
     if (it->second.terminal) {
         return 0;
     }
@@ -184,8 +206,8 @@ bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>& meta,
             // Late callbacks carry the original deadline. Reject them without
             // recreating state after its terminal record has been collected.
             release_layers = true;
-        } else {
-            auto it = request_states_.try_emplace(routing->unique_key, RequestState{routing->deadline_ms}).first;
+        } else if (auto it = findOrCreateRequestLocked(routing->unique_key, routing->deadline_ms);
+                   it != request_states_.end()) {
             auto& state = it->second;
             release_layers = state.terminal || currentTimeMs() >= state.deadlineMs();
             if (!state.terminal && !state.consumed && currentTimeMs() < state.deadlineMs()
@@ -210,6 +232,8 @@ bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>& meta,
                                     static_cast<int>(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
             }
             scheduleDeadlineCheckLocked(routing->unique_key, state);
+        } else {
+            release_layers = true;
         }
     }
     if (release_layers) {
@@ -239,7 +263,10 @@ void P2PConnectorResourceStore::markTerminal(const std::string& unique_key,
                 return;
             }
             // StartLoad may end before GenerateStream registers its deadline.
-            it = request_states_.emplace(unique_key, RequestState{request_deadline_ms}).first;
+            it = findOrCreateRequestLocked(unique_key, request_deadline_ms);
+            if (it == request_states_.end()) {
+                return;
+            }
         }
         if (!it->second.terminal) {
             it->second.terminal = true;
@@ -274,7 +301,10 @@ std::shared_ptr<P2PConnectorResourceEntry> P2PConnectorResourceStore::waitAndSte
     }
     const auto start_time_us = currentTimeUs();
     std::unique_lock<std::mutex> lock(resource_map_mutex_);
-    auto it = request_states_.try_emplace(unique_key, RequestState{request_deadline_ms}).first;
+    auto                         it = findOrCreateRequestLocked(unique_key, request_deadline_ms);
+    if (it == request_states_.end()) {
+        return nullptr;
+    }
     auto& state = it->second;
     if (state.terminal || state.consumed || state.request_deadline_ms != request_deadline_ms) {
         return nullptr;
@@ -419,7 +449,10 @@ void P2PConnectorResourceStore::publishPrefillPayload(const std::string&        
         if (currentTimeMs() >= request_deadline_ms) {
             return;
         }
-        auto it = request_states_.try_emplace(unique_key, RequestState{request_deadline_ms}).first;
+        auto it = findOrCreateRequestLocked(unique_key, request_deadline_ms);
+        if (it == request_states_.end()) {
+            return;
+        }
         auto& state = it->second;
         scheduleDeadlineCheckLocked(unique_key, state);
         if (state.terminal || currentTimeMs() >= state.deadlineMs()

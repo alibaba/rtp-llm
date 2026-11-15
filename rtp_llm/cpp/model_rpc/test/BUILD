@@ -253,7 +253,7 @@ cc_test(
         "@local_config_cuda//cuda:cudart",
     ],
     env = {"TEST_USING_DEVICE": "CUDA"},
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "H20_CU13"},
     tags = ["manual"],
     timeout = "moderate",
 )
@@ -276,7 +276,7 @@ cc_test(
         "@local_config_cuda//cuda:cudart",
     ],
     env = {"TEST_USING_DEVICE": "CUDA"},
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "H20_CU13"},
     tags = ["manual"],
     timeout = "long",
 )

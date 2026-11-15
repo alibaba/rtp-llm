@@ -267,7 +267,7 @@ void PrefillRpcServer::expireBatchAttachments(int64_t now_ms) {
         if (auto stream = state.stream.lock())
             stream->reportError(ErrorCode::GENERATE_TIMEOUT, "PD batch result attachment deadline exceeded");
         if (engine_ && engine_->getCacheManager())
-            engine_->getCacheManager()->cancelPrefillRequest(state.key, state.request_deadline_ms);
+            engine_->getCacheManager()->expirePrefillRequest(state.key, state.request_deadline_ms);
     }
 }
 
@@ -413,8 +413,15 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
             generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.request_info, handoff_status);
             return generate_context.error_status;
         }
+        ErrorInfo  registration_error;
         const auto local_deadline = engine_->getCacheManager()->prefillRequestDeadline(
-            request->generate_config().unique_key(), request->generate_config().timeout_ms());
+            request->generate_config().unique_key(), request->generate_config().timeout_ms(), &registration_error);
+        if (registration_error.hasError()) {
+            generate_context.error_info = registration_error;
+            generate_context.error_status =
+                serializeErrorMsg(generate_context.request_key, generate_context.request_info, registration_error);
+            return generate_context.error_status;
+        }
         const auto admission = cancel_registry_->admit(
             *request, request->generate_config().unique_key(), "", local_deadline, cancel_handle);
         if (!admission.ok()) {
@@ -593,9 +600,10 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
     response->set_batch_id(request->batch_id());
 
     const auto& parallelism_config = maga_init_params_.parallelism_config;
-    RTP_LLM_CHECK_WITH_INFO(parallelism_config.dp_size == 1,
-                            "P2P EnqueueBatch only supports single-DP mode, dp_size=%ld",
-                            parallelism_config.dp_size);
+    if (parallelism_config.dp_size != 1) {
+        trace_status = grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "P2P EnqueueBatch requires single-DP mode");
+        return trace_status;
+    }
     const int local_dp_rank = static_cast<int>(parallelism_config.dp_rank);
 
     int                         input_count = 0;
@@ -727,8 +735,18 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                     reject_item(ErrorCode::INVALID_PARAMS, "EnqueueBatch does not support prefill-only inputs");
                     continue;
                 }
-                input->request_deadline_ms =
-                    engine_->getCacheManager()->prefillRequestDeadline(config->unique_key(), config->timeout_ms());
+                const auto support = checkPDSupport(item);
+                if (!support.supported) {
+                    reject_item(ErrorCode::INVALID_PARAMS, support.reason);
+                    continue;
+                }
+                ErrorInfo registration_error;
+                input->request_deadline_ms = engine_->getCacheManager()->prefillRequestDeadline(
+                    config->unique_key(), config->timeout_ms(), &registration_error);
+                if (registration_error.hasError()) {
+                    reject_item(registration_error.code(), registration_error.ToString());
+                    continue;
+                }
                 if (input->request_deadline_ms <= currentTimeMs()) {
                     reject_item(ErrorCode::GENERATE_TIMEOUT, "P2P EnqueueBatch request expired before admission");
                     continue;
@@ -842,7 +860,7 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
 
 ::grpc::Status PrefillRpcServer::StartLoad(::grpc::ServerContext*                context,
                                            const P2PConnectorStartLoadRequestPB* request,
-                                           P2PConnectorStartLoadResponsePB*      response) {
+                                           P2PConnectorStartLoadResponsePB*      response) try {
     RTP_LLM_LOG_DEBUG(
         "StartLoad gRPC entry, unique_key=%s, peer=%s", request->unique_key().c_str(), context->peer().c_str());
     RTP_LLM_LOG_DEBUG("receive start load request from client: %s, request: [%s]",
@@ -897,6 +915,12 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                             request->unique_key().c_str());
     }
     return grpc::Status::OK;
+} catch (const std::exception& error) {
+    RTP_LLM_LOG_ERROR("Prefill StartLoad failed for key=%s: %s", request->unique_key().c_str(), error.what());
+    return grpc::Status(grpc::StatusCode::INTERNAL, "Prefill StartLoad failed");
+} catch (...) {
+    RTP_LLM_LOG_ERROR("Prefill StartLoad failed for key=%s with an unknown exception", request->unique_key().c_str());
+    return grpc::Status(grpc::StatusCode::INTERNAL, "Prefill StartLoad failed");
 }
 
 grpc::Status

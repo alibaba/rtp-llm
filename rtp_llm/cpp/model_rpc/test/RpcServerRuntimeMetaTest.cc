@@ -230,6 +230,22 @@ TEST(RpcServerRuntimeMetaTest, PriorityCanceledIsPublishedOnceAndClearsControlOv
     EXPECT_EQ(info.finished_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
 }
 
+TEST(RpcServerRuntimeMetaTest, OrdinaryCancelWithoutLocalStreamOnlyPublishesTerminalStatus) {
+    RpcServerRuntimeMeta meta;
+    ASSERT_TRUE(meta.markCancellationPending(TaskIdentity{/*request_id=*/407, /*batch_id=*/88}, false));
+    const auto pending = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    EXPECT_TRUE(pending.running_task_info_list.empty());
+    EXPECT_TRUE(pending.finished_task_info_list.empty());
+
+    const auto code = static_cast<int64_t>(ErrorCode::CANCELLED);
+    ASSERT_TRUE(meta.markCancellationComplete(407, code, "request cancelled", nullptr));
+    const auto completed = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    EXPECT_TRUE(completed.running_task_info_list.empty());
+    ASSERT_EQ(completed.finished_task_info_list.size(), 1);
+    EXPECT_EQ(completed.finished_task_info_list[0].request_id, 407);
+    EXPECT_EQ(completed.finished_task_info_list[0].error_code, code);
+}
+
 TEST(RpcServerRuntimeMetaTest, PriorityCanceledReplacesRunningTaskWithSingleTypedFinishedRecord) {
     RpcServerRuntimeMeta meta;
     auto                 input = std::make_shared<GenerateInput>();

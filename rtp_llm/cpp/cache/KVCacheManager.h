@@ -154,8 +154,9 @@ public:
 
     bool hasActiveConnectors() const;
     bool hasP2PConnector() const;
-    int64_t prefillRequestDeadline(const std::string& unique_key, int64_t timeout_ms);
+    int64_t           prefillRequestDeadline(const std::string& unique_key, int64_t timeout_ms, ErrorInfo* error);
     void              cancelPrefillRequest(const std::string& unique_key, int64_t request_deadline_ms);
+    void              expirePrefillRequest(const std::string& unique_key, int64_t request_deadline_ms);
     void              publishPrefillPayload(const std::string&                           unique_key,
                                              int64_t                                      deadline_ms,
                                              PrefillResultStore::SideChannelData&& data);

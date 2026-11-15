@@ -1,5 +1,7 @@
 #pragma once
 
+#include <list>
+
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
@@ -101,6 +103,8 @@ private:
 
     // gRPC infrastructure
     std::shared_ptr<PrefillServerCallerAsyncState> async_state_;
+    // Allocate the handoff node before starting the RPC so teardown can splice it.
+    std::list<std::shared_ptr<PrefillServerCallerAsyncState>> drain_entry_;
 
     // Request/Response
     ErrorInfo         error_info_;

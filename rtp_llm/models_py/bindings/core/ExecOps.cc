@@ -490,7 +490,10 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                                        request_id,
                                        event,
                                        deadline_ms)) {
-                throw std::runtime_error("P2P layer publication failed for " + std::to_string(request_id));
+                RTP_LLM_LOG_WARNING("P2P layer publication failed, request_id=%ld layer_id=%d tag=%s",
+                                    request_id,
+                                    layer_kv.layer_id,
+                                    layer_kv.tag.c_str());
             }
         }
 
@@ -564,17 +567,6 @@ torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale) {
 
 void cudaSyncAndCheck() {
     runtimeSyncAndCheck();
-}
-
-void cudaCurrentStreamSyncAndCheck() {
-    // Finish this forward without waiting for independent P2P transfer streams.
-#if USING_CUDA
-    check_cuda_value(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream()));
-    check_cuda_error();
-#elif USING_ROCM
-    ROCM_CHECK(hipStreamSynchronize(at::hip::getCurrentHIPStream(at::hip::current_device())));
-    ROCM_CHECK_ERROR();
-#endif
 }
 
 void cudaCheckLastError() {

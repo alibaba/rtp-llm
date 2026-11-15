@@ -5,6 +5,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/utils/StringUtil.h"
@@ -281,17 +282,17 @@ public:
 
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
 #define JSONIZE(field) json.Jsonize(#field, field, field)
-// used for de-serialization
 #define JSONIZE_OPTIONAL(field)                                                                                        \
-    try {                                                                                                              \
-        using Type = decltype(field)::value_type;                                                                      \
-        Type field##Tmp;                                                                                               \
-        json.Jsonize(#field, field##Tmp);                                                                              \
-        field = field##Tmp;                                                                                            \
-    } catch (autil::legacy::ExceptionBase & e) {                                                                       \
-        if (field.has_value() == false) {                                                                              \
-            field = std::nullopt;                                                                                      \
+    if (json.GetMode() == autil::legacy::FastJsonizableBase::Mode::TO_JSON) {                                          \
+        if (field.has_value()) {                                                                                       \
+            json.Jsonize(#field, *field);                                                                              \
         }                                                                                                              \
+    } else {                                                                                                           \
+        try {                                                                                                          \
+            decltype(field)::value_type value{};                                                                       \
+            json.Jsonize(#field, value);                                                                               \
+            field = std::move(value);                                                                                  \
+        } catch (const autil::legacy::ExceptionBase&) {}                                                               \
     }
         JSONIZE(max_new_tokens);
         JSONIZE(min_new_tokens);

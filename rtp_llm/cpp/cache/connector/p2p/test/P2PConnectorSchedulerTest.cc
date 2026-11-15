@@ -356,7 +356,7 @@ TEST(P2PConnectorConfigTest, LoadTimeoutComesFromSharedPDSepConfig) {
     CacheStoreConfig cache_store;
     ParallelismConfig parallelism;
     PDSepConfig pd_sep;
-    EXPECT_EQ(pd_sep.load_cache_timeout_ms, 60000);
+    EXPECT_EQ(pd_sep.load_cache_timeout_ms, 5000);
     pd_sep.load_cache_timeout_ms = 900000;
     auto config = P2PConnectorSchedulerConfig::create(runtime, cache_store, parallelism, pd_sep);
     EXPECT_EQ(config.load_cache_timeout_ms, 900000);
@@ -1564,6 +1564,10 @@ TEST(P2PRetainedKvTest, ThresholdUsesCapacityBytesAndStrictGreaterThan) {
         checker.retained_kv_over_threshold_since_ms_ -= 31000;
         checker.checkRetainedResources({context});
     }, ::testing::KilledBySignal(SIGABRT), "");
+    checker.kv_leak_exit_threshold_percent_ = 0;
+    checker.retained_kv_over_threshold_since_ms_ -= 31000;
+    checker.checkRetainedResources({context});
+    EXPECT_TRUE(context->resourceHoldPending());
 }
 
 TEST(P2PRetainedKvTest, DistinctRequestsAccumulateAndGroupsUseDifferentBlockSizes) {
@@ -1607,7 +1611,7 @@ TEST(P2PRetainedKvTest, InitDerivesCapacityAndRejectsInvalidThreshold) {
     P2PConnectorSchedulerConfig config;
     config.topology = test::makeTestCacheTopology(2, 2, {{0}, {1}});
     P2PConnectorAsyncReadContextChecker checker;
-    for (const int invalid : {-1, 0, 101}) {
+    for (const int invalid : {-1, 101}) {
         config.p2p_kv_leak_exit_threshold_percent = invalid;
         EXPECT_FALSE(checker.init(nullptr, nullptr, pool, config));
     }

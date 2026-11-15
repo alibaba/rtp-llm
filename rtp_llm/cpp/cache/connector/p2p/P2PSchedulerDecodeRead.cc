@@ -19,6 +19,7 @@ namespace {
 // completion events and deadlines remain isolated on the read context checker.
 constexpr size_t kAsyncReadThreadCount = 4;
 constexpr size_t kAsyncReadQueueSize   = 1024;
+constexpr size_t kMaxPlanCacheEntries  = 64;
 
 P2PConnectorSchedulerConfig normalizedSchedulerConfig(P2PConnectorSchedulerConfig config) {
     // Preserve the existing non-positive-value fallback, using the shared
@@ -140,7 +141,18 @@ P2PSchedulerDecodeRead::planFor(int prefill_tp_size, int prefill_cp_size, const 
     auto result =
         std::make_shared<const PlanResult>(KVCacheTransferPlanner::plan(src_layout, dst_layout, tags, offset));
 
+    if (!result->ok()) {
+        return result;
+    }
     std::lock_guard<std::mutex> lock(plan_cache_mutex_);
+    const auto                  cached = plan_cache_.find(key);
+    if (cached != plan_cache_.end()) {
+        return cached->second;
+    }
+    // A changing peer layout must not grow the scheduler's cache indefinitely.
+    if (plan_cache_.size() >= kMaxPlanCacheEntries) {
+        plan_cache_.erase(plan_cache_.begin());
+    }
     auto [it, inserted] = plan_cache_.emplace(key, result);
     (void)inserted;
     return it->second;

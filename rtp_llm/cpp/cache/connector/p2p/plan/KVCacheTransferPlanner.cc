@@ -13,6 +13,9 @@ namespace rtp_llm {
 
 namespace {
 
+// Planning expands remote rank metadata synchronously on the scheduler path.
+constexpr int64_t kMaxPlanRankCount = 1024;
+
 ErrorInfo planError(const std::string& msg) {
     return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "transfer plan: " + msg);
 }
@@ -488,6 +491,10 @@ PlanResult KVCacheTransferPlanner::plan(const ShardLayout&              src,
                                         const std::vector<std::string>& tags,
                                         size_t                          source_replica_offset) {
     PlanResult result;
+    if (src.pc.tp_size > kMaxPlanRankCount || dst.pc.tp_size > kMaxPlanRankCount) {
+        result.error = planError("rank count exceeds " + std::to_string(kMaxPlanRankCount));
+        return result;
+    }
     if (src.rankCount() <= 0 || dst.rankCount() <= 0) {
         result.error = planError("rank count must be positive");
         return result;

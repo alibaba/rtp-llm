@@ -752,9 +752,17 @@ void KVCacheManager::cancelPrefillRequest(const std::string& unique_key, int64_t
     }
 }
 
-int64_t KVCacheManager::prefillRequestDeadline(const std::string& unique_key, int64_t timeout_ms) {
+void KVCacheManager::expirePrefillRequest(const std::string& unique_key, int64_t request_deadline_ms) {
+    if (p2p_connector_) {
+        if (auto store = p2p_connector_->streamStore()) {
+            store->markTerminal(unique_key, request_deadline_ms, P2PConnectorResourceStore::TerminalReason::TIMED_OUT);
+        }
+    }
+}
+
+int64_t KVCacheManager::prefillRequestDeadline(const std::string& unique_key, int64_t timeout_ms, ErrorInfo* error) {
     auto store = p2p_connector_ ? p2p_connector_->streamStore() : nullptr;
-    return store ? store->requestDeadline(unique_key, timeout_ms) : 0;
+    return store ? store->requestDeadline(unique_key, timeout_ms, error) : 0;
 }
 
 bool KVCacheManager::hasP2PConnector() const {
@@ -805,6 +813,17 @@ bool KVCacheManager::writeP2PLayer(size_t                               model_id
     if (!p2p_connector_) {
         return false;
     }
+    const auto reject = [&](const std::string& reason) {
+        return p2p_connector_->rejectLayer(
+            request_id,
+            deadline_ms,
+            deadline_clock_offset_ms,
+            ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                      reason + ", local_layer=" + std::to_string(local_layer_id) + " tag=" + tag));
+    };
+    if (chunk_id < 0) {
+        return reject("P2P layer publication is missing chunk metadata");
+    }
     if (cache_keys.size() != block_ids.size()) {
         RTP_LLM_LOG_WARNING(
             "writeP2PLayer rejected invalid key/block pairs, request_id=%ld model_id=%zu local_layer_id=%d "
@@ -815,7 +834,7 @@ bool KVCacheManager::writeP2PLayer(size_t                               model_id
             tag.c_str(),
             cache_keys.size(),
             block_ids.size());
-        return false;
+        return reject("P2P layer publication has mismatched key and block counts");
     }
 
     const uint32_t global_layer_id = coordinator_manager_->convertToGlobalLayerId(model_id, local_layer_id);
@@ -826,7 +845,7 @@ bool KVCacheManager::writeP2PLayer(size_t                               model_id
                             model_id,
                             local_layer_id,
                             tag.c_str());
-        return false;
+        return reject("P2P layer publication cannot map the local layer");
     }
 
     const auto& layer = config_.topology().layer(static_cast<int>(global_layer_id));
@@ -835,7 +854,7 @@ bool KVCacheManager::writeP2PLayer(size_t                               model_id
                             request_id,
                             global_layer_id,
                             tag.c_str());
-        return false;
+        return reject("P2P layer publication tag does not belong to the layer");
     }
 
     auto layer_resource = std::make_shared<KVCacheResource>();
@@ -874,7 +893,7 @@ bool KVCacheManager::writeP2PLayer(size_t                               model_id
                                 request_id,
                                 global_layer_id,
                                 tag.c_str());
-            return false;
+            return reject("P2P layer publication could not retain the source KV blocks");
         }
     }
 

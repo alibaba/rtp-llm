@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <atomic>
 #include <chrono>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -476,6 +477,16 @@ TEST_F(TransferTaskTest, FirstFailureSurvivesCancelForceCancelAndLaterCompletion
     task.notifyDone(false, TransferErrorCode::TIMEOUT, "later timeout");
     EXPECT_EQ(task.errorCode(), TransferErrorCode::RPC_FAILED);
     EXPECT_EQ(task.errorMessage(), "connection reset peer=worker:9000");
+}
+
+TEST_F(TransferTaskTest, ThrowingCompletionCallbackPreservesTransferResult) {
+    TransferTask task({}, currentTimeMs() + 5000);
+    ASSERT_TRUE(task.startTransfer());
+    task.setDoneCallback([] { throw std::runtime_error("callback failure"); });
+
+    EXPECT_NO_THROW(task.notifyDone(true));
+    EXPECT_TRUE(task.done());
+    EXPECT_TRUE(task.success());
 }
 
 TEST_F(TransferTaskTest, CancellingOverlappingBatchesWaitsForLastPhysicalReceive) {

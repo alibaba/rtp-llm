@@ -55,6 +55,45 @@ TEST(RpcCompletionQueueTest, ThrowingCallbackDoesNotStopLaterCompletion) {
     EXPECT_TRUE(second_ready.get());
 }
 
+TEST(RpcCompletionQueueTest, StartingAnotherCallDoesNotBlockCompletionDispatch) {
+    RpcCompletionQueue queue;
+    auto               alarm      = std::make_shared<grpc::Alarm>();
+    auto               completed  = std::make_shared<std::promise<bool>>();
+    auto               completion = completed->get_future();
+    ASSERT_TRUE(queue.submit(
+        nullptr,
+        [&](grpc::CompletionQueue* cq, void* tag) {
+            alarm->Set(cq, std::chrono::system_clock::now() + std::chrono::seconds(30), tag);
+            return true;
+        },
+        [alarm, completed](bool ok) {
+            (void)alarm;
+            completed->set_value(ok);
+        }));
+
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto               started = entered.get_future();
+    auto               gate    = release.get_future();
+    auto               submit  = std::async(std::launch::async, [&] {
+        return queue.submit(
+            nullptr,
+            [&](grpc::CompletionQueue*, void*) {
+                entered.set_value();
+                gate.wait();
+                return false;
+            },
+            [](bool) {});
+    });
+    EXPECT_EQ(started.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    alarm->Cancel();
+    const auto observed = completion.wait_for(std::chrono::seconds(2));
+    release.set_value();
+    EXPECT_FALSE(submit.get());
+    ASSERT_EQ(observed, std::future_status::ready);
+    EXPECT_FALSE(completion.get());
+}
+
 class DecodeLoadHelperTest: public ::testing::Test {
 protected:
     void SetUp() override {

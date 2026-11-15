@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 import grpc
+from online_eval.engine_stream import is_mock_prefill
 
 from .harness import (
     DEFAULT_MASTER_MANAGEMENT_PORT,
@@ -262,6 +263,7 @@ class EngineOps:
         self.pb2, self.pb2_grpc = ensure_proto_modules()
         self.schedule_pb2, self.schedule_pb2_grpc = ensure_schedule_proto_modules()
         self._channels: dict = {}
+        self._mock_prefill_probes = {}
         self._request_counter = 20000
         self._rid_lock = threading.Lock()
         # One-shot management-exposition readiness gate state (see
@@ -278,6 +280,7 @@ class EngineOps:
             except Exception:
                 pass
         self._channels.clear()
+        self._mock_prefill_probes.clear()
 
     def _channel(self, target: str):
         if target not in self._channels:
@@ -326,7 +329,9 @@ class EngineOps:
         }
         config = self.pb2.GenerateConfigPB(
             max_new_tokens=max(1, output_len),
+            can_use_pd_separation=output_len > 1,
             num_return_sequences=1,
+            num_beams=1,
             top_p=1.0,
             top_k=0,
             temperature=1.0,
@@ -455,23 +460,38 @@ class EngineOps:
             )
 
     def start_stream(self, response, request_id: int, input_pb=None) -> StreamHandle:
-        """Start FetchResponse (BATCH dispatch, enqueued_by_master) or
-        GenerateStreamCall (NON_BATCH, frontend-sent) — decided per response
-        from the master's enqueued_by_master flag."""
-        target = self.prefill_addr(response)
+        """Read admitted and direct requests through the selected engine."""
+        prefill_addr = self.role_addr(response, "PREFILL")
+        mock = False
+        if prefill_addr:
+            prefill_stub = self.pb2_grpc.RpcServiceStub(self._channel(prefill_addr))
+            mock = is_mock_prefill(
+                self._mock_prefill_probes, prefill_addr, prefill_stub, self.pb2
+            )
+        target = (
+            prefill_addr
+            if mock
+            else self.role_addr(response, "DECODE")
+            or self.role_addr(response, "PDFUSION")
+        )
         if not target:
-            raise RuntimeError("schedule response has no PREFILL/PDFUSION address")
+            raise RuntimeError("schedule response has no DECODE/PDFUSION address")
         stub = self.pb2_grpc.RpcServiceStub(self._channel(target))
-        if response.enqueued_by_master:
+        if mock and response.enqueued_by_master:
             call = stub.FetchResponse(
                 self.pb2.FetchRequestPB(request_id=request_id), timeout=60.0
             )
         else:
             if input_pb is None:
+                if response.enqueued_by_master:
+                    raise ValueError(
+                        "real Decode requires the input originally sent to Master"
+                    )
                 # Default-shape fallback: callers that scheduled with a
                 # non-default shape MUST pass input_pb (see run_one_request).
                 input_pb = self.build_generate_input(request_id)
             self._copy_role_addrs(input_pb, response)
+            input_pb.enqueued_by_master = response.enqueued_by_master
             call = stub.GenerateStreamCall(input_pb, timeout=60.0)
         return StreamHandle(call, StreamSnapshot())
 
@@ -515,12 +535,8 @@ class EngineOps:
             # carry the SAME shape/block-keys the ScheduleRequest carried,
             # otherwise the engine sees a different request than the master
             # scheduled (input_len/block cache keys diverge).
-            input_pb = (
-                None
-                if response.enqueued_by_master
-                else self.build_generate_input(
-                    rid, output_len=output_len, block_keys=block_keys
-                )
+            input_pb = self.build_generate_input(
+                rid, output_len=output_len, block_keys=block_keys
             )
             handle = self.start_stream(response, rid, input_pb=input_pb)
             handle.thread.join(RECOVERY_TIMEOUT_S)
@@ -872,11 +888,7 @@ class EngineOps:
             # SAME shape/block-keys kwargs the ScheduleRequest carried — a
             # default-shape rebuild would desynchronize the engine's view
             # (admitting default block keys) from the master's routing view.
-            input_pb = (
-                self.build_generate_input(rid, **kwargs)
-                if not response.enqueued_by_master
-                else None
-            )
+            input_pb = self.build_generate_input(rid, **kwargs)
             handle = self.start_stream(response, rid, input_pb=input_pb)
             handle.wait_end(stream_timeout_s)
             snap = handle.snap

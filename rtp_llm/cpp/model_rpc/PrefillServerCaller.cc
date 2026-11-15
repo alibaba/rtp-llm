@@ -5,7 +5,6 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -19,13 +18,37 @@ constexpr int32_t kPeerInfoProbeMaxMs     = 1000;
 
 namespace {
 
+constexpr auto kCancelProbeInterval = std::chrono::milliseconds(5);
+
 struct SyncPrefillRpcCancelEntry {
+    bool poll(std::chrono::system_clock::time_point now) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!client_context) {
+            return true;
+        }
+        try {
+            if (is_cancelled && is_cancelled()) {
+                cancel_status = grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
+            } else if (now >= deadline) {
+                cancel_status = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "prefill server rpc timeout");
+            } else {
+                return false;
+            }
+        } catch (...) {
+            cancel_status =
+                grpcStatusFromErrorInfo({ErrorCode::EXECUTION_EXCEPTION, "Prefill RPC cancellation check failed"});
+        }
+        client_context->TryCancel();
+        client_context = nullptr;
+        is_cancelled   = {};
+        return true;
+    }
+
     std::mutex mutex;
     std::function<bool()> is_cancelled;
     grpc::ClientContext* client_context = nullptr;
     std::chrono::system_clock::time_point deadline;
-    std::atomic<bool> timed_out{false};
-    std::atomic<bool> client_cancelled{false};
+    grpc::Status                          cancel_status;
 };
 
 class SyncPrefillRpcCancelMonitor {
@@ -68,31 +91,22 @@ private:
             active.insert(active.end(), entries_.begin(), entries_.end());
             entries_.clear();
             lock.unlock();
-            active.erase(std::remove_if(active.begin(), active.end(), [](const auto& weak) {
+            const auto now        = std::chrono::system_clock::now();
+            auto       next_probe = now + kCancelProbeInterval;
+            // poll() and stop() share the lock protecting the stack-owned contexts.
+            auto completed = std::remove_if(active.begin(), active.end(), [&](const auto& weak) {
                 auto entry = weak.lock();
-                if (!entry) {
+                if (!entry || entry->poll(now)) {
                     return true;
                 }
-                // stop() takes the same per-request lock before invalidating
-                // the stack-owned context and its ServerContext callback.
-                std::lock_guard<std::mutex> entry_lock(entry->mutex);
-                if (!entry->client_context) {
-                    return true;
-                }
-                if (entry->is_cancelled()) {
-                    entry->client_cancelled.store(true);
-                } else if (std::chrono::system_clock::now() >= entry->deadline) {
-                    entry->timed_out.store(true);
-                } else {
-                    return false;
-                }
-                entry->client_context->TryCancel();
-                entry->client_context = nullptr;
-                entry->is_cancelled = {};
-                return true;
-            }), active.end());
+                next_probe = std::min(next_probe, entry->deadline);
+                return false;
+            });
+            active.erase(completed, active.end());
             lock.lock();
-            cv_.wait_for(lock, std::chrono::milliseconds(1));
+            if (!active.empty()) {
+                cv_.wait_until(lock, next_probe, [this] { return stopping_; });
+            }
         }
     }
 
@@ -125,12 +139,16 @@ public:
         entry_->is_cancelled = {};
     }
 
-    bool timedOut() const {
-        return entry_->timed_out.load();
+    bool poll() {
+        return entry_->poll(std::chrono::system_clock::now());
     }
 
-    bool clientCancelled() const {
-        return entry_->client_cancelled.load();
+    grpc::Status finish(grpc::Status status) {
+        stop();
+        if (!status.ok() && !entry_->cancel_status.ok()) {
+            return entry_->cancel_status;
+        }
+        return status;
     }
 
 private:
@@ -289,31 +307,23 @@ grpc::Status PrefillServerCaller::callPrefillToAddr(grpc::ServerContext*        
 
     // 读取 PrefillServer 的响应并转发给客户端
     GenerateOutputsPB response;
+    grpc::Status      forwarding_status;
     while (reader->Read(&response)) {
-        if (is_cancelled()) {
-            RTP_LLM_LOG_WARNING("request [%lld] client cancelled while forwarding prefill response",
-                                request->request_id());
-            client_context.TryCancel();
-            return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
+        if (cancel_guard.poll()) {
+            forwarding_status = grpc::Status(grpc::StatusCode::CANCELLED, "prefill response forwarding cancelled");
+            break;
         }
         if (!response_writer->Write(response)) {
             RTP_LLM_LOG_WARNING("request [%lld] write response to client failed", request->request_id());
             client_context.TryCancel();
-            return grpc::Status(grpc::StatusCode::INTERNAL, "write response to client failed");
+            forwarding_status = grpc::Status(grpc::StatusCode::INTERNAL, "write response to client failed");
+            break;
         }
     }
 
     // 获取最终状态
     auto status = reader->Finish();
-    cancel_guard.stop();
-    if (!status.ok() && cancel_guard.timedOut()) {
-        client_context.TryCancel();
-        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "prefill server rpc timeout");
-    }
-    if (!status.ok() && cancel_guard.clientCancelled()) {
-        client_context.TryCancel();
-        return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
-    }
+    status      = cancel_guard.finish(forwarding_status.ok() ? std::move(status) : forwarding_status);
     if (!status.ok()) {
         RTP_LLM_LOG_WARNING("request [%lld] prefill server rpc failed, status %d(%s)",
                             request->request_id(),
@@ -388,7 +398,7 @@ grpc::Status PrefillServerCaller::enqueueBatch(const EnqueueBatchRequestPB& requ
     const auto          deadline = std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline_ms));
     context.set_deadline(deadline);
     SyncPrefillRpcCancelGuard cancel_guard(is_cancelled, &context, deadline);
-    return connection->stub->EnqueueBatch(&context, request, response);
+    return cancel_guard.finish(connection->stub->EnqueueBatch(&context, request, response));
 }
 
 grpc::Status PrefillServerCaller::forwardBatchGenerate(const BatchGenerateInputPB&  request,
@@ -407,7 +417,7 @@ grpc::Status PrefillServerCaller::forwardBatchGenerate(const BatchGenerateInputP
         context.set_deadline(deadline);
     }
     SyncPrefillRpcCancelGuard cancel_guard(is_cancelled, &context, deadline);
-    return connection->stub->BatchGenerateCall(&context, request, response);
+    return cancel_guard.finish(connection->stub->BatchGenerateCall(&context, request, response));
 }
 
 }  // namespace rtp_llm

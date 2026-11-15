@@ -147,9 +147,9 @@ static ::tcp_transfer::TcpLayerBlockTransferRequest makeRequest(const std::strin
 // Task / block helpers
 // ---------------------------------------------------------------------------
 
-static KeyBlockInfoMap makeBlocks(int64_t cache_key, void* addr, size_t size) {
+static KeyBlockInfoMap makeBlocks(int64_t cache_key, void* addr, size_t size, int device_index = -1) {
     auto kbi = std::make_shared<KeyBlockInfo>();
-    kbi->blocks.push_back(BlockInfo{false, 0, 0, addr, size});
+    kbi->blocks.push_back(BlockInfo{device_index >= 0, device_index, 0, addr, size});
     KeyBlockInfoMap m;
     m[cache_key] = kbi;
     return m;
@@ -245,7 +245,8 @@ TEST_F(TcpTransferServiceTest, A1_NormalTransfer_RecvFirst_Success) {
     const std::string content(size, 'A');
     auto              gpu_buf = allocDevice(size);
 
-    auto task = task_store_->addTask("k1", makeBlocks(1, gpu_buf.data_ptr(), size), currentTimeMs() + 5000);
+    auto task = task_store_->addTask(
+        "k1", makeBlocks(1, gpu_buf.data_ptr(), size, gpu_buf.get_device()), currentTimeMs() + 5000);
     ASSERT_NE(task, nullptr);
 
     auto req = makeRequest("k1", currentTimeMs() + 5000);
@@ -277,7 +278,8 @@ TEST_F(TcpTransferServiceTest, A2_NormalTransfer_TransferFirst_RecvLater_Success
     auto                                          closure = issueTransfer(&req, &resp);
 
     // Register task AFTER the RPC is already waiting.
-    auto task = task_store_->addTask("k2", makeBlocks(1, gpu_buf.data_ptr(), size), currentTimeMs() + 5000);
+    auto task = task_store_->addTask(
+        "k2", makeBlocks(1, gpu_buf.data_ptr(), size, gpu_buf.get_device()), currentTimeMs() + 5000);
     ASSERT_NE(task, nullptr);
 
     ASSERT_TRUE(closure->waitFor(kWait));
@@ -404,7 +406,8 @@ TEST_F(TcpTransferServiceTest, C3_CancelDuringBlockedH2d_KeepsTaskInflightUntilP
     constexpr size_t  size = 64;
     const std::string content(size, 'H');
     gpu_buf = allocDevice(size);
-    auto task = task_store_->addTask("k_c3", makeBlocks(1, gpu_buf.data_ptr(), size), currentTimeMs() + 5000);
+    auto task = task_store_->addTask(
+        "k_c3", makeBlocks(1, gpu_buf.data_ptr(), size, gpu_buf.get_device()), currentTimeMs() + 5000);
     ASSERT_NE(task, nullptr);
 
     req = makeRequest("k_c3", currentTimeMs() + 5000);
@@ -485,7 +488,8 @@ TEST_F(TcpTransferServiceTest, E2b_ExtraKeyInSender_IgnoredOnSuccess) {
     const std::string content(size, 'V');
     auto              gpu_buf = allocDevice(size);
 
-    auto task = task_store_->addTask("k_e2b", makeBlocks(1, gpu_buf.data_ptr(), size), currentTimeMs() + 5000);
+    auto task = task_store_->addTask(
+        "k_e2b", makeBlocks(1, gpu_buf.data_ptr(), size, gpu_buf.get_device()), currentTimeMs() + 5000);
     ASSERT_NE(task, nullptr);
 
     auto req = makeRequest("k_e2b", currentTimeMs() + 5000);
@@ -534,7 +538,8 @@ TEST_F(TcpTransferServiceTest, G3_ConcurrentTransfers_SameKey_BothComplete) {
     const std::string content(size, 'G');
     auto              gpu_buf = allocDevice(size);
 
-    auto task = task_store_->addTask("k_g3", makeBlocks(1, gpu_buf.data_ptr(), size), currentTimeMs() + 5000);
+    auto task = task_store_->addTask(
+        "k_g3", makeBlocks(1, gpu_buf.data_ptr(), size, gpu_buf.get_device()), currentTimeMs() + 5000);
     ASSERT_NE(task, nullptr);
 
     auto req1 = makeRequest("k_g3", currentTimeMs() + 5000);

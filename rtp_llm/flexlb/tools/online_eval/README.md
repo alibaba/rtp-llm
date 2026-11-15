@@ -404,10 +404,11 @@ The client is configured entirely through environment variables
 for that mapping (unpassed vars are blanked so no ambient environment leaks
 in).
 
-For master-enqueued batch requests (BATCH dispatcher), the client follows the
-frontend behavior: it calls `FetchResponse` on the selected prefill engine. For
-frontend-sent requests (NON_BATCH dispatcher), it calls `GenerateStreamCall`
-directly on the routed prefill engine.
+For real engines, the client calls `GenerateStreamCall` on the selected Decode
+or PDFUSION engine, carrying the Master admission flag and selected role
+addresses. The evaluation mocks return an empty topology from `GetPeerInfo`
+and use their simulated Prefill entry, including `FetchResponse` for requests
+already admitted by Master.
 
 The functional-test runner selects a scheduling profile
 (`--profile batch-window|single-nonbatch|single-batch|window-nonbatch`):

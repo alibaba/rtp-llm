@@ -142,8 +142,10 @@ grpc::Status DecodeRpcServer::parsePrefillDpAddr(const std::string& addr, std::s
 }
 
 DecodeRpcServer::~DecodeRpcServer() {
-    if (cancel_cleanup_thread_)
+    if (cancel_cleanup_thread_) {
         cancel_cleanup_thread_->stop();
+        cancel_cleanup_thread_.reset();
+    }
 }
 
 grpc::Status DecodeRpcServer::Cancel(grpc::ServerContext*, const CancelRequestPB* request, CancelResponsePB* response) {
@@ -331,7 +333,10 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
         batch_deadline_ms = std::max(batch_deadline_ms, entry_ms + (timeout > 0 ? timeout : kDefaultRpcTimeoutMs));
     }
     const auto client_cancelled = [context]() { return context && context->IsCancelled(); };
-    if (!all_pd) {
+    const bool single_dp        = maga_init_params_.parallelism_config.dp_size == 1;
+    if (!all_pd || !single_dp) {
+        if (master_admitted && !single_dp)
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "P2P batch inference requires single-DP mode");
         if (master_admitted)
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                                 "cannot forward a mixed batch after Master Prefill admission");
@@ -341,9 +346,6 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
         return prefill_server_caller_->forwardBatchGenerate(
             effective, response, address, batch_has_unbounded_request ? 0 : batch_deadline_ms, client_cancelled);
     }
-    if (maga_init_params_.parallelism_config.dp_size != 1)
-        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "P2P batch inference requires single-DP mode");
-
     struct BatchContextGuard {
         PDCancelRegistry&                             registry;
         EngineBase&                                   engine;
@@ -379,6 +381,9 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
                 for (size_t i = enqueued_stream_count; i < streams.size(); ++i)
                     engine.enqueue(streams[i]);
             }
+            for (auto& ctx : contexts) {
+                ctx->markRpcHandlingCompleted();
+            }
             contexts.clear();
             for (const auto& handle : handles) {
                 if (completed)
@@ -393,6 +398,8 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
         prefill_request.set_batch_id(request->inputs(0).request_id());
         auto* slot = prefill_request.add_dp_slots();
         slot->set_dp_rank(0);
+        // The batch validated that all items target this exact Prefill endpoint.
+        std::optional<PrefillPeerInfo> peer;
         for (auto& item : *effective.mutable_inputs()) {
             auto* config = item.mutable_generate_config();
             config->set_unique_key(masterEnqueuedHandoffUniqueKey(item.request_id()));
@@ -415,15 +422,14 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
 
             std::shared_ptr<GenerateInput> input;
             GenerateInputPB                prefill_input;
-            PrefillPeerInfo                peer;
             auto status = preparePDRequest(item, deadline_ms, input, prefill_input, peer, context);
             if (!status.ok())
                 return guard.status = status;
             input->request_deadline_is_handoff_only = configured_timeout == 0;
             input->generate_config->timeout_ms      = configured_timeout;
             auto stream = engine_->makeStream(input);
-            stream->setPrefillTpSize(peer.tp_size);
-            stream->setPrefillCpSize(peer.cp_size);
+            stream->setPrefillTpSize(peer->tp_size);
+            stream->setPrefillCpSize(peer->cp_size);
             guard.streams.push_back(stream);
             cancel_registry_->attach(handle, stream);
             auto ctx = std::make_unique<GenerateContext>(
@@ -513,15 +519,13 @@ grpc::Status DecodeRpcServer::preparePDRequest(const GenerateInputPB&          r
                                                int64_t                         deadline_ms,
                                                std::shared_ptr<GenerateInput>& input,
                                                GenerateInputPB&                prefill_request,
-                                               PrefillPeerInfo&                peer_info,
-                                               grpc::ServerContext*           server_context) {
+                                               std::optional<PrefillPeerInfo>& peer_info,
+                                               grpc::ServerContext*            server_context) {
     input                      = QueryConverter::transQuery(&request);
     input->request_deadline_ms = deadline_ms;
-    const auto& config         = *input->generate_config;
-    if (config.isPrefillOnly() || config.num_beams > 1 || !config.variable_num_beams.empty()
-        || config.num_return_sequences > 1) {
-        return serializeErrorMsg(std::to_string(request.request_id()),
-                                 {ErrorCode::INVALID_PARAMS, "request does not support PD handoff"});
+    const auto support         = checkPDSupport(request);
+    if (!support.supported) {
+        return serializeErrorMsg(std::to_string(request.request_id()), {ErrorCode::INVALID_PARAMS, support.reason});
     }
     // Preserve the configured duration on the wire; D keeps its own deadline.
     input->generate_config->timeout_ms = request.generate_config().timeout_ms();
@@ -531,22 +535,25 @@ grpc::Status DecodeRpcServer::preparePDRequest(const GenerateInputPB&          r
         return serializeErrorMsg(std::to_string(request.request_id()), status);
     prefill_request.CopyFrom(request);
     prefill_request.mutable_generate_config()->set_timeout_ms(input->generate_config->timeout_ms);
+    const auto remaining = deadline_ms - currentTimeMs();
+    if (remaining <= 0)
+        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "PD preprocessing deadline exceeded");
+    if (peer_info) {
+        return grpc::Status::OK;
+    }
     const auto  address = prefillAddress(request);
     std::string ip;
     uint32_t    port         = 0;
     auto        parse_status = parsePrefillDpAddr(address, &ip, &port);
     if (!parse_status.ok())
         return parse_status;
-    const auto remaining = deadline_ms - currentTimeMs();
-    if (remaining <= 0)
-        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "PD preprocessing deadline exceeded");
     auto peer_result = prefill_server_caller_->getPrefillPeerInfo(ip, port, clampRpcTimeoutMsToInt32(remaining));
     if (!peer_result.ok())
         return grpcStatusFromErrorInfo(peer_result.status());
-    peer_info = std::move(peer_result.value());
-    if (peer_info.tp_size <= 0 || peer_info.cp_size <= 0) {
+    if (peer_result.value().tp_size <= 0 || peer_result.value().cp_size <= 0) {
         return grpc::Status(grpc::StatusCode::INTERNAL, "prefill peer info is not available");
     }
+    peer_info = std::move(peer_result.value());
     return grpc::Status::OK;
 }
 
@@ -584,7 +591,10 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
     // Check if pd separation should be used
     // A successful Master batch admission is authoritative: Prefill has
     // already entered the P2P path, so Decode must attach to that handoff.
-    auto pd_separation = checkPDSupport(*request).supported || request->enqueued_by_master();
+    const bool needs_prefill_multimodal_processing = request->multimodal_inputs_size() > 0 && !request->has_v41_inputs()
+                                                     && !request->has_multimodal_token_layout() && !mm_processor_;
+    const bool pd_separation =
+        request->enqueued_by_master() || (checkPDSupport(*request).supported && !needs_prefill_multimodal_processing);
     if (pd_separation) {
         std::string handoff_unique_key;
         if (request->enqueued_by_master()) {
@@ -602,6 +612,7 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
         GenerateInputPB prefill_forward_request;
         prefill_forward_request.CopyFrom(*effective_request);
         prefill_forward_request.mutable_generate_config()->set_timeout_ms(configured_timeout_ms);
+        prefill_forward_request.mutable_generate_config()->set_can_use_pd_separation(false);
         return prefill_server_caller_->callPrefill(server_context, &prefill_forward_request, response_writer);
     }
 
@@ -695,7 +706,7 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
     try {
         std::shared_ptr<GenerateInput> input;
         GenerateInputPB                prefill_request;
-        PrefillPeerInfo                peer_info;
+        std::optional<PrefillPeerInfo> peer_info;
         const auto                     prepare_start_us = currentTimeUs();
         auto                           prepare_status   = preparePDRequest(*effective_request,
                                                request_entry_ms + handoff_timeout_ms,
@@ -734,8 +745,8 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
                 }
             }
         } unenqueued_guard{stream};
-        stream->setPrefillTpSize(peer_info.tp_size);
-        stream->setPrefillCpSize(peer_info.cp_size);
+        stream->setPrefillTpSize(peer_info->tp_size);
+        stream->setPrefillCpSize(peer_info->cp_size);
         generate_context.setStream(stream);
         cancel_registry_->attach(cancel_handle, stream);
 
@@ -791,7 +802,7 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
         // Keep the async prefill RPC alive for the handoff lifecycle only. StartLoad applies the first token to the
         // decode stream, so client output must come exclusively from pollStreamOutput().
         std::optional<StreamState> observed_state;
-        const auto check_progress = [&](bool& remote_done) {
+        const auto                 check_progress = [&] {
             const auto state = stream->getStatus();
             if (!observed_state || state != *observed_state) {
                 observed_state = state;
@@ -799,10 +810,8 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
                 generate_context.reportMetrics(collector);
             }
             if (!prefill_caller_ctx) {
-                remote_done = true;
                 return FirstError::Snapshot{};
             }
-            remote_done = prefill_caller_ctx->done();
             const auto remote = prefill_caller_ctx->firstError();
             const auto first = FirstError::earlier(stream->firstError(), remote);
             if (remote.error.hasError() && first.order == remote.order) {

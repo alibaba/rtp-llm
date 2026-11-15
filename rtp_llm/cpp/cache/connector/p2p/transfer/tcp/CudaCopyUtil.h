@@ -13,6 +13,7 @@ struct CopyTask {
     size_t size;               // 拷贝大小
     char*  dst_ptr;            // 目标地址，必须由调用者预先分配
     int    device_index = -1;  // GPU allocation device; -1 selects the current device.
+    bool   is_cuda      = true;  // Whether the KV endpoint is device-backed.
 };
 
 /// @brief GPU 拷贝工具类，封装批量拷贝逻辑
