@@ -161,8 +161,6 @@ void RdmaTransferService::transferViaRdma(const std::shared_ptr<RdmaTaskContext>
         }
         return;
     }
-    auto staging_transfer = std::move(build_result.staging_transfer);
-
     auto conn = rdma_client_->getConnection(ctx->getRdmaServerIp(), ctx->getRdmaServerPort());
     if (!conn) {
         ctx->run(false, TransferErrorCode::CONNECTION_FAILED, "rdma get connection failed");
@@ -175,15 +173,19 @@ void RdmaTransferService::transferViaRdma(const std::shared_ptr<RdmaTaskContext>
     }
 
     auto already_run = std::make_shared<std::atomic<bool>>(false);
-    auto physical_done = std::make_shared<std::atomic<bool>>(false);
+    auto resources   = std::make_shared<TransferResources>();
+    // Keep the staging lease in the active transfer even if the backend
+    // discards its callback. The physical completion path releases it.
+    resources->staging        = std::move(build_result.staging_transfer);
     auto disconnect_triggered = std::make_shared<std::atomic<bool>>(false);
-    auto completed_count = std::make_shared<std::atomic<size_t>>(0);
-    std::string unique_key = ctx->getUniqueKey();
-    int64_t posted_at_us = currentTimeUs();
+    auto completed_count       = std::make_shared<std::atomic<size_t>>(0);
+    std::string unique_key     = ctx->getUniqueKey();
+    int64_t posted_at_us       = currentTimeUs();
 
     auto cuda_copy_util = cuda_copy_util_;
-    auto guardedRun = [ctx, already_run, physical_done, unique_key, posted_at_us, staging_transfer, cuda_copy_util](
+    auto guardedRun     = [ctx, already_run, resources, unique_key, posted_at_us, cuda_copy_util](
                           bool success, TransferErrorCode ec = TransferErrorCode::OK, const std::string& msg = "") {
+        auto        staging_transfer = std::move(resources->staging);
         std::string final_message = msg;
         if (success && staging_transfer
             && (!cuda_copy_util || !cuda_copy_util->batchCopyToDevice(staging_transfer->h2d_copy_tasks))) {
@@ -196,7 +198,7 @@ void RdmaTransferService::transferViaRdma(const std::shared_ptr<RdmaTaskContext>
         // This callback is the physical RDMA completion boundary. Always mark
         // the recv task complete here, even if the RPC watchdog replied earlier.
         ctx->notifyTransferDone(success, ec, final_message);
-        physical_done->store(true, std::memory_order_release);
+        resources->physical_done.store(true, std::memory_order_release);
         if (owns_rpc_completion) {
             int64_t total_us = currentTimeUs() - posted_at_us;
             if (success) {
@@ -230,7 +232,7 @@ void RdmaTransferService::transferViaRdma(const std::shared_ptr<RdmaTaskContext>
                                      conn,
                                      ctx->getDeadlineMs(),
                                      already_run,
-                                     physical_done,
+                                     resources,
                                      disconnect_triggered,
                                      completed_count,
                                      batch_count,
@@ -324,7 +326,7 @@ void RdmaTransferService::transferDeadlineCheckProc() {
     {
         std::lock_guard<std::mutex> lock(active_transfers_mutex_);
         for (auto it = active_transfers_.begin(); it != active_transfers_.end();) {
-            if (it->physical_done->load(std::memory_order_acquire)) {
+            if (it->resources->physical_done.load(std::memory_order_acquire)) {
                 it = active_transfers_.erase(it);
             } else {
                 if (static_cast<int64_t>(it->deadline_ms) <= now_ms) {

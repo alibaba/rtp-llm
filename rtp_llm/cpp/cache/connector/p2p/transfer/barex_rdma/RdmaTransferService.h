@@ -62,12 +62,17 @@ private:
     std::list<std::shared_ptr<RdmaTaskContext>>  wait_tasks_;
     autil::LoopThreadPtr                         wait_check_loop_thread_;
 
+    struct TransferResources {
+        std::atomic<bool>                    physical_done{false};
+        std::shared_ptr<RdmaStagingTransfer> staging;
+    };
+
     struct ActiveTransfer {
         std::weak_ptr<RdmaTaskContext> ctx;
         std::shared_ptr<IRdmaConnection> connection;
         uint64_t deadline_ms;
         std::shared_ptr<std::atomic<bool>> already_run;
-        std::shared_ptr<std::atomic<bool>> physical_done;
+        std::shared_ptr<TransferResources>   resources;
         std::shared_ptr<std::atomic<bool>> disconnect_triggered;
         std::shared_ptr<std::atomic<size_t>> completed_count;
         size_t total_batches;

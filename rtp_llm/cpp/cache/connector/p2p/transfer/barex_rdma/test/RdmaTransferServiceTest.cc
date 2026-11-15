@@ -232,6 +232,14 @@ public:
         callback(ec, message);
     }
 
+    void discardCallbacks() {
+        std::vector<RdmaReadCallback> callbacks;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            callbacks.swap(held_callbacks_);
+        }
+    }
+
     std::atomic<int> close_count_{0};
 
 private:
@@ -1007,6 +1015,40 @@ TEST_F(RdmaTransferServiceTest, H3_DeadlineGraceClosesConnectionAndCompletesTask
 }  // namespace rtp_llm
 
 namespace rtp_llm::transfer::barex_rdma {
+TEST(RdmaReadDeadlineTest, DiscardedCallbackDoesNotCompleteDmaOrRecycleStaging) {
+    char source[64]{};
+    auto target = torch::zeros({sizeof(source)}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    const auto deadline = currentTimeMs() + 60000;
+    auto       request  = makeRequest("discarded-callback", deadline);
+    addRdmaBlock(request, 1, source, sizeof(source));
+    ::rdma_transfer::RdmaLayerBlockTransferResponse response;
+    MockRpcController                               controller;
+    BlockingClosure                                 closure;
+
+    auto memory_manager = std::make_shared<MockRdmaMemoryManager>();
+    auto staging_pool   = RdmaStagingBufferPool::create(
+        memory_manager, HostStagingBlockPool::kAlignment, HostStagingBlockPool::kAlignment);
+    ASSERT_NE(staging_pool, nullptr);
+    auto                store  = std::make_shared<TransferTaskStore>();
+    auto                client = std::make_shared<HangingRdmaClient>();
+    RdmaTransferService service(store, client, nullptr, staging_pool);
+    auto                task = store->addTask("discarded-callback", makeCudaKvBlocks(1, target), deadline);
+    ASSERT_NE(task, nullptr);
+
+    auto context = std::make_shared<RdmaTaskContext>(&controller, &request, &response, &closure, nullptr);
+    context->setTask(task);
+    service.transferViaRdma(context);
+    ASSERT_EQ(client->conn_->heldCount(), 1u);
+    context.reset();
+    client->conn_->discardCallbacks();
+
+    ASSERT_TRUE(closure.waitFor(std::chrono::milliseconds(0)));
+    EXPECT_EQ(response.error_code(), ::rdma_transfer::RDMA_TRANSFER_CONTEXT_DESTROYED);
+    task->cancel();
+    EXPECT_FALSE(task->done());
+    EXPECT_FALSE(staging_pool->mallocBatchWithBackoff(1, std::chrono::milliseconds(1)).has_value());
+}
+
 TEST(RdmaReadDeadlineTest, CloseWithoutCompletionKeepsTransferActive) {
     char       source[64]{};
     char       target[64]{};

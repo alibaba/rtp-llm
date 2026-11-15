@@ -141,7 +141,13 @@ RdmaTaskContext::RdmaTaskContext(::google::protobuf::RpcController* controller,
                      0) {}
 
 RdmaTaskContext::~RdmaTaskContext() {
-    if (done_) {
+    if (!done_) {
+        return;
+    }
+    if (transfer_started_) {
+        // Losing the callback can finish the RPC, but cannot prove DMA stopped.
+        finishRpc(false, TransferErrorCode::CONTEXT_DESTROYED, "RDMA completion callback was lost");
+    } else {
         run(false, TransferErrorCode::CONTEXT_DESTROYED, "RdmaTaskContext destroyed without completion");
     }
 }
