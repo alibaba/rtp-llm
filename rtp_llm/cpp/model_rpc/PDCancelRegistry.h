@@ -93,6 +93,7 @@ private:
     void                                    trimLocked(int64_t now_ms);
     void                                    scheduleExpirationLocked(const Handle& handle, int64_t expires_at_ms);
     static constexpr int64_t                kRetentionMs = 10 * 60 * 1000;
+    static constexpr int64_t                kActiveReadExpiryRetryMs = 1000;
     // Shared bound for admitted requests and cancel-before-admission fences.
     // Existing requests remain cancellable when new record admission is full.
     size_t                                  record_capacity_       = 1u << 20;

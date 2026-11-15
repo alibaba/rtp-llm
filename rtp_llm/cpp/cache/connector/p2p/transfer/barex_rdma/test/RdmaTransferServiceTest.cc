@@ -185,12 +185,16 @@ public:
     std::atomic<size_t> dereg_count{0};
 };
 
-/// Mock connection that never fires the read callback — simulates lost RDMA CQE.
+/// Holds read callbacks until explicitly completed or flushed on close.
 class HangingRdmaConnection: public IRdmaConnection {
 public:
+    explicit HangingRdmaConnection(bool flush_on_close): flush_on_close_(flush_on_close) {}
+
     void close() override {
         close_count_.fetch_add(1);
-        completeAll(false);
+        if (flush_on_close_) {
+            completeAll(false);
+        }
     }
 
     void read(const std::vector<std::pair<torch::Tensor, std::shared_ptr<RemoteBuffer>>>&,
@@ -231,13 +235,15 @@ public:
     std::atomic<int> close_count_{0};
 
 private:
-    std::mutex mu_;
-    std::vector<RdmaReadCallback> held_callbacks_;
+    const bool                    flush_on_close_;
+    std::mutex                    mu_;
+    std::vector<RdmaReadCallback>  held_callbacks_;
 };
 
 class HangingRdmaClient: public IRdmaClient {
 public:
-    HangingRdmaClient(): conn_(std::make_shared<HangingRdmaConnection>()) {}
+    explicit HangingRdmaClient(bool flush_on_close = true):
+        conn_(std::make_shared<HangingRdmaConnection>(flush_on_close)) {}
 
     std::shared_ptr<IRdmaConnection> getConnection(const std::string&, uint32_t) override {
         return conn_;
@@ -1001,6 +1007,46 @@ TEST_F(RdmaTransferServiceTest, H3_DeadlineGraceClosesConnectionAndCompletesTask
 }  // namespace rtp_llm
 
 namespace rtp_llm::transfer::barex_rdma {
+TEST(RdmaReadDeadlineTest, CloseWithoutCompletionKeepsTransferActive) {
+    char       source[64]{};
+    char       target[64]{};
+    const auto deadline = currentTimeMs() + 60000;
+    auto       request  = makeRequest("close-without-completion", deadline);
+    addRdmaBlock(request, 1, source, sizeof(source));
+    ::rdma_transfer::RdmaLayerBlockTransferResponse response;
+    MockRpcController                               controller;
+    BlockingClosure                                 closure;
+
+    auto                store  = std::make_shared<TransferTaskStore>();
+    auto                client = std::make_shared<HangingRdmaClient>(/*flush_on_close=*/false);
+    RdmaTransferService service(store, client);
+    service.per_connection_block_count_        = 1;
+    service.rdma_disconnect_after_deadline_ms_ = 0;
+    auto task = store->addTask("close-without-completion", makeKvBlocks(1, target, sizeof(target)), deadline);
+    ASSERT_NE(task, nullptr);
+
+    auto context = std::make_shared<RdmaTaskContext>(&controller, &request, &response, &closure, nullptr);
+    context->setTask(task);
+    service.transferViaRdma(context);
+    ASSERT_EQ(client->conn_->heldCount(), 1u);
+    ASSERT_EQ(service.active_transfers_.size(), 1u);
+
+    service.active_transfers_.front().deadline_ms = 0;
+    service.transferDeadlineCheckProc();
+    service.transferDeadlineCheckProc();
+    ASSERT_TRUE(closure.waitFor(std::chrono::milliseconds(0)));
+    EXPECT_EQ(response.error_code(), ::rdma_transfer::RDMA_TRANSFER_CONTEXT_TIMEOUT);
+    EXPECT_EQ(client->conn_->close_count_.load(), 1);
+    EXPECT_FALSE(task->done());
+    EXPECT_EQ(service.active_transfers_.size(), 1u);
+
+    client->conn_->completeAll(false);
+    EXPECT_TRUE(task->done());
+    EXPECT_EQ(response.error_code(), ::rdma_transfer::RDMA_TRANSFER_CONTEXT_TIMEOUT);
+    service.transferDeadlineCheckProc();
+    EXPECT_TRUE(service.active_transfers_.empty());
+}
+
 TEST(RdmaReadFirstCauseTest, LaterIndexFailureSurvivesWatchdogAndCancellationUntilAllDmaCompletes) {
     auto store = std::make_shared<TransferTaskStore>();
     auto client = std::make_shared<HangingRdmaClient>();

@@ -989,6 +989,40 @@ TEST(PDCancelRegistryTest, ActiveReadCannotBeRetiredByCancellationRetention) {
     EXPECT_FALSE(handle->downstream_done);
 }
 
+TEST(PDCancelRegistryTest, ActiveReadKeepsCompletedRequestCancellableAfterRetention) {
+    auto             meta = std::make_shared<RpcServerRuntimeMeta>();
+    PDCancelRegistry registry(meta);
+    GenerateInputPB  request;
+    request.set_request_id(118);
+    PDCancelRegistry::Handle handle;
+    ASSERT_TRUE(registry.admit(request, "reading118", "", currentTimeMs() + 1000, handle).ok());
+    registry.finishLocal(handle);
+    registry.beginRead("reading118");
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex_);
+        const auto                  expiration = handle->retain_until_ms;
+        registry.trimLocked(expiration);
+        EXPECT_EQ(registry.entries_.count(118), 1u);
+        EXPECT_EQ(registry.entry_expirations_.size(), 1u);
+        EXPECT_GT(handle->retain_until_ms, expiration);
+    }
+
+    auto cancellation = registry.cancel(118, {ErrorCode::CANCELLED, "late cancel"});
+    ASSERT_TRUE(cancellation.ok());
+    EXPECT_EQ(cancellation.value(), CANCEL_STATUS_ACCEPTED);
+    EXPECT_TRUE(registry.isCanceled("reading118"));
+    EXPECT_FALSE(registry.complete(handle));
+
+    registry.endRead("reading118");
+    ASSERT_TRUE(registry.complete(handle));
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex_);
+        registry.trimLocked(handle->retain_until_ms);
+        EXPECT_TRUE(registry.entries_.empty());
+        EXPECT_TRUE(registry.entry_expirations_.empty());
+    }
+}
+
 TEST(PDCancelRegistryTest, CancelKeyIndexKeepsOtherCanceledRequestWithSameKey) {
     auto meta = std::make_shared<RpcServerRuntimeMeta>();
     PDCancelRegistry registry(meta);

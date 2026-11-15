@@ -44,6 +44,12 @@ void PDCancelRegistry::trimLocked(int64_t now_ms) {
             || e->retain_until_ms != expires_at_ms) {
             continue;
         }
+        if (active_reads_.count(e->unique_key)) {
+            // An outstanding StartLoad still needs its request ID to resolve
+            // a late cancellation. Retry after this bounded sweep.
+            scheduleExpirationLocked(e, now_ms + kActiveReadExpiryRetryMs);
+            continue;
+        }
         if (e->canceled.load()) {
             if (!e->downstream_done) {
                 // complete() already proved local physical cleanup. Retiring this
