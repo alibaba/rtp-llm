@@ -267,9 +267,7 @@ class NativePdSmokeTest(unittest.TestCase):
                     Path(launch.call_args.kwargs["stdout"].name),
                     role.task / "service.log",
                 )
-                self.assertEqual(
-                    argv[argv.index("--moe-strategy") + 1], "mega_moe_se"
-                )
+                self.assertEqual(argv[argv.index("--moe-strategy") + 1], "mega_moe_se")
                 self.assertIn("--fp8-gemm", argv)
                 self.assertIn("--fp8-kv-cache", argv)
                 self.assertIn("--rdma-hcas", argv)
@@ -305,6 +303,8 @@ class NativePdSmokeTest(unittest.TestCase):
             ):
                 item = config()
                 item["decode_dp"] = decode_dp
+                item["compact_smoke"] = decode_dp == 2
+                page_tokens = 1024 if item["compact_smoke"] else 4096
                 role = worker.Worker(threading.Event())
                 role.config, role.role, role.host = item, "prefill", item["prefill"]
                 role.task = Path(tmp)
@@ -326,9 +326,12 @@ class NativePdSmokeTest(unittest.TestCase):
                         / ("service.log" if log_mode == "1" else "logs/engine.log")
                     ),
                 )
-                self.assertEqual(command[command.index("--block-size") + 1], "4096")
                 self.assertEqual(
-                    command[command.index("--reuse-unit-tokens") + 1], "32768"
+                    command[command.index("--block-size") + 1], str(page_tokens)
+                )
+                self.assertEqual(
+                    command[command.index("--reuse-unit-tokens") + 1],
+                    str(page_tokens * 8),
                 )
                 self.assertEqual(command.count("--decode-role-addr"), decode_dp)
 
@@ -347,6 +350,9 @@ class NativePdSmokeTest(unittest.TestCase):
                     peer_port=28188,
                     orthogonal_smoke=True,
                     tp_size=worker.PREFILL_TP_SIZE,
+                    compact_smoke=item["compact_smoke"],
+                    fp8_gemm=True,
+                    fp8_kv_cache=True,
                 )
                 with patch.object(launcher.socket, "socket") as sockets:
                     sockets.return_value.getsockname.return_value = ("127.0.0.1", 0)
@@ -354,9 +360,7 @@ class NativePdSmokeTest(unittest.TestCase):
                 options = dict(zip(server[1::2], server[2::2]))
                 self.assertEqual(options["--prefill_cp_kv_cache_sharded"], "1")
                 self.assertEqual(options["--dp_size"], "1")
-                self.assertEqual(
-                    int(options["--seq_size_per_block"]), worker.CACHE_PAGE_TOKENS
-                )
+                self.assertEqual(int(options["--seq_size_per_block"]), page_tokens)
                 self.assertEqual(
                     int(command[command.index("--reuse-unit-tokens") + 1]),
                     int(options["--seq_size_per_block"]) * int(options["--tp_size"]),
@@ -551,8 +555,9 @@ class NativePdSmokeTest(unittest.TestCase):
         role.task = Path("/unused")
         role._create_socket_directory()
         directory = role.socket_dir
-        with worker.socket.socket(worker.socket.AF_UNIX) as endpoint:
-            endpoint.bind(str(directory / "rtp_llm_tp_k3_dp1_0.sock"))
+        for name in ("rtp_llm_tp_k3_dp1_0.sock", "rtp_llm_tp_k3_pp0_dp1_0.sock"):
+            with worker.socket.socket(worker.socket.AF_UNIX) as endpoint:
+                endpoint.bind(str(directory / name))
         role._cleanup_socket_directory()
         self.assertFalse(directory.exists())
 
@@ -649,7 +654,9 @@ class NativePdSmokeTest(unittest.TestCase):
                         [("group", 123456, worker.signal.SIGKILL), ("wait", 10)],
                     )
 
-    @unittest.skipUnless(worker.sys.platform == "linux", "requires Linux process groups")
+    @unittest.skipUnless(
+        worker.sys.platform == "linux", "requires Linux process groups"
+    )
     def test_cleanup_reaps_real_process_without_stopping_foreign_group(self):
         program = (
             "import signal,sys,time; "
@@ -769,6 +776,21 @@ class NativePdSmokeTest(unittest.TestCase):
                 },
             )
 
+    def test_cleanup_rejects_fatal_rank_logs_without_a_core_dump(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            role = worker.Worker(threading.Event())
+            role.task = Path(tmp)
+            (role.task / "service.log").write_text(
+                "Fatal Python error: Segmentation fault\n"
+            )
+            with patch.object(worker, "stop_process"), self.assertRaisesRegex(
+                RuntimeError, "Service logged a fatal error"
+            ):
+                role.close()
+            self.assertFalse(
+                json.loads((role.task / "cleanup.json").read_text())["stopped"]
+            )
+
     def test_cleanup_reports_rank_core_even_when_supervisor_and_gpu_are_clean(self):
         with tempfile.TemporaryDirectory() as tmp:
             role = worker.Worker(threading.Event())
@@ -780,7 +802,9 @@ class NativePdSmokeTest(unittest.TestCase):
             ):
                 role.close()
             self.assertEqual(core.read_bytes(), b"core evidence")
-            self.assertFalse(json.loads((role.task / "cleanup.json").read_text())["stopped"])
+            self.assertFalse(
+                json.loads((role.task / "cleanup.json").read_text())["stopped"]
+            )
 
     def test_worker_cleanup_preserves_baseline_and_reports_new_contexts(self):
         baseline = {("GPU-0", "123")}

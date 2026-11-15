@@ -22,10 +22,10 @@ from pd_config import gpu_contexts, validate_config
 from result_check import failure_details
 from server_launcher import cpu_tp_socket_environment, runtime_tmp_environment
 
-# server_launcher's orthogonal Prefill profile uses TP8 and 4096-token pages.
 # CP-sharded cache keys span all Prefill ranks, independently of Decode DP.
 PREFILL_TP_SIZE = 8
 CACHE_PAGE_TOKENS = 4096
+COMPACT_CACHE_PAGE_TOKENS = 1024
 WORKER_PORT_STRIDE = 9
 
 
@@ -267,7 +267,7 @@ class Worker:
             for name in names:
                 info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
                 if not re.fullmatch(
-                    r"rtp_llm_tp_k3_dp[0-9]+_[0-9]+\.sock", name
+                    r"rtp_llm_tp_k3_(?:pp[0-9]+_)?dp[0-9]+_[0-9]+\.sock", name
                 ) or not stat.S_ISSOCK(info.st_mode):
                     raise ValueError("Unexpected file in owned CPU TP socket directory")
             for name in names:
@@ -448,11 +448,15 @@ class Worker:
             "--runtime-tmp-dir",
             str(self.runtime_tmp_dir),
             "--orthogonal-smoke",
+            "--model-type",
+            self.config.get("model_type", "kimi_k3"),
             "--moe-strategy",
             self.host.get("moe_strategy")
             or self.config.get("moe_strategy")
             or ("mega_moe" if self.role == "prefill" else "mega_moe_se"),
         ]
+        if self.config.get("compact_smoke", False):
+            command.append("--compact-smoke")
         for key in ("fp8_gemm", "fp8_kv_cache", "warm_up", "model_warm_up"):
             if self.config.get(key, False):
                 command.append("--" + key.replace("_", "-"))
@@ -541,6 +545,11 @@ class Worker:
         self.status()
         decode = self.config["decode"]
         dp = self.config.get("decode_dp", 1)
+        page_tokens = (
+            COMPACT_CACHE_PAGE_TOKENS
+            if self.config.get("compact_smoke", False)
+            else CACHE_PAGE_TOKENS
+        )
         command = [
             sys.executable,
             str(Path(__file__).with_name("text_smoke.py")),
@@ -552,10 +561,12 @@ class Worker:
             str(self.task / "requests" / "accuracy.json"),
             "--namespace",
             self.task.parent.name,
+            "--model-type",
+            self.config.get("model_type", "kimi_k3"),
             "--block-size",
-            str(CACHE_PAGE_TOKENS),
+            str(page_tokens),
             "--reuse-unit-tokens",
-            str(CACHE_PAGE_TOKENS * PREFILL_TP_SIZE),
+            str(page_tokens * PREFILL_TP_SIZE),
             "--rdma-prewarm-attempts",
             "3",
             "--checkpoint",
@@ -576,6 +587,8 @@ class Worker:
             "--prefill-grpc-port",
             str(self.host["port"] + 1),
         ]
+        if self.config.get("compact_smoke", False):
+            command.append("--compact-smoke")
         for owner in range(dp):
             port = decode["port"] + owner * (8 // dp) * 9
             command += ["--decode-role-addr", f"{decode['ip']}:{port}:{port + 1}"]
@@ -636,9 +649,20 @@ class Worker:
             # A supervisor may exit zero after reaping a crashed rank. Keep the
             # role's fresh core dumps in the verdict as well as the artifacts.
             if self.task is not None:
-                cores = sorted(path.name for path in self.task.glob("core-*") if path.is_file())
+                cores = sorted(
+                    path.name for path in self.task.glob("core-*") if path.is_file()
+                )
                 if cores:
                     errors.append(f"Service generated core dumps: {cores}")
+                fatal = re.compile(
+                    r"Fatal Python error:|Signal: (?:Aborted|Segmentation fault) \("
+                    r"|DeepGEMM grid sync timeout:|CUDA error: unspecified launch failure"
+                )
+                for pattern in ("service.log", "service/logs/*.log", "logs/engine.log"):
+                    for path in self.task.glob(pattern):
+                        with path.open(errors="replace") as stream:
+                            if any(fatal.search(line) for line in stream):
+                                errors.append(f"Service logged a fatal error: {path}")
             if self.service is not None:
                 deadline = time.monotonic() + 60
                 while True:

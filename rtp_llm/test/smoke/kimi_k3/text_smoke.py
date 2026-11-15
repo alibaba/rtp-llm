@@ -156,6 +156,10 @@ def parse_args() -> argparse.Namespace:
         "--prefill-grpc-port", type=int, help="Local Prefill group RPC port"
     )
     parser.add_argument("--namespace", required=True)
+    parser.add_argument(
+        "--model-type", choices=("kimi_k3", "kimi_k31"), default="kimi_k3"
+    )
+    parser.add_argument("--compact-smoke", action="store_true")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--block-size", type=int, required=True)
     parser.add_argument(
@@ -216,7 +220,7 @@ def parse_args() -> argparse.Namespace:
     layers = text_config.get("num_hidden_layers")
     if layers != 93:
         parser.error("smoke requires a complete 93-layer checkpoint")
-    args.suite = "main-text-64k-capped"
+    args.suite = "kimi-pd-compact-v2" if args.compact_smoke else "main-text-64k-capped"
     args.run_kind = "full-93"
     if args.check_jit_publication:
         if args.jit_snapshot_root is None or not args.jit_snapshot_root.is_dir():
@@ -273,8 +277,9 @@ def parse_args() -> argparse.Namespace:
             parser.error(f"--{key.replace('_', '-')} must be non-negative")
     if args.chunk_tokens != 65536:
         parser.error("smoke requires a 65536-token single-prefill budget")
-    if args.block_size != 4096:
-        parser.error("smoke requires 4096-token cache blocks")
+    expected_block = 1024 if args.compact_smoke else 4096
+    if args.block_size != expected_block:
+        parser.error(f"smoke requires {expected_block}-token cache blocks")
     args.case_deadline_s = 300
     if args.reuse_unit_tokens and (
         args.reuse_unit_tokens < args.block_size
@@ -383,9 +388,7 @@ class Runner:
             "run_kind": "full-93",
             "suite": self.args.suite,
             "case_profile": (
-                "compact-64k-v1"
-                if self.args.suite == "main-text-64k-capped"
-                else None
+                "compact-64k-v1" if self.args.suite == "main-text-64k-capped" else None
             ),
             "orthogonal_phases": list(self.args.orthogonal_phases),
             "profile": (
@@ -2140,7 +2143,9 @@ class Runner:
         )
         legacy_pool = re.compile(r"kvc raw pool\[DEVICE/full\]:.*?\btotal=(\d+)")
         legacy_blocks = None
-        with pathlib.Path(engine_log).open(encoding="utf-8", errors="replace") as stream:
+        with pathlib.Path(engine_log).open(
+            encoding="utf-8", errors="replace"
+        ) as stream:
             for line in stream:
                 if match := pool_summary.search(line):
                     # The startup count includes the reserved block zero.
@@ -2711,22 +2716,27 @@ class Runner:
 
 def main() -> int:
     args = parse_args()
-    runner = Runner(args)
+    if args.compact_smoke:
+        from framework_smoke import FrameworkRunner
+
+        runner = FrameworkRunner(args)
+    else:
+        runner = Runner(args)
     try:
-        runner.run_main_text()
-        # Seed after the broad correctness suite. On the 93-layer model,
-        # its traffic can evict an early witness from Host as well as
-        # Device; the PageRR and long-KV stages provide bounded pressure.
-        runner._orthogonal_cache_seed()
-        for phase in (
-            runner._orthogonal_page_boundaries,
-            runner._orthogonal_chunk_kv,
-            runner._orthogonal_bounded_cache_pressure,
-            runner._orthogonal_cache,
-            runner._orthogonal_cancel_recovery,
-            runner._orthogonal_decode_batches,
-        ):
-            phase()
+        if args.compact_smoke:
+            runner.run_framework()
+        else:
+            runner.run_main_text()
+            runner._orthogonal_cache_seed()
+            for phase in (
+                runner._orthogonal_page_boundaries,
+                runner._orthogonal_chunk_kv,
+                runner._orthogonal_bounded_cache_pressure,
+                runner._orthogonal_cache,
+                runner._orthogonal_cancel_recovery,
+                runner._orthogonal_decode_batches,
+            ):
+                phase()
         from request_smoke import SmokeRequests, run_request_cases
 
         protocol = SmokeRequests(args)
