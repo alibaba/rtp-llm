@@ -60,6 +60,15 @@ py_test(
 )
 
 py_test(
+    name = "tau2_bench_comparer_test",
+    srcs = glob(["*.py"], exclude = ["entry.py"]),
+    main = "tau2_bench_comparer_test.py",
+    imports = [".."],
+    env = {"GPU_COUNT": "0"},
+    deps = SMOKE_FRAMEWORK_DEPS,
+)
+
+py_test(
     name = "dash_cancel_state_test",
     srcs = [
         "dash_cancel_state.py",

@@ -2,6 +2,7 @@ import glob
 import importlib.metadata
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -75,6 +76,10 @@ class Tau2BenchComparer(BaseComparer):
         self._install_litellm()
         data_dir = self._prepare_tau2_data(extract_root)
         task_ids_path = self._resolve_task_ids_file(extract_root, task_ids_file)
+        with open(task_ids_path, "r", encoding="utf-8") as fp:
+            expected_count = sum(
+                len(set(map(str, ids))) for ids in json.load(fp).values()
+            )
         script_path = self._resolve_script_file(extract_root, script_file)
 
         host = "127.0.0.1"
@@ -97,14 +102,14 @@ class Tau2BenchComparer(BaseComparer):
                 QueryStatus.OTHERS,
                 f"no 'Dump report to: ...json' line in tau2-bench stdout, see {log_path}",
             )
-        score = self._load_overall_score(report_path)
+        score = self._load_overall_score(report_path, expected_count)
         logging.info(
             f"[TAU2] parsed score={score} from {report_path}, threshold={threshold}"
         )
         if score is None:
             raise SmokeException(
                 QueryStatus.OTHERS,
-                f"failed to extract OVERALL score from report {report_path}, see {log_path}",
+                f"failed to extract valid OVERALL score/sample count from report {report_path}, see {log_path}",
             )
         if score < threshold:
             raise SmokeException(
@@ -407,8 +412,8 @@ class Tau2BenchComparer(BaseComparer):
         return os.path.normpath(os.path.join(cwd, rel_path))
 
     @staticmethod
-    def _load_overall_score(report_path: str) -> Optional[float]:
-        """Read evalscope JSON report and return OVERALL mean_acc score."""
+    def _load_overall_score(report_path: str, expected_count: int) -> Optional[float]:
+        """Read OVERALL mean_acc, counting omitted simulations as failures."""
         try:
             with open(report_path, "r", encoding="utf-8") as fp:
                 data = json.load(fp)
@@ -417,12 +422,30 @@ class Tau2BenchComparer(BaseComparer):
             return None
 
         score, metrics = Tau2BenchComparer._normalize_report_schema(data)
-        if score is not None:
-            return score
-        for metric in metrics:
-            if metric["name"] == "mean_acc" and metric["is_overall"]:
-                return metric["score"]
-        return None
+        mean_acc = [metric for metric in metrics if metric["name"] == "mean_acc"]
+        overall = [metric for metric in mean_acc if metric["is_overall"]]
+        if not overall and len(mean_acc) == 1:
+            overall = mean_acc
+        if len(overall) != 1:
+            return None
+        metric = overall[0]
+        score = metric["score"] if score is None else score
+        count = metric["num"]
+        if (
+            type(expected_count) is not int
+            or expected_count <= 0
+            or type(count) is not int
+            or not 0 <= count <= expected_count
+            or not math.isfinite(score)
+            or not 0 <= score <= 1
+        ):
+            return None
+        # ignore_errors omits failed simulations from EvalScope's mean. Keep
+        # every selected task in the regression gate's denominator.
+        logging.info(
+            "[TAU2] selected=%s, scored=%s, raw_score=%s", expected_count, count, score
+        )
+        return score * (count / expected_count)
 
     @staticmethod
     def _normalize_report_schema(
@@ -446,6 +469,7 @@ class Tau2BenchComparer(BaseComparer):
                     "name": name.lower(),
                     "score": metric_score,
                     "is_overall": Tau2BenchComparer._is_overall_metric(raw_metric),
+                    "num": raw_metric.get("num"),
                 }
             )
         return score, metrics
@@ -482,6 +506,6 @@ class Tau2BenchComparer(BaseComparer):
 
     @staticmethod
     def _to_float(value: Any) -> Optional[float]:
-        if isinstance(value, (int, float)):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
             return float(value)
         return None
