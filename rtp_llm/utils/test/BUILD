@@ -139,7 +139,7 @@ py_test(
 py_test(
     name = "ckpt_file_info_test",
     srcs = ["ckpt_file_info_test.py"],
-    deps = ["//rtp_llm:utils", "//rtp_llm:safetensors"],
+    deps = ["//rtp_llm:utils", "//rtp_llm:safetensors", "//rtp_llm:numpy"],
     env = {"GPU_COUNT": "0"},
 )
 
