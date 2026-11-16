@@ -96,6 +96,8 @@ tryRegisterSelection 在同一次持锁期间核对选址快照、请求名额�
 引擎实际可用 KV 以 worker 上报为准，不把 inputLength 当作取消释放的物理 KV。
 
 Endpoint 的 ResourceWait 保存等待优先级、截止时间及撤销标志，不查询请求内部状态。
+等待记录只保存端点身份标识和创建时的拓扑，不反向持有 Endpoint；有效性由 Endpoint 检查。
+Endpoint 在锁外交付等待结果；结果已结束而无法交付的新登记，由该 Endpoint 立即回滚。
 请求放弃等待、取消或结束时，RequestContext 立即撤销保护；抢占组件随后移除登记并处理等待结果。
 撤销不在 Context 锁内完成 Future，已取得但未被接收的登记仍由抢占结果处理路径回滚。
 保护有效时，低优先级请求不能使用该 Endpoint 的容量，更高优先级请求仍可竞争。

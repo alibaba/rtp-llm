@@ -33,6 +33,8 @@ import static org.flexlb.worker.endpoint.DecodeResources.Capacity.saturatedAddNo
  */
 public class DecodeEndpoint extends WorkerEndpoint
         implements EndpointStats.Decode, SelectionRollback {
+    // ResourceWait retains this identity, not the Endpoint and its request ledger.
+    private final Object resourceWaitEndpointId = new Object();
     private final java.util.Set<ResourceWait> resourceWaits =
             java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
     private final WorkerRequests requests;
@@ -57,13 +59,27 @@ public class DecodeEndpoint extends WorkerEndpoint
     }
 
     public final boolean registerResourceWait(ResourceWait wait) {
-        checkArgument(wait.endpoint == this, "resource wait belongs to another endpoint");
         stateLock().lock();
         try {
-            return wait.isEffective(System.currentTimeMillis()) && resourceWaits.add(wait);
+            return isResourceWaitEffective(wait, System.currentTimeMillis())
+                    && resourceWaits.add(wait);
         } finally {
             stateLock().unlock();
         }
+    }
+
+    /**
+     * Checks the wait deadline and revocation together with this endpoint's current availability.
+     */
+    public final boolean isResourceWaitEffective(ResourceWait wait, long nowMs) {
+        checkArgument(
+                wait.endpointId == resourceWaitEndpointId,
+                "resource wait belongs to another endpoint");
+        return !wait.revoked
+                && !wait.result.isDone()
+                && nowMs < wait.deadlineMs
+                && acceptsNewRequests()
+                && getStatus().topologySnapshot() == wait.topology;
     }
 
     public final void removeResourceWait(ResourceWait wait) {
@@ -74,7 +90,7 @@ public class DecodeEndpoint extends WorkerEndpoint
         } finally {
             stateLock().unlock();
         }
-        wait.complete(null);
+        completeResourceWait(wait, null);
     }
 
     public final void tryAcquire(ResourceWait wait) {
@@ -82,7 +98,9 @@ public class DecodeEndpoint extends WorkerEndpoint
         boolean ended;
         stateLock().lock();
         try {
-            ended = !resourceWaits.contains(wait) || !wait.isEffective(System.currentTimeMillis());
+            ended =
+                    !resourceWaits.contains(wait)
+                            || !isResourceWaitEffective(wait, System.currentTimeMillis());
             if (!ended)
                 registration =
                         tryRegisterSelection(
@@ -97,7 +115,7 @@ public class DecodeEndpoint extends WorkerEndpoint
         } finally {
             stateLock().unlock();
         }
-        if (ended || registration != null) wait.complete(registration);
+        if (ended || registration != null) completeResourceWait(wait, registration);
     }
 
     /**
@@ -236,7 +254,15 @@ public class DecodeEndpoint extends WorkerEndpoint
             long expectedKv,
             AdmissionCapacity capacity) {
         return new ResourceWait(
-                this, request, selectionId, priority, deadlineMs, hardKv, expectedKv, capacity);
+                resourceWaitEndpointId,
+                getStatus().topologySnapshot(),
+                request,
+                selectionId,
+                priority,
+                deadlineMs,
+                hardKv,
+                expectedKv,
+                capacity);
     }
 
     /**
@@ -457,7 +483,7 @@ public class DecodeEndpoint extends WorkerEndpoint
     private boolean priorityAllowedLocked(int priority) {
         long now = System.currentTimeMillis();
         for (var wait : resourceWaits) {
-            if (wait.priority > priority && wait.isEffective(now)) return false;
+            if (wait.priority > priority && isResourceWaitEffective(wait, now)) return false;
         }
         return true;
     }
@@ -471,7 +497,15 @@ public class DecodeEndpoint extends WorkerEndpoint
         } finally {
             stateLock().unlock();
         }
-        for (var wait : waits) wait.complete(null);
+        for (var wait : waits) completeResourceWait(wait, null);
+    }
+
+    /**
+     * Completes outside the endpoint lock and returns an undeliverable reservation to this ledger.
+     */
+    private void completeResourceWait(ResourceWait wait, RequestRegistration registration) {
+        if (!wait.result.complete(registration) && registration != null)
+            rollbackSelection(registration);
     }
 
     private ReleaseResult removeRegistration(
@@ -733,11 +767,12 @@ public class DecodeEndpoint extends WorkerEndpoint
     }
 
     /**
-     * Waits for Decode capacity for one exact request selection; cancellation or endpoint closure ends the wait.
+     * Holds one selection's capacity demand, deadline, revocation and result.
+     * DecodeEndpoint checks endpoint availability and completes or rolls back the reservation.
      */
     public static final class ResourceWait {
         private volatile boolean revoked;
-        private final DecodeEndpoint endpoint;
+        private final Object endpointId;
         private final WorkerRequest request;
         private final long selectionId;
         private final WorkerStatus.TopologySnapshot topology;
@@ -749,7 +784,8 @@ public class DecodeEndpoint extends WorkerEndpoint
         private final CompletableFuture<RequestRegistration> result = new CompletableFuture<>();
 
         private ResourceWait(
-                DecodeEndpoint endpoint,
+                Object endpointId,
+                WorkerStatus.TopologySnapshot topology,
                 WorkerRequest request,
                 long selectionId,
                 int priority,
@@ -757,19 +793,15 @@ public class DecodeEndpoint extends WorkerEndpoint
                 long hardKv,
                 long expectedKv,
                 AdmissionCapacity capacity) {
-            this.endpoint = endpoint;
+            this.endpointId = endpointId;
             this.request = request;
             this.selectionId = selectionId;
-            this.topology = endpoint.getStatus().topologySnapshot();
+            this.topology = topology;
             this.priority = priority;
             this.deadlineMs = deadlineMs;
             this.hardKv = hardKv;
             this.expectedKv = expectedKv;
             this.capacity = capacity;
-        }
-
-        public final DecodeEndpoint endpoint() {
-            return endpoint;
         }
 
         public final WorkerRequest request() {
@@ -793,19 +825,6 @@ public class DecodeEndpoint extends WorkerEndpoint
          */
         public void revoke() {
             revoked = true;
-        }
-
-        public final boolean isEffective(long nowMs) {
-            return !revoked
-                    && !result.isDone()
-                    && nowMs < deadlineMs
-                    && endpoint.acceptsNewRequests()
-                    && endpoint.getStatus().topologySnapshot() == topology;
-        }
-
-        private void complete(RequestRegistration registration) {
-            if (!result.complete(registration) && registration != null)
-                endpoint.rollbackSelection(registration);
         }
     }
 

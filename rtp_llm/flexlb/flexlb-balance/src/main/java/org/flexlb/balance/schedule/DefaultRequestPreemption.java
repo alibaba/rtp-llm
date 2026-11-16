@@ -109,7 +109,8 @@ final class DefaultRequestPreemption implements RequestPreemption {
             if (!wait.isDone()) {
                 recordDecodePlanObservability(request, proposal);
                 for (var selected : proposal.requestsToPreempt()) {
-                    if (!wait.isEffective(System.currentTimeMillis()) || admissionStopped()) break;
+                    if (!endpoint.isResourceWaitEffective(wait, System.currentTimeMillis())
+                            || admissionStopped()) break;
                     var victim = requests.findActive(selected.requestId());
                     if (victim == null) continue;
                     var route = victim.snapshot().route();
@@ -219,7 +220,7 @@ final class DefaultRequestPreemption implements RequestPreemption {
         }
         var request = item.selection.requestContext();
         if (!item.wait.isDone()) {
-            if (!item.wait.isEffective(System.currentTimeMillis())) {
+            if (!item.endpoint.isResourceWaitEffective(item.wait, System.currentTimeMillis())) {
                 request.clearResourceWait(item.wait);
                 item.endpoint.removeResourceWait(item.wait);
             } else item.endpoint.tryAcquire(item.wait);

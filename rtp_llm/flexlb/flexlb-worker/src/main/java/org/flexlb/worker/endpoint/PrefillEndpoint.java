@@ -93,7 +93,12 @@ public class PrefillEndpoint extends WorkerEndpoint
                 return Registration.rejected(RegistrationStatus.VERSION_CONFLICT);
             if (requests.containsKey(requestId))
                 return Registration.rejected(RegistrationStatus.ALREADY_REGISTERED);
-            var record = new RequestRegistration(this, requestId, RegistrationPhase.REGISTERED);
+            var record =
+                    new RequestRegistration(
+                            expected.generationId(),
+                            requestId,
+                            RegistrationPhase.REGISTERED,
+                            clock.getAsLong());
             record.computeTokens = computeTokens;
             requests.put(requestId, record);
             registeredComputeTokens += computeTokens;
@@ -467,7 +472,7 @@ public class PrefillEndpoint extends WorkerEndpoint
      * require the endpoint lock.
      */
     public static final class RequestRegistration implements WorkerEndpoint.RequestRegistration {
-        final PrefillEndpoint owner;
+        private final long endpointGenerationId;
 
         RegistrationPhase phase;
 
@@ -483,11 +488,11 @@ public class PrefillEndpoint extends WorkerEndpoint
         long lastObservedAtMs;
 
         private RequestRegistration(
-                PrefillEndpoint owner, String requestId, RegistrationPhase phase) {
-            this.owner = owner;
+                long endpointGenerationId, String requestId, RegistrationPhase phase, long nowMs) {
+            this.endpointGenerationId = endpointGenerationId;
             this.phase = phase;
             this.requestId = Objects.requireNonNull(requestId);
-            this.lastObservedAtMs = owner.clock.getAsLong();
+            this.lastObservedAtMs = nowMs;
         }
 
         @Override
@@ -497,7 +502,7 @@ public class PrefillEndpoint extends WorkerEndpoint
 
         @Override
         public long endpointGenerationId() {
-            return owner.getStatus().getGenerationId();
+            return endpointGenerationId;
         }
 
         private void commit(long nowMs) {

@@ -351,8 +351,9 @@ public final class EndpointTestSupport {
         return state.releaseRequest(exact.prefillRegistration());
     }
 
-    public static PreparationScope preparation(PrefillEndpoint.RequestRegistration reservation) {
-        return new PreparationScope(() -> rollback(reservation));
+    public static PreparationScope preparation(
+            PrefillEndpoint endpoint, PrefillEndpoint.RequestRegistration reservation) {
+        return new PreparationScope(() -> rollback(endpoint, reservation));
     }
 
     /**
@@ -496,7 +497,8 @@ public final class EndpointTestSupport {
             var reservation = reserveUnqueued(endpoint, item, predictedMs);
             {
                 var handoff = endpoint.commitSelection(item);
-                try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+                try (var preparationReservation =
+                        EndpointTestSupport.preparation(endpoint, reservation)) {
                     // The endpoint ledger owns this request until authoritative termination.
                 }
             }
@@ -518,8 +520,9 @@ public final class EndpointTestSupport {
         }
     }
 
-    static void rollback(PrefillEndpoint.RequestRegistration reservation) {
-        if (reservation != null) reservation.owner.rollbackSelection(reservation);
+    static void rollback(
+            PrefillEndpoint endpoint, PrefillEndpoint.RequestRegistration reservation) {
+        if (reservation != null) endpoint.rollbackSelection(reservation);
     }
 
     private static void advanceVersion(PrefillEndpoint endpoint, String field) {

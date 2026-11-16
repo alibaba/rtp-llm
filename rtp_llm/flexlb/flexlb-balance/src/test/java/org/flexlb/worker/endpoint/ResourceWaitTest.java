@@ -16,6 +16,63 @@ import static org.mockito.Mockito.when;
  */
 class ResourceWaitTest {
     @Test
+    void anotherEndpointCannotInstallWaitEvenWhenWorkerTopologyIsShared() {
+        try (var fixture = new Fixture()) {
+            var wait = fixture.waiter(60, Long.MAX_VALUE).resourceWait;
+            var other =
+                    new DecodeEndpoint(
+                            fixture.endpoint.getStatus(),
+                            mock(org.flexlb.balance.schedule.RequestRepository.class),
+                            new CapacityNotifier());
+            try {
+                org.junit.jupiter.api.Assertions.assertThrows(
+                        IllegalArgumentException.class, () -> other.registerResourceWait(wait));
+                assertFalse(wait.isDone());
+                assertTrue(fixture.endpoint.registerResourceWait(wait));
+            } finally {
+                EndpointTestSupport.closeAndWait(other);
+            }
+        }
+    }
+
+    @Test
+    void cancellationAfterAllocationBeforeDeliveryReturnsReservationToEndpoint() {
+        try (var fixture = new Fixture()) {
+            var endpoint = org.mockito.Mockito.spy(fixture.endpoint);
+            var request = mock(WorkerRequest.class);
+            when(request.getRequestId()).thenReturn("cancel-during-allocation");
+            var wait =
+                    endpoint.createResourceWait(
+                            request, 1L, 60, Long.MAX_VALUE, 10L, 10L, fixture.capacity);
+            assertTrue(endpoint.registerResourceWait(wait));
+            org.mockito.Mockito.doAnswer(
+                            call -> {
+                                var registration = call.callRealMethod();
+                                endpoint.removeResourceWait(wait);
+                                return registration;
+                            })
+                    .when(endpoint)
+                    .tryRegisterSelection(
+                            org.mockito.ArgumentMatchers.anyString(),
+                            org.mockito.ArgumentMatchers.any(
+                                    DecodeEndpoint.SelectionSnapshot.class),
+                            org.mockito.ArgumentMatchers.anyLong(),
+                            org.mockito.ArgumentMatchers.anyLong(),
+                            org.mockito.ArgumentMatchers.anyInt(),
+                            org.mockito.ArgumentMatchers.any(
+                                    DecodeResources.AdmissionCapacity.class));
+
+            endpoint.tryAcquire(wait);
+            assertNull(wait.result().toCompletableFuture().join());
+            assertTrue(endpoint.resourceSnapshot().requests().isEmpty());
+            org.junit.jupiter.api.Assertions.assertEquals(
+                    0L, endpoint.selectionSnapshot().usage().occupiedRequests());
+            org.junit.jupiter.api.Assertions.assertEquals(
+                    0L, endpoint.selectionSnapshot().usage().hardReservedKvTokens());
+        }
+    }
+
+    @Test
     void lowerPriorityCannotTakeCapacityButHigherPriorityCan() {
         try (var fixture = new Fixture()) {
             var a = fixture.waiter(60, Long.MAX_VALUE);
