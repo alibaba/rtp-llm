@@ -633,7 +633,7 @@ def _native_pd_latency_model_fingerprint(
         if execution_geometry_enabled or execution_cache_source_enabled:
             raise ValueError("unified prefill does not use execution geometry")
         values["navi_latency_mode"] = (
-            "unified_native_prefill_capacity19_v2"
+            "unified_native_prefill_capacity19_prior_cache_v3"
             if capacity_split_prediction
             else "unified_native_prefill_admission_v1"
         )
@@ -713,6 +713,38 @@ class _ExecutionStartState:
     step_prefill_tokens: int = -1
     step_decode_requests: int = -1
     step_decode_tokens: int = -1
+
+
+@dataclass(frozen=True)
+class _ResolvedCacheHit:
+    cache_hit_tokens: int
+    observed_perf_ns: int
+
+
+@dataclass
+class _RequestCacheLookup:
+    request_id: int
+    result: _ResolvedCacheHit | None = None
+
+
+@dataclass(frozen=True)
+class _AdmissionPriorCacheForecast:
+    running_capacity: bool
+    prompt_tokens: int
+    context_tokens: int
+    compute_tokens: int
+    context_before_cache_forecast: int
+    cache_lookup: _RequestCacheLookup
+
+    def resolved_context(self, deadline_ns: int) -> int | None:
+        result = self.cache_lookup.result
+        if result is None or result.observed_perf_ns > deadline_ns:
+            return None
+        # Progress stays fixed at admission; only the unknown cache is resolved.
+        return min(
+            self.prompt_tokens,
+            max(self.context_before_cache_forecast, result.cache_hit_tokens),
+        )
 
 
 @dataclass(frozen=True)
@@ -825,6 +857,9 @@ class _ObservedWorkload:
     native_handoff_batch_ids: tuple[int, ...] = field(
         default=(), compare=False, repr=False
     )
+    prior_cache_forecasts: tuple[_AdmissionPriorCacheForecast, ...] = field(
+        default=(), compare=False, repr=False
+    )
 
     def valid(self) -> bool:
         return (
@@ -925,6 +960,10 @@ class _WorkloadContribution:
     remaining_prefill_tokens: int
     total_context_tokens: int
     remaining_total_tokens: int
+    context_before_cache_forecast: int = 0
+    cache_lookup: _RequestCacheLookup | None = field(
+        default=None, compare=False, repr=False
+    )
 
 
 @dataclass
@@ -1107,6 +1146,7 @@ class _ForwardBatchState:
     cancelled_request_ids: set[int] = field(default_factory=set)
     handle: Any = None
     initial_cache_hits: dict[int, int] = field(default_factory=dict)
+    cache_lookups: dict[int, _RequestCacheLookup] = field(default_factory=dict)
     initial_external_cache_hits: dict[int, int] = field(default_factory=dict)
     initial_execution_policy_inputs: dict[int, tuple[int, int, int]] = field(
         default_factory=dict
@@ -3612,6 +3652,13 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 remaining_prefill_tokens=compute_tokens,
                 total_context_tokens=cache_hit_tokens,
                 remaining_total_tokens=compute_tokens,
+                cache_lookup=(
+                    state.cache_lookups.setdefault(
+                        request_id, _RequestCacheLookup(request_id)
+                    )
+                    if self._pp_capacity_unified
+                    else None
+                ),
             )
 
         with self._execution_lock:
@@ -3716,6 +3763,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
         )
         running_capacity_slot_count = base.running_capacity_slot_count
         prepared_running = _PrefillWorkloadSliceAggregate()
+        prior_cache_forecasts = list(base.prior_cache_forecasts)
         with self._prepared_workload_lock:
             native_handoff_batch_ids = tuple(self._native_handoff_batches)
             pending = self._prepared_workload
@@ -3729,6 +3777,14 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                         getattr(aggregate, name) + getattr(pending, name),
                     )
             slots = max(0, base.max_running_request_count - running_capacity_slot_count)
+            if self._pp_capacity_unified:
+                for index, (_, contribution) in enumerate(
+                    self._prepared_contributions.values()
+                ):
+                    if contribution.cache_lookup is not None:
+                        prior_cache_forecasts.append(
+                            self._admission_cache_forecast(contribution, index < slots)
+                        )
             for _, contribution in itertools.islice(
                 self._prepared_contributions.values(), slots
             ):
@@ -3781,6 +3837,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             return replace(
                 workload,
                 native_handoff_batch_ids=native_handoff_batch_ids,
+                prior_cache_forecasts=tuple(prior_cache_forecasts),
                 waiting_request_ids=tuple(
                     sorted(
                         set(base.waiting_request_ids or ())
@@ -3832,7 +3889,9 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
         )
 
     @staticmethod
-    def _capacity_sample_features(admission_state, request_stats):
+    def _capacity_sample_features(
+        admission_state, request_stats, *, cache_resolution_deadline_ns=0
+    ):
         preceding = admission_state.preceding_workload
         running_capacity = _PrefillWorkloadSliceAggregate.from_snapshot(
             preceding.running_capacity_prefill
@@ -3840,6 +3899,28 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
         waiting_capacity = _PrefillWorkloadSliceAggregate.from_snapshot(
             preceding.waiting_capacity_prefill
         )
+        if cache_resolution_deadline_ns > 0:
+            for forecast in preceding.prior_cache_forecasts:
+                context = forecast.resolved_context(cache_resolution_deadline_ns)
+                if context is None:
+                    continue
+                target = (
+                    running_capacity if forecast.running_capacity else waiting_capacity
+                )
+                compute = forecast.prompt_tokens - context
+                old_context = forecast.context_tokens if forecast.compute_tokens else 0
+                new_context = context if compute else 0
+                target.request_count += int(compute > 0) - int(
+                    forecast.compute_tokens > 0
+                )
+                target.context_tokens += new_context - old_context
+                target.compute_tokens += compute - forecast.compute_tokens
+                target.compute_token_square_sum += (
+                    compute**2 - forecast.compute_tokens**2
+                )
+                target.context_compute_token_product_sum += (
+                    new_context * compute - old_context * forecast.compute_tokens
+                )
         for request_id, total_tokens, actual_cache_hit_tokens in request_stats:
             total_tokens = max(0, int(total_tokens))
             actual_cache_hit_tokens = min(
@@ -3906,7 +3987,9 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             - max(0, inflight_scheduled_tokens),
         )
         computed_tokens = min(computed_tokens, prompt_tokens)
-        if not self._native_cache_lookup_complete(request):
+        context_before_cache_forecast = computed_tokens
+        cache_lookup_complete = self._native_cache_lookup_complete(request)
+        if not cache_lookup_complete:
             computed_tokens = max(
                 computed_tokens,
                 min(prompt_tokens, self._predicted_cache_hit_for_request(request)),
@@ -3939,6 +4022,14 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 computed_tokens if remaining_prefill_tokens > 0 else 0
             ),
             remaining_total_tokens=remaining_prefill_tokens,
+            context_before_cache_forecast=context_before_cache_forecast,
+            cache_lookup=(
+                state.cache_lookups.get(self._navi_request_id(request))
+                if self._pp_capacity_unified
+                and state is not None
+                and not cache_lookup_complete
+                else None
+            ),
         )
 
     def _refresh_workload_contributions(
@@ -4007,7 +4098,18 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             }
         )
 
-    def _partition_prefill_workload(self, scheduler):
+    @staticmethod
+    def _admission_cache_forecast(contribution, running_capacity):
+        return _AdmissionPriorCacheForecast(
+            running_capacity=running_capacity,
+            prompt_tokens=contribution.prompt_tokens,
+            context_tokens=contribution.prefill_context_tokens,
+            compute_tokens=contribution.remaining_prefill_tokens,
+            context_before_cache_forecast=contribution.context_before_cache_forecast,
+            cache_lookup=contribution.cache_lookup,
+        )
+
+    def _partition_prefill_workload(self, scheduler, *, prior_cache_forecasts=None):
         try:
             running = tuple(scheduler.running)
         except (AttributeError, TypeError):
@@ -4038,12 +4140,23 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                         request, "running" if running_now else "waiting"
                     )
             contribution = self._workload_contributions.get(request_id)
+            uses_running_capacity = (
+                running_now or running_capacity_slot_count < max_running_request_count
+            )
+            if (
+                prior_cache_forecasts is not None
+                and contribution is not None
+                and contribution.cache_lookup is not None
+            ):
+                prior_cache_forecasts.append(
+                    self._admission_cache_forecast(contribution, uses_running_capacity)
+                )
             if contribution is not None:
                 if running_now:
                     scheduler_running.apply(contribution)
                 else:
                     scheduler_waiting.apply(contribution)
-            if running_now or running_capacity_slot_count < max_running_request_count:
+            if uses_running_capacity:
                 if contribution is not None:
                     running_capacity.apply(contribution)
                 running_capacity_slot_count += 1
@@ -4134,6 +4247,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             )
             if request is not None:
                 waiting_request_ids.add(self._navi_request_id(request))
+        prior_cache_forecasts = []
         (
             max_running_request_count,
             running_capacity_slot_count,
@@ -4141,7 +4255,12 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             waiting_capacity_prefill,
             scheduler_running_prefill,
             scheduler_waiting_prefill,
-        ) = self._partition_prefill_workload(scheduler)
+        ) = self._partition_prefill_workload(
+            scheduler,
+            prior_cache_forecasts=(
+                prior_cache_forecasts if self._pp_capacity_unified else None
+            ),
+        )
         workload = self._workload_aggregate.snapshot(
             running_request_count,
             running_elapsed_time_ms,
@@ -4158,7 +4277,11 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             scheduler_running_prefill,
             scheduler_waiting_prefill,
         )
-        return replace(workload, waiting_request_ids=tuple(sorted(waiting_request_ids)))
+        return replace(
+            workload,
+            waiting_request_ids=tuple(sorted(waiting_request_ids)),
+            prior_cache_forecasts=tuple(prior_cache_forecasts),
+        )
 
     def _audit_stalled_running_requests(
         self, scheduler, running, inflight_scheduled_tokens, now_ns
@@ -5398,6 +5521,12 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                             boundary,
                         )
                 state.initial_cache_hits.setdefault(request_id, cache_hit_tokens)
+                cache_lookup = state.cache_lookups.get(request_id)
+                if cache_lookup is not None and cache_lookup.result is None:
+                    cache_lookup.result = _ResolvedCacheHit(
+                        cache_hit_tokens=state.initial_cache_hits[request_id],
+                        observed_perf_ns=execution_step.started_ns,
+                    )
                 publication_reporters[external_request_id] = state.handle
 
         for progress in execution_step.batch_progress:
@@ -5782,7 +5911,47 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             (
                 sample_running_capacity,
                 sample_waiting_capacity,
-            ) = self._capacity_sample_features(admission_state, request_stats)
+            ) = self._capacity_sample_features(
+                admission_state,
+                request_stats,
+                cache_resolution_deadline_ns=(
+                    finish_ns if self._pp_capacity_unified else 0
+                ),
+            )
+            if self._pp_capacity_unified and preceding.prior_cache_forecasts:
+                corrections = []
+                for forecast in preceding.prior_cache_forecasts:
+                    context = forecast.resolved_context(finish_ns)
+                    if context is None or context != (
+                        forecast.prompt_tokens - forecast.compute_tokens
+                    ):
+                        corrections.append(
+                            {
+                                "request_id": forecast.cache_lookup.request_id,
+                                "running_capacity": forecast.running_capacity,
+                                "prompt_tokens": forecast.prompt_tokens,
+                                "context_before_cache_forecast": (
+                                    forecast.context_before_cache_forecast
+                                ),
+                                "forecast_compute_tokens": forecast.compute_tokens,
+                                "resolved_compute_tokens": (
+                                    None
+                                    if context is None
+                                    else forecast.prompt_tokens - context
+                                ),
+                            }
+                        )
+                self.on_request_lifecycle_event(
+                    {
+                        "event": "prior_cache_training_correction",
+                        "event_time_us": time.time_ns() // 1000,
+                        "native_batch_id": state.batch_id,
+                        "native_schedule_batch_id": state.schedule_batch_id,
+                        "cache_resolution_deadline_perf_ns": finish_ns,
+                        "forecast_requests": len(preceding.prior_cache_forecasts),
+                        "corrections_or_unresolved": corrections,
+                    }
+                )
             (
                 sample_scheduler_running,
                 sample_scheduler_waiting,
