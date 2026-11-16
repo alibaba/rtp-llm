@@ -55,6 +55,14 @@ class BootstrapError(ValueError):
         super().__init__(message or code)
 
 
+class GangTopologyBootstrapError(BootstrapError):
+    """An invalid C2 topology requires the platform to restart the container."""
+
+    def __init__(self, code, missing_ip_parts=()):
+        self.missing_ip_parts = missing_ip_parts
+        super().__init__(code)
+
+
 def enter_worker_cgroup():
     """Join the ASI-delegated worker leaf before importing torch."""
     path = os.environ.get(WORKER_CGROUP_ENV)
@@ -554,6 +562,10 @@ def _model_manifest_revision(checkpoint):
 
 def _prepare_network_identity(env, directory):
     """Resolve startup identity once for the Owner and all Worker attempts."""
+    from rtp_llm.models_py.modules.dsv41.engram_distributed.config import (
+        GangInfoMissingIP,
+        ShardConfigError,
+    )
     from rtp_llm.models_py.modules.dsv41.engram_distributed.resident_network import (
         STATE_ENV,
         TRANSPORT_ENV,
@@ -576,7 +588,12 @@ def _prepare_network_identity(env, directory):
         raise ValueError("resident local state must be private and owned by this user")
     result[STATE_ENV] = str(state)
     generation_env = "RTP_ENGRAM_RESIDENT_GENERATION"
-    generation, peers, _ = c2_topology(result)
+    try:
+        generation, peers, _ = c2_topology(result, report_missing_ips=True)
+    except GangInfoMissingIP as error:
+        raise GangTopologyBootstrapError(error.code, error.parts) from None
+    except ShardConfigError as error:
+        raise GangTopologyBootstrapError(error.code) from None
     if result.setdefault(generation_env, generation) != generation:
         raise BootstrapError("RESIDENT_C2_GANG_IDENTITY_MISMATCH")
     if "RTP_ENGRAM_MODEL_REVISION" not in result:
@@ -675,9 +692,16 @@ def supervise_prefill(args):
                             "prefill event=owner_started pid=%s", supervisor.owner.pid
                         )
                     supervisor.run(Path(directory))
+                except GangTopologyBootstrapError as error:
+                    _LOGGER.error(
+                        "prefill event=ganginfo_bootstrap_failed code=%s missing_ip_parts=%s",
+                        error.code,
+                        json.dumps(error.missing_ip_parts),
+                    )
+                    raise SystemExit(1) from None
                 except Exception as error:
                     # Keep the entry process alive and unready when bootstrap
-                    # fails. Never log env/secrets; only the safe error code.
+                    # fails for a reason other than C2 topology validation.
                     _hold_after_bootstrap_failure(supervisor, error)
                 finally:
                     if supervisor.owner is not None:

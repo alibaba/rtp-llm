@@ -50,7 +50,7 @@ def _owner_port(env):
     return int(port)
 
 
-def c2_topology(env):
+def c2_topology(env, *, report_missing_ips=False):
     """Use the C2 gang projection as the only authority for keyless peers."""
     annotations = Path(env.get(config.ANNOTATION_ENV, config.DEFAULT_ANNOTATION))
     try:
@@ -85,7 +85,9 @@ def c2_topology(env):
             for name, ip in members
             if name.replace("_", "-") == local_part.replace("_", "-")
         ]
-    except (KeyError, OSError, ValueError):
+    except (KeyError, OSError, ValueError) as error:
+        if report_missing_ips and isinstance(error, config.GangInfoMissingIP):
+            raise
         raise config.ShardConfigError("RESIDENT_C2_GANG_METADATA_INVALID") from None
     count = config.ShardConfig.from_environ(env).shard_count
     if len(members) != count:

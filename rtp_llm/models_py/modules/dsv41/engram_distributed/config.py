@@ -204,6 +204,14 @@ class GangInfoError(ValueError):
         super().__init__(code)
 
 
+class GangInfoMissingIP(GangInfoError):
+    """C2 has published the parts but has not filled in all their IPs."""
+
+    def __init__(self, parts):
+        self.parts = tuple(parts)
+        super().__init__("GANGINFO_MISSING_IP")
+
+
 def part_number(name):
     """Trailing ``_part<N>`` index, or None when the name has no such suffix."""
     head, separator, tail = name.rpartition("_part")
@@ -240,8 +248,15 @@ def read_parts(path=DEFAULT_ANNOTATION):
     if type(payload) is not dict or not payload:
         raise GangInfoError("GANGINFO_INVALID_JSON")
     parts = []
+    missing_ips = []
     for name, info in payload.items():
-        if type(info) is not dict or type(info.get("ip")) is not str or not info["ip"]:
+        if type(info) is not dict:
+            raise GangInfoError("GANGINFO_INVALID_JSON")
+        ip = info.get("ip")
+        if ip is None or ip == "":
+            missing_ips.append(name)
+            continue
+        if type(ip) is not str:
             raise GangInfoError("GANGINFO_INVALID_JSON")
         port = info.get("port")
         if port in (None, "", 0):
@@ -252,9 +267,11 @@ def read_parts(path=DEFAULT_ANNOTATION):
             port = int(port)
         else:
             raise GangInfoError("GANGINFO_INVALID_PORT")
-        parts.append((name, info["ip"], port))
+        parts.append((name, ip, port))
     if len({ip for _, ip, _ in parts}) != len(parts):
         raise GangInfoError("GANGINFO_DUPLICATE_ADDRESS")
+    if missing_ips:
+        raise GangInfoMissingIP(missing_ips)
     if all(part_number(name) is not None for name, _, _ in parts):
         parts.sort(key=lambda item: part_number(item[0]))
     return parts
