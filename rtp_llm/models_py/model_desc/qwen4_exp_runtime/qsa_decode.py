@@ -23,8 +23,14 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     apply_partial_rope,
     build_base_rope,
     build_qsa_rope,
-    build_qsa_rope_from_logical_positions,
     is_qsa_rope_style,
+)
+
+from .step_metadata import (
+    cached_query_geometry,
+    cached_step_value,
+    cached_text_rope,
+    tensor_signature,
 )
 
 
@@ -85,11 +91,20 @@ def select_decode_tokens(
     host_max_compressed = (max(host_lengths) + 1) // ratio
     # Replay refreshes this device tensor before launching the captured graph.
     # Reading the pinned mirror inside capture would freeze an H2D dependency.
-    sequence_lengths = (
-        self.main_inputs.sequence_lengths_plus_1_device - 1
+    length_source = (
+        self.main_inputs.sequence_lengths_plus_1_device
         if graph_decode
-        else sequence_lengths.to(device=q.device, dtype=torch.int32, non_blocking=True)
-    ).contiguous()
+        else sequence_lengths
+    )
+    sequence_lengths = cached_step_value(
+        self,
+        ("decode_lengths", graph_decode, tensor_signature(length_source), q.device),
+        lambda: (
+            length_source - 1
+            if graph_decode
+            else length_source.to(device=q.device, dtype=torch.int32, non_blocking=True)
+        ).contiguous(),
+    )
     invalid_lengths = any(length < 0 for length in host_lengths)
     if invalid_lengths:
         raise RuntimeError("qwen4_exp QSA sequence_lengths must be non-negative")
@@ -146,13 +161,14 @@ def select_decode_tokens(
     elif graph_decode:
         # Graph capture uses the engine's canonical text
         # positions. The C++ graph owner refreshes lengths before replay.
-        current_cos, current_sin = build_qsa_rope_from_logical_positions(
+        current_cos, current_sin = cached_text_rope(
+            self,
             sequence_lengths,
             rope_config,
+            indexer,
             token_count=batch_size,
             dtype=raw_keys.dtype,
             device=raw_keys.device,
-            inv_freq=frequency,
         )
     else:
         current_cos, current_sin = build_qsa_rope(
@@ -210,8 +226,11 @@ def select_decode_tokens(
     active = state_table.ne(0).any(dim=1) if self.main_inputs.is_s_padded else None
 
     if prepared is None:
-        visible_token_lengths = sequence_lengths + 1
-        compressed_lengths = visible_token_lengths // ratio
+        visible, compressed, _, block_starts = cached_query_geometry(
+            self, sequence_lengths, 1, ratio
+        )
+        visible_token_lengths = visible.reshape(-1)
+        compressed_lengths = compressed.reshape(-1)
     if active is not None:
         visible_token_lengths = torch.where(active, visible_token_lengths, 0)
         compressed_lengths = torch.where(active, compressed_lengths, 0)
@@ -238,15 +257,20 @@ def select_decode_tokens(
     # Only rows that close a compression group consume these values. Build
     # one block-start RoPE row per request instead of [0, context_len).
     if prepared is None and position_state is None:
-        block_starts = sequence_lengths.to(torch.int64)
-        block_starts = block_starts - block_starts.remainder(ratio)
-        rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
+        if block_starts is None:
+            block_starts = cached_step_value(
+                self,
+                ("decode_block_starts", tensor_signature(sequence_lengths), ratio),
+                lambda: _block_starts(sequence_lengths, ratio),
+            )
+        rope_cos, rope_sin = cached_text_rope(
+            self,
             block_starts,
             rope_config,
+            indexer,
             token_count=batch_size,
             dtype=raw_keys.dtype,
             device=raw_keys.device,
-            inv_freq=frequency,
         )
     if position_state is not None:
         rope_cos, rope_sin = position_state.rope(rope_config, group=True)
@@ -351,3 +375,8 @@ def select_decode_tokens(
         validate_lengths=False,
         scores_are_masked=True,
     )
+
+
+def _block_starts(sequence_lengths, ratio):
+    positions = sequence_lengths.to(torch.int64)
+    return positions - positions.remainder(ratio)
