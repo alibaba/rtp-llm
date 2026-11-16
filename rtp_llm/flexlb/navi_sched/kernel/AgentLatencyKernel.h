@@ -36,6 +36,9 @@ private:
     struct UnifiedBatchState {
         NaviSchedLatencyFeatures features;
         NaviSchedLatencyFeatures precedingFeatures;
+        NaviSchedLatencyFeatures currentBatchCapacityFeatures;
+        std::unordered_set<uint64_t> readyRunningRequestIds;
+        bool hasCurrentBatchCapacityFeatures = false;
         int32_t remainingPrefillRequestCount = 0;
         int64_t readyTimeUs = 0;
         NaviSchedLocalBatchInfo localBatch;

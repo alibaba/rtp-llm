@@ -422,9 +422,10 @@ public:
     };
 
     explicit VLLMAgentBridge(const std::shared_ptr<NaviSchedAgent> &agent,
-                             bool pdSeparated = false)
+                             bool pdSeparated = false, bool prefillCapacitySplit = false)
         : _agent(agent)
         , _pdSeparated(pdSeparated)
+        , _prefillCapacitySplit(!pdSeparated || prefillCapacitySplit)
         , _forwardState(std::make_shared<ForwardState>())
     {
     }
@@ -1207,8 +1208,8 @@ public:
         snapshot.remainingPrefillTokenSquareSum = remainingPrefillTokenSquareSum;
         snapshot.contextRemainingPrefillTokenProductSum =
             contextRemainingPrefillTokenProductSum;
-        snapshot.prefillCapacitySplit = !_pdSeparated;
-        if (!_pdSeparated) {
+        snapshot.prefillCapacitySplit = _prefillCapacitySplit;
+        if (_prefillCapacitySplit) {
             snapshot.maxRunningRequestCount = maxRunningRequestCount;
             snapshot.runningCapacitySlotCount = runningCapacitySlotCount;
             snapshot.runningCapacityPrefillRequestCount =
@@ -1343,6 +1344,7 @@ private:
 private:
     std::shared_ptr<NaviSchedAgent> _agent;
     bool _pdSeparated = false;
+    bool _prefillCapacitySplit = false;
     std::shared_ptr<ForwardState> _forwardState;
 };
 
@@ -1430,8 +1432,9 @@ void bindNaviSchedData(py::module_ &m)
                  });
              });
     py::class_<VLLMAgentBridge>(m, "_VLLMAgentBridge")
-        .def(py::init<const std::shared_ptr<NaviSchedAgent> &, bool>(), py::arg("agent"),
-             py::arg("pd_separated") = false)
+        .def(py::init<const std::shared_ptr<NaviSchedAgent> &, bool, bool>(),
+             py::arg("agent"), py::arg("pd_separated") = false,
+             py::arg("prefill_capacity_split") = false)
         .def("start_batch", &VLLMAgentBridge::startBatch, py::arg("batch_id"),
              py::arg("requests"),
              py::arg("prefix_cache_prompt_tokens") = std::map<uint64_t, int64_t>(),
@@ -1904,6 +1907,8 @@ void bindNaviSchedData(py::module_ &m)
                        &NaviSchedAgentConfig::prefillExecutionPolicy)
         .def_readwrite("unified_latency_prediction",
                        &NaviSchedAgentConfig::unifiedLatencyPrediction)
+        .def_readwrite("pd_unified_capacity_split",
+                       &NaviSchedAgentConfig::pdUnifiedCapacitySplit)
         .def_readwrite("full_attention_query_drop_tokens",
                        &NaviSchedAgentConfig::fullAttentionQueryDropTokens)
         .def_readwrite("mamba_replay_stop_shift",

@@ -348,6 +348,7 @@ struct NaviSchedAgentConfig {
     NaviSchedRuntimeConfig runtime;
     bool pdSeparated = true;
     bool unifiedLatencyPrediction = false;
+    bool pdUnifiedCapacitySplit = false;
     bool mambaReplayStopShift = false;
     int64_t mambaRetentionInterval = -1;
     bool mambaAlign = false;
