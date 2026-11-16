@@ -1088,7 +1088,6 @@ bool GenerateStream::needsAsyncBookkeepingJoinForKvReservation() const {
     }
 
     const auto state = getMtpAsyncDeviceState();
-    const auto state = getMtpAsyncDeviceState();
     // Normal decode can reserve from its published next length while the host
     // commit is pending. Without device input there is no published length:
     // join before allocation reads seqLength(), otherwise a page crossing can
