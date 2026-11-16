@@ -246,6 +246,7 @@ TEST(SpeculativeSamplerTest, ExplicitForceAcceptKeepsItsOverride) {
     const auto result   = sampler.forward(params, draft, target);
     EXPECT_EQ(result.accept_len.item<int32_t>(), 4);
     EXPECT_TRUE(torch::equal(result.accept_tokens.cpu(), torch::tensor({{1, 1, 1, 2}}, torch::kInt32)));
+}
 
 TEST(DFlashSamplerTest, GreedyUsesExactPointMass) {
     GenerateConfig config;

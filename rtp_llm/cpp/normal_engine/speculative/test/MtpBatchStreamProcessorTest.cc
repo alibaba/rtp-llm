@@ -99,7 +99,7 @@ class ProcessorTestGenerateStream: public NormalGenerateStream {
 public:
     using NormalGenerateStream::NormalGenerateStream;
     using GenerateStream::generate_status_;
-    using GenerateStream::logits_processor_list_;
+    using GenerateStream::sampling_state_;
 };
 
 class MtpBatchStreamProcessorTest: public DeviceTestBase {
@@ -1247,8 +1247,17 @@ TEST_F(MtpBatchStreamProcessorTest, testTorchSpecDSparkAnchorProposalAndVerifyWi
         TensorHolder holder;
         auto anchors = torch::tensor({101, 202}, torch::kInt32).to(torch::kCUDA);
         auto ends    = torch::tensor({10, 20}, torch::kInt32).to(torch::kCUDA);
-        GptModelInputs propose_input;
-        processor.buildDSparkProposeInput(propose_input, anchors, ends, holder);
+        auto positions = torch::tensor({10, 20}, torch::kInt32).reshape({2, 1}).to(torch::kCUDA);
+        mtp::DSparkRoundState round{anchors, ends, positions};
+        GptModelInputs              propose_input;
+        mtp::DSparkProposeInputBuffers propose_buffers;
+        mtp::prepareDSparkProposeInput(propose_input,
+                                       round,
+                                       /*propose_step=*/static_cast<size_t>(gamma),
+                                       /*mask_token_id=*/255,
+                                       /*sample_from_anchor=*/true,
+                                       propose_buffers,
+                                       holder);
         std::vector<int32_t> expected_propose;
         for (const int32_t anchor: {101, 202}) {
             expected_propose.push_back(anchor);
@@ -1259,8 +1268,6 @@ TEST_F(MtpBatchStreamProcessorTest, testTorchSpecDSparkAnchorProposalAndVerifyWi
                   toVec<int32_t>(propose_input.input_lengths));
         EXPECT_EQ(gamma * 2, propose_input.lm_output_indexes.numel());
 
-        auto positions = torch::tensor({10, 20}, torch::kInt32).reshape({2, 1}).to(torch::kCUDA);
-        MtpBatchStreamProcessor::DSparkRoundState round{anchors, ends, positions};
         auto proposals =
             torch::arange(1, gamma * 2 + 1, torch::kInt32).reshape({2, gamma}).to(torch::kCUDA);
         GptModelInputs verify_input;
