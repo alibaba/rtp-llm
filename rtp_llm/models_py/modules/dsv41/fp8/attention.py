@@ -25,7 +25,6 @@ import deep_gemm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
 from rtp_llm.models_py.modules.dsv41._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
@@ -354,6 +353,8 @@ def _prepare_wo_a_stacked(
     floor-log2 bitcasts each block scale and packs 4 UE8M0 bytes per
     int32; output shape ``[G, R, K/512]`` matches
     ``deep_gemm.fp8_einsum(..., recipe=(1, 1, 128))`` expectations."""
+    from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
     w_stk = weight_fp8.view(G, R, K).contiguous()
     scale_block = K // scale_raw.shape[-1]
     scale_fp32 = scale_raw.float().view(G, R // scale_block, K // scale_block)

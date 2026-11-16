@@ -3,7 +3,6 @@
 import weakref
 
 import torch
-from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.base.common.embedding import Embedding
@@ -31,6 +30,8 @@ class V41MXFP8Linear(torch.nn.Module):
         self.weight_scales = self.pack_scales(scales)
 
     def pack_scales(self, scales: torch.Tensor) -> torch.Tensor:
+        from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
         if scales.shape != ((self.N + 31) // 32, (self.K + 31) // 32):
             raise ValueError(
                 f"Invalid V4.1 FP8 scales: {(self.N, self.K)}, {scales.shape}"
@@ -148,6 +149,8 @@ def iter_fp8_linears() -> list:
 
 def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
     """V4 ckpt UE8M0 ``[N/128, K/128]`` to DeepGEMM int32-packed scale."""
+    from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
     n_blk, _ = scale.shape
     n = n_blk * 128
     idx = torch.arange(n, device=scale.device) // 128

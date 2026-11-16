@@ -263,6 +263,10 @@ def build_plan(args):
             "MAGA_SERVER_WORK_DIR": str(directory),
             "RTP_PYTHON_BIN": sys.executable,
         }
+        if "RTP_V41_PPU_MEGAMOE_MODULE" in os.environ:
+            environment["RTP_V41_PPU_MEGAMOE_MODULE"] = os.environ[
+                "RTP_V41_PPU_MEGAMOE_MODULE"
+            ]
         command = [
             sys.executable,
             "-B",
@@ -655,7 +659,12 @@ def check_graph_evidence(job):
             if (calls > 0) != enabled or (route == "packed_attention" and calls % 40):
                 raise ValueError(f"rank {rank}: wrong {route} Graph capture count: {calls}")
         assignments += sum(e["mega_received_assignments"] for e in engines)
-    if not assignments:
+    mega_module = job["environment"].get(
+        "RTP_V41_PPU_MEGAMOE_MODULE",
+        os.environ.get("RTP_V41_PPU_MEGAMOE_MODULE", "deep_gemm"),
+    )
+    # The separately packaged provider documents receive stats as reserved.
+    if mega_module != "deep_gemm_mega" and not assignments:
         raise ValueError("Graph reports contain no received expert assignments")
 
 

@@ -26,6 +26,19 @@ _VERIFY_FUSED_TOPK_ENV = "RTP_V41_PPU_VERIFY_FUSED_INDEXER_TOPK"
 _VERIFY_COMPACT_TOPK_ENV = "RTP_V41_PPU_VERIFY_COMPACT_TOPK"
 
 
+@lru_cache(maxsize=1)
+def _sparse_indexer_ops():
+    import deep_gemm
+
+    if not hasattr(deep_gemm, "fp8_fp4_paged_sparse_mqa_logits"):
+        import deep_gemm_mega as deep_gemm
+
+    return (
+        deep_gemm.fp8_fp4_paged_sparse_mqa_logits,
+        deep_gemm.get_paged_sparse_mqa_logits_metadata,
+    )
+
+
 def indexer_scores(
     query, head_weights, *, cache, source_layer, ratio, positions, valid_mask
 ) -> torch.Tensor:
@@ -106,10 +119,7 @@ def _indexer_score_tiles(
     scales. Sparse block IDs skip the unused half of ratio-2 pages while the
     scheduler and output columns remain in compact compressed coordinates.
     """
-    from deep_gemm import (
-        fp8_fp4_paged_sparse_mqa_logits,
-        get_paged_sparse_mqa_logits_metadata,
-    )
+    score_logits, make_metadata = _sparse_indexer_ops()
 
     pool = cache.pool(source_layer, _INDEXER_POOL)
     table = cache.tables[_INDEXER_POOL][: query.shape[0]]
@@ -196,12 +206,12 @@ def _indexer_score_tiles(
                 logical_blocks, physical_blocks, blocks, start, width, 256,
             )
         if entry is None:
-            metadata = get_paged_sparse_mqa_logits_metadata(
+            metadata = make_metadata(
                 lengths, safe_pages, rows, physical_page, block_ids, torch.int8, tile
             )
             if tile_metadata_cache is not None:
                 tile_metadata_cache[key] = safe_pages, lengths, metadata
-        scores = fp8_fp4_paged_sparse_mqa_logits(
+        scores = score_logits(
             packed_query, packed_pool, weights, metadata, blocks, tile
         )
         if kernels is None:
@@ -941,10 +951,7 @@ def _sparse_candidate_scores(
     if capacity <= width:
         return None
 
-    from deep_gemm import (
-        fp8_fp4_paged_sparse_mqa_logits,
-        get_paged_sparse_mqa_logits_metadata,
-    )
+    score_logits, make_metadata = _sparse_indexer_ops()
     kernels = _compact_kernels()
     device = query.device
     key = (
@@ -966,7 +973,7 @@ def _sparse_candidate_scores(
             physical_page // tile, tile, count, blocks, kernels.triton.next_power_of_2(count),
             num_warps=8,
         )
-        metadata = get_paged_sparse_mqa_logits_metadata(
+        metadata = make_metadata(
             lengths, table, rows, physical_page, provider_ids, torch.int8, tile,
         )
         schedule = metadata, logical_ids, lengths, candidates, candidate_active, visible, valid_mask
@@ -976,7 +983,7 @@ def _sparse_candidate_scores(
     packed_query, packed_pool, weights = _score_inputs(
         query, head_weights, pool, physical_page, True, quantized_query,
     )
-    scores = fp8_fp4_paged_sparse_mqa_logits(
+    scores = score_logits(
         packed_query, packed_pool, weights, metadata, blocks, tile,
     )
     return SimpleNamespace(
