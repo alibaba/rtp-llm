@@ -426,7 +426,7 @@ public abstract class AbstractRequestScheduler
                         result != null && result.status() == SelectionResult.Status.BLOCKED;
                 Throwable cleanup;
                 if (waitingForCapacity && acquired != null) {
-                    cleanup = releaseRouteResources(acquired, ReleaseReason.LOCAL_ROLLBACK, false);
+                    cleanup = rollbackSelectedRouteResources(acquired);
                     if (cleanup != null) {
                         var rollbackError =
                                 Response.buildErrorResponse(
@@ -528,10 +528,7 @@ public abstract class AbstractRequestScheduler
                     }
                 }
             }
-            failure =
-                    route == null
-                            ? null
-                            : releaseRouteResources(route, ReleaseReason.LOCAL_ROLLBACK, false);
+            failure = route == null ? null : rollbackSelectedRouteResources(route);
             boolean rollbackFailed = failure != null;
             if (routingContext != null) {
                 if (rollbackFailed)
@@ -553,67 +550,6 @@ public abstract class AbstractRequestScheduler
         } catch (RuntimeException | Error completion) {
             return Failures.append(completion, failure);
         }
-    }
-
-    /**
-     * One resource-release implementation for admission rollback, route withdrawal and request end.
-     * Rollback checks every acquired resource; request end retains successful release progress.
-     */
-    static Throwable releaseRouteResources(
-            RequestRoute route, ReleaseReason reason, boolean notificationsSubmitted) {
-        var ctx = route.ctx();
-        var state = ctx.snapshot();
-        boolean rollback = reason == ReleaseReason.LOCAL_ROLLBACK;
-        boolean mayReleaseDecode =
-                reason != ReleaseReason.COUNTERPART_FINISHED || state.committedRoute() == null;
-        boolean prefillAndEncoderReleased =
-                !rollback && state.route() == route && state.prefillCleanupCompleted();
-        boolean decodeReleased =
-                !rollback && state.route() == route && state.decodeCleanupCompleted();
-        Throwable failure = null;
-        if (!prefillAndEncoderReleased) {
-            if (route.encoderEndpoint() != null)
-                failure =
-                        Failures.run(
-                                failure,
-                                () ->
-                                        route.encoderEndpoint()
-                                                .releaseRequest(route.encoderRegistration()));
-            if (route.prefillEndpoint() != null)
-                failure =
-                        Failures.run(
-                                failure,
-                                () ->
-                                        route.prefillEndpoint()
-                                                .releaseRequest(route.prefillRegistration()));
-            prefillAndEncoderReleased = failure == null;
-        }
-        try {
-            if (!decodeReleased && mayReleaseDecode) {
-                var endpoint = route.decodeEndpoint();
-                var registration = route.decodeRegistration();
-                if (endpoint == null || registration == null) {
-                    decodeReleased = true;
-                } else if (rollback) {
-                    endpoint.rollbackSelection(registration);
-                    decodeReleased = true;
-                } else if (reason == ReleaseReason.COUNTERPART_FINISHED) {
-                    decodeReleased = endpoint.releaseUnconfirmedRequest(registration);
-                } else {
-                    endpoint.releaseRequest(registration);
-                    decodeReleased = true;
-                }
-            }
-        } catch (Throwable problem) {
-            failure = Failures.append(failure, problem);
-        }
-        ctx.recordCleanupProgress(
-                route,
-                prefillAndEncoderReleased,
-                decodeReleased,
-                notificationsSubmitted && failure == null,
-                System.currentTimeMillis());
-        return failure;
     }
 
     final boolean tryCompleteFromExternal(
@@ -875,17 +811,62 @@ public abstract class AbstractRequestScheduler
                             null, () -> expirationTimer.update(ctx, ctx.snapshot().deadlines()));
             problem = Failures.append(problem, submitEngineCancellation(ctx));
             var state = ctx.snapshot();
-            var reason = releaseReason(state);
             var route = state.route();
-            if (reason != null) {
-                if (route == null) {
-                    ctx.recordCleanupProgress(
-                            null, true, true, problem == null, System.currentTimeMillis());
-                } else {
-                    problem =
-                            Failures.append(
-                                    problem, releaseRouteResources(route, reason, problem == null));
+            if (state.phase() == Phase.ENDING && state.selectionId() == 0L) {
+                boolean prefillAndEncoderReleased =
+                        route == null || state.prefillCleanupCompleted();
+                boolean decodeReleased = route == null || state.decodeCleanupCompleted();
+                Throwable releaseFailure = null;
+                if (!prefillAndEncoderReleased) {
+                    if (route.encoderEndpoint() != null)
+                        releaseFailure =
+                                Failures.run(
+                                        releaseFailure,
+                                        () ->
+                                                route.encoderEndpoint()
+                                                        .releaseRequest(
+                                                                route.encoderRegistration()));
+                    if (route.prefillEndpoint() != null)
+                        releaseFailure =
+                                Failures.run(
+                                        releaseFailure,
+                                        () ->
+                                                route.prefillEndpoint()
+                                                        .releaseRequest(
+                                                                route.prefillRegistration()));
+                    prefillAndEncoderReleased = releaseFailure == null;
                 }
+                boolean remoteReleaseConfirmed =
+                        state.committedRoute() != null
+                                && state.prefillWorkerReleaseConfirmed()
+                                && state.decodeWorkerReleaseConfirmed();
+                try {
+                    if (!decodeReleased) {
+                        var endpoint = route.decodeEndpoint();
+                        var registration = route.decodeRegistration();
+                        if (remoteReleaseConfirmed || state.inactivityExpired()) {
+                            // Remove local registration only; reported Worker occupancy remains
+                            // authoritative.
+                            if (endpoint != null && registration != null)
+                                endpoint.releaseRequest(registration);
+                            decodeReleased = true;
+                        } else if (state.committedRoute() == null) {
+                            decodeReleased =
+                                    endpoint == null
+                                            || registration == null
+                                            || endpoint.releaseUnconfirmedRequest(registration);
+                        }
+                    }
+                } catch (Throwable cleanupFailure) {
+                    releaseFailure = Failures.append(releaseFailure, cleanupFailure);
+                }
+                problem = Failures.append(problem, releaseFailure);
+                ctx.recordCleanupProgress(
+                        route,
+                        prefillAndEncoderReleased,
+                        decodeReleased,
+                        problem == null,
+                        System.currentTimeMillis());
             } else if (problem == null) {
                 ctx.recordCleanupProgress(route, false, false, true, System.currentTimeMillis());
             }
@@ -915,16 +896,43 @@ public abstract class AbstractRequestScheduler
         return null;
     }
 
-    private static ReleaseReason releaseReason(RequestContext.Snapshot state) {
-        if (state.phase() != Phase.ENDING || state.selectionId() != 0L) return null;
-        if (state.committedRoute() != null
-                && state.prefillWorkerReleaseConfirmed()
-                && state.decodeWorkerReleaseConfirmed()) return ReleaseReason.REMOTE_CLEANUP;
-        // Inactivity expiry drops local bookkeeping; confirmed capacity still follows Worker
-        // reports.
-        return state.inactivityExpired()
-                ? ReleaseReason.EXPIRED
-                : ReleaseReason.COUNTERPART_FINISHED;
+    /**
+     * Rolls back each registration acquired by one unpublished selection, without ending selection.
+     * Decode rollback rejects a registration already confirmed by the Worker.
+     */
+    private static Throwable rollbackSelectedRouteResources(RequestRoute route) {
+        Throwable failure = null;
+        if (route.encoderEndpoint() != null)
+            failure =
+                    Failures.run(
+                            failure,
+                            () ->
+                                    route.encoderEndpoint()
+                                            .releaseRequest(route.encoderRegistration()));
+        if (route.prefillEndpoint() != null)
+            failure =
+                    Failures.run(
+                            failure,
+                            () ->
+                                    route.prefillEndpoint()
+                                            .releaseRequest(route.prefillRegistration()));
+        boolean prefillAndEncoderReleased = failure == null;
+        boolean decodeReleased = false;
+        try {
+            if (route.decodeEndpoint() != null && route.decodeRegistration() != null)
+                route.decodeEndpoint().rollbackSelection(route.decodeRegistration());
+            decodeReleased = true;
+        } catch (Throwable problem) {
+            failure = Failures.append(failure, problem);
+        }
+        route.ctx()
+                .recordCleanupProgress(
+                        route,
+                        prefillAndEncoderReleased,
+                        decodeReleased,
+                        false,
+                        System.currentTimeMillis());
+        return failure;
     }
 
     private static Response response(RequestContext.Snapshot ending, RequestRoute route) {
@@ -1008,13 +1016,5 @@ public abstract class AbstractRequestScheduler
             return Response.buildErrorResponse(
                     StrategyErrorType.INVALID_REQUEST, "missing scheduling metadata");
         return null;
-    }
-
-    enum ReleaseReason {
-        COUNTERPART_FINISHED,
-        LOCAL_ROLLBACK,
-        NOT_SENT,
-        REMOTE_CLEANUP,
-        EXPIRED
     }
 }

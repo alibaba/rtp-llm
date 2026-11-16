@@ -2,7 +2,6 @@ package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
-import org.flexlb.balance.request.Response;
 import org.flexlb.balance.requestlog.TheoryCacheHitReporter;
 import org.flexlb.balance.schedule.RequestContext.SelectionAttempt;
 import org.flexlb.config.ConfigService;
@@ -33,7 +32,6 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -88,41 +86,41 @@ class RequestResourceAccountingTest {
     }
 
     @Test
-    void partialCleanupFailureStillAttemptsOtherResourcesAndPreservesDecodeSettlement() {
-        var context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), ID);
-        var prefill = mock(PrefillEndpoint.class);
-        var decode = RequestProtocolTestSupport.decodeEndpoint();
-        var reservation = new DecodeEndpoint.RequestRegistration(1L, String.valueOf(ID));
-        var item =
-                SchedulingTestConfig.createRoute(
-                        context,
-                        new Response(),
-                        null,
-                        null,
-                        prefill,
-                        decode,
-                        reservation,
-                        System.currentTimeMillis());
-        when(decode.releaseRequest(reservation)).thenReturn(true);
-        var releaseFailure = new IllegalStateException("Prefill release failed");
-        when(prefill.releaseRequest(item.prefillRegistration())).thenThrow(releaseFailure);
-        RequestProtocolTestSupport.closing(item);
-        var firstFailure =
-                AbstractRequestScheduler.releaseRouteResources(
-                        item, AbstractRequestScheduler.ReleaseReason.NOT_SENT, false);
-        assertFalse(context.snapshot().prefillCleanupCompleted());
-        assertTrue(context.snapshot().decodeCleanupCompleted());
-        assertSame(releaseFailure, firstFailure);
-        org.mockito.Mockito.verify(decode).releaseRequest(reservation);
+    void partialCleanupFailureStillReleasesDecodeAndPreservesProgressOnRetry() throws Exception {
+        try (Fixture f = new Fixture(true)) {
+            var releaseFailure = new IllegalStateException("Prefill release failed");
+            org.mockito.Mockito.doThrow(releaseFailure)
+                    .when(f.prefill)
+                    .releaseRequest(f.routeReservation);
+            f.requests.cancel(String.valueOf(ID), CancelReason.CLIENT_CANCELLED);
+            f.item.ctx()
+                    .finishSelectionWithoutCommit(f.admission, null, System.currentTimeMillis());
 
-        org.mockito.Mockito.doReturn(true).when(prefill).releaseRequest(item.prefillRegistration());
-        assertNull(
-                AbstractRequestScheduler.releaseRouteResources(
-                        item, AbstractRequestScheduler.ReleaseReason.NOT_SENT, false));
-        assertTrue(context.snapshot().prefillCleanupCompleted());
-        assertTrue(context.snapshot().decodeCleanupCompleted());
-        org.mockito.Mockito.verify(decode, org.mockito.Mockito.times(1))
-                .releaseRequest(reservation);
+            var firstFailure =
+                    org.junit.jupiter.api.Assertions.assertThrows(
+                            IllegalStateException.class,
+                            () ->
+                                    org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                                            f.requests, "cleanupRequest", f.item.ctx()));
+            assertSame(releaseFailure, firstFailure);
+            assertFalse(f.item.ctx().snapshot().prefillCleanupCompleted());
+            assertTrue(f.item.ctx().snapshot().decodeCleanupCompleted());
+            assertFalse(f.decode.resourceSnapshot().requests().containsKey(String.valueOf(ID)));
+            assertEquals(0L, f.decode.selectionSnapshot().usage().hardReservedKvTokens());
+            assertEquals(0L, f.decode.selectionSnapshot().usage().occupiedRequests());
+            long releasedVersion = f.decode.resourceSnapshot().selection().admissionVersion();
+
+            org.mockito.Mockito.doCallRealMethod()
+                    .when(f.prefill)
+                    .releaseRequest(f.routeReservation);
+            org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                    f.requests, "cleanupRequest", f.item.ctx());
+            assertTrue(f.item.ctx().snapshot().prefillCleanupCompleted());
+            assertTrue(f.item.ctx().snapshot().decodeCleanupCompleted());
+            assertEquals(0, f.prefill.stats().locallyOwnedRequests());
+            assertEquals(
+                    releasedVersion, f.decode.resourceSnapshot().selection().admissionVersion());
+        }
     }
 
     @ParameterizedTest

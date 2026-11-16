@@ -93,6 +93,11 @@ finishSelectionWithoutCommit，落实等待中的取消或失败，再由调度�
 提交时间和 P/D 远端释放证据直接记录在请求上。结束结果归档不携带路由引用。
 每轮清理在请求锁外提交取消和释放资源，再一次记录成功释放的各侧资源及通知进展并检查归档；
 部分失败保留已成功的进度。归档还要求响应已选定或 Future 已完成。
+选址回滚由 rollbackSelectedRouteResources 撤销本次取得的登记，不隐含结束选址；
+退出选址时由 finishUnpublishedRoute 先回滚，再完成选址收尾。
+cleanupRequest 直接依据提交情况、P/D 远端释放确认和无反馈过期推进结束清理，
+不再通过释放原因枚举选择动作。已提交但释放依据不足时保留 Decode 登记；
+未提交时只删除未确认登记；无反馈过期移除本地记录不清除 Worker 上报占用。
 Timing 统一保存观测时间：AtMs 是 Unix 毫秒时间点，Nanos 是单调时钟时间点，ElapsedUs/DelayMs 是耗时。
 登记时间同时用于队列观测和生命周期查询；没有第二份 enqueueTime。已废弃的 ACK 阶段及其延迟统计不再保留。
 PreemptionStatistics 一次保存已提交抢占的诊断成本和请求数量，成本不解释为毫秒。
