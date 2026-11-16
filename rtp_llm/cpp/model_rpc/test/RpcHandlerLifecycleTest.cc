@@ -1,4 +1,5 @@
 #include <chrono>
+#include <thread>
 #include <exception>
 #include <future>
 #include <memory>
@@ -541,18 +542,24 @@ TEST_F(RpcHandlerLifecycleTest, PrefillBatchTerminalCleanupMarksHandlingComplete
         auto& entry = prefill.batch_entries_["lifecycle-batch"];
         entry.reserved = true;
         entry.context = std::move(context);
+        const auto now = currentTimeMs();
+        prefill.registerBatchAttach("lifecycle-batch", stream, 5000, now + 10000, now);
+        ASSERT_TRUE(prefill.attachBatch("lifecycle-batch", now));
         if (action == OutputAction::COMPLETE) {
             stream->reportEvent(StreamEvents::GenerateDone);
-            reap(engine, free_before);
         } else {
             stream->reportError(ErrorCode::PRIORITY_PREEMPTED, kFailureReason);
         }
-        prefill.batchContextCleanupTick();
-        EXPECT_TRUE(prefill.batch_entries_.empty());
-        EXPECT_EQ(capture.content().find(kUnexpectedExit), std::string::npos);
-        if (action == OutputAction::FAIL) {
-            reap(engine, free_before);
+        reap(engine, free_before);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (prefill.onflightRequestNum() != 0 && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
+        {
+            std::lock_guard<std::mutex> lock(prefill.batch_event_owner_->mutex);
+            EXPECT_EQ(prefill.onflightRequestNum(), 0u);
+        }
+        EXPECT_EQ(capture.content().find(kUnexpectedExit), std::string::npos);
     }
 }
 

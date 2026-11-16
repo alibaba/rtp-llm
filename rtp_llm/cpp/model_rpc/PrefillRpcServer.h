@@ -6,6 +6,8 @@
 #include "rtp_llm/cpp/model_rpc/PDCancelRegistry.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRequestLogger.h"
 #include <atomic>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -44,7 +46,7 @@ public:
 
 private:
     std::unique_ptr<PrefillRequestLogger> request_logger_;
-    std::unique_ptr<PDCancelRegistry> cancel_registry_;
+    std::shared_ptr<PDCancelRegistry>     cancel_registry_;
     // Per-onflight tracker for [HANG-DIAG] watchdog. Each GenerateStreamCall
     // registers an entry on entry and removes it on return; the background
     // hang_diag_thread_ periodically scans for entries that have been alive
@@ -85,31 +87,41 @@ private:
         int64_t                          request_deadline_ms{0};
         bool                             attach_pending{false};
         bool                             expired{false};
+        bool                             attached{false};
+        uint64_t                         generation{0};
+        std::function<void()>            cancel_alarm;
     };
+    struct BatchEventOwner {
+        explicit BatchEventOwner(PrefillRpcServer* server): server(server) {}
+        std::mutex        mutex;
+        PrefillRpcServer* server;
+    };
+    static std::function<void()>                scheduleBatchEvent(std::weak_ptr<BatchEventOwner>         owner,
+                                                                   int64_t                                delay_ms,
+                                                                   std::function<void(PrefillRpcServer&)> callback);
     void                                        registerBatchAttach(const std::string&       key,
                                                                     const GenerateStreamPtr& stream,
                                                                     int64_t                  timeout_ms,
                                                                     int64_t                  request_deadline_ms,
                                                                     int64_t                  now_ms);
     bool                                        attachBatch(const std::string& key, int64_t now_ms);
-    void                                        expireBatchAttachments(int64_t now_ms);
+    void expireBatchAttachment(const std::string& key, uint64_t generation, int64_t now_ms);
+    void finishBatchStream(const std::string& key, uint64_t generation);
     bool                                        batch_stopping_{false};
     std::mutex                                  batch_mutex_;
     std::unordered_map<std::string, BatchEntry> batch_entries_;
+    uint64_t                                    batch_generation_{0};
+    std::shared_ptr<BatchEventOwner>            batch_event_owner_{std::make_shared<BatchEventOwner>(this)};
 
-    void               hangDiagTick();
-    void               batchContextCleanupTick();
-    std::unique_ptr<GenerateContext> makeBatchRequestContext(
-        const GenerateInputPB& request,
-        const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& batch_span);
-    void               cancelCleanupTick();
-    int64_t            last_cancel_tick_ms_{0};
+    void hangDiagTick();
+    std::unique_ptr<GenerateContext>
+                       makeBatchRequestContext(const GenerateInputPB&                                              request,
+                                               const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& batch_span);
     static const char* stepName(int step);
 
     mutable std::mutex                                            onflight_trackers_mutex_;
     std::unordered_map<int64_t, std::shared_ptr<OnflightTracker>> onflight_trackers_;
     autil::LoopThreadPtr                                          hang_diag_thread_;
-    autil::LoopThreadPtr                                          batch_context_cleanup_thread_;
     int64_t                                                       hang_diag_warn_threshold_ms_{60 * 1000};
 };
 

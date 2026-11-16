@@ -138,6 +138,7 @@ cc_library(
         "//rtp_llm/cpp/utils:atomic_util",
         "//rtp_llm/cpp/utils:deferred_completion_queue_drainer",
         "//rtp_llm/cpp/utils:grpc_address_util",
+        "//rtp_llm/cpp/utils:rpc_completion_queue",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:kv_cache_utils",

@@ -405,7 +405,7 @@ TEST(RpcWriterCancellationTest, PdValidationAndAdmissionErrorsEndServerSpanBefor
         EXPECT_EQ(errorInfoFromGrpcStatus(status).code(), ErrorCode::GENERATE_TIMEOUT);
         EXPECT_NE(status.error_message().find("trace_id=decode-rejected-trace"), std::string::npos);
         EXPECT_EQ(server.onflight_requests_.load(), 0u);
-        EXPECT_TRUE(server.cancel_registry_->pending().empty());
+        EXPECT_FALSE(server.cancel_registry_->find(61));
     }
     EXPECT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
     auto spans = span_data->GetSpans();
@@ -473,9 +473,17 @@ TEST(RpcWriterCancellationTest, BatchItemTraceUsesItsRemoteContextAndEndsOnPreem
         auto& entry = server.batch_entries_["trace-batch"];
         entry.reserved = true;
         entry.context = std::move(context);
+        const auto now = currentTimeMs();
+        server.registerBatchAttach("trace-batch", stream, 5000, now + 10000, now);
+        ASSERT_TRUE(server.attachBatch("trace-batch", now));
         stream->reportError(ErrorCode::PRIORITY_PREEMPTED, "victim preempted");
-        server.batchContextCleanupTick();
-        EXPECT_TRUE(server.batch_entries_.empty());
+        ASSERT_EQ(stream->moveToNext(), StreamState::FINISHED);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (server.onflightRequestNum() != 0 && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        std::lock_guard<std::mutex> lock(server.batch_event_owner_->mutex);
+        EXPECT_EQ(server.onflightRequestNum(), 0u);
     }
     EXPECT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
     auto spans = span_data->GetSpans();
