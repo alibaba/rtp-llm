@@ -134,7 +134,7 @@ def package():
     )
     jar = FRAMEWORK / "java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar"
     with zipfile.ZipFile(jar) as archive:
-        provider = "META-INF/services/org.flexlb.discovery.ServiceDiscovery"
+        provider = "META-INF/services/org.flexlb.discovery.ServiceDiscoveryProvider"
         if internal_discovery:
             required = (
                 provider,
@@ -146,8 +146,8 @@ def package():
                     "Internal Engine package is missing native VIPServer discovery"
                 )
             if (
-                archive.read(provider).decode().strip()
-                != "org.flexlb.discovery.VipServerDiscovery"
+                "org.flexlb.discovery.VipServerDiscovery"
+                not in archive.read(provider).decode().splitlines()
             ):
                 raise SystemExit("Unexpected Engine discovery provider")
         elif provider in archive.namelist():
