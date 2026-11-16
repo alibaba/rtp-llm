@@ -779,14 +779,15 @@ static GreedyOutput tryCompactDeferredSampling(const GreedyParams& params, float
     };
     const float compact_p = normalize_p(requested_p[0]);
     if (params.allow_compact_deferred_output && (!filter_env || std::string(filter_env) == "1")
-        && requested_k[0] == 1024
-        && std::all_of(requested_k, requested_k + batch_size, [](int32_t value) { return value == 1024; })
+        && requested_k[0] >= 2 && requested_k[0] <= 1024
+        && std::all_of(requested_k, requested_k + batch_size,
+                       [requested_k](int32_t value) { return value == requested_k[0]; })
         && std::all_of(requested_p, requested_p + batch_size, [compact_p, normalize_p](float value) {
                return normalize_p(value) == compact_p;
            })) {
         torch::Tensor log_normalizer;
         auto compact = torch_ext::deferred_compact_topk_topp(
-            params.logits, 1024, compact_p, temperature, &log_normalizer);
+            params.logits, 1024, compact_p, temperature, &log_normalizer, requested_k[0]);
         if (std::get<0>(compact).defined()) {
             torch::Tensor prepared_rng;
             if (params.deferred_rejection_rows > 0) {

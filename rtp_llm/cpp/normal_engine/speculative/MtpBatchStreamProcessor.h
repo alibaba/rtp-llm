@@ -133,7 +133,7 @@ public:
                             const SpeculativeExecutionConfig&  sp_config,
                             bool                               warm_up):
         NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
-        propose_step_(sp_config.gen_num_per_cycle) {}
+        propose_step_(sp_config.gen_num_per_cycle), glm5_target_(model_config.model_type == "glm_5") {}
 
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
                                  const MergedOutput& prefill_output,
@@ -184,7 +184,8 @@ public:
                             const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result     = {},
                             bool                                        compact_target_capable = false,
                             const torch::Tensor&                        draft_token_ids = {},
-                            bool                                        allow_deferred_sampling = true) const;
+                            bool                                        allow_deferred_sampling = true,
+                            bool                                        allow_inplace_logits = false) const;
 
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                       GptModelInputs&     model_input,
@@ -258,5 +259,7 @@ protected:
 
 protected:
     int propose_step_;
+    bool glm5_target_;
+    mutable std::optional<torch::Stream> sampler_input_copy_stream_;
 };
 }  // namespace rtp_llm

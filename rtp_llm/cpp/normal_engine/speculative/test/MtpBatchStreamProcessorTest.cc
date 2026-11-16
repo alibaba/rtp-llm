@@ -1800,6 +1800,253 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTok
     }
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testGlm5AutoCompactTargetAndInplaceLogits) {
+    if (!std::getenv("RTP_LLM_TEST_PYTHON_SAMPLING")) {
+        GTEST_SKIP() << "Requires the deferred sampling runtime";
+    }
+    initializeSamplingPython();
+    ASSERT_TRUE(supportsDeferredRejectionSampling());
+    ModelConfig model_config;
+    model_config.model_type = "glm_5";
+    model_config.max_seq_len = 32;
+    model_config.vocab_size  = 2048;
+    model_config.num_layers  = 1;
+    RuntimeConfig runtime_config;
+    ResourceContext resource_context;
+    auto stream = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    stream->setScoreLen(2);
+    StreamGroups stream_groups({stream});
+    SpeculativeExecutionConfig sp_config;
+    sp_config.gen_num_per_cycle = 1;
+    CacheConfig cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+    MtpBatchStreamProcessor processor(
+        model_config, PDSepConfig(), ProfilingDebugLoggingConfig(), cache_config, sp_config, false);
+
+    GptModelInputs model_inputs;
+    GptModelOutputs model_output;
+    auto logit_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    model_output.logits = torch::arange(2048, logit_options).mul(-0.0001).unsqueeze(0).repeat({2, 1});
+    const auto gather = [&](bool inplace) {
+        return processor.gatherSpecSamplerInput(stream_groups,
+                                                model_inputs,
+                                                model_output,
+                                                {},
+                                                false,
+                                                {},
+                                                true,
+                                                inplace);
+    };
+    auto copied = gather(false);
+    ASSERT_TRUE(copied.ok());
+    EXPECT_NE(copied.value().logits.data_ptr(), model_output.logits.data_ptr());
+
+    auto inplace = gather(true);
+    ASSERT_TRUE(inplace.ok());
+    EXPECT_EQ(inplace.value().logits.data_ptr(), model_output.logits.data_ptr());
+    EXPECT_EQ(inplace.value().token_ids.size(0), 2);
+    EXPECT_EQ(inplace.value().token_ids.size(1), 1);
+    EXPECT_EQ(toVec<int32_t>(inplace.value().top_k), (std::vector<int32_t>{1024, 1024}));
+    Sampler sampler(SamplerInitParams{"glm_5", 2048});
+    auto sampled = sampler.forward(inplace.value());
+    ASSERT_TRUE(sampled.deferred_token_sampling);
+    ASSERT_TRUE(sampled.verify_candidate_ids.defined());
+    EXPECT_EQ(sampled.verify_logits.size(1), 1024);
+    {
+        autil::EnvGuard disabled("RTP_LLM_GLM5_AUTO_TOPK1024", "0");
+        auto fallback = gather(true);
+        ASSERT_TRUE(fallback.ok());
+        EXPECT_EQ(toVec<int32_t>(fallback.value().top_k), (std::vector<int32_t>{0, 0}));
+    }
+    stream->generateConfig()->top_k = 32;
+    auto explicit_k = gather(true);
+    ASSERT_TRUE(explicit_k.ok());
+    EXPECT_EQ(toVec<int32_t>(explicit_k.value().top_k), (std::vector<int32_t>{32, 32}));
+    auto explicit_sampled = sampler.forward(explicit_k.value());
+    ASSERT_TRUE(explicit_sampled.verify_candidate_ids.defined());
+    EXPECT_EQ(explicit_sampled.verify_logits.size(1), 1024);
+    EXPECT_EQ(torch::isfinite(explicit_sampled.verify_logits).sum().item<int64_t>(), 64);
+    stream->generateConfig()->top_k = 1536;
+    auto wide_k = gather(true);
+    ASSERT_TRUE(wide_k.ok());
+    EXPECT_EQ(toVec<int32_t>(wide_k.value().top_k), (std::vector<int32_t>{1536, 1536}));
+    auto wide_sampled = sampler.forward(wide_k.value());
+    ASSERT_TRUE(wide_sampled.deferred_token_sampling);
+    EXPECT_FALSE(wide_sampled.verify_candidate_ids.defined());
+    EXPECT_EQ(torch::isfinite(wide_sampled.verify_logits).sum().item<int64_t>(), 3072);
+    stream->generateConfig()->top_k = 32;
+    stream->generateConfig()->repetition_penalty = 1.1f;
+    auto history = processor.gatherSpecSamplerInput(stream_groups,
+                                                    model_inputs,
+                                                    model_output,
+                                                    {},
+                                                    false,
+                                                    torch::full({1, 1}, 7, torch::kInt32),
+                                                    true,
+                                                    true);
+    ASSERT_TRUE(history.ok());
+    EXPECT_TRUE(history.value().token_ids.is_cuda());
+    EXPECT_EQ(history.value().token_ids.size(1), static_cast<int64_t>(history.value().step + 1));
+    auto token_prefix = history.value().token_ids.narrow(1, 0, 2).cpu();
+    EXPECT_EQ(token_prefix.data_ptr<int32_t>()[0], 1);
+    EXPECT_EQ(token_prefix.data_ptr<int32_t>()[1], 7);
+    EXPECT_EQ(token_prefix.data_ptr<int32_t>()[2], 1);
+    EXPECT_EQ(token_prefix.data_ptr<int32_t>()[3], 7);
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testGlm5TargetVerifySingleGpuABProfile) {
+    if (!std::getenv("RTP_LLM_TEST_TARGET_VERIFY_AB"))
+        GTEST_SKIP() << "Enable explicitly for the single-GPU sampling comparison";
+    initializeSamplingPython();
+    ASSERT_TRUE(supportsDeferredRejectionSampling());
+    const bool accept_all = std::getenv("RTP_LLM_TEST_TARGET_VERIFY_ACCEPT_ALL") != nullptr;
+    const bool deferred_only = std::getenv("RTP_LLM_TEST_TARGET_VERIFY_DEFERRED_ONLY") != nullptr;
+    constexpr int batch = 32, steps = 5, rows = steps + 1, vocab = 129280, cap = 1024;
+    constexpr float top_p = 0.9f;
+    ModelConfig model_config;
+    model_config.model_type  = "glm_5";
+    model_config.max_seq_len = 32;
+    model_config.vocab_size  = vocab;
+    model_config.num_layers  = 1;
+    RuntimeConfig runtime_config;
+    ResourceContext resources;
+    std::list<GenerateStreamPtr> streams;
+    for (int i = 0; i < batch; ++i) {
+        auto query                          = std::make_shared<GenerateInput>();
+        query->input_ids                    = torch::tensor({1}, torch::kInt32);
+        query->generate_config              = std::make_shared<GenerateConfig>();
+        query->generate_config->top_k       = 0;
+        query->generate_config->top_p       = top_p;
+        query->generate_config->temperature = 1.0f;
+        query->generate_config->do_sample   = true;
+        query->generate_config->random_seed = 20261116 + i;
+        auto stream = std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resources, nullptr);
+        stream->setScoreLen(rows);
+        stream->setReturnAllProbs(true);
+        stream->setNeedReleaseResource(false);
+        streams.push_back(stream);
+    }
+    StreamGroups stream_groups(streams);
+    SpeculativeExecutionConfig spec_config;
+    spec_config.gen_num_per_cycle = steps;
+    CacheConfig cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+    MtpBatchStreamProcessor processor(
+        model_config, PDSepConfig(), ProfilingDebugLoggingConfig(), cache_config, spec_config, false);
+    autil::EnvGuard force_topk("RTP_LLM_HY4_FORCE_TOPK", "1024");
+    Sampler eager_sampler(SamplerInitParams{"hy_v4", vocab});
+    Sampler deferred_sampler(SamplerInitParams{"glm_5", vocab});
+    speculative::SpeculativeSampler verifier(torch::Tensor(), steps);
+    const auto fp = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    std::vector<float> values(vocab);
+    double mass = 0;
+    for (int v = 1; v < vocab; ++v) {
+        values[v] = -static_cast<float>(v) / vocab;
+        if (v < cap)
+            mass += std::exp(static_cast<double>(values[v]));
+    }
+    values[0] = accept_all ? 80.0f :
+                             static_cast<float>(std::log(mass * 0.7 * top_p / (1 - 0.7 * top_p)));
+    auto pristine = torch::tensor(values).to(fp).unsqueeze(0).expand({batch * rows, vocab}).contiguous();
+    GptModelInputs model_inputs;
+    GptModelOutputs model_outputs;
+    model_outputs.logits = pristine;
+    SamplerOutput draft;
+    draft.token_ids = torch::zeros({batch, steps}, fp.dtype(torch::kInt32));
+    draft.draft_point_mass = true;
+    const char* directory = std::getenv("TEST_UNDECLARED_OUTPUTS_DIR");
+    ASSERT_NE(directory, nullptr);
+    for (bool deferred : {true, false}) {
+        if (deferred_only && !deferred)
+            continue;
+        auto gathered = processor.gatherSpecSamplerInput(
+            stream_groups, model_inputs, model_outputs, {}, true, draft.token_ids, deferred, true);
+        ASSERT_TRUE(gathered.ok());
+        auto inputs = std::move(gathered.value());
+        ASSERT_EQ(inputs.defer_token_sampling, deferred);
+        if (deferred) {
+            ASSERT_EQ(inputs.top_k.data_ptr<int32_t>()[0], cap);
+            inputs.rejection_rows = rows;
+            for (const auto& stream : streams)
+                inputs.rejection_generators.push_back(stream->getGenerator());
+        } else {
+            ASSERT_TRUE(inputs.allow_compact_target_probs);
+        }
+        Sampler& sampler = deferred ? deferred_sampler : eager_sampler;
+        auto run = [&]() {
+            at::RecordFunction full(at::RecordScope::USER_SCOPE);
+            full.before(deferred ? "ab.deferred.full" : "ab.eager.full");
+            SamplerOutput target;
+            {
+                at::RecordFunction sample(at::RecordScope::USER_SCOPE);
+                sample.before(deferred ? "ab.deferred.target_sampling" : "ab.eager.target_sampling");
+                target = sampler.forward(inputs);
+            }
+            TORCH_CHECK(target.deferred_token_sampling == deferred, "unexpected Target sampling path");
+            if (deferred) {
+                TORCH_CHECK(target.verify_candidate_ids.defined(), "missing deferred candidates");
+                target.verify_logits = target.verify_logits.reshape({batch, rows, cap});
+                target.verify_candidate_ids = target.verify_candidate_ids.reshape({batch, rows, cap});
+                target.verify_dense_fallback = target.verify_dense_fallback.reshape({batch, rows, vocab});
+            } else {
+                TORCH_CHECK(target.all_probs_indices.defined(), "missing eager compact candidates");
+                target.all_probs = target.all_probs.reshape({batch, rows, cap});
+                target.all_probs_indices = target.all_probs_indices.reshape({batch, rows, cap});
+            }
+            at::RecordFunction verify(at::RecordScope::USER_SCOPE);
+            verify.before(deferred ? "ab.deferred.reject_bonus" : "ab.eager.reject_bonus");
+            auto result = verifier.forward(streams, draft, target);
+            return result.accept_len;
+        };
+        for (int i = 0; i < 5; ++i) {
+            inputs.logits.copy_(pristine);
+            run();
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        }
+        std::vector<double> times;
+        int64_t total_emitted = 0;
+        for (int i = 0; i < 20; ++i) {
+            inputs.logits.copy_(pristine);
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            const auto start = std::chrono::steady_clock::now();
+            auto lengths = run();
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            const auto end = std::chrono::steady_clock::now();
+            times.push_back(std::chrono::duration<double, std::micro>(end - start).count());
+            ASSERT_TRUE(torch::all((lengths >= 1) & (lengths <= rows)).item<bool>());
+            if (accept_all) {
+                ASSERT_TRUE(torch::all(lengths == rows).item<bool>());
+            }
+            total_emitted += lengths.sum().item<int64_t>();
+        }
+        std::sort(times.begin(), times.end());
+        namespace tap = torch::autograd::profiler;
+        namespace tpi = torch::profiler::impl;
+        tpi::ProfilerConfig config(tpi::ProfilerState::KINETO, true);
+        const std::set<tpi::ActivityType> activities{tpi::ActivityType::CPU, tpi::ActivityType::CUDA};
+        tap::prepareProfiler(config, activities);
+        tap::enableProfiler(config, activities);
+        for (int i = 0; i < 5; ++i) {
+            inputs.logits.copy_(pristine);
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            run();
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        }
+        auto trace = tap::disableProfiler();
+        const std::string name = deferred ? "deferred" : "eager";
+        trace->save(std::string(directory) + "/glm5_target_verify_" + name + ".json");
+        std::ofstream report(std::string(directory) + "/glm5_target_verify_" + name + "_results.json");
+        report << "{\"batch\":32,\"steps\":5,\"vocab\":129280,\"top_k\":1024,\"top_p\":0.9"
+               << ",\"median_wall_us\":" << times[times.size() / 2]
+               << ",\"mean_emitted\":" << static_cast<double>(total_emitted) / (20 * batch)
+               << ",\"samples_us\":[";
+        for (size_t i = 0; i < times.size(); ++i)
+            report << (i ? "," : "") << times[i];
+        report << "]}" << std::endl;
+        std::cout << "TARGET_VERIFY_AB " << name << " median_wall_us=" << times[times.size() / 2] << std::endl;
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputPreservesNarrowLogitsWithoutLogprobs) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;

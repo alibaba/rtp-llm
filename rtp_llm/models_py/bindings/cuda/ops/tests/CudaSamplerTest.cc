@@ -3174,6 +3174,26 @@ TEST_F(CudaSamplerTest, testDoSample) {
                             10);
 }
 
+TEST_F(CudaSamplerTest, testCompactDeferredHonorsRequestTopK) {
+    const auto* properties = at::cuda::getCurrentDeviceProperties();
+    if (properties->major != 10 || (properties->minor != 0 && properties->minor != 3))
+        GTEST_SKIP() << "DeepSelect requires SM100 or SM103";
+    auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto logits = torch::arange(4096, options).neg().unsqueeze(0).repeat({2, 1});
+    torch::Tensor normalizer;
+    auto selected = torch_ext::deferred_compact_topk_topp(logits, 1024, 1.0f, 1.0f, &normalizer, 32);
+    ASSERT_TRUE(std::get<0>(selected).defined());
+    auto keep = torch::isfinite(std::get<0>(selected));
+    EXPECT_EQ(keep.sum().item<int64_t>(), 64);
+    auto ids = std::get<1>(selected).masked_select(keep).reshape({2, 32});
+    auto expected = torch::arange(32, ids.options()).unsqueeze(0).expand({2, 32});
+    EXPECT_TRUE(torch::equal(ids, expected));
+    auto reference = torch::logsumexp(logits.narrow(1, 0, 32), -1);
+    EXPECT_TRUE(torch::allclose(normalizer, reference, 1e-5, 1e-5));
+    auto unsupported = torch_ext::deferred_compact_topk_topp(logits, 1024, 1.0f, 1.0f, nullptr, 1025);
+    EXPECT_FALSE(std::get<0>(unsupported).defined());
+}
+
 TEST_F(CudaSamplerTest, testCompactFilteredNormalizerReuse) {
     initializeSamplerPython();
     const auto* properties = at::cuda::getCurrentDeviceProperties();

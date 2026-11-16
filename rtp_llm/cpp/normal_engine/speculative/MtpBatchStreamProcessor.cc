@@ -760,7 +760,8 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                                                 const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
                                                 bool compact_target_capable,
                                                 const torch::Tensor& draft_token_ids,
-                                                bool allow_deferred_sampling) const {
+                                                bool allow_deferred_sampling,
+                                                bool allow_inplace_logits) const {
     RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.gather_spec_sampler_input");
     (void)model_inputs;
     RTP_LLM_CHECK(!stream_groups.empty());
@@ -774,8 +775,49 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     size_t score_len        = propose_step_ + 1;
     size_t total_batch_size = stream_groups.size() * score_len;
 
-    SamplerInputs sampler_inputs =
-        allocateSamplerInputs(stream_groups, total_batch_size, total_batch_size, propose_step_);
+    const bool needs_draft_history =
+        propose_step_ > 0 && std::any_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
+            const auto& config = *stream->generateConfig();
+            return config.do_sample
+                   && (config.repetition_penalty != 1.0f || config.presence_penalty != 0.0f
+                       || config.frequency_penalty != 0.0f || config.no_repeat_ngram_size.value_or(0) > 0);
+        });
+#if USING_CUDA
+    const bool deferred_eligible = allow_deferred_sampling && supportsDeferredRejectionSampling()
+                                   && model_output.logits.is_cuda()
+                                   && model_output.logits.scalar_type() == torch::kFloat32;
+#else
+    const bool deferred_eligible = false;
+#endif
+    // The deferred verifier reads Target logits and draft IDs, but never the
+    // target token-history matrix when no penalty, processor, or beam uses it.
+    // Avoid copying O(batch * score_len * context_length) host token IDs.
+    const bool skip_history = glm5_target_ && deferred_eligible && !needs_draft_history
+                              && std::all_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
+                                     const auto& config = *stream->generateConfig();
+                                     return stream->currentNumBeams() == 1 && stream->nextNumBeams() == 1
+                                            && stream->getAllLogitsProcessorPtr().empty()
+                                            && config.repetition_penalty == 1.0f && config.presence_penalty == 0.0f
+                                            && config.frequency_penalty == 0.0f
+                                            && config.no_repeat_ngram_size.value_or(0) == 0;
+                                 });
+    const bool device_history = glm5_target_ && deferred_eligible && needs_draft_history
+                                && std::all_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
+                                       return stream->currentNumBeams() == 1 && stream->nextNumBeams() == 1
+                                              && stream->getAllLogitsProcessorPtr().empty();
+                                   });
+    SamplerInputs sampler_inputs = allocateSamplerInputs(
+        stream_groups,
+        total_batch_size,
+        total_batch_size,
+        propose_step_,
+        /*materialize_host_token_ids=*/!skip_history && !device_history);
+    if (skip_history) {
+        // The deferred verifier never reads history in this case. Keep the
+        // sampler's [rows, width] tensor contract without allocating a
+        // [rows, context_length] pinned buffer that will never be uploaded.
+        sampler_inputs.token_ids = torch::zeros({static_cast<int64_t>(total_batch_size), 1}, torch::kInt32);
+    }
     fillSamplerCommonInputs(sampler_inputs, all_streams, true, propose_step_);
     setLogitsProcessorInputs(sampler_inputs, all_streams, true);
     sampler_inputs.phase = LogitsProcessorPhase::MTP_VERIFY;
@@ -787,49 +829,106 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         sampler_inputs.spec_applied_processors  = spec_logits_result.applied_processors;
         sampler_inputs.spec_propose_step        = propose_step_;
     }
-
-    const bool needs_draft_history =
-        propose_step_ > 0 && std::any_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
-            const auto& config = *stream->generateConfig();
-            return config.do_sample
-                   && (config.repetition_penalty != 1.0f || config.presence_penalty != 0.0f
-                       || config.frequency_penalty != 0.0f || config.no_repeat_ngram_size.value_or(0) > 0);
-        });
     torch::Tensor suffix_positions;
     torch::Tensor source_rows;
+    torch::Tensor history_host;
+    torch::Tensor base_lengths_host;
     if (needs_draft_history) {
         RTP_LLM_CHECK_WITH_INFO(draft_token_ids.defined() && draft_token_ids.dim() == 2
                                     && draft_token_ids.size(0) == static_cast<int64_t>(stream_groups.size())
                                     && draft_token_ids.size(1) == static_cast<int64_t>(propose_step_),
                                 "MTP history penalties require the current batch draft token IDs");
-        auto options = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
-        suffix_positions =
-            torch::empty({static_cast<int64_t>(total_batch_size), static_cast<int64_t>(propose_step_)}, options);
-        source_rows = torch::empty({static_cast<int64_t>(total_batch_size)}, options);
+        if (device_history) {
+            const auto pinned_i32 = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+            history_host = torch::empty({static_cast<int64_t>(stream_groups.size()),
+                                         static_cast<int64_t>(sampler_inputs.step + 1)}, pinned_i32);
+            base_lengths_host = torch::empty({static_cast<int64_t>(stream_groups.size())}, pinned_i32);
+        } else {
+            const auto pinned_i64 = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
+            suffix_positions = torch::empty(
+                {static_cast<int64_t>(total_batch_size), static_cast<int64_t>(propose_step_)}, pinned_i64);
+            source_rows = torch::empty({static_cast<int64_t>(total_batch_size)}, pinned_i64);
+        }
     }
     int64_t batch_idx = 0;
+    int64_t request_idx = 0;
     for (auto& stream : all_streams) {
-        auto complete_token_ids = stream->completeTokenIds();
-        auto seq_len            = static_cast<int64_t>(stream->seqLength());
+        auto seq_len = static_cast<int64_t>(stream->seqLength());
+        RTP_LLM_CHECK_WITH_INFO(seq_len + static_cast<int64_t>(propose_step_)
+                                    <= static_cast<int64_t>(sampler_inputs.step + 1),
+                                "MTP sampler history exceeds allocated width");
 
-        copyScoreSamplerTokenIds(
-            sampler_inputs.token_ids, complete_token_ids, batch_idx, static_cast<int64_t>(score_len), seq_len);
+        if (device_history) {
+            copyScoreSamplerTokenIds(history_host, stream->completeTokenIds(), request_idx, 1, seq_len);
+            base_lengths_host.data_ptr<int32_t>()[request_idx] = static_cast<int32_t>(seq_len);
+        } else if (!skip_history) {
+            copyScoreSamplerTokenIds(sampler_inputs.token_ids,
+                                     stream->completeTokenIds(),
+                                     batch_idx,
+                                     static_cast<int64_t>(score_len),
+                                     seq_len);
+        }
         for (int64_t position = 0; position < static_cast<int64_t>(score_len); ++position) {
             const int64_t row                                        = batch_idx + position;
             sampler_inputs.sequence_lengths.data_ptr<int32_t>()[row] = seq_len + position;
-            if (needs_draft_history) {
+            if (needs_draft_history && !device_history) {
                 source_rows.data_ptr<int64_t>()[row] = batch_idx / score_len;
                 auto begin                           = suffix_positions.data_ptr<int64_t>() + row * propose_step_;
                 std::iota(begin, begin + propose_step_, seq_len);
             }
         }
         batch_idx += static_cast<int64_t>(score_len);
-        RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
-                          stream->streamLogTag().c_str(),
-                          tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
+        if (device_history) {
+            RTP_LLM_LOG_DEBUG("stream [%s], sampler history = [%s]",
+                              stream->streamLogTag().c_str(),
+                              tensorDebugStringWithData<int32_t>(history_host.narrow(0, request_idx, 1)
+                                                                     .narrow(1, 0, seq_len)).c_str());
+        } else if (!skip_history) {
+            RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
+                              stream->streamLogTag().c_str(),
+                              tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
+        }
+        ++request_idx;
     }
 
-    if (needs_draft_history) {
+    if (device_history) {
+#if USING_CUDA
+        const auto main_stream = cuda_graph::graphGetCurrentStream();
+        if (!sampler_input_copy_stream_ || sampler_input_copy_stream_->device_index() != main_stream.device_index()
+            || *sampler_input_copy_stream_ == main_stream) {
+            do {
+                sampler_input_copy_stream_ = cuda_graph::graphGetStreamFromPool(false);
+            } while (*sampler_input_copy_stream_ == main_stream);
+        }
+        const auto copy_stream = cuda_graph::toGraphStream(*sampler_input_copy_stream_);
+        auto       copy_ready  = cuda_graph::makeGraphEvent();
+        torch::Tensor history_gpu;
+        torch::Tensor base_lengths_gpu;
+        {
+            cuda_graph::GraphStreamGuard guard(copy_stream);
+            history_gpu      = history_host.to(model_output.logits.device(), /*non_blocking=*/true);
+            base_lengths_gpu = base_lengths_host.to(model_output.logits.device(), /*non_blocking=*/true);
+            copy_ready.record(copy_stream);
+        }
+        copy_ready.block(main_stream);
+        history_gpu.record_stream(main_stream);
+        base_lengths_gpu.record_stream(main_stream);
+        auto draft_gpu = draft_token_ids.to(model_output.logits.device(), torch::kInt32, true).contiguous();
+        const auto batch = static_cast<int64_t>(stream_groups.size());
+        const auto rows  = static_cast<int64_t>(score_len);
+        const auto width = static_cast<int64_t>(sampler_inputs.step + 1);
+        auto matrix = torch::empty({batch, rows, width}, model_output.logits.options().dtype(torch::kInt32));
+        invokeMtpSpecSamplerTokenMatrix(history_gpu,
+                                        draft_gpu,
+                                        base_lengths_gpu,
+                                        matrix,
+                                        static_cast<int64_t>(propose_step_),
+                                        main_stream.stream());
+        sampler_inputs.token_ids = matrix.view({static_cast<int64_t>(total_batch_size), width});
+#else
+        RTP_LLM_CHECK_WITH_INFO(false, "device sampler history requires CUDA");
+#endif
+    } else if (needs_draft_history) {
         auto device              = model_output.logits.device();
         auto drafts              = draft_token_ids.to(device, torch::kInt32, true);
         sampler_inputs.token_ids = sampler_inputs.token_ids.to(device, true);
@@ -839,13 +938,26 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
     auto vocab_size           = (size_t)model_output.logits.size(1);
     sampler_inputs.vocab_size = vocab_size;
-    sampler_inputs.logits     = model_output.logits.clone();
-
-#if USING_CUDA
-    sampler_inputs.defer_token_sampling =
-        allow_deferred_sampling && supportsDeferredRejectionSampling()
-        && sampler_inputs.logits.scalar_type() == torch::kFloat32;
-#endif
+    sampler_inputs.defer_token_sampling = deferred_eligible;
+    // The GLM5 deferred verifier has finished reading the LM-head output here.
+    // Return-logprobs retains its raw view, so that case still needs isolation.
+    sampler_inputs.logits = allow_inplace_logits && sampler_inputs.defer_token_sampling
+                                    && !stream_groups.needReturnLogProbs() ?
+                                model_output.logits :
+                                model_output.logits.clone();
+    // Use 1024 candidates only when the request leaves Top-K unrestricted.
+    // Explicit request limits must keep their sampling semantics.
+    // Set RTP_LLM_GLM5_AUTO_TOPK1024=0 to keep the original unrestricted policy.
+    const char* auto_topk = std::getenv("RTP_LLM_GLM5_AUTO_TOPK1024");
+    if (glm5_target_ && sampler_inputs.defer_token_sampling && vocab_size > 1024
+        && (!auto_topk || std::strcmp(auto_topk, "0") != 0)) {
+        auto* top_k = sampler_inputs.top_k.data_ptr<int32_t>();
+        for (size_t row = 0; row < total_batch_size; ++row) {
+            if (top_k[row] <= 0) {
+                top_k[row] = 1024;
+            }
+        }
+    }
     sampler_inputs.allow_compact_target_probs =
         return_all_probs && compact_target_capable && !sampler_inputs.defer_token_sampling;
     sampler_inputs.skip_logits_probs_restore = true;

@@ -69,7 +69,7 @@ std::string debugTensorSummary(const torch::Tensor& tensor, int64_t limit = 24) 
 
 bool FastTopKSampler::compactPointMassEnabled() const {
 #if USING_CUDA
-    return allow_compact_point_mass_ && mtpFusionEnabled() && (!d2t_map_.defined() || d2t_map_.numel() == 0);
+    return allow_compact_point_mass_;
 #else
     return false;
 #endif

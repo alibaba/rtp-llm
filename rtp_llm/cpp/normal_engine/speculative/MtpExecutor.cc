@@ -1479,6 +1479,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     hidden_size_      = mtpHiddenSize(params.model_config_);
     propose_step_     = propose_params->gen_num_per_circle;
     vocab_size_       = params.model_config_.vocab_size;
+    glm5_target_      = params.model_config_.model_type == "glm_5";
     draft_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
     const char* adaptive_env = std::getenv("RTP_LLM_ADAPTIVE_VERIFICATION");
     RTP_LLM_CHECK_WITH_INFO(!adaptive_env || std::string(adaptive_env) == "0" || std::string(adaptive_env) == "1",
@@ -1805,7 +1806,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
     fast_topk_sampler_.reset(new speculative::FastTopKSampler(
         d2t_map_,
-        role_type_ == RoleType::PDFUSION && parallelism_config_.tp_size == 1,
+        parallelism_config_.tp_size == 1
+            && (role_type_ == RoleType::PDFUSION
+                || (role_type_ == RoleType::DECODE && params.model_config_.model_type == "glm_5")),
         params.model_config_.model_type == "hy_v4"));
 
     RTP_LLM_LOG_INFO("[speculative decoding] d2t_map size: %ld", d2t_map_.defined() ? d2t_map_.numel() : 0);
@@ -2659,7 +2662,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                                                 *spec_logits_result,
                                                                 sampler_->optimizedSamplingEnabled()
                                                                     && draft_sampler_output.draft_point_mass,
-                                                                draft_sampler_output.token_ids));
+                                                                draft_sampler_output.token_ids,
+                                                                /*allow_deferred_sampling=*/true,
+                                                                /*allow_inplace_logits=*/glm5_target_ && !target_logprobs.defined()));
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
             if (packed_verify) {
                 if (sampler_input.spec_mask_ready_event) {

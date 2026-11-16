@@ -252,6 +252,7 @@ private:
     size_t                                           propose_step_;
     size_t                                           draft_vocab_size_;
     bool                                             adaptive_verification_ = false;
+    bool                                             glm5_target_ = false;
     std::shared_ptr<py::object>                      adaptive_session_;
     std::map<std::weak_ptr<GenerateStream>, int64_t, std::owner_less<std::weak_ptr<GenerateStream>>>
                                                      adaptive_request_ids_;
