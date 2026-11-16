@@ -1,11 +1,14 @@
-"""Four PP smoke configurations: basic PP, mixed parallelism/MTP and two PD handoffs.
+"""PP smoke: basic PP, mixed parallelism/MTP, PD handoffs and chunked prefill.
 
 Each configuration starts only the servers under test. Numerical comparisons,
 cache backend matrices and scheduler state transitions belong to functional tests.
+Chunk smoke checks requests spanning multiple chunks; exact middle/final batching,
+decode parking and inflight KV lifetime are covered by C++ tests.
 
-Set PP_QWEN35_MOE_CHECKPOINT_PATH or CHECKPOINT_PATH when running the suite.
-Matching *_TOKENIZER_PATH overrides are optional. All cases reuse the same MoE
-checkpoint; only the mixed-parallel case enables expert parallelism.
+The bundled model fixture supplies the default checkpoint. Matching
+PP_QWEN35_MOE_CHECKPOINT_PATH and *_TOKENIZER_PATH environment variables are
+optional overrides for targeted runs. All cases reuse the same MoE checkpoint;
+only the mixed-parallel case enables expert parallelism.
 """
 
 import argparse
@@ -14,6 +17,7 @@ import logging
 import os
 import re
 import shlex
+import socket
 import subprocess
 import sys
 import time
@@ -33,6 +37,16 @@ from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 from rtp_llm.test.utils.port_util import PortsContext
 
 REQUEST_TIMEOUT = int(os.environ.get("PP_REQUEST_TIMEOUT", "300"))
+SERVER_START_TIMEOUT = int(os.environ.get("PP_SERVER_START_TIMEOUT", "1600"))
+BACKEND_RPC_READY_TIMEOUT = int(
+    os.environ.get("PP_BACKEND_RPC_READY_TIMEOUT", "600")
+)
+WORKER_STATUS_TIMEOUT = int(os.environ.get("PP_WORKER_STATUS_TIMEOUT", "15"))
+COMPLETION_TIMEOUT = int(os.environ.get("PP_COMPLETION_TIMEOUT", "15"))
+IDLE_TIMEOUT = int(os.environ.get("PP_IDLE_TIMEOUT", "30"))
+SHUTDOWN_TIMEOUT = int(os.environ.get("PP_SHUTDOWN_TIMEOUT", "120"))
+STATUS_POLL_INTERVAL = float(os.environ.get("PP_STATUS_POLL_INTERVAL", "0.2"))
+MODEL_FIXTURE = Path(__file__).parent / "data/model/qwen35/qwen35_pp_smoke.json"
 VARIANTS = {
     "pdfusion_pp4_tp1": {
         "pp": 4,
@@ -117,21 +131,28 @@ class PPSmokeTest(unittest.TestCase):
 
     def setUp(self):
         self.variant = VARIANTS[self.case_name]
+        parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+        parser.add_argument("--prefill_chunk_size", type=int, default=0)
+        options, _ = parser.parse_known_args(shlex.split(os.environ["SMOKE_ARGS"]))
+        self.chunk_size = options.prefill_chunk_size
         self.model_type = self.variant["model_type"]
         family = self.variant["family"]
+        model_fixture = json.loads(MODEL_FIXTURE.read_text())
+        self.assertEqual(model_fixture["model_type"], self.model_type)
         self.checkpoint = os.environ.get(
-            f"{family}_CHECKPOINT_PATH", os.environ.get("CHECKPOINT_PATH")
-        )
-        self.assertTrue(
-            self.checkpoint, f"Set {family}_CHECKPOINT_PATH or CHECKPOINT_PATH"
+            f"{family}_CHECKPOINT_PATH",
+            os.environ.get("CHECKPOINT_PATH", model_fixture["model_path"]),
         )
         self.tokenizer_path = os.environ.get(
             f"{family}_TOKENIZER_PATH",
-            os.environ.get("TOKENIZER_PATH", self.checkpoint),
+            os.environ.get(
+                "TOKENIZER_PATH", model_fixture.get("tokenizer_path", self.checkpoint)
+            ),
         )
         self.outputs = []
         self.routing_evidence = []
         self.shutdown_evidence = {}
+        self.startup_evidence = []
         self.logs = []
 
     def id(self):
@@ -157,17 +178,30 @@ class PPSmokeTest(unittest.TestCase):
         ]
 
     def start_server(self, server):
+        started = time.monotonic()
+        ready = False
         try:
+            ready = server.start_server(
+                model_path=self.checkpoint,
+                model_type=self.model_type,
+                tokenizer_path=self.tokenizer_path,
+                timeout=SERVER_START_TIMEOUT,
+            )
             self.assertTrue(
-                server.start_server(
-                    model_path=self.checkpoint,
-                    model_type=self.model_type,
-                    tokenizer_path=self.tokenizer_path,
-                ),
+                ready,
                 f"{self.case_name} failed to start: {server.log_file_path}",
             )
         finally:
             self.logs.append(server.log_file_path)
+            self.startup_evidence.append(
+                {
+                    "role": server._role_name,
+                    "phase": "server_ready",
+                    "elapsed_seconds": time.monotonic() - started,
+                    "ready": ready,
+                    "log": server.log_file_path,
+                }
+            )
 
     def generate(self, port, prompt, tokens, label, role_addrs=None, dp_rank=0):
         started = time.monotonic()
@@ -204,6 +238,8 @@ class PPSmokeTest(unittest.TestCase):
         return result
 
     def assert_mtp_executed(self, results):
+        if not self.variant["sp"]:
+            return
         # Acceptance depends on the prompt. Smoke checks execution, while
         # deterministic executor tests cover accepted/rejected draft branches.
         for result in results:
@@ -232,36 +268,95 @@ class PPSmokeTest(unittest.TestCase):
             }
         ]
 
-    def worker_status(self, port):
-        response = requests.get(
-            f"http://127.0.0.1:{port}/worker_status", timeout=5
-        )
-        self.assertEqual(response.status_code, 200, response.text)
-        status = {int(item["dp_rank"]): item for item in response.json()["results"]}
-        self.assertEqual(set(status), set(range(self.variant["dp"])), status)
-        return status
-
-    def wait_frontends(self, port):
-        # start_server waits only for the main port. Each DP frontend starts
-        # after its own backend is ready, so wait for all of them before traffic.
-        pending = {
-            int(port) + rank * self.variant["tp"] * MIN_WORKER_INFO_PORT_NUM
-            for rank in range(self.variant["dp"])
-        }
-        deadline = time.monotonic() + 60
-        while pending and time.monotonic() < deadline:
-            for frontend_port in list(pending):
-                try:
-                    response = requests.get(
-                        f"http://127.0.0.1:{frontend_port}/frontend_health", timeout=2
+    def worker_status(self, port, timeout=WORKER_STATUS_TIMEOUT):
+        # The frontend intentionally returns partial results when one DP backend's
+        # one-second gRPC probe misses its deadline. A single partial sample is not
+        # evidence that the backend or the request failed, so retry until the
+        # bounded observation deadline before asserting the full DP view.
+        expected_ranks = set(range(self.variant["dp"]))
+        deadline = time.monotonic() + timeout
+        last_error = "worker_status was not attempted"
+        while True:
+            try:
+                response = requests.get(
+                    f"http://127.0.0.1:{port}/worker_status", timeout=5
+                )
+                if response.status_code == 200:
+                    payload = response.json()
+                    status = {
+                        int(item["dp_rank"]): item for item in payload["results"]
+                    }
+                    if set(status) == expected_ranks:
+                        return status
+                    last_error = (
+                        f"partial DP status: expected={sorted(expected_ranks)}, "
+                        f"actual={sorted(status)}"
                     )
-                    if response.status_code == 200:
-                        pending.remove(frontend_port)
-                except requests.RequestException:
-                    pass
+                else:
+                    last_error = (
+                        f"HTTP {response.status_code}: {response.text[:1000]}"
+                    )
+            except (
+                requests.RequestException,
+                ValueError,
+                KeyError,
+                TypeError,
+            ) as error:
+                last_error = repr(error)
+            if time.monotonic() >= deadline:
+                self.fail(
+                    f"worker_status did not return all DP ranks within {timeout}s: "
+                    f"{last_error}"
+                )
+            time.sleep(STATUS_POLL_INTERVAL)
+
+    def wait_backend_rpcs(self, server, local_ranks):
+        # All HTTP requests enter through the main frontend, which start_server
+        # already checked. Wait for the model RPC listeners actually used by
+        # request routing or PD handoff before sending the first request.
+        started = time.monotonic()
+        pending = {}
+        for local_rank in local_ranks:
+            backend = ServerConfig()
+            backend.start_port = server.port
+            backend.set_local_rank(local_rank)
+            pending[local_rank] = backend.rpc_server_port
+        deadline = time.monotonic() + BACKEND_RPC_READY_TIMEOUT
+        last_status = {}
+        while pending and time.monotonic() < deadline:
+            with server._state_lock:
+                process = server._server_process
+            if process is None or process.poll() is not None:
+                self.fail(
+                    f"server exited while waiting for model RPCs: "
+                    f"exit_code={None if process is None else process.poll()}, "
+                    f"log={server.log_file_path}"
+                )
+            for local_rank, rpc_port in list(pending.items()):
+                try:
+                    with socket.create_connection(
+                        ("127.0.0.1", rpc_port), timeout=2
+                    ):
+                        del pending[local_rank]
+                        last_status.pop(local_rank, None)
+                except OSError as error:
+                    last_status[local_rank] = repr(error)
             if pending:
-                time.sleep(0.1)
-        self.assertFalse(pending, f"DP frontends failed to become ready: ports={pending}")
+                time.sleep(STATUS_POLL_INTERVAL)
+        self.assertFalse(
+            pending,
+            f"model RPCs failed to become ready within "
+            f"{BACKEND_RPC_READY_TIMEOUT}s: pending={pending}, "
+            f"last_status={last_status}, log={server.log_file_path}",
+        )
+        self.startup_evidence.append(
+            {
+                "role": server._role_name,
+                "phase": "model_rpcs_ready",
+                "elapsed_seconds": time.monotonic() - started,
+                "ready": True,
+            }
+        )
 
     @staticmethod
     def finished_requests(status):
@@ -304,29 +399,45 @@ class PPSmokeTest(unittest.TestCase):
                 rank,
             )
 
+        def wait_for_futures(futures):
+            while not all(future.done() for future in futures):
+                collect_completions()
+                time.sleep(STATUS_POLL_INTERVAL)
+
         if concurrent:
             with ThreadPoolExecutor(max_workers=len(cases)) as pool:
                 futures = [pool.submit(send, i, case) for i, case in enumerate(cases)]
                 # Worker history expires after five seconds. Collect short
                 # requests while longer requests in the same burst still run.
-                while not all(future.done() for future in futures):
-                    collect_completions()
-                    time.sleep(0.05)
+                wait_for_futures(futures)
                 results = [future.result() for future in futures]
         else:
-            results = [send(i, case) for i, case in enumerate(cases)]
+            # Sequential phases still need observation while the request runs;
+            # otherwise a fast completion may expire from the five-second worker
+            # history before the client-side response has been processed.
+            results = []
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                for i, case in enumerate(cases):
+                    future = pool.submit(send, i, case)
+                    wait_for_futures([future])
+                    results.append(future.result())
 
         # Compare completions for the whole burst. Per-request comparisons
         # would see each other's completions or serialize the traffic.
         expected = Counter(rank for rank, _, _ in cases)
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + COMPLETION_TIMEOUT
         while True:
             running = collect_completions()
             actual = Counter(rank for rank, _ in completed)
-            ready = actual == expected and (not wait_for_idle or not running)
-            if ready or time.monotonic() >= deadline:
+            if actual == expected or time.monotonic() >= deadline:
                 break
-            time.sleep(0.05)
+            time.sleep(STATUS_POLL_INTERVAL)
+        if actual == expected and wait_for_idle:
+            idle_deadline = time.monotonic() + IDLE_TIMEOUT
+            while running and time.monotonic() < idle_deadline:
+                time.sleep(STATUS_POLL_INTERVAL)
+                running = collect_completions()
+            actual = Counter(rank for rank, _ in completed)
         self.routing_evidence.append(
             {
                 "phase": label,
@@ -349,7 +460,6 @@ class PPSmokeTest(unittest.TestCase):
         return results
 
     def run_mixed_requests(self, server):
-        self.wait_frontends(server.port)
         counting = "Continue counting the positive integers: 1, 2, 3,"
         # Each side must progress while the other side participates with fake work.
         self.run_dp_requests(
@@ -380,7 +490,42 @@ class PPSmokeTest(unittest.TestCase):
             "concurrent_generation",
             concurrent=True,
         )
-        self.assert_graceful_shutdown(server)
+        self.assert_shutdown(
+            server,
+            allow_forced_cleanup=self.variant["dp"] > 1
+            and self.variant["ep"] > 1,
+        )
+
+    def chunk_cases(self):
+        long_prompt = "apple " * (self.chunk_size * 3) + "Continue: apple"
+        return [
+            (long_prompt, 8),
+            ("The capital of France is", 8),
+            (long_prompt, 0),
+        ]
+
+    def assert_chunk_lengths(self, results):
+        lengths = [result["aux_info"]["input_len"] for result in results]
+        self.assertGreater(lengths[0], self.chunk_size * 2)
+        self.assertLessEqual(lengths[1], self.chunk_size)
+        self.assertGreater(lengths[2], self.chunk_size * 2)
+
+    def run_chunk_requests(self, server):
+        # Exercise long/short and prefill-only requests while peer DP ranks are idle.
+        for rank in range(self.variant["dp"]):
+            results = self.run_dp_requests(
+                server,
+                [(rank, prompt, tokens) for prompt, tokens in self.chunk_cases()],
+                f"chunk_dp{rank}",
+                concurrent=True,
+                wait_for_idle=True,
+            )
+            self.assert_chunk_lengths(results)
+        if self.variant["dp"] > 1:
+            self.assert_shutdown(
+                server,
+                allow_forced_cleanup=self.variant["ep"] > 1,
+            )
 
     def run_pdfusion(self, gpu_ids):
         variant = self.variant
@@ -431,7 +576,10 @@ class PPSmokeTest(unittest.TestCase):
         )
         try:
             self.start_server(server)
-            if dp > 1:
+            self.wait_backend_rpcs(server, range(0, dp * tp, tp))
+            if self.chunk_size:
+                self.run_chunk_requests(server)
+            elif dp > 1:
                 self.run_mixed_requests(server)
             else:
                 self.generate(
@@ -509,12 +657,40 @@ class PPSmokeTest(unittest.TestCase):
             decode_pp,
         )
         try:
-            self.start_server(decode)
-            self.start_server(prefill)
+            # The roles own disjoint GPUs and neither one's readiness depends on
+            # the peer being ready. Start them together so one test-level
+            # watchdog does not have to cover two serial cold model loads.
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                starts = [
+                    pool.submit(self.start_server, decode),
+                    pool.submit(self.start_server, prefill),
+                ]
+                try:
+                    for started in starts:
+                        started.result()
+                except Exception:
+                    # stop_server is safe against a concurrent startup: its
+                    # stop-request flag also catches a process published after
+                    # this point. Do not wait for the peer's full startup timeout.
+                    decode.stop_server()
+                    prefill.stop_server()
+                    raise
+            # HTTP readiness does not imply that the model RPC used for the PD
+            # handoff is listening yet. Check both role roots concurrently so a
+            # failed role consumes one readiness budget rather than two.
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                rpc_ready = [
+                    pool.submit(self.wait_backend_rpcs, decode, [0]),
+                    pool.submit(self.wait_backend_rpcs, prefill, [0]),
+                ]
+                for ready in rpc_ready:
+                    ready.result()
             cases = [
                 ("Count the positive integers in order: 1, 2, 3,", 32),
                 ("Briefly explain what a distributed system is:", 64),
             ]
+            if self.chunk_size:
+                cases = self.chunk_cases()
             # Check repeated PD handoffs; concurrent requests are covered by
             # the mixed-parallel case in the same suite.
             results = []
@@ -522,14 +698,24 @@ class PPSmokeTest(unittest.TestCase):
                 result = self.generate(
                     prefill.port, prompt, tokens, f"pd_handoff_{index}"
                 )
-                self.assertTrue(result["aux_info"]["pd_sep"], result)
+                # Prefill-only requests complete without handing off to decode.
+                if tokens > 0:
+                    self.assertTrue(result["aux_info"]["pd_sep"], result)
                 results.append(result)
             self.assert_mtp_executed(results)
+            if self.chunk_size:
+                self.assert_chunk_lengths(results)
         finally:
-            prefill.stop_server()
-            decode.stop_server()
+            # Always attempt both cleanups. A failure while stopping Prefill must
+            # not leave Decode holding its GPUs and ports.
+            try:
+                prefill.stop_server()
+            finally:
+                decode.stop_server()
 
-    def assert_graceful_shutdown(self, server):
+    def assert_shutdown(self, server, allow_forced_cleanup=False):
+        # DP+EP can hit an existing shutdown race after requests finish. Callers
+        # must opt in explicitly; all other shutdowns keep the strict checks.
         with server._state_lock:
             process = server._server_process
         self.assertIsNotNone(process)
@@ -539,21 +725,28 @@ class PPSmokeTest(unittest.TestCase):
         process.terminate()
         try:
             try:
-                exit_code = process.wait(timeout=90)
+                exit_code = process.wait(timeout=SHUTDOWN_TIMEOUT)
             except subprocess.TimeoutExpired:
-                self.fail(f"PP shutdown timed out: {server.log_file_path}")
+                self.fail(
+                    f"PP shutdown timed out after {SHUTDOWN_TIMEOUT}s: "
+                    f"{server.log_file_path}"
+                )
             self.assertEqual(exit_code, 0, server.log_file_path)
-            _, alive = psutil.wait_procs(children, timeout=5)
+            _, alive = psutil.wait_procs(children, timeout=10)
             self.assertFalse(
                 alive, f"PP shutdown left children alive: {[p.pid for p in alive]}"
             )
             log = Path(server.log_file_path).read_text(errors="replace")
-            failure = re.search(
-                r"Force killing process |Timed out waiting for .* process group to exit"
-                r"|engine stop failed during backend shutdown"
-                r"|\*\*\* SIG(?:SEGV|FPE|ILL|ABRT|BUS).*received by PID",
-                log,
+            failure_pattern = (
+                r"engine stop failed during backend shutdown"
+                r"|\*\*\* SIG(?:SEGV|FPE|ILL|ABRT|BUS).*received by PID"
             )
+            if not allow_forced_cleanup:
+                failure_pattern += (
+                    r"|Force killing process "
+                    r"|Timed out waiting for .* process group to exit"
+                )
+            failure = re.search(failure_pattern, log)
             self.assertIsNone(
                 failure, f"shutdown failure: {failure}; log={server.log_file_path}"
             )
@@ -561,6 +754,7 @@ class PPSmokeTest(unittest.TestCase):
                 scenario="after_requests",
                 elapsed_seconds=time.monotonic() - started,
                 exit_code=exit_code,
+                forced_cleanup="Force killing process " in log,
             )
         finally:
             # After the parent exits, stop_server cannot discover orphaned children.
@@ -579,6 +773,17 @@ class PPSmokeTest(unittest.TestCase):
             "model_type": self.model_type,
             "checkpoint": self.checkpoint,
             "topology": self.variant,
+            "chunk_size": self.chunk_size,
+            "timeouts": {
+                "request": REQUEST_TIMEOUT,
+                "server_start": SERVER_START_TIMEOUT,
+                "backend_rpc_ready": BACKEND_RPC_READY_TIMEOUT,
+                "worker_status": WORKER_STATUS_TIMEOUT,
+                "completion": COMPLETION_TIMEOUT,
+                "idle": IDLE_TIMEOUT,
+                "shutdown": SHUTDOWN_TIMEOUT,
+            },
+            "startup": self.startup_evidence,
             "outputs": self.outputs,
             "routing": self.routing_evidence,
             "shutdown": self.shutdown_evidence,

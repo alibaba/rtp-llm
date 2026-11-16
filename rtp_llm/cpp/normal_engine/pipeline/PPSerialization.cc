@@ -406,6 +406,7 @@ void modelInputFields(IO& io, Input& in) {
     io.flag(in.use_opaque_kv_cache_store);
     io.flag(in.need_all_logits);
     io.flag(in.skip_lm_head);
+    io.flag(in.is_middle_chunk_only);
     io.flag(in.need_all_hidden_states);
     io.flag(in.capture_hidden_states);
     io.flag(in.need_moe_gating);
@@ -530,10 +531,12 @@ void executionResultFields(IO& io, Result& result) {
 torch::Tensor serializePlan(const PPExecutionPlan& plan) {
     return encodeToTensor([&](ByteEncoder& w) {
         modelInputFields(w, plan.model_input);
+        w.tensor(plan.request_ids);
         samplingPlanFields(w, plan.sampling_plan);
         outputConfigFields(w, plan.output_config);
         w.flag(plan.is_decode);
         w.tensor(plan.draft_next_position_ids);
+        w.tensor(plan.middle_chunk_boundary_tokens);
         w.val<uint64_t>(plan.finished_request_ids.size());
         for (const auto request_id : plan.finished_request_ids) {
             w.val<RequestId>(request_id);
@@ -545,10 +548,12 @@ PPExecutionPlan deserializePlan(const torch::Tensor& buffer) {
     ByteReader r(buffer);
     PPExecutionPlan plan;
     modelInputFields(r, plan.model_input);
+    r.tensor(plan.request_ids);
     samplingPlanFields(r, plan.sampling_plan);
     outputConfigFields(r, plan.output_config);
     plan.is_decode = r.flag();
     r.tensor(plan.draft_next_position_ids);
+    r.tensor(plan.middle_chunk_boundary_tokens);
     plan.finished_request_ids.resize(r.count());
     for (auto& request_id : plan.finished_request_ids) {
         request_id = r.val<RequestId>();

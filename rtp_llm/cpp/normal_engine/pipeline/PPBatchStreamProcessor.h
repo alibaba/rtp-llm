@@ -77,7 +77,8 @@ public:
                                                const torch::Tensor& target_hidden_states,
                                                const torch::Tensor& sampled_token_ids,
                                                const torch::Tensor& next_position_ids,
-                                               TensorHolder&        host_holder) const;
+                                               TensorHolder&        host_holder,
+                                               const torch::Tensor& middle_chunk_boundary_tokens = {}) const;
 
     void prepareDraftPrefillAfterVerify(GptModelInputs&                              draft_prefill_input,
                                         const torch::Tensor&                         target_hidden_states,
@@ -91,11 +92,25 @@ public:
                                         const torch::Tensor& draft_last_hidden_states,
                                         const torch::Tensor& draft_token_ids) const;
 
+    static torch::Tensor gatherMtpProposalLogits(const torch::Tensor& logits, int64_t proposal_rows);
+
+    static torch::Tensor gatherMtpLastHiddenStates(const GptModelInputs& input,
+                                                  const torch::Tensor& hidden_states,
+                                                  int64_t              proposal_rows,
+                                                  bool                 cp_enabled);
+
     void
     prepareDSparkCommitInput(GptModelInputs& commit_input, const torch::Tensor& target_features, bool cp_enabled) const;
 
-    mtp::DSparkRoundState buildDSparkRoundState(const PPExecutionPlan&  plan,
+    mtp::DSparkRoundState prepareDSparkProposeRound(GptModelInputs&       draft_input,
+                                                    const PPExecutionPlan& plan,
+                                                    const PPSamplingOutput& sampling_output,
+                                                    TensorHolder&         host_holder);
+
+    mtp::DSparkRoundState buildDSparkRoundState(const GptModelInputs&   target_input,
+                                                const torch::Tensor&    next_position_ids,
                                                 const PPSamplingOutput& sampling_output,
+                                                int64_t                 proposal_rows,
                                                 TensorHolder&           host_holder) const;
 
     void prepareDSparkProposeModelInput(const mtp::DSparkRoundState& round_state,
@@ -107,9 +122,10 @@ public:
                                                 TensorHolder&         host_holder) const;
 
     /** Validate received results before metrics or stream updates consume them. */
-    void validateExecutionResult(const StreamGroups& stream_groups, const PPExecutionResult& result) const;
+    void validateExecutionResult(const PPExecutionSnapshot& snapshot, const PPExecutionResult& result) const;
 
-    void dispatchExecutionResult(const StreamGroups& stream_groups, const PPExecutionResult& result) const;
+    void dispatchExecutionResult(const PPExecutionSnapshot& snapshot, const PPExecutionResult& result) const;
+    static PPExecutionSnapshot captureExecution(const StreamGroups& stream_groups);
 
 private:
     void fillTargetVerifyModelInput(const std::list<GenerateStreamPtr>& streams, GptModelInputs& model_input) const;
@@ -121,10 +137,9 @@ private:
                                                   int64_t                                  sequence_offset,
                                                   GrammarPrefetchContext*                  grammar_prefetch) const;
 
-    SamplerInputs allocateSamplerInputs(const PPSamplingPlan& sampling_plan,
-                                        const PPOutputConfig& output_config,
+    SamplerInputs allocateSamplerInputs(const PPOutputConfig& output_config,
                                         size_t                total_batch_size,
-                                        size_t                propose_step) const;
+                                        size_t                step) const;
 
     void fillSamplerInputs(SamplerInputs&                                        sampler_inputs,
                            const PPSamplingPlan&                                 sampling_plan,
@@ -143,11 +158,13 @@ private:
                              const SamplerOutput&   sampler_output,
                              PPExecutionResult&     result) const;
 
-    void dispatchPrefillOnlyExecutionResult(const StreamGroups& stream_groups, const PPExecutionResult& result) const;
+    void dispatchPrefillOnlySingleStream(const PPStreamExecution& execution,
+                                         const PPExecutionResult& result,
+                                         int64_t                  stream_idx) const;
 
-    void dispatchSpeculativeExecutionResult(const StreamGroups& stream_groups, const PPExecutionResult& result) const;
-
-    void dispatchNormalExecutionResult(const StreamGroups& stream_groups, const PPExecutionResult& result) const;
+    void dispatchSpeculativeSingleStream(const PPStreamExecution& execution,
+                                         const PPExecutionResult& result,
+                                         int64_t                  stream_idx) const;
 
     void dispatchNormalSingleStream(const GenerateStreamPtr& stream,
                                     const PPExecutionResult& result,

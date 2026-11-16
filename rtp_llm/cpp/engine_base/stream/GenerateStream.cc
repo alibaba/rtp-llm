@@ -3,6 +3,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstring>
 #include <memory>
 #include <ATen/Generator.h>
 #if defined(USING_CUDA) || defined(USING_ROCM)
@@ -546,6 +547,11 @@ bool GenerateStream::isMiddleChunk() const {
     return useChunkWindow() && !isLastChunk();
 }
 
+bool GenerateStream::hasPendingChunk() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return useChunkWindow() && reuseLength() < seqLength();
+}
+
 void GenerateStream::advanceChunk() {
     reuse_length_ += currentChunkLen();
     chunk_advanced_ = true;
@@ -727,6 +733,16 @@ int32_t GenerateStream::generateNextPositionId(int32_t* now_pos, std::optional<i
     // Do not use value_or(seqLength()) here: value_or eagerly evaluates its
     // argument and would reintroduce a racy read for device-authoritative MTP.
     const int32_t effective_sequence_length = sequence_length.has_value() ? sequence_length.value() : seqLength();
+    if (isMiddleChunk()) {
+        const auto position_ids          = generateContextPositionIds();
+        const auto position_id_len_factor = mm_position_ids_style_ == PositionIdsStyle::MROPE ? 3 : 1;
+        const auto boundary_pos           = prefixLength() + contextLength();
+        std::memcpy(now_pos,
+                    position_ids.data_ptr<int32_t>() + boundary_pos * position_id_len_factor,
+                    position_id_len_factor * sizeof(int32_t));
+        return boundary_pos;
+    }
+
     if (!context_position_ids_) {
         const int32_t anchor = effective_sequence_length - 1;
         const int32_t width  = mm_position_ids_style_ == PositionIdsStyle::MROPE ? 3 : 1;
@@ -957,6 +973,10 @@ StreamState GenerateStream::moveToNext() {
         std::lock_guard<std::mutex> lock(*mutex_);
         checkTimeoutWithoutLock();
         const auto old_status = getStatus();
+        // Errors may arrive while several PP chunks still own this request's KV.
+        if (isPPInflight()) {
+            return old_status;
+        }
         // Chunked context rounds must not take the decode-time KV growth path.
         if (old_status == StreamState::RUNNING && chunkedPrefillEnabled() && isContextStream()
             && !generate_status_->checkFinished()) {
@@ -1018,15 +1038,19 @@ bool GenerateStream::needsAsyncBookkeepingJoinForKvReservation() const {
 }
 
 void GenerateStream::setPPInflight() {
-    pp_inflight_.store(true, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(*mutex_);
+    pp_inflight_.fetch_add(1, std::memory_order_release);
 }
 
 void GenerateStream::clearPPInflight() {
-    pp_inflight_.store(false, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(*mutex_);
+    const auto                  count = pp_inflight_.load(std::memory_order_acquire);
+    RTP_LLM_CHECK_WITH_INFO(count > 0, "PP execution completed more than once, request_id=%ld", streamId());
+    pp_inflight_.fetch_sub(1, std::memory_order_release);
 }
 
 bool GenerateStream::isPPInflight() const {
-    return pp_inflight_.load(std::memory_order_acquire);
+    return pp_inflight_.load(std::memory_order_acquire) != 0;
 }
 
 bool GenerateStream::hasError() const {
