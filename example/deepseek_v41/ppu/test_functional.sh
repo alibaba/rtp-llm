@@ -101,7 +101,7 @@ if [[ "$v41_role" == ptpc-qnorm-contracts || "$v41_role" == ptpc-qnorm-device ]]
         rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc_norm \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc_prepared \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc_input_reuse \
-        rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc_qnorm_reuse
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc_qnorm_reuse "${@:2}"
 fi
 if [[ "$v41_role" == ptpc-prepared-contracts || "$v41_role" == ptpc-prepared-device ]]; then
     export RTP_V41_PPU_PTPC_FUSION=1

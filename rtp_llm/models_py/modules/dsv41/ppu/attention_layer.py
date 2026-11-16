@@ -1090,6 +1090,7 @@ class SharedPPUAttention(PPUAttentionProjections):
         elif state.prefill:
             qr, q, kv, indexer_quantized_input = self.project_query_kv(
                 x, reuse_ptpc=True,
+                fuse_qr_norm=bool(use_cp_workspace and cp.cp_size == 8),
                 prepare_indexer=bool(self.compress_ratio and self.is_index_source),
                 **({"fused_qkv": True, "query_rows": query_rows} if dense_projections else {}),
             )

@@ -1,7 +1,8 @@
 """Component gates for Q-LoRA RMSNorm's shared whole-row PTPC producer.
 
-The oracle is the frozen ATen norm/quant expression plus native GEMM. No
-checkpoint, complete model, cache publication, or service is exercised.
+The explicit producer uses the frozen ATen norm/quant expression. Ordinary
+device norms use a direct FlashInfer oracle; CPU dispatch uses a test-only
+provider. No checkpoint, model, cache publication, or service is exercised.
 """
 
 from collections import Counter
@@ -11,7 +12,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -23,14 +24,52 @@ from rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc_input_reuse import (
     make_norm,
     make_projection,
     old_linear,
-    old_norm,
-    old_projection,
     old_quant,
     quantizations,
 )
 
 
 ROWS = (1, 3, 4, 8, 24, 32)
+
+
+def aten_norm(value, norm):
+    """Independent arithmetic oracle for the explicit producer's BF16 landing."""
+    if not value.numel():
+        return torch.empty_like(value)
+    values = value.float()
+    inverse = torch.rsqrt(values.square().mean(-1, keepdim=True) + norm.variance_epsilon)
+    return (values * inverse * norm.weight.float()).to(torch.bfloat16)
+
+
+def ordinary_norm(value, norm):
+    """Approved standalone contract, independent of the production dispatcher."""
+    if not value.numel():
+        return torch.empty_like(value)
+    if not value.is_cuda:
+        return aten_norm(value, norm)
+    from flashinfer.norm import rmsnorm
+
+    dense = value.resolve_conj().resolve_neg().contiguous()
+    gamma = norm.weight.resolve_conj().resolve_neg().contiguous()
+    return rmsnorm(
+        dense.view(-1, dense.shape[-1]), gamma, eps=norm.variance_epsilon
+    ).view(value.shape)
+
+
+def reference_projection(op, value, *, indexed, fused_qr=False):
+    """Only an admitted explicit QR producer has the ATen-tree contract."""
+    raw_qr = old_linear(op.wq_a, value)
+    qr = (aten_norm if fused_qr else ordinary_norm)(raw_qr, op.q_norm)
+    q = old_linear(op.wq_b, qr)
+    kv = ordinary_norm(old_linear(op.wkv, value), op.kv_norm)
+    return (qr, q, kv, old_linear(op.index_wq, qr)) if indexed else (qr, q, kv)
+
+
+def cpu_ordinary_provider(value, weight, eps):
+    """Explicit CPU test double; never replaces a device provider."""
+    if value.device.type != "cpu":
+        raise AssertionError("CPU dispatch provider received a device tensor")
+    return aten_norm(value, SimpleNamespace(weight=weight, variance_epsilon=eps))
 
 
 def real_projection():
@@ -109,6 +148,17 @@ class _QNormReuseBase(unittest.TestCase):
 
 
 class PTPCQNormReuseCPU(_QNormReuseBase):
+    def setUp(self):
+        super().setUp()
+        self.ordinary_provider = Mock(side_effect=cpu_ordinary_provider)
+        for name in ("_flashinfer_rmsnorm", "_strided_rmsnorm"):
+            provider = patch(
+                "rtp_llm.models_py.modules.dsv41.ppu.rmsnorm." + name,
+                return_value=self.ordinary_provider,
+            )
+            provider.start()
+            self.addCleanup(provider.stop)
+
     @torch.no_grad()
     def test_cpu_fallback_keeps_norm_formula_and_one_call(self):
         norm = make_norm(1280, "cpu", 4171)
@@ -119,9 +169,11 @@ class PTPCQNormReuseCPU(_QNormReuseBase):
             ):
                 with self.subTest(rows=rows, zero=not bool(value.count_nonzero())):
                     before = norm.calls
+                    provider_calls = self.ordinary_provider.call_count
                     normalized, pair = norm.forward_with_ptpc_input(value)
                     self.assertEqual(norm.calls - before, 1)
-                    assert_bits(self, normalized, old_norm(value, norm))
+                    self.assertEqual(self.ordinary_provider.call_count - provider_calls, 1)
+                    assert_bits(self, normalized, ordinary_norm(value, norm))
                     self.assertIsNone(pair)
 
     @torch.no_grad()
@@ -139,7 +191,7 @@ class PTPCQNormReuseCPU(_QNormReuseBase):
                         before = norm.calls
                         normalized, pair = norm.forward_with_ptpc_input(value)
                         self.assertEqual(norm.calls - before, 1)
-                        assert_bits(self, normalized, old_norm(value, norm))
+                        assert_bits(self, normalized, ordinary_norm(value, norm))
                         self.assertIsNone(pair)
 
     @torch.no_grad()
@@ -157,7 +209,7 @@ class PTPCQNormReuseCPU(_QNormReuseBase):
                     self.assertEqual(len(calls), expected_quant)
                     self.assertEqual(op.q_norm.calls - before, 1)
                     self.assert_outputs(
-                        actual, old_projection(op, value, indexed=indexed)
+                        actual, reference_projection(op, value, indexed=indexed)
                     )
             # Either legacy QR consumer declines the combined producer.
             for name in (("wq_b", "index_wq") if indexed else ("wq_b",)):
@@ -178,7 +230,7 @@ class PTPCQNormReuseCPU(_QNormReuseBase):
                 ):
                     actual = projection(op, value, indexed=indexed, reuse=True)
                 self.assertEqual(op.q_norm.calls - before, 1)
-                self.assert_outputs(actual, old_projection(op, value, indexed=indexed))
+                self.assert_outputs(actual, reference_projection(op, value, indexed=indexed))
 
     @torch.no_grad()
     def test_default_prepared_path_does_not_opt_in_to_qnorm_producer(self):
@@ -195,7 +247,29 @@ class PTPCQNormReuseCPU(_QNormReuseBase):
             index = op.project_indexer_query(qr, quantized_input=pair)
         self.assertEqual(len(calls), 2)
         self.assertEqual(op.q_norm.calls, 1)
-        self.assert_outputs((qr, q, kv, index), old_projection(op, value, indexed=True))
+        self.assert_outputs((qr, q, kv, index), reference_projection(op, value, indexed=True))
+
+    @torch.no_grad()
+    def test_actual_prefill_requests_producer_only_for_cp8_workspace(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc_prefill_reuse import (
+            prefill_component,
+        )
+
+        class ProjectionReached(Exception):
+            pass
+
+        for cp_size, restored, expected in ((8, False, True), (8, True, True), (1, False, False)):
+            with self.subTest(cp_size=cp_size, restored=restored), prefill_component(8) as (
+                attn, _, _, _, hidden
+            ):
+                attn._cp_ctx.cp_size = cp_size
+                attn._cp_ctx.gather_restore_positions = torch.arange(8) if restored else None
+                with patch.object(attn, "project_query_kv", side_effect=ProjectionReached) as project:
+                    with self.assertRaises(ProjectionReached):
+                        attn._body(torch.zeros(8, hidden, dtype=torch.bfloat16))
+                self.assertEqual(project.call_args.kwargs["fuse_qr_norm"], expected)
+                self.assertTrue(project.call_args.kwargs["reuse_ptpc"])
+                self.assertTrue(project.call_args.kwargs["prepare_indexer"])
 
     @torch.no_grad()
     def test_actual_decode_entry_points_pass_explicit_opt_in(self):
@@ -279,7 +353,7 @@ class PTPCQNormReuseDevice(_QNormReuseBase):
                     value = torch.randn(
                         rows, hidden, device="cuda", dtype=torch.bfloat16
                     )
-                    expected = old_projection(op, value, indexed=indexed)
+                    expected = reference_projection(op, value, indexed=indexed, fused_qr=True)
                     observed = []
                     original = op.q_norm.forward_with_ptpc_input
 
@@ -346,7 +420,7 @@ class PTPCQNormReuseDevice(_QNormReuseBase):
                         value.copy_(torch.randn_like(value) * magnitude)
                         op.q_norm.weight.copy_(torch.randn_like(op.q_norm.weight))
                         graph.replay()
-                        expected = old_projection(op, value, indexed=indexed)
+                        expected = reference_projection(op, value, indexed=indexed, fused_qr=True)
                         self.assert_outputs(actual, expected)
                         assert_bits(self, normalized, expected[0])
                         self.assert_pair(expected[0], pair)
@@ -364,7 +438,7 @@ class PTPCQNormReuseDevice(_QNormReuseBase):
         norm = make_norm(1280, "cuda", 4173)
         zero = torch.zeros(3, 1280, device="cuda", dtype=torch.bfloat16)
         normalized, pair = norm.forward_with_ptpc_input(zero)
-        assert_bits(self, normalized, old_norm(zero, norm))
+        assert_bits(self, normalized, aten_norm(zero, norm))
         self.assert_pair(normalized, pair)
         for value in (
             torch.randn(3, 2560, device="cuda", dtype=torch.bfloat16)[:, ::2],
@@ -375,7 +449,7 @@ class PTPCQNormReuseDevice(_QNormReuseBase):
             before = fallback.calls
             normalized, pair = fallback.forward_with_ptpc_input(value)
             self.assertEqual(fallback.calls - before, 1)
-            assert_bits(self, normalized, old_norm(value, fallback))
+            assert_bits(self, normalized, ordinary_norm(value, fallback))
             self.assertIsNone(pair)
         for mode, fusion in (
             ("legacy", "1"), (ENV["RTP_V41_PPU_QUANT_MODE"], "0")
@@ -391,7 +465,7 @@ class PTPCQNormReuseDevice(_QNormReuseBase):
                 before = fallback.calls
                 normalized, pair = fallback.forward_with_ptpc_input(zero)
                 self.assertEqual(fallback.calls - before, 1)
-                assert_bits(self, normalized, old_norm(zero, fallback))
+                assert_bits(self, normalized, ordinary_norm(zero, fallback))
                 self.assertIsNone(pair)
         for name in ("wq_b", "index_wq"):
             op, hidden = make_projection("cuda")
@@ -411,7 +485,7 @@ class PTPCQNormReuseDevice(_QNormReuseBase):
                 actual = projection(op, value, indexed=True)
             self.assertEqual(op.q_norm.calls - before, 1)
             self.assertEqual(len(calls), 2)
-            self.assert_outputs(actual, old_projection(op, value, indexed=True))
+            self.assert_outputs(actual, reference_projection(op, value, indexed=True))
         op, hidden = make_projection("cuda")
         value = torch.randn(4, hidden, device="cuda", dtype=torch.bfloat16)
         for fusion, fuse in (("1", False), ("0", True)):
@@ -422,7 +496,7 @@ class PTPCQNormReuseDevice(_QNormReuseBase):
                 actual = projection(op, value, indexed=True, fuse=fuse)
             self.assertEqual(op.q_norm.calls - before, 1)
             self.assertEqual(len(calls), 2 if fusion == "1" else 4)
-            self.assert_outputs(actual, old_projection(op, value, indexed=True))
+            self.assert_outputs(actual, reference_projection(op, value, indexed=True))
         empty = zero[:0]
         with patch(
             "rtp_llm.models_py.modules.dsv41.ppu.ptpc_norm_quant._kernels",
@@ -456,13 +530,15 @@ class PTPCQNormReuseDevice(_QNormReuseBase):
             root.mkdir(parents=True, exist_ok=True)
             for rows, indexed in ((3, False), (4, True)):
                 value = torch.randn(rows, hidden, device="cuda", dtype=torch.bfloat16)
-                expected = old_projection(op, value, indexed=indexed)
                 measured = {}
                 for baseline in (True, False):
                     name = "prepared-only" if baseline else "combined"
                     path = root / f"qnorm-{name}-M{rows}-indexed{int(indexed)}.json"
                     counts, actual = profile_projection(
                         op, value, indexed, baseline, path
+                    )
+                    expected = reference_projection(
+                        op, value, indexed=indexed, fused_qr=not baseline
                     )
                     self.assert_outputs(actual, expected)
                     measured[name] = counts
@@ -473,14 +549,36 @@ class PTPCQNormReuseDevice(_QNormReuseBase):
                     v for k, v in candidate.items() if "quantize_rows" in k
                 )
                 self.assertEqual((base_quant, next_quant), (2, 1))
+                def ordinary(name):
+                    return "flashinfer::norm::RMSNorm" in name
+
+                def combined(name):
+                    return name == "norm_quant"
+                ordinary_norms = [
+                    Counter({k: v for k, v in counts.items() if ordinary(k)})
+                    for counts in (baseline, candidate)
+                ]
+                combined_norms = [
+                    Counter({k: v for k, v in counts.items() if combined(k)})
+                    for counts in (baseline, candidate)
+                ]
+                # The candidate replaces QR's standalone FlashInfer + quant
+                # with one ATen-tree producer. KV's ordinary norm remains.
+                self.assertEqual([sum(c.values()) for c in ordinary_norms], [2, 1])
+                self.assertEqual([sum(c.values()) for c in combined_norms], [0, 1])
+                self.assertFalse(ordinary_norms[1] - ordinary_norms[0])
+                self.assertEqual(sum((ordinary_norms[0] - ordinary_norms[1]).values()), 1)
                 self.assertEqual(
                     Counter(
-                        {k: v for k, v in baseline.items() if "quantize_rows" not in k}
+                        {k: v for k, v in baseline.items()
+                         if "quantize_rows" not in k and not ordinary(k) and not combined(k)}
                     ),
                     Counter(
-                        {k: v for k, v in candidate.items() if "quantize_rows" not in k}
+                        {k: v for k, v in candidate.items()
+                         if "quantize_rows" not in k and not ordinary(k) and not combined(k)}
                     ),
                 )
+                self.assertEqual(sum(baseline.values()) - sum(candidate.values()), 1)
                 for counts in (baseline, candidate):
                     gemms = sum(v for k, v in counts.items() if "fp8_dense_gemm" in k)
                     self.assertEqual(gemms, 4 if indexed else 3, counts)
@@ -493,7 +591,9 @@ class PTPCQNormReuseDevice(_QNormReuseBase):
                             "prepared_only_kernels": dict(baseline),
                             "combined_kernels": dict(candidate),
                             "quant_kernels": [base_quant, next_quant],
-                            "nonquant_multiset_unchanged": True,
+                            "ordinary_norm_kernels": [sum(c.values()) for c in ordinary_norms],
+                            "combined_norm_kernels": [sum(c.values()) for c in combined_norms],
+                            "unaffected_kernel_multiset_unchanged": True,
                         },
                         sort_keys=True,
                     ),
