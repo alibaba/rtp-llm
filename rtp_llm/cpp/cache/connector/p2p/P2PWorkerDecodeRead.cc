@@ -159,11 +159,11 @@ ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&         
     task_group->partition_keys.reserve(prepared.size());
     task_group->tasks.reserve(prepared.size());
     for (const auto& receive : prepared) {
-        task_group->partition_keys.push_back(receive.request.unique_key);
         task_group->task_start_time_us.emplace(receive.request.unique_key, 0);
         ++task_group->pending_buffer_tasks.at(task_group->task_buffer_keys.at(receive.request.unique_key));
     }
     for (const auto& receive : prepared) {
+        task_group->partition_keys.push_back(receive.request.unique_key);
         const int64_t recv_start_us = currentTimeUs();
         auto task = receiver_->recv(receive.request);
         if (!task) {
@@ -489,7 +489,7 @@ void P2PWorkerDecodeRead::registerTaskCompletionCallback(
     const std::shared_ptr<ReadTaskGroup>& task_group) {
     const auto callback_state = completion_callback_state_;
     const std::weak_ptr<ReadTaskGroup> weak_task_group = task_group;
-    const std::string task_key = task_group->partition_keys.at(task_group->tasks.size() - 1);
+    const std::string task_key = task_group->partition_keys.empty() ? unique_key : task_group->partition_keys.back();
     std::weak_ptr<transfer::IKVCacheRecvTask> weak_task = task;
     const auto                                start_it  = task_group->task_start_time_us.find(task_key);
     const int64_t recv_start_us = start_it == task_group->task_start_time_us.end() ? -1 : start_it->second;
