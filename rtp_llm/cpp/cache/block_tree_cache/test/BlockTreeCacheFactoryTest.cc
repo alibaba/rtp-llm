@@ -724,6 +724,42 @@ TEST_F(BlockTreeCacheFactoryTest, FactoryConsumesNegotiatedBlockCounts) {
     EXPECT_EQ(cache->groupSets().front()->diskPool()->totalBlocksNum(), 6u);
 }
 
+TEST_F(BlockTreeCacheFactoryTest, NegotiatedHybridCountsRemainAuthoritativeWithNonDefaultHostRatio) {
+    const auto config = makeTierRatioConfig();
+    for (const double ratio : {0.5, 2.0}) {
+        SCOPED_TRACE(ratio);
+        block_transfer_engine_test::TempDirGuard disk_dir("negotiated_host_swa_ratio");
+        KVCacheConfig                            options;
+        options.enable_memory_cache          = true;
+        options.memory_cache_size_mb         = 1;
+        options.memory_cache_swa_block_ratio = ratio;
+        options.enable_disk_cache            = true;
+        options.disk_cache_size_mb           = 1;
+        options.disk_cache_paths             = disk_dir.path;
+        options.disk_cache_buffered_io       = true;
+        auto layout                          = planBlockTreeCacheLayout(config, options);
+        ASSERT_NE(layout, nullptr);
+        ASSERT_EQ(layout->sizing.group_sets.size(), 2u);
+        EXPECT_DOUBLE_EQ(layout->sizing.host_swa_block_ratio, ratio);
+        layout->block_nums.emplace();
+        layout->block_nums->host = {{CacheGroupType::FULL, 5}, {CacheGroupType::SWA, 7}};
+        layout->block_nums->disk = {{CacheGroupType::FULL, 9}, {CacheGroupType::SWA, 4}};
+
+        auto allocator = initAllocator<CoordinatorCacheManager>(config);
+        auto cache =
+            createBlockTreeCache(config, options, allocator, ParallelismConfig{}, nullptr, nullptr, nullptr, layout);
+        ASSERT_NE(cache, nullptr);
+        ASSERT_EQ(cache->groupSets().size(), 2u);
+        for (const auto& group_set : cache->groupSets()) {
+            const auto type = group_set->groupType();
+            ASSERT_NE(group_set->hostPool(), nullptr);
+            ASSERT_NE(group_set->diskPool(), nullptr);
+            EXPECT_EQ(group_set->hostPool()->totalBlocksNum() + 1, layout->block_nums->host.at(type));
+            EXPECT_EQ(group_set->diskPool()->totalBlocksNum() + 1, layout->block_nums->disk.at(type));
+        }
+    }
+}
+
 TEST(BlockTreeCacheFactoryUtilityTest, HostRatioFitsPhysicalBudgetAndKeepsLegacyAndNonHybridCounts) {
     const std::vector<size_t>         strides{128, 512};
     const std::vector<CacheGroupType> types{CacheGroupType::FULL, CacheGroupType::SWA};
