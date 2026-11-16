@@ -18,7 +18,10 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
-from rtp_llm.models_py.triton_kernels.common.activation import silu_and_mul
+from rtp_llm.models_py.triton_kernels.common.activation import (
+    silu_and_mul,
+    try_ep_silu_and_mul,
+)
 from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
     get_default_config,
     invoke_fused_moe_kernel,
@@ -183,7 +186,10 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         intermediate2 = torch.empty(
             M * top_k, self.inter_size, device=device, dtype=dtype
         )
-        silu_and_mul(intermediate2, intermediate1)
+        if self.ep_size == 1 or not try_ep_silu_and_mul(
+            intermediate2, intermediate1, flat_topk_ids, self.E
+        ):
+            silu_and_mul(intermediate2, intermediate1)
 
         # GEMM2: intermediate2 @ w2.T → out [M*top_k, K]
         out = torch.empty(M * top_k, K, device=device, dtype=dtype)

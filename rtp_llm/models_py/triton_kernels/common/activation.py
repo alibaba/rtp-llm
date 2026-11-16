@@ -5,6 +5,12 @@ import torch
 import triton
 import triton.language as tl
 
+try:
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as gl
+except ImportError:
+    gluon = None
+
 
 @triton.jit
 def _silu_and_mul_kernel(
@@ -66,6 +72,46 @@ def silu_and_mul(
         BLOCK_SIZE_N=BLOCK_SIZE_N,
     )
     return output_tensor
+
+
+if gluon is not None:
+
+    @gluon.jit(do_not_specialize=["ROWS"])
+    def _ep_silu_and_mul(OUT, X, IDS, ROWS, WIDTH: gl.constexpr, REMOTE: gl.constexpr):
+        layout: gl.constexpr = gl.BlockedLayout([1, 8], [32, 1], [4, 1], [1, 0])
+        vector = gl.program_id(0) * 512 + gl.arange(
+            0, 512, layout=gl.SliceLayout(1, layout)
+        )
+        lane = gl.arange(0, 8, layout=gl.SliceLayout(0, layout))
+        vectors_per_row: gl.constexpr = WIDTH // 8
+        row = (vector // vectors_per_row).to(gl.int64)
+        col = (vector % vectors_per_row)[:, None] * 8 + lane[None, :]
+        valid = row < ROWS
+        valid &= gl.load(IDS + row, valid, other=REMOTE) != REMOTE
+        offset = row[:, None] * 2 * WIDTH + col
+        value = gl.load(X + offset, valid[:, None], other=0).to(gl.float32)
+        gate = gl.load(X + offset + WIDTH, valid[:, None], other=0).to(gl.float32)
+        activated = (gate * (1.0 / (1.0 + gl.exp(-gate)))) * value
+        gl.store(OUT + row[:, None] * WIDTH + col, activated, valid[:, None])
+
+
+def try_ep_silu_and_mul(output, gate_up, route_ids, remote_expert):
+    from rtp_llm.models_py.utils.device_capability import cached_device_capability
+
+    rows, width = output.shape
+    if not (
+        gluon is not None
+        and cached_device_capability(output.device) == (9, 0)
+        and output.dtype == torch.bfloat16
+        and width == 640
+        and rows >= 81920
+    ):
+        return False
+    # The down GEMM zeros these routes without reading the activation.
+    _ep_silu_and_mul[(triton.cdiv(rows * (width // 8), 512),)](
+        output, gate_up, route_ids, rows, width, remote_expert, num_warps=4
+    )
+    return True
 
 
 @triton.jit
