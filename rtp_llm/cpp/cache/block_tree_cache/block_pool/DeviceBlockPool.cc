@@ -307,6 +307,15 @@ bool DeviceBlockPool::hasExternalRefNoLock(BlockIdxType block) const {
 }
 
 DeviceBlockPool::~DeviceBlockPool() {
+    // The pool owns both the registered slab and the CacheStore keeping the
+    // RDMA memory util alive. Unregister before releasing either of them.
+    try {
+        deregUserMr();
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_ERROR("deregister block pool during destruction failed, pool_name=%s, error=%s",
+                          config().pool_name.c_str(),
+                          error.what());
+    }
     cache_aligned_buffer_ = torch::Tensor();
 }
 

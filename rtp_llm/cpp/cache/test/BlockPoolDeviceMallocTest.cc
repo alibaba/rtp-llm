@@ -20,7 +20,6 @@ namespace rtp_llm {
 namespace test {
 namespace {
 
-#if USING_CUDA || USING_ROCM
 class RecordingMemoryUtil: public MemoryUtil {
 public:
     bool regUserMr(void* buf, uint64_t size, bool gpu, uint64_t aligned_size) override {
@@ -127,6 +126,7 @@ private:
     std::shared_ptr<MemoryUtil> memory_util_;
 };
 
+#if USING_CUDA || USING_ROCM
 int deviceCount() {
 #if USING_CUDA
     int count = 0;
@@ -182,6 +182,42 @@ DeviceBlockPoolConfig makeSmallBlockPoolConfig() {
 #endif
 
 }  // namespace
+
+TEST(BlockPoolDeviceMallocTest, DestructionUnregistersTensorBacking) {
+    auto cache_config = makeSimpleMhaCacheConfig(1, 4, 1, DataType::TYPE_FP16, 1, 64);
+    auto config = DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front());
+    config.use_device_malloc_backing = false;
+    auto memory_util = std::make_shared<RecordingMemoryUtil>();
+    auto cache_store = std::make_shared<RecordingCacheStore>(memory_util);
+    auto pool = std::make_shared<DeviceBlockPool>(std::make_shared<const DeviceBlockPoolConfig>(config));
+    ASSERT_TRUE(pool->init());
+    void* address = pool->getBaseAddress();
+    pool->regUserMr(0, cache_store);
+    ASSERT_EQ(memory_util->reg_calls.size(), 1u);
+    std::weak_ptr<RecordingCacheStore> retained_store = cache_store;
+    cache_store.reset();
+    ASSERT_FALSE(retained_store.expired());
+    pool.reset();
+    ASSERT_EQ(memory_util->dereg_calls.size(), 1u);
+    EXPECT_EQ(memory_util->dereg_calls[0].buf, address);
+    EXPECT_TRUE(memory_util->dereg_calls[0].gpu);
+    EXPECT_TRUE(retained_store.expired());
+}
+
+TEST(BlockPoolDeviceMallocTest, ExplicitUnregisterIsNotRepeatedDuringDestruction) {
+    auto cache_config = makeSimpleMhaCacheConfig(1, 4, 1, DataType::TYPE_FP16, 1, 64);
+    auto config = DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front());
+    config.use_device_malloc_backing = false;
+    auto memory_util = std::make_shared<RecordingMemoryUtil>();
+    auto cache_store = std::make_shared<RecordingCacheStore>(memory_util);
+    auto pool = std::make_shared<DeviceBlockPool>(std::make_shared<const DeviceBlockPoolConfig>(config));
+    ASSERT_TRUE(pool->init());
+    pool->regUserMr(0, cache_store);
+    pool->deregUserMr();
+    ASSERT_EQ(memory_util->dereg_calls.size(), 1u);
+    pool.reset();
+    EXPECT_EQ(memory_util->dereg_calls.size(), 1u);
+}
 
 TEST(BlockPoolDeviceMallocTest, AllocatesUsableGpuBacking) {
 #if USING_CUDA || USING_ROCM

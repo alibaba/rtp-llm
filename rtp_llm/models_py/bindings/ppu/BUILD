@@ -1,4 +1,4 @@
-load("//:def.bzl", "copts", "cuda_copts")
+load("//:def.bzl", "cc_test_wrapper", "copts", "cuda_copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
@@ -28,6 +28,26 @@ cc_library(
     ] + torch_deps(),
     visibility = ["//visibility:public"],
     alwayslink = 1,
+)
+
+cc_test_wrapper(
+    name = "no_block_copy_test",
+    srcs = ["NoBlockCopyTest.cc"],
+    copts = copts(),
+    deps = [
+        ":no_block_copy",
+        "//rtp_llm/models_py/bindings:no_block_copy_hdr",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    exec_properties = {"gpu": "PPU-ZW810E", "gpu_count": "2"},
+    tags = ["PPU-ZW810E"],
 )
 
 

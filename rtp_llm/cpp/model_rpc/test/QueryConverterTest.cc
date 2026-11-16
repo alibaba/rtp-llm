@@ -432,6 +432,28 @@ TEST_F(QueryConverterTest, RoleAddrPreservesPdfusionDefaultAndRejectsConflicts) 
     EXPECT_EQ(QueryConverter::getRoleAddrs(&omitted_legacy_default)[0].role, RoleType::PDFUSION);
 }
 
+TEST_F(QueryConverterTest, TimingMetadataPreservesLongMicrosecondDurations) {
+    for (const int64_t duration : {2147483647LL, 2147483648LL, 14400000000LL}) {
+        SCOPED_TRACE(duration);
+        GenerateOutput output;
+        output.output_ids = torch::zeros({1, 1}, torch::kInt32);
+        output.finished = true;
+        output.aux_info.cost_time_us = duration + 20;
+        output.aux_info.first_token_cost_time_us = duration + 10;
+        output.aux_info.wait_time_us = duration;
+        GenerateOutputs outputs;
+        outputs.generate_outputs.push_back(output);
+        GenerateOutputsPB encoded;
+        QueryConverter::transResponse(&encoded, &outputs, true, "", 10000);
+        GenerateOutputsPB decoded;
+        ASSERT_TRUE(decoded.ParseFromString(encoded.SerializeAsString()));
+        const auto& timing = decoded.flatten_output().aux_info(0);
+        EXPECT_EQ(timing.cost_time_us(), duration + 20);
+        EXPECT_EQ(timing.first_token_cost_time_us(), duration + 10);
+        EXPECT_EQ(timing.wait_time_us(), duration);
+    }
+}
+
 TEST_F(QueryConverterTest, testTransOutput) {
     auto output_token_ids = torch::empty({1, 3}, torch::kInt32);
     auto data             = output_token_ids.data_ptr<int>();
