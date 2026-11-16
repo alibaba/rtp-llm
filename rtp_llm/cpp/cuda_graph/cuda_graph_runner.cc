@@ -939,23 +939,24 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             stridedCopyHost(inputs.attention_inputs.kv_cache_kernel_block_id,
                             py_model_inputs_.attention_inputs.kv_cache_kernel_block_id);
         }
-        if (!device_only_metadata && !is_prefill_cuda_graph_mode_) {
-            copyToHostMirror(inputs.attention_inputs.sequence_lengths,
-                             py_model_inputs_.attention_inputs.sequence_lengths,
-                             state.current_batch_size * sizeof(int));
-            // When the live inputs carry no sequence_lengths at all (target verify
-            // feeds the prefill attention path), nothing was copied above, so the
-            // whole captured range - not just the padding tail - would otherwise
-            // keep the capture-time max_seq_len values.
-            const bool has_live_sequence_lengths = inputs.attention_inputs.sequence_lengths.defined()
-                                                   && inputs.attention_inputs.sequence_lengths.numel() > 0;
-            const int fill_start = has_live_sequence_lengths ? state.current_batch_size : 0;
-            if (fill_start < selected_graph_batch_size) {
-                py_model_inputs_.attention_inputs.sequence_lengths.slice(0, fill_start, selected_graph_batch_size)
-                    .fill_(0);
-            }
-        } else {
-            if (isGenerationPrefillCudaGraph()) {
+        if (!device_only_metadata) {
+            if (!is_prefill_cuda_graph_mode_) {
+                copyToHostMirror(inputs.attention_inputs.sequence_lengths,
+                                 py_model_inputs_.attention_inputs.sequence_lengths,
+                                 state.current_batch_size * sizeof(int));
+                // When the live inputs carry no sequence_lengths at all (target verify
+                // feeds the prefill attention path), nothing was copied above, so the
+                // whole captured range - not just the padding tail - would otherwise
+                // keep the capture-time max_seq_len values.
+                const bool has_live_sequence_lengths = inputs.attention_inputs.sequence_lengths.defined()
+                                                       && inputs.attention_inputs.sequence_lengths.numel() > 0;
+                const int fill_start = has_live_sequence_lengths ? state.current_batch_size : 0;
+                if (fill_start < selected_graph_batch_size) {
+                    py_model_inputs_.attention_inputs.sequence_lengths.slice(
+                        0, fill_start, selected_graph_batch_size)
+                        .fill_(0);
+                }
+            } else if (isGenerationPrefillCudaGraph()) {
                 auto& captured_attn  = py_model_inputs_.attention_inputs;
                 auto* input_lengths  = captured_attn.input_lengths.data_ptr<int32_t>();
                 auto* prefix_lengths = captured_attn.prefix_lengths.data_ptr<int32_t>();
