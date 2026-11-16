@@ -12,6 +12,46 @@
 namespace navi_sched {
 
 namespace {
+
+bool makeCurrentBatchCapacityFeatures(
+    const std::vector<NaviSchedRequestStats> &requests,
+    const std::unordered_set<uint64_t> &runningRequestIds,
+    NaviSchedLatencyFeatures &features)
+{
+    NaviSchedLatencyFeatures result;
+    if (!result.appendCapacitySplitAggregate(0, 0, 0, 0, 0.0, 0.0,
+                                             0, 0, 0, 0.0, 0.0)) return false;
+    for (const auto &request : requests) {
+        if (!request.valid()) return false;
+        const auto miss = request.totalTokenCount - request.cacheHitTokenCount;
+        if (miss == 0) continue;
+        if (runningRequestIds.count(request.requestId)) {
+            result.appendRequest(request.cacheHitTokenCount, miss);
+        } else {
+            result.appendWaitingRequest(request.cacheHitTokenCount, miss);
+        }
+    }
+    features = std::move(result);
+    return true;
+}
+
+bool refineCurrentBatchCapacityFeatures(
+    const NaviSchedLatencyFeatures &readyFeatures,
+    const NaviSchedLatencyFeatures &previousBatchFeatures,
+    const std::vector<NaviSchedRequestStats> &requests,
+    const std::unordered_set<uint64_t> &runningRequestIds,
+    NaviSchedLatencyFeatures &refinedReadyFeatures,
+    NaviSchedLatencyFeatures &refinedBatchFeatures)
+{
+    auto updated = readyFeatures;
+    NaviSchedLatencyFeatures current;
+    if (!makeCurrentBatchCapacityFeatures(requests, runningRequestIds, current) ||
+        !updated.subtract(previousBatchFeatures) || !updated.append(current)) return false;
+    refinedReadyFeatures = std::move(updated);
+    refinedBatchFeatures = std::move(current);
+    return true;
+}
+
 constexpr double QUEUE_BETA_1 = 0.9;
 constexpr double QUEUE_BETA_2 = 0.95;
 constexpr double QUEUE_EPSILON = 1e-20;
@@ -371,10 +411,25 @@ bool AgentLatencyKernel::addUnifiedBatch(const AgentLatencyInput &input,
     if (requests.empty()) {
         return false;
     }
-    state.precedingFeatures = _unifiedWorkloadFeatures;
-    if (!state.precedingFeatures.appendRunningElapsedTimeMs(
-            getRunningElapsedTimeMs(input.eventTimeUs))) {
-        return false;
+    if (_agentReportR && _agentReportR->usesPdUnifiedCapacitySplit()) {
+        if (!input.precedingFeatures.usesCapacitySplit()) return false;
+        state.precedingFeatures = input.precedingFeatures;
+        if (input.readyBatchRunningRequestCount >= 0) {
+            if (static_cast<size_t>(input.readyBatchRunningRequestCount) > requests.size())
+                return false;
+            for (int32_t index = 0; index < input.readyBatchRunningRequestCount; ++index)
+                state.readyRunningRequestIds.emplace(requests[index].requestId);
+            if (!makeCurrentBatchCapacityFeatures(requests, state.readyRunningRequestIds,
+                                                  state.currentBatchCapacityFeatures))
+                return false;
+            state.hasCurrentBatchCapacityFeatures = true;
+        }
+    } else {
+        state.precedingFeatures = _unifiedWorkloadFeatures;
+        if (!state.precedingFeatures.appendRunningElapsedTimeMs(
+                getRunningElapsedTimeMs(input.eventTimeUs))) {
+            return false;
+        }
     }
     state.readyTimeUs = input.eventTimeUs;
     state.localBatch = input.batch->makeLocalBatchInfo();
@@ -415,6 +470,14 @@ bool AgentLatencyKernel::replaceUnifiedBatch(const AgentLatencyInput &input,
     }
     UnifiedBatchState replacement;
     replacement.precedingFeatures = state.precedingFeatures;
+    replacement.readyRunningRequestIds = state.readyRunningRequestIds;
+    replacement.hasCurrentBatchCapacityFeatures = state.hasCurrentBatchCapacityFeatures;
+    if (state.hasCurrentBatchCapacityFeatures &&
+        !refineCurrentBatchCapacityFeatures(
+            state.precedingFeatures, state.currentBatchCapacityFeatures,
+            AgentBatchR::getRequestStats(*input.batch), state.readyRunningRequestIds,
+            replacement.precedingFeatures, replacement.currentBatchCapacityFeatures))
+        return false;
     replacement.readyTimeUs = state.readyTimeUs;
     replacement.localBatch = input.batch->makeLocalBatchInfo();
     if (!replacement.localBatch.valid() || !replacement.features.appendBatchCount(1)) {
@@ -467,6 +530,13 @@ bool AgentLatencyKernel::retireUnifiedBatch(AgentLatencyInput &input,
     }
     if (AgentLatencyInputType::BATCH_FINISHED == input.type) {
         input.precedingFeatures = state.precedingFeatures;
+        if (state.hasCurrentBatchCapacityFeatures) {
+            NaviSchedLatencyFeatures current;
+            if (!refineCurrentBatchCapacityFeatures(
+                    state.precedingFeatures, state.currentBatchCapacityFeatures,
+                    input.queries, state.readyRunningRequestIds,
+                    input.precedingFeatures, current)) return false;
+        }
         input.unifiedLatencySample = true;
         input.modelLatencyMs =
             std::max<int64_t>(0, input.eventTimeUs - state.readyTimeUs) / 1000.0 *
@@ -510,6 +580,8 @@ NaviSchedWorkloadSnapshot AgentLatencyKernel::makeUnifiedWorkloadSnapshot(
 void AgentLatencyKernel::reportUnifiedWorkload(
     int64_t eventTimeUs, const NaviSchedLocalBatchInfo &admittedBatch)
 {
+    // Observed Native snapshots carry remaining work for the capacity model.
+    if (_agentReportR->usesPdUnifiedCapacitySplit()) return;
     auto snapshot = makeUnifiedWorkloadSnapshot(
         eventTimeUs > 0 ? eventTimeUs : autil::TimeUtility::currentTime(), admittedBatch);
     const auto revision = _agentReportR->reportWorkloadUpdated(snapshot);

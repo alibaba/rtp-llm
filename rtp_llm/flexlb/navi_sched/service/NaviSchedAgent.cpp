@@ -966,6 +966,7 @@ NaviSchedAgentImpl::NaviSchedAgentImpl(const NaviSchedAgentConfig &agentConfig,
     , _serverPort(serverPort)
     , _cacheTotalBlocks(totalBlocks)
     , _pdSeparated(agentConfig.pdSeparated)
+    , _pdUnifiedCapacitySplit(agentConfig.pdUnifiedCapacitySplit)
     , _unifiedLatencyPrediction(agentConfig.unifiedLatencyPrediction)
     , _executionGeometryEnabled(agentConfig.executionGeometryEnabled)
     , _executionCacheSourceEnabled(agentConfig.executionCacheSourceEnabled)
@@ -1010,6 +1011,7 @@ bool NaviSchedAgentImpl::init()
               _agentReportBridgeR->getControlConfig().prefillExecutionPolicy))) ||
         (_projectedExecutionGeometryEnabled && !_executionGeometryEnabled) ||
         (_executionCacheSourceEnabled && !_executionGeometryEnabled) ||
+        (_pdUnifiedCapacitySplit && (!_pdSeparated || !_unifiedLatencyPrediction)) ||
         _cacheTotalBlocks < 0 || (!_pdSeparated && !_unifiedLatencyPrediction) ||
         !std::isfinite(_timeCompression) || _timeCompression <= 0.0 ||
         getConfig().latencyPersistIntervalMs <= 0) {
@@ -1065,6 +1067,7 @@ bool NaviSchedAgentImpl::init()
     reportConfig["latency_validation_enabled"] = getConfig().latencyValidationEnabled;
     reportConfig["pd_separated"] = _pdSeparated;
     reportConfig["unified_latency_prediction"] = _unifiedLatencyPrediction;
+    reportConfig["pd_unified_capacity_split"] = _pdUnifiedCapacitySplit;
     reportConfig["full_attention_query_drop_tokens"] = _fullAttentionQueryDropTokens;
     reportConfig["mamba_replay_stop_shift"] = _mambaReplayStopShift;
     reportConfig["mamba_retention_interval"] = _mambaRetentionInterval;
@@ -1085,7 +1088,8 @@ bool NaviSchedAgentImpl::init()
     nonLinearPrefillModelConfig["execution_cache_source_enabled"] =
         _executionCacheSourceEnabled;
     nonLinearPrefillModelConfig["use_batch_count_feature"] = _pdSeparated;
-    nonLinearPrefillModelConfig["use_capacity_split_feature"] = !_pdSeparated;
+    nonLinearPrefillModelConfig["use_capacity_split_feature"] =
+        !_pdSeparated || _pdUnifiedCapacitySplit;
     resourceConfigs[NonLinearPrefillModelR::RESOURCE_ID] =
         autil::legacy::ToJsonString(nonLinearPrefillModelConfig, true);
     resourceConfigs[AgentHistoryR::RESOURCE_ID] =
@@ -1191,12 +1195,18 @@ bool NaviSchedAgentImpl::addBatchRequest(const NaviSchedBatchRequest &request,
                 }
                 AgentBatchR::ExecutionState state;
                 _agentBatchR->getExecutionState(state);
-                if (!_agentReportR->reportNativeBatchReady(batch)) {
+                NaviSchedWorkloadSnapshot readyWorkload;
+                int32_t readyBatchRunningRequestCount = -1;
+                if (!_agentReportR->reportNativeBatchReady(
+                        batch, _pdUnifiedCapacitySplit ? &readyWorkload : nullptr,
+                        _pdUnifiedCapacitySplit ? &readyBatchRunningRequestCount : nullptr)) {
                     throw std::runtime_error("publish native batch workload failed");
                 }
                 if (!_agentLatencyInputR->submitBatchReady(
                         batch, state.batchWaitingRequests, state.queuedBatchRequests,
-                        state.runningRequests, state.eventTimeUs)) {
+                        state.runningRequests, state.eventTimeUs,
+                        _pdUnifiedCapacitySplit ? &readyWorkload : nullptr,
+                        readyBatchRunningRequestCount)) {
                     AUTIL_LOG(ERROR,
                               "submit ready batch latency input failed, "
                               "scheduleBatchId [%ld], localBatchId [%ld], "
@@ -1220,8 +1230,8 @@ bool NaviSchedAgentImpl::addBatchRequest(const NaviSchedBatchRequest &request,
                 acceptedCallbackStarted = true;
                 AgentBatchR::ExecutionState state;
                 _agentBatchR->getExecutionState(state);
-                const bool nativeWorkload = !_agentReportR->pdSeparated() &&
-                                            _agentReportR->usesUnifiedLatencyPrediction();
+                const bool nativeWorkload =
+                    _agentReportR->usesObservedUnifiedWorkload();
                 if (nativeWorkload && !_agentReportR->reportNativeRequestReceived(
                                           requestStats, state.batchWaitingRequests,
                                           state.queuedBatchRequests,

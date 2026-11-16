@@ -30,6 +30,27 @@ NaviSchedWorkloadSnapshot emptyObserved(int32_t capacity = 0)
     return value;
 }
 
+TEST(AgentWorkloadOwnershipTest, TracksCurrentBatchRunningSlotsAtReady)
+{
+    AgentWorkloadOwnership ownership;
+    ASSERT_TRUE(ownership.addBatch(1, {request(11, 100, 20)}));
+    ASSERT_TRUE(ownership.addBatch(2, {request(21, 100, 100), request(22, 200, 0)}));
+    NaviSchedWorkloadSnapshot combined;
+    int32_t currentRunningRequests = -1;
+    ASSERT_TRUE(ownership.combine(emptyObserved(2), combined, {}, 2,
+                                  &currentRunningRequests));
+    EXPECT_EQ(1, currentRunningRequests);
+    ASSERT_TRUE(ownership.combine(emptyObserved(1), combined, {}, 2,
+                                  &currentRunningRequests));
+    EXPECT_EQ(0, currentRunningRequests);
+    ASSERT_TRUE(ownership.combine(emptyObserved(3), combined, {}, 2,
+                                  &currentRunningRequests));
+    EXPECT_EQ(2, currentRunningRequests);
+    ASSERT_TRUE(ownership.combine(emptyObserved(3), combined, {2}, 2,
+                                  &currentRunningRequests));
+    EXPECT_EQ(0, currentRunningRequests);
+}
+
 TEST(AgentWorkloadOwnershipTest, PartialCancellationAndExactHandoff)
 {
     AgentWorkloadOwnership ownership;
